@@ -1,0 +1,5 @@
+name: hermes-maintenance
+version: 1.0.0
+description: Route significant Hermes source changes to the persistent coding session
+provides_hooks:
+  - pre_tool_call

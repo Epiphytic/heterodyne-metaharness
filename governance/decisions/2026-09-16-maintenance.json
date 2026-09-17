@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-16-maintenance",
+  "proposal": "Persistent Codex maintenance ownership, lean active specification, evidence-gated historical lifecycle and safe context cleanup.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-16T18:00:00-07:00",
+      "evidence": "User request in source Codex session 01a0ac8d-fce3-7a61-aadf-b1ead3b4ad81; timestamp is recording date, not inferred approval time."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-16T18:00:00-07:00",
+      "by": "Liam",
+      "evidence": "Explicit implementation handoff: user message approves these requirements. Source session 01a0ac8d-fce3-7a61-aadf-b1ead3b4ad81, fork 01a0acf9-dfb2-7d43-93f6-e90472d7c123.",
+      "proposal_sha256": "66ea4af748f4e4ec593acaa73769c0d329c3c7167b11cd9739422b61a796f399"
+    }
+  ]
+}

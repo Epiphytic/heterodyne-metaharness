@@ -354,6 +354,8 @@ class Supervisor:
         self.persist(run)
 
     def heartbeat(self, run):
+        if run.get('persistent') and run['state'] == 'idle':
+            return
         if run['state'] in TERMINAL or run.get('legacy'):
             return
         now = self.clock()

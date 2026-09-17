@@ -26,6 +26,10 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--home', default=str(home_path()))
     sub = p.add_subparsers(dest='command', required=True)
+    maintenance = sub.add_parser('maintenance')
+    maintenance.add_argument('--file', required=True)
+    maintenance.add_argument('--title', required=True)
+    maintenance.add_argument('--key', required=True)
     start = sub.add_parser('start')
     start.add_argument('name'); start.add_argument('repo'); start.add_argument('agent')
     start.add_argument('--prompt', default=''); start.add_argument('--file')
@@ -183,6 +187,9 @@ def task_dispatch(args, store, supervisor, config):
 
 def dispatch(args, store, supervisor, config):
     command = args.command
+    if command == 'maintenance':
+        from .maintenance import enqueue_task
+        return enqueue_task(store, supervisor, config, args.title, Path(args.file).read_text(), args.key)
     if command == 'task':
         return task_dispatch(args, store, supervisor, config)
     if command == 'start':
@@ -222,7 +229,8 @@ def dispatch(args, store, supervisor, config):
     elif command == 'send':
         supervisor.submit(run, text_input(args), args.target, args.message_id)
     elif command == 'event':
-        run['state'] = args.state
+        run['state'] = 'idle' if args.state == 'completed' and run.get('persistent') else args.state
+        run['task_state'] = args.state
         run['task_summary'] = args.text
         supervisor.report(run, args.state, args.text, args.event_id)
         supervisor.persist(run)

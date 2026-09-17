@@ -56,6 +56,18 @@ class CodexProvider(Provider):
     database = ('CODEX_HOME', '.codex', 'state_*.sqlite', 'threads', 'created_at')
 
     def start(self, run, executable, extra):
+        source = run.get('config', {}).get('fork_session_id')
+        if source:
+            if run.get('native_session_id'):
+                return self.resume(run, executable, extra)
+            if run.get('fork_attempted'):
+                raise ValueError('Fork already attempted; recover exact native identity before relaunch')
+            try:
+                source = str(uuid.UUID(source))
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError('fork requires an exact native UUID') from None
+            run['fork_attempted'] = True
+            return [executable, 'fork', *extra, '--', source, *([run.get('launch_prompt', run.get('prompt', ''))] if run.get('launch_prompt', run.get('prompt', '')) else [])]
         return [executable, *extra, *_initial_prompt(run)]
 
     def resume(self, run, executable, extra):
