@@ -53,3 +53,10 @@ Runtime operations: [runbook](docs/sqlite-runtime-repair.md),
 
 Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notifications.md),
 [execution evidence](docs/brain-notifications-execution-evidence.md).
+
+| Module | Responsibility |
+|---|---|
+| [harness/status.py](harness/status.py) | Native activity and durable duplicate-status rejection |
+| [harness/task_workspace.py](harness/task_workspace.py) | Per-Bead checkout intent and exact idle native handoff |
+| [harness/task_stages.py](harness/task_stages.py) | Ordered Bead evidence and post-merge close gate |
+| [harness/approvals.py](harness/approvals.py) | Conservative harness decisions, durable routing and policy tuning |

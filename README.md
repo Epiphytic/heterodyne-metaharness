@@ -127,3 +127,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests use temporary state, fake coding executables, isolated real tmux sockets and local mock Marmot servers. They never reboot the host, call real models, create real channels or send real messages.
+
+Native idle/status, per-Bead checkout boundaries and harness approval tuning:
+[contracts](spec/status.md), [worktrees](spec/worktrees.md), [approvals](spec/approvals.md),
+and [deployment/review runbook](docs/workstream-lifecycle.md).

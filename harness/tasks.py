@@ -172,7 +172,10 @@ def scope_fingerprint(issue):
     fields = ('title', 'description', 'acceptance_criteria', 'design', 'spec_id', 'notes',
               'metadata', 'labels', 'dependencies', 'assignee', 'priority', 'issue_type',
               'due_at', 'defer_until', 'estimated_minutes', 'external_ref')
-    encoded = json.dumps({key: issue.get(key) for key in fields}, sort_keys=True)
+    scope = {key: issue.get(key) for key in fields}
+    scope['metadata'] = {key: value for key, value in (issue.get('metadata') or {}).items()
+                         if key != 'harness_lifecycle'}
+    encoded = json.dumps(scope, sort_keys=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 

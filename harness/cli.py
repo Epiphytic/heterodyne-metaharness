@@ -26,6 +26,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--home', default=str(home_path()))
     sub = p.add_subparsers(dest='command', required=True)
+    from .approvals import configure_cli
+    configure_cli(sub)
     maintenance = sub.add_parser('maintenance')
     maintenance.add_argument('--file', required=True)
     maintenance.add_argument('--title', required=True)
@@ -68,6 +70,10 @@ def parser():
     update.add_argument('--file', required=True)
     update.add_argument('--key', required=True)
     update.add_argument('--authorization-file', required=True)
+    stage = actions.add_parser('stage')
+    stage.add_argument('issue_id')
+    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','close-ready'))
+    stage.add_argument('--evidence-file', required=True)
     reconcile = actions.add_parser('reconcile')
     reconcile.add_argument('issue_id', nargs='?')
     create = actions.add_parser('create')
@@ -176,8 +182,14 @@ def task_dispatch(args, store, supervisor, config):
         result = {'context': beads.context(run)}
     elif action == 'close':
         from .tasks import assert_close_current
-        assert_close_current(store, run, beads.show(run, args.issue_id))
+        from .task_stages import close_ready
+        issue = beads.show(run, args.issue_id)
+        close_ready(run, issue)
+        assert_close_current(store, run, issue)
         result = beads.close(run, args.issue_id, args.evidence_file)
+    elif action == 'stage':
+        from .task_stages import record
+        result = record(store, beads, run, args.issue_id, args.stage, json.loads(Path(args.evidence_file).read_text()))
     elif action == 'worktree':
         result = beads.worktree(run, args.issue_id, args.repository)
     elif action == 'recover':
@@ -199,11 +211,12 @@ def task_dispatch(args, store, supervisor, config):
         result = getattr(beads, action)(run)
         state['pickup_enabled'] = action == 'resume'
     elif action in ('show', 'bind', 'claim'):
-        result = getattr(beads, action)(run, args.issue_id)
+        from .task_workspace import assign
+        result = assign(args, store, supervisor, beads, run)
     else:
         result = beads.ready(run)
     supervisor.persist(run)
-    if action in ('bind', 'claim', 'reconcile', 'show'):
+    if action in ('bind', 'claim', 'reconcile', 'show', 'stage'):
         from .tasks import observe
         observe(store, result)
         if action == 'claim':
@@ -217,6 +230,9 @@ def task_dispatch(args, store, supervisor, config):
 
 def dispatch(args, store, supervisor, config):
     command = args.command
+    if command == 'approvals':
+        from .approvals import handle_cli
+        return handle_cli(args, store, Beads(config.get('beads', {})))
     if command == 'maintenance':
         from .maintenance import enqueue_task
         return enqueue_task(store, supervisor, config, args.title, Path(args.file).read_text(), args.key)

@@ -9,6 +9,11 @@ def git(repo, *args):
 
 
 def prepare(run, root):
+    task = run.get('task_worktrees', {}).get(run.get('beads', {}).get('issue_id'))
+    if task and run.get('workdir') == task['path']:
+        if git(task['path'], 'branch', '--show-current') != task['branch']:
+            raise RuntimeError('Task worktree ownership changed')
+        return
     if not run.get('repo'):
         Path(run['workdir']).mkdir(parents=True, exist_ok=True)
         return
