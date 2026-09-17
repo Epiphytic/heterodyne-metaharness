@@ -9,6 +9,7 @@ AGENTS contain short pointers; USER owns personal preferences. Beads owns task s
 - [Session lifecycle](sessions.md)
 - [Context hygiene](context.md)
 - [Change lifecycle](changes.md)
+- [Runtime repair](runtime.md)
 
 Canonical checkout: `/home/operator/repos/hermes-workstream-harness/spec`.
 Brain snapshots may publish a pointer to this checkout; never create a second authority.

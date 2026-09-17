@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-sqlite-runtime",
+  "proposal": "Repair the affected Hermes SQLite runtime using existing native helpers, with durable private backups, dependency and integrity verification, and preserved sessions.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T02:09:13.039850+00:00",
+      "evidence": "Recording the explicitly authorized SQLite fix scope from persistent maintenance user handoff."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T02:09:13.039850+00:00",
+      "by": "Liam",
+      "evidence": "User explicitly authorized investigation AND FIX; Bead btq-harness-9a729b18a99e76122751427b supersedes research-only restriction in native fork 01a0acf9-dfb2-7d43-93f6-e90472d7c123. Timestamp records this evidence, not an inferred original approval time.",
+      "proposal_sha256": "21fd170b157ce073048b7f838019bd24398a1b4eca32d559201cc1e87b59d89c"
+    }
+  ]
+}
