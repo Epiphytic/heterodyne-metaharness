@@ -1,5 +1,9 @@
 # Module registry
 
+Authority: [active specification](spec/README.md). Operational checks and results:
+[deployment runbook](docs/maintenance-deployment.md),
+[execution evidence](docs/maintenance-execution-evidence.md).
+
 | Module | Responsibility |
 |---|---|
 | `harness/store.py` | Atomic run, alias/lineage, event, inbox and outbox persistence; readable checkpoints |
@@ -23,3 +27,13 @@
 | `install_capabilities.py` | Native global compaction/search defaults and Semble MCP registration |
 | `policy/` | Versioned Hermes SOUL and coding-delegation contract |
 | `tests/` | Lifecycle, crash, identity, transport, installer and isolated real-tmux verification |
+| [harness/maintenance.py](harness/maintenance.py) | Admission of idempotent Beads tasks to the existing maintenance manager |
+| [harness/governance.py](harness/governance.py) | Spec links/reference checks and historical lifecycle/evidence validation |
+| [harness/cleanup.py](harness/cleanup.py) | Hash-verified file quarantine, replacements and repeat-safe execution |
+| [harness/transcript_cleanup.py](harness/transcript_cleanup.py) | Structured identity guards, consistent backup and native detached-session deletion |
+| [plugins/hermes-maintenance](plugins/hermes-maintenance/__init__.py) | Supported Hermes pre-tool workflow guard |
+| [install_maintenance.py](install_maintenance.py) | Existing session binding, managed local AGENTS block and plugin installation |
+| [prepare_context_cleanup.py](prepare_context_cleanup.py) | Exact reviewed file/memory cleanup manifest generation |
+| [migrate_maintenance_cron.py](migrate_maintenance_cron.py) | Native retirement of duplicate supervision and failure-monitor update |
+| [install_brain_pointer.py](install_brain_pointer.py) | Scoped SOUL mirror and canonical-spec pointer, with private external backup |
+| [spec/](spec/README.md) | Small crosslinked active maintenance contracts |

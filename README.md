@@ -2,9 +2,14 @@
 
 A durable supervisor for an interactive coding agent plus a separate Hermes manager, with Marmot project channels. Python standard library, tmux and systemd provide persistence and process ownership. Codex, Claude Code and Hermes differences live behind agent adapters.
 
+The [active specification](spec/README.md) is authoritative for Hermes maintenance.
+See the [maintenance deployment runbook](docs/maintenance-deployment.md),
+[execution evidence](docs/maintenance-execution-evidence.md), and [module registry](MANIFEST.md).
+
 ## Commands
 
 ```sh
+workstream maintenance --title 'Hermes improvement' --file task.txt --key REQUEST_ID
 workstream start project /absolute/repository codex --file task.txt
 workstream start project /absolute/repository claude --file task.txt --group EXISTING_GROUP
 workstream list
@@ -92,7 +97,8 @@ repository object storage. The inspected host used approximately 440 KiB for
 workstream state versus 2.4 GiB for Codex and 1.7 GiB for Claude storage. Installing
 agenticow would add another storage system without addressing the measured usage,
 so it is not installed. Any later archive/retention policy must preserve native
-resume history and durable ownership; this change deletes no session history.
+resume history and durable ownership. Separately reviewed historical cleanup is
+recorded in the [maintenance execution evidence](docs/maintenance-execution-evidence.md).
 
 ## Deployment
 
