@@ -38,6 +38,8 @@ class Store:
           id TEXT PRIMARY KEY, run_id TEXT, group_id TEXT, text TEXT,
           created_at REAL, delivered_at REAL, attempts INTEGER DEFAULT 0,
           next_attempt REAL DEFAULT 0, error TEXT);
+        CREATE TABLE IF NOT EXISTS outbox_reactions (
+          id TEXT PRIMARY KEY, account_id TEXT NOT NULL, target_id TEXT NOT NULL, emoji TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS inbox (
           id TEXT PRIMARY KEY, run_id TEXT, text TEXT, created_at REAL, state TEXT);
         CREATE TABLE IF NOT EXISTS identities (

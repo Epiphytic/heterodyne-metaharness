@@ -42,7 +42,8 @@ def _attempt(store, transport, now, ops_group):
     original_timeout = getattr(transport, 'timeout', MAX_ATTEMPT_SECONDS)
     transport.timeout = min(original_timeout, MAX_ATTEMPT_SECONDS)
     try:
-        transport.send(row['group_id'], row['text'], row['id'])
+        from .reactions import send_outbox
+        send_outbox(store, transport, row)
     except Exception as exc:
         with store.db:
             store.db.execute('''UPDATE outbox SET attempts=attempts+1,

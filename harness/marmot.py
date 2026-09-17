@@ -37,6 +37,12 @@ def _hex(value: str, field: str) -> str:
     return value.lower()
 
 
+def validate_reaction(emoji):
+    if (not isinstance(emoji, str) or not emoji.strip() or emoji != emoji.strip() or len(emoji) > 64
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 or 0xD800 <= ord(char) <= 0xDFFF for char in emoji)):
+        raise MarmotError('reaction must be nonblank, control-free and at most 64 Unicode scalar values without surrounding whitespace')
+
+
 class Marmot:
     def __init__(self, config: dict):
         bootstrap_path = Path(config.get('bootstrap', '~/.marmot-agents/hermes/bootstrap.json')).expanduser()
@@ -125,6 +131,25 @@ class Marmot:
         ids = response.get('message_ids_hex')
         if not isinstance(ids, list) or not ids:
             raise MarmotError('Marmot final_sent returned no message ids')
+        for value in ids:
+            _hex(value, 'message_id')
+        return response
+
+    def react(self, group_id: str, target_id: str, emoji: str, event_id: str) -> dict:
+        """Ensure an active own reaction; connector deduplicates by tuple, not key.
+
+        Contract: spec/reactions.md. The durable key correlates this single attempt.
+        """
+        if not isinstance(event_id, str) or not event_id:
+            raise MarmotError('reaction requires a durable event id')
+        validate_reaction(emoji)
+        response = self._request({'type': 'send_reaction', 'account_id_hex': self.account_id,
+                                  'group_id_hex': _hex(group_id, 'group_id'),
+                                  'target_message_id_hex': _hex(target_id, 'target_id'), 'emoji': emoji},
+                                 'app_event_sent', event_id)
+        ids = response.get('message_ids_hex')
+        if not isinstance(ids, list) or not ids:
+            raise MarmotError('Marmot app_event_sent returned no message ids')
         for value in ids:
             _hex(value, 'message_id')
         return response

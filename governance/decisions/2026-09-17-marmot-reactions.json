@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-marmot-reactions",
+  "proposal": "Restore explicitly authorized Marmot reactions through the existing agent-control facade and durable outbox, preserving stable request identity, bounded retries, exact routing, native approvals and operator-reviewed deployment.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T06:33:56.636186+00:00",
+      "evidence": "Record scope of assigned Bead btq-harness-ca87352d5f650e4786833c94."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T06:33:56.636186+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "0d7fe45dddcf50492c6401dd826d5fd4ccfbd065c5b22e8e0f7cc316e71b1b3c",
+      "evidence": "Operator task handoff records Liam reaction-restoration request and authorization to implement within this persistent session. Timestamp records authorization evidence; no separate new user approval is claimed."
+    }
+  ]
+}

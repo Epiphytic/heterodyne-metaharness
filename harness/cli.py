@@ -40,6 +40,9 @@ def parser():
     send = sub.add_parser('send'); send.add_argument('name')
     send.add_argument('--target', choices=['worker', 'manager'], default='manager')
     send.add_argument('--text'); send.add_argument('--file'); send.add_argument('--message-id')
+    react = sub.add_parser('react'); react.add_argument('name')
+    react.add_argument('--message-id', required=True)
+    react.add_argument('--emoji', required=True); react.add_argument('--key', required=True)
     event = sub.add_parser('event'); event.add_argument('name')
     event.add_argument('--state', choices=['working', 'blocked', 'completed', 'failed', 'awaiting_resume'], required=True)
     event.add_argument('--text', required=True); event.add_argument('--event-id')
@@ -243,6 +246,9 @@ def dispatch(args, store, supervisor, config):
     if command == 'deliver':
         deliver(store, supervisor.transport, ops_group=config.get('ops_group')); return health(store)
     run = store.get(args.name)
+    if command == 'react':
+        from .reactions import enqueue
+        return enqueue(store, run, supervisor.transport.account_id, args.message_id, args.emoji, args.key)
     if command == 'stop':
         supervisor.stop(run)
     elif command == 'resume':

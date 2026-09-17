@@ -36,6 +36,7 @@ Authority: [active specification](spec/README.md). Operational checks and result
 | [prepare_context_cleanup.py](prepare_context_cleanup.py) | Exact reviewed file/memory cleanup manifest generation |
 | [migrate_maintenance_cron.py](migrate_maintenance_cron.py) | Native retirement of duplicate supervision and failure-monitor update |
 | [install_brain_pointer.py](install_brain_pointer.py) | Scoped SOUL mirror and canonical-spec pointer, with private external backup |
+| [harness/reactions.py](harness/reactions.py) | Immutable reaction intents through shared outbox delivery |
 | [harness/tasks.py](harness/tasks.py) | Generic admission, durable revisions and read-only task projections |
 | [harness/task_hooks.py](harness/task_hooks.py) | Current-owner task receipt and turn-state adapters |
 | [harness/brain.py](harness/brain.py) | Transactional per-session inventory offers and acknowledged checkpoints |

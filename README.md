@@ -12,6 +12,8 @@ Shared brain notifications: [contract](spec/brain.md) and [deployment steps](doc
 
 Task admission and addendums: [contract](spec/tasks.md) and [deployment steps](docs/task-addendums.md).
 
+Marmot reactions: [contract](spec/reactions.md) and [deployment steps](docs/marmot-reactions.md).
+
 ## Commands
 
 ```sh

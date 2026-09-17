@@ -49,6 +49,29 @@ class MarmotTests(unittest.TestCase):
         self.assertEqual(client.send('bb', 'status', 'event-1')['message_ids_hex'], ['cc'])
         self.assertEqual(self.requests[0]['idempotency_key'], 'event-1')
 
+    def test_react_uses_existing_wire_contract(self):
+        client = self.client(lambda _: {'type': 'app_event_sent', 'message_ids_hex': ['cc']})
+        self.assertEqual(client.react('BB', 'DD', '👀', 'durable-key')['message_ids_hex'], ['cc'])
+        request = self.requests[0]
+        self.assertEqual(request['type'], 'send_reaction')
+        self.assertEqual(request['target_message_id_hex'], 'dd')
+        self.assertEqual(request['id'], 'durable-key')
+        self.assertNotIn('idempotency_key', request)
+
+    def test_react_rejection_and_lost_ack_do_not_retry(self):
+        client = self.client(lambda _: {'type': 'error', 'code': 'unsupported_operation'})
+        with self.assertRaises(MarmotError):client.react('bb', 'dd', '👀', 'key')
+        self.assertEqual(len(self.requests), 1)
+
+    def test_react_socket_failure(self):
+        client = self.client(lambda _: None)
+        with self.assertRaises(MarmotError):client.react('bb', 'dd', '👀', 'key')
+        self.assertEqual(len(self.requests), 1)
+
+    def test_react_requires_durable_ack(self):
+        client = self.client(lambda _: {'type': 'app_event_sent', 'message_ids_hex': []})
+        with self.assertRaises(MarmotError):client.react('bb', 'dd', '👀', 'key')
+
     def test_server_error_is_not_success(self):
         client = self.client(lambda _: {'type': 'error', 'code': 'send_in_progress'})
         with self.assertRaises(MarmotError):
