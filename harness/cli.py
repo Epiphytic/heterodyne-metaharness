@@ -290,7 +290,7 @@ def main(argv=None):
         from .routing import enqueue
         handled = enqueue(args.group, args.message_id, sys.stdin.read(), args.sender, db_path=store.root / 'harness.sqlite3')
         print(json.dumps({'handled': handled})); return 0
-    transport = Marmot(config.get('marmot', {})) if args.command in ('start', 'resume', 'bind-group', 'daemon', 'deliver') else None
+    transport = Marmot(config.get('marmot', {})) if args.command in ('start', 'resume', 'bind-group', 'daemon', 'deliver', 'react') else None
     supervisor = Supervisor(store, Tmux(config.get('tmux_socket', 'hermes-workstreams')), transport, config)
     if args.command == 'daemon':
         daemon(store, supervisor, config); return 0

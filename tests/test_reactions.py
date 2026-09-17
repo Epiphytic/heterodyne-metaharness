@@ -1,7 +1,10 @@
 from pathlib import Path
+import contextlib
+import io
+import os
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from harness import cli
 from harness.delivery import deliver
@@ -18,6 +21,16 @@ class ReactionsTest(unittest.TestCase):
                         workdir=self.tmp.name, created_at=1)
         with self.store.db:self.store.save(self.run)
         self.transport = Mock(account_id='aa', timeout=20)
+
+    def test_main_constructs_transport_but_only_enqueues(self):
+        with patch.dict(os.environ), patch.object(cli, 'load_config', return_value={'marmot': {'account_id': 'aa'}}), \
+                patch.object(cli, 'Marmot', return_value=self.transport) as factory, \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.main(['--home', self.tmp.name, 'react', 'test', '--message-id', 'dd',
+                      '--emoji', '👀', '--key', 'main'])
+        factory.assert_called_once_with({'account_id': 'aa'})
+        self.transport.react.assert_not_called()
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM outbox_reactions').fetchone()[0], 1)
 
     def test_actual_cli_repeat_key_survives_store_restart_and_rejects_changes(self):
         supervisor = Mock(transport=self.transport)
