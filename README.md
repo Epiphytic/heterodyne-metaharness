@@ -25,7 +25,11 @@ The supplied `workstream-start NAME REPO AGENT [PROMPT] [GROUP]`, `workstream-st
 
 State lives in `$HERMES_HOME/workstreams/harness.sqlite3`, independent of all model contexts. Each run has an inspectable `workstreams/runs/RUN_ID/checkpoint.json`, separate manager/worker identities, exact native session IDs when discoverable, last observations, input submission states and a durable message outbox.
 
+Stable aliases `workstream-NAME-worker` and `workstream-NAME-manager` resolve to the same run and Marmot group across native session-ID changes. `workstream identities NAME` shows current bindings and predecessor history. Claude receives its native display name; Codex uses the external alias because its installed CLI has no equivalent startup naming flag. Codex/Claude SessionStart hooks register successor IDs and inject checkpoint context; Hermes compression chains are followed from its persisted session lineage. Existing Codex hooks are preserved and only the exact added hook hash is trusted.
+
 A changed Linux boot ID queues an interruption report with the last observation, then restores native conversations without a prompt. Unknown native identity opens a blank worker and says so. Arbitrary command jobs remain interrupted. A recovered manager/worker waits for explicit steering; previous tests, builds and tools are not automatically replayed. A same-boot crash during a non-idempotent submit or launch is reported as uncertain, never retried blindly. `resume` restores conversation state and does not itself authorize task execution.
+
+Pre-interruption pending input becomes `held`; `workstream inbox NAME` exposes it for inspection. Fresh user messages remain routable. Recovery cannot silently execute an old queued instruction.
 
 Compaction keeps the native identity and durable supervisor state; native Codex/Claude lifecycle events retain explicit turn-completion and compacted markers. A turn ending never means the whole task completed. The manager verifies task outcome and records it through `event`. Manager responses also relay from its persisted transcript when available.
 
