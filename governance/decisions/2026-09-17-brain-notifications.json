@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-brain-notifications",
+  "proposal": "Restore deterministic shared brain/spec/skill inventory notifications with durable per-session acknowledged checkpoints, shared provider adapters, safe native hooks, bounded notices and verified delivery; task addendums remain a separate Bead.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T02:33:56.689429+00:00",
+      "evidence": "Recording current user-authorized scope for Bead btq-harness-44cff6fd3d31e0d7404fbc26."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T02:33:56.689429+00:00",
+      "by": "Liam",
+      "evidence": "Explicit implementation authorization in persistent fork handoff and follow-up: proceed within already authorized task. Timestamp records authorization evidence, not inferred original approval time. Task addendums excluded to dependent Bead.",
+      "proposal_sha256": "368548021dc03cb048f9b30d0662d489c134c71af9609c115bd05d75dd3fb95c"
+    }
+  ]
+}
