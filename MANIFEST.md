@@ -37,3 +37,8 @@ Authority: [active specification](spec/README.md). Operational checks and result
 | [migrate_maintenance_cron.py](migrate_maintenance_cron.py) | Native retirement of duplicate supervision and failure-monitor update |
 | [install_brain_pointer.py](install_brain_pointer.py) | Scoped SOUL mirror and canonical-spec pointer, with private external backup |
 | [spec/](spec/README.md) | Small crosslinked active maintenance contracts |
+| [harness/runtime_repair.py](harness/runtime_repair.py) | Native runtime staging, dependency gates, backups and guarded cutover |
+| [prepare_runtime_packaging.py](prepare_runtime_packaging.py) | Exact native state-module packaging correction manifest |
+
+Runtime operations: [runbook](docs/sqlite-runtime-repair.md),
+[execution evidence](docs/sqlite-runtime-execution-evidence.md).

@@ -5,6 +5,8 @@ A durable supervisor for an interactive coding agent plus a separate Hermes mana
 The [active specification](spec/README.md) is authoritative for Hermes maintenance.
 See the [maintenance deployment runbook](docs/maintenance-deployment.md),
 [execution evidence](docs/maintenance-execution-evidence.md), and [module registry](MANIFEST.md).
+SQLite runtime repair: [runbook](docs/sqlite-runtime-repair.md) and
+[deployment evidence](docs/sqlite-runtime-execution-evidence.md).
 
 ## Commands
 
