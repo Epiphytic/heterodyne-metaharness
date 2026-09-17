@@ -13,6 +13,113 @@
       "by": "Liam",
       "evidence": "Explicit implementation handoff: user message approves these requirements. Source session 01a0ac8d-fce3-7a61-aadf-b1ead3b4ad81, fork 01a0acf9-dfb2-7d43-93f6-e90472d7c123.",
       "proposal_sha256": "66ea4af748f4e4ec593acaa73769c0d329c3c7167b11cd9739422b61a796f399"
+    },
+    {
+      "state": "completed",
+      "at": "2026-09-17T01:58:28+00:00",
+      "spec": [
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "spec/README.md",
+          "sha256": "afa1871c4ad5e0d289f0e3263193cd1c6653433b3ad0ed9057e7ffbc180475df"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "spec/maintenance.md",
+          "sha256": "a485c21f7301d4d980e18323186accab6bfd579f94b0997e2428edfad7c82bc7"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "spec/sessions.md",
+          "sha256": "78f5adae56d47773ac7c533e19fd60358b10c38964267d2c7cb11315ea426597"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "spec/context.md",
+          "sha256": "cbabf5655ec2b53f73584eb1e161eb642b52c48f1ea5bcba6039ccd601058113"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "spec/changes.md",
+          "sha256": "de9718ab4ee1b8e10ccb73b83c7a1c4426e22fb4085ccdfc8b7863e154096b38"
+        }
+      ],
+      "implementation": [
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "harness/maintenance.py",
+          "sha256": "ca5c31b27afce781ab0308f92f001926b0e4b699af642aa6063efab00d389a29"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "harness/agents.py",
+          "sha256": "68de405f8f620c6bcc7e2a6c6acd792e3125f35fe52c09df3797c8d7bb819d66"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "harness/governance.py",
+          "sha256": "bdf36bdf0bfe68c0a5f6aff09172f16ff401cb821b0e04769a9d8c129d0ecde3"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "harness/cleanup.py",
+          "sha256": "eb4663b5e86fd02342e9d1393a6c27b11fba8b0b25097f11dcd8eb64c29bb53c"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "harness/transcript_cleanup.py",
+          "sha256": "00b62133260420bb8300132dafdcd95b38dfcac73f4b6df78eeb4e9e9b9ffbbd"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "plugins/hermes-maintenance/__init__.py",
+          "sha256": "b2f94434ba29e816519ab7dac35528ac9e4e4b92c0c291d84b1343e0bd8dc676"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "install_maintenance.py",
+          "sha256": "d0bfa91882f70ad8288b24d3568363ca55463ace6353ad34d0554bcd5dbc5470"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "install_brain_pointer.py",
+          "sha256": "9fdec9d9fb3ed76386df97787a5f41b3a65a2bbb2f8028f64b9f4398bb562669"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "prepare_context_cleanup.py",
+          "sha256": "d24953f4cd39a09ba848a25179bf7c2adeaa62814cf8bbcc1aea5eb9509403f3"
+        },
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "migrate_maintenance_cron.py",
+          "sha256": "ebf7ecc76b6e6ab20dc4292663a2f2e7499bea37d4e71243bffa218e2f548219"
+        }
+      ],
+      "deployment": [
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "docs/maintenance-execution-evidence.md",
+          "sha256": "55f59f6e9acbe29df0368c08270c06a0cd9a0d36f299d5396a6a64473585afff",
+          "kind": "execution-evidence"
+        }
+      ],
+      "dependencies": [
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "docs/maintenance-execution-evidence.md",
+          "sha256": "55f59f6e9acbe29df0368c08270c06a0cd9a0d36f299d5396a6a64473585afff",
+          "kind": "execution-evidence"
+        }
+      ],
+      "verification": [
+        {
+          "commit": "a497d8a81715e4a0adc5ba90d3cc9faf71e1a827",
+          "path": "docs/maintenance-execution-evidence.md",
+          "sha256": "55f59f6e9acbe29df0368c08270c06a0cd9a0d36f299d5396a6a64473585afff",
+          "kind": "execution-evidence"
+        }
+      ]
     }
   ]
 }
