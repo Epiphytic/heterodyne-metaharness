@@ -60,6 +60,13 @@ def parser():
             action.add_argument('--evidence-file', required=True)
         if name == 'worktree':
             action.add_argument('repository')
+    update = actions.add_parser('update')
+    update.add_argument('issue_id')
+    update.add_argument('--file', required=True)
+    update.add_argument('--key', required=True)
+    update.add_argument('--authorization-file', required=True)
+    reconcile = actions.add_parser('reconcile')
+    reconcile.add_argument('issue_id', nargs='?')
     create = actions.add_parser('create')
     create.add_argument('--title', required=True)
     create.add_argument('--file', required=True)
@@ -151,11 +158,22 @@ def task_dispatch(args, store, supervisor, config):
         state['workstream'] = args.workstream
     action = args.task_action
     if action == 'create':
-        result = beads.create(run, args.title, Path(args.file).read_text(), key=args.key,
+        from .tasks import admit
+        return admit(store, supervisor, beads, run, args.title, Path(args.file).read_text(), args.key,
                               kind=args.kind, metadata=json.loads(args.metadata), approval_id=args.approval_id)
+    elif action == 'update':
+        from .tasks import addendum
+        return addendum(store, beads, run, args.issue_id, Path(args.file).read_text(), args.key, Path(args.authorization_file).read_text())
+    elif action == 'reconcile':
+        issue_id = args.issue_id or state.get('issue_id')
+        if not issue_id:
+            raise BeadsError('No bound task to reconcile')
+        result = beads.show(run, issue_id)
     elif action == 'context':
         result = {'context': beads.context(run)}
     elif action == 'close':
+        from .tasks import assert_close_current
+        assert_close_current(store, run, beads.show(run, args.issue_id))
         result = beads.close(run, args.issue_id, args.evidence_file)
     elif action == 'worktree':
         result = beads.worktree(run, args.issue_id, args.repository)
@@ -182,6 +200,15 @@ def task_dispatch(args, store, supervisor, config):
     else:
         result = beads.ready(run)
     supervisor.persist(run)
+    if action in ('bind', 'claim', 'reconcile', 'show'):
+        from .tasks import observe
+        observe(store, result)
+        if action == 'claim':
+            from .tasks import record_claim_baseline
+            record_claim_baseline(store, run, result)
+    elif action == 'close':
+        from .tasks import observe
+        observe(store, result['issue'])
     return result
 
 
@@ -244,6 +271,13 @@ def dispatch(args, store, supervisor, config):
 def main(argv=None):
     args = parser().parse_args(argv)
     os.environ['HERMES_HOME'] = str(Path(args.home).expanduser())
+    if args.command == 'task' and args.task_action in ('show', 'context'):
+        from .tasks import readonly
+        result = readonly(args.home, args.name, getattr(args, 'issue_id', None))
+        if args.task_action == 'context':
+            result['context'] = 'Cached task data, not execution authority: ' + json.dumps(result['snapshot'])
+        print(json.dumps(result, indent=2))
+        return 0
     store = Store(args.home)
     config = load_config(args.home)
     if args.command == 'route':

@@ -11,7 +11,7 @@ from harness.queue_hook import invoke
 
 class QueueHookTest(unittest.TestCase):
     def setUp(self):
-        self.run = {'id': str(uuid.uuid4()), 'agent': 'codex', 'workdir': '/tmp/work', 'beads': {}}
+        self.run = {'id': str(uuid.uuid4()), 'agent': 'codex', 'name': 'demo', 'state': 'active', 'created_at': 1, 'workdir': '/tmp/work', 'beads': {}}
         self.store = Mock()
         self.store.get.return_value = self.run
         self.env = {'HERMES_WORKSTREAM_RUN': self.run['id']}
@@ -76,19 +76,42 @@ class QueueHookTest(unittest.TestCase):
             args = parser().parse_args(['task', 'demo', '--workstream', 'test', 'create',
                                        '--title', 'Implement', '--file', str(task), '--key', 'message-42'])
             facade.return_value.config = {}
+            from harness.store import Store
+            store = Store(Path(directory))
+            self.addCleanup(store.db.close)
+            with store.db: store.save(self.run)
+            facade.return_value.create.return_value = {'id': 'created', 'title': 'Implement', 'status': 'open'}
             supervisor = Mock()
-            task_dispatch(args, self.store, supervisor, self.config)
+            task_dispatch(args, store, supervisor, self.config)
+            self.run['beads']['workstream'] = 'test'
             facade.return_value.create.assert_called_once_with(
                 self.run, 'Implement', 'Acceptance: tested', key='message-42', kind='task', metadata={}, approval_id=None)
             supervisor.persist.assert_called_once_with(self.run)
 
     @patch('harness.cli.Beads')
     def test_task_cli_claim_persists_mutated_identity(self, facade):
-        args = parser().parse_args(['task', 'demo', 'claim', 'btq-task'])
-        supervisor = Mock()
-        task_dispatch(args, self.store, supervisor, self.config)
-        facade.return_value.claim.assert_called_once_with(self.run, 'btq-task')
-        supervisor.persist.assert_called_once_with(self.run)
+        import tempfile
+        from harness.store import Store
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory))
+            try:
+                with store.db: store.save(self.run)
+                def claim(run, issue_id):
+                    run['beads']['issue_id'] = issue_id
+                    return {'id': issue_id, 'title': 'Task', 'status': 'in_progress', 'assignee': 'fixture'}
+                facade.return_value.claim.side_effect = claim
+                args = parser().parse_args(['task', 'demo', 'claim', 'btq-task'])
+                supervisor = Mock()
+                supervisor.persist.side_effect = lambda run: store.save(run)
+                task_dispatch(args, store, supervisor, self.config)
+                claimed_run = facade.return_value.claim.call_args.args[0]
+                self.assertEqual(claimed_run['id'], self.run['id'])
+                self.assertEqual(claimed_run['beads']['issue_id'], 'btq-task')
+                facade.return_value.claim.assert_called_once_with(claimed_run, 'btq-task')
+                supervisor.persist.assert_called_once_with(claimed_run)
+                self.assertEqual(store.get('demo')['beads']['task_snapshot']['issue']['id'], 'btq-task')
+            finally:
+                store.db.close()
 
     @patch('harness.cli.Beads')
     def test_recovery_clears_guards_without_restarting_task(self, facade):

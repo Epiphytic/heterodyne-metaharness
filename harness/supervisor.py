@@ -319,8 +319,18 @@ class Supervisor:
         self.persist(run)
 
     def drain_inbox(self, run):
-        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY created_at LIMIT 1", (run['id'],)).fetchall()
+        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
         for row in rows:
+            if row['id'].startswith('task-update:'):
+                from .tasks import current_notification
+                if not current_notification(self.store, run, row):
+                    with self.store.db:
+                        self.store.db.execute("UPDATE inbox SET state='superseded' WHERE id=?", (row['id'],))
+                    continue
+                if (run.get('native_turn_state') != 'idle' or run.get('resume_required')
+                        or run.get('beads', {}).get('recovery_required')
+                        or run.get('observed_state') == 'awaiting_approval'):
+                    continue
             self.submit(run, row['text'], target=row['target'], message_id=row['id'])
 
     def recover_intents(self, run):
@@ -377,6 +387,9 @@ class Supervisor:
                     self.store.event(run, 'manager_compacted', 'Manager compacted; stable workstream and channel mapping retained.', event['id'])
             for event in events:
                 kind, summary, key = event['kind'], event['summary'], event['id']
+                turn_states = {'working': 'working', 'approval': 'awaiting_approval', 'turn_completed': 'idle'}
+                if kind in turn_states:
+                    run['native_turn_state'] = turn_states[kind]
                 if kind == 'turn_completed':
                     self.store.event(run, kind, 'Coding agent finished a turn:\n' + summary, key)
                     if run.get('resume_required'):

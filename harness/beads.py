@@ -100,6 +100,7 @@ class Beads:
         if issue.get('assignee') and issue['assignee'] != queue.worker:
             raise BeadsError('Bead belongs to another worker; recovery must be explicit')
         run.setdefault('beads', {})['issue_id'] = issue_id
+        run['beads']['worker_identity'] = queue.worker
         return issue
 
     def claim(self, run, issue_id):
@@ -118,6 +119,7 @@ class Beads:
         if result.get('assignee') != queue.worker or result.get('status') != 'in_progress':
             raise BeadsError('Claim ownership not confirmed; do not execute')
         run.setdefault('beads', {})['issue_id'] = issue_id
+        run['beads']['worker_identity'] = queue.worker
         return result
 
     def pause(self, run):

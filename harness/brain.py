@@ -131,16 +131,7 @@ def _acknowledge(db, session, native_id, turn_id, messages, exact_turn):
     if row is None:
         return False
     marker = '[brain-notice:' + row[0] + ']'
-    seen = False
-    delivered = False
-    for message in messages:
-        if message.get('role') in ('user', 'developer'):
-            value = message.get('api_content') or message.get('content', '')
-            seen = (seen if exact_turn else False) or marker in json.dumps(value)
-            if not exact_turn:
-                delivered = False
-        elif seen and message.get('role') == 'assistant' and message.get('content'):
-            delivered = True
+    delivered = received(marker, messages, exact_turn)
     if not delivered:
         return False
     db.execute('INSERT OR IGNORE INTO brain_visible(token,session,native_id,notice) VALUES (?,?,?,?)',
@@ -156,3 +147,18 @@ def acknowledge(db, session, native_id, turn_id, messages, *, exact_turn=False):
     with db:
         db.execute('BEGIN IMMEDIATE')
         return _acknowledge(db, session, native_id, turn_id, messages, exact_turn)
+
+
+def received(marker, messages, exact_turn=False):
+    """Shared proof of injected context followed by assistant transcript content."""
+    seen = False
+    delivered = False
+    for message in messages:
+        if message.get('role') in ('user', 'developer'):
+            value = message.get('api_content') or message.get('content', '')
+            seen = (seen if exact_turn else False) or marker in json.dumps(value)
+            if not exact_turn:
+                delivered = False
+        elif seen and message.get('role') == 'assistant' and message.get('content'):
+            delivered = True
+    return delivered

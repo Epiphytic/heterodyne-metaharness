@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-task-addendums",
+  "proposal": "Unify workstream task admission and preserve independent tasks as separate Beads; deliver idempotent active-task addendum revisions to the current stable worker, retain authorization and history, provide sandbox-readable task snapshots, and preserve ownership, approval and recovery guards.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T02:58:19.407786+00:00",
+      "evidence": "Record scope of claimed Bead btq-harness-a40956ff84a9873066149391."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T02:58:19.407786+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "35fb089a93721dedd03c0b18bb71d860b3c2061701652330435c3ab19dd856ab",
+      "evidence": "Operator handoff records that the existing user request authorizes this scope. No new Liam message or new approval is claimed. Timestamp records this authorization evidence; operator implementation feedback is not a separate user approval."
+    }
+  ]
+}

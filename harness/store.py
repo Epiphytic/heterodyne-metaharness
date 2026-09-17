@@ -123,7 +123,15 @@ class Store:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = directory / 'checkpoint.json'
         temp = target.with_suffix('.tmp')
-        temp.write_text(json.dumps(run, indent=2) + '\n')
-        os.chmod(temp, 0o600)
+        with temp.open('w') as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(json.dumps(run, indent=2) + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
         temp.replace(target)
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         return target

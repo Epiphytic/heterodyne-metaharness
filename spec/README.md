@@ -9,6 +9,7 @@ AGENTS contain short pointers; USER owns personal preferences. Beads owns task s
 - [Session lifecycle](sessions.md)
 - [Context hygiene](context.md)
 - [Shared brain notifications](brain.md)
+- [Task admission and addendums](tasks.md)
 - [Change lifecycle](changes.md)
 - [Runtime repair](runtime.md)
 

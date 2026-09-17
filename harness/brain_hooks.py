@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from . import brain
+from . import brain, task_hooks
 from .store import Store
 
 
@@ -99,6 +99,7 @@ def handle(store, provider, payload, spec):
     event = payload.get('hook_event_name')
     turn = str(payload.get('turn_id') or 'native-prompt')
     with store.lock():
+        task_hooks.activity(store, session, native, turn, event)
         if event in ('Stop', 'post_llm_call'):
             if provider == 'hermes':
                 messages = payload.get('conversation_history') or []
@@ -106,10 +107,16 @@ def handle(store, provider, payload, spec):
                 saved = store.db.execute('SELECT path,offset FROM brain_transcripts WHERE session=? AND native_id=? AND turn_id=?',
                                          (session, native, turn)).fetchone()
                 messages = transcript_messages(saved[0], provider, saved[1]) if saved else []
-            return {'acknowledged': brain.acknowledge(store.db, session, native, turn, messages, exact_turn=provider != 'hermes')}
+            task_ack = task_hooks.acknowledge(store, session, native, turn, messages, exact_turn=provider != 'hermes')
+            return {'acknowledged': brain.acknowledge(store.db, session, native, turn, messages, exact_turn=provider != 'hermes'),
+                    'task_acknowledged': task_ack}
         if event not in ('SessionStart', 'UserPromptSubmit', 'pre_llm_call'):
             return None
+        task_notice = task_hooks.offer(store, session, native, turn)
         notice = brain.offer(store.db, session, native, turn, brain.scan(store.root.parent, spec))
+        if task_notice:
+            notice = dict(notice) if notice else {'context': ''}
+            notice['context'] += '\n' + task_notice['context']
         if notice and provider != 'hermes' and payload.get('transcript_path'):
             path = Path(payload['transcript_path'])
             offset = path.stat().st_size if path.exists() else 0

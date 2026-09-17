@@ -10,6 +10,8 @@ SQLite runtime repair: [runbook](docs/sqlite-runtime-repair.md) and
 
 Shared brain notifications: [contract](spec/brain.md) and [deployment steps](docs/brain-notifications.md), and [execution evidence](docs/brain-notifications-execution-evidence.md).
 
+Task admission and addendums: [contract](spec/tasks.md) and [deployment steps](docs/task-addendums.md).
+
 ## Commands
 
 ```sh
