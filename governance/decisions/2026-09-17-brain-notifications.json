@@ -13,6 +13,98 @@
       "by": "Liam",
       "evidence": "Explicit implementation authorization in persistent fork handoff and follow-up: proceed within already authorized task. Timestamp records authorization evidence, not inferred original approval time. Task addendums excluded to dependent Bead.",
       "proposal_sha256": "368548021dc03cb048f9b30d0662d489c134c71af9609c115bd05d75dd3fb95c"
+    },
+    {
+      "state": "completed",
+      "at": "2026-09-17T02:49:19.959865+00:00",
+      "spec": [
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "spec/brain.md",
+          "sha256": "1b674d2c2c7a01f44c1c356a107fcb20decef776c403fbf5afa7d95cd0a2a7ce"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "spec/README.md",
+          "sha256": "0837bc4d7730dde838ab135b61f4a010ec054943c4c2250f984cce8f12f8479a"
+        }
+      ],
+      "implementation": [
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "harness/brain.py",
+          "sha256": "254f12110d7d65c1f2e0fd1601ba4e00357990e78c393d02410608bc5cc9b4aa"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "harness/brain_hooks.py",
+          "sha256": "c9aca99a2e842e52a8283ca934a028b57fbef1ebc4956f6d1589098d6c57578c"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "harness/brain_visible.py",
+          "sha256": "c7c04986b118bebbef0d08060bb53a59f9b0144469f7f4a00d583fba30c09ab5"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "harness/delivery.py",
+          "sha256": "740428a83ebba2e295d6a15d70d438a7bfa104067a424ca9f57d7f06d7f17398"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "plugins/session-sync/__init__.py",
+          "sha256": "149855e7813358122710ed2ff9b716e685f80ea5a51eab8b28608b11b2bb5f04"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "install_brain.py",
+          "sha256": "2f27e37db5a28d6806b9b1bb1ebd90fc63a72558e2e779d8aa4ad70dbe2bcc20"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "bin/workstream-brain-hook",
+          "sha256": "8a468d30a45a67ae56077bf6681f6258eb7e81d1425543ea05aabc9766deefc2"
+        }
+      ],
+      "deployment": [
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "docs/brain-notifications-execution-evidence.md",
+          "sha256": "56eebdf42b7a343b64d6aa0ef39a1eea47bbb7642e9b986b77c00126763ac13f",
+          "kind": "execution-evidence"
+        }
+      ],
+      "dependencies": [
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "docs/brain-notifications-execution-evidence.md",
+          "sha256": "56eebdf42b7a343b64d6aa0ef39a1eea47bbb7642e9b986b77c00126763ac13f",
+          "kind": "execution-evidence"
+        }
+      ],
+      "verification": [
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "docs/brain-notifications-execution-evidence.md",
+          "sha256": "56eebdf42b7a343b64d6aa0ef39a1eea47bbb7642e9b986b77c00126763ac13f",
+          "kind": "execution-evidence"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "tests/test_brain.py",
+          "sha256": "3501ae54027216ae4fdbe39d56f5372d3361ca7f89e2a140a3a09a08b786110a"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "tests/test_brain_hooks.py",
+          "sha256": "824bd534a3ba0ecff6834685294c43cd79579487426f2289fab21538604fb2cf"
+        },
+        {
+          "commit": "f27d54328a7fb71e1d7833d38f7dae535128d343",
+          "path": "tests/test_brain_visible.py",
+          "sha256": "427264410088c09c730307df757c13408500639fe04a138c35e0c4f297885a56"
+        }
+      ]
     }
   ]
 }
