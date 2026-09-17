@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-status-pane-fallback",
+  "proposal": "Fix authorized Bead 259f status reporting: remove timestamp suffix, suppress duplicate active observations, and add persisted normalized pane snapshots as a stopped-reporting fallback; retain native approval, input, recovery and task-completion guards.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T21:18:26.534136+00:00",
+      "evidence": "Prioritized slice of assigned Bead 259f; remaining approval-relay and lifecycle scope stays open."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T21:18:26.534136+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "6bb0cec7615feea12544ad6954c9d039201a233906f9485287d9f687858cbcb2",
+      "evidence": "Current operator priority steering and assigned Bead revision 761115de9a76d42d32fd73df797ba78b9e1ba3aaf3fb9d18838b3073686e2bb2 record existing user-authorized scope. Timestamp records this evidence, not a new user approval. Supersedes timestamped ongoing-report behavior in the earlier implementation; deployment verification pending."
+    }
+  ]
+}

@@ -48,6 +48,24 @@ class StatusTest(unittest.TestCase):
         with self.store.db:self.store.event(run, 'working', 'same report', 'changed')
         self.assertIsNotNone(self.store.db.execute('SELECT id FROM outbox WHERE id="changed"').fetchone())
 
+    def test_ongoing_timestamp_cannot_defeat_dedup_and_change_is_prompt(self):
+        run = self.start()
+        run.update(state='active', native_turn_state='working', task_summary='Running tests')
+        self.supervisor.heartbeat(run)
+        count = len(self.events('progress'))
+        for elapsed in (240, 480):
+            self.now += elapsed
+            with self.assertLogs('harness.status', level='ERROR'):
+                self.supervisor.heartbeat(run)
+            self.assertEqual(len(self.events('progress')), count)
+        self.assertEqual(len(self.events('duplicate_status_error')), 2)
+        run['task_summary'] = 'Tests passed; preparing review'
+        self.now += 1
+        self.supervisor.heartbeat(run)
+        self.assertEqual(len(self.events('progress')), count + 1)
+        texts = [row[0] for row in self.store.db.execute('SELECT text FROM outbox')]
+        self.assertFalse(any('Observed at' in text for text in texts))
+
     def test_exact_stop_updates_run_and_stale_turn_cannot_overwrite(self):
         run = self.start()
         task_hooks.activity(self.store, run['id']+':worker', 'native', 'new', 'UserPromptSubmit')
@@ -58,6 +76,44 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(run['state'], 'idle')
         self.assertFalse(status.activity(run, 'native', 'old', 'working', 1))
         self.assertEqual(run['state'], 'idle')
+
+    def test_static_pane_normalized_persisted_and_changed_output_delivers(self):
+        run = self.start()
+        run.update(state='active', native_turn_state='working', task_summary='Running')
+        pane = self.tmux.panes[run['id']]
+        pane['text'] = 'Output\nWorking (1m 2s • esc to interrupt)'
+        self.supervisor.observe(run)
+        self.supervisor.heartbeat(run)
+        count = len(self.events('progress'))
+        digest = run['pane_digest']
+        pane['text'] = 'Output\nWorking (2m 3s • esc to interrupt)'
+        self.supervisor.observe(run)
+        self.assertTrue(status.is_idle(run, self.store))
+        self.assertEqual(run['native_turn_state'], 'working')  # reporting does not authorize input
+        with self.assertLogs('harness.status', level='ERROR'):
+            self.supervisor.heartbeat(run)
+        self.assertEqual(len(self.events('progress')), count)
+        restored = self.store.get(run['id'])
+        self.assertEqual(restored['pane_digest'], digest)
+        self.assertEqual(restored['pane_unchanged_ticks'], 1)
+        self.now += 1000
+        self.supervisor.heartbeat(restored)
+        self.assertEqual(len(self.events('progress')), count)
+        pane['text'] += '\nNew output'
+        self.supervisor.observe(restored)
+        self.supervisor.heartbeat(restored)
+        self.assertEqual(len(self.events('progress')), count + 1)
+        self.assertEqual(restored['pane_unchanged_ticks'], 0)
+
+    def test_static_pane_never_hides_approval_or_authorizes_recovery(self):
+        run = self.start()
+        status.observe_pane(run, 'Would you like to run this command?')
+        status.observe_pane(run, 'Would you like to run this command?')
+        run['observed_state'] = 'awaiting_approval'
+        self.assertFalse(status.is_idle(run, self.store))
+        run['observed_state'] = 'working'
+        run['resume_required'] = True
+        self.assertFalse(status.is_idle(run, self.store))
 
     def test_native_abort_updates_state_without_task_completion(self):
         run = self.start()

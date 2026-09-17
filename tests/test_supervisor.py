@@ -134,7 +134,7 @@ class SupervisorTest(unittest.TestCase):
         self.new_supervisor('boot-b').tick()
         self.assertEqual(len(self.tmux.launches), 4)
 
-    def test_unknown_and_approval_states_report_on_fixed_persisted_deadline(self):
+    def test_unknown_and_approval_reports_do_not_repeat_at_deadline(self):
         run = self.start()
         for text in ('>', 'Do you want to proceed?'):
             self.tmux.panes[run['id']]['text'] = text
@@ -146,8 +146,10 @@ class SupervisorTest(unittest.TestCase):
         self.new_supervisor().tick()
         self.assertEqual(len(self.events('progress')), 2)
         self.now += 1
-        self.new_supervisor().tick()
-        self.assertEqual(len(self.events('progress')), 3)
+        with self.assertLogs('harness.status', level='ERROR'):
+            self.new_supervisor().tick()
+        self.assertEqual(len(self.events('progress')), 2)
+        self.assertEqual(len(self.events('duplicate_status_error')), 1)
         self.assertLessEqual(REPORT_INTERVAL, 300)
 
     def test_command_reboot_does_not_replay_workload(self):

@@ -256,8 +256,10 @@ class Supervisor:
         self.persist(run)
 
     def observe(self, run):
+        from .status import observe_pane
         info = self.tmux.inspect(run)
         if not info['alive']:
+            run['pane_stopped'] = False
             if run['state'] in ('starting', 'blocked', 'interrupted', 'failed'):
                 return
             if run['agent'] == 'command' and not info.get('missing'):
@@ -269,6 +271,8 @@ class Supervisor:
                 run['state'] = 'interrupted'
                 self.report(run, 'interrupted', 'Coding agent exited. Checkpoint preserved; explicit resume is available.')
             return
+        if run['agent'] != 'command':
+            observe_pane(run, info['text'])
         observation = Adapter(run['agent']).observe(run, info['text'])
         run['pane_id'] = info['pane_id']
         if observation.get('native_session_id'):
@@ -385,13 +389,13 @@ class Supervisor:
         if idle and not changed:
             return
         transition = run.get('heartbeat_idle') is not None and run['heartbeat_idle'] != idle
-        if (idle and changed) or transition or now - run.get('last_report_at', 0) >= REPORT_INTERVAL:
+        if changed or transition or now - run.get('last_report_at', 0) >= REPORT_INTERVAL:
             run['last_report_at'] = now
             run['heartbeat_digest'] = digest
             run['heartbeat_idle'] = idle
-            # A fresh ongoing observation is meaningful even when the pane is
-            # unchanged. Never label that as new task progress.
-            self.report(run, 'progress', text if idle else f'{text}\nObserved at {now:.3f}; periodic observation, not a progress claim.')
+            # Observation timestamps must never manufacture a content change.
+            # Store.event error-logs and suppresses unchanged active reports.
+            self.report(run, 'progress', text)
         self.persist(run)
 
     def lifecycle(self, run):
