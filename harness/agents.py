@@ -43,6 +43,9 @@ class Provider:
     name = None
     database = None
 
+    def discover_missing_cwd(self, db, run, started):
+        return set()
+
     def argv(self, run, recover=False):
         config = run.get('config', {})
         executable = config.get('executable', self.name)
@@ -92,6 +95,17 @@ class HermesProvider(Provider):
     name = 'hermes'
     database = ('HERMES_HOME', '.hermes', 'state.db', 'sessions', 'started_at')
 
+    def discover_missing_cwd(self, db, run, started):
+        """Named CLI manager only; never adopt a fork or a latest conversation."""
+        name = _hermes_session_name(run)
+        if not name:
+            return set()
+        return {row[0] for row in db.execute(
+            "SELECT id FROM sessions WHERE (cwd IS NULL OR cwd='') "
+            "AND title=? AND source='cli' AND parent_session_id IS NULL "
+            "AND started_at>=? AND started_at<=?",
+            (name, int(started), started + 120))}
+
     def start(self, run, executable, extra):
         name = _hermes_session_name(run)
         return [executable, 'chat', '--cli', *extra,
@@ -136,7 +150,7 @@ class Adapter:
         return self.provider.argv(run, recover)
 
     def discover(self, run):
-        """Only accept a unique cwd/time match; ambiguity stays unresolved."""
+        """Accept unique scoped launch candidates; never guess among native sessions."""
         if run.get('native_session_id'):
             return run['native_session_id']
         if self.provider.database is None:
@@ -157,6 +171,7 @@ class Adapter:
                     ids.update(row[0] for row in db.execute(
                         f'SELECT id FROM {table} WHERE cwd=? AND {clock}>=? AND {clock}<=?',
                         (str(Path(run['workdir']).resolve()), int(started), started + 120)))
+                    ids.update(self.provider.discover_missing_cwd(db, run, started))
             except sqlite3.Error:
                 continue
         return next(iter(ids)) if len(ids) == 1 else None
