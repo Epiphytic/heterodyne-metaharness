@@ -5,6 +5,8 @@ heartbeat interval. A separate process may call this more frequently. Per-group
 FIFO preserves status order while allowing other groups past a failed target.
 """
 import fcntl
+import logging
+import sqlite3
 import time
 
 MAX_ATTEMPT_SECONDS = 15
@@ -64,6 +66,11 @@ def deliver(store, transport, now=None, ops_group=None):
         except BlockingIOError:
             return
         try:
+            from .brain_visible import enqueue_receipts
+            try:
+                enqueue_receipts(store)
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                logging.getLogger(__name__).warning('Brain visible routing deferred: %s', type(exc).__name__)
             _attempt(store, transport, now, ops_group)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)

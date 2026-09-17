@@ -63,6 +63,8 @@ def scan(home, spec, *, max_files=20000, max_bytes=128 * 1024 * 1024):
 
 def initialize(db):
     db.executescript('''
+    CREATE TABLE IF NOT EXISTS brain_visible(token TEXT PRIMARY KEY, session TEXT NOT NULL,
+      native_id TEXT NOT NULL, notice TEXT NOT NULL, recipient TEXT, queued_at REAL, routing_attempt_at REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS brain_known(session TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS brain_pending(session TEXT PRIMARY KEY, token TEXT NOT NULL,
       snapshot TEXT NOT NULL, notice TEXT NOT NULL);
@@ -123,7 +125,7 @@ def offer(db, session, native_id, turn_id, current):
 
 def _acknowledge(db, session, native_id, turn_id, messages, exact_turn):
     """Require exact offer plus injected marker followed by model assistant content."""
-    row = db.execute('''SELECT p.token,p.snapshot FROM brain_pending p JOIN brain_offers o
+    row = db.execute('''SELECT p.token,p.snapshot,p.notice FROM brain_pending p JOIN brain_offers o
       ON o.session=p.session AND o.token=p.token WHERE p.session=? AND o.native_id=? AND o.turn_id=?''',
                      (session, native_id, turn_id)).fetchone()
     if row is None:
@@ -141,6 +143,8 @@ def _acknowledge(db, session, native_id, turn_id, messages, exact_turn):
             delivered = True
     if not delivered:
         return False
+    db.execute('INSERT OR IGNORE INTO brain_visible(token,session,native_id,notice) VALUES (?,?,?,?)',
+               (row[0], session, native_id, row[2]))
     db.execute('INSERT OR REPLACE INTO brain_known VALUES (?,?)', (session, row[1]))
     db.execute('DELETE FROM brain_pending WHERE session=? AND token=?', (session, row[0]))
     db.execute('DELETE FROM brain_offers WHERE session=?', (session,))

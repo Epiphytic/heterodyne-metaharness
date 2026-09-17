@@ -8,6 +8,8 @@ See the [maintenance deployment runbook](docs/maintenance-deployment.md),
 SQLite runtime repair: [runbook](docs/sqlite-runtime-repair.md) and
 [deployment evidence](docs/sqlite-runtime-execution-evidence.md).
 
+Shared brain notifications: [contract](spec/brain.md) and [deployment steps](docs/brain-notifications.md).
+
 ## Commands
 
 ```sh

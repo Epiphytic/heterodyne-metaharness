@@ -94,7 +94,7 @@ def memory_plan(home):
     matches = [i for i, entry in enumerate(entries) if entry.strip().startswith('session-sync plugin (')]
     if len(matches) != 1:
         raise ValueError('Expected one session-sync memory entry')
-    entries[matches[0]] = '\nShared brain notifications: session-sync is enabled. Current behavior and receipt/checkpoint contract: /home/operator/repos/hermes-workstream-harness/spec/brain.md.\n'
+    entries[matches[0]] = '\nShared brain notifications: session-sync is enabled. Preserve Liam’s preference for a visible session-chat notice after confirmed context receipt; durable delivery retries when routing or transport is unavailable. Current behavior and receipt/checkpoint contract: /home/operator/repos/hermes-workstream-harness/spec/brain.md.\n'
     return {'files': [{'path': str(path), 'sha256': cleanup.digest(path), 'replacement': '§'.join(entries)}],
             'creates': []}
 

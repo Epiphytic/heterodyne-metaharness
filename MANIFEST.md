@@ -36,6 +36,11 @@ Authority: [active specification](spec/README.md). Operational checks and result
 | [prepare_context_cleanup.py](prepare_context_cleanup.py) | Exact reviewed file/memory cleanup manifest generation |
 | [migrate_maintenance_cron.py](migrate_maintenance_cron.py) | Native retirement of duplicate supervision and failure-monitor update |
 | [install_brain_pointer.py](install_brain_pointer.py) | Scoped SOUL mirror and canonical-spec pointer, with private external backup |
+| [harness/brain.py](harness/brain.py) | Transactional per-session inventory offers and acknowledged checkpoints |
+| [harness/brain_visible.py](harness/brain_visible.py) | Exact chat routing and durable visible receipts through the existing outbox |
+| [harness/brain_hooks.py](harness/brain_hooks.py) | Shared native provider receipt adapters |
+| [plugins/session-sync](plugins/session-sync/__init__.py) | Generic Hermes pre/post-turn notification hooks |
+| [install_brain.py](install_brain.py) | Private reviewed hook/plugin installation plans and exact trust |
 | [spec/](spec/README.md) | Small crosslinked active maintenance contracts |
 | [harness/runtime_repair.py](harness/runtime_repair.py) | Native runtime staging, dependency gates, backups and guarded cutover |
 | [prepare_runtime_packaging.py](prepare_runtime_packaging.py) | Exact native state-module packaging correction manifest |

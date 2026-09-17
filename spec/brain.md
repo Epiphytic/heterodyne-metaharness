@@ -35,7 +35,16 @@ These receipts attest context delivery, not semantic understanding or task succe
 
 Sleeping sessions stay asleep. Catch-up occurs on the next natural turn/context
 hook, including resume/compact startup. No polling, forced turn, tool interruption,
-Marmot send, queue pickup or native approval bypass is part of notification delivery.
+queue pickup or native approval bypass is part of notification delivery.
+
+After confirmed context receipt, atomically retain a separate bounded path-only
+visible-chat receipt. The existing outbox dispatcher resolves exact run/group
+ownership (role-labeled), or a unique standalone Hermes Marmot registry entry using
+its structured native/compression identity and session key. Never guess a target.
+Missing or ambiguous routing remains pending for fair bounded retries. Enqueue is
+deduplicated by notice token and recipient; only existing transport acknowledgment
+marks the outbox delivered. Context checkpoints advance independently of visible
+routing/delivery. No forced model turn is needed for retries.
 
 Installation preserves unrelated provider hooks and plugin configuration. Replace
 the legacy disabled session-sync implementation using a reviewed private backup

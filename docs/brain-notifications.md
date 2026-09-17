@@ -2,6 +2,7 @@
 
 Current contract: [spec](../spec/brain.md). Shared implementation:
 [store](../harness/brain.py), [native adapters](../harness/brain_hooks.py),
+[visible receipt routing](../harness/brain_visible.py),
 [generic Hermes plugin](../plugins/session-sync/__init__.py),
 [reviewed installer](../install_brain.py). Maintenance guard is unchanged.
 
@@ -53,3 +54,13 @@ Only after successful enable/invocation, prepare a second reviewed memory plan:
 Sync only reviewed brain mirror paths after installation; no private plans,
 configuration values, transcripts, or duplicate normative spec. Task-update routing
 and durable addendum notices are the separate dependent Bead, not this deployment.
+
+Visible chat receipts preserve the existing user preference. Context acknowledgment
+retains a receipt transactionally; the existing dispatcher routes it and enqueues
+one token/recipient outbox item. Unavailable routing and transport remain pending.
+Reload the supervisor/dispatcher code after integration; hooks alone do not reload
+its imported delivery module. Verify an outbox acknowledgment separately from a
+context acknowledgment. Both manager and worker initial context receipts were
+operator-confirmed on d1e9a5f, before visible receipt storage existed; no historical
+visible receipt is fabricated for those deleted pending records. The next actual
+brain change produces a new receipt under the revised mechanism.
