@@ -13,6 +13,113 @@
       "by": "existing user authorization",
       "proposal_sha256": "35fb089a93721dedd03c0b18bb71d860b3c2061701652330435c3ab19dd856ab",
       "evidence": "Operator handoff records that the existing user request authorizes this scope. No new Liam message or new approval is claimed. Timestamp records this authorization evidence; operator implementation feedback is not a separate user approval."
+    },
+    {
+      "state": "completed",
+      "at": "2026-09-17T03:12:57.583753+00:00",
+      "spec": [
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "spec/tasks.md",
+          "sha256": "8cbfa6e4d9b30a0b6db3e61a41691f49b91770e9aaf49249a51a91c73f81186c"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "spec/README.md",
+          "sha256": "daedd59fd210c88dc2a8f0e4b36b9abe5ba891b41f840427b64efb3ed88c09ca"
+        }
+      ],
+      "implementation": [
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/tasks.py",
+          "sha256": "5db22e740d7d73c085883cee42b89339ef2a442a5297606f835c478541e49ad8"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/task_hooks.py",
+          "sha256": "568f1a1983ce6a669982f3fb0e8e4ed4abac51f67dbe41b57132afae001911d1"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/cli.py",
+          "sha256": "aa96a001e73c072402b878baaa19b8d6f8566f89cf59a2493eedd5a8939d3eff"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/beads.py",
+          "sha256": "73c65b55edf9b13de13877bf461ed364aa54ef590a8c2219a149bbb8dfee7fbc"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/maintenance.py",
+          "sha256": "8d458e53b16645cc9faafaa659bb3cf2e0a222a96f0f91d292ae372fd4ebded1"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/brain.py",
+          "sha256": "ce551e42a458edb76174924deff0a8f4fce22001c16f116124b6f2c938f5cc4e"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/brain_hooks.py",
+          "sha256": "a0d657f4f753e40e223ce59b85abcc33e4ec0ec8fc54f785b2250ecf9dee1b57"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/store.py",
+          "sha256": "da57a16165c1ca6884c9fd0d1b4b1ee25b1442f2e09d7dab46ed35e81d3ea839"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "harness/supervisor.py",
+          "sha256": "5d25474fbc5af5cf944f8d4a0696ec48074f51ed54b714000471990841f7f6e0"
+        }
+      ],
+      "deployment": [
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "docs/task-addendums-execution-evidence.md",
+          "sha256": "918f00c8a976853f4dc1529cb459e2e2f20896f3a90807ff05b86c12b1963360",
+          "kind": "execution-evidence"
+        }
+      ],
+      "dependencies": [
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "docs/task-addendums-execution-evidence.md",
+          "sha256": "918f00c8a976853f4dc1529cb459e2e2f20896f3a90807ff05b86c12b1963360",
+          "kind": "execution-evidence"
+        }
+      ],
+      "verification": [
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "docs/task-addendums-execution-evidence.md",
+          "sha256": "918f00c8a976853f4dc1529cb459e2e2f20896f3a90807ff05b86c12b1963360",
+          "kind": "execution-evidence"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "tests/test_tasks.py",
+          "sha256": "6d132a397c14bce60992040deb8f46c80dbb66427f3ecfd9090ad3a5a853ed80"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "tests/test_queue_hook.py",
+          "sha256": "0c7b7790cf9cfd56dbae9f2eb57fb077901aee22bbd188604e483a2c95c63a93"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "tests/test_beads.py",
+          "sha256": "3c75bc4283bb1f89331202c7ba319fa91d32445ef2e229d20f3e07a12e5c4c4b"
+        },
+        {
+          "commit": "69fba78d60513b000be49675ed5273a5489db4af",
+          "path": "tests/test_brain_hooks.py",
+          "sha256": "824bd534a3ba0ecff6834685294c43cd79579487426f2289fab21538604fb2cf"
+        }
+      ]
     }
   ]
 }
