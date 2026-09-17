@@ -118,6 +118,8 @@ exec python3 "$(dirname "$0")/watchdog-digest.py" "$@"
         replace(path, json.dumps(config, indent=2) + '\n', 0o600)
     config = json.loads(path.read_text())
     config['native_hook_command'] = shlex.quote(str(ROOT / 'bin/workstream-session')) + ' auto'
+    config.setdefault('beads', {}).update(enabled=True,
+        executable='/home/operator/repos/beads-task-queue/bin/btq')
     replace(path, json.dumps(config, indent=2) + '\n', 0o600)
     unit = Path.home() / '.config/systemd/user/hermes-workstreams.service'
     interpreter = shutil.which('python3')
@@ -144,13 +146,14 @@ WantedBy=default.target
 '''
     replace(unit, service, 0o644)
     if enable:
-        from harness.hook_config import install_codex_hook
+        from harness.hook_config import install_codex_hook, install_queue_hooks
         codex_home = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))
         for filename in ('hooks.json', 'config.toml'):
             source = codex_home / filename
             backup = source.with_name(source.name + '.pre-durable-harness')
             if source.exists() and not backup.exists(): shutil.copy2(source, backup)
         install_codex_hook(config['native_hook_command'])
+        install_queue_hooks(shlex.quote(str(ROOT / 'bin/workstream-queue-hook')))
         subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         subprocess.run(['systemctl', '--user', 'enable', '--now', 'hermes-workstreams.service'], check=True)
     print(json.dumps({'cli': str(cli), 'service': str(unit), 'enabled': enable}))

@@ -83,7 +83,7 @@ def _response(process, selector, pending, request, deadline):
     raise TimeoutError('Codex hook discovery exceeded its deadline')
 
 
-def discover_hook(command, home, cwd, executable='codex'):
+def discover_hook(command, home, cwd, executable='codex', event='sessionStart', matcher=MATCHER, timeout=15):
     process = subprocess.Popen([executable, 'app-server'], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env=dict(os.environ, CODEX_HOME=str(home)))
@@ -99,14 +99,14 @@ def discover_hook(command, home, cwd, executable='codex'):
             'params': {'cwds': [str(cwd)]}}, deadline)
         expected_source = str(Path(home) / 'hooks.json')
         candidates = [hook for entry in result.get('data', []) for hook in entry.get('hooks', [])
-                      if hook.get('command') == command and hook.get('eventName') == 'sessionStart'
+                      if hook.get('command') == command and hook.get('eventName') == event
                       and hook.get('sourcePath') == expected_source]
         if len(candidates) != 1:
             raise RuntimeError('Codex did not discover exactly one installed harness hook')
         hook = candidates[0]
         if not re.fullmatch(r'sha256:[0-9a-f]{64}', hook.get('currentHash', '')):
             raise RuntimeError('Codex returned an invalid hook trust hash')
-        if hook.get('matcher') != MATCHER or hook.get('timeoutSec') != 15 or not hook.get('enabled'):
+        if hook.get('matcher') != matcher or hook.get('timeoutSec') != timeout or not hook.get('enabled'):
             raise RuntimeError('Codex hook definition does not match the installed harness hook')
         return hook
     finally:
@@ -186,3 +186,50 @@ def install_codex_hook(command, codex_home=None, cwd=None, executable='codex'):
         if verified.get('trustStatus') != 'trusted':
             raise RuntimeError('Codex has not confirmed trust for the installed harness hook')
         return {'key': verified['key'], 'hash': verified['currentHash'], 'source': str(path)}
+
+
+def _queue_hook_plan(agent, home, wrapper):
+    path = home / ('hooks.json' if agent == 'codex' else 'settings.json')
+    if not path.exists():
+        raise RuntimeError(f'{agent} native hooks missing; install the shared queue first')
+    data = json.loads(path.read_text())
+    vetted = []
+    for event, native_event in (('SessionStart', 'sessionStart'), ('Stop', 'stop')):
+        old = '/home/operator/repos/beads-task-queue/bin/pickup-hook ' + event + ' ' + agent
+        command = wrapper + ' ' + event + ' ' + agent
+        matches = [(group, hook) for group in data.get('hooks', {}).get(event, [])
+                   for hook in group.get('hooks', []) if hook.get('command') in (old, command)]
+        if len(matches) != 1:
+            raise RuntimeError(f'Expected one {agent} {event} queue hook; refusing ambiguous migration')
+        group, hook = matches[0]
+        hook['command'] = command
+        vetted.append((command, native_event, group.get('matcher'), hook.get('timeout', 30)))
+    return path, json.dumps(data, indent=2) + '\n', vetted
+
+
+def _trust_queue_hooks(home, vetted):
+    config_path = home / 'config.toml'
+    for command, event, matcher, timeout in vetted:
+        args = (command, home, home, 'codex', event, matcher, timeout)
+        hook = discover_hook(*args)
+        old = config_path.read_text()
+        updated = _trust_text(old, hook['key'], hook['currentHash'])
+        if old != updated:
+            _write(config_path, updated)
+        if discover_hook(*args).get('trustStatus') != 'trusted':
+            raise RuntimeError('Codex queue hook trust verification failed')
+
+
+def install_queue_hooks(wrapper, codex_home=None, claude_home=None):
+    """Replace only installed BTQ commands; preflight both providers before writes."""
+    homes = {'codex': Path(codex_home or os.environ.get('CODEX_HOME', '~/.codex')).expanduser(),
+             'claude': Path(claude_home or '~/.claude').expanduser()}
+    with open(homes['codex'] / '.harness-hook-install.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        plans = {agent: _queue_hook_plan(agent, home, wrapper) for agent, home in homes.items()}
+        for agent, (path, updated, vetted) in plans.items():
+            if path.read_text() != updated:
+                _write(path, updated)
+            if agent == 'codex':
+                _trust_queue_hooks(homes[agent], vetted)
+    return [str(plan[0]) for plan in plans.values()]

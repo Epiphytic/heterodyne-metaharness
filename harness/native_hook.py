@@ -9,10 +9,23 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 
 from .store import Store
 
 MAX_PAYLOAD = 1024 * 1024
+
+
+def enrichment(home, run):
+    """Optional context cannot hold native identity restoration past its deadline."""
+    try:
+        result = subprocess.run([sys.executable, '-m', 'harness.hook_context', str(home)],
+                                input=json.dumps(run), capture_output=True, text=True,
+                                cwd=Path(__file__).resolve().parents[1],
+                                timeout=10, check=True)
+        return result.stdout[:12000]
+    except (OSError, subprocess.SubprocessError):
+        return 'Optional memory/Beads context unavailable; use the checkpoint and explicit task/search commands.'
 
 
 def register(store, run_name_or_id, role, native_id, previous_id=None, *, source=None, cwd=None):
@@ -93,6 +106,8 @@ def main(argv=None):
                    f"Marmot group: {run.get('group_id') or 'not bound'}. "
                    f"Read {checkpoint} after compaction to recover ownership and task state. "
                    'Use the existing manager and coding session; do not create replacement workstreams.')
+        if args.role == 'worker':
+            context += '\n' + enrichment(store.root.parent, run)
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart',
                                                 'additionalContext': context}}))
         return 0

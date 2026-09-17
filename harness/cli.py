@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 
+from .beads import Beads, BeadsError
 from .delivery import deliver, health
 from .marmot import Marmot
 from .store import Store, home_path
@@ -42,6 +43,28 @@ def parser():
     route = sub.add_parser('route')
     route.add_argument('--group', required=True); route.add_argument('--message-id', required=True)
     route.add_argument('--sender', required=True)
+    task = sub.add_parser('task')
+    task.add_argument('name')
+    task.add_argument('--workstream')
+    actions = task.add_subparsers(dest='task_action', required=True)
+    for name in ('ready', 'context', 'pause', 'resume'):
+        actions.add_parser(name)
+    for name in ('show', 'bind', 'claim', 'close', 'worktree'):
+        action = actions.add_parser(name)
+        action.add_argument('issue_id')
+        if name == 'close':
+            action.add_argument('--evidence-file', required=True)
+        if name == 'worktree':
+            action.add_argument('repository')
+    create = actions.add_parser('create')
+    create.add_argument('--title', required=True)
+    create.add_argument('--file', required=True)
+    create.add_argument('--key', required=True)
+    create.add_argument('--kind', choices=('task', 'research', 'review', 'brainstorm'), default='task')
+    create.add_argument('--metadata', default='{}')
+    create.add_argument('--approval-id')
+    recover = actions.add_parser('recover')
+    recover.add_argument('--evidence-file', required=True)
     for name in ('list', 'doctor', 'daemon', 'tick', 'deliver', 'import-legacy'):
         sub.add_parser(name)
     return p
@@ -113,8 +136,55 @@ def daemon(store, supervisor, config):
     thread.join(timeout=2)
 
 
+def task_dispatch(args, store, supervisor, config):
+    run = store.get(args.name)
+    beads = Beads(config.get('beads', {}))
+    state = run.setdefault('beads', {})
+    if args.workstream:
+        previous = state.get('workstream') or beads.config.get('workstream')
+        if state.get('issue_id') and previous != args.workstream:
+            raise BeadsError('Cannot reroute a run with a bound task')
+        state['workstream'] = args.workstream
+    action = args.task_action
+    if action == 'create':
+        result = beads.create(run, args.title, Path(args.file).read_text(), key=args.key,
+                              kind=args.kind, metadata=json.loads(args.metadata), approval_id=args.approval_id)
+    elif action == 'context':
+        result = {'context': beads.context(run)}
+    elif action == 'close':
+        result = beads.close(run, args.issue_id, args.evidence_file)
+    elif action == 'worktree':
+        result = beads.worktree(run, args.issue_id, args.repository)
+    elif action == 'recover':
+        evidence = Path(args.evidence_file).read_text().strip()
+        if not evidence:
+            raise BeadsError('Recovery evidence must describe interrupted effects and verified ownership')
+        if state.get('issue_id'):
+            queue = beads._queue(run)
+            issue = queue.show(state['issue_id'])
+            if issue.get('assignee') not in ('', None, queue.worker):
+                raise BeadsError('Recovery cannot take another worker claim')
+        beads.pause(run)
+        run['resume_required'] = False
+        state.update(recovery_required=False, pickup_enabled=False,
+                     recovery_evidence=evidence[:16000], reconciled_at=time.time())
+        result = {'reconciled': True, 'pickup_enabled': False,
+                  'note': 'Task ownership retained; resume pickup or send work only after inspecting effects.'}
+    elif action in ('pause', 'resume'):
+        result = getattr(beads, action)(run)
+        state['pickup_enabled'] = action == 'resume'
+    elif action in ('show', 'bind', 'claim'):
+        result = getattr(beads, action)(run, args.issue_id)
+    else:
+        result = beads.ready(run)
+    supervisor.persist(run)
+    return result
+
+
 def dispatch(args, store, supervisor, config):
     command = args.command
+    if command == 'task':
+        return task_dispatch(args, store, supervisor, config)
     if command == 'start':
         return supervisor.start(args.name, args.repo, args.agent, text_input(args), args.group, json.loads(args.agent_config), args.parent_session)
     if command == 'status':

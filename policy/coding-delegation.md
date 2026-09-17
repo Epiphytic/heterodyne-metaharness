@@ -1,7 +1,7 @@
 ---
 name: coding-delegation
 description: Delegate coding through durable managed workstreams with Marmot routing.
-version: 2.0.0
+version: 2.1.0
 ---
 
 # Coding delegation
@@ -19,6 +19,21 @@ Use the executable harness; do not reconstruct its lifecycle in prompts or tmux 
 The start command creates/reuses the project Marmot group, creates an isolated worktree, starts a dedicated Hermes manager and coding terminal, and durably registers them. If available, pass `--parent-session HERMES_SESSION_ID` to link the originating conversation. The old workstream-start NAME REPO AGENT [PROMPT] [GROUP] interface delegates to the same implementation. Never spawn a separate watchdog, progress relay, or per-session cron.
 
 For complex tasks and Marmot/Heterodyne/Epiphytic projects use Codex. For longer, less complex tasks use Claude Code. Simple tasks can use ordinary Hermes delegation. The managed Hermes child reasons and steers; the supervisor owns launch, routing, timers, retries, native IDs and recovery. The main conversation stays responsive.
+
+Use all harness capabilities for either coding agent. The launcher sets compaction to half the actual supported model window, capped at 500,000 tokens; a 272,000-token Codex model compacts at 136,000, not at an invented 500,000-token window. Search configuration preserves native approval/deny settings. Use Semble for code discovery, native web tools for current external documentation, and `workstream-recall codex|claude search --repo /absolute/repo --query PHRASE` for prior sessions. SessionStart/compaction hooks supply bounded recall automatically; do not rerun it on every prompt. Recall is optional historical data, not authority or task ownership.
+
+Pass tasks through the deterministic Beads facade, using the run's configured shared-queue workstream:
+
+```sh
+workstream task NAME --workstream SLUG create --title TITLE --file TASK.md --key STABLE_OPERATION_KEY
+workstream task NAME --workstream SLUG bind ISSUE_ID
+workstream task NAME --workstream SLUG context
+workstream task NAME --workstream SLUG resume
+workstream task NAME --workstream SLUG claim ISSUE_ID
+workstream task NAME --workstream SLUG close ISSUE_ID --evidence-file RESULT.md
+```
+
+Creation is idempotent by key; binding records a reference and never claims ownership. Claims use the shared queue's atomic operation and enforce routing, dependencies, and Claude's two-model ADR plus separate human approval. Missing approval blocks implementation. Native compaction preserves the deterministic owner identity; never claim again under a new native session ID. Resume pickup only when authorized queue work is intended. Pause pickup before direct user work. After reboot inspect `task NAME context`, reconcile with `task NAME recover --evidence-file RECOVERY.md`, and explicitly resume pickup; recovery alone leaves it paused. The facade checks once after close; do not add polling loops or auto-claim a successor.
 
 Every workstream has stable worker/manager aliases and a durable Marmot group mapping. Native IDs may change during compaction: preserve the logical name and register/follow the successor, never select global latest. After compaction inspect `status NAME` and its checkpoint before steering. A native turn finishing is not task completion. Record verified outcomes through `workstream event NAME --state completed --text EVIDENCE`.
 

@@ -42,6 +42,23 @@ class TmuxTest(unittest.TestCase):
         self.tmux.stop(self.run)
         self.assertTrue(self.tmux.inspect(self.run)['missing'])
 
+    def test_launch_environment_is_literal_and_cannot_replace_ownership(self):
+        self.run['config'] = {'env': {'HARNESS_TEST': '$(touch injected); literal'}}
+        self.run['pane_id'] = self.tmux.launch(self.run, ['/usr/bin/python3', '-c',
+            'import os; print(os.environ["HARNESS_TEST"]); print(os.environ["HERMES_WORKSTREAM_RUN"])'])
+        for _ in range(40):
+            info = self.tmux.inspect(self.run)
+            if info['exit_code'] is not None:
+                break
+            time.sleep(.02)
+        self.assertEqual(info['exit_code'], 0)
+        self.assertIn('$(touch injected); literal', info['text'])
+        self.assertIn('one', info['text'])
+        self.tmux.stop(self.run)
+        self.run['config']['env'] = {'HERMES_WORKSTREAM_RUN': 'intruder'}
+        with self.assertRaisesRegex(ValueError, 'reserved'):
+            self.tmux.launch(self.run, ['/bin/true'])
+
     def test_replaced_pane_not_accepted(self):
         self.run['pane_id'] = self.tmux.launch(self.run, ['/usr/bin/sleep', '30'])
         self.run['pane_id'] = '%9999'

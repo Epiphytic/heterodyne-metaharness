@@ -39,9 +39,68 @@ Every ongoing run, including unknown, blocked and failed states, queues a status
 
 The installed Marmot hook sends authenticated messages for an owned channel to its durable manager inbox, before ordinary gateway dispatch. Unowned channels use the normal gateway. New groups require no gateway restart once the hook is installed. Duplicate inbound IDs cannot create duplicate manager inputs. Inputs retain their explicit target across restart.
 
+## Context, search, and session recall
+
+Both coding adapters receive deterministic compaction and search settings at launch.
+The target is **half the real model window, capped at 500,000 tokens**. Installed
+Codex metadata currently advertises 272,000 tokens for `gpt-6-astra`, so its trigger
+is 136,000 tokens. Claude uses its native 50% override and a maximum 1,000,000-token
+compaction window. These settings apply to new or restarted native processes.
+See [context/search details](docs/context-search.md) for unknown-model behavior.
+
+Both agents can use Semble MCP for code discovery and native tools for web search.
+Existing approval settings and explicit denials remain effective. Auto-memory is
+pinned in an isolated venv; `workstream-recall AGENT list|search --repo PATH` scopes
+recall to the canonical repository and its existing worktrees. Add `--query PHRASE`
+for search. SessionStart and compaction recovery supply bounded metadata, not a
+per-prompt history dump. Upstream Codex recall currently rejects this host's newer
+schema and has no search; the harness supplies a separate read-only JSONL fallback.
+See [compatibility and limits](docs/auto-memory.md).
+
+## Passing Beads tasks
+
+The `workstream task` facade supplies a stable owner/session identity independent
+of native compaction IDs and routes operations through the shared Beads queue:
+
+New runs default to their run name as the workstream, with pickup paused. A configured
+shared queue workstream overrides that name; use `--workstream` when selecting it
+explicitly. The launcher passes deterministic `BTQ_WS` and `BTQ_SESSION_ID` to workers.
+
+```sh
+workstream task project --workstream SLUG create --title 'Fix delivery' --file task.txt --key delivery-fix-v1
+workstream task project --workstream SLUG bind ISSUE_ID
+workstream task project --workstream SLUG context
+workstream task project --workstream SLUG resume
+workstream task project --workstream SLUG claim ISSUE_ID
+workstream task project --workstream SLUG close ISSUE_ID --evidence-file result.txt
+```
+
+Creation with the same operation key is idempotent. Bind records a reference;
+claim acquires ownership atomically. Routing, dependencies and Claude implementation
+approval remain enforced. `pause` stops pickup for direct user work; `ready` checks
+once, without polling. Closing checks once between tasks without claiming the next
+one. After reboot, `recover --evidence-file recovery.txt` reconciles durable ownership
+but leaves pickup paused until explicitly resumed. A Claude task still needs the
+shared queue's two-model ADR and separate human approval before implementation.
+
+## Disk usage decision
+
+[agenticow](https://github.com/ruvnet/agenticow) branches vector-memory indexes using
+copy-on-write. It does not compress native Claude/Codex transcripts or Git worktrees.
+This harness does not duplicate vector indexes, and Git worktrees already share
+repository object storage. The inspected host used approximately 440 KiB for
+workstream state versus 2.4 GiB for Codex and 1.7 GiB for Claude storage. Installing
+agenticow would add another storage system without addressing the measured usage,
+so it is not installed. Any later archive/retention policy must preserve native
+resume history and durable ownership; this change deletes no session history.
+
 ## Deployment
 
 Run `python install.py` with Hermes's venv Python to load current Marmot member configuration, then `python install_routing.py ~/.hermes/plugins/marmot/adapter.py`. First routing installation needs a gateway restart. The installer backs up replaced files and is idempotent. It creates `~/.config/systemd/user/hermes-workstreams.service`; enable user lingering for unattended boot (`loginctl show-user "$USER" -p Linger`). A dedicated `tmux -L hermes-workstreams` server retains interactive panes and exit status.
+
+Run `python3 install_capabilities.py` for native global context/search defaults and
+Semble registration, and `python3 install_memory.py /path/to/auto-memory` for the
+reviewed revision's isolated package, wrappers and preserved global recall blocks.
 
 Configuration: `workstreams/harness-config.json` supplies `marmot` (bootstrap, socket, members, relays, timeout), `ops_group`, `tmux_socket`, `manager` executable/extra_args and CLI path. Per-worker `--agent-config` supplies explicit executable/extra_args. No permission bypass or approval-key automation is added. Worktrees and channels are preserved on stop; cleanup is a separately reviewed operation.
 

@@ -41,6 +41,13 @@ class Tmux:
             return info['pane_id']
         if not argv or not all(isinstance(arg, str) and '\0' not in arg for arg in argv):
             raise ValueError('argv must be nonempty strings without NUL')
+        environment = []
+        for key, value in run.get('config', {}).get('env', {}).items():
+            if (not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)
+                    or key.startswith('HERMES_WORKSTREAM_')
+                    or not isinstance(value, str) or '\0' in value):
+                raise ValueError('invalid or reserved launch environment variable')
+            environment.extend(['-e', key + '=' + value])
         # tmux parses a trailing semicolon even in argv; quote it for tmux itself.
         argv = [arg[:-1] + r'\;' if arg.endswith(';') else arg for arg in argv]
         # tmux treats ONE command argument as a shell command. env gives at least two.
@@ -48,6 +55,7 @@ class Tmux:
                             ';', 'new-session', '-d', '-P', '-F', '#{pane_id}',
                             '-s', name, '-c', run['workdir'],
                             '-e', 'HERMES_WORKSTREAM_RUN=' + run['id'],
+                            *environment,
                             '--', '/usr/bin/env', '--', *argv)
         pane = result.stdout.strip().splitlines()[0]
         if not re.fullmatch(r'%\d+', pane):

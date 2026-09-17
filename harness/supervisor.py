@@ -10,6 +10,8 @@ from .agents import Adapter
 from .store import TERMINAL
 from .workspace import prepare
 from .marmot import MarmotError, UncertainOutcome
+from .beads import Beads
+from .capabilities import apply_capabilities
 
 REPORT_INTERVAL = 240
 
@@ -24,6 +26,7 @@ class Supervisor:
         self.config = config or {}
         self.boot = boot or boot_id()
         self.clock = clock
+        self.beads = Beads(self.config.get('beads', {}))
 
     def persist(self, run):
         with self.store.db:
@@ -61,6 +64,9 @@ class Supervisor:
         run['session_names'] = {'worker': f'workstream-{name}-worker',
                                 'manager': f'workstream-{name}-manager'}
         run['parent_hermes_session_id'] = parent_session or os.environ.get('HERMES_SESSION_ID')
+        if self.beads.enabled and agent in ('codex', 'claude'):
+            run['beads'] = {'workstream': self.config['beads'].get('workstream') or name.lower(),
+                            'pickup_enabled': False}
         if agent in ('claude', 'hermes'):
             run['config']['session_name'] = run['session_names']['worker']
         self.persist(run)
@@ -134,6 +140,9 @@ class Supervisor:
             'A completed turn is not necessarily a completed task. Verify evidence before reporting completed. '
             'On recovery, describe the interruption using the checkpoint and await explicit steering; '
             'do not replay commands, restart tests or resume implementation automatically. '
+            f'Use {command} task {run["name"]} for durable Beads task passing and ownership; '
+            'bind and claim explicitly before queued execution, close only with evidence. '
+            'Use workstream-recall and semble search to find prior work before implementation. '
             f'Initial task, for context: {run.get("prompt", "")}'
         )
 
@@ -147,6 +156,10 @@ class Supervisor:
             self.tmux.stop(target)
         target.pop('pane_id', None)
         target['launched_at'] = self.clock()
+        config = target.setdefault('config', {})
+        target['capabilities'] = apply_capabilities(target, config)
+        if target is run and self.beads.enabled and run['agent'] in ('codex', 'claude'):
+            config.setdefault('env', {}).update(self.beads.environment(run))
         if target['agent'] == 'claude' and self.config.get('native_hook_command'):
             from .hook_config import claude_args
             config = target.setdefault('config', {})
@@ -193,6 +206,8 @@ class Supervisor:
         old_boot = run.get('boot_id')
         run.update(boot_id=self.boot, state='interrupted', resume_required=True,
                    interrupted_at=self.clock(), interruption_reason=reason)
+        if self.beads.enabled and run['agent'] in ('codex', 'claude'):
+            run.setdefault('beads', {}).update(recovery_required=True, pickup_enabled=False)
         with self.store.db:
             self.store.db.execute("UPDATE inbox SET state='held' WHERE run_id=? AND state='pending'", (run['id'],))
         run['recovery_count'] = run.get('recovery_count', 0) + 1

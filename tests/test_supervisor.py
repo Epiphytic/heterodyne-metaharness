@@ -96,6 +96,23 @@ class SupervisorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.start(agent='codex')
 
+    def test_beads_identity_and_context_policy_survive_reboot(self):
+        config = {'beads': {'enabled': True}}
+        self.supervisor = Supervisor(self.store, self.tmux, self.transport, config, boot='boot-a')
+        run = self.start()
+        self.assertEqual(run['state'], 'active')
+        self.assertEqual(run['config']['env']['BTQ_SESSION_ID'], run['id'])
+        self.assertEqual(run['config']['env']['BTQ_WS'], 'demo')
+        self.assertEqual(run['config']['env']['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'], '50')
+        self.assertFalse(run['beads']['pickup_enabled'])
+        self.tmux.panes.clear()
+        reboot = Supervisor(self.store, self.tmux, self.transport, config, boot='boot-b')
+        reboot.recover(run)
+        self.assertTrue(run['beads']['recovery_required'])
+        self.assertFalse(run['beads']['pickup_enabled'])
+        self.assertEqual(run['config']['env']['BTQ_SESSION_ID'], run['id'])
+        self.assertEqual(run['state'], 'awaiting_resume')
+
     def test_reboot_reports_checkpoint_resumes_exact_id_without_task(self):
         run = self.start()
         original_id = run['native_session_id']
