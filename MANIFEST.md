@@ -47,3 +47,6 @@ Authority: [active specification](spec/README.md). Operational checks and result
 
 Runtime operations: [runbook](docs/sqlite-runtime-repair.md),
 [execution evidence](docs/sqlite-runtime-execution-evidence.md).
+
+Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notifications.md),
+[execution evidence](docs/brain-notifications-execution-evidence.md).
