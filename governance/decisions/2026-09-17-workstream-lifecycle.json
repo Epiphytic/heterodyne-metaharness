@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-workstream-lifecycle",
+  "proposal": "Implement approved Bead e472ea0c scope: accurate native activity, idle suppression and duplicate status errors; per-Bead worktrees with local dependency reuse; signed commit, full tests, private PR/review, merge and post-merge test lifecycle; auditable manager question routing and conservative harness approval tuning while native approvals remain native.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T11:05:46.839851+00:00",
+      "evidence": "Records current assigned Bead scope and its durable operator-supplied authorization evidence."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T11:05:46.839851+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "33e8449305854f21a594cfc9275b0828f78b06c3747962670cd01f40abe069d0",
+      "evidence": "Existing user task authorization and recorded Bead addendums, through revision b1b40e4195884a29b6eef0b8859bf02e735561af2a046a565748297bf98eb80e. Operator explicitly directs continued implementation with no public publication; native approval constraints remain. This timestamp records evidence, not a new user approval."
+    }
+  ]
+}

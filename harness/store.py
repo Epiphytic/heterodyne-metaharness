@@ -40,6 +40,8 @@ class Store:
           next_attempt REAL DEFAULT 0, error TEXT);
         CREATE TABLE IF NOT EXISTS outbox_reactions (
           id TEXT PRIMARY KEY, account_id TEXT NOT NULL, target_id TEXT NOT NULL, emoji TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS status_notices (
+          id TEXT PRIMARY KEY, run_id TEXT NOT NULL, digest TEXT NOT NULL, group_id TEXT, kind TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS inbox (
           id TEXT PRIMARY KEY, run_id TEXT, text TEXT, created_at REAL, state TEXT);
         CREATE TABLE IF NOT EXISTS identities (
@@ -102,9 +104,16 @@ class Store:
     def event(self, run, kind, text, event_id=None, group=None):
         identity = event_id or str(uuid.uuid4())
         now = time.time()
+        if not self.db.in_transaction:
+            self.db.execute('BEGIN IMMEDIATE')
+        if self.db.execute('SELECT 1 FROM events WHERE id=?', (identity,)).fetchone():
+            return identity
+        target = group or run.get('group_id')
+        from .status import KINDS, record
+        if kind in KINDS and not record(self, run, identity, kind, text, target, now):
+            return identity
         self.db.execute('INSERT OR IGNORE INTO events VALUES (?,?,?,?,?)',
                         (identity, run['id'], kind, text, now))
-        target = group or run.get('group_id')
         if target:
             self.db.execute('''INSERT OR IGNORE INTO outbox
               (id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)''',

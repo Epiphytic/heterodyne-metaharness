@@ -364,19 +364,32 @@ class Supervisor:
         self.persist(run)
 
     def heartbeat(self, run):
-        if run.get('persistent') and run['state'] == 'idle':
-            return
+        from .status import fingerprint, is_idle
         if run['state'] in TERMINAL or run.get('legacy'):
             return
         now = self.clock()
-        if run['state'] not in TERMINAL and now - run.get('last_report_at', 0) >= REPORT_INTERVAL:
+        idle = is_idle(run, self.store)
+        summary = run.get('task_summary') or run.get('observation', {}).get('summary', run.get('error', 'Awaiting first observation.'))
+        text = f"Status: {'idle' if idle else run['state']}; native turn: {run.get('native_turn_state', 'unknown')}. {summary}"
+        digest = fingerprint(run, text)
+        changed = run.get('heartbeat_digest') != digest
+        # Idle ticks do not produce notices. This is distinct from detecting
+        # faulty duplicate production in Store.event; unchanged idle is normal.
+        if idle and not changed:
+            return
+        transition = run.get('heartbeat_idle') is not None and run['heartbeat_idle'] != idle
+        if (idle and changed) or transition or now - run.get('last_report_at', 0) >= REPORT_INTERVAL:
             run['last_report_at'] = now
-            summary = run.get('observation', {}).get('summary', run.get('error', 'Awaiting first observation.'))
-            self.report(run, 'progress', f"Status: {run['state']}. {summary}")
+            run['heartbeat_digest'] = digest
+            run['heartbeat_idle'] = idle
+            # A fresh ongoing observation is meaningful even when the pane is
+            # unchanged. Never label that as new task progress.
+            self.report(run, 'progress', text if idle else f'{text}\nObserved at {now:.3f}; periodic observation, not a progress claim.')
         self.persist(run)
 
     def lifecycle(self, run):
         from .lifecycle import observe_events
+        from .status import activity
         events = observe_events(run)
         manager_events = observe_events(run['manager']) if run.get('manager') else []
         with self.store.db:
@@ -387,9 +400,12 @@ class Supervisor:
                     self.store.event(run, 'manager_compacted', 'Manager compacted; stable workstream and channel mapping retained.', event['id'])
             for event in events:
                 kind, summary, key = event['kind'], event['summary'], event['id']
-                turn_states = {'working': 'working', 'approval': 'awaiting_approval', 'turn_completed': 'idle'}
+                turn_states = {'working': 'working', 'approval': 'awaiting_approval', 'turn_completed': 'idle', 'turn_aborted': 'idle'}
                 if kind in turn_states:
-                    run['native_turn_state'] = turn_states[kind]
+                    activity(run, run.get('native_session_id'), event.get('turn_id'),
+                             turn_states[kind], event.get('at') or self.clock())
+                if kind == 'turn_aborted':
+                    self.store.event(run, kind, summary, key)
                 if kind == 'turn_completed':
                     self.store.event(run, kind, 'Coding agent finished a turn:\n' + summary, key)
                     if run.get('resume_required'):

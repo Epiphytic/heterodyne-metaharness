@@ -67,17 +67,18 @@ def acknowledge(store, session, native, turn, messages, *, exact_turn=False):
 
 def activity(store, session, native, turn, event):
     owner, _, role = session.rpartition(':')
-    if role != 'worker':
+    if role not in ('worker', 'manager'):
         return
     try:
         run=store.get(owner)
     except ValueError:
         return
+    target = run if role == 'worker' else run.get('manager', {})
+    from .status import activity as update_activity
     if event in ('UserPromptSubmit','pre_llm_call'):
-        run['native_turn_state']='working'
-        run['native_turn_key']=[native,turn]
-    elif event in ('Stop','post_llm_call') and run.get('native_turn_key')==[native,turn]:
-        run['native_turn_state']='idle'
+        update_activity(target, native, turn, 'working')
+    elif event in ('Stop','post_llm_call') and target.get('native_turn_key')==[native,turn]:
+        update_activity(target, native, turn, 'idle')
     else:
         return
     with store.db:store.save(run)

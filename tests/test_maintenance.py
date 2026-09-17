@@ -104,8 +104,15 @@ class MaintenanceTests(unittest.TestCase):
         from harness.supervisor import Supervisor
         supervisor=object.__new__(Supervisor)
         supervisor.report=Mock(); supervisor.persist=Mock()
-        supervisor.heartbeat({'persistent':True,'state':'idle'})
-        supervisor.report.assert_not_called()
+        supervisor.clock=Mock(return_value=1000)
+        supervisor.store=Mock()
+        supervisor.store.db.execute.return_value.fetchone.return_value=None
+        run={'id':'idle-run','persistent':True,'state':'idle'}
+        supervisor.heartbeat(run)
+        supervisor.report.assert_called_once()  # Initial state announcement.
+        supervisor.clock.return_value=2000
+        supervisor.heartbeat(run)
+        supervisor.report.assert_called_once()  # Unchanged idle produces nothing.
 
     def test_guard_blocks_source_keeps_memory(self):
         path=Path(__file__).resolve().parents[1]/'plugins/hermes-maintenance/__init__.py'

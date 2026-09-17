@@ -49,10 +49,13 @@ def _native_event(agent, record):
             return {"kind": "compacted", "summary": "Native context compacted; session identity retained."}
         if record.get("type") != "event_msg":
             return None
+        details = {'turn_id': payload.get('turn_id'), 'at': payload.get('completed_at') or payload.get('started_at')}
         if kind in {"task_complete", "turn_complete"}:
-            return {"kind": "turn_completed", "summary": str(payload.get("last_agent_message") or "")[:SUMMARY_LIMIT]}
+            return {"kind": "turn_completed", "summary": str(payload.get("last_agent_message") or "")[:SUMMARY_LIMIT], **details}
+        if kind == 'turn_aborted':
+            return {'kind': 'turn_aborted', 'summary': 'Native turn interrupted; task ownership retained.', **details}
         if kind in {"task_started", "turn_started"}:
-            return {"kind": "working", "summary": "Native agent turn started."}
+            return {"kind": "working", "summary": "Native agent turn started.", **details}
         if kind in {"exec_approval_request", "apply_patch_approval_request"}:
             return {"kind": "approval", "summary": "Native agent requests approval."}
     elif agent == "claude":
