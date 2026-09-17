@@ -23,6 +23,7 @@ def prepare(home):
     text=memory.read_text()
     text=text.replace(' Always reply English.', '').replace(' NEVER reply in Chinese (or any language other than English) — violated 2026-09-09, Liam called it out.', '')
     text=text.replace(' Always-on Marmot activation for chat 8f240eee… needs gateway restart (config listed, gateway predated it).', '')
+    text=text.replace('session-sync plugin (2026-09-09, ~/.hermes/plugins/session-sync/): pre_llm_call hook', 'session-sync plugin (~/.hermes/plugins/session-sync/): installed but DISABLED as verified 2026-09-16; not in plugins.enabled. The following describes its implementation, not active context synchronization: pre_llm_call hook')
     text=text.replace('## Workstream: memory-lance (2026-09-09, in progress)', '## Historical workstream: memory-lance (2026-09-09 snapshot)')
     text=text.replace('in flight with codex in tmux ws-memory-lance.', 'were pending at this historical snapshot; the legacy ws-memory-lance harness is archived. Consult Beads and deployed artifacts for current milestone status.')
     pointer='Hermes maintenance: significant changes use existing hermes-maintenance Codex/tmux via workstream maintenance. Active authority: /home/operator/repos/hermes-workstream-harness/spec/README.md. Beads owns current task status.'
