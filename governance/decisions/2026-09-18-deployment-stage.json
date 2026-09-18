@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-18-deployment-stage",
+  "proposal": "Require an operator-evidenced deployment stage after post-merge testing and before Bead closure, or an explicit operator-reviewed non-deployable applicability reason, preserving immutable history and closed-task idempotency.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-18T19:35:47.855785+00:00",
+      "evidence": "Bound Bead 259f deployment definition-of-done addendum."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-18T19:35:47.855785+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "ac8bc8cbce25d9379a7fbfde2e21324b37ef8b9bdf6d44fbc2f5eafc0f37d735",
+      "evidence": "Existing authorized Bead addendum cf7b56e3fee695f5c6cb0c53c77bd7822be2f7d8afdab80fd0c5578ec8f21746 records operator deployment definition of done. This records existing authorization, not a new user approval. Implementation is not deployment evidence."
+    }
+  ]
+}

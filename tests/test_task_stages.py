@@ -29,7 +29,9 @@ class StageTest(unittest.TestCase):
         return {'commit':self.sha,'evidence_ref':'retained-evidence', 'result':'passed','full_suite':True,
                 'command':['python3','-m','unittest','discover'], 'log_sha256':'b'*64,
                 'pr_url':'https://private.example/pull/1','remote':'origin','pushed_commit':self.sha,
-                'merge_authority':'operator','review_ref':'operator-review'}
+                'merge_authority':'operator','review_ref':'operator-review',
+                'applicable':True,'deployment_authority':'operator','target':'service',
+                'deployed_revision':self.sha,'live_verification_ref':'retained-live-check'}
 
     def test_order_repeat_metadata_and_close(self):
         with self.assertRaises(BeadsError):stages.close_ready(self.run,self.issue)
@@ -56,3 +58,22 @@ class StageTest(unittest.TestCase):
         self.issue['status']='closed'
         stages.close_ready(self.run,self.issue)
         self.assertFalse(self.queue.bd.called)
+
+    def test_deployment_requires_live_operator_evidence(self):
+        for field in ('deployment_authority', 'target', 'live_verification_ref', 'deployed_revision', 'applicable'):
+            evidence = self.evidence()
+            evidence.pop(field)
+            with self.subTest(field=field), self.assertRaises(BeadsError):
+                stages.deployment_evidence(evidence, self.sha)
+        evidence = self.evidence()
+        evidence['deployed_revision'] = 'c' * 40
+        with self.assertRaises(BeadsError):
+            stages.deployment_evidence(evidence, self.sha)
+
+    def test_non_deployable_requires_explicit_operator_reason(self):
+        evidence = self.evidence()
+        evidence['applicable'] = False
+        with self.assertRaises(BeadsError):
+            stages.deployment_evidence(evidence, self.sha)
+        evidence['reason'] = 'Documentation-only task; no running artifact'
+        stages.deployment_evidence(evidence, self.sha)

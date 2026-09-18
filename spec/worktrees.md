@@ -33,3 +33,24 @@ operator cleanup must verify closed Bead, pinned completion evidence, correct
 manifest/path/branch, no active worker at that cwd, clean Git state and no needed
 untracked/ignored dependency artifacts. Remove only that exact worktree through
 Git; never enumerate-and-delete unrelated worktrees or force removal.
+
+## Concurrent review tasks
+
+One worktree owns one Bead; one native worker executes in one current worktree.
+A task may remain claimed during review, merge and deployment while the worker
+claims another eligible task. Every existing active claim must have an owned task
+worktree, unchanged verified owner, valid chronological lifecycle evidence through
+PR-open, a passing full suite and recorded pushed review commit. Its checkout must
+remain clean at the latest recorded lifecycle commit. Otherwise a new claim fails.
+The native idle, approval and recovery boundary still applies before switching.
+No existing task is released or closed merely to make another claim possible.
+
+Concurrent admission reuses BTQ's exact ready/routing/design checks and native
+atomic `bd update --claim`, replacing only its legacy one-active-claim restriction
+with the review checks above. Post-claim owner/routing/design are reverified; an
+uncertain mutation remains uncertain. Unmanaged BTQ retains its existing policy.
+Lifecycle stage/close commands for a retained task validate that task's exact owned
+checkout, never the newly active worktree. They do not switch or restart the worker.
+Unread scope changes still block closure; rebind the retained task at a safe boundary
+to consume revised task context before resuming implementation. There is no second
+writer, automatic merge, automatic approval or implicit deployment.

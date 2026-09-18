@@ -68,7 +68,7 @@ def admit(store, supervisor, beads, run, title, text, key, **options):
     identity = hashlib.sha256((run['id'] + '\0' + key).encode()).hexdigest()
     message = ('Task queued: ' + issue['id'] + '. Preserve the current claim and native approvals. '
                'At an authorized task boundary inspect and claim through workstream task ' + run['name'] +
-               '; use the existing worker, one task at a time.')
+               '; use the existing worker and an isolated owned worktree per task.')
     with store.db:
         store.db.execute('INSERT OR IGNORE INTO inbox(id,run_id,text,created_at,state,target) VALUES(?,?,?,?,?,?)',
                          (identity, run['id'], message, time.time(), 'pending', 'manager'))

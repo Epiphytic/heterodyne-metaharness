@@ -72,7 +72,7 @@ def parser():
     update.add_argument('--authorization-file', required=True)
     stage = actions.add_parser('stage')
     stage.add_argument('issue_id')
-    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','close-ready'))
+    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','deployed','close-ready'))
     stage.add_argument('--evidence-file', required=True)
     reconcile = actions.add_parser('reconcile')
     reconcile.add_argument('issue_id', nargs='?')
@@ -184,12 +184,14 @@ def task_dispatch(args, store, supervisor, config):
         from .tasks import assert_close_current
         from .task_stages import close_ready
         issue = beads.show(run, args.issue_id)
-        close_ready(run, issue)
+        from .task_review import checkout
+        close_ready(checkout(run, args.issue_id), issue)
         assert_close_current(store, run, issue)
         result = beads.close(run, args.issue_id, args.evidence_file)
     elif action == 'stage':
         from .task_stages import record
-        result = record(store, beads, run, args.issue_id, args.stage, json.loads(Path(args.evidence_file).read_text()))
+        from .task_review import checkout
+        result = record(store, beads, checkout(run, args.issue_id), args.issue_id, args.stage, json.loads(Path(args.evidence_file).read_text()))
     elif action == 'worktree':
         result = beads.worktree(run, args.issue_id, args.repository)
     elif action == 'recover':

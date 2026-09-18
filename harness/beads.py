@@ -88,7 +88,8 @@ class Beads:
     def _check_binding(self, run, queue, issue_id):
         previous = run.get('beads', {}).get('issue_id')
         if previous and previous != issue_id and queue.show(previous).get('status') != 'closed':
-            raise BeadsError('Close or explicitly reconcile the existing bound task first')
+            from .task_review import can_handoff
+            can_handoff(run, queue, queue.show(previous))
 
     def bind(self, run, issue_id):
         """Record a routed task reference. Binding never claims or permits execution."""
@@ -115,7 +116,8 @@ class Beads:
             # Recover a successful claim whose acknowledgement was lost.
             result = issue
         else:
-            result = self._call(run, 'claim', issue_id)
+            from .task_review import claim_concurrent
+            result = claim_concurrent(self, run, queue, issue_id)
         if result.get('assignee') != queue.worker or result.get('status') != 'in_progress':
             raise BeadsError('Claim ownership not confirmed; do not execute')
         run.setdefault('beads', {})['issue_id'] = issue_id

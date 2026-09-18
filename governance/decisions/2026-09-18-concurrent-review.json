@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-18-concurrent-review",
+  "proposal": "Allow retained owned Beads at tested PR-open stage to remain in review while another eligible task executes in its isolated worktree, preserving native boundary, ownership, approval, dependency and lifecycle checks.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-18T20:02:19.261210+00:00",
+      "evidence": "Bead 259f concurrent worktree addendum."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-18T20:02:19.261210+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "11f363c5eef48f2ddb828ee91519073028bb5ce636f770a783f849ff8b79e274",
+      "evidence": "Existing operator-authorized concurrent-Bead requirement recorded in current Bead addendum; no new user approval claimed. Deployment and verification remain pending."
+    }
+  ]
+}

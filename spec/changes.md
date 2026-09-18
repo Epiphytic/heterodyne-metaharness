@@ -18,7 +18,7 @@ See [authority](README.md) and [maintenance admission](maintenance.md).
 
 For open/queued Beads use `workstream task RUN stage ID --stage STAGE
 --evidence-file JSON`. Ordered stages are committed, tested, pr-open, merged,
-final-tested, close-ready. Metadata retains each stage, timestamp, evidence and
+final-tested, deployed, close-ready. Metadata retains each stage, timestamp, evidence and
 content digest. Identical retries do not rewrite history. Existing closed records
 remain historical facts; missing stages block new closure, not completed history.
 
@@ -31,7 +31,13 @@ push to an explicitly configured authorized private destination and open review.
 Operator merges; merged evidence requires merge_authority operator and review_ref,
 and the PR commit must be an ancestor of the merged result. Operator updates the
 owned checkout to that result before recording/testing it. Final-tested must pin
-that merge SHA; close-ready and close require that same tested result.
+that merge SHA. Deployed evidence additionally requires deployment_authority operator,
+applicable true, target, deployed_revision equal to that SHA, result passed and a
+retained live_verification_ref. Source installation instructions or test fixtures
+are not live verification. Non-deployable work still records a deployed stage with
+applicable false and an explicit operator-reviewed reason. Close-ready and close
+require the same tested deployment. Existing open records without deployment cannot
+close; retain their earlier evidence and reconcile explicitly, never rewrite history.
 
 These are deterministic structural checks on trusted operator/worker evidence,
 not cryptographic authentication of arbitrary review URLs or claimed test output.

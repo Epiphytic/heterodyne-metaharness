@@ -16,6 +16,7 @@ class BeadsTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.queue.state = Path(directory.name)
+        self.queue.bd.return_value = []
         self.queue.matches.return_value = True
         self.queue.design_allowed.return_value = True
         self.beads._queue = Mock(return_value=self.queue)
