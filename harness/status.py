@@ -59,7 +59,7 @@ def activity(target, native, turn, state, at=None):
     at = time.time() if at is None else at
     key = [native, turn] if turn else None
     current = target.get('native_turn_key')
-    if key and current and key != current and at < target.get('native_turn_at', 0):
+    if at < target.get('native_turn_at', 0):
         return False
     if state != 'working' and key and current and key != current:
         return False

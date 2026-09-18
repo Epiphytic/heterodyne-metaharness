@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-17-native-completion-notify",
+  "proposal": "Add authorized Bead 259f native Codex completion receipts with exact owner, cwd and turn correlation, durable idempotency, stale lifecycle rejection, and an additive user notify installer preserving existing notifications and approval policy.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-17T22:55:46.223643+00:00",
+      "evidence": "Assigned Bead 259f native completion addendum; remaining relay and lifecycle work stays open."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-17T22:55:46.223643+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "dcb87e6f431078815a3a9c02a52969c0f60e7d50ccc8f0dd1cf76b23963da003",
+      "evidence": "Assigned task revision 5ecde7dc7bacb0009a508542d3df972ff76ab38fd0f19cd84ab16ab2b5129aba records operator-directed implementation under existing user authorization. This timestamps the authorization record, not a new user approval. Deployment and live receipt verification remain pending."
+    }
+  ]
+}

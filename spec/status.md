@@ -30,6 +30,24 @@ idempotency contracts. No pane parsing approves commands or declares task comple
 
 ## Pane reporting fallback
 
+Codex user-level `notify` uses `bin/workstream-notify` for native
+`agent-turn-complete` receipts. The exact current worker native ID, owned cwd
+and active turn key must match before idle is applied. Old/forked identities
+cannot clear a newer turn. The shared supervisor lock serializes receipts and
+observation; replayed lifecycle evidence older than the receipt cannot reopen
+that turn. Receipts retain turn, timestamp and assistant-message SHA256, never
+message content. Duplicate receipt IDs have no second effect. Matching receipt
+sets native activity and stale working task state idle, without closing a Bead
+or clearing recovery/approval requirements. Unmatched turns are retained as
+unapplied evidence; existing lifecycle and pane detection remain the fallback.
+
+Installation changes only user config `notify`, preserving an existing command
+as a bounded chained invocation with the original payload, including when the
+harness handler fails. No trust/approval setting changes. Failures log only their
+class and do not fail the native turn; a busy supervisor lock defers to fallback.
+The callback does not acknowledge unseen task/brain notices or submit terminal
+input. A new native process must load the reviewed config through exact resume.
+
 Each observation reuses the owned tmux capture (visible pane plus 200 history
 lines). SHA256 of its text is persisted as pane_digest, with pane_unchanged_ticks
 and pane_stopped. Two consecutive identical nonempty observations (one equal
