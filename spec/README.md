@@ -23,3 +23,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Harness approval policy](approvals.md)
 
 - [Native permission relay](permission-relay.md)
+
+- [Queue continuation](continuation.md)

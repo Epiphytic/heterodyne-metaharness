@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-queue-continuation",
+  "proposal": "Perform one durable eligible-work check at an authorized native completion boundary, preserving pause, prompt, ownership, dependency and recovery guards; resume assigned work or use the existing idle claim/worktree handoff before one durable continuation, with cooldown and loop suppression.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-19T20:01:32.284506+00:00",
+      "evidence": "Bound Bead btq-harness-928fc46b2edb8305c764dc88."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-19T20:01:32.284506+00:00",
+      "by": "existing operator directive relayed in this conversation",
+      "proposal_sha256": "09325678842150a31248c8f80055df20c675008f60105baacb1b1d5a83fb42ff",
+      "evidence": "Recorded Sep 18 operator requirement: harness automatically continues eligible work at turn end; prior coordination explicitly requires one boundary check, not polling or timeout reclaim. This records existing authorization only; implementation details are worker design, not a new Liam message or native approval."
+    }
+  ]
+}

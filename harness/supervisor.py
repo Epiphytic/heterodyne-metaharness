@@ -327,24 +327,38 @@ class Supervisor:
             raise
         with self.store.db:
             self.store.db.execute("UPDATE inbox SET state='submitted' WHERE id=?", (key,))
+            if key.startswith('continuation:'):
+                run.setdefault('continuation', {})['submitted_turn'] = run.get('native_turn_key')
+                self.store.save(run)
+                self.store.event(run, 'queue_continuation_sent', key, key + ':sent')
         if target == 'worker':
             run.update(state='active', resume_required=False)
         self.persist(run)
 
     def drain_inbox(self, run):
-        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
+        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 2 WHEN id LIKE 'continuation:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
         for row in rows:
-            if row['id'].startswith('task-update:'):
-                from .tasks import current_notification
-                if not current_notification(self.store, run, row):
-                    with self.store.db:
-                        self.store.db.execute("UPDATE inbox SET state='superseded' WHERE id=?", (row['id'],))
-                    continue
-                if (run.get('native_turn_state') != 'idle' or run.get('resume_required')
-                        or run.get('beads', {}).get('recovery_required')
-                        or run.get('observed_state') == 'awaiting_approval'):
-                    continue
+            if not self.inbox_ready(run, row):
+                continue
             self.submit(run, row['text'], target=row['target'], message_id=row['id'])
+
+    def inbox_ready(self, run, row):
+        from .continuation import safe, awaiting_start
+        if row['id'].startswith('continuation:'):
+            state = run.get('continuation', {})
+            return (row['id'] == 'continuation:' + state.get('boundary', '')
+                    and state.get('selected_issue') == run.get('beads', {}).get('issue_id')
+                    and safe(run))
+        if not row['id'].startswith('task-update:'):
+            return True
+        from .tasks import current_notification
+        if not current_notification(self.store, run, row):
+            with self.store.db:
+                self.store.db.execute("UPDATE inbox SET state='superseded' WHERE id=?", (row['id'],))
+            return False
+        return (not awaiting_start(run) and run.get('native_turn_state') == 'idle'
+                and not run.get('resume_required') and not run.get('beads', {}).get('recovery_required')
+                and run.get('observed_state') != 'awaiting_approval')
 
     def recover_intents(self, run):
         targets = [run] + ([run['manager']] if run.get('manager') else [])
@@ -373,6 +387,8 @@ class Supervisor:
         else:
             self.observe(run)
         self.lifecycle(run)
+        from .continuation import advance
+        advance(self, run)
         self.drain_inbox(run)
         self.persist(run)
 
@@ -402,7 +418,7 @@ class Supervisor:
 
     def lifecycle(self, run):
         from .lifecycle import observe_events
-        from .status import activity
+        from .continuation import native_event
         events = observe_events(run)
         manager_events = observe_events(run['manager']) if run.get('manager') else []
         with self.store.db:
@@ -413,10 +429,7 @@ class Supervisor:
                     self.store.event(run, 'manager_compacted', 'Manager compacted; stable workstream and channel mapping retained.', event['id'])
             for event in events:
                 kind, summary, key = event['kind'], event['summary'], event['id']
-                turn_states = {'working': 'working', 'approval': 'awaiting_approval', 'turn_completed': 'idle', 'turn_aborted': 'idle'}
-                if kind in turn_states:
-                    activity(run, run.get('native_session_id'), event.get('turn_id'),
-                             turn_states[kind], event.get('at') or self.clock())
+                native_event(run, event, self.clock())
                 if kind == 'turn_aborted':
                     self.store.event(run, kind, summary, key)
                 if kind == 'turn_completed':

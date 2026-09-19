@@ -63,6 +63,9 @@ def activity(target, native, turn, state, at=None):
         return False
     if state != 'working' and key and current and key != current:
         return False
+    if state == 'working' and key and key != current:
+        from .continuation import started
+        started(target, key)
     target['native_turn_state'] = state
     target['native_turn_at'] = max(at, target.get('native_turn_at', 0))
     if key:

@@ -40,6 +40,7 @@ class NotifyTest(unittest.TestCase):
         self.assertFalse(receive(self.store, self.payload))
         run = self.store.get('run')
         self.assertEqual((run['state'], run['task_state'], run['native_turn_state']), ('idle',)*3)
+        self.assertFalse(run['continuation']['checked'])
         self.assertFalse(status.activity(run, 'native', 'turn', 'working', 2))
         receipt = self.store.db.execute("SELECT text FROM events WHERE kind='native_completion'").fetchall()
         self.assertEqual(len(receipt), 1)
