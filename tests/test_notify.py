@@ -61,6 +61,15 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(run['state'], 'awaiting_resume')
         self.assertTrue(run['resume_required'])
 
+    def test_completion_after_idle_hook_creates_boundary_once(self):
+        status.activity(self.run, 'native', 'turn', 'idle', 2)
+        with self.store.db:
+            self.store.save(self.run)
+        self.assertTrue(receive(self.store, self.payload))
+        boundary = self.store.get('run')['continuation']['boundary']
+        self.assertFalse(receive(self.store, self.payload))
+        self.assertEqual(self.store.get('run')['continuation']['boundary'], boundary)
+
     def test_install_multiline_preserves_policy_and_backup(self):
         original = '# config\nnotify = [\n"old", "--arg",\n]\napproval_policy = "on-request"\n[tui]\nnotifications = true\n'
         home = self.root / 'codex'

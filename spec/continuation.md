@@ -5,10 +5,16 @@ Native aborts, compaction, startup history, static panes and timer ticks are not
 triggers. Exact native/turn identity deduplicates notifier and transcript observations.
 The boundary and consumed flag survive supervisor restart in the shared checkpoint.
 This implements the boundary-only routing contract; it is not queue polling.
+An exact current-turn completion remains a boundary when an earlier hook already
+recorded that turn idle. Duplicate observations reuse the same boundary. Historical
+or mismatched turns cannot establish it merely because the worker is idle.
 
 Pickup must be enabled in both the harness and native BTQ state. Recovery holds,
 paused pickup, uncertain/held worker input, pending direct steering, missing panes,
 approval/question observations and conservative question detection hold continuation.
+Manager reporting state `working` does not itself mean the native worker is busy:
+the native turn must independently be idle. Blocked/failed/recovery run states
+remain ineligible; reporting must not override those holds.
 A fresh live observation is required after worktree switching. No native permission
 is accepted, no approval dependency is removed and no claim is reclaimed by timeout.
 Direct messages take precedence. Providers retain their existing native hooks.

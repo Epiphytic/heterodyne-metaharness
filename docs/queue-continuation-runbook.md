@@ -6,6 +6,13 @@ and lifecycle integration, existing Beads facade/worktree handoff and durable in
 No additional package, plugin, hook trust, native permission or database migration.
 Per-run checkpoint fields carry the new state; retained native/inbox history is intact.
 
+First deployment acceptance remains incomplete: the operator's retained
+`/tmp/hermes-928-deploy-evidence/live-verification.json` verifies service health but
+explicitly leaves the natural-turn continuation pending. A later checkpoint showed
+no continuation state. The corrective review covers exact completion after an idle
+hook and manager reporting state `working`; neither is evidence of successful live
+continuation. Re-run the natural-boundary check below after deploying the correction.
+
 Operator deployment, after signed commit/full suite/private patch review:
 
 1. Back up the harness SQLite database coherently and retain checkpoint snapshots in

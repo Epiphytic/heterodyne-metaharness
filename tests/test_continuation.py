@@ -60,6 +60,26 @@ class ContinuationTest(unittest.TestCase):
         self.beads.ready.assert_called_once()
         self.assertEqual(self.tmux.sent, [])
 
+    def test_manager_working_report_does_not_block_native_idle(self):
+        self.run['state'] = 'working'
+        self.advance()
+        self.advance()
+        self.beads.ready.assert_called_once()
+        self.assertEqual(len(self.tmux.sent), 1)
+
+    def test_completion_after_newer_idle_hook_still_marks_exact_boundary(self):
+        from harness.continuation import native_event
+        self.run.pop('continuation')
+        self.run['native_turn_at'] = 1001
+        event = {'kind': 'turn_completed', 'summary': 'More work remains',
+                 'id': 'complete', 'turn_id': 'turn', 'at': 1000}
+        native_event(self.run, event, 1002)
+        self.advance()
+        native_event(self.run, event, 1003)
+        self.advance()
+        self.beads.ready.assert_called_once()
+        self.assertEqual(len(self.tmux.sent), 1)
+
     def test_approval_question_pause_recovery_and_missing_pane_hold(self):
         cases = [({'observed_state': 'awaiting_approval'}, {}),
                  ({'observed_state': 'awaiting_question'}, {}),

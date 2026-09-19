@@ -26,9 +26,11 @@ def native_event(run, event, now):
     if kind not in states:
         return
     was_working = run.get('native_turn_state') == 'working'
+    matched_idle = (run.get('native_turn_state') == 'idle' and event.get('turn_id')
+                    and run.get('native_turn_key') == [run.get('native_session_id'), event['turn_id']])
     applied = activity(run, run.get('native_session_id'), event.get('turn_id'),
                        states[kind], event.get('at') or now)
-    if applied and was_working and kind == 'turn_completed':
+    if kind == 'turn_completed' and ((applied and was_working) or matched_idle):
         completed(run, event.get('turn_id') or event['id'], event['summary'])
 
 
@@ -37,7 +39,7 @@ def safe(run):
     observation = run.get('observation', {})
     tail = '\n'.join(observation.get('summary', '').splitlines()[-8:])
     return (run.get('native_turn_state') == 'idle'
-            and run.get('state') in ('active', 'idle')
+            and run.get('state') in ('active', 'working', 'idle')
             and beads.get('pickup_enabled') is True
             and not beads.get('recovery_required') and not run.get('resume_required')
             and run.get('observed_state') not in ('awaiting_approval', 'awaiting_question')

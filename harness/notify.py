@@ -34,9 +34,8 @@ def receive(store, payload):
             matched = run.get('native_turn_key') == [native, turn]
             receipt['applied'] = matched
             if matched:
-                if run.get('native_turn_state') == 'working':
-                    from .continuation import completed
-                    completed(run, turn, str(payload.get('last-assistant-message', '')))
+                from .continuation import completed
+                completed(run, turn, str(payload.get('last-assistant-message', '')))
                 status.activity(run, native, turn, 'idle', receipt['at'])
                 if not run.get('resume_required') and run.get('task_state') == 'working':
                     run['task_state'] = 'idle'
