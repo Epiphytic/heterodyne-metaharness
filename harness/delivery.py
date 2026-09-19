@@ -43,7 +43,11 @@ def _attempt(store, transport, now, ops_group):
     transport.timeout = min(original_timeout, MAX_ATTEMPT_SECONDS)
     try:
         from .reactions import send_outbox
-        send_outbox(store, transport, row)
+        response = send_outbox(store, transport, row)
+        if row['id'].startswith('permission:'):
+            from .permission_relay import delivered
+            with store.db:
+                delivered(store, transport, row, response)
     except Exception as exc:
         with store.db:
             store.db.execute('''UPDATE outbox SET attempts=attempts+1,

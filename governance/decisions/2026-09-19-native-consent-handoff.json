@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-native-consent-handoff",
+  "proposal": "Preserve exact Marmot reaction and target-message evidence as durable consent for existing-manager native inspection, without guessed approval IDs, automatic keystrokes or fabricated native gate resolution.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-19T07:13:50.100524+00:00",
+      "evidence": "Bead 259f permission relay and related terminal-observation/gates scope."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-19T07:13:50.100524+00:00",
+      "by": "operator directive relayed in current conversation",
+      "proposal_sha256": "9db223137e9852acdf5aacca054815c7f3584f763172be538e1dc891c6c296e0",
+      "evidence": "2026-09-19 user message directs durable consent handoff with exact native inspection and preservation of consent event plus specific target message. This records that supplied authorization; no native approval or deployment is claimed."
+    }
+  ]
+}

@@ -280,6 +280,8 @@ class Supervisor:
         run['observation'] = dict(observation, at=self.clock(), pane_alive=True)
         if observation['state'] == 'awaiting_approval' and run.get('observed_state') != 'awaiting_approval':
             self.report(run, 'blocked', 'Coding agent appears to need approval. Native permission prompt preserved.')
+        from .permission_relay import observe as relay_permission
+        relay_permission(self.store, run, info)
         run['observed_state'] = observation['state']
         self.observe_manager(run)
 
