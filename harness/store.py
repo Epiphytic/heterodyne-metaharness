@@ -101,7 +101,7 @@ class Store:
                 self.db.execute('INSERT OR IGNORE INTO native_sessions VALUES (?,?,?,?,?)',
                                 (run['id'], role, native, old_id if old_id != native else None, time.time()))
 
-    def event(self, run, kind, text, event_id=None, group=None):
+    def event(self, run, kind, text, event_id=None, group=None, operator_ask=False):
         identity = event_id or str(uuid.uuid4())
         now = time.time()
         if not self.db.in_transaction:
@@ -118,6 +118,10 @@ class Store:
             self.db.execute('''INSERT OR IGNORE INTO outbox
               (id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)''',
               (identity, run['id'], target, f"[{run['name']}] {text}", now))
+            from .operator_asks import ASK_KINDS, register
+            if operator_ask or kind in ASK_KINDS:
+                row = self.db.execute('SELECT * FROM outbox WHERE id=?', (identity,)).fetchone()
+                register(self, row, text)
         return identity
 
     def project(self, repo):

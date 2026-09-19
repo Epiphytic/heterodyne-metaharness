@@ -158,6 +158,9 @@ def _route(store,run,identity,classification,evidence):
         store.db.execute('''INSERT OR IGNORE INTO outbox
             (id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)''',
             ('approval-visible:'+identity,run['id'],run['group_id'],f'[{run["name"]}] {text}',time.time()))
+        from .operator_asks import register
+        row = store.db.execute('SELECT * FROM outbox WHERE id=?', ('approval-visible:'+identity,)).fetchone()
+        register(store, row, text)
 
 
 def configure_cli(sub):

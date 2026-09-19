@@ -42,7 +42,7 @@ class VisibleTest(unittest.TestCase):
         row = self.store.db.execute('SELECT * FROM outbox').fetchone()
         self.assertIn('worker brain context received', row['text'])
         self.assertIn(notice['token'], row['text'])
-        transport=Mock()
+        transport=Mock(account_id='cc')
         transport.timeout=10
         transport.send.side_effect=RuntimeError('offline')
         deliver(self.store, transport, now=1)
@@ -88,7 +88,7 @@ class VisibleTest(unittest.TestCase):
         with self.store.db:
             self.store.db.execute('INSERT INTO outbox(id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)',
                                   ('progress','run','abcdef','existing progress',1))
-        transport=Mock();transport.timeout=10
+        transport=Mock(account_id='cc');transport.timeout=10
         with patch('harness.brain_visible.enqueue_receipts', side_effect=sqlite3.OperationalError('locked')):
             with self.assertLogs('harness.delivery', level='WARNING'):
                 deliver(self.store,transport,now=2)

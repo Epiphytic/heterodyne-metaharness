@@ -26,6 +26,9 @@ def _escalate(store, row, ops_group, now):
     store.db.execute('''INSERT OR IGNORE INTO outbox
       (id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)''',
       (identity, row['run_id'], ops_group, text, now))
+    from .operator_asks import register
+    escalation = store.db.execute('SELECT * FROM outbox WHERE id=?', (identity,)).fetchone()
+    register(store, escalation, 'Check Marmot connector delivery for ' + row['run_id'])
 
 
 def _attempt(store, transport, now, ops_group):
@@ -56,6 +59,8 @@ def _attempt(store, transport, now, ops_group):
                 _escalate(store, row, ops_group, now)
     else:
         with store.db:
+            from .operator_asks import delivered
+            delivered(store, row, now)
             store.db.execute('''UPDATE outbox SET delivered_at=?, attempts=attempts+1,
               error=NULL WHERE id=?''', (now, row['id']))
     finally:

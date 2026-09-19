@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-operator-asks",
+  "proposal": "Durably register operator asks, resolve authoritative group admins at first send, tag their npub references plus the two designated operator recipients, preserve exact payloads across uncertain retries, and keep short outstanding-ask reminders last in harness-owned chat text. Route babysitter escalations through the same outbox and hourly backstop questions to the existing canonical maintenance group; preserve native approval boundaries.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-19T22:48:49.245619+00:00",
+      "evidence": "Bound Bead btq-harness-cb8fe048d297336039c81e2c."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-19T22:48:49.245619+00:00",
+      "by": "existing operator directive relayed by manager",
+      "proposal_sha256": "28d3aa58701668d24b118b40c2f8bc7111928cb9fc0225db1758d9613aa00ae7",
+      "evidence": "The bound Bead records the Sep 19 user requirement for admin-tagged escalations and outstanding asks. The manager resolution in this conversation directs using wn groups admins, additionally tagging the two designated operators, plain @npub text, and resuming this task. This records existing scope authorization, not a new direct Liam message or authorization to bypass native approvals. Live deployment and database safety verification remain operator work."
+    }
+  ]
+}

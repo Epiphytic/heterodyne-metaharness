@@ -48,6 +48,10 @@ Compaction keeps the native identity and durable supervisor state; native Codex/
 
 ## Reporting and routing
 
+Operator questions use [durable asks and admin tags](spec/operator-asks.md).
+See the [reviewed deployment procedure](docs/operator-asks-deployment.md) for
+admin lookup configuration, existing live-home constraints and verification.
+
 Every ongoing run, including unknown, blocked and failed states, queues a status at most every 240 seconds plus a 10-second observation tick. Delivery runs separately, validates acknowledged Marmot responses, retries using the same remote idempotency key, and escalates after three failures. Network outages cannot guarantee delivery; `doctor` exposes backlog and oldest pending report, and messages survive outages/restarts. Transports and tmux input do not share an exactly-once transaction: uncertain input requires inspection.
 
 The installed Marmot hook sends authenticated messages for an owned channel to its durable manager inbox, before ordinary gateway dispatch. Unowned channels use the normal gateway. New groups require no gateway restart once the hook is installed. Duplicate inbound IDs cannot create duplicate manager inputs. Inputs retain their explicit target across restart.

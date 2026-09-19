@@ -13,6 +13,9 @@ Authority: [active specification](spec/README.md). Operational checks and result
 | `harness/workspace.py` | Idempotent creation of isolated, owned worktrees |
 | `harness/marmot.py` | Validated, bounded agent-control protocol facade |
 | `harness/delivery.py` | Acknowledged message retries, ordering and escalation |
+| [harness/operator_asks.py](harness/operator_asks.py) | Durable open asks, immutable rendered deliveries and final-paragraph reminders |
+| [harness/admin_references.py](harness/admin_references.py) | Explicit authoritative admin lookup and public npub references |
+| [install_operator_asks.py](install_operator_asks.py) | Reviewed babysitter adapters and admin lookup configuration plan |
 | `harness/routing.py` | Authorized channel admission, deduplication and crash-durable input spool |
 | `harness/lifecycle.py` | Bounded exact-session transcript observation and compression continuation |
 | `harness/native_hook.py` | Native SessionStart identity registration and checkpoint context restoration |

@@ -60,6 +60,9 @@ def observe(store, run, info):
                 store.db.execute('INSERT OR IGNORE INTO permission_parts VALUES (?,?,?)', (event,identity,index))
                 store.db.execute('''INSERT OR IGNORE INTO outbox(id,run_id,group_id,text,created_at)
                     VALUES (?,?,?,?,?)''', (event,run['id'],run['group_id'],header+f'Part {index+1}/{len(parts)}\n'+part,now))
+                from .operator_asks import register
+                row = store.db.execute('SELECT * FROM outbox WHERE id=?', (event,)).fetchone()
+                register(store, row, f'Inspect native approval in {run["name"]}, pane {pane}', 'permission:'+identity)
     return identity
 
 

@@ -28,6 +28,8 @@ def parser():
     sub = p.add_subparsers(dest='command', required=True)
     from .approvals import configure_cli
     configure_cli(sub)
+    from .operator_asks import configure_cli as configure_asks
+    configure_asks(sub)
     maintenance = sub.add_parser('maintenance')
     maintenance.add_argument('--file', required=True)
     maintenance.add_argument('--title', required=True)
@@ -48,6 +50,7 @@ def parser():
     event = sub.add_parser('event'); event.add_argument('name')
     event.add_argument('--state', choices=['working', 'blocked', 'completed', 'failed', 'awaiting_resume'], required=True)
     event.add_argument('--text', required=True); event.add_argument('--event-id')
+    event.add_argument('--operator-ask', action='store_true')
     bind = sub.add_parser('bind-group'); bind.add_argument('name'); bind.add_argument('group')
     route = sub.add_parser('route')
     route.add_argument('--group', required=True); route.add_argument('--message-id', required=True)
@@ -235,6 +238,9 @@ def dispatch(args, store, supervisor, config):
     if command == 'approvals':
         from .approvals import handle_cli
         return handle_cli(args, store, Beads(config.get('beads', {})))
+    if command == 'ask':
+        from .operator_asks import handle_cli
+        return handle_cli(args, store)
     if command == 'maintenance':
         from .maintenance import enqueue_task
         return enqueue_task(store, supervisor, config, args.title, Path(args.file).read_text(), args.key)
@@ -283,7 +289,8 @@ def dispatch(args, store, supervisor, config):
         run['state'] = 'idle' if args.state == 'completed' and run.get('persistent') else args.state
         run['task_state'] = args.state
         run['task_summary'] = args.text
-        supervisor.report(run, args.state, args.text, args.event_id)
+        supervisor.report(run, args.state, args.text, args.event_id,
+                          operator_ask=getattr(args, 'operator_ask', False))
         supervisor.persist(run)
     elif command == 'bind-group':
         run['group_id'] = args.group

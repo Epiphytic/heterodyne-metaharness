@@ -33,9 +33,10 @@ class Supervisor:
             self.store.save(run)
         self.store.checkpoint(run)
 
-    def report(self, run, kind, text, key=None):
+    def report(self, run, kind, text, key=None, operator_ask=False):
         with self.store.db:
-            self.store.event(run, kind, text, key, group=run.get('group_id') or self.config.get('ops_group'))
+            self.store.event(run, kind, text, key, group=run.get('group_id') or self.config.get('ops_group'),
+                             operator_ask=operator_ask)
             self.store.save(run)
 
     def start(self, name, repo, agent, prompt='', group=None, agent_config=None, parent_session=None):
@@ -278,10 +279,11 @@ class Supervisor:
         if observation.get('native_session_id'):
             run['native_session_id'] = observation['native_session_id']
         run['observation'] = dict(observation, at=self.clock(), pane_alive=True)
-        if observation['state'] == 'awaiting_approval' and run.get('observed_state') != 'awaiting_approval':
-            self.report(run, 'blocked', 'Coding agent appears to need approval. Native permission prompt preserved.')
         from .permission_relay import observe as relay_permission
-        relay_permission(self.store, run, info)
+        approval_relay = relay_permission(self.store, run, info)
+        if observation['state'] == 'awaiting_approval' and run.get('observed_state') != 'awaiting_approval':
+            self.report(run, 'blocked', 'Coding agent appears to need approval. Native permission prompt preserved.',
+                        operator_ask=approval_relay is None)
         run['observed_state'] = observation['state']
         self.observe_manager(run)
 
@@ -296,11 +298,11 @@ class Supervisor:
                     manager['native_session_id'] = native
                 manager['observation'] = observation
                 if observation['state'] == 'awaiting_approval' and manager.get('observed_state') != 'awaiting_approval':
-                    self.report(run, 'blocked', 'Manager appears to need native approval. Its prompt is preserved.')
+                    self.report(run, 'blocked', 'Manager appears to need native approval. Its prompt is preserved.', operator_ask=True)
                 manager['observed_state'] = observation['state']
             elif not run.get('manager_missing'):
                 run['state'] = 'blocked'
-                self.report(run, 'blocked', 'Manager exited; coding session remains owned and reporting. Use resume to restore manager.')
+                self.report(run, 'blocked', 'Manager exited; coding session remains owned and reporting. Use resume to restore manager.', operator_ask=True)
             run['manager_missing'] = not manager_info['alive']
 
     def submit(self, run, text, target='manager', message_id=None):

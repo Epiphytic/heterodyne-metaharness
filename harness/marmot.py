@@ -67,6 +67,7 @@ class Marmot:
                                         not all(isinstance(x, str) and x for x in self.relays)):
             raise MarmotError('relays must be a list of relay URLs')
         self.timeout = float(config.get('timeout', 20))
+        self.group_admins = config.get('group_admins', {})
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise MarmotError('timeout must be finite and positive')
         self.auth_token = config.get('auth_token') or os.environ.get('MARMOT_AGENT_AUTH_TOKEN')
@@ -75,6 +76,15 @@ class Marmot:
             self.auth_token = Path(token_file).expanduser().read_text().strip()
             if not self.auth_token:
                 raise MarmotError('Marmot auth token file is empty')
+
+    def admin_references(self, group_id):
+        from .admin_references import lookup
+        start = time.monotonic()
+        references = lookup(self.group_admins, self.account_id, group_id, self.timeout)
+        self.timeout -= time.monotonic() - start
+        if self.timeout <= 0:
+            raise MarmotError('Admin lookup exhausted delivery deadline')
+        return references
 
     def _request(self, payload: dict, expected: str, request_id: str, *, creating=False) -> dict:
         envelope = dict(payload, marmot_agent_control=PROTOCOL, id=request_id)

@@ -25,3 +25,4 @@ Native observation and duplicate reporting: [status](status.md).
 - [Native permission relay](permission-relay.md)
 
 - [Queue continuation](continuation.md)
+- [Operator asks and admin tags](operator-asks.md)

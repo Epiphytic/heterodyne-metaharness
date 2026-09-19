@@ -40,4 +40,5 @@ def send_outbox(store, transport, row):
         return transport.react(row['group_id'], reaction['target_id'], reaction['emoji'], row['id'])
     if row['id'].startswith('reaction:'):
         raise MarmotError('reaction payload missing; cannot deliver as ordinary text')
-    return transport.send(row['group_id'], row['text'], row['id'])
+    from .operator_asks import prepare
+    return transport.send(row['group_id'], prepare(store, transport, row), row['id'])
