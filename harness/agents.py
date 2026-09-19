@@ -181,7 +181,14 @@ class Adapter:
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', pane_text)
         tail = '\n'.join(text.strip().splitlines()[-8:])
         state = 'unknown'
-        if re.search(r'(?i)(approve|permission required|allow this|do you want to proceed|trust this)', tail):
+        if self.provider.name == 'hermes':
+            # Native cli_tui_mixin renders this modal and its live input hint.
+            # Completed prose (including "I approved it") is not a modal.
+            pending = ('Dangerous Command' in text and 'Allow once' in text
+                       and 'Deny' in text and '↑/↓ to select, Enter to confirm' in tail)
+        else:
+            pending = re.search(r'(?i)(approve|permission required|allow this|do you want to proceed|trust this)', tail)
+        if pending:
             state = 'awaiting_approval'
         return {'native_session_id': self.discover(run), 'state': state,
                 'summary': tail[-1200:] or 'No terminal output observed yet.'}

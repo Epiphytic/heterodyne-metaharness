@@ -25,6 +25,15 @@ return false without sending a message. Confirm the actual adapter mutation
 hook still matches the reviewed anchor. Record source, suite log/hash and service
 revision. A passing fixture suite alone does not certify deployment.
 
+The manager observation correction also requires a supervisor reload. Before
+reload, inspect retained manager inbox entries: a prior failed `send` may have
+queued its message before reporting `Native approval pending`. Do not enqueue a
+second copy or assume the first was lost. In particular, the old transport-design
+question has been superseded by the operator's durable-consent direction.
+After reload, verify a normal manager input screen with historical "I approved
+it" prose is no longer `awaiting_approval`; verify its exact native ID is unchanged.
+Do not clear approval state manually or send approval keys to force this check.
+
 At the next real native approval, verify captured complete region and numbered
 parts reach the exact channel, all acknowledged message IDs are retained, and a
 permitted operator reaction creates one `permission_consents` row and manager

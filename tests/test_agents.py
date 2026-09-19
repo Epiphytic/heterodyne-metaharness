@@ -6,6 +6,23 @@ from harness.agents import Adapter
 
 
 class AgentsTest(unittest.TestCase):
+    def test_hermes_approval_history_is_not_pending(self):
+        pane = ("The worker's approval prompt was sitting on the pane — I approved it\n"
+                "(option 2, don't-ask-again), so it is continuing.\n"
+                "❯ Draft a reply to the last email in my inbox")
+        self.assertEqual(Adapter('hermes').observe({}, pane)['state'], 'unknown')
+
+    def test_hermes_live_modal_survives_long_command(self):
+        pane = ('⚠️  Dangerous Command\n' + 'command argument\n' * 40
+                + '❯ Allow once\n  Deny\n  ↑/↓ to select, Enter to confirm')
+        self.assertEqual(Adapter('hermes').observe({}, pane)['state'], 'awaiting_approval')
+        self.assertEqual(Adapter('hermes').observe(
+            {}, pane.replace('↑/↓ to select, Enter to confirm', '❯ New question'))['state'], 'unknown')
+
+    def test_hermes_other_modal_hint_is_not_approval(self):
+        self.assertEqual(Adapter('hermes').observe(
+            {}, 'Choose an option\n↑/↓ to select, Enter to confirm')['state'], 'unknown')
+
     def test_recovery_never_replays_prompt(self):
         for name in ('codex', 'claude', 'hermes'):
             run = dict(id='test', native_session_id='exact-id', prompt='DO NOT REPLAY')

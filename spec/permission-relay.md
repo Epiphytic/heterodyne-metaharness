@@ -13,6 +13,12 @@ summary replaces the permission evidence. Retries preserve those IDs. Every
 acknowledged visible message ID is bound to its account, group and outbox part.
 Unsupported UI forms remain native and require explicit inspection.
 
+Hermes manager observation requires the native dangerous-command panel's title,
+allow/deny choices and trailing live selection hint before reporting a pending
+approval. Historical prose about approving a command is not a pending request.
+This heuristic does not authenticate a request or authorize an approval; an
+unrecognized screen remains unknown, never proven safe or completed.
+
 A pane may itself omit command content. Relay explicitly discloses that limitation;
 it never asserts that a clipped terminal screenshot is a complete native command.
 Manager inbox evidence remains available even if client display truncates a part.
