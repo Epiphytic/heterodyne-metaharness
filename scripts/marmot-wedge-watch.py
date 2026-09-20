@@ -2,8 +2,7 @@
 """Deterministic watchdog; contract: spec/marmot-wedge-watch.md.
 
 Activation records provide before/after evidence for connector fixes. No LLM,
-no direct database access, and no direct gateway restart. Inventory comes from
-an operator-reviewed socket-backed exporter; never run wn against the live home.
+no direct database access, and no direct gateway restart. Socket liveness uses account_list; never run wn against the live home.
 """
 import argparse
 import datetime as dt
@@ -13,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -63,25 +63,34 @@ def last_inbound(path):
     return newest
 
 
-def newest_allowed(inventory, users, gw_last, now):
-    """Validate a complete local-receipt inventory, never sender event time."""
-    if inventory.get('complete') is not True or inventory.get('source') != 'agent-control':
-        raise ValueError('requires complete agent-control inventory')
-    captured = timestamp(inventory['captured_at'])
-    if not 0 <= now - captured <= 60:
-        raise ValueError('stale or future inventory')
-    newest = 0.0
-    for chat in inventory['chats']:
-        if timestamp(chat['activity_sort_at']) < gw_last - 60:
-            continue
-        for message in chat['messages']:
-            if message['direction'] != 'received' or message['from'].lower() not in users:
-                continue
-            received = timestamp(message['received_at'])
-            if received > now + 60:
-                raise ValueError('future local receipt timestamp')
-            newest = max(newest, received)
-    return newest
+def probe_socket(path, timeout=5):
+    """Bounded documented account_list probe; no arbitrary text operations."""
+    request_id = uuid.uuid4().hex
+    request = {'marmot_agent_control': 'marmot.agent-control.v2',
+               'id': request_id, 'type': 'account_list'}
+    deadline = time.monotonic() + timeout
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(timeout)
+        connection.connect(str(path))
+        connection.sendall(json.dumps(request).encode() + b'\n')
+        response = bytearray()
+        while b'\n' not in response:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('socket probe timed out')
+            connection.settimeout(remaining)
+            chunk = connection.recv(4096)
+            if not chunk:
+                raise ValueError('socket EOF before response')
+            response.extend(chunk)
+            if len(response) > 65536:
+                raise ValueError('socket response exceeds bound')
+    data = json.loads(response.split(b'\n', 1)[0])
+    if (not isinstance(data, dict) or data.get('id') != request_id
+            or data.get('marmot_agent_control') != request['marmot_agent_control']
+            or data.get('type') != 'account_list' or not isinstance(data.get('accounts'), list)
+            or not data['accounts']):
+        raise ValueError('invalid account_list response')
 
 
 def append_record(path, record):
@@ -111,31 +120,34 @@ def save_state(path, state):
     sync_directory(path.parent)
 
 
-def assess(args, now):
+def assess(args, now, probe=probe_socket):
     heartbeat = json.loads(args.heartbeat.read_text())
     started = timestamp(heartbeat['start_time'])
     if started > now:
         raise ValueError('gateway start time is in the future')
     if now - started < 300:
-        return None
+        return {'reason': 'startup_grace'}
     mtime = args.heartbeat.stat().st_mtime
     if mtime > now + 60:
         raise ValueError('heartbeat mtime is in the future')
-    # Stale heartbeat is independently sufficient; inventory outage must not
-    # prevent recovery of a dead gateway. Unavailable message evidence is null.
+    # A dead connector is escalated, not "fixed" by restarting its gateway.
+    try:
+        probe(args.socket)
+    except (OSError, ValueError) as exc:
+        raise ValueError('socket_unavailable: connector probe failed; manager intervention required') from exc
     if now - mtime > 180:
-        return dict(reason='stale_heartbeat', newest_allowed=None,
-                    gw_last_inbound=None, gw_start_time=started)
+        return dict(reason='stale_heartbeat', gw_last_inbound=None, gw_start_time=started)
+    allowed_users(args.env_file)  # Native inbound log is already sender-filtered.
     gw_last = last_inbound(args.gw_log)
-    inventory = json.loads(args.inventory.read_text())
-    newest = newest_allowed(inventory, allowed_users(args.env_file), gw_last, now)
-    if newest > gw_last + 300:
-        return dict(reason='wedge', newest_allowed=newest,
-                    gw_last_inbound=gw_last, gw_start_time=started)
+    if gw_last > now + 60:
+        raise ValueError('gateway inbound timestamp is in the future')
+    if now - gw_last > args.inbound_max_age:
+        return dict(reason='inbound_inactivity', gw_last_inbound=gw_last, gw_start_time=started,
+                    threshold_seconds=args.inbound_max_age)
     return None
 
 
-def run(args, now=None, execute=subprocess.run):
+def run(args, now=None, execute=subprocess.run, probe=probe_socket):
     now = time.time() if now is None else now
     args.state.parent.mkdir(parents=True, exist_ok=True)
     with args.state.with_suffix('.lock').open('a') as lock:
@@ -145,7 +157,9 @@ def run(args, now=None, execute=subprocess.run):
         # automatically; operator reconciles timer and journal against intent ID.
         if state.get('pending'):
             raise ValueError('unresolved activation intent; reconcile timer before retry')
-        reason = assess(args, now)
+        reason = assess(args, now, probe)
+        if reason and reason['reason'] == 'startup_grace':
+            return ''
         if reason is None:
             if state.get('last_trigger'):
                 save_state(args.state, {'last_trigger': 0})
@@ -173,12 +187,20 @@ def main():
     for name, default in [('gw-log', home / 'logs/gateway.log'),
                           ('heartbeat', home / 'state/gateway.heartbeat'),
                           ('env-file', home / '.env'),
-                          ('inventory', home / 'state/marmot-inbound-inventory.json'),
+                          ('socket', Path.home() / '.marmot-agents/hermes/dev/wn-agent.sock'),
                           ('state', home / 'state/marmot-wedge-watch.json'),
                           ('activation-log', home / 'logs/marmot-wedge-watch.log')]:
         parser.add_argument('--' + name, type=Path, default=default)
+    parser.add_argument('--check', action='store_true', help='Report assessment without state writes or timer activation')
+    parser.add_argument('--inbound-max-age', type=int, default=300)
     try:
-        notice = run(parser.parse_args())
+        args = parser.parse_args()
+        if args.inbound_max_age < 300:
+            raise ValueError('inbound max age must be at least 300 seconds')
+        if args.check:
+            print(json.dumps({'assessment': assess(args, time.time())}, sort_keys=True))
+            return 0
+        notice = run(args)
         if notice:
             print(notice)
         return 0

@@ -1,0 +1,18 @@
+{
+  "proposal": "Implement deterministic Marmot watchdog with startup grace, cooldown, durable activation records and sanctioned gateway timer only. Per manager resolution in this conversation, replace unsafe live-home wn CLI reads with account_list socket liveness, gateway heartbeat and inbound-log inactivity; socket failure escalates. Inactivity is explicitly heuristic and may restart a quiet healthy gateway. Deployment remains manager-side.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T19:00:49.725778+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-0df13f499c20ed5f0b2d32fd and current manager scope correction."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T19:00:49.725778+00:00",
+      "by": "manager under existing operator authorization",
+      "proposal_sha256": "88232b7725a5dcd9e509cf2b4f4c97727e9d5ad2191837e54dd6d4d1a35ce092",
+      "evidence": "Current conversation: manager explicitly directs socket liveness plus gateway.log freshness and heartbeat, forbids live-home CLI, and says proceed. Original bound task authorizes guarded timer recovery; no new direct Liam message or deployment completion claimed."
+    }
+  ]
+}
