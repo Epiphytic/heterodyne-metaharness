@@ -59,3 +59,5 @@ this refreshes the projection and queues the appropriate owner notice. Reconcili
 is also required before relying on external edits for completion. No continuous queue
 pickup polling is introduced. Pause/recovery and original atomic claim/approval guards
 remain unchanged; notification does not authorize new task execution.
+
+Independent-outcome classification and historical mapping: [refinement](task-refinement.md).

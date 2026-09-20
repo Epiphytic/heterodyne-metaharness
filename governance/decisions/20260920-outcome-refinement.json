@@ -1,0 +1,18 @@
+{
+  "proposal": "Document outcome-based admission/refinement and audit remaining maintenance work, retaining original IDs, authorization, closed history and active ownership; partition the already-approved reviewer and scoped-ask outcomes into linked queued Beads without duplicate execution.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T21:05:23.614169+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound ff386b scope revision fdabeb3f37c4df5788fe58a30ff0198334fb09d7fb9e334ea0b49b6518bafb87."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T21:05:23.614169+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "43a6440de24260adedbcaded99363f31486c23af43f42e8c7057e596c98cb390",
+      "evidence": "User authorized the seven workflow improvements and explicitly approved the transition/reviewer design; manager directs this bound refinement audit. Partitioning retains that authority, not a new approval or deployment permission."
+    }
+  ]
+}

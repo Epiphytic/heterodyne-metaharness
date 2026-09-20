@@ -1,0 +1,374 @@
+{
+  "schema": 1,
+  "kind": "historical-audit-not-task-authority",
+  "at": "2026-09-20T21:05:23.614169+00:00",
+  "objective": "deterministic evidence-based workstream communication",
+  "method": "Native Beads list --all --label ws:hermes-maintenance --limit201 --readonly; bounded at200, native show for every ID. Closed records compared byte-equivalently as parsed JSON. No native transcript/private config exported.",
+  "checks": {
+    "before_count": 25,
+    "after_count": 27,
+    "closed_unchanged": 21,
+    "active_claim_unchanged": "btq-harness-ff386b2c95b28b0eb7e443d5",
+    "existing_descriptions_unchanged": true,
+    "new_records": [
+      "btq-harness-98d757a000aa1d75d4c99280",
+      "btq-harness-fa72b786ac157f7c2d051bdd"
+    ],
+    "changed_existing_records": [
+      "btq-harness-3f284a1f6cfca24044abf240"
+    ]
+  },
+  "records": [
+    {
+      "id": "btq-harness-7fa04aa8c98f8c9a1c8539ce",
+      "title": "Hourly backstop agent: queue/marmot health sweep + babysitter expansion loop",
+      "status_at_audit": "closed",
+      "record_sha256": "0d8914c54c2b3a9137ab1ae35ec1e3d3cebda6f7ab84928cbd15e48897e09035",
+      "description_sha256": "f75ccb6e33c76b0e3e6f0a7f66175a850491d2afa67f5c00c722a94835b5c84f",
+      "notes_sha256": "8c1df288e069bdfc646b4074f12a56a0d2dd944406e29b7ad9d3fff6189ee993",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-cb8fe048d297336039c81e2c",
+      "title": "Admin-tagged escalations: mention all group admins in every operator ask (addendum to 326a06b1 + 3157e53f)",
+      "status_at_audit": "closed",
+      "record_sha256": "ec127d179428f4064cf86376b5a243310a2ca370432890309f2ca50f6e3fb448",
+      "description_sha256": "03ff1d7bc95c84058a29dbc7bdff91005caf1298f8fd8c2a5788bb27b18bf963",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-53ac6f7ea00122996fbb6709",
+      "title": "Fix continuation gate: manager working-state blocks auto-claim",
+      "status_at_audit": "closed",
+      "record_sha256": "aa960c27219fe5073afee18fa7b8110ff1772e0e7091f7e3a31e3d75a6838d3c",
+      "description_sha256": "6c25e2d59dff693599d70ab447cabf90963707cedf633bcaf2968598c3910394",
+      "notes_sha256": "0bd61e0933fbac7e5a66f4d407a995fffe1094fa918929a2a2f9bd71d35fa022",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-1c551cdb360f6d7bf77714fd",
+      "title": "Queue-ordering controls: --at-top insert flag, prioritize verb, drop-everything verb",
+      "status_at_audit": "closed",
+      "record_sha256": "19897adca28162cfab61220770cb0795c4fd99fa00264b5b889d56816b822ee2",
+      "description_sha256": "c740d0f7ccfb7599aa00af143e730732faa0993b05d19b9d0d2958cee386ce5f",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-928fc46b2edb8305c764dc88",
+      "title": "Auto-claim next task on turn end (queue continuity; operator priority)",
+      "status_at_audit": "closed",
+      "record_sha256": "5d8e62fc2afe17d1d2bee4a1493d69e9f32d72efed3980d24c163c2249f6aa0d",
+      "description_sha256": "b9abaea6dbc535bc95df4bdfdedd8e39a3804fa2345861700e3a6a3a3ab36fd8",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-0915045cb906607b6df230d8",
+      "title": "Dedup leaks alternating status spam; window dedup + rate limit needed",
+      "status_at_audit": "closed",
+      "record_sha256": "14ed0f1bacffb33127099377a3d3964a2ca11ac7fac1ddb7a9a8ec6ff8c69d3a",
+      "description_sha256": "a40cc4d06f68806cb00ddb558392148e3577062ac0f42a2a93283bf7a2e5dbc9",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-3157e53fbf58faab13719a2e",
+      "title": "Terminal observation: 50-line window, scrollback buffer, deterministic activity detection, Hermes-surfaced approvals",
+      "status_at_audit": "closed",
+      "record_sha256": "a9a09508047f9b5e222d0fa388c612c02acc7892087d376fac77081910138b2e",
+      "description_sha256": "04874d396e2a6f81fff6135cd0544e0e0ae0a12b6acd2f28b9026ae1712fd7cd",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-fa72b786ac157f7c2d051bdd",
+      "title": "Scoped operator-reaction consent and activity-aware outstanding asks",
+      "status_at_audit": "open",
+      "record_sha256": "325ce107c65a97cf22e18046c3acd84dd480f456bc268927e4390496b49e55fb",
+      "description_sha256": "a0dded5b2c8c7ed89958e8015551b52a895b84cfb096dddfc118a6c435552230",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-98d757a000aa1d75d4c99280",
+      "title": "Independent evidence-based progress and completion reviewers",
+      "status_at_audit": "open",
+      "record_sha256": "0b4eb26e80d8fd0e078aff5f2f1b7d43a898967ab68ffcc3c0242026c44937fa",
+      "description_sha256": "7b3a74511215b8fa36b24cbdeb21433b9c8ddca6e60ea7ff0d456940275c5ca4",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-4c52658c8c1b5806e845cb41",
+      "title": "Deterministic /status command for workstream channels (queue + pane tail, no LLM)",
+      "status_at_audit": "open",
+      "record_sha256": "31ee5c4ee5316799b688216c859bf97c5c1a883d91b2d95b1ccb11c0bae12d68",
+      "description_sha256": "214eda0d0745d2c7359b2f314193a7b07c7c95aa09cca96b104fd86438ff01ff",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-3a5654bab1e18ffacd5157c7",
+      "title": "Fix duplicate status spam: pane_digest volatility defeats status fingerprint dedup",
+      "status_at_audit": "closed",
+      "record_sha256": "a3b01a2b74980ba78727f085de3166e0fc38be29e142ccf653a6935eb6711893",
+      "description_sha256": "a091a46cffaa768fb30e22d0407ccde5ba4b2ac0b12561d5efd041a09a72363b",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-0c5a5ae445fa3772e9bee368",
+      "title": "Integrate Beads workflow steps into btq routing and read-only progress views",
+      "status_at_audit": "closed",
+      "record_sha256": "bf4af74990f4b3aec7fa52fb79e27c0b203c3386d5f58953ef68b75f47f3845b",
+      "description_sha256": "2d54d734765bb185efcf2a62b746dfd85c56959cd0fd8a24f6237e6ede6cf7ba",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-3f284a1f6cfca24044abf240",
+      "title": "Drive durable maintenance notices from Beads workflow transitions",
+      "status_at_audit": "open",
+      "record_sha256": "17368ceb9e5dcbb7861a807ee7af46589fd65a8b8df54fd47aac338a0d1491e1",
+      "description_sha256": "c4891ebcbe359ae58be41e439a72b202f928599c1cfb0a2a6808dbb4afd27f49",
+      "notes_sha256": "f152d24313b31f96a00d83a7c8d0aa39af8fae3ccf643d83d928a0967957c3df",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-5a954683b196b1f42cc172e1",
+      "title": "Represent approval and external blockers as native Beads gates",
+      "status_at_audit": "closed",
+      "record_sha256": "5aaf1c8d9037d0c6e0168b3c2e5596cba851abd6f59e3ed8c2c4537d611bcaa6",
+      "description_sha256": "1d8d841896e0491a0d88add509298fbe05063d12568a9f2625361ce4e4ce825d",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-da81014f29d4099246775b15",
+      "title": "Enforce structured evidence handoffs through deployment and live verification",
+      "status_at_audit": "closed",
+      "record_sha256": "7f949ca6aa342aa9ad632c8dec96f8b4c0290afb42a4f385ce13e44b20f39445",
+      "description_sha256": "3eff6bd2cc4900dce95a72c48a25009f0830a3f99b2d1d427df9f30c49a72825",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-ff386b2c95b28b0eb7e443d5",
+      "title": "Split independent maintenance outcomes into linked Beads without losing history",
+      "status_at_audit": "in_progress",
+      "record_sha256": "23a7d86724c5a2d0f7b3824976e704ee12119bbad2a38f2a5ba8a83f6d0be2cc",
+      "description_sha256": "3db54ee92766ccfc812fd536a17e2ebd7c70e4d4c3ff3f76965ed4728241bf7c",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-0e771da3ce9ed353a10c8609",
+      "title": "Add reusable Beads workflow formulas for engineering and research",
+      "status_at_audit": "closed",
+      "record_sha256": "a5ddf92370270758e1eed92fbfb2544bcd9c82c227a9d6d23b69c58c48374e83",
+      "description_sha256": "3a06c71b09433a9e365231e3dea3b3c55f4165cb6cb3dd289c9c3b4f941b90d1",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-d290cf60e03357167888a515",
+      "title": "Separate delivery ownership from implementation ownership with linked Beads",
+      "status_at_audit": "closed",
+      "record_sha256": "610cb764306237fa10102697d7a410b5e8c82a00345c4c1830075e88b475c004",
+      "description_sha256": "adf247331219c721e416a07e17efe94ccdf980d8daa1ad5042dfcbdf3d46f91d",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-259f65643d37dc3464c4dec4",
+      "title": "Fix permissions-message relay from workstream agents (reactable, untruncated) and verify duplicate suppression after deploy",
+      "status_at_audit": "closed",
+      "record_sha256": "f027613120461b2501bf118f6c912427c2d6cc2a1a22d0f7c70b6ed555a08c85",
+      "description_sha256": "d3b4b8e299fc0730ee26b22df60e796235b617531b7d5d382effb2745769ecd5",
+      "notes_sha256": "34ef0d348188178334e6f7cfa080fcb4d66bf5002ff5bb4fc26bd9c3831d0588",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-e472ea0ca2b6a9ec5fe5d454",
+      "title": "Suppress unchanged idle notices and improve codex idle detection",
+      "status_at_audit": "closed",
+      "record_sha256": "adaaad76ec7ae1677fe1f53b2a29a5f275ffff979c97ffd7229f16c10ec3a70d",
+      "description_sha256": "b06933cbbff5beb9024cc87890ccd6eb0682ea5ac902d9044d09c36ca2e9ce29",
+      "notes_sha256": "22924049a1607d008218bfcf79c3a8dfe85dc58f6e1c2136545b5faf95546ce7",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-ca87352d5f650e4786833c94",
+      "title": "Restore Marmot reactions through agent-control facade",
+      "status_at_audit": "closed",
+      "record_sha256": "56b093a92090fe66dab7a83400fc11626f4f7732633a935007ff92e60a8255d1",
+      "description_sha256": "5a097d9e17d9b2ff7e205d77dc8c8e4f0f5a4cc35730e94af7c659d12fdd4603",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-a40956ff84a9873066149391",
+      "title": "Notify active workers of Bead addendums through shared handoff",
+      "status_at_audit": "closed",
+      "record_sha256": "d310ffe58641ae741e33acb0b27f6dfbfc41b0d1a863679cec1ac5acb5c4c12b",
+      "description_sha256": "4f3bb354e79858d59045d5b3beb547c3c2ab727e68389a5d0847a52da748a77f",
+      "notes_sha256": "d1432186a75de466e22b114ccf2cb096b7286c3d0be3e4117623bd956f8a14c5",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-44cff6fd3d31e0d7404fbc26",
+      "title": "Restore deterministic brain change notifications across sessions",
+      "status_at_audit": "closed",
+      "record_sha256": "72ab11c273218117de3a016b4ae4460fbdbae6e84cd628974deeb98b3b2599ea",
+      "description_sha256": "1567a143a96f9d1acbaefb9879c6d1fbfefcc37ef20022db82966e8c3dd99b09",
+      "notes_sha256": "b52224a4ba90e9d44897c88ac9eed214d71a29cf16884e1511a85f7caa910ef2",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-9a729b18a99e76122751427b",
+      "title": "Investigate and fix Hermes SQLite WAL warning",
+      "status_at_audit": "closed",
+      "record_sha256": "615a1f8e9f7984018594568476df1b5e70e06f0785108c08f1eb3dcf22df5731",
+      "description_sha256": "6f55af6a260daa5f1c6cc9db9f801820e46543b1a61278a54f4b69f4e1524236",
+      "notes_sha256": "8d3b6affbd531cfee0cd2aea4d9ca2b222c43f9b7088ceeae8ba50acfd4c9caf",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-295b8e0abf3787620376177e",
+      "title": "Persistent Hermes maintenance governance and curated context",
+      "status_at_audit": "closed",
+      "record_sha256": "d1869aef1b03d87f2d25bb49b899ddb702633c2767222c777f1c882bdef4b7e5",
+      "description_sha256": "db0cab439165c088827a6100bbdf7b6da02b86783a5c82d42c66a4672878edfb",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-326a06b1084c6bc455a02b5e",
+      "title": "Approval audit + expanded codex allow lists -> brain repo config, notify with GitHub URL",
+      "status_at_audit": "open",
+      "record_sha256": "7b1e4751360ee43e9a47b6932c6a59bd83c13fbebd1dae558ecf661e91b60636",
+      "description_sha256": "a9a2798b371c771aeb95c356e0b3d9ff806033f23a5c0e4469abd2b3cdbf0637",
+      "notes_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    },
+    {
+      "id": "btq-harness-0df13f499c20ed5f0b2d32fd",
+      "title": "marmot-wedge-watch: deterministic gateway inbound-wedge detector + auto-restart",
+      "status_at_audit": "closed",
+      "record_sha256": "06746ac1ed50ed2bdf3f506abac3ea3863a0a139f27017d1fbc95201e25ecd94",
+      "description_sha256": "8491536e86f4e15d5a3ef033d783687592cab8f3205acf7757b79de7ae5c4b45",
+      "notes_sha256": "af3f090449d9752937e035cde4fed31307a0c88b31327737cbe37d0ee117e14f",
+      "route": [
+        "agent:codex",
+        "session:b61d651b-8206-52d9-8965-d30d937dd103",
+        "ws:hermes-maintenance"
+      ]
+    }
+  ]
+}
