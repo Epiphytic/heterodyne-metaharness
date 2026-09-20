@@ -133,6 +133,8 @@ def prior_history(queue, issue):
     for step in prior:
         if group[step].get('status') != 'closed':
             raise BeadsError('Prior delivery step is not closed')
+        from .task_gates import check
+        check(queue, group[step])
         pinned = artifact(group[step])
         from .task_formulas import validate
         for event in history(group[step]):

@@ -58,3 +58,5 @@ independently; the parent closes only when every required role is closed with va
 evidence. Task scope receipts, stable current ownership, recovery, routes and native
 approval constraints continue to apply. Research/configuration cannot use concurrent
 PR handoff: finish the active step before taking another.
+
+Attach [revision-bound prerequisite gates](gates.md) to the role that needs external or design approval.

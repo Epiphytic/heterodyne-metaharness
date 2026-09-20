@@ -61,6 +61,8 @@ def parser():
     actions = task.add_subparsers(dest='task_action', required=True)
     from .queue_cli import configure
     configure(actions)
+    from .task_gates import configure as configure_gates
+    configure_gates(actions)
     for name in ('context', 'pause', 'resume'):
         actions.add_parser(name)
     for name in ('show', 'bind', 'claim', 'close', 'worktree'):
@@ -179,6 +181,9 @@ def task_dispatch(args, store, supervisor, config):
     if action in ('ready', 'prioritize', 'dep', 'drop-everything'):
         from .queue_cli import dispatch as queue_dispatch
         return queue_dispatch(args, store, supervisor, beads, run)
+    if action == 'gate':
+        from .task_gates import dispatch as gate_dispatch
+        return gate_dispatch(args, store, beads, run)
     if action == 'formula':
         from .task_formulas import create
         return create(store, supervisor, beads, run, json.loads(Path(args.file).read_text()))
@@ -204,6 +209,9 @@ def task_dispatch(args, store, supervisor, config):
         from .tasks import assert_close_current
         from .task_stages import close_ready
         issue = beads.show(run, args.issue_id)
+        from .task_gates import check
+        if issue.get('status') != 'closed':
+            check(beads._queue(run), issue)
         from .task_review import checkout
         from .task_delivery import contract, close_step
         if contract(issue) and issue.get('status') != 'closed':

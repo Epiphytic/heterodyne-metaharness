@@ -35,3 +35,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Marmot inbound watchdog](marmot-wedge-watch.md)
 
 - [Workflow formulas](formulas.md)
+
+- [Prerequisite gates](gates.md)

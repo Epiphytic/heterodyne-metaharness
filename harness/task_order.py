@@ -94,6 +94,8 @@ def dependency(queue, run, operation, value, blocker, issuer):
     issue, prerequisite = resolve(queue, run, value), resolve(queue, run, blocker)
     if not issuer.strip() or issue['id'] == prerequisite['id'] or issue.get('status') == 'closed':
         raise BeadsError('Require issuer, distinct routed tasks and an open dependent')
+    if operation == 'remove' and prerequisite['id'] in issue.get('metadata', {}).get('harness_gates', {}):
+        raise BeadsError('Gate dependency removal requires explicit gate reconciliation')
     approval = issue.get('metadata', {}).get('design_approval')
     if operation == 'remove' and prerequisite['id'] == approval:
         raise BeadsError('Approval dependency removal needs the design approval workflow')

@@ -1,0 +1,18 @@
+{
+  "proposal": "Represent design, merge, deployment and external prerequisites as revision-bound native Beads gates with idempotent facade admission and evidence resolution, preserving native approvals and existing design guards.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T20:08:58.868458+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-5a954683b196b1f42cc172e1 revision 21b0fd714efe770dd629a151df1cb6ca7da9fba074c338e730bcf0c4d8551982."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T20:08:58.868458+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "8a776c471d8d87aef0880992e68734db5872ab75c1735cdc3c16b19ef73d18ef",
+      "evidence": "Existing user authorization for the reviewed seven improvements recorded in the bound task; manager confirmed this binding and directed implementation. No new user message or merge/deploy approval claimed."
+    }
+  ]
+}

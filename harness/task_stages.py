@@ -87,6 +87,8 @@ def record(store, beads, run, issue_id, stage, evidence):
     issue = queue.show(issue_id)
     if issue_id != run.get('beads', {}).get('issue_id') or issue.get('assignee') != queue.worker:
         raise BeadsError('Only the bound current owner can record task lifecycle')
+    from .task_gates import check
+    check(queue, issue)
     metadata = dict(issue.get('metadata') or {})
     history = list(metadata.get('harness_lifecycle') or [])
     digest = hashlib.sha256(json.dumps([stage, evidence], sort_keys=True).encode()).hexdigest()

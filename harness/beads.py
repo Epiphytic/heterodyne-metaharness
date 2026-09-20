@@ -68,6 +68,11 @@ class Beads:
         return self._call(run, 'show', issue_id)
 
     def _allowed(self, queue, issue):
+        from .task_gates import check
+        try:
+            check(queue, issue)
+        except BeadsError:
+            return False
         from .task_delivery import contract, members, prior_history
         if contract(issue):
             try:

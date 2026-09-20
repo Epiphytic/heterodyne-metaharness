@@ -66,3 +66,5 @@ Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notificatio
 | [harness/task_delivery.py](harness/task_delivery.py) | Linked delivery roles, retained artifacts and parent closure validation |
 
 | [harness/task_formulas.py](harness/task_formulas.py) | Versioned persistent workflow admission and retained evidence checks |
+
+- `harness/task_gates.py`, `spec/gates.md`: revision-bound native prerequisite gates.
