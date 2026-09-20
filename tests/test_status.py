@@ -16,6 +16,40 @@ class StatusTest(unittest.TestCase):
     start = fixture.SupervisorTest.start
     events = fixture.SupervisorTest.events
 
+    def test_churning_pane_and_turn_do_not_produce_repeated_heartbeats(self):
+        from harness.supervisor import REPORT_INTERVAL
+        run = self.start()
+        run.update(state='active', native_turn_state='working', task_summary='Running tests')
+        with patch.object(self.supervisor, 'report', wraps=self.supervisor.report) as report:
+            self.supervisor.heartbeat(run)
+            for tick in range(10, REPORT_INTERVAL, 10):
+                self.now += 10
+                run['pane_digest'] = str(tick)
+                run['native_turn_key'] = ['native', str(tick)]
+                self.supervisor.heartbeat(run)
+            self.assertEqual(report.call_count, 1)
+        self.assertEqual(len(self.events('progress')), 1)
+        self.assertFalse(self.events('duplicate_status_error'))
+
+    def test_alternating_content_is_suppressed_across_recent_window(self):
+        run = self.start()
+        with self.store.db:
+            self.store.event(run, 'working', 'Alpha', 'window-a')
+            self.store.event(run, 'working', 'Beta', 'window-b')
+        with self.assertLogs('harness.status', level='ERROR'):
+            with self.store.db:
+                self.store.event(run, 'working', 'Alpha', 'window-a-again')
+        self.assertIsNone(self.store.db.execute('SELECT id FROM outbox WHERE id=?',
+                                              ('window-a-again',)).fetchone())
+
+    def test_fingerprint_tracks_semantics_not_display_wrappers(self):
+        run = self.start()
+        before = status.fingerprint(run, 'Status: active; native turn: working. Same')
+        run.update(pane_digest='changed', native_turn_key=['new', 'turn'])
+        self.assertEqual(before, status.fingerprint(run, 'Same Observed at 2026-09-20T12:00:00Z'))
+        run['beads'] = {'issue_id': 'new-task'}
+        self.assertNotEqual(before, status.fingerprint(run, 'Same'))
+
     def test_idle_suppression_changed_text_and_native_transition(self):
         run = self.start()
         run.update(native_turn_state='idle', state='idle', task_summary='Waiting for review')

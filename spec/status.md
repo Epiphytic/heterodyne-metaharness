@@ -18,6 +18,10 @@ at the 240-second interval are duplicate errors and suppressed. The interval is
 not permission to repeat unchanged content. Observation timestamp suffixes are
 removed; annotations and display labels must not manufacture content changes.
 
+Heartbeat change detection uses the same semantic-state and normalized-content
+inputs as delivery deduplication; pane churn and new native turn IDs alone never
+produce additional heartbeat attempts.
+
 Status production uses a durable twenty-notice window per run, recipient and kind,
 including pending and delivered outbox events. Digests include semantic state
 (run/native activity, recovery, manager presence, observed state and assigned Bead)

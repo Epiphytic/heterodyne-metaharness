@@ -10,9 +10,9 @@ KINDS = {'progress', 'working', 'blocked', 'completed', 'failed', 'awaiting_resu
 
 
 def fingerprint(run, text):
-    state = {key: run.get(key) for key in ('state', 'native_turn_state', 'native_turn_key',
-                                         'resume_required', 'manager_missing', 'pane_digest')}
-    return hashlib.sha256(json.dumps([state, text], sort_keys=True).encode()).hexdigest()
+    # Pixels and native turn identities are observation details, not new status.
+    return hashlib.sha256(json.dumps([semantic_state(run), normalized_text(text)],
+                                     sort_keys=True).encode()).hexdigest()
 
 
 def observe_pane(run, text):

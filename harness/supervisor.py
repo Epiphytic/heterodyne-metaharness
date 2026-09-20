@@ -448,9 +448,9 @@ class Supervisor:
         changed = run.get('heartbeat_digest') != digest
         # Idle ticks do not produce notices. This is distinct from detecting
         # faulty duplicate production in Store.event; unchanged idle is normal.
-        if idle and not changed:
-            return
         transition = run.get('heartbeat_idle') is not None and run['heartbeat_idle'] != idle
+        if idle and not changed and not transition:
+            return
         if changed or transition or now - run.get('last_report_at', 0) >= REPORT_INTERVAL:
             run['last_report_at'] = now
             run['heartbeat_digest'] = digest

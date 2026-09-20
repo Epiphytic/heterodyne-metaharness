@@ -1,0 +1,18 @@
+{
+  "proposal": "Align heartbeat fingerprint with existing semantic-state and normalized-content deduplication, excluding volatile pane digests and native turn identities. Preserve static-pane reporting transitions and existing durable recent-notice window; verify pane churn and alternating-content regressions.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T19:33:08.767958+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-3a5654bab1e18ffacd5157c7; manager explicitly directs implementation in current conversation under standing operator authorization. No new direct operator message or deployment approval claimed."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T19:33:08.767958+00:00",
+      "by": "manager under existing operator authorization",
+      "proposal_sha256": "697075ec3b2de0301060da204db1ee45bd97aed5905c3095088bc7f1336bfb13",
+      "evidence": "Bound Bead btq-harness-3a5654bab1e18ffacd5157c7; manager explicitly directs implementation in current conversation under standing operator authorization. No new direct operator message or deployment approval claimed."
+    }
+  ]
+}
