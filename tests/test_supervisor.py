@@ -86,6 +86,55 @@ class SupervisorTest(unittest.TestCase):
     def events(self, kind):
         return self.store.db.execute('SELECT * FROM events WHERE kind=?', (kind,)).fetchall()
 
+    def test_same_boot_dead_pane_recovers_exact_session_after_restart(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        native = run['native_session_id']
+        self.tmux.panes[run['id']].update(alive=False, dead=True, exit_code=0)
+        self.supervisor.tick_run(run)
+        self.assertEqual(len(self.tmux.launches), 2)
+        self.now += 11
+        self.new_supervisor().tick_run(self.store.get(run['id']))
+        saved = self.store.get(run['id'])
+        self.assertEqual(saved['state'], 'awaiting_resume')
+        self.assertTrue(saved['resume_required'])
+        self.assertEqual(saved['native_session_id'], native)
+        self.assertIn(native, self.tmux.launches[-1][1])
+        self.assertEqual(saved['prompt_state'], 'not_replayed')
+        self.assertEqual(self.tmux.sent, [])
+        self.new_supervisor().tick_run(saved)
+        self.assertEqual(len(self.tmux.launches), 3)
+
+    def test_dead_pane_failed_restore_holds_without_launch_retry(self):
+        from unittest.mock import patch
+        run = self.start('codex')
+        run.update(native_session_id='11111111-1111-4111-8111-111111111111', state='failed')
+        self.tmux.panes[run['id']].update(alive=False, dead=True)
+        self.supervisor.recover_dead_pane(run)
+        self.now += 11
+        with patch.object(self.supervisor, 'launch', side_effect=RuntimeError('failed')) as launch:
+            self.supervisor.recover_dead_pane(run)
+            self.now += 1000
+            self.supervisor.recover_dead_pane(run)
+            launch.assert_called_once()
+        self.assertTrue(run['resume_required'])
+        self.assertEqual(run['state'], 'blocked')
+        self.assertEqual(run['dead_pane_recovery']['attempts'], 1)
+
+    def test_dead_pane_recovery_preserves_holds_and_missing_panes(self):
+        run = self.start('codex')
+        run['state'] = 'interrupted'
+        self.tmux.panes[run['id']].update(alive=False, dead=True)
+        for changes in ({'resume_required': True}, {'beads': {'recovery_required': True}},
+                        {'observed_state': 'awaiting_approval'}, {'native_session_id': None}):
+            candidate = dict(run, **changes)
+            self.supervisor.recover_dead_pane(candidate)
+            self.assertNotIn('dead_pane_recovery', candidate)
+        self.tmux.panes[run['id']]['missing'] = True
+        self.supervisor.recover_dead_pane(run)
+        self.assertNotIn('dead_pane_recovery', run)
+        self.assertEqual(len(self.tmux.launches), 2)
+
     def test_start_retry_preserves_identity_prompt_and_group(self):
         first = self.start()
         second = self.start(prompt='replacement must not overwrite')

@@ -38,7 +38,18 @@ Uncertain tmux delivery is retained for explicit reconciliation, never resent bl
 
 Consume each boundary before external queue reads or writes. Empty queues and errors
 are not retried on subsequent supervisor ticks; a new authorized native completion
-is a new boundary. At most one continuation is attempted within 60 seconds. Consecutive
+is a new boundary. A reconciled status or assignee change of the bound task also
+schedules one fresh check, distinct from its native completion. Revision-only changes
+and duplicate projections do not schedule checks. The task check retains question,
+pause, recovery, pending-input and unchanged-work guards; when necessary it waits
+until the existing cooldown expires without querying Beads. Direct bare Beads writes
+require explicit task reconciliation; there is no continuous task-status polling.
+Each consumed boundary emits exactly one `queue_boundary` event with its outcome,
+including guard, disabled and error outcomes. After a crash between consumption and
+accounting, recovery records `interrupted-check` without repeating queue effects.
+An earlier completion superseded before checking is accounted as such. Duplicate
+native receipts keep their original completion identity after a task transition.
+At most one continuation is attempted within 60 seconds. Consecutive
 automatic turns with unchanged task scope and Git HEAD are suppressed even after that
 cooldown; a natural turn, task change or committed progress permits continuation.
 This intentionally favors a visible hold over an endless model/status loop. Operator

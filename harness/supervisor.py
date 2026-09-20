@@ -388,11 +388,33 @@ class Supervisor:
             self.recover(run)
         else:
             self.observe(run)
+            self.recover_dead_pane(run)
         self.lifecycle(run)
         from .continuation import advance
         advance(self, run)
         self.drain_inbox(run)
         self.persist(run)
+
+    def recover_dead_pane(self, run):
+        """Restore a known conversation once; existing recovery holds own failures."""
+        if (run['agent'] not in ('codex', 'claude', 'hermes')
+                or run['state'] not in ('interrupted', 'failed')
+                or run.get('resume_required') or run.get('beads', {}).get('recovery_required')
+                or not run.get('native_session_id')
+                or run.get('observed_state') in ('awaiting_approval', 'awaiting_question')):
+            return
+        info = self.tmux.inspect(run)
+        if info.get('alive') or info.get('missing') or not info.get('dead'):
+            return
+        now = self.clock()
+        retry = run.setdefault('dead_pane_recovery', {'attempts': 0, 'next_at': now + 10})
+        if now < retry['next_at']:
+            self.persist(run)
+            return
+        retry['attempts'] += 1
+        retry['next_at'] = now + min(300, 10 * 2 ** min(retry['attempts'], 5))
+        self.persist(run)
+        self.recover(run, reason='owned worker pane exited')
 
     def heartbeat(self, run):
         from .status import fingerprint, is_idle

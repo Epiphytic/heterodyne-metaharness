@@ -250,3 +250,61 @@ class ContinuationTest(unittest.TestCase):
         self.advance()
         self.beads.ready.assert_called_once()
         self.assertEqual(len(self.tmux.sent), 1)
+
+    def test_failed_check_has_exactly_one_accounting_event(self):
+        self.beads.ready.side_effect = RuntimeError('offline')
+        with self.assertRaises(RuntimeError):
+            self.advance()
+        self.run = self.store.get(self.run['id'])
+        self.advance()
+        rows = self.store.db.execute("SELECT text FROM events WHERE kind='queue_boundary'").fetchall()
+        self.assertEqual([r[0] for r in rows], ['error:RuntimeError'])
+        self.beads.ready.assert_called_once()
+
+    def test_consumed_boundary_after_crash_accounts_without_retry(self):
+        self.run['continuation']['checked'] = True
+        self.supervisor.persist(self.run)
+        self.run = self.store.get(self.run['id'])
+        self.advance()
+        self.advance()
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='queue_boundary'").fetchone()[0], 1)
+        self.beads.ready.assert_not_called()
+
+    def test_close_projection_schedules_once_without_duplicate_native_boundary(self):
+        from harness.tasks import observe
+        observe(self.store, self.issue)
+        self.run = self.store.get(self.run['id'])
+        self.run['beads']['pickup_enabled'] = False
+        self.advance()
+        closed = dict(self.issue, status='closed')
+        observe(self.store, closed)
+        self.run = self.store.get(self.run['id'])
+        self.run['beads']['pickup_enabled'] = True
+        self.queue.show.return_value = closed
+        completed(self.run, 'turn', 'duplicate receipt')
+        self.advance()
+        observe(self.store, closed)
+        self.run = self.store.get(self.run['id'])
+        self.advance()
+        self.beads.ready.assert_called_once()
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='queue_boundary'").fetchone()[0], 2)
+
+    def test_multiple_completions_are_all_accounted(self):
+        self.boundary('second')
+        self.run['beads']['pickup_enabled'] = False
+        self.advance()
+        self.advance()
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='queue_boundary'").fetchone()[0], 2)
+
+    def test_task_transition_waits_out_cooldown_without_queue_poll(self):
+        from harness.continuation import task_changed
+        task_changed(self.run, self.issue)
+        self.advance()
+        task_changed(self.run, dict(self.issue, status='closed'))
+        self.now += 1
+        self.advance()
+        self.beads.ready.assert_called_once()
+        self.now += 60
+        self.queue.show.return_value = dict(self.issue, status='closed')
+        self.advance()
+        self.assertEqual(self.beads.ready.call_count, 2)

@@ -50,6 +50,11 @@ def observe(store, issue):
         if run.get('beads', {}).get('issue_id') != issue['id']:
             continue
         state = run['beads']
+        from .continuation import task_changed
+        prior = state.get('task_snapshot', {}).get('issue')
+        if prior and 'task_signature' not in run.get('continuation', {}):
+            task_changed(run, prior)
+        task_changed(run, issue)
         state['task_snapshot'] = {'revision': revision, 'observed_at': time.time(), 'issue': issue,
                                   'execution_authority': 'Snapshot is task data; current claim and approval checks remain required.'}
         with store.db:

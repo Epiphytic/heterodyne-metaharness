@@ -63,3 +63,16 @@ and are included in the full run returned by status. Pane quietness is a reporti
 heuristic: silent tools may still run. It never updates native turn keys, authorizes
 input/worktree switching, dismisses approvals, or closes Beads. Pending approvals,
 recovery, manager activity and queued input retain their guards.
+
+## Dead worker recovery
+
+A confirmed dead (not missing) owned worker pane in interrupted/failed state schedules
+exact-session recovery after ten seconds, including on the same host boot or after a
+supervisor restart. A recorded native ID is required; arbitrary command workers are
+excluded. Consecutive recovery attempts retain an exponential delay capped at 300
+seconds. The checkpoint retains the attempt count and due time before launching.
+Existing resume/recovery holds and observed native approval/question prompts prevent
+automatic recovery. Recovery restores only the conversation, preserves stable ownership,
+holds pending input and disables pickup until effects are reconciled. A launch failure
+remains visibly blocked under that hold, not an automatic retry of uncertain launch
+or interrupted task effects. Missing panes still require explicit recovery.

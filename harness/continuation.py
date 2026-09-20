@@ -11,9 +11,12 @@ def completed(run, turn, summary):
     """Called only for a matched native completion, never pane inactivity/abort."""
     identity = hashlib.sha256(json.dumps([run['native_session_id'], turn]).encode()).hexdigest()
     state = run.setdefault('continuation', {})
-    if state.get('boundary') == identity:
+    if state.get('completion', state.get('boundary')) == identity:
         return
-    state.update(boundary=identity, checked=False,
+    if state.get('boundary'):
+        state.setdefault('unaccounted', []).append(state['boundary'])
+    state.pop('not_before', None)
+    state.update(boundary=identity, completion=identity, checked=False,
                  question=bool(re.search(r'\?|awaiting (?:your|operator)|waiting for (?:your|operator)',
                                          summary[-2000:], re.I)))
 
@@ -98,8 +101,20 @@ def _select(supervisor, run, queue):
 def advance(supervisor, run):
     """Supervisor lock held. Consume before external reads/writes; failures do not poll."""
     state = run.get('continuation', {})
-    if not supervisor.beads.enabled or not state.get('boundary') or state.get('checked'):
+    with supervisor.store.db:
+        for identity in state.pop('unaccounted', []):
+            supervisor.store.event(run, 'queue_boundary', 'superseded-before-check',
+                                   'queue-boundary:' + identity)
+    if not state.get('boundary'):
         return
+    if state.get('checked'):
+        state['checking'] = False
+        with supervisor.store.db:
+            supervisor.store.event(run, 'queue_boundary', 'interrupted-check',
+                                   'queue-boundary:' + state['boundary'])
+        return
+    if supervisor.clock() < state.get('not_before', 0):
+        return  # One scheduled task transition, no external queue polling.
     # Completion can reach the notifier just before the terminal clears its
     # working footer. Wait for the ordinary pane observation, without querying
     # Beads or losing the one boundary to this rendering race.
@@ -111,21 +126,56 @@ def advance(supervisor, run):
     with supervisor.store.db:
         supervisor.store.db.execute("UPDATE inbox SET state='superseded' WHERE run_id=? AND state='pending' AND id LIKE 'continuation:%' AND id!=?",
                                     (run['id'], 'continuation:' + state['boundary']))
+    reason = 'interrupted-check'
+    state['checking'] = True
+    try:
+        reason = _check(supervisor, run, state)
+    except Exception as exc:
+        reason = 'error:' + type(exc).__name__
+        raise
+    finally:
+        run['continuation']['checking'] = False
+        with supervisor.store.db:
+            supervisor.store.event(run, 'queue_boundary', reason,
+                                   'queue-boundary:' + state['boundary'])
+        supervisor.persist(run)
+
+
+def _check(supervisor, run, state):
     now = supervisor.clock()
-    reason = 'guarded'
-    if safe(run) and now - state.get('sent_at', 0) >= 60:
-        pending = supervisor.store.db.execute(
-            "SELECT 1 FROM inbox WHERE run_id=? AND target='worker' AND state IN ('pending','sending','uncertain','held') LIMIT 1",
-            (run['id'],)).fetchone()
-        if not pending:
-            queue = supervisor.beads._queue(run)
-            if not (queue.state / 'paused').exists():
-                issue = _select(supervisor, run, queue)
-                reason = 'empty' if issue is None else _send(supervisor, run, issue, now)
-    with supervisor.store.db:
-        supervisor.store.event(run, 'queue_boundary', reason,
-                               'queue-boundary:' + state['boundary'])
-    supervisor.persist(run)
+    if not supervisor.beads.enabled:
+        return 'disabled'
+    if not safe(run):
+        return 'guarded'
+    if now - state.get('sent_at', 0) < 60:
+        return 'cooldown'
+    pending = supervisor.store.db.execute(
+        "SELECT 1 FROM inbox WHERE run_id=? AND target='worker' AND state IN ('pending','sending','uncertain','held') LIMIT 1",
+        (run['id'],)).fetchone()
+    if pending:
+        return 'pending-input'
+    queue = supervisor.beads._queue(run)
+    if (queue.state / 'paused').exists():
+        return 'pickup-paused'
+    issue = _select(supervisor, run, queue)
+    return 'empty' if issue is None else _send(supervisor, run, issue, now)
+
+
+def task_changed(run, issue):
+    """A reconciled ownership/status transition, never a timer or revision bump."""
+    state = run.get('continuation', {})
+    signature = [issue['id'], issue.get('status'), issue.get('assignee')]
+    previous = state.get('task_signature')
+    state['task_signature'] = signature
+    if previous is None or previous == signature or not state.get('checked') or state.get('checking'):
+        return
+    # Preserve all guards and loop/cooldown history. Duplicate completions must
+    # still match their original completion ID, not this task-transition token.
+    state.setdefault('unaccounted', []).append(state['boundary'])
+    state.setdefault('completion', state.get('boundary'))
+    state['boundary'] = hashlib.sha256(json.dumps([state['boundary'], signature]).encode()).hexdigest()
+    state['checked'] = False
+    state['not_before'] = state.get('sent_at', 0) + 60
 
 
 def _send(supervisor, run, issue, now):

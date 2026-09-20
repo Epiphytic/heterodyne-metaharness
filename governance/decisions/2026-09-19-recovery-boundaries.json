@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-recovery-boundaries",
+  "proposal": "Restore confirmed dead owned worker panes through existing exact-session recovery with durable bounded scheduling and preserved holds; account for every consumed completion boundary, and schedule a single guarded check on reconciled bound-task ownership/status changes without queue polling.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T01:34:50.165441+00:00",
+      "evidence": "Rescoped Bead btq-harness-53ac6f7ea00122996fbb6709."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T01:34:50.165441+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "f5e2d16f5e2ede921f8309cf94bca2671f7aec1ae032a0166a6908d32f214dea",
+      "evidence": "Manager directed claiming and implementing this rescope in the persistent maintenance session. Existing user-authorized harness repairs apply; no new direct Liam approval is asserted. Preserve fixes in 3a8a891 and existing native approval/recovery guards. Root reviews and deploys."
+    }
+  ]
+}
