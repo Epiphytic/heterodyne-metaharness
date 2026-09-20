@@ -9,6 +9,17 @@ PROMPT = re.compile(r'Would you like to (?:run the following command|grant these
 PART_SIZE = 6000
 
 
+def approval_region(text):
+    """Recognize a current modal footer and retain its complete captured region."""
+    tail = '\n'.join(text.splitlines()[-4:])
+    if ('↑/↓ to select, Enter to confirm' in tail
+            and 'Allow once' in text and 'Deny' in text and 'Dangerous Command' in text):
+        return text[text.rfind('Dangerous Command'):]
+    footer = re.search(r'(?i)(?:press )?enter to (?:confirm|select).*esc to (?:cancel|dismiss)', tail)
+    headings = list(PROMPT.finditer(text))
+    return text[headings[-1].start():] if footer and headings else None
+
+
 def initialize(db):
     schema = '''
     CREATE TABLE IF NOT EXISTS permission_relays(
@@ -31,15 +42,15 @@ def observe(store, run, info):
     text = info.get('text', '')
     if not isinstance(text, str):
         raise ValueError('Approval pane must be text')
-    footer = re.search(r'(?i)(?:press )?enter to (?:confirm|select).*esc to (?:cancel|dismiss)', '\n'.join(text.splitlines()[-4:]))
-    if not info.get('alive') or not footer or not PROMPT.search(text) or not run.get('native_session_id'):
+    region = approval_region(text)
+    if not info.get('alive') or region is None or not run.get('native_session_id'):
         return None
     if not isinstance(text, str) or len(text.encode()) > 1024 * 1024:
-        raise ValueError('Approval pane exceeds evidence bound; inspect native pane')
+        raise ValueError('Approval pane exceeds evidence bound; Hermes must reconcile native request')
     pane = info.get('pane_id')
     if not pane or pane != run.get('pane_id'):
         raise ValueError('Approval evidence requires exact owned pane')
-    text = text[list(PROMPT.finditer(text))[-1].start():]
+    text = region
     initialize(store.db)
     digest = hashlib.sha256(text.encode()).hexdigest()
     identity = hashlib.sha256(json.dumps([run['id'],run['native_session_id'],pane,digest]).encode()).hexdigest()

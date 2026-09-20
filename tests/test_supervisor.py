@@ -86,6 +86,36 @@ class SupervisorTest(unittest.TestCase):
     def events(self, kind):
         return self.store.db.execute('SELECT * FROM events WHERE kind=?', (kind,)).fetchall()
 
+    def test_terminal_buffers_and_long_approval_survive_supervisor_restart(self):
+        run = self.start('codex')
+        run['native_session_id'] = 'worker-native'
+        text = ('Would you like to run the following command?\n'
+                + 'command reason\n' * 300 + 'Press enter to confirm or esc to cancel')
+        self.tmux.panes[run['id']]['text'] = text
+        self.supervisor.observe(run)
+        self.supervisor.persist(run)
+        restored = self.store.get(run['id'])
+        self.new_supervisor().observe(restored)
+        self.assertFalse(restored['terminal_buffer']['changed'])
+        self.assertEqual(restored['observation']['summary'], text)
+        self.assertEqual(self.store.db.execute('SELECT evidence FROM permission_relays').fetchone()[0], text)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM inbox WHERE id LIKE 'permission:%'").fetchone()[0], 1)
+        self.assertEqual(self.tmux.sent, [])
+
+    def test_manager_modal_surfaces_complete_evidence(self):
+        run = self.start('codex')
+        manager = run['manager']
+        manager['native_session_id'] = 'manager-native'
+        text = ('Dangerous Command\n' + 'full command argument\n' * 60
+                + 'Allow once\nDeny\n↑/↓ to select, Enter to confirm')
+        self.tmux.panes[manager['id']]['text'] = text
+        self.supervisor.observe_manager(run)
+        evidence = self.store.db.execute('SELECT native_id,evidence FROM permission_relays').fetchone()
+        self.assertEqual(evidence['native_id'], 'manager-native')
+        self.assertEqual(evidence['evidence'], text)
+        self.assertEqual(manager['terminal_buffer']['text'], text)
+        self.assertEqual(self.tmux.sent, [])
+
     def test_same_boot_dead_pane_recovers_exact_session_after_restart(self):
         run = self.start('codex')
         run['native_session_id'] = '11111111-1111-4111-8111-111111111111'

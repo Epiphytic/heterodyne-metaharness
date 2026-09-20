@@ -51,3 +51,5 @@ identities without confusing delivery acknowledgment with native approval.
 Consent reaches the durable inbox without interrupting an active tool or native
 approval. Gateway reload to install the callback is operator deployment work.
 Receipt does not demonstrate successful native execution or resolve the Bead.
+
+Capture and exact worker/manager buffer comparisons follow [terminal observation](terminal-observation.md).

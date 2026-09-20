@@ -59,6 +59,20 @@ class ConsentTest(unittest.TestCase):
         self.assertTrue(self.intake())
         self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM permission_consents').fetchone()[0],0)
 
+    def test_exact_manager_binding_routes_but_changed_manager_does_not(self):
+        self.run['manager'] = {'native_session_id': 'native', 'pane_id': '%1'}
+        self.run['native_session_id'] = 'worker-native'
+        self.run['pane_id'] = '%2'
+        with self.store.db:
+            self.store.save(self.run)
+        self.assertTrue(self.intake())
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM permission_consents').fetchone()[0], 1)
+        self.run['manager']['native_session_id'] = 'replacement'
+        with self.store.db:
+            self.store.save(self.run)
+        self.assertTrue(self.intake(dict(self.event, event_id_hex='abcd')))
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM permission_consents').fetchone()[0], 1)
+
     def test_failed_inbox_insert_retries_atomically(self):
         self.store.db.execute("CREATE TRIGGER fail_consent BEFORE INSERT ON inbox WHEN NEW.id LIKE 'permission-consent:%' BEGIN SELECT RAISE(ABORT,'fixture'); END")
         with self.assertRaises(Exception): self.intake()

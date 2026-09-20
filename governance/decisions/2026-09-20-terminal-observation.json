@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-20-terminal-observation",
+  "proposal": "Retain at least 50 observation lines and bounded per-session scrollback, compare exact captures durably, and surface complete recognized worker and manager approval evidence through Hermes without granting native approval authority.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T11:25:50.668000+00:00",
+      "evidence": "Bound Bead btq-harness-3157e53fbf58faab13719a2e revision 13a4e4bf6c34989fe6910dfbb30653710206704abc6d609dc3bf868a73ef1b3c."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T11:25:50.668000+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "ed20b8308d8491020fb8301db2530163240969ec706baee3d1b1efde86c16851",
+      "evidence": "User explicitly instructed this persistent worker to implement the bound terminal-observation acceptance criteria, test, commit and record lifecycle stages. Native approvals remain binding; merge and deployment remain operator-owned."
+    }
+  ]
+}

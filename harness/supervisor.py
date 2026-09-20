@@ -274,6 +274,8 @@ class Supervisor:
             return
         if run['agent'] != 'command':
             observe_pane(run, info['text'])
+        from .terminal_observation import retain
+        retain(run, info, self.clock())
         observation = Adapter(run['agent']).observe(run, info['text'])
         run['pane_id'] = info['pane_id']
         if observation.get('native_session_id'):
@@ -292,13 +294,21 @@ class Supervisor:
         if manager:
             manager_info = self.tmux.inspect(manager)
             if manager_info['alive']:
+                from .terminal_observation import retain
+                retain(manager, manager_info, self.clock())
                 observation = Adapter('hermes').observe(manager, manager_info['text'])
                 native = observation.get('native_session_id')
                 if native:
                     manager['native_session_id'] = native
                 manager['observation'] = observation
+                manager['pane_id'] = manager_info['pane_id']
+                from .permission_relay import observe as relay_permission
+                approval_relay = relay_permission(self.store, dict(
+                    run, native_session_id=manager.get('native_session_id'),
+                    pane_id=manager['pane_id']), manager_info)
                 if observation['state'] == 'awaiting_approval' and manager.get('observed_state') != 'awaiting_approval':
-                    self.report(run, 'blocked', 'Manager appears to need native approval. Its prompt is preserved.', operator_ask=True)
+                    self.report(run, 'blocked', 'Manager needs native approval through Hermes.\n' + observation['summary'],
+                                operator_ask=approval_relay is None)
                 manager['observed_state'] = observation['state']
             elif not run.get('manager_missing'):
                 run['state'] = 'blocked'
@@ -317,7 +327,7 @@ class Supervisor:
         if row['state'] != 'pending':
             return
         if destination.get('observed_state') == 'awaiting_approval':
-            raise ValueError('Native approval pending; inspect the terminal before steering')
+            raise ValueError('Native approval pending; resolve through Hermes before steering')
         with self.store.db:
             self.store.db.execute("UPDATE inbox SET state='sending' WHERE id=?", (key,))
         try:

@@ -32,7 +32,10 @@ def receive(store, event, *, account_id, allowed_senders):
     if not allowed_senders or sender == account or sender not in allowed_senders:
         return True
     run = store.get(prompt['run_id'])
-    if run.get('state') in TERMINAL or run.get('group_id') != group or run.get('native_session_id') != prompt['native_id'] or run.get('pane_id') != prompt['pane_id']:
+    subjects = (run, run.get('manager') or {})
+    bound = any(subject.get('native_session_id') == prompt['native_id']
+                and subject.get('pane_id') == prompt['pane_id'] for subject in subjects)
+    if run.get('state') in TERMINAL or run.get('group_id') != group or not bound:
         return True  # A stale binding is never authority for a newer request.
     encoded = json.dumps(event, sort_keys=True, ensure_ascii=False)
     if len(encoded.encode()) > 1024 * 1024:

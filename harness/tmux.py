@@ -93,7 +93,7 @@ class Tmux:
             number = int(killed) if killed.isdigit() else getattr(signal, 'SIG' + killed.removeprefix('SIG'), None)
             if number is not None:
                 exit_code = 128 + int(number)
-        text = self._call('capture-pane', '-p', '-t', pane, '-S', '-200').stdout
+        text = self._call('capture-pane', '-p', '-t', pane, '-S', '-2000').stdout
         return {'pane_id': pane, 'alive': dead == '0', 'dead': dead == '1',
                 'missing': False, 'exit_code': exit_code, 'exit_signal': killed or None, 'text': text}
 

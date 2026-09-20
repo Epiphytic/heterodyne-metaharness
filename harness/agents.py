@@ -177,18 +177,21 @@ class Adapter:
         return next(iter(ids)) if len(ids) == 1 else None
 
     def observe(self, run, pane_text):
-        # Screens are evidence for humans, never an approval or completion oracle.
+        # Screens are evidence for Hermes, never approval or completion authority.
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', pane_text)
-        tail = '\n'.join(text.strip().splitlines()[-8:])
+        tail = '\n'.join(text.strip().splitlines()[-50:])
         state = 'unknown'
         if self.provider.name == 'hermes':
             # Native cli_tui_mixin renders this modal and its live input hint.
             # Completed prose (including "I approved it") is not a modal.
-            pending = ('Dangerous Command' in text and 'Allow once' in text
-                       and 'Deny' in text and '↑/↓ to select, Enter to confirm' in tail)
+            pending = False  # Exact current-modal recognition below.
         else:
             pending = re.search(r'(?i)(approve|permission required|allow this|do you want to proceed|trust this)', tail)
+        from .permission_relay import approval_region
+        region = approval_region(text)
+        if region:
+            pending = True
         if pending:
             state = 'awaiting_approval'
         return {'native_session_id': self.discover(run), 'state': state,
-                'summary': tail[-1200:] or 'No terminal output observed yet.'}
+                'summary': region or tail or 'No terminal output observed yet.'}
