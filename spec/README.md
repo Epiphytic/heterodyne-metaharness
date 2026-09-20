@@ -45,3 +45,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Outcome refinement](task-refinement.md)
 
 - [Transition delivery](transitions.md)
+
+- [On-demand channel status](channel-status.md)

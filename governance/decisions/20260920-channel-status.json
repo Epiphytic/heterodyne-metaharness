@@ -1,0 +1,18 @@
+{
+  "proposal": "Provide an authenticated deterministic read-only Marmot /status command using cached queue/lifecycle projections and owned tmux tail, bounded output and runtime, without any model dispatch or task mutation.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T22:18:36.278398+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-4c52658c8c1b5806e845cb41 scope."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T22:18:36.278398+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "f26ab79d6bb87e99d42d423f1e93470fc3ca98a7aa21f4a12cd505b9634f9d60",
+      "evidence": "Existing operator request and manager explicit implementation signal for bound revision 63c0679d07a4c0be7bfac65edda7297cbf068b1c38914e0b576a3ecc883c0157. No new operator message or deployment claimed."
+    }
+  ]
+}
