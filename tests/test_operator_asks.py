@@ -179,6 +179,22 @@ class AdminLookupTests(unittest.TestCase):
             self.assertEqual(command.call_args.kwargs['timeout'], 3)
             self.assertEqual(command.call_args.args[0][-4:], ['groups', 'admins', 'aa', '--json'])
 
+    def test_wrapped_result_envelope_accepted(self):
+        """wn 0.10.x wraps payloads as {"ok":true,"result":{...}} (regression:
+        the envelope shape previously failed every lookup and wedged the
+        delivery outbox FIFO for hours)."""
+        wrapped = {'ok': True, 'result': self.payload()}
+        with patch('harness.admin_references.subprocess.run') as command:
+            command.return_value.stdout = json.dumps(wrapped)
+            refs = lookup(self.config, self.account, 'aa', 3)
+            self.assertEqual(set(refs), {npub(self.account)} | {npub(key) for key in OPERATORS})
+
+    def test_ok_false_envelope_fails_closed(self):
+        with patch('harness.admin_references.subprocess.run') as command:
+            command.return_value.stdout = json.dumps({'ok': False, 'error': {'code': 'x'}})
+            with self.assertRaises(MarmotError):
+                lookup(self.config, self.account, 'aa', 3)
+
     def test_wrong_group_bad_key_and_unavailable_fail_closed(self):
         for field, value in [('group_id', 'bb'), ('admins', [{'admin_id': self.account, 'npub': 'npub1bad'}])]:
             payload = self.payload()

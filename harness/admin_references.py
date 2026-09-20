@@ -48,6 +48,12 @@ def lookup(config, account, group, timeout):
         if len(result.stdout) > 65536:
             raise ValueError('response exceeds bound')
         payload = json.loads(result.stdout)
+        # wn 0.10.x wraps results as {"ok":true,"result":{...}}; accept the
+        # legacy flat payload too. An explicit ok:false is a failed lookup.
+        if isinstance(payload, dict) and payload.get('ok') is False:
+            raise ValueError('wn reported failure')
+        if isinstance(payload, dict) and isinstance(payload.get('result'), dict):
+            payload = payload['result']
         if payload.get('account_id') != account or payload.get('group_id') != group:
             raise ValueError('account or group mismatch')
         admins = payload['admins']
