@@ -29,3 +29,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Operator asks and admin tags](operator-asks.md)
 
 - [Terminal observation](terminal-observation.md)
+
+- [Linked delivery ownership](delivery-tasks.md)

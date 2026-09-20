@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-20-delivery-ownership",
+  "proposal": "Separate new delivery parents from independently claimable implementation/test, review/merge and deployment steps, preserving native dependency and approval gates with pinned artifacts and verified parent closure.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T11:43:21.153631+00:00",
+      "evidence": "Bound Bead btq-harness-d290cf60e03357167888a515 revision 780c957349443e12bdab797e31cdba4dd1b46d242d86f2c94bc983c75995478f."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T11:43:21.153631+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "e9277deea832191666624e7e5bd0b1ac839542b90eff7f6a7bf753319be50f35",
+      "evidence": "User explicitly confirmed implementation in the bound worktree of parent delivery and independently claimable steps, blocking edges, pinned artifacts and minimal closure contract. Merge/deployment remain operator-owned; no new approval is inferred from task metadata."
+    }
+  ]
+}

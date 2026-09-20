@@ -143,8 +143,12 @@ def readonly(home, name, issue_id=None):
             raise BeadsError('Task snapshot is not routed to this worker')
         if issue.get('assignee') and issue['assignee'] != worker(run):
             raise BeadsError('Task snapshot belongs to another worker')
-        return {'snapshot':{'revision':record[0],'issue':issue},'read_only':True,
-                'current_claim_must_be_verified':True}
+        from .task_delivery import projection
+        result = {'snapshot':{'revision':record[0],'issue':issue},'read_only':True,
+                  'current_claim_must_be_verified':True}
+        if linked := projection(db, issue):
+            result['delivery_steps'] = linked
+        return result
 
 
 
@@ -179,7 +183,7 @@ def scope_fingerprint(issue):
               'due_at', 'defer_until', 'estimated_minutes', 'external_ref')
     scope = {key: issue.get(key) for key in fields}
     scope['metadata'] = {key: value for key, value in (issue.get('metadata') or {}).items()
-                         if key != 'harness_lifecycle'}
+                         if key not in ('harness_lifecycle', 'harness_delivery_artifact')}
     encoded = json.dumps(scope, sort_keys=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
 

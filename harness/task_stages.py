@@ -11,23 +11,23 @@ from .workspace import git
 STAGES = ('committed', 'tested', 'pr-open', 'merged', 'final-tested', 'deployed', 'close-ready')
 
 
-def clean_commit(run, commit):
+def clean_commit(run, commit, require_head=True):
     if not isinstance(commit, str) or not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', commit):
         raise BeadsError('Evidence requires a full commit SHA')
-    if git(run['workdir'], 'status', '--porcelain'):
+    if require_head and git(run['workdir'], 'status', '--porcelain'):
         raise BeadsError('Uncommitted work at lifecycle boundary is a workflow error')
     actual = git(run['workdir'], 'rev-parse', '--verify', commit + '^{commit}')
-    if actual != commit or git(run['workdir'], 'rev-parse', 'HEAD') != commit:
+    if actual != commit or (require_head and git(run['workdir'], 'rev-parse', 'HEAD') != commit):
         raise BeadsError('Evidence must pin the current full commit SHA')
     if git(run['workdir'], 'log', '-1', '--format=%G?', commit) != 'G':
         raise BeadsError('Commit signature must verify as G')
     return actual
 
 
-def validate_evidence(run, stage, evidence, history):
+def validate_evidence(run, stage, evidence, history, require_head=True):
     if not isinstance(evidence, dict) or not evidence.get('evidence_ref'):
         raise BeadsError('Stage needs an actual evidence reference')
-    commit = clean_commit(run, evidence.get('commit', ''))
+    commit = clean_commit(run, evidence.get('commit', ''), require_head=require_head)
     by_stage = {event['stage']: event for event in history}
     if stage in ('tested', 'final-tested'):
         if evidence.get('result') != 'passed' or evidence.get('full_suite') is not True:
@@ -91,15 +91,25 @@ def record(store, beads, run, issue_id, stage, evidence):
     digest = hashlib.sha256(json.dumps([stage, evidence], sort_keys=True).encode()).hexdigest()
     if any(event.get('digest') == digest for event in history):
         return issue  # Lost acknowledgment retry never repeats a mutation.
-    expected = STAGES[len(history)] if len(history) < len(STAGES) else None
+    from .task_delivery import contract, prior_history, STEPS
+    binding = contract(issue)
+    allowed = STEPS.get(binding['role'], ()) if binding else STAGES
+    previous = prior_history(queue, issue) if binding else []
+    expected = allowed[len(history)] if len(history) < len(allowed) else None
     if stage != expected:
         raise BeadsError(f'Lifecycle requires {expected}; amendments need explicit reconciliation')
-    validate_evidence(run, stage, evidence, history)
+    validate_evidence(run, stage, evidence, previous + history)
     history.append({'stage': stage, 'evidence': evidence, 'digest': digest, 'at': time.time()})
     metadata['harness_lifecycle'] = history
+    if binding:
+        metadata['harness_delivery_artifact'] = {
+            'checkout': run['workdir'], 'commit': evidence['commit'],
+            'branch': git(run['workdir'], 'branch', '--show-current')}
+
     queue.bd('update', issue_id, '--metadata', json.dumps(metadata))
     result = queue.show(issue_id)
-    if result.get('metadata', {}).get('harness_lifecycle') != history:
+    if (result.get('metadata', {}).get('harness_lifecycle') != history
+            or (binding and result.get('metadata', {}).get('harness_delivery_artifact') != metadata['harness_delivery_artifact'])):
         raise BeadsError('Lifecycle write uncertain; inspect and replay same evidence only')
     return result
 

@@ -135,3 +135,6 @@ Tests use temporary state, fake coding executables, isolated real tmux sockets a
 Native idle/status, per-Bead checkout boundaries and harness approval tuning:
 [contracts](spec/status.md), [worktrees](spec/worktrees.md), [approvals](spec/approvals.md),
 and [deployment/review runbook](docs/workstream-lifecycle.md).
+
+Separate implementation, review and deployment ownership:
+[linked delivery contract](spec/delivery-tasks.md) and [operations](docs/delivery-tasks.md).

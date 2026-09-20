@@ -89,6 +89,8 @@ def parser():
     create.add_argument('--metadata', default='{}')
     create.add_argument('--approval-id')
     create.add_argument('--at-top', action='store_true')
+    delivery = actions.add_parser('delivery')
+    delivery.add_argument('--file', required=True)
     recover = actions.add_parser('recover')
     recover.add_argument('--evidence-file', required=True)
     for name in ('list', 'doctor', 'daemon', 'tick', 'deliver', 'import-legacy'):
@@ -175,6 +177,9 @@ def task_dispatch(args, store, supervisor, config):
     if action in ('ready', 'prioritize', 'dep', 'drop-everything'):
         from .queue_cli import dispatch as queue_dispatch
         return queue_dispatch(args, store, supervisor, beads, run)
+    if action == 'delivery':
+        from .task_delivery import create
+        return create(store, supervisor, beads, run, json.loads(Path(args.file).read_text()))
     if action == 'create':
         from .tasks import admit
         return admit(store, supervisor, beads, run, args.title, Path(args.file).read_text(), args.key,
@@ -195,7 +200,11 @@ def task_dispatch(args, store, supervisor, config):
         from .task_stages import close_ready
         issue = beads.show(run, args.issue_id)
         from .task_review import checkout
-        close_ready(checkout(run, args.issue_id), issue)
+        from .task_delivery import contract, close_step
+        if contract(issue) and issue.get('status') != 'closed':
+            close_step(beads._queue(run), checkout(run, args.issue_id), issue)
+        else:
+            close_ready(checkout(run, args.issue_id), issue)
         assert_close_current(store, run, issue)
         result = beads.close(run, args.issue_id, args.evidence_file)
     elif action == 'stage':

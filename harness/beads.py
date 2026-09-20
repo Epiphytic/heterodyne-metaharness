@@ -68,6 +68,14 @@ class Beads:
         return self._call(run, 'show', issue_id)
 
     def _allowed(self, queue, issue):
+        from .task_delivery import contract, members, prior_history
+        if contract(issue):
+            try:
+                members(queue, issue)
+                if contract(issue)["role"] == "parent":
+                    prior_history(queue, issue)
+            except BeadsError:
+                return False  # Partial group creation cannot become eligible.
         if not queue.matches(issue) or not queue.design_allowed(issue):
             return False
         if queue.agent != 'claude' or 'kind:task' not in issue.get('labels', []):

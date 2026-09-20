@@ -63,3 +63,4 @@ Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notificatio
 | [harness/task_workspace.py](harness/task_workspace.py) | Per-Bead checkout intent and exact idle native handoff |
 | [harness/task_stages.py](harness/task_stages.py) | Ordered Bead evidence and post-merge close gate |
 | [harness/approvals.py](harness/approvals.py) | Conservative harness decisions, durable routing and policy tuning |
+| [harness/task_delivery.py](harness/task_delivery.py) | Linked delivery roles, retained artifacts and parent closure validation |

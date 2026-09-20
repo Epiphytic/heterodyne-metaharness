@@ -47,3 +47,6 @@ approval, unread scope and recovery guards still apply. Lifecycle metadata itsel
 is not a scope addendum. No task is finished merely because edits were frozen.
 
 Task checkout isolation: [worktrees](worktrees.md). Native state: [status](status.md).
+
+Explicit new [linked delivery groups](delivery-tasks.md) partition these stages among
+implementation, review and deployment owners. Legacy task closure remains unchanged.
