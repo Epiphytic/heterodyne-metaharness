@@ -141,7 +141,7 @@ class GateTest(unittest.TestCase):
         from unittest.mock import patch
         self.setup_gate()
         self.issues.clear()
-        self.issues['btq-target']=dict(id='btq-target',metadata={},status='open',dependencies=[])
+        self.issues['btq-target']=dict(id='btq-target',title='Target',metadata={},status='open',dependencies=[])
         path=Path(self.tmp.name)/'plan.json'
         path.write_text(json.dumps(self.plan))
         args=cli.parser().parse_args(['task','test','gate','create','--file',str(path)])
@@ -174,7 +174,7 @@ class GateTest(unittest.TestCase):
     def test_reserved_gate_after_failed_create_is_not_eligible(self):
         self.setup_gate()
         self.issues.clear()
-        self.issues['btq-target']=dict(id='btq-target',metadata={},status='open',dependencies=[])
+        self.issues['btq-target']=dict(id='btq-target',title='Target',metadata={},status='open',dependencies=[])
         native=self.queue.bd.side_effect
         def fail(*args):
             if args[0]=='create':

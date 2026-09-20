@@ -33,7 +33,7 @@ class InterruptTest(unittest.TestCase):
         self.run['workdir'] = record['path']
         self.queue = Mock(agent='codex', ws='demo', worker='codex:fixture:'+self.run['id'], state=self.root/'q')
         self.queue.state.mkdir()
-        self.data = {key:dict(id=key, status=status, assignee=owner, metadata={}) for key,status,owner in
+        self.data = {key:dict(id=key, title=key, status=status, assignee=owner, metadata={}) for key,status,owner in
                      [('btq-old','in_progress',self.queue.worker), ('btq-new','open','')]}
         self.queue.show.side_effect = lambda key: copy.deepcopy(self.data[key])
         self.queue.matches.return_value = self.queue.design_allowed.return_value = True

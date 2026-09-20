@@ -2,6 +2,10 @@
 
 Authority: [sessions](sessions.md), [entrypoint](README.md).
 
+For bound Beads, [transition delivery](transitions.md) supersedes the legacy
+heartbeat emission rules below. Native observation/ownership guards remain intact;
+legacy reporting remains for sessions without a task snapshot.
+
 Native turn completion is not Bead completion. Exact native Stop/post-turn hooks
 record idle for their matching turn; Codex task_complete and turn_aborted records
 also record idle. Newer turn identities reject older completion/start evidence.

@@ -138,3 +138,5 @@ and [deployment/review runbook](docs/workstream-lifecycle.md).
 
 Separate implementation, review and deployment ownership:
 [linked delivery contract](spec/delivery-tasks.md) and [operations](docs/delivery-tasks.md).
+
+Deterministic task notices: [contract](spec/transitions.md), [rollout](docs/transition-delivery.md).

@@ -178,10 +178,15 @@ def dispatch(args, store, beads, run):
     if args.gate_action == 'create':
         result = create(queue, run, json.loads(Path(args.file).read_text()))
         observe(store, result['issue'])
+        from .transitions import gate
+        gate(store, run, result['issue'], result['gate'])
         return result
     if args.gate_action == 'resolve':
         result = resolve_gate(queue, run, args.gate_id, json.loads(Path(args.evidence_file).read_text()))
-        observe(store, queue.show(result['metadata']['harness_gate']['issue_id']))
+        issue = queue.show(result['metadata']['harness_gate']['issue_id'])
+        observe(store, issue)
+        from .transitions import gate
+        gate(store, run, issue, result, resolved=True)
         return result
     issue = resolve(queue, run, args.issue_id)
     check(queue, issue)

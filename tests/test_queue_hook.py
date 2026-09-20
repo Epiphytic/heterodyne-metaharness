@@ -110,6 +110,7 @@ class QueueHookTest(unittest.TestCase):
                 facade.return_value.claim.assert_called_once_with(claimed_run, 'btq-task')
                 supervisor.persist.assert_called_once_with(claimed_run)
                 self.assertEqual(store.get('demo')['beads']['task_snapshot']['issue']['id'], 'btq-task')
+                self.assertEqual(store.db.execute("SELECT count(*) FROM transitions WHERE kind='handoff'").fetchone()[0], 1)
             finally:
                 store.db.close()
 

@@ -76,3 +76,6 @@ Structured handoffs: `harness/task_handoffs.py`, `formulas/deployable-v2.formula
 Workflow progress: `harness/task_progress.py`, [spec](spec/workflow-routing.md), [deployment](docs/workflow-routing-deployment.md).
 
 Outcome refinement: [policy](spec/task-refinement.md), [audit](docs/maintenance-outcomes-audit.md).
+
+Transition delivery: `harness/transitions.py`, `harness/transition_cli.py`,
+`tests/test_transitions.py`; [spec](spec/transitions.md), [rollout](docs/transition-delivery.md).

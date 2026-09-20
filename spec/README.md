@@ -43,3 +43,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Workflow routing and progress](workflow-routing.md)
 
 - [Outcome refinement](task-refinement.md)
+
+- [Transition delivery](transitions.md)

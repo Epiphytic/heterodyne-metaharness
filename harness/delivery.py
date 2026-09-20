@@ -18,7 +18,7 @@ ESCALATION_SUFFIX = ':delivery-escalation'
 # the same group more than once per hour. Keyed on rendered text because status
 # re-renders vary per poll; row-id dedup alone cannot catch them.
 SEND_DEDUP_SECONDS = 3600
-DEDUP_IGNORE_PREFIXES = ('reaction:', 'permission:')
+DEDUP_IGNORE_PREFIXES = ('reaction:', 'permission:', 'transition:')
 
 
 def _send_dedup_key(text):
@@ -137,6 +137,9 @@ def deliver(store, transport, now=None, ops_group=None):
                 enqueue_receipts(store)
             except (OSError, ValueError, sqlite3.Error) as exc:
                 logging.getLogger(__name__).warning('Brain visible routing deferred: %s', type(exc).__name__)
+            from .transitions import flush, retire_polls
+            retire_polls(store, now)
+            flush(store, now)
             _attempt(store, transport, now, ops_group)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)

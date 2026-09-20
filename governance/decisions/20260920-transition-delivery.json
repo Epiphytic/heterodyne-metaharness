@@ -1,0 +1,18 @@
+{
+  "proposal": "Deliver deterministic native task transitions in fixed two-minute ordered batches with whole first handoffs, typed steering and approval evidence, distinct stop signals, durable retries and audited obsolete-poll retirement; retain existing permissions and separate reviewer/consent task ownership.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T21:33:43.901269+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound btq-harness-3f284a1f6cfca24044abf240 scope and refined outcome ownership."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T21:33:43.901269+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "be6d3a895ba1ff56effe04dbe876090cf174fb57757ebd5c01a37ea2a0c8f1c8",
+      "evidence": "User explicitly approved transition-driven delivery design and deterministic-only observation. Manager resolved payload format under existing policy in addendum transition-format-answer-20260920, revision 41f97362336383dac14022d0ead3e650df69580c2203f7a3388aaa1e15e1e05a. No new operator approval, deployment permission or reviewer implementation claimed."
+    }
+  ]
+}

@@ -43,6 +43,15 @@ def observe(store, issue):
         raise BeadsError('Task snapshot exceeds bound; inspect externally')
     revision = hashlib.sha256(encoded.encode()).hexdigest()
     with store.db:
+        store.db.execute('BEGIN IMMEDIATE')
+        from .transitions import observe as observe_transition
+        for routed in store.runs():
+            labels = issue.get('labels', [])
+            bound = routed.get('beads', {}).get('issue_id') == issue['id']
+            if bound or ('ws:' + routed.get('beads', {}).get('workstream', '') in labels
+                         and 'agent:' + routed['agent'] in labels
+                         and ('session:' + routed['id'] in labels)):
+                observe_transition(store, routed, issue)
         store.db.execute('INSERT OR IGNORE INTO task_revisions VALUES (?,?,?,?)',
                          (issue['id'], revision, encoded, time.time()))
         store.db.execute('INSERT OR REPLACE INTO task_current VALUES (?,?,?)', (issue['id'], revision, encoded))

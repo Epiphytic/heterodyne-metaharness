@@ -95,6 +95,8 @@ def _select(supervisor, run, queue):
     supervisor.persist(run)
     observe(supervisor.store, result)
     record_claim_baseline(supervisor.store, run, result)
+    from .transitions import handoff
+    handoff(supervisor.store, run, result)
     # observe updates the stored projection. Never overwrite it with our old dict.
     run.update(supervisor.store.get(run['id']))
     return result

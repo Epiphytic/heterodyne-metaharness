@@ -30,6 +30,8 @@ def parser():
     configure_cli(sub)
     from .operator_asks import configure_cli as configure_asks
     configure_asks(sub)
+    from .transition_cli import configure as configure_notices
+    configure_notices(sub)
     maintenance = sub.add_parser('maintenance')
     maintenance.add_argument('--file', required=True)
     maintenance.add_argument('--title', required=True)
@@ -256,6 +258,8 @@ def task_dispatch(args, store, supervisor, config):
         if action == 'claim':
             from .tasks import record_claim_baseline
             record_claim_baseline(store, run, result)
+            from .transitions import handoff
+            handoff(store, run, result)
     elif action == 'close':
         from .tasks import observe
         observe(store, result['issue'])
@@ -264,6 +268,9 @@ def task_dispatch(args, store, supervisor, config):
 
 def dispatch(args, store, supervisor, config):
     command = args.command
+    if command == 'notice':
+        from .transition_cli import dispatch as notice_dispatch
+        return notice_dispatch(args, store, Beads(config.get('beads', {})))
     if command == 'approvals':
         from .approvals import handle_cli
         return handle_cli(args, store, Beads(config.get('beads', {})))

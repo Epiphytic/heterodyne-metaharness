@@ -270,7 +270,8 @@ class Supervisor:
                 self.report(run, run['state'], f"Command exited with status {info.get('exit_code')}. {info['text'][-1000:]}")
             else:
                 run['state'] = 'interrupted'
-                self.report(run, 'interrupted', 'Coding agent exited. Checkpoint preserved; explicit resume is available.')
+                self.report(run, 'agent-crashed' if info.get('dead') else 'interrupted',
+                            'Coding agent exited. Checkpoint preserved; explicit resume is available.')
             return
         if run['agent'] != 'command':
             observe_pane(run, info['text'])
@@ -339,6 +340,9 @@ class Supervisor:
             raise
         with self.store.db:
             self.store.db.execute("UPDATE inbox SET state='submitted' WHERE id=?", (key,))
+            if target == 'worker' and not key.startswith(('task-update:', 'continuation:', 'babysitter-idle:')):
+                from .transitions import steering
+                steering(self.store, run, text, key, self.clock())
             if key.startswith(('continuation:', 'babysitter-idle:')):
                 run.setdefault('continuation', {})['submitted_turn'] = run.get('native_turn_key')
                 run['continuation']['sent_at'] = self.clock()
@@ -440,6 +444,8 @@ class Supervisor:
         from .status import fingerprint, is_idle
         if run['state'] in TERMINAL or run.get('legacy'):
             return
+        if run.get('beads', {}).get('issue_id'):
+            return  # Native workflow mutations own visible status, never a poll.
         now = self.clock()
         idle = is_idle(run, self.store)
         summary = run.get('task_summary') or run.get('observation', {}).get('summary', run.get('error', 'Awaiting first observation.'))
@@ -478,8 +484,8 @@ class Supervisor:
                     self.store.event(run, kind, summary, key)
                 if kind == 'turn_completed':
                     self.store.event(run, kind, 'Coding agent finished a turn:\n' + summary, key)
-                    if run.get('resume_required'):
-                        continue  # Recovery reports history; it never asks a manager to continue it.
+                    if run.get('resume_required') or run.get('beads', {}).get('issue_id'):
+                        continue  # Bound tasks use deterministic transitions; reviews have their own scheduler.
                     text = ('Coding agent finished a turn. Inspect this result and the checkpoint; '
                             'verify whether the task is complete, needs steering, or needs human input. '
                             'Use workstream event to publish your assessment.\n' + summary)

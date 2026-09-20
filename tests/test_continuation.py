@@ -25,7 +25,7 @@ class ContinuationTest(unittest.TestCase):
                         native_turn_state='idle', state='idle', observed_state='unknown',
                         observation={'pane_alive': True, 'summary': '› Ask Codex to do anything'})
         self.run['beads'] = {'pickup_enabled': True, 'issue_id': 'current', 'worker_identity': 'codex:host:' + self.run['id']}
-        self.issue = {'id': 'current', 'status': 'in_progress', 'assignee': self.run['beads']['worker_identity'], 'description': 'Do the assigned work'}
+        self.issue = {'id': 'current', 'title': 'Current task', 'status': 'in_progress', 'assignee': self.run['beads']['worker_identity'], 'description': 'Do the assigned work'}
         self.queue = Mock(state=Path(self.temp.name), worker=self.issue['assignee'])
         self.queue.show.return_value = self.issue
         self.beads = Mock(enabled=True)
@@ -157,6 +157,7 @@ class ContinuationTest(unittest.TestCase):
         saved = self.store.get(self.run['id'])
         self.assertEqual(saved['beads']['task_snapshot']['issue']['id'], 'next')
         self.assertEqual(saved['beads']['issue_id'], 'next')
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM transitions WHERE kind='handoff'").fetchone()[0], 1)
         self.supervisor.drain_inbox(self.run)
         self.assertEqual(len(self.tmux.sent), 1)
         self.beads.claim.assert_called_once()

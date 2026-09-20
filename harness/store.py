@@ -61,6 +61,8 @@ class Store:
         if 'target' not in columns:
             self.db.execute("ALTER TABLE inbox ADD COLUMN target TEXT NOT NULL DEFAULT 'manager'")
             self.db.commit()
+        from .transitions import initialize
+        initialize(self.db)
         os.chmod(self.root / 'harness.sqlite3', 0o600)
 
     @contextlib.contextmanager
@@ -114,6 +116,11 @@ class Store:
         if self.db.execute('SELECT 1 FROM events WHERE id=?', (identity,)).fetchone():
             return identity
         target = group or run.get('group_id')
+        from .transitions import capture_report
+        if not operator_ask and capture_report(self, run, kind, text, identity, now):
+            self.db.execute('INSERT INTO events VALUES (?,?,?,?,?)',
+                            (identity, run['id'], kind, text, now))
+            return identity
         from .status import KINDS, record
         if kind in KINDS and not record(self, run, identity, kind, text, target, now):
             return identity
