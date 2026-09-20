@@ -1,0 +1,18 @@
+{
+  "proposal": "Integrate workflow-step predecessor evidence validation and persisted pickup guards with installed BTQ claims, and provide bounded native/cached read-only progress views without extra queue polling or implicit authority.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T20:43:46.832220+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-0c5a5ae445fa3772e9bee368 revision 537657bcb86bf87474365c1776c80ee30fd535130e1ab0dd9ac0b4dde7b678a1."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T20:43:46.832220+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "b4123d8385aab4e930e54c1d8dd926c2ab7ad70eeca202af408e58e96a313846",
+      "evidence": "Existing user authorization for seven reviewed improvements; manager directed implementation of this bound integration task. No separate merge/deploy approval or new Liam message asserted."
+    }
+  ]
+}

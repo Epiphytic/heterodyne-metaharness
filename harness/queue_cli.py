@@ -4,6 +4,8 @@ from .tasks import observe, record_claim_baseline
 
 
 def configure(actions):
+    progress = actions.add_parser('progress')
+    progress.add_argument('--live', action='store_true')
     ready = actions.add_parser('ready')
     ready.add_argument('--all', action='store_true')
     priority = actions.add_parser('prioritize')

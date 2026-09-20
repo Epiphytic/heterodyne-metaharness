@@ -77,8 +77,11 @@ class Beads:
         if contract(issue):
             try:
                 members(queue, issue)
-                if contract(issue)["role"] == "parent":
-                    prior_history(queue, issue)
+                if any(queue.show(edge['id']).get('status') != 'closed'
+                       for edge in issue.get('dependencies', [])
+                       if edge.get('dependency_type') == 'blocks'):
+                    return False
+                prior_history(queue, issue)
             except BeadsError:
                 return False  # Partial group creation cannot become eligible.
         if not queue.matches(issue) or not queue.design_allowed(issue):
@@ -93,7 +96,8 @@ class Beads:
                        and edge.get('type') == 'blocks') for edge in edges)
 
     def ready(self, run):
-        if run.get('beads', {}).get('recovery_required') or run.get('resume_required'):
+        if (run.get('beads', {}).get('recovery_required') or run.get('resume_required')
+                or run.get('beads', {}).get('pickup_enabled') is False):
             return []
         queue = self._queue(run)
         from .task_order import order_key
@@ -122,6 +126,8 @@ class Beads:
         if run.get('beads', {}).get('recovery_required') or run.get('resume_required'):
             raise BeadsError('Reboot recovery requires explicit operator reconciliation before claiming')
         queue = self._queue(run)
+        if run.get('beads', {}).get('pickup_enabled') is False or (queue.state / 'paused').exists():
+            raise BeadsError('Task pickup is paused')
         self._check_binding(run, queue, issue_id)
         issue = queue.show(issue_id)
         from .task_interrupt import parked
@@ -134,8 +140,9 @@ class Beads:
         else:
             from .task_review import claim_concurrent
             result = claim_concurrent(self, run, queue, issue_id)
-        if result.get('assignee') != queue.worker or result.get('status') != 'in_progress':
-            raise BeadsError('Claim ownership not confirmed; do not execute')
+        if (result.get('assignee') != queue.worker or result.get('status') != 'in_progress'
+                or not self._allowed(queue, result)):
+            raise BeadsError('Claim ownership or current prerequisites not confirmed; do not execute')
         run.setdefault('beads', {})['issue_id'] = issue_id
         run['beads']['worker_identity'] = queue.worker
         return result

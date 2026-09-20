@@ -72,3 +72,5 @@ Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notificatio
 Structured handoffs: `harness/task_handoffs.py`, `formulas/deployable-v2.formula.json`,
 `formulas/library-v2.formula.json`, `tests/test_task_handoffs.py`;
 [spec](spec/handoffs.md), [runbook](docs/structured-handoffs.md).
+
+Workflow progress: `harness/task_progress.py`, [spec](spec/workflow-routing.md), [deployment](docs/workflow-routing-deployment.md).

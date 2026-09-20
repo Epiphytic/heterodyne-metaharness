@@ -331,6 +331,10 @@ def dispatch(args, store, supervisor, config):
 def main(argv=None):
     args = parser().parse_args(argv)
     os.environ['HERMES_HOME'] = str(Path(args.home).expanduser())
+    if args.command == 'task' and args.task_action == 'progress':
+        from .task_progress import read
+        print(json.dumps(read(args.home, args.name, load_config(args.home) if args.live else None), indent=2))
+        return 0
     if args.command == 'task' and args.task_action in ('show', 'context'):
         from .tasks import readonly
         result = readonly(args.home, args.name, getattr(args, 'issue_id', None))
