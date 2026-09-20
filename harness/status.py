@@ -27,27 +27,55 @@ def observe_pane(run, text):
     return same
 
 
-def record(store, run, identity, kind, text, group, now):
-    """Caller holds a write transaction; unchanged production is a durable fault.
+def normalized_text(text):
+    """Remove harness display wrappers, not arbitrary numbers or command content."""
+    text = re.sub(r'^Status: [\w-]+; native turn: [\w-]+\.\s*', '', text)
+    text = re.sub(r'\s+Observed at \d{4}-\d{2}-\d{2}[T ][\d:.]+(?:Z|[+-][\d:]+| UTC)?\.?$', '', text)
+    return ' '.join(text.split())
 
-    The tail includes pending notices: retries reuse one event, while a second
-    producer must not pile identical statuses behind an unavailable transport.
-    Sent outbox rows are retained, so the tail survives delivery and restart.
-    """
-    digest = fingerprint(run, text)
-    prior = store.db.execute('SELECT digest,group_id FROM status_notices WHERE run_id=? ORDER BY rowid DESC LIMIT 1',
-                             (run['id'],)).fetchone()
+
+def semantic_state(run):
+    state = {key: run.get(key) for key in
+             ('state', 'native_turn_state', 'resume_required', 'manager_missing', 'observed_state')}
+    state['issue_id'] = run.get('beads', {}).get('issue_id')
+    return json.dumps(state, sort_keys=True)
+
+
+def suppressed(store, run, identity, scope, now):
+    """Keep event idempotency durable; throttle journal output across restarts."""
+    error = f'Duplicate status suppressed: workstream={run["id"]} event={identity}'
+    store.db.execute('INSERT INTO events VALUES (?,?,?,?,?)',
+                     (identity, run['id'], 'duplicate_status_error', error, now))
+    logged = store.db.execute('SELECT logged_at FROM status_limits WHERE run_id=? AND recipient=? AND kind=?', scope).fetchone()
+    if logged[0] is None or now - logged[0] >= 300:
+        store.db.execute('UPDATE status_limits SET logged_at=? WHERE run_id=? AND recipient=? AND kind=?', (now, *scope))
+        logging.getLogger(__name__).error(error)
+    return False
+
+
+def record(store, run, identity, kind, text, group, now):
+    """Caller holds a write transaction; pending and delivered notices share gates."""
+    scope = (run['id'], json.dumps(group), kind)
+    semantic = semantic_state(run)
+    content = normalized_text(text) if kind == 'progress' else text
+    digest = hashlib.sha256(json.dumps([semantic, content]).encode()).hexdigest()
+    store.db.execute('INSERT OR IGNORE INTO status_limits(run_id,recipient,kind) VALUES (?,?,?)', scope)
+    limit = store.db.execute('SELECT semantic,accepted_at FROM status_limits WHERE run_id=? AND recipient=? AND kind=?', scope).fetchone()
+    same_state = limit['semantic'] == semantic
+    prior = store.db.execute('''SELECT digest FROM status_notices
+        WHERE run_id=? AND group_id IS ? AND kind=? ORDER BY rowid DESC LIMIT 20''',
+        (run['id'], group, kind)).fetchall()
+    duplicate = same_state and any(row['digest'] == digest for row in prior)
+    limited = kind == 'progress' and same_state and now - limit['accepted_at'] < 300
     static = (kind == 'progress' and run.get('pane_stopped') and
               run.get('reported_pane_digest') == run.get('pane_digest') and
               run.get('reported_pane_group') == group)
-    if static or (prior and tuple(prior) == (digest, group)):
-        error = f'Duplicate status suppressed: workstream={run["id"]} event={identity} digest={digest} pane_digest={run.get("pane_digest")} static={static}'
-        store.db.execute('INSERT INTO events VALUES (?,?,?,?,?)',
-                         (identity, run['id'], 'duplicate_status_error', error, now))
-        logging.getLogger(__name__).error(error)
-        return False
+    if static or duplicate or limited:
+        return suppressed(store, run, identity, scope, now)
     store.db.execute('INSERT INTO status_notices VALUES (?,?,?,?,?)',
                      (identity, run['id'], digest, group, kind))
+    store.db.execute('UPDATE status_limits SET semantic=?,accepted_at=? WHERE run_id=? AND recipient=? AND kind=?',
+                     (semantic, now, *scope))
     if kind == 'progress':
         run['reported_pane_digest'] = run.get('pane_digest')
         run['reported_pane_group'] = group

@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-status-window",
+  "proposal": "Suppress alternating status duplicates with a durable recent window, semantic five-minute progress admission, conservative display normalization and journal throttling, preserving real state transitions, asks and outbox retry identity.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T06:49:16.497311+00:00",
+      "evidence": "Bead btq-harness-0915045cb906607b6df230d8 revision 7d5b6996048f547ae86c96ffad50b835c0e400eb9b08b4332007609d6bd9e516."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T06:49:16.497311+00:00",
+      "by": "existing user authorization",
+      "proposal_sha256": "3ab0cae8c498c81d861ba7926464a217666428e5386e083faaed704b16af4748",
+      "evidence": "User explicitly requested implementing the assigned dedup/rate-limit/normalization task, tests, commit and private review push in this session. Operator retains merge/deployment ownership; no deployment completion asserted."
+    }
+  ]
+}

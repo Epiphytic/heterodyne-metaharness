@@ -42,6 +42,11 @@ class Store:
           id TEXT PRIMARY KEY, account_id TEXT NOT NULL, target_id TEXT NOT NULL, emoji TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS status_notices (
           id TEXT PRIMARY KEY, run_id TEXT NOT NULL, digest TEXT NOT NULL, group_id TEXT, kind TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS status_recipient ON status_notices(run_id,group_id,kind);
+        CREATE TABLE IF NOT EXISTS status_limits (
+          run_id TEXT NOT NULL, recipient TEXT NOT NULL, kind TEXT NOT NULL,
+          semantic TEXT, accepted_at REAL, logged_at REAL,
+          PRIMARY KEY(run_id,recipient,kind));
         CREATE TABLE IF NOT EXISTS inbox (
           id TEXT PRIMARY KEY, run_id TEXT, text TEXT, created_at REAL, state TEXT);
         CREATE TABLE IF NOT EXISTS identities (

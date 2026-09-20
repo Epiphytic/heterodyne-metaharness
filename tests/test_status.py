@@ -6,7 +6,11 @@ from harness.delivery import deliver
 
 
 class StatusTest(unittest.TestCase):
-    setUp = fixture.SupervisorTest.setUp
+    def setUp(self):
+        fixture.SupervisorTest.setUp(self)
+        timer = patch('harness.store.time.time', side_effect=lambda: self.now)
+        timer.start()
+        self.addCleanup(timer.stop)
     tearDown = fixture.SupervisorTest.tearDown
     new_supervisor = fixture.SupervisorTest.new_supervisor
     start = fixture.SupervisorTest.start
@@ -22,6 +26,7 @@ class StatusTest(unittest.TestCase):
         self.supervisor.heartbeat(run)
         self.assertEqual(len(self.events('progress')), count)
         self.assertFalse(self.events('duplicate_status_error'))
+        self.now += 300
         run['task_summary'] = 'Waiting for approval'
         self.supervisor.heartbeat(run)
         self.assertEqual(len(self.events('progress')), count + 1)
@@ -39,7 +44,7 @@ class StatusTest(unittest.TestCase):
         self.assertIsNone(self.store.db.execute('SELECT id FROM outbox WHERE id="second"').fetchone())
         while self.store.db.execute('SELECT 1 FROM outbox WHERE delivered_at IS NULL').fetchone():
             deliver(self.store, self.transport, now=9999999999)
-        with self.assertLogs('harness.status', level='ERROR'):
+        with self.assertNoLogs('harness.status', level='ERROR'):
             with self.store.db:self.store.event(run, 'working', 'same report', 'third')
         self.assertEqual(len(self.events('duplicate_status_error')), 2)
         with self.store.db:self.store.event(run, 'working', 'same report', 'third')
@@ -102,8 +107,11 @@ class StatusTest(unittest.TestCase):
         pane['text'] += '\nNew output'
         self.supervisor.observe(restored)
         self.supervisor.heartbeat(restored)
-        self.assertEqual(len(self.events('progress')), count + 1)
+        self.assertEqual(len(self.events('progress')), count)  # pixels alone cannot resend unchanged text
         self.assertEqual(restored['pane_unchanged_ticks'], 0)
+        restored['task_summary'] = 'New test result ready'
+        self.supervisor.heartbeat(restored)
+        self.assertEqual(len(self.events('progress')), count + 1)
 
     def test_static_pane_never_hides_approval_or_authorizes_recovery(self):
         run = self.start()

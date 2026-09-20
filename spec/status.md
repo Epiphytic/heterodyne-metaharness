@@ -18,15 +18,32 @@ at the 240-second interval are duplicate errors and suppressed. The interval is
 not permission to repeat unchanged content. Observation timestamp suffixes are
 removed; annotations and display labels must not manufacture content changes.
 
-Status production hashes observable run/turn state and exact content. The previous
-queued/delivered status per run and group is retained durably. Producing an identical
-new notice records duplicate_status_error in the event store and ERROR on stderr,
-and suppresses the extra outbox row. Replaying the same event ID is idempotent and
-is not a new duplicate fault. Intentional idle suppression happens before production
-and is not an error. Pending notices remain retryable with their original identities;
-failed delivery never advances a delivered checkpoint. Transition sequences are
-preserved (A, B, A is valid). Brain/task notices and reaction intents have their own
-idempotency contracts. No pane parsing approves commands or declares task completion.
+Status production uses a durable twenty-notice window per run, recipient and kind,
+including pending and delivered outbox events. Digests include semantic state
+(run/native activity, recovery, manager presence, observed state and assigned Bead)
+and content, excluding volatile pane hashes and native turn IDs. Real semantic
+state transitions bypass prior-window matches, including returning to a previous
+state. Progress strips only the harness Status/native-turn prefix, a trailing
+ISO Observed-at annotation and whitespace; arbitrary command numbers remain intact.
+Original delivered text is unchanged. This is deterministic normalization, not
+natural-language equivalence detection.
+
+Within unchanged semantic state, progress is admitted at most once per 300 seconds
+regardless of wording or pane movement. Suppression does not slide the deadline;
+at the boundary changed content can pass, but unchanged recent content remains a
+duplicate. Other kinds (including distinct approval asks) are not progress-throttled.
+Durable status_limits and status_notices update atomically with event/outbox admission
+under the existing write transaction. Restart, pending transport failure and another
+producer cannot reset those gates. Existing pre-upgrade history is retained; the
+first post-upgrade event establishes its new semantic baseline.
+
+Each suppressed event retains duplicate_status_error for identity replay protection,
+but its ERROR journal message is emitted at most once per run/recipient/kind per
+300 seconds, also persisted across restart. Replaying an event ID has no new effect.
+Intentional idle suppression happens before production and is not an error. Existing
+outbox retries retain their identities; no delivered checkpoint advances on failure.
+Brain/task notices and reaction intents retain their own idempotency contracts.
+No pane parsing approves commands or declares task completion.
 
 ## Pane reporting fallback
 
