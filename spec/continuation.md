@@ -60,6 +60,17 @@ state, terminal selection hints and a question/waiting-for-operator pattern in t
 last completion suppress input. Ordinary agents must still pause pickup before
 asking for operator direction. Unknown native UI contracts are not an approval API.
 The babysitter remains a separate safety net, not the authoritative pickup mechanism.
+At an eligible idle observation it may inspect ready work at most once per minute.
+Ready work stranded idle queues one standard resume nudge through the durable inbox,
+then creates an operator escalation through the existing tagged-ask outbox. It never
+claims a task. Nudge identity binds the owned pane and native turn; repeated detector
+runs or lost local state cannot resend it. A changed turn retires stale queued input.
+Delivery rechecks native idle, questions, approvals, recovery and both pickup pauses;
+direct steering takes precedence. The detector's per-pane state deduplicates an
+unchanged ready-set episode; failed escalation remains retryable. The existing
+babysitter classifier resets the episode on observed activity or a prompt.
+The externally installed babysitter is updated by a guarded backup/apply plan;
+confirmed dead panes are restored by the supervisor, not by sending keys to them.
 
 See [task contracts](tasks.md), [worktrees](worktrees.md), [native status](status.md),
 [permissions](permission-relay.md) and [change lifecycle](changes.md).

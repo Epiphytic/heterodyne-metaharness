@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-idle-ready-detector",
+  "proposal": "Add a babysitter safety-net detector for eligible ready work stranded at an idle owned worker: durable guarded nudge before tagged escalation, bounded ready observations, deduplicated notices, no claims or approval bypass.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T01:44:45.980771+00:00",
+      "evidence": "Addendum on Bead btq-harness-53ac6f7ea00122996fbb6709, task snapshot revision 9c762627feb674cd808446a912063a184d34dfc5b659f2b054c31135b9e87d97."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T01:44:45.980771+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "cc010b0239e3ee32911578ef224046e940c54b9dd7e144a52816e0fe1708bf0c",
+      "evidence": "The assigned Bead records the operator request to detect ready tickets with an idle worker and escalate after a standard nudge. This records that existing relayed authorization, not a new direct user approval. Manager reviews and deploys."
+    }
+  ]
+}

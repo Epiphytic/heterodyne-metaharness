@@ -8,7 +8,8 @@ It adds same-boot dead-pane recovery using the existing exact-resume path and
 accounts for consumed boundaries even when queue access fails. Bound-task
 status/ownership transitions schedule one guarded check, including after closure;
 revision changes alone do not. Bare external Beads writes require explicit task
-reconciliation. No new package, provider hook, or runtime configuration is required.
+reconciliation. No new package or provider hook is required. The babysitter addendum needs the
+scoped installer below in addition to the supervisor deployment.
 
 ## Operator deployment
 
@@ -42,3 +43,31 @@ Ripwire quality-delta reports nonzero structural findings, chiefly dynamic test
 callbacks flagged as dead code, class size and short-horizon churn. No clean quality
 gate claim is made. Regression tests exercise durable SQLite/checkpoints with fake
 providers, while the full suite also includes isolated native sockets/tmux.
+
+## Babysitter addendum
+
+Prepare from the reviewed canonical revision (the plan contains source; keep it private):
+
+```sh
+python3 install_babysitter_queue.py --babysitter /home/operator/.hermes/workstreams/babysitter.py --output /tmp/53ac6f7-babysitter-plan.json
+```
+
+Apply with the existing backup mechanism, retaining its verified rollback manifest:
+
+```sh
+python3 install_brain.py --apply /tmp/53ac6f7-babysitter-plan.json --quarantine /home/operator/.local/state/hermes-quarantine/53ac6f7-babysitter
+```
+
+Use a fresh quarantine path if that directory already exists. Re-plan and confirm no changes.
+Reload the existing babysitter through its operator-owned launcher; do not create a
+second watchdog. This installer replaces only `nudge_idle_worker` and adds episode
+resets beside existing idle-counter resets in `poll_pane`; unrelated behavior stays
+intact. Review that exact diff before applying. The existing babysitter lifetime and
+pane classifier remain constraints, including its configured expiry.
+
+Verify with an isolated owned idle fixture and eligible queued task: one durable nudge,
+one tagged operator escalation, repeated observation quiet, no claim by the detector.
+Verify pending approval/recovery/pickup pause holds delivery, a new native turn retires
+the old nudge, and direct steering precedes automatic input. No live model turn or
+operator message is claimed by fixture results. Ready reads and ask enqueue must run
+outside the shared harness lock; only owned inbox insertion is locked.

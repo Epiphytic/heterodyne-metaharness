@@ -329,8 +329,9 @@ class Supervisor:
             raise
         with self.store.db:
             self.store.db.execute("UPDATE inbox SET state='submitted' WHERE id=?", (key,))
-            if key.startswith('continuation:'):
+            if key.startswith(('continuation:', 'babysitter-idle:')):
                 run.setdefault('continuation', {})['submitted_turn'] = run.get('native_turn_key')
+                run['continuation']['sent_at'] = self.clock()
                 self.store.save(run)
                 self.store.event(run, 'queue_continuation_sent', key, key + ':sent')
         if target == 'worker':
@@ -338,7 +339,7 @@ class Supervisor:
         self.persist(run)
 
     def drain_inbox(self, run):
-        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 2 WHEN id LIKE 'continuation:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
+        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 2 WHEN id LIKE 'continuation:%' OR id LIKE 'babysitter-idle:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
         for row in rows:
             if not self.inbox_ready(run, row):
                 continue
@@ -346,6 +347,15 @@ class Supervisor:
 
     def inbox_ready(self, run, row):
         from .continuation import safe, awaiting_start
+        if row['id'].startswith('babysitter-idle:'):
+            from .babysitter_queue import nudge_key
+            if row['id'] != nudge_key(run):
+                with self.store.db:
+                    self.store.db.execute("UPDATE inbox SET state='superseded' WHERE id=?", (row['id'],))
+                return False
+            return (safe(run) and self.beads.enabled
+                    and self.clock() - run.get('continuation', {}).get('sent_at', 0) >= 60
+                    and not (self.beads._queue(run).state / 'paused').exists())
         if row['id'].startswith('continuation:'):
             state = run.get('continuation', {})
             return (row['id'] == 'continuation:' + state.get('boundary', '')
