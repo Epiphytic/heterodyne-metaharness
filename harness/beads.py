@@ -83,7 +83,8 @@ class Beads:
         if run.get('beads', {}).get('recovery_required') or run.get('resume_required'):
             return []
         queue = self._queue(run)
-        return [issue for issue in queue.ready() if self._allowed(queue, issue)]
+        from .task_order import order_key
+        return sorted((issue for issue in queue.ready() if self._allowed(queue, issue)), key=order_key)
 
     def _check_binding(self, run, queue, issue_id):
         previous = run.get('beads', {}).get('issue_id')
@@ -110,6 +111,8 @@ class Beads:
         queue = self._queue(run)
         self._check_binding(run, queue, issue_id)
         issue = queue.show(issue_id)
+        from .task_interrupt import parked
+        parked(run, queue, issue)  # Validate a retained parked checkout before resuming.
         if not self._allowed(queue, issue):
             raise BeadsError('Routing or design approval/dependency evidence does not allow execution')
         if issue.get('assignee') == queue.worker and issue.get('status') == 'in_progress':
@@ -151,7 +154,7 @@ class Beads:
             current.unlink()
         return result
 
-    def create(self, run, title, description, *, key, kind='task', metadata=None, approval_id=None):
+    def create(self, run, title, description, *, key, kind='task', metadata=None, approval_id=None, at_top=False):
         """Idempotent task passing into the existing queue, never auto-claiming.
 
         key is a caller-persisted operation identity. Reuse with changed task data
@@ -167,6 +170,8 @@ class Beads:
         issue_id = f'btq-harness-{identity}'
         labels = [f'agent:{queue.agent}', f'ws:{ws}', f'session:{session}', f'kind:{kind}']
         payload = dict(metadata or {})
+        if at_top:
+            payload['harness_insert_at_top'] = True
         if any(field in payload for field in ('approved_by', 'approved_at', 'brainstorm_models')):
             raise BeadsError('Implementation task creation cannot fabricate approval evidence')
         if approval_id:
@@ -185,6 +190,9 @@ class Beads:
         issue = queue.show(issue_id)
         if issue.get('metadata', {}).get('harness_request_hash') != fingerprint or not queue.matches(issue):
             raise BeadsError('Task key already identifies different content or route; inspect existing bead')
+        if at_top and not issue.get('metadata', {}).get('harness_queue_order'):
+            from .task_order import prioritize
+            issue = prioritize(queue, run, [issue_id], queue.worker)[0]
         return issue
 
     def context(self, run):

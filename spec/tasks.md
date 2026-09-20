@@ -1,7 +1,7 @@
 # Task admission and addendums
 
 Authority: [entrypoint](README.md), [ownership](maintenance.md),
-[session lifecycle](sessions.md), and [context receipts](brain.md).
+[session lifecycle](sessions.md), [queue order](queue-order.md), and [context receipts](brain.md).
 Beads remains authoritative for tasks, claim ownership and approval dependencies.
 Local revision journals and checkpoints are projections, never an alternate queue.
 

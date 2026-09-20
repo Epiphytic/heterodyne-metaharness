@@ -59,7 +59,9 @@ def parser():
     task.add_argument('name')
     task.add_argument('--workstream')
     actions = task.add_subparsers(dest='task_action', required=True)
-    for name in ('ready', 'context', 'pause', 'resume'):
+    from .queue_cli import configure
+    configure(actions)
+    for name in ('context', 'pause', 'resume'):
         actions.add_parser(name)
     for name in ('show', 'bind', 'claim', 'close', 'worktree'):
         action = actions.add_parser(name)
@@ -86,6 +88,7 @@ def parser():
     create.add_argument('--kind', choices=('task', 'research', 'review', 'brainstorm'), default='task')
     create.add_argument('--metadata', default='{}')
     create.add_argument('--approval-id')
+    create.add_argument('--at-top', action='store_true')
     recover = actions.add_parser('recover')
     recover.add_argument('--evidence-file', required=True)
     for name in ('list', 'doctor', 'daemon', 'tick', 'deliver', 'import-legacy'):
@@ -169,10 +172,14 @@ def task_dispatch(args, store, supervisor, config):
             raise BeadsError('Cannot reroute a run with a bound task')
         state['workstream'] = args.workstream
     action = args.task_action
+    if action in ('ready', 'prioritize', 'dep', 'drop-everything'):
+        from .queue_cli import dispatch as queue_dispatch
+        return queue_dispatch(args, store, supervisor, beads, run)
     if action == 'create':
         from .tasks import admit
         return admit(store, supervisor, beads, run, args.title, Path(args.file).read_text(), args.key,
-                              kind=args.kind, metadata=json.loads(args.metadata), approval_id=args.approval_id)
+                              kind=args.kind, metadata=json.loads(args.metadata), approval_id=args.approval_id,
+                              at_top=args.at_top)
     elif action == 'update':
         from .tasks import addendum
         return addendum(store, beads, run, args.issue_id, Path(args.file).read_text(), args.key, Path(args.authorization_file).read_text())

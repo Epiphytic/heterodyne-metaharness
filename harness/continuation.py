@@ -71,6 +71,8 @@ def _select(supervisor, run, queue):
     ready = beads.ready(run)
     current = run.get('beads', {}).get('issue_id')
     issue = queue.show(current) if current else None
+    if current and run.get('task_parks', {}).get(current, {}).get('state') == 'parked':
+        return None  # Interrupted handoff needs explicit reconciliation, never auto-resume.
     if issue and issue.get('status') != 'closed':
         if issue.get('assignee') != queue.worker or issue.get('status') != 'in_progress':
             raise BeadsError('Continuation cannot resume an unverified claim')

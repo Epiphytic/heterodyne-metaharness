@@ -32,7 +32,8 @@ def prepare(run, root, issue_id, previous):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', issue_id):
         raise BeadsError('Invalid task worktree identity')
     boundary(run)
-    source = Path(run.get('owned_worktree', {}).get('path', run['workdir'])).resolve()
+    source = Path(existing['source'] if existing else
+                  run.get('owned_worktree', {}).get('path', run['workdir'])).resolve()
     directory = root / 'runs' / run['id'] / 'beads' / issue_id
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / 'checkout'
@@ -148,4 +149,7 @@ def assign(args, store, supervisor, beads, run):
     if record:
         supervisor.persist(run)
         switch(supervisor, run, record)
+    if args.task_action == 'claim':
+        from .task_interrupt import resumed
+        resumed(run, args.issue_id)
     return result

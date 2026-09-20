@@ -54,3 +54,7 @@ checkout, never the newly active worktree. They do not switch or restart the wor
 Unread scope changes still block closure; rebind the retained task at a safe boundary
 to consume revised task context before resuming implementation. There is no second
 writer, automatic merge, automatic approval or implicit deployment.
+
+Explicit [queue interruption](queue-order.md) also permits handoff from a verified
+parked clean owned checkout. Its claim remains retained; no review evidence is
+invented for unfinished work. Resume reuses the recorded dependency-copy source.

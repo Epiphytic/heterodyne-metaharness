@@ -85,7 +85,7 @@ class QueueHookTest(unittest.TestCase):
             task_dispatch(args, store, supervisor, self.config)
             self.run['beads']['workstream'] = 'test'
             facade.return_value.create.assert_called_once_with(
-                self.run, 'Implement', 'Acceptance: tested', key='message-42', kind='task', metadata={}, approval_id=None)
+                self.run, 'Implement', 'Acceptance: tested', key='message-42', kind='task', metadata={}, approval_id=None, at_top=False)
             supervisor.persist.assert_called_once_with(self.run)
 
     @patch('harness.cli.Beads')

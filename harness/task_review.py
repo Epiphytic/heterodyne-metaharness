@@ -28,6 +28,9 @@ def checkout(run, issue_id):
 
 def can_handoff(run, queue, issue):
     """Never treat a claimed task or unpushed implementation as a review task."""
+    from .task_interrupt import parked
+    if parked(run, queue, issue):
+        return checkout(run, issue['id'])
     from .task_stages import STAGES, clean_commit
     if issue.get('status') != 'in_progress' or issue.get('assignee') != queue.worker:
         raise BeadsError('Review handoff requires the same verified owner')

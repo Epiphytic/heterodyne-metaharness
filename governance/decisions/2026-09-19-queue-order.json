@@ -1,0 +1,18 @@
+{
+  "id": "2026-09-19-queue-order",
+  "proposal": "Add deterministic Beads-owned FIFO and explicit front ordering, dependency visibility/management, and clean-boundary interruption with retained owned task worktrees, preserving native approval, recovery and atomic claim gates.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T02:29:59.815650+00:00",
+      "evidence": "Bound Bead btq-harness-1c551cdb360f6d7bf77714fd and existing dependency-visibility scope addendum."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T02:29:59.815650+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "a4e4c3446984b3f8ab11b087a859340f305ebc2245281670254ed2a5c6c2d0b7",
+      "evidence": "Existing user request authorizes queue controls, dependency management and guarded parking. Manager supplied assignment in the persistent maintenance worker. No new direct Liam approval or deployment is asserted; root reviews and deploys."
+    }
+  ]
+}
