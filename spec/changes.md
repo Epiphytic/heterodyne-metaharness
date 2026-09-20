@@ -50,3 +50,5 @@ Task checkout isolation: [worktrees](worktrees.md). Native state: [status](statu
 
 Explicit new [linked delivery groups](delivery-tasks.md) partition these stages among
 implementation, review and deployment owners. Legacy task closure remains unchanged.
+
+Explicit [workflow formulas](formulas.md) select alternative evidence stages for library, research and configuration work; ordinary untyped tasks retain the full lifecycle.

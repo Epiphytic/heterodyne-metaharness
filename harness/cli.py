@@ -77,7 +77,7 @@ def parser():
     update.add_argument('--authorization-file', required=True)
     stage = actions.add_parser('stage')
     stage.add_argument('issue_id')
-    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','deployed','close-ready'))
+    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','deployed','close-ready','integrated','investigated','recommended','changed','verified'))
     stage.add_argument('--evidence-file', required=True)
     reconcile = actions.add_parser('reconcile')
     reconcile.add_argument('issue_id', nargs='?')
@@ -91,6 +91,8 @@ def parser():
     create.add_argument('--at-top', action='store_true')
     delivery = actions.add_parser('delivery')
     delivery.add_argument('--file', required=True)
+    formula = actions.add_parser('formula')
+    formula.add_argument('--file', required=True)
     recover = actions.add_parser('recover')
     recover.add_argument('--evidence-file', required=True)
     for name in ('list', 'doctor', 'daemon', 'tick', 'deliver', 'import-legacy'):
@@ -177,6 +179,9 @@ def task_dispatch(args, store, supervisor, config):
     if action in ('ready', 'prioritize', 'dep', 'drop-everything'):
         from .queue_cli import dispatch as queue_dispatch
         return queue_dispatch(args, store, supervisor, beads, run)
+    if action == 'formula':
+        from .task_formulas import create
+        return create(store, supervisor, beads, run, json.loads(Path(args.file).read_text()))
     if action == 'delivery':
         from .task_delivery import create
         return create(store, supervisor, beads, run, json.loads(Path(args.file).read_text()))

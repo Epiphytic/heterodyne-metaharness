@@ -1,0 +1,20 @@
+{
+  "formula": "hermes-configuration-v1",
+  "version": 1,
+  "type": "workflow",
+  "phase": "liquid",
+  "description": "Configuration delivery; authority: spec/formulas.md",
+  "steps": [
+    {
+      "id": "change",
+      "title": "Change"
+    },
+    {
+      "id": "verification",
+      "title": "Verification",
+      "needs": [
+        "change"
+      ]
+    }
+  ]
+}

@@ -78,7 +78,8 @@ def deployment_evidence(evidence, commit):
 
 
 def record(store, beads, run, issue_id, stage, evidence):
-    if stage not in STAGES:
+    from .task_formulas import EVIDENCE_STAGES, validate
+    if stage not in (*STAGES, *EVIDENCE_STAGES, 'integrated'):
         raise BeadsError('Unknown lifecycle stage')
     if run.get('resume_required') or run.get('beads', {}).get('recovery_required'):
         raise BeadsError('Reconcile recovery before lifecycle transitions')
@@ -91,17 +92,22 @@ def record(store, beads, run, issue_id, stage, evidence):
     digest = hashlib.sha256(json.dumps([stage, evidence], sort_keys=True).encode()).hexdigest()
     if any(event.get('digest') == digest for event in history):
         return issue  # Lost acknowledgment retry never repeats a mutation.
-    from .task_delivery import contract, prior_history, STEPS
+    from .task_delivery import contract, prior_history, steps
     binding = contract(issue)
-    allowed = STEPS.get(binding['role'], ()) if binding else STAGES
+    allowed = steps(binding).get(binding['role'], ()) if binding else STAGES
     previous = prior_history(queue, issue) if binding else []
     expected = allowed[len(history)] if len(history) < len(allowed) else None
     if stage != expected:
         raise BeadsError(f'Lifecycle requires {expected}; amendments need explicit reconciliation')
-    validate_evidence(run, stage, evidence, previous + history)
+    if binding:
+        validate(run, binding, stage, evidence, previous + history)
+    else:
+        validate_evidence(run, stage, evidence, previous + history)
     history.append({'stage': stage, 'evidence': evidence, 'digest': digest, 'at': time.time()})
     metadata['harness_lifecycle'] = history
-    if binding:
+    if binding and stage in EVIDENCE_STAGES:
+        metadata['harness_delivery_artifact'] = {'evidence_digest': digest}
+    elif binding:
         metadata['harness_delivery_artifact'] = {
             'checkout': run['workdir'], 'commit': evidence['commit'],
             'branch': git(run['workdir'], 'branch', '--show-current')}

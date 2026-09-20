@@ -1,0 +1,18 @@
+{
+  "proposal": "Implement the four reusable persistent Beads workflow formulas through deterministic facade admission, preserving native ownership, dependency, approval and evidence guards; verify installed Beads 1.1.0 behavior without a database upgrade.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T19:53:59.989637+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-0e771da3ce9ed353a10c8609, revision 484da8783d471bccaf2ae0a12ebd88a33078dc317c974a04c5a25d3b9841abb8."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T19:53:59.989637+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "8a2c31a37e01cebe5067936d1ee735787b903b85d6c1546745895b815ce707c4",
+      "evidence": "Task records the user request to inject the reviewed seven improvements on 2026-09-17; manager explicitly confirmed this binding and directed implementation. This records existing implementation authorization, not a new user message or merge/deployment approval."
+    }
+  ]
+}

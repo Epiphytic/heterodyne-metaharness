@@ -56,3 +56,5 @@ or a completed model turn never means the parent delivery is done.
 
 See [task admission](tasks.md), [worktrees](worktrees.md), and
 [queue dependencies](queue-order.md). No package or service configuration is added.
+
+Version-2 [workflow formulas](formulas.md) reuse this machinery with explicit alternative role and evidence contracts.
