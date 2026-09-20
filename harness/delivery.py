@@ -5,6 +5,8 @@ heartbeat interval. A separate process may call this more frequently. Per-group
 FIFO preserves status order while allowing other groups past a failed target.
 """
 import fcntl
+import hashlib
+import json
 import logging
 import sqlite3
 import time
@@ -12,6 +14,37 @@ import time
 MAX_ATTEMPT_SECONDS = 15
 RETRY_SECONDS = 30
 ESCALATION_SUFFIX = ':delivery-escalation'
+# Operator-set floor (2026-09-20): identical rendered text must not be SENT to
+# the same group more than once per hour. Keyed on rendered text because status
+# re-renders vary per poll; row-id dedup alone cannot catch them.
+SEND_DEDUP_SECONDS = 3600
+DEDUP_IGNORE_PREFIXES = ('reaction:', 'permission:')
+
+
+def _send_dedup_key(text):
+    return hashlib.sha256(json.dumps(text).encode()).hexdigest()
+
+
+def _initialize_dedup(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS send_dedup(
+      text_hash TEXT PRIMARY KEY, group_id TEXT NOT NULL,
+      last_sent_at REAL NOT NULL)''')
+
+
+def _recently_sent(db, group_id, text, now):
+    _initialize_dedup(db)
+    cutoff = now - SEND_DEDUP_SECONDS
+    db.execute('DELETE FROM send_dedup WHERE last_sent_at < ?', (cutoff,))
+    row = db.execute('SELECT 1 FROM send_dedup WHERE text_hash=? AND group_id=? AND last_sent_at>?',
+                     (_send_dedup_key(text), group_id, cutoff)).fetchone()
+    return row is not None
+
+
+def _mark_sent(db, group_id, text, now):
+    _initialize_dedup(db)
+    db.execute('''INSERT INTO send_dedup(text_hash,group_id,last_sent_at) VALUES (?,?,?)
+      ON CONFLICT(text_hash) DO UPDATE SET last_sent_at=excluded.last_sent_at,
+      group_id=excluded.group_id''', (_send_dedup_key(text), group_id, now))
 
 
 def _escalate(store, row, ops_group, now):
@@ -44,6 +77,23 @@ def _attempt(store, transport, now, ops_group):
     # Marmot enforces this across connection/write/read, including slow trickles.
     original_timeout = getattr(transport, 'timeout', MAX_ATTEMPT_SECONDS)
     transport.timeout = min(original_timeout, MAX_ATTEMPT_SECONDS)
+    if not row['id'].startswith(DEDUP_IGNORE_PREFIXES):
+        rendered = None
+        try:
+            from .operator_asks import prepare
+            rendered = prepare(store, transport, row)
+        except Exception:
+            rendered = None  # prepare failure must not bypass the normal error path
+        if rendered is not None and _recently_sent(store.db, row['group_id'], rendered, now):
+            last = store.db.execute('''SELECT MAX(last_sent_at) FROM send_dedup
+              WHERE text_hash=? AND group_id=?''',
+              (_send_dedup_key(rendered), row['group_id'])).fetchone()[0]
+            retry_at = max((last or now) + SEND_DEDUP_SECONDS, now + RETRY_SECONDS)
+            with store.db:
+                store.db.execute('''UPDATE outbox SET attempts=attempts+1,
+                  next_attempt=?, error='send-dedup: identical text sent within 1h' WHERE id=?''',
+                  (retry_at, row['id']))
+            return
     try:
         from .reactions import send_outbox
         response = send_outbox(store, transport, row)
@@ -61,6 +111,12 @@ def _attempt(store, transport, now, ops_group):
         with store.db:
             from .operator_asks import delivered
             delivered(store, row, now)
+            if not row['id'].startswith(DEDUP_IGNORE_PREFIXES):
+                try:
+                    from .operator_asks import prepare
+                    _mark_sent(store.db, row['group_id'], prepare(store, transport, row), now)
+                except Exception:
+                    pass
             store.db.execute('''UPDATE outbox SET delivered_at=?, attempts=attempts+1,
               error=NULL WHERE id=?''', (now, row['id']))
     finally:

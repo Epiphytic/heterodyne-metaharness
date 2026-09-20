@@ -56,6 +56,8 @@ class DeliveryTests(unittest.TestCase):
     def test_failed_group_preserves_order_without_blocking_other_group(self):
         self.enqueue('first')
         self.enqueue('second', created=1)
+        self.store.db.execute("UPDATE outbox SET text='second-status' WHERE id='second'")
+        self.store.db.commit()
         self.enqueue('other', group='bb', created=2)
         self.transport.fail = True
         deliver(self.store, self.transport, now=10)
@@ -67,6 +69,26 @@ class DeliveryTests(unittest.TestCase):
         deliver(self.store, self.transport, now=40)
         deliver(self.store, self.transport, now=41)
         self.assertEqual([c[1] for c in self.transport.calls], ['first', 'other', 'first', 'second'])
+
+    def test_identical_text_not_resent_within_one_hour(self):
+        # Operator contract (2026-09-20): dedup all sent-message hashes for a
+        # full hour; identical rendered text to a group is dropped, not resent.
+        self.enqueue('event-a')
+        deliver(self.store, self.transport, now=10)
+        self.enqueue('event-b', created=1)  # distinct row, same text
+        deliver(self.store, self.transport, now=20)
+        deliver(self.store, self.transport, now=3500)  # 58 min later: still suppressed
+        self.assertEqual([c[1] for c in self.transport.calls], ['event-a'])
+        self.assertEqual(health(self.store)['pending'], 1)
+        deliver(self.store, self.transport, now=3610)  # past the hour window: sends
+        self.assertEqual([c[1] for c in self.transport.calls], ['event-a', 'event-b'])
+
+    def test_identical_text_to_different_groups_both_send(self):
+        self.enqueue('event-a', group='aa')
+        self.enqueue('event-b', group='bb', created=1)
+        deliver(self.store, self.transport, now=10)
+        deliver(self.store, self.transport, now=11)
+        self.assertEqual([c[1] for c in self.transport.calls], ['event-a', 'event-b'])
 
     def test_third_failure_queues_single_escalation_without_recursive_alerts(self):
         self.enqueue('event')
