@@ -1,0 +1,18 @@
+{
+  "proposal": "Enforce structured retained evidence handoffs across independently owned implementation, review, deployment and live verification steps, preserving current contracts and operator deployment authority through new versioned profiles.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-20T20:26:52.419913+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-da81014f29d4099246775b15 revision 197d62fa917b07ad088ee8ff095f0021714598786d41b0415ff26ea3553f388d."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-20T20:26:52.419913+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "a70a4365b8917a27d4a56f9b2c832f3a9ee4c87f6904e9c2cc60e9b3cfa02395",
+      "evidence": "Existing user authorization for the reviewed seven improvements recorded in the bound task; manager confirmed binding and directed implementation. No new user approval message or merge/deploy approval claimed."
+    }
+  ]
+}

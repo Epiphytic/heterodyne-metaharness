@@ -60,3 +60,7 @@ approval constraints continue to apply. Research/configuration cannot use concur
 PR handoff: finish the active step before taking another.
 
 Attach [revision-bound prerequisite gates](gates.md) to the role that needs external or design approval.
+
+New [structured handoff profiles](handoffs.md): deployable-v2 adds a separate
+verification role after deployment; library-v2 strengthens retained Git evidence.
+Published v1 profiles remain unchanged.

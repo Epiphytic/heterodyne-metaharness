@@ -170,8 +170,12 @@ def close_step(queue, run, issue):
         return
     events = history(issue)
     pinned = artifact(issue)
+    from .task_handoffs import enabled
+    retained_owner = enabled(binding) and binding['role'] != 'implementation'
+    if retained_owner:
+        run = dict(run, workdir=pinned['checkout'])
     if 'commit' in pinned:
-        clean_commit(run, pinned['commit'])
+        clean_commit(run, pinned['commit'], require_head=not retained_owner)
     for event in events:
         from .task_formulas import validate
         validate(run, binding, event['stage'], event['evidence'], prior, require_head=False)

@@ -1,0 +1,34 @@
+{
+  "formula": "hermes-deployable-v2",
+  "version": 1,
+  "type": "workflow",
+  "phase": "liquid",
+  "description": "Structured retained handoffs; authority: spec/handoffs.md",
+  "steps": [
+    {
+      "id": "implementation",
+      "title": "Implementation"
+    },
+    {
+      "id": "review",
+      "title": "Review",
+      "needs": [
+        "implementation"
+      ]
+    },
+    {
+      "id": "deployment",
+      "title": "Deployment",
+      "needs": [
+        "review"
+      ]
+    },
+    {
+      "id": "verification",
+      "title": "Verification",
+      "needs": [
+        "deployment"
+      ]
+    }
+  ]
+}

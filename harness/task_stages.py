@@ -79,7 +79,7 @@ def deployment_evidence(evidence, commit):
 
 def record(store, beads, run, issue_id, stage, evidence):
     from .task_formulas import EVIDENCE_STAGES, validate
-    if stage not in (*STAGES, *EVIDENCE_STAGES, 'integrated'):
+    if stage not in (*STAGES, *EVIDENCE_STAGES, 'integrated', 'live-verified'):
         raise BeadsError('Unknown lifecycle stage')
     if run.get('resume_required') or run.get('beads', {}).get('recovery_required'):
         raise BeadsError('Reconcile recovery before lifecycle transitions')
@@ -110,9 +110,11 @@ def record(store, beads, run, issue_id, stage, evidence):
     if binding and stage in EVIDENCE_STAGES:
         metadata['harness_delivery_artifact'] = {'evidence_digest': digest}
     elif binding:
+        from .task_handoffs import context
+        artifact_run = context(run, binding, evidence)
         metadata['harness_delivery_artifact'] = {
-            'checkout': run['workdir'], 'commit': evidence['commit'],
-            'branch': git(run['workdir'], 'branch', '--show-current')}
+            'checkout': artifact_run['workdir'], 'commit': evidence['commit'],
+            'branch': git(artifact_run['workdir'], 'branch', '--show-current')}
 
     queue.bd('update', issue_id, '--metadata', json.dumps(metadata))
     result = queue.show(issue_id)

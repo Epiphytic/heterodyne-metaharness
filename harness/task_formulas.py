@@ -13,6 +13,10 @@ PROFILES = {
     'research-v1': {'investigation': ('investigated',), 'recommendation': ('recommended',)},
     'configuration-v1': {'change': ('changed',), 'verification': ('verified',)},
 }
+PROFILES['deployable-v2'] = {**PROFILES['deployable-v1'], 'deployment': ('deployed',),
+                              'verification': ('live-verified',)}
+PROFILES['library-v2'] = dict(PROFILES['library-v1'])
+
 EVIDENCE_STAGES = ('investigated', 'recommended', 'changed', 'verified')
 
 
@@ -66,6 +70,9 @@ def retained(evidence):
 
 def validate(run, binding, stage, evidence, history, require_head=True):
     from .task_stages import validate_evidence, clean_commit
+    from . import task_handoffs
+    if task_handoffs.enabled(binding):
+        return task_handoffs.validate(run, stage, evidence, history, require_head)
     if stage in EVIDENCE_STAGES:
         if not evidence.get('evidence_ref') or not evidence.get('summary'):
             raise BeadsError('Evidence reference and substantive result summary required')

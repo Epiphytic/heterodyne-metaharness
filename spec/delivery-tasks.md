@@ -58,3 +58,5 @@ See [task admission](tasks.md), [worktrees](worktrees.md), and
 [queue dependencies](queue-order.md). No package or service configuration is added.
 
 Version-2 [workflow formulas](formulas.md) reuse this machinery with explicit alternative role and evidence contracts.
+
+New formula profiles enforce [structured retained handoffs](handoffs.md) across owners.

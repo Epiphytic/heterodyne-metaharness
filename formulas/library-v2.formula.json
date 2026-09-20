@@ -1,0 +1,27 @@
+{
+  "formula": "hermes-library-v2",
+  "version": 1,
+  "type": "workflow",
+  "phase": "liquid",
+  "description": "Structured retained handoffs; authority: spec/handoffs.md",
+  "steps": [
+    {
+      "id": "implementation",
+      "title": "Implementation"
+    },
+    {
+      "id": "review",
+      "title": "Review",
+      "needs": [
+        "implementation"
+      ]
+    },
+    {
+      "id": "integration",
+      "title": "Integration",
+      "needs": [
+        "review"
+      ]
+    }
+  ]
+}

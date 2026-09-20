@@ -30,22 +30,28 @@ class FormulaTest(unittest.TestCase):
         path.write_text('Evidence retained for review.\n')
         return [{'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}]
 
+    def stage_evidence(self, stage, prior):
+        evidence = self.evidence()
+        evidence.update(artifacts=self.retained(), summary="Actual findings and limitations")
+        if prior:
+            evidence["input_digest"] = prior[-1]["digest"]
+        return evidence
+
     def finish(self, group, role):
         issue = self.issues[group[role]['id']]
         self.bind(issue)
         prior = delivery.prior_history(self.queue, issue)
         for stage in delivery.steps(delivery.contract(issue))[role]:
-            evidence = self.evidence()
-            evidence.update(artifacts=self.retained(), summary='Actual findings and limitations')
-            if prior:
-                evidence['input_digest'] = prior[-1]['digest']
+            evidence = self.stage_evidence(stage, prior)
             stages.record(self.store, self.beads, self.run, issue['id'], stage, evidence)
+            prior.append(self.queue.show(issue['id'])['metadata']['harness_lifecycle'][-1])
         fresh = self.queue.show(issue['id'])
         delivery.close_step(self.queue, self.run, fresh)
         issue['status'] = 'closed'
 
     def test_all_graphs_replay_and_parent_closure(self):
-        for name, profile in formulas.PROFILES.items():
+        for name in ('deployable-v1', 'library-v1', 'research-v1', 'configuration-v1'):
+            profile = formulas.PROFILES[name]
             with self.subTest(name=name):
                 self.plan['key'] = name
                 group = self.create(name)

@@ -37,3 +37,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Workflow formulas](formulas.md)
 
 - [Prerequisite gates](gates.md)
+
+- [Structured retained handoffs](handoffs.md)

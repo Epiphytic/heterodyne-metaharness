@@ -68,3 +68,7 @@ Brain notifications: [contract](spec/brain.md), [runbook](docs/brain-notificatio
 | [harness/task_formulas.py](harness/task_formulas.py) | Versioned persistent workflow admission and retained evidence checks |
 
 - `harness/task_gates.py`, `spec/gates.md`: revision-bound native prerequisite gates.
+
+Structured handoffs: `harness/task_handoffs.py`, `formulas/deployable-v2.formula.json`,
+`formulas/library-v2.formula.json`, `tests/test_task_handoffs.py`;
+[spec](spec/handoffs.md), [runbook](docs/structured-handoffs.md).

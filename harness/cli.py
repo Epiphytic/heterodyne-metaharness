@@ -79,7 +79,7 @@ def parser():
     update.add_argument('--authorization-file', required=True)
     stage = actions.add_parser('stage')
     stage.add_argument('issue_id')
-    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','deployed','close-ready','integrated','investigated','recommended','changed','verified'))
+    stage.add_argument('--stage', required=True, choices=('committed','tested','pr-open','merged','final-tested','deployed','close-ready','live-verified','integrated','investigated','recommended','changed','verified'))
     stage.add_argument('--evidence-file', required=True)
     reconcile = actions.add_parser('reconcile')
     reconcile.add_argument('issue_id', nargs='?')
