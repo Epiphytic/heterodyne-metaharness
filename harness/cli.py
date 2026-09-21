@@ -32,6 +32,8 @@ def parser():
     configure_asks(sub)
     from .transition_cli import configure as configure_notices
     configure_notices(sub)
+    from .review_cli import configure as configure_reviews
+    configure_reviews(sub)
     maintenance = sub.add_parser('maintenance')
     maintenance.add_argument('--file', required=True)
     maintenance.add_argument('--title', required=True)
@@ -221,6 +223,9 @@ def task_dispatch(args, store, supervisor, config):
         else:
             close_ready(checkout(run, args.issue_id), issue)
         assert_close_current(store, run, issue)
+        if supervisor.config.get('reviews', {}).get('enabled') is True:
+            from .reviews import assert_close
+            assert_close(store, run, issue)
         result = beads.close(run, args.issue_id, args.evidence_file)
     elif action == 'stage':
         from .task_stages import record
@@ -282,6 +287,9 @@ def dispatch(args, store, supervisor, config):
         return enqueue_task(store, supervisor, config, args.title, Path(args.file).read_text(), args.key)
     if command == 'task':
         return task_dispatch(args, store, supervisor, config)
+    if command == 'review':
+        from .review_cli import dispatch as review_dispatch
+        return review_dispatch(args, store, supervisor.beads)
     if command == 'start':
         return supervisor.start(args.name, args.repo, args.agent, text_input(args), args.group, json.loads(args.agent_config), args.parent_session)
     if command == 'status':

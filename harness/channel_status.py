@@ -73,8 +73,10 @@ def stage_counts(issues):
 
 
 
-def capture(run):
+def capture(run, lines=25):
     """Read-only tmux commands with a shared two-second deadline; no inspect/reap."""
+    if not isinstance(lines, int) or not 1 <= lines <= 2000:
+        raise ValueError('Invalid capture line count')
     name, pane = run.get('tmux_session', ''), run.get('pane_id', '')
     if not re.fullmatch(r'[A-Za-z0-9_-]+', name) or not re.fullmatch(r'%\d+', pane):
         return 'unavailable (no owned pane)', ''
@@ -92,8 +94,8 @@ def capture(run):
         matching = [line.split('\t') for line in panes if line.split('\t')[0] == pane]
         if len(matching) != 1:
             return 'unavailable (pane missing)', ''
-        text = call('capture-pane', '-p', '-t', pane, '-S', '-25')
-        return 'exited' if matching[0][1] == '1' else 'live', '\n'.join(text.rstrip().splitlines()[-25:])
+        text = call('capture-pane', '-p', '-t', pane, '-S', '-' + str(lines))
+        return 'exited' if matching[0][1] == '1' else 'live', '\n'.join(text.rstrip().splitlines()[-lines:])
     except (OSError, subprocess.SubprocessError):
         return 'unavailable (tmux read failed)', ''
 

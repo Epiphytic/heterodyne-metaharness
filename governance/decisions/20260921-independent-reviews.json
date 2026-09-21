@@ -1,0 +1,19 @@
+{
+  "id": "20260921-independent-reviews",
+  "proposal": "Implement independent tool-free Hermes progress reviews at active elapsed 10,30,90,150 minutes and every 60 thereafter, plus artifact-bound completion review released by an exact native turn boundary. Detection is deterministic; full summaries use durable delivery; delivered review and resolved or operator-accepted blocking findings gate closure. Preserve existing ask, approval, recovery and ownership contracts.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-21T04:31:01.646740+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Scope partition recorded in Bead btq-harness-98d757a000aa1d75d4c99280."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-21T04:31:01.646740+00:00",
+      "by": "operator (prior explicit user authorization)",
+      "proposal_sha256": "dc8d6ce4296358d320a90d4f9cec2d6c79365e03e7eced93236eb6a895dbd0f9",
+      "evidence": "Existing conversation OPERATOR DECISIONS explicitly approves read-only Hermes reviewers, 10/30/60 cadence, artifact-bound native boundary, delivered completion-review gate and deterministic detection. Manager binding partitions that scope; it is not a new user approval."
+    }
+  ]
+}

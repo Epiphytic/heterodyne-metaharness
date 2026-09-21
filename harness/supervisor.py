@@ -414,6 +414,8 @@ class Supervisor:
             self.observe(run)
             self.recover_dead_pane(run)
         self.lifecycle(run)
+        from .review_dispatch import tick as review_tick
+        review_tick(self.store, run, self.clock(), self.config)
         from .continuation import advance
         advance(self, run)
         self.drain_inbox(run)

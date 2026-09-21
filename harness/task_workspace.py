@@ -7,6 +7,7 @@ import subprocess
 
 from .beads import BeadsError
 from .workspace import git
+from .durable_files import write_json as _save
 
 
 def boundary(run):
@@ -94,15 +95,6 @@ def _dependencies(record, manifest):
         record['ready'] = True
         _save(manifest, record)
 
-def _save(path, data):
-    temporary = path.with_suffix('.tmp')
-    with temporary.open('w') as out:
-        json.dump(data, out, sort_keys=True, indent=2)
-        out.flush(); os.fsync(out.fileno())
-    temporary.replace(path)
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try: os.fsync(fd)
-    finally: os.close(fd)
 
 
 def switch(supervisor, run, record):
