@@ -89,3 +89,9 @@ recognition remains the top hardening item.
 - harness-improvements (NEW, created 21:32): btq-dik roles design (in_progress, worker writing docs/open-workstream-roles.md), btq-1ji, btq-2sa queued
 - mdk: 3 in_progress (QUIC corruption 1bdb3731, SQLite locks 6f5254ab, PR#1937 round2 76601505), 5 open
 - unassigned/other: btq-akm (nostr probe), btq-ryv (crash snapshot mining)
+
+## Operator decision (2026-09-20, post-audit)
+
+Codex allowlists (326a06b): **DEFERRED** — keep PROPOSED-NOT-APPLIED until the
+harness shows better stability, particularly on approval flows. Do not apply
+to live ~/.codex/config.toml until then. (Operator directive, CLI session.)
