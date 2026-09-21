@@ -341,6 +341,54 @@ Test the actual installed bd serialization contract in addition to dict-only moc
 Inventory other known harness metadata consumers before enabling this change;
 normalizing only `order_key` would leave readback and epoch calculation broken.
 
+## Alignment with the bead-forward workflow (btq-harness-67e876d0)
+
+The bead-forward workflow landed after this design's first draft and is now
+canonical in `spec/blockers.md`, `spec/pr-watch.md` and
+`spec/secondary-workers.md`. The permission architecture aligns with it as
+follows; where the two documents overlap, the bead-forward specs govern.
+
+- Blockers as permission gates, not parallel machinery. Every occurrence
+  classification that requires an authority decision (extended capability,
+  operator sign-off on a permission delta, sandbox-profile change) becomes a
+  signed blocker Bead via `task RUN blocker create` with `category`
+  `access-validation` or `approval`, an explicit assignee type (human, agent,
+  worker, external) and an operator-controlled policy. The supervisor never
+  re-derives authority from conversation; the blocker binding is the authority.
+- Nostr-signed receipts are the approval evidence primitive. Approval of a
+  permission delta or negotiation outcome is a NIP-01/BIP340-signed receipt
+  ingested through `blocker receive`/`blocker resolve`, bound to the gate nonce,
+  policy revision and evidence digest — the same verification contract the
+  preparation phase already requires for permission receipts. A permission
+  receipt without a signed blocker decision is inert.
+- Negotiate-then-restart integrates with secondary workers. While a parent task
+  is blocked on a permission negotiation, the supervisor uses the single
+  retained secondary slot (`blocker secondary-start`) for other eligible work
+  instead of idling; the primary stays untouched pending the signed resolution.
+  The secondary inherits only capabilities its own manifest declares — it is
+  not granted the blocked task's pending permissions.
+- PR-watch closes the delivery loop for permission changes. Permission
+  architecture changes (template versions, policy updates, provider support
+  matrix) ship as ordinary code/test/PR beads; a `pr-review` gate with a
+  registered adapter and the hourly cron backstop watches human review, and
+  authorized `changes-requested` comments create fix beads that re-block the
+  parent under a superseding gate.
+- Determinism is preserved. Blocker routing, receipt verification, watch
+  reconciliation and occurrence classification are all deterministic scripts;
+  no model joins the emission or decision path. `approval_policy=never` is
+  never relaxed by either system: a receipt resolves a blocker, it does not
+  type commands or bypass sandbox enforcement.
+- Metadata normalization is shared. The typed decoder contract in this design
+  is the same one `spec/blockers.md` requires for gate metadata (object or one
+  JSON encoding, fail closed); implement it once at the Beads adapter boundary
+  for both consumers.
+
+Implementation note for the follow-up bead (btq-harness-ac63e3b7): the pinned
+design artifact for implementation now includes this alignment section; the
+blocker/permission service boundaries should be designed as one typed facade so
+the task-state transport and blocker transport do not duplicate authority
+checks.
+
 ## Alternatives and limits
 
 A blanket writable home or canonical Git directory would reduce friction but
