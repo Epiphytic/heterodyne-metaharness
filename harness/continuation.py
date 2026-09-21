@@ -35,6 +35,9 @@ def native_event(run, event, now):
                        states[kind], event.get('at') or now)
     if kind == 'turn_completed' and ((applied and was_working) or matched_idle):
         completed(run, event.get('turn_id') or event['id'], event['summary'])
+        if event.get('turn_id'):
+            run['native_completion'] = {'native': run.get('native_session_id'),
+                                        'turn': event['turn_id'], 'at': now, 'applied': True}
 
 
 def safe(run):

@@ -18,7 +18,7 @@ ESCALATION_SUFFIX = ':delivery-escalation'
 # the same group more than once per hour. Keyed on rendered text because status
 # re-renders vary per poll; row-id dedup alone cannot catch them.
 SEND_DEDUP_SECONDS = 3600
-DEDUP_IGNORE_PREFIXES = ('reaction:', 'permission:', 'transition:')
+DEDUP_IGNORE_PREFIXES = ('reaction:', 'permission:', 'transition:', 'review:')
 
 
 def _send_dedup_key(text):
@@ -64,14 +64,25 @@ def _escalate(store, row, ops_group, now):
     register(store, escalation, 'Check Marmot connector delivery for ' + row['run_id'])
 
 
-def _attempt(store, transport, now, ops_group):
-    row = store.db.execute('''SELECT current.* FROM outbox AS current
-      WHERE current.delivered_at IS NULL AND current.next_attempt<=?
+def _next_deliverable(store, now):
+    """Held reviews neither send nor block a later operator ask in their group."""
+    from .reviews import held_events
+    held = held_events(store)
+    placeholders = ','.join('?' for _ in held) or 'NULL'
+    excluded = f'AND current.id NOT IN ({placeholders})' if held else ''
+    earlier_excluded = f'AND earlier.id NOT IN ({placeholders})' if held else ''
+    row = store.db.execute(f'''SELECT current.* FROM outbox AS current
+      WHERE current.delivered_at IS NULL AND current.next_attempt<=? {excluded}
       AND NOT EXISTS (SELECT 1 FROM outbox AS earlier
-        WHERE earlier.group_id=current.group_id AND earlier.delivered_at IS NULL
+        WHERE earlier.group_id=current.group_id AND earlier.delivered_at IS NULL {earlier_excluded}
           AND (earlier.created_at<current.created_at OR
             (earlier.created_at=current.created_at AND earlier.rowid<current.rowid)))
-      ORDER BY current.next_attempt, current.created_at, current.rowid LIMIT 1''', (now,)).fetchone()
+      ORDER BY current.next_attempt, current.created_at, current.rowid LIMIT 1''', (now, *held, *held)).fetchone()
+    return row
+
+
+def _attempt(store, transport, now, ops_group):
+    row = _next_deliverable(store, now)
     if row is None:
         return
     # Marmot enforces this across connection/write/read, including slow trickles.

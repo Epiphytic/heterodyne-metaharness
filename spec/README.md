@@ -47,3 +47,5 @@ Native observation and duplicate reporting: [status](status.md).
 - [Transition delivery](transitions.md)
 
 - [On-demand channel status](channel-status.md)
+
+- [Independent evidence reviews](reviews.md)
