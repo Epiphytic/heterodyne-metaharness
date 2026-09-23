@@ -393,7 +393,7 @@ class Supervisor:
                     self.store.db.execute("UPDATE inbox SET state='superseded' WHERE id=?", (row['id'],))
                 return False
             return (safe(run) and self.beads.enabled
-                    and self.clock() - run.get('continuation', {}).get('sent_at', 0) >= 60
+                    and self.clock() - (run.get('continuation', {}).get('sent_at') or 0) >= 60
                     and not (self.beads._queue(run).state / 'paused').exists())
         if row['id'].startswith('continuation:'):
             state = run.get('continuation', {})
