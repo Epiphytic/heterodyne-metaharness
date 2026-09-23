@@ -444,7 +444,7 @@ class Supervisor:
         observe_secondary(self, run)
         self.lifecycle(run)
         from .review_dispatch import tick as review_tick
-        review_tick(self.store, run, self.clock(), self.config)
+        review_tick(self.store, run, self.clock(), self.config, self.beads)
         from .continuation import advance
         advance(self, run)
         self.drain_inbox(run)
