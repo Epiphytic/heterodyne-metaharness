@@ -309,3 +309,32 @@ class ContinuationTest(unittest.TestCase):
         self.queue.show.return_value = dict(self.issue, status='closed')
         self.advance()
         self.assertEqual(self.beads.ready.call_count, 2)
+
+    def test_null_send_time_at_task_boundary_does_not_crash_tick(self):
+        from harness.tasks import observe
+        observe(self.store, self.issue)
+        self.run = self.store.get(self.run['id'])
+        self.run['continuation'].update(checked=True, sent_at=None)
+        self.supervisor.persist(self.run)
+
+        closed = dict(self.issue, status='closed')
+        observe(self.store, closed)
+        self.run = self.store.get(self.run['id'])
+        self.queue.show.return_value = closed
+        self.supervisor.tick_run(self.run)
+
+        self.assertEqual(self.run['continuation']['not_before'], 60)
+        self.assertNotEqual(self.run['state'], 'awaiting_resume')
+        self.assertFalse(self.run.get('resume_required'))
+        self.assertFalse(self.run['beads'].get('recovery_required'))
+
+    def test_null_schedule_and_send_times_allow_boundary_check(self):
+        self.run['continuation'].update(not_before=None, sent_at=None)
+        self.advance()
+        self.beads.ready.assert_called_once()
+
+    def test_null_send_time_allows_safe_idle_nudge(self):
+        from harness.babysitter_queue import nudge_key
+        self.run['continuation']['sent_at'] = None
+        row = {'id': nudge_key(self.run), 'target': 'worker'}
+        self.assertTrue(self.supervisor.inbox_ready(self.run, row))

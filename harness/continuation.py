@@ -120,7 +120,7 @@ def advance(supervisor, run):
             supervisor.store.event(run, 'queue_boundary', 'interrupted-check',
                                    'queue-boundary:' + state['boundary'])
         return
-    if supervisor.clock() < state.get('not_before', 0):
+    if supervisor.clock() < (state.get('not_before') or 0):
         return  # One scheduled task transition, no external queue polling.
     # Completion can reach the notifier just before the terminal clears its
     # working footer. Wait for the ordinary pane observation, without querying
@@ -154,7 +154,7 @@ def _check(supervisor, run, state):
         return 'disabled'
     if not safe(run):
         return 'guarded'
-    if now - state.get('sent_at', 0) < 60:
+    if now - (state.get('sent_at') or 0) < 60:
         return 'cooldown'
     pending = supervisor.store.db.execute(
         "SELECT 1 FROM inbox WHERE run_id=? AND target='worker' AND state IN ('pending','sending','uncertain','held') LIMIT 1",
@@ -182,7 +182,7 @@ def task_changed(run, issue):
     state.setdefault('completion', state.get('boundary'))
     state['boundary'] = hashlib.sha256(json.dumps([state['boundary'], signature]).encode()).hexdigest()
     state['checked'] = False
-    state['not_before'] = state.get('sent_at', 0) + 60
+    state['not_before'] = (state.get('sent_at') or 0) + 60
 
 
 def _send(supervisor, run, issue, now):
