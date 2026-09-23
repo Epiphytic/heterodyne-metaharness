@@ -16,8 +16,19 @@ def resolve(queue, run, value):
     return issue
 
 
-def order_key(issue):
+def native_order(issue):
+    """Ordering metadata as stored natively; bd round-trips metadata values as JSON strings."""
     order = (issue.get('metadata') or {}).get('harness_queue_order')
+    if isinstance(order, str):
+        try:
+            order = json.loads(order)
+        except ValueError as exc:
+            raise BeadsError(f'Malformed native queue ordering metadata: {exc}') from None
+    return order
+
+
+def order_key(issue):
+    order = native_order(issue)
     if order is not None:
         if not isinstance(order, dict) or type(order.get('epoch')) is not int or type(order.get('index')) is not int:
             raise BeadsError('Malformed native queue ordering metadata')
@@ -43,13 +54,14 @@ def prioritize(queue, run, values, issuer):
     ordered = pending(queue)
     for issue in ordered:
         order_key(issue)  # Fail before mutation on invalid metadata.
-    epoch = max([time.time_ns()] + [i.get('metadata', {}).get('harness_queue_order', {}).get('epoch', 0) + 1 for i in ordered])
+    epoch = max([time.time_ns()] + [(native_order(i) or {}).get('epoch', 0) + 1 for i in ordered])
     result = []
     for index, issue in enumerate(issues):
         value = {'epoch': epoch, 'index': index, 'issuer': issuer}
         queue.bd('update', issue['id'], '--set-metadata', 'harness_queue_order=' + json.dumps(value))
         current = queue.show(issue['id'])
-        if current.get('metadata', {}).get('harness_queue_order') != value:
+        # bd round-trips metadata values as strings; compare the native shape.
+        if native_order(current) != value:
             raise BeadsError('Queue order write uncertain; inspect native metadata before retry')
         result.append(current)
     return result
