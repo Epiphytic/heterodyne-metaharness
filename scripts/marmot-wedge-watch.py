@@ -19,7 +19,8 @@ import time
 import uuid
 
 TIMER = 'hermes-gw-deploy.timer'
-NOTICE = 'Armed hermes-gw-deploy.timer; gateway restart + replay in ~90s.'
+SERVICE = 'hermes-gw-deploy.service'
+NOTICE = 'Re-armed hermes-gw-deploy.timer; execution verification pending.'
 
 
 def timestamp(value):
@@ -138,7 +139,15 @@ def assess(args, now, probe=probe_socket):
     if now - mtime > 180:
         return dict(reason='stale_heartbeat', gw_last_inbound=None, gw_start_time=started)
     allowed_users(args.env_file)  # Native inbound log is already sender-filtered.
-    gw_last = last_inbound(args.gw_log)
+    candidates = []
+    for source in (args.gw_log, getattr(args, 'agent_log', args.gw_log)):
+        try:
+            candidates.append(last_inbound(source))
+        except (OSError, ValueError):
+            continue
+    if not candidates:
+        raise ValueError('no Marmot inbound timestamp in either configured log source')
+    gw_last = max(candidates)
     if gw_last > now + 60:
         raise ValueError('gateway inbound timestamp is in the future')
     if now - gw_last > args.inbound_max_age:
@@ -147,44 +156,89 @@ def assess(args, now, probe=probe_socket):
     return None
 
 
+def service_status(execute):
+    result = execute(['/usr/bin/systemctl', '--user', 'show', SERVICE,
+                      '--property=ExecMainStartTimestampMonotonic,Result,ExecMainStatus,ActiveState'],
+                     capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        raise ValueError('cannot inspect recovery service')
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    fields['execution'] = int(fields['ExecMainStartTimestampMonotonic'])
+    return fields
+
+
+def verify_pending(args, state, now, execute):
+    pending = state['pending']
+    if pending.get('phase') != 'armed':
+        raise ValueError('unresolved activation intent; reconcile timer before retry')
+    status = service_status(execute)
+    ran = status['execution'] > pending['baseline_execution']
+    if ran and status['ActiveState'] not in ('activating', 'deactivating'):
+        success = status['Result'] == 'success' and status['ExecMainStatus'] == '0'
+        append_record(args.activation_log, dict(pending, phase='verified',
+                      service_ran=True, service_success=success, verified_at=now))
+        save_state(args.state, {'last_trigger': state['last_trigger']})
+        if not success:
+            raise ValueError('recovery service ran but failed')
+        return 'Recovery service execution verified.'
+    if now - pending['ts'] > 300:
+        # Preserve intent; do not loop on a broken timer or claim recovery.
+        raise ValueError('recovery service execution not verified within 300 seconds; reconcile timer')
+    return ''
+
+
 def run(args, now=None, execute=subprocess.run, probe=probe_socket):
     now = time.time() if now is None else now
     args.state.parent.mkdir(parents=True, exist_ok=True)
     with args.state.with_suffix('.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads(args.state.read_text()) if args.state.exists() else {}
-        # A crash after intent has uncertain external effects. Do not arm again
-        # automatically; operator reconciles timer and journal against intent ID.
         if state.get('pending'):
-            raise ValueError('unresolved activation intent; reconcile timer before retry')
+            return verify_pending(args, state, now, execute)
         reason = assess(args, now, probe)
-        if reason and reason['reason'] == 'startup_grace':
-            return ''
-        if reason is None:
-            if state.get('last_trigger'):
-                save_state(args.state, {'last_trigger': 0})
-            return ''
+        if reason is None or reason['reason'] == 'startup_grace':
+            return ''  # Healthy ticks do not erase the one-hour throttle.
         last = timestamp(state.get('last_trigger', 0))
-        if last and now - last < 900:
+        if last and now - last < 3600:
             return ''
-        activation = dict(reason, ts=now, activation_id=uuid.uuid4().hex)
-        append_record(args.activation_log, dict(activation, phase='intent', armed_timer=False))
+        baseline = service_status(execute)
+        activation = dict(reason, ts=now, activation_id=uuid.uuid4().hex,
+                          baseline_execution=baseline['execution'], phase='intent')
+        append_record(args.activation_log, dict(activation, armed_timer=False))
         save_state(args.state, {'last_trigger': now, 'pending': activation})
-        result = execute(['/usr/bin/systemctl', '--user', 'start', TIMER],
-                         capture_output=True, text=True, timeout=20, check=False)
-        armed = result.returncode == 0
-        append_record(args.activation_log, dict(activation, phase='result', armed_timer=armed,
-                                               returncode=result.returncode))
-        save_state(args.state, {'last_trigger': now})
-        if not armed:
-            raise ValueError('timer arming command failed (exit ' + str(result.returncode) + ')')
+        for command in ('stop', 'start'):
+            result = execute(['/usr/bin/systemctl', '--user', command, TIMER],
+                             capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode:
+                append_record(args.activation_log, dict(activation, phase='failed',
+                              command=command, returncode=result.returncode, armed_timer=False))
+                # Even a failed command can have effects; retain intent for reconciliation.
+                raise ValueError('timer re-arm ' + command + ' failed')
+        activation['phase'] = 'armed'
+        append_record(args.activation_log, dict(activation, armed_timer=True, service_ran=False))
+        save_state(args.state, {'last_trigger': now, 'pending': activation})
         return reason['reason'] + ': ' + NOTICE
+
+
+def error_notice(args, message, now):
+    """Bound repeated failure notices independently of uncertain activation state."""
+    path = args.state.with_suffix('.errors.json')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix('.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(path.read_text()) if path.exists() else {}
+        if state.get('at') and now - timestamp(state['at']) < 3600:
+            return False
+        append_record(args.activation_log, {'phase': 'error', 'ts': now, 'error': message})
+        save_state(path, {'at': now})
+        return True
 
 
 def main():
     home = Path.home() / '.hermes'
     parser = argparse.ArgumentParser(description=__doc__)
     for name, default in [('gw-log', home / 'logs/gateway.log'),
+                          ('agent-log', home / 'logs/agent.log'),
                           ('heartbeat', home / 'state/gateway.heartbeat'),
                           ('env-file', home / '.env'),
                           ('socket', Path.home() / '.marmot-agents/hermes/dev/wn-agent.sock'),
@@ -193,6 +247,7 @@ def main():
         parser.add_argument('--' + name, type=Path, default=default)
     parser.add_argument('--check', action='store_true', help='Report assessment without state writes or timer activation')
     parser.add_argument('--inbound-max-age', type=int, default=300)
+    args = None
     try:
         args = parser.parse_args()
         if args.inbound_max_age < 300:
@@ -205,6 +260,12 @@ def main():
             print(notice)
         return 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        if args is not None and not args.check:
+            try:
+                if not error_notice(args, str(exc), time.time()):
+                    return 0
+            except (OSError, ValueError):
+                pass  # Cannot durably suppress; surface the original failure.
         print('marmot-wedge-watch ERROR: ' + str(exc), file=sys.stderr)
         return 1
 

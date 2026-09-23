@@ -79,3 +79,7 @@ Outcome refinement: [policy](spec/task-refinement.md), [audit](docs/maintenance-
 
 Transition delivery: `harness/transitions.py`, `harness/transition_cli.py`,
 `tests/test_transitions.py`; [spec](spec/transitions.md), [rollout](docs/transition-delivery.md).
+
+Babysitter agent resolution: `harness/babysitter_resolution.py`,
+`harness/babysitter_observers.py`, `install_babysitter_resolution.py`;
+[contract](spec/babysitter-resolution.md), [design and rollout](docs/babysitter-agent-resolution.md).

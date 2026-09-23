@@ -1,0 +1,64 @@
+======================================================================
+ERROR: test_secondary_claim_isolated_launch_and_retained_primary (tests.test_secondary_worker.SecondaryTest.test_secondary_claim_isolated_launch_and_retained_primary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_secondary_worker.py", line 36, in test_secondary_claim_isolated_launch_and_retained_primary
+    slot = secondary.start(self.supervisor, self.run, 'btq-next')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/harness/secondary_worker.py", line 50, in start
+    for item in queue.bd('list', '--assignee', queue.worker, '--status', 'in_progress', '--limit', '0'):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1199, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_secondary_worker.py", line 28, in bd
+    return original(*args)
+           ^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_task_gates.py", line 28, in bd
+    return fixtures.DeliveryTest.bd(self, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_task_delivery.py", line 57, in bd
+    key = args[args.index('--id') + 1]
+               ^^^^^^^^^^^^^^^^^^
+ValueError: tuple.index(x): x not in tuple
+
+======================================================================
+ERROR: test_secondary_completion_then_parent_signed_unblock_and_resume (tests.test_secondary_worker.SecondaryTest.test_secondary_completion_then_parent_signed_unblock_and_resume)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_secondary_worker.py", line 61, in test_secondary_completion_then_parent_signed_unblock_and_resume
+    slot = secondary.start(self.supervisor, self.run, 'btq-next')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/harness/secondary_worker.py", line 50, in start
+    for item in queue.bd('list', '--assignee', queue.worker, '--status', 'in_progress', '--limit', '0'):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1199, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_secondary_worker.py", line 28, in bd
+    return original(*args)
+           ^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_task_gates.py", line 28, in bd
+    return fixtures.DeliveryTest.bd(self, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-harness-67e876d04b02b3ba1cccf2d3/checkout/tests/test_task_delivery.py", line 57, in bd
+    key = args[args.index('--id') + 1]
+               ^^^^^^^^^^^^^^^^^^
+ValueError: tuple.index(x): x not in tuple
+
+----------------------------------------------------------------------
+Ran 13 tests in 11.652s
+
+FAILED (errors=2)

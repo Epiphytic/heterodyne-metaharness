@@ -130,7 +130,7 @@ class TasksTest(unittest.TestCase):
         from harness.supervisor import Supervisor
         self.claim()
         supervisor=object.__new__(Supervisor)
-        supervisor.store=self.store;supervisor.submit=Mock()
+        supervisor.store=self.store;supervisor.submit=Mock();supervisor.beads=self.beads
         run=self.store.get('test')
         for state in ('working','awaiting_approval','unknown'):
             run['native_turn_state']=state
@@ -149,7 +149,7 @@ class TasksTest(unittest.TestCase):
         from harness.supervisor import Supervisor
         self.claim()
         supervisor=object.__new__(Supervisor)
-        supervisor.store=self.store;supervisor.submit=Mock()
+        supervisor.store=self.store;supervisor.submit=Mock();supervisor.beads=self.beads
         run=self.store.get('test');run['native_turn_state']='working'
         with self.store.db:
             self.store.db.execute("INSERT INTO inbox(id,run_id,text,created_at,state,target) VALUES (?,?,?,?,?,?)",

@@ -27,7 +27,13 @@ class WedgeWatchTest(unittest.TestCase):
         self.args.env_file.write_text('MARMOT_ALLOWED_USERS=' + 'a' * 64 + '\n')
         self.args.gw_log.write_text('2027-01-15T08:00:00+00:00 INFO gateway.run: inbound message: platform=marmot\n')
         self.gw_last = watch.last_inbound(self.args.gw_log)
-        self.execute = Mock(return_value=SimpleNamespace(returncode=0))
+        self.execution = 10
+        self.execute = Mock(side_effect=self.systemctl)
+
+    def systemctl(self, argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            f'ExecMainStartTimestampMonotonic={self.execution}\nResult=success\n'
+            'ExecMainStatus=0\nActiveState=inactive\n'))
 
     def stale_log(self):
         self.args.gw_log.write_text('2027-01-15T07:50:00+00:00 INFO gateway.run: inbound message: platform=marmot\n')
@@ -43,18 +49,21 @@ class WedgeWatchTest(unittest.TestCase):
     def test_wedge_intent_durable_before_arm_and_cooldown(self):
         self.stale_log()
         def arm(argv, **kwargs):
-            self.assertEqual(argv, ['/usr/bin/systemctl', '--user', 'start', watch.TIMER])
-            intent = json.loads(self.args.activation_log.read_text())
-            self.assertEqual(intent['phase'], 'intent')
-            self.assertFalse(intent['armed_timer'])
-            self.assertTrue(json.loads(self.args.state.read_text())['pending'])
-            return SimpleNamespace(returncode=0)
+            if argv[2] in ('stop', 'start'):
+                intent = json.loads(self.args.activation_log.read_text())
+                self.assertEqual(intent['phase'], 'intent')
+                self.assertTrue(json.loads(self.args.state.read_text())['pending'])
+            return self.systemctl(argv, **kwargs)
         self.execute.side_effect = arm
         self.assertIn(watch.NOTICE, self.run_watch())
-        self.assertEqual(self.run_watch(), '')
-        self.assertEqual(self.execute.call_count, 1)
+        self.assertEqual([x.args[0][2] for x in self.execute.call_args_list], ['show', 'stop', 'start'])
+        self.assertEqual(self.run_watch(), '')  # Old service execution is not proof.
+        self.execution += 1
+        self.assertIn('verified', self.run_watch())
+        self.now += 901
+        self.assertEqual(self.run_watch(), '')  # One hour, not fifteen minutes.
         records = [json.loads(x) for x in self.args.activation_log.read_text().splitlines()]
-        self.assertTrue(records[1]['armed_timer'])
+        self.assertTrue(records[-1]['service_success'])
 
     def test_stale_heartbeat_without_message_source(self):
         os.utime(self.args.heartbeat, (self.now - 181, self.now - 181))
@@ -69,12 +78,13 @@ class WedgeWatchTest(unittest.TestCase):
         self.stale_log()
         self.run_watch()
         self.args.heartbeat.write_text(json.dumps({'start_time': self.now - 1}))
-        self.assertEqual(self.run_watch(), '')
+        self.execution += 1
+        self.assertIn('verified', self.run_watch())
         self.assertEqual(json.loads(self.args.state.read_text())['last_trigger'], self.now)
         self.now += 301
         os.utime(self.args.heartbeat, (self.now, self.now))
         self.assertEqual(self.run_watch(), '')
-        self.assertEqual(self.execute.call_count, 1)
+        self.assertEqual(self.execute.call_count, 4)
 
     def test_quiet_chat_is_inactivity_not_proven_wedge(self):
         self.stale_log()
@@ -88,20 +98,55 @@ class WedgeWatchTest(unittest.TestCase):
 
     def test_failure_does_not_claim_arm_success(self):
         self.stale_log()
-        self.execute.return_value.returncode = 1
-        with self.assertRaisesRegex(ValueError, 'arming command failed'):
+        self.execute.side_effect = lambda argv, **kw: (self.systemctl(argv, **kw)
+            if argv[2] == 'show' else SimpleNamespace(returncode=1))
+        with self.assertRaisesRegex(ValueError, 're-arm stop failed'):
             self.run_watch()
         result = json.loads(self.args.activation_log.read_text().splitlines()[-1])
         self.assertFalse(result['armed_timer'])
+        self.assertTrue(json.loads(self.args.state.read_text())['pending'])
 
     def test_uncertain_arm_blocks_retry(self):
         self.stale_log()
-        self.execute.side_effect = TimeoutError('uncertain')
+        self.execute.side_effect = lambda argv, **kw: (self.systemctl(argv, **kw)
+            if argv[2] == 'show' else (_ for _ in ()).throw(TimeoutError('uncertain')))
         with self.assertRaises(TimeoutError):
             self.run_watch()
         with self.assertRaisesRegex(ValueError, 'unresolved activation'):
             self.run_watch()
-        self.assertEqual(self.execute.call_count, 1)
+        self.assertEqual(self.execute.call_count, 2)
+
+    def test_timer_noop_is_not_success_and_not_rearmed(self):
+        self.stale_log()
+        self.run_watch()
+        self.now += 301
+        with self.assertRaisesRegex(ValueError, 'not verified'):
+            self.run_watch()
+        self.assertEqual([x.args[0][2] for x in self.execute.call_args_list], ['show', 'stop', 'start', 'show'])
+
+    def test_error_notice_is_hourly_across_restart_without_erasing_intent(self):
+        self.args.state.write_text(json.dumps({'pending': {'phase': 'intent'}}))
+        self.assertTrue(watch.error_notice(self.args, 'timer failed', self.now))
+        self.assertFalse(watch.error_notice(self.args, 'timer failed', self.now + 900))
+        self.assertFalse(watch.error_notice(self.args, 'another failure', self.now + 3599))
+        self.assertTrue(watch.error_notice(self.args, 'timer failed', self.now + 3600))
+        self.assertEqual(json.loads(self.args.state.read_text())['pending']['phase'], 'intent')
+
+    def test_service_failure_is_recorded_not_verified_success(self):
+        self.stale_log()
+        self.run_watch()
+        self.execute.side_effect = lambda *a, **kw: SimpleNamespace(returncode=0,
+            stdout='ExecMainStartTimestampMonotonic=11\nResult=exit-code\nExecMainStatus=1\nActiveState=failed\n')
+        with self.assertRaisesRegex(ValueError, 'ran but failed'):
+            self.run_watch()
+        self.assertFalse(json.loads(self.args.activation_log.read_text().splitlines()[-1])['service_success'])
+
+    def test_agent_log_preserves_fresh_inbound_when_gateway_log_silent(self):
+        self.args.agent_log = self.args.gw_log.with_name('agent.log')
+        self.args.agent_log.write_text(self.args.gw_log.read_text())
+        self.stale_log()
+        self.assertEqual(self.run_watch(), '')
+        self.execute.assert_not_called()
 
     def test_socket_failure_escalates_without_gateway_restart(self):
         self.probe.side_effect = OSError('unavailable')
@@ -109,10 +154,10 @@ class WedgeWatchTest(unittest.TestCase):
             self.run_watch()
         self.execute.assert_not_called()
 
-    def test_healthy_resets_cooldown(self):
+    def test_healthy_preserves_cooldown(self):
         self.args.state.write_text(json.dumps({'last_trigger': self.now-10}))
         self.assertEqual(self.run_watch(), '')
-        self.assertEqual(json.loads(self.args.state.read_text())['last_trigger'], 0)
+        self.assertEqual(json.loads(self.args.state.read_text())['last_trigger'], self.now-10)
 
     def test_log_missing_is_error(self):
         self.args.gw_log.write_text('unrelated log\n')

@@ -9,10 +9,11 @@ checkpoint, observation, queue position, approval, or native session. Unauthoriz
 status commands are consumed without disclosing state. Arguments receive usage;
 channel identity, not user-supplied workstream names, selects the view. Non-status
 messages retain their existing routing. Unknown channels list active workstream
-names only; ambiguous ownership returns unavailable, never another run's pane.
+names and terminal runs with nonclosed cached routed Beads; ambiguous ownership returns unavailable, never another run's pane.
 
 The renderer opens harness SQLite in read-only mode and one read transaction.
-It reads active runs and cached task projections, reusing exact route validation,
+It reads at most 200 runs (including terminal runs with open cached tasks) and
+5000 cached task projections, reusing exact route validation,
 queue ordering and workflow classification. It reports in-flight tasks, pending
 order with blockers, and counts of latest recorded lifecycle positions (closed
 is done; close-ready is deployed). Counts describe cached tasks, not all historical

@@ -186,7 +186,8 @@ class Adapter:
             # Completed prose (including "I approved it") is not a modal.
             pending = False  # Exact current-modal recognition below.
         else:
-            pending = re.search(r'(?i)(approve|permission required|allow this|do you want to proceed|trust this)', tail)
+                # Prose like 'maintainer approved' must not read as a modal (2026-09-23 false positive).
+            pending = re.search(r'(?im)^(?:.*(?:would you like|do you want to proceed|permission required|allow this|trust this)|(?:approve)\b.*(?:\?|command|edits|permissions))', tail)
         from .permission_relay import approval_region
         region = approval_region(text)
         if region:

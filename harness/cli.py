@@ -34,6 +34,8 @@ def parser():
     configure_notices(sub)
     from .review_cli import configure as configure_reviews
     configure_reviews(sub)
+    from .manager_resolution import configure as configure_manager
+    configure_manager(sub)
     maintenance = sub.add_parser('maintenance')
     maintenance.add_argument('--file', required=True)
     maintenance.add_argument('--title', required=True)
@@ -43,10 +45,15 @@ def parser():
     start.add_argument('--prompt', default=''); start.add_argument('--file')
     start.add_argument('--group'); start.add_argument('--agent-config', default='{}')
     start.add_argument('--parent-session')
-    for name in ('status', 'stop', 'resume', 'identities', 'inbox'):
+    start.add_argument('--no-persistent', dest='persistent', action='store_false')
+    for name in ('status', 'resume', 'identities', 'inbox'):
         cmd = sub.add_parser(name); cmd.add_argument('name')
+    for name in ('close', 'stop'):
+        cmd = sub.add_parser(name); cmd.add_argument('name')
+        cmd.add_argument('--consent-file', required=True)
+        cmd.add_argument('--force', action='store_true')
     send = sub.add_parser('send'); send.add_argument('name')
-    send.add_argument('--target', choices=['worker', 'manager'], default='manager')
+    send.add_argument('--target', choices=['worker', 'manager', 'secondary'], default='manager')
     send.add_argument('--text'); send.add_argument('--file'); send.add_argument('--message-id')
     react = sub.add_parser('react'); react.add_argument('name')
     react.add_argument('--message-id', required=True)
@@ -67,6 +74,8 @@ def parser():
     configure(actions)
     from .task_gates import configure as configure_gates
     configure_gates(actions)
+    from .blocker_cli import configure as configure_blockers
+    configure_blockers(actions)
     for name in ('context', 'pause', 'resume'):
         actions.add_parser(name)
     for name in ('show', 'bind', 'claim', 'close', 'worktree'):
@@ -185,6 +194,9 @@ def task_dispatch(args, store, supervisor, config):
     if action in ('ready', 'prioritize', 'dep', 'drop-everything'):
         from .queue_cli import dispatch as queue_dispatch
         return queue_dispatch(args, store, supervisor, beads, run)
+    if action == 'blocker':
+        from .blocker_cli import dispatch as blocker_dispatch
+        return blocker_dispatch(args, store, beads, run, config, supervisor)
     if action == 'gate':
         from .task_gates import dispatch as gate_dispatch
         return gate_dispatch(args, store, beads, run)
@@ -215,6 +227,8 @@ def task_dispatch(args, store, supervisor, config):
         issue = beads.show(run, args.issue_id)
         from .task_gates import check
         if issue.get('status') != 'closed':
+            from .task_blockers import check_policies
+            check_policies(issue, beads.config)
             check(beads._queue(run), issue)
         from .task_review import checkout
         from .task_delivery import contract, close_step
@@ -273,6 +287,9 @@ def task_dispatch(args, store, supervisor, config):
 
 def dispatch(args, store, supervisor, config):
     command = args.command
+    if command == 'manager-task':
+        from .manager_resolution import dispatch as manager_dispatch
+        return manager_dispatch(args, store, supervisor, config)
     if command == 'notice':
         from .transition_cli import dispatch as notice_dispatch
         return notice_dispatch(args, store, Beads(config.get('beads', {})))
@@ -291,7 +308,7 @@ def dispatch(args, store, supervisor, config):
         from .review_cli import dispatch as review_dispatch
         return review_dispatch(args, store, supervisor.beads)
     if command == 'start':
-        return supervisor.start(args.name, args.repo, args.agent, text_input(args), args.group, json.loads(args.agent_config), args.parent_session)
+        return supervisor.start(args.name, args.repo, args.agent, text_input(args), args.group, json.loads(args.agent_config), args.parent_session, persistent=args.persistent)
     if command == 'status':
         return store.get(args.name)
     if command == 'identities':
@@ -317,8 +334,9 @@ def dispatch(args, store, supervisor, config):
     if command == 'react':
         from .reactions import enqueue
         return enqueue(store, run, supervisor.transport.account_id, args.message_id, args.emoji, args.key)
-    if command == 'stop':
-        supervisor.stop(run)
+    if command in ('close', 'stop'):
+        from .run_closure import terminate
+        terminate(supervisor, run, command, json.loads(Path(args.consent_file).read_text()), args.force)
     elif command == 'resume':
         if run.get('legacy'):
             run['legacy'] = False
@@ -330,7 +348,9 @@ def dispatch(args, store, supervisor, config):
     elif command == 'send':
         supervisor.submit(run, text_input(args), args.target, args.message_id)
     elif command == 'event':
-        run['state'] = 'idle' if args.state == 'completed' and run.get('persistent') else args.state
+        from .store import TERMINAL
+        if run['state'] not in TERMINAL:
+            run['state'] = 'idle' if args.state == 'completed' else args.state
         run['task_state'] = args.state
         run['task_summary'] = args.text
         supervisor.report(run, args.state, args.text, args.event_id,

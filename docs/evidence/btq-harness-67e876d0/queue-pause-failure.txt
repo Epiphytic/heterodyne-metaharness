@@ -1,0 +1,3 @@
+Operation: workstream task 6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a pause
+Outcome: rejected; read-only filesystem at /home/operator/.local/state/beads-task-queue/4e7a1c11465bf231daa34706f2a7d55eb5094590b40047f587a53dd0458c67c0/paused
+No durable pickup pause recorded. No further claim or queue mutation attempted.

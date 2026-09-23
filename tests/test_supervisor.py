@@ -247,7 +247,8 @@ class SupervisorTest(unittest.TestCase):
         unrelated = Path(self.temp.name) / 'unrelated-worktree'
         unrelated.mkdir()
         (unrelated / 'keep').write_text('unrelated')
-        self.supervisor.stop(run)
+        self.supervisor.stop(run, dict(run_id=run['id'], action='stop', approved_by='operator',
+            response='Stop now', evidence_ref='fixture:operator-stop', force=False, open_beads=[]))
         self.assertEqual(owned.read_text(), 'valuable edits')
         self.assertEqual((unrelated / 'keep').read_text(), 'unrelated')
         self.assertEqual(set(self.tmux.stops), {run['id'], run['manager']['id']})
@@ -397,15 +398,16 @@ class SupervisorTest(unittest.TestCase):
                 self.supervisor.tick()
                 state = self.store.get('real-command')['state']
                 self.assertNotEqual(state, 'failed', self.tmux.inspect(run))
-                if state == 'completed':
+                if state == 'idle':
                     break
                 time.sleep(.02)
-            self.assertEqual(self.store.get('real-command')['state'], 'completed', self.tmux.inspect(run))
+            self.assertEqual(self.store.get('real-command')['state'], 'idle', self.tmux.inspect(run))
             self.assertTrue(self.tmux.inspect(run['manager'])['alive'])
             self.assertEqual(len(self.events('completed')), 1)
             self.supervisor.tick()
             self.assertEqual(len(self.events('completed')), 1)
-            self.supervisor.stop(self.store.get('real-command'))
+            self.supervisor.stop(self.store.get('real-command'), dict(run_id=run['id'], action='stop',
+                approved_by='operator', response='Stop now', evidence_ref='fixture:stop', force=False, open_beads=[]))
             self.assertTrue(self.tmux.inspect(run)['missing'])
             self.assertTrue(self.tmux.inspect(run['manager'])['missing'])
         finally:

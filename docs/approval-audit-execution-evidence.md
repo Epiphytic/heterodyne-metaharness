@@ -8,7 +8,7 @@ request. This task proposes defaults; it does not change native approval policy.
 
 Private brain repository `liamhelmer/belthanior-hermes`, signed commit
 `687dc1dedf7c49a5f8af6b4b7329939cae9884be`, signature `G`, author
-`[operator-email-redacted]`. Created in isolated worktree
+`girt@epiphytic.dev`. Created in isolated worktree
 `/tmp/brain-326a06b-review`, branch `bead/326a06b-approval-audit`.
 The authorized non-force push to GitHub main succeeded from base `a3c7268`.
 GitHub API confirmed repository privacy and the published config blob

@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll LLM quota utilization every ten minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=harness-usage-monitor.service
+
+[Install]
+WantedBy=timers.target

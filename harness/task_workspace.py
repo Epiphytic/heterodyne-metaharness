@@ -11,6 +11,8 @@ from .durable_files import write_json as _save
 
 
 def boundary(run):
+    if run.get('secondary'):
+        raise BeadsError('Finish retained secondary slot before switching primary worktree')
     if run.get('resume_required') or run.get('beads', {}).get('recovery_required'):
         raise BeadsError('Reconcile recovery before changing task worktree')
     if run.get('native_session_id') and run.get('native_turn_state') != 'idle':

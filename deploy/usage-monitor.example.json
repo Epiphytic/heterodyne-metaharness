@@ -1,0 +1,20 @@
+{
+  "usage_monitor": {
+    "ops_group": "REPLACE_WITH_FULL_OPS_GROUP_HEX",
+    "account_id": "REPLACE_WITH_ACCOUNT_HEX",
+    "socket": "~/.marmot-agents/hermes/dev/wn-agent.sock",
+    "client_path": "~/.hermes/plugins",
+    "client_module": "marmot.adapter",
+    "thresholds": [50, 80, 90, 95, 99, 100],
+    "sources": {
+      "codex": {
+        "enabled": false, "adapter": "codex", "models": ["gpt-6-astra"],
+        "quota_ceiling": {"5h": null, "daily": null, "weekly": null, "monthly": null}
+      },
+      "zai": {
+        "enabled": false, "adapter": "zai", "models": ["GLM-5.3-Flash"],
+        "quota_ceiling": {"5h": null, "daily": null, "weekly": null, "monthly": null}
+      }
+    }
+  }
+}

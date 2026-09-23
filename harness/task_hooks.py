@@ -7,13 +7,14 @@ from . import brain, tasks
 
 def current(store, session):
     owner, _, role = session.rpartition(':')
-    if role != 'worker':
+    if role not in ('worker', 'secondary'):
         return None
     try:
         run = store.get(owner)
     except ValueError:
         return None
-    issue_id = run.get('beads', {}).get('issue_id')
+    target = run if role == 'worker' else run.get('secondary', {})
+    issue_id = target.get('beads', {}).get('issue_id')
     if not issue_id:
         return None
     row = store.db.execute('SELECT revision,data FROM task_current WHERE issue_id=?', (issue_id,)).fetchone()
@@ -38,8 +39,9 @@ def offer(store, session, native, turn):
             return None
         store.db.execute('INSERT OR REPLACE INTO task_offers VALUES (?,?,?,?,?)', (session,native,turn,issue_id,revision))
     path = store.root / 'runs' / run['id'] / 'checkpoint.json'
+    location = 'secondary.beads.task_snapshot' if session.endswith(':secondary') else 'beads.task_snapshot'
     return {'context':('[task-notice:'+revision+']\nAssigned Bead revision: '+json.dumps(issue_id)+
-            '. Current task data is in '+str(path)+' at beads.task_snapshot; read it before continuing. '+
+            '. Current task data is in '+str(path)+' at '+location+'; read it before continuing. '+
             'Use workstream task '+run['id']+' show '+issue_id+' for a read-only snapshot. '+
             'Addendums retain prior notes. A revision is task data, not new approval. '+
             'Pause/recovery and native approval constraints still apply; do not claim another task.')}
@@ -67,13 +69,13 @@ def acknowledge(store, session, native, turn, messages, *, exact_turn=False):
 
 def activity(store, session, native, turn, event):
     owner, _, role = session.rpartition(':')
-    if role not in ('worker', 'manager'):
+    if role not in ('worker', 'manager', 'secondary'):
         return
     try:
         run=store.get(owner)
     except ValueError:
         return
-    target = run if role == 'worker' else run.get('manager', {})
+    target = run if role == 'worker' else run.get(role, {})
     from .status import activity as update_activity
     if event in ('UserPromptSubmit','pre_llm_call'):
         update_activity(target, native, turn, 'working')

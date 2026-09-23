@@ -73,8 +73,12 @@ def _next_deliverable(store, now):
     earlier_excluded = f'AND earlier.id NOT IN ({placeholders})' if held else ''
     row = store.db.execute(f'''SELECT current.* FROM outbox AS current
       WHERE current.delivered_at IS NULL AND current.next_attempt<=? {excluded}
+      AND (current.id NOT LIKE 'ask-reminder:%' OR NOT EXISTS
+        (SELECT 1 FROM outbox urgent WHERE urgent.group_id=current.group_id
+         AND urgent.delivered_at IS NULL AND urgent.id NOT LIKE 'ask-reminder:%'))
       AND NOT EXISTS (SELECT 1 FROM outbox AS earlier
         WHERE earlier.group_id=current.group_id AND earlier.delivered_at IS NULL {earlier_excluded}
+          AND (current.id LIKE 'ask-reminder:%' OR earlier.id NOT LIKE 'ask-reminder:%')
           AND (earlier.created_at<current.created_at OR
             (earlier.created_at=current.created_at AND earlier.rowid<current.rowid)))
       ORDER BY current.next_attempt, current.created_at, current.rowid LIMIT 1''', (now, *held, *held)).fetchone()
@@ -151,6 +155,8 @@ def deliver(store, transport, now=None, ops_group=None):
             from .transitions import flush, retire_polls
             retire_polls(store, now)
             flush(store, now)
+            from .operator_asks import enqueue_reminder
+            enqueue_reminder(store, now)
             _attempt(store, transport, now, ops_group)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)

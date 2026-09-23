@@ -74,3 +74,5 @@ confirmed dead panes are restored by the supervisor, not by sending keys to them
 
 See [task contracts](tasks.md), [worktrees](worktrees.md), [native status](status.md),
 [permissions](permission-relay.md) and [change lifecycle](changes.md).
+
+Focused agent repair for structured faults: [babysitter resolution](babysitter-resolution.md).

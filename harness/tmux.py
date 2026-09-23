@@ -55,6 +55,7 @@ class Tmux:
                             ';', 'new-session', '-d', '-P', '-F', '#{pane_id}',
                             '-s', name, '-c', run['workdir'],
                             '-e', 'HERMES_WORKSTREAM_RUN=' + run['id'],
+                            '-e', 'HERMES_WORKSTREAM_ROLE=' + run.get('managed_role', 'worker'),
                             *environment,
                             '--', '/usr/bin/env', '--', *argv)
         pane = result.stdout.strip().splitlines()[0]

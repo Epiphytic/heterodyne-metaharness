@@ -1,0 +1,6 @@
+Operator explicitly directed resume after sandbox relaunch with checkout7 writable.
+Verified bound btq-bjs in_progress with unchanged stable worker identity via facade
+reconcile. Worktree retains implementation and tests. No git index.lock exists;
+no commit or push occurred. No pytest or git process survived. Prior full suite
+was interrupted at 16%; it is not passing evidence and will be rerun after recovery.
+23 new lifecycle tests passed before restart. No deployments or live sends occurred.

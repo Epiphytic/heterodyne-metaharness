@@ -97,7 +97,7 @@ class Store:
         self.identities(run)
 
     def identities(self, run):
-        for role, target in [('worker', run), ('manager', run.get('manager', {}))]:
+        for role, target in [('worker', run), ('manager', run.get('manager', {})), ('secondary', run.get('secondary', {}))]:
             alias = f"workstream-{run['name']}-{role}"
             native = target.get('native_session_id')
             previous = self.db.execute('SELECT native_id FROM identities WHERE alias=?', (alias,)).fetchone()

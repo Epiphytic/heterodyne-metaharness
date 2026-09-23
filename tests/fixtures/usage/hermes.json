@@ -1,0 +1,1 @@
+{"daily":[{"date":"2026-09-20","modelBreakdowns":[{"modelName":"glm","inputTokens":10,"outputTokens":20,"cacheReadTokens":30,"cacheCreationTokens":40}]},{"date":"2026-09-21","modelBreakdowns":[{"modelName":"glm","inputTokens":30,"outputTokens":20,"cacheReadTokens":10,"cacheCreationTokens":0}]}]}

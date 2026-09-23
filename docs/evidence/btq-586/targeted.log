@@ -1,0 +1,20 @@
+test_5h_midnight_counts_both_overlapping_daily_buckets (test_usage_monitor.UsageTests.test_5h_midnight_counts_both_overlapping_daily_buckets) ... ok
+test_ccusage_fixtures_and_conservative_5h (test_usage_monitor.UsageTests.test_ccusage_fixtures_and_conservative_5h) ... ok
+test_codex_latest_per_id_duration_not_slot (test_usage_monitor.UsageTests.test_codex_latest_per_id_duration_not_slot) ... ok
+test_delivery_failure_retained_health_and_alert (test_usage_monitor.UsageTests.test_delivery_failure_retained_health_and_alert) ... ok
+test_failure_is_visible_and_healthy_source_continues (test_usage_monitor.UsageTests.test_failure_is_visible_and_healthy_source_continues) ... ok
+test_fallback_failure_preserves_real_quota (test_usage_monitor.UsageTests.test_fallback_failure_preserves_real_quota) ... ok
+test_fallback_only_covers_missing_intervals (test_usage_monitor.UsageTests.test_fallback_only_covers_missing_intervals) ... ok
+test_invalid_numeric_samples_and_thresholds (test_usage_monitor.UsageTests.test_invalid_numeric_samples_and_thresholds) ... ok
+test_jump_dedup_restart_and_new_window (test_usage_monitor.UsageTests.test_jump_dedup_restart_and_new_window) ... ok
+test_partial_and_malformed_jsonl (test_usage_monitor.UsageTests.test_partial_and_malformed_jsonl) ... ok
+test_recovery_delivers_pending_and_clears_health (test_usage_monitor.UsageTests.test_recovery_delivers_pending_and_clears_health) ... ok
+test_retention_never_drops_pending (test_usage_monitor.UsageTests.test_retention_never_drops_pending) ... ok
+test_socket_client_is_awaited_text_and_identity (test_usage_monitor.UsageTests.test_socket_client_is_awaited_text_and_identity) ... ok
+test_uncertain_send_reuses_frozen_identity (test_usage_monitor.UsageTests.test_uncertain_send_reuses_frozen_identity) ... ok
+test_windows (test_usage_monitor.UsageTests.test_windows) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 1.078s
+
+OK
