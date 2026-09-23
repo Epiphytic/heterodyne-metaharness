@@ -99,7 +99,8 @@ class SupervisorTest(unittest.TestCase):
         self.assertFalse(restored['terminal_buffer']['changed'])
         self.assertEqual(restored['observation']['summary'], text)
         self.assertEqual(self.store.db.execute('SELECT evidence FROM permission_relays').fetchone()[0], text)
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM inbox WHERE id LIKE 'permission:%'").fetchone()[0], 1)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM manager_tasks').fetchone()[0], 1)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM outbox WHERE id LIKE 'permission:%'").fetchone()[0], 0)
         self.assertEqual(self.tmux.sent, [])
 
     def test_manager_modal_surfaces_complete_evidence(self):
@@ -219,16 +220,15 @@ class SupervisorTest(unittest.TestCase):
             self.tmux.panes[run['id']]['text'] = text
             self.now += REPORT_INTERVAL
             self.new_supervisor().tick()
-        self.assertEqual(len(self.events('progress')), 2)
-        self.assertEqual(self.store.get('demo')['last_report_at'], self.now)
+        self.assertEqual(len(self.events('progress')), 1)
+        self.assertEqual(self.store.get('demo')['last_report_at'], self.now - REPORT_INTERVAL)
         self.now += REPORT_INTERVAL - 1
         self.new_supervisor().tick()
-        self.assertEqual(len(self.events('progress')), 2)
+        self.assertEqual(len(self.events('progress')), 1)
         self.now += 1
-        with self.assertLogs('harness.status', level='ERROR'):
-            self.new_supervisor().tick()
-        self.assertEqual(len(self.events('progress')), 2)
-        self.assertEqual(len(self.events('duplicate_status_error')), 1)
+        self.new_supervisor().tick()
+        self.assertEqual(len(self.events('progress')), 1)
+        self.assertEqual(len(self.events('duplicate_status_error')), 0)
         self.assertLessEqual(REPORT_INTERVAL, 300)
 
     def test_command_reboot_does_not_replay_workload(self):
@@ -378,7 +378,7 @@ class SupervisorTest(unittest.TestCase):
         self.now += REPORT_INTERVAL
         self.new_supervisor().tick()
         self.assertFalse(self.tmux.sent)
-        self.assertEqual(len(self.events('progress')), 1)
+        self.assertEqual(len(self.events('progress')), 0)
 
     @unittest.skipUnless(shutil.which('tmux'), 'tmux required')
     def test_real_tmux_command_exit_keeps_manager_and_reports_once(self):

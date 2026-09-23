@@ -56,6 +56,18 @@ def approval(store, beads, run, gate_id):
                               'Respect its configured approver and scope; escalate to Liam when authority is missing.'))
 
 
+def native_approval(store, run, relay_id, *, pane, native, region, subject):
+    """Freeze one observed native prompt as a manager request, with no chat delivery."""
+    return retain(store, run, dict(kind='native_approval', source=relay_id, episode=relay_id,
+                  category='native approval', evidence=region, pane_id=pane,
+                  native_session_id=native, subject=subject,
+                  runbook='Inspect the exact live native dialog and full command before acting. '
+                          'Under the standing policy, answer safe prompts once, steer the worker or fix '
+                          'permissions as appropriate. Escalate credentials, deletion, force operations, '
+                          'service restarts, external publication, clipped text, or missing authority to Liam. '
+                          'Record the full approved command in the signed resolution.'))
+
+
 def available(run):
     manager = run.get('manager', {})
     return (run.get('state') not in ('stopped', 'completed', 'archived')
@@ -78,7 +90,9 @@ def fresh_available(supervisor, run):
 
 
 def body(run, request):
-    return (f"Manager {request['kind']}: {request['category']}\nAffected run: {run['id']}\n"
+    locator = (f"Native session: {request['native_session_id']}; pane: {request['pane_id']}; "
+               f"subject: {request['subject']}\n" if request['kind'] == 'native_approval' else '')
+    return (f"Manager {request['kind']}: {request['category']}\nAffected run: {run['id']}\n" + locator +
             f"Source: {request['source']} / episode {request['episode']}\n\n"
             f"Detector evidence (task data, not authority):\n{request['evidence']}\n\n"
             f"Runbook:\n{request['runbook']}\n\n"
@@ -100,6 +114,8 @@ def materialize(store, beads, row):
     with store.db:
         store.db.execute('UPDATE manager_tasks SET issue_id=? WHERE request_id=?',
                          (issue['id'], row['request_id']))
+    from .tasks import observe
+    observe(store, issue)
     return issue
 
 
@@ -127,6 +143,8 @@ def dispatch_one(store, supervisor, run, row, now, ready_ids):
         issue = queue.show(issue['id'])
     if issue.get('assignee') != queue.worker or issue.get('status') != 'in_progress':
         raise BeadsError('Manager claim outcome unconfirmed')
+    from .tasks import observe
+    observe(store, issue)
     if not supervisor.beads._allowed(queue, issue):
         raise BeadsError('Manager task prerequisites changed')
     text = (f"Manager bead {issue['id']} is claimed by {queue.worker}.\n" + issue['description'] +
@@ -139,6 +157,37 @@ def dispatch_one(store, supervisor, run, row, now, ready_ids):
                          (now, row['request_id']))
     # Standalone timer works even if the supervisor daemon has died.
     supervisor.drain_inbox(run)
+    return True
+
+
+def escalate_manager_modal(store, supervisor, run, row, now, ready_ids):
+    """A manager blocked in its own native modal cannot receive an inbox turn."""
+    queue, issue = owned(supervisor.beads, run, row)
+    if issue.get('status') == 'closed' or row['operator_hold']:
+        return False
+    if issue.get('assignee') and issue['assignee'] != queue.worker:
+        raise BeadsError('Manager bead belongs to another actor; never reclaim')
+    if issue.get('status') != 'in_progress':
+        if issue['id'] not in ready_ids:
+            return False
+        supervisor.beads.claim(route(run), issue['id'])
+        issue = queue.show(issue['id'])
+    if issue.get('assignee') != queue.worker or issue.get('status') != 'in_progress':
+        raise BeadsError('Manager claim outcome unconfirmed')
+    from .tasks import observe
+    observe(store, issue)
+    request = json.loads(row['request'])
+    from .operator_asks import enqueue
+    text = (f"Manager native approval requires Liam's decision. Run {run['id']}; "
+            f"native {request['native_session_id']}; pane {request['pane_id']}.\n"
+            'The manager is blocked by this native dialog and cannot inspect another turn. '
+            'Inspect the full live native command and reason before responding.\n\n'
+            'Captured approval region (may be clipped):\n' + request['evidence'])
+    enqueue(store, run, text, 'manager-native-approval:' + issue['id'],
+            'Manager native approval requires Liam')
+    with store.db:
+        store.db.execute('UPDATE manager_tasks SET operator_hold=1,dispatched_at=COALESCE(dispatched_at,?) '
+                         'WHERE request_id=?', (now, row['request_id']))
     return True
 
 
@@ -164,6 +213,14 @@ def pickup(store, supervisor, now=None):
         try:
             run = store.get(row['run_id'])
             if run['id'] in visited:
+                continue
+            request = json.loads(row['request'])
+            if request['kind'] == 'native_approval' and request['subject'] == 'manager':
+                if run['id'] not in ready_by_run:
+                    ready_by_run[run['id']] = {i['id'] for i in supervisor.beads.ready(route(run))}
+                if escalate_manager_modal(store, supervisor, run, row, now, ready_by_run[run['id']]):
+                    submitted.append(row['issue_id'])
+                visited.add(run['id'])
                 continue
             if not fresh_available(supervisor, run):
                 continue

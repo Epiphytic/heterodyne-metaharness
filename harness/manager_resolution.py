@@ -1,5 +1,6 @@
 """Signed manager outcomes, independently verified before Beads closure."""
 import json
+import os
 import time
 
 from . import blocker_receipts as receipts, manager_tasks as tasks
@@ -12,6 +13,9 @@ def lookup(store, run, issue_id):
                            (run['id'], issue_id)).fetchone()
     if not row or row['dispatched_at'] is None:
         raise BeadsError('No dispatched manager request for this run/bead')
+    request = json.loads(row['request'])
+    if request['kind'] == 'native_approval' and request['subject'] == 'manager' and row['operator_hold']:
+        return row  # The blocked manager could not receive its own pickup turn.
     inbox = store.db.execute('SELECT state FROM inbox WHERE id=?', (row['request_id'],)).fetchone()
     if not inbox or inbox['state'] != 'submitted':
         raise BeadsError('Manager delivery must be confirmed before resolution')
@@ -20,6 +24,27 @@ def lookup(store, run, issue_id):
 
 def verification(store, beads, run, row):
     request = json.loads(row['request'])
+    if request['kind'] == 'native_approval':
+        from .permission_relay import initialize
+        initialize(store.db)
+        relay = store.db.execute('SELECT * FROM permission_relays WHERE id=? AND run_id=?',
+                                 (request['source'], run['id'])).fetchone()
+        if (not relay or relay['pane_id'] != request['pane_id']
+                or relay['native_id'] != request['native_session_id']
+                or relay['evidence'] != request['evidence']):
+            raise BeadsError('Native approval evidence binding changed')
+        subject = run.get('manager', {}) if request['subject'] == 'manager' else run
+        observation = subject.get('observation', {})
+        if (subject.get('pane_id') != relay['pane_id']
+                or (subject.get('native_session_id') or 'unknown') != relay['native_id']
+                or subject.get('observed_state') == 'awaiting_approval'
+                or observation.get('state') == 'awaiting_approval'
+                or not observation.get('pane_alive')
+                or observation.get('at', 0) <= row['dispatched_at']):
+            raise BeadsError('Fresh post-action native observation required')
+        return {'relay_id': relay['id'], 'pane_id': relay['pane_id'],
+                'native_session_id': relay['native_id'], 'observation': observation,
+                'observed_at_ms': int(observation['at'] * 1000)}
     if request['kind'] == 'approval':
         from . import task_gates as gates
         queue = beads._queue(run)
@@ -87,6 +112,9 @@ def resolve(store, beads, run, issue_id, event, config, now=None):
         expected['verification'] = retained['verification']
         expected['verification_sha256'] = receipts.digest(retained['verification'])
     body = validate(event, expected, config, now)
+    request = json.loads(row['request'])
+    if request['kind'] == 'native_approval' and request['evidence'] not in body['resolution']:
+        raise BeadsError('Signed resolution must include the full captured approval text')
     if body['action_completed_at_ms'] < int(row['dispatched_at'] * 1000):
         raise BeadsError('Resolution action predates manager dispatch')
     receipt = receipts.canonical({'signed_event': event, 'verification': expected['verification']})
@@ -95,6 +123,18 @@ def resolve(store, beads, run, issue_id, event, config, now=None):
     # Reserve the exact receipt before external writes; uncertain outcomes reconcile by event ID.
     with store.db:
         store.db.execute('UPDATE manager_tasks SET resolution=? WHERE request_id=?', (receipt, row['request_id']))
+    if request['kind'] == 'native_approval':
+        path = store.root / 'runs' / run['id'] / 'approval-log.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prior = path.read_text().splitlines() if path.exists() else []
+        record = {'schema': 'harness.native-approval-resolution.v1', 'relay_id': request['source'],
+                  'issue_id': issue_id, 'event': event, 'captured_approval': request['evidence'],
+                  'verification': expected['verification']}
+        if not any(json.loads(line).get('event', {}).get('id') == event['id'] for line in prior):
+            with path.open('a') as audit:
+                audit.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + '\n')
+                audit.flush()
+                os.fsync(audit.fileno())
     marker = 'manager-resolution:' + event['id']
     comment = marker + '\n' + body['resolution'] + '\n' + receipt
     comments = queue.bd('comments', issue_id)
@@ -107,15 +147,23 @@ def resolve(store, beads, run, issue_id, event, config, now=None):
     result = queue.show(issue_id)
     if result.get('status') != 'closed':
         raise BeadsError('Close outcome unconfirmed; inspect and replay exact signed event')
+    from .tasks import observe
+    observe(store, result)
     return result
 
 
 def escalate(store, run, issue_id, reason):
-    lookup(store, run, issue_id)
+    row = lookup(store, run, issue_id)
     if not reason.strip():
         raise BeadsError('Escalation needs the concrete authority or dangerous operation')
+    request = json.loads(row['request'])
+    detail = ''
+    if request['kind'] == 'native_approval':
+        detail = (f"\nRun: {run['id']}; native session: {request['native_session_id']}; "
+                  f"pane: {request['pane_id']}.\nCaptured native approval region "
+                  '(inspect live dialog for complete command):\n' + request['evidence'])
     from .operator_asks import enqueue
-    result = enqueue(store, run, f'Manager bead {issue_id} requires Liam: {reason}',
+    result = enqueue(store, run, f'Manager bead {issue_id} requires Liam: {reason}' + detail,
                    'manager-task:' + issue_id, reason)
     with store.db:
         store.db.execute('UPDATE manager_tasks SET operator_hold=1 WHERE issue_id=? AND run_id=?', (issue_id, run['id']))

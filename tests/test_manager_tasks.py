@@ -13,6 +13,7 @@ from harness.babysitter_resolution import observe
 from harness.beads import BeadsError
 from harness.store import Store
 from harness.supervisor import Supervisor
+from harness.permission_relay import observe as relay_observe
 from tests.test_supervisor import FakeTmux, FakeTransport
 
 
@@ -165,6 +166,107 @@ def test_shared_pickup_approval_waits_for_gate_resolution(setup):
     database['gate']['metadata']['harness_gate_resolution'] = {'receipt': 'existing signed gate result'}
     with pytest.raises(BeadsError, match='without verified evidence'):
         resolution.evidence(store, supervisor.beads, run, issue_id)
+
+
+def native_prompt(setup, subject='worker'):
+    store, supervisor, run, _, _ = setup
+    target = run['manager'] if subject == 'manager' else run
+    target['native_session_id'] = subject + '-native'
+    region = ('Dangerous Command\necho fixture\nAllow once\nDeny\n'
+              '↑/↓ to select, Enter to confirm')
+    supervisor.tmux.panes[target['id']]['text'] = region
+    relay_observe(store, dict(run, native_session_id=target['native_session_id'],
+                             pane_id=target['pane_id']), supervisor.tmux.inspect(target),
+                  beads=supervisor.beads)
+    return region
+
+
+def test_native_prompt_claims_manager_bead_without_operator_ping(setup):
+    store, supervisor, run, database, _ = setup
+    before = store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0]
+    region = native_prompt(setup)
+    assert len(database) == 1  # Detection creates the Bead before the cron tick.
+    assert tasks.pickup(store, supervisor, now=100)['submitted']
+    row = first(setup)
+    issue = database[row['issue_id']]
+    assert issue['status'] == 'in_progress' and issue['assignee'].startswith('bel:')
+    assert region in issue['description'] and run['pane_id'] in issue['description']
+    assert store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0] == before
+    assert len(supervisor.tmux.sent) == 1
+    assert tasks.pickup(store, supervisor, now=101)['submitted'] == []
+
+
+def test_native_resolution_requires_full_text_and_appends_audit(setup):
+    store, supervisor, run, database, _ = setup
+    region = native_prompt(setup)
+    tasks.pickup(store, supervisor, now=100)
+    run['observed_state'] = 'idle'
+    run['observation'] = {'state': 'idle', 'at': 103, 'pane_alive': True}
+    event, config = signed(setup, resolution='Approved once after live inspection.\n' + region)
+    result = resolution.resolve(store, supervisor.beads, run, first(setup)['issue_id'], event, config, now=104)
+    assert result['status'] == 'closed'
+    audit = store.root / 'runs' / run['id'] / 'approval-log.jsonl'
+    assert json.loads(audit.read_text().splitlines()[0])['captured_approval'] == region
+    resolution.resolve(store, supervisor.beads, run, first(setup)['issue_id'], event, config, now=105)
+    assert len(audit.read_text().splitlines()) == 1
+
+
+def test_native_resolution_rejects_stale_observation_and_incomplete_text(setup):
+    store, supervisor, run, database, _ = setup
+    native_prompt(setup)
+    tasks.pickup(store, supervisor, now=100)
+    issue_id = first(setup)['issue_id']
+    with pytest.raises(BeadsError, match='Fresh post-action'):
+        resolution.evidence(store, supervisor.beads, run, issue_id)
+    run['observed_state'] = 'idle'
+    run['observation'] = {'state': 'idle', 'at': 103, 'pane_alive': True}
+    event, config = signed(setup, resolution='Approved once')
+    with pytest.raises(BeadsError, match='full captured approval text'):
+        resolution.resolve(store, supervisor.beads, run, issue_id, event, config, now=104)
+    assert database[issue_id]['status'] == 'in_progress'
+    assert not (store.root / 'runs' / run['id'] / 'approval-log.jsonl').exists()
+
+
+def test_native_bead_creation_failure_retries_at_pickup(setup):
+    store, supervisor, run, database, _ = setup
+    create = supervisor.beads.create.side_effect
+    attempts = 0
+    def retryable_create(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BeadsError('temporary Beads failure')
+        return create(*args, **kwargs)
+    supervisor.beads.create.side_effect = retryable_create
+    native_prompt(setup)
+    assert first(setup)['issue_id'] is None
+    assert not database
+    assert tasks.pickup(store, supervisor, now=100)['submitted']
+    assert attempts == 2 and first(setup)['issue_id'] in database
+
+
+def test_native_escalation_is_first_and_only_operator_ask(setup):
+    store, supervisor, run, _, _ = setup
+    before = store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0]
+    region = native_prompt(setup)
+    tasks.pickup(store, supervisor, now=100)
+    assert store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0] == before
+    issue_id = first(setup)['issue_id']
+    resolution.escalate(store, run, issue_id, 'Needs credential access')
+    resolution.escalate(store, run, issue_id, 'Needs credential access')
+    asks = store.db.execute('SELECT text FROM outbox WHERE id LIKE "operator-ask:%"').fetchall()
+    assert len(asks) == 1 and region in asks[0][0]
+
+
+def test_manager_own_modal_claims_then_escalates_without_self_steer(setup):
+    store, supervisor, run, database, _ = setup
+    native_prompt(setup, 'manager')
+    result = tasks.pickup(store, supervisor, now=100)
+    assert len(result['submitted']) == 1
+    row = first(setup)
+    assert row['operator_hold'] == 1 and database[row['issue_id']]['status'] == 'in_progress'
+    assert not supervisor.tmux.sent
+    assert store.db.execute('SELECT COUNT(*) FROM outbox WHERE id LIKE "operator-ask:%"').fetchone()[0] == 1
 
 
 def test_disruptive_boundary_requires_completed_matching_turn():

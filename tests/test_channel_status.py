@@ -46,6 +46,8 @@ In flight:
 active | active title [executing]
 Pending (claim order; blocked entries labeled):
 pending | pending title [ready]
+Approvals:
+(none)
 Pane %7, run run; captured 2026-09-20T22:00:00+00:00; live
 one
 two'''
@@ -61,6 +63,27 @@ two'''
         self.db.execute('INSERT INTO runs VALUES (?,?,?)',('aa','working',json.dumps(dict(self.run,id='other'))))
         self.db.commit()
         with self.assertRaisesRegex(ValueError,'Ambiguous'): status.snapshot(self.home,'aa')
+
+    def test_native_approval_states_from_local_manager_projection(self):
+        self.db.execute('''CREATE TABLE manager_tasks (issue_id TEXT,run_id TEXT,request TEXT,
+            operator_hold INTEGER,resolution TEXT)''')
+        for key, state, hold, resolution in [('open','open',0,None),('claimed','open',0,None),
+                                              ('progress','in_progress',0,None),('held','in_progress',1,None),
+                                              ('done','closed',0,'signed'),
+                                              ('unverified','closed',0,None)]:
+            self.issue(key,state,assignee='bel' if key != 'open' else '')
+            self.db.execute('INSERT INTO manager_tasks VALUES (?,?,?,?,?)',
+                            (key,'run',json.dumps({'kind':'native_approval'}),hold,resolution))
+        self.db.commit()
+        self.db.execute('INSERT INTO manager_tasks VALUES (?,?,?,?,?)',
+                        ('missing','run',json.dumps({'kind':'native_approval'}),0,None))
+        self.db.commit()
+        states = {item['id']: item['state'] for item in status.snapshot(self.home,'aa')['approvals']}
+        self.assertEqual(states,{'open':'open','claimed':'claimed','progress':'in_progress',
+                                 'held':'escalated','done':'resolved',
+                                 'unverified':'closed_unverified','missing':'unknown'})
+        rendered = status.render(status.snapshot(self.home,'aa'),('live',''),'now')
+        self.assertIn('held [escalated]',rendered)
 
     def test_order_and_missing_dependency_is_not_claimable(self):
         self.db.execute('DELETE FROM task_current WHERE issue_id="pending"')

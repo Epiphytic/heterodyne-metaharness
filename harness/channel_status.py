@@ -55,7 +55,24 @@ def snapshot(home, group):
         progress = build(run, selected, cache.__getitem__)
         for row in progress['tasks']:
             row['status'] = cache[row['id']].get('status')
-        return {'run': run, 'tasks': progress['tasks'], 'counts': stage_counts(selected)}
+        approvals = []
+        has_manager_tasks = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manager_tasks'").fetchone()
+        if has_manager_tasks:
+            rows = db.execute('''SELECT issue_id,operator_hold,resolution FROM manager_tasks
+                WHERE run_id=? AND json_extract(request,'$.kind')='native_approval'
+                ORDER BY CASE WHEN resolution IS NULL THEN 0 ELSE 1 END,
+                rowid DESC LIMIT 100''', (run['id'],)).fetchall()
+            for issue_id, hold, resolution in rows:
+                issue = cache.get(issue_id) or {}
+                state = ('resolved' if resolution and issue.get('status') == 'closed' else
+                         'closed_unverified' if issue.get('status') == 'closed' else
+                         'escalated' if hold else
+                         'in_progress' if issue.get('status') == 'in_progress' else
+                         'claimed' if issue.get('assignee') else
+                         'unknown' if issue_id and not issue else 'open')
+                approvals.append({'id': issue_id or '(creating)', 'state': state})
+        return {'run': run, 'tasks': progress['tasks'], 'counts': stage_counts(selected),
+                'approvals': approvals}
 
 
 def stage_counts(issues):
@@ -121,6 +138,13 @@ def render(data, pane, captured_at):
             lines.append('(none cached)')
         if len(tasks) > 12:
             lines.append(f'... {len(tasks)-12} more; use workstream task {clean(run["name"])} progress locally.')
+    approvals = data.get('approvals', [])
+    lines.append('Approvals:')
+    lines.extend(f"{clean(item['id'])} [{clean(item['state'])}]" for item in approvals[:12])
+    if not approvals:
+        lines.append('(none)')
+    if len(approvals) > 12:
+        lines.append(f'... {len(approvals)-12} more; inspect manager Beads locally.')
     header = bounded('\n'.join(lines), 3000)
     state, text = pane
     # Preserve lines while stripping terminal controls; capture-pane omits ANSI escapes.

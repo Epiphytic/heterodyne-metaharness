@@ -20,6 +20,13 @@ is done; close-ready is deployed). Counts describe cached tasks, not all histori
 native Beads. Missing cached dependencies are blocked/unknown, never claim authority.
 No Beads subprocess, live queue refresh, config/credential read or model is allowed.
 
+The same read transaction includes native approval requests and their cached
+manager Bead state. `/status` shows each pending approval as open, claimed,
+in progress, or escalated; locally verified and closed requests are resolved.
+It uses only the durable local request and task projection, so a stale projection
+is reported as unknown rather than refreshed during the status read. A Bead
+closed without a signed resolution is labeled closed_unverified.
+
 Terminal reads use the dedicated hermes-workstreams tmux socket. Verify exact
 session ownership and immutable pane membership before capture. Return the last
 25 non-trailing-empty lines of capture including scrollback, labeled with run ID,
