@@ -110,6 +110,25 @@ class OrderTest(unittest.TestCase):
         with self.assertRaises(BeadsError):
             prioritize(self.queue, self.run, ['btq-a'], 'manager')
 
+    def test_bd_string_roundtrip_metadata_still_orders(self):
+        """Real bd stores metadata values as strings; ordering must tolerate that shape."""
+        self.queue.bd.side_effect = self.string_bd
+        prioritize(self.queue, self.run, ['btq-a'], 'manager')
+        self.assertEqual('btq-a', self.ids()[0])
+        # malformed content, even string-shaped, still fails loudly
+        self.data['btq-b']['metadata']['harness_queue_order'] = 'not-json'
+        with self.assertRaises(BeadsError):
+            self.ids()
+        self.data['btq-b']['metadata']['harness_queue_order'] = '"{"epoch": 1}"'
+
+    def string_bd(self, *args):
+        if args[0] == 'update':
+            field, value = args[3].split('=', 1)
+            # bd CLI round-trip: metadata values are stored/returned as strings
+            self.data[args[1]]['metadata'][field] = value
+            return
+        return self.bd(*args)
+
     def test_eight_task_dependency_fixture_is_listed_but_not_all_ready(self):
         names = ['259f', '0e771d', '5a9546', 'ff386b', 'da8101', '3f284a', '0c5a5a', 'd290cf']
         self.data = {name: dict(id=name, status='open', assignee='', metadata={},
