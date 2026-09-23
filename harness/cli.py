@@ -149,10 +149,18 @@ def import_legacy(store):
 
 def delivery_loop(home, config, stop):
     store = Store(home)
-    transport = Marmot(config.get('marmot', {}))
+    active = config
+    transport = Marmot(active.get('marmot', {}))
     while not stop.is_set():
         try:
-            deliver(store, transport, ops_group=config.get('ops_group'))
+            try:
+                fresh = load_config(home)
+                if fresh != active:
+                    replacement = Marmot(fresh.get('marmot', {}))
+                    active, transport = fresh, replacement
+            except Exception as exc:
+                print(json.dumps({'component': 'delivery-config', 'error': str(exc)}), file=sys.stderr, flush=True)
+            deliver(store, transport, ops_group=active.get('ops_group'))
         except Exception as exc:
             print(json.dumps({'component': 'delivery', 'error': str(exc)}), file=sys.stderr, flush=True)
         stop.wait(1)
@@ -168,6 +176,14 @@ def daemon(store, supervisor, config):
     while not stop.is_set():
         try:
             with store.lock(blocking=False):
+                try:
+                    fresh = load_config(store.root.parent)
+                    if fresh != supervisor.config:
+                        beads = Beads(fresh.get('beads', {}))
+                        transport = Marmot(fresh.get('marmot', {}))
+                        supervisor.config, supervisor.beads, supervisor.transport = fresh, beads, transport
+                except Exception as exc:
+                    print(json.dumps({'component': 'supervisor-config', 'error': str(exc)}), file=sys.stderr, flush=True)
                 supervisor.tick()
         except BlockingIOError:
             pass  # Another CLI transaction owns the state; next tick reconciles it.

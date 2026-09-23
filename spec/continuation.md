@@ -75,4 +75,8 @@ confirmed dead panes are restored by the supervisor, not by sending keys to them
 See [task contracts](tasks.md), [worktrees](worktrees.md), [native status](status.md),
 [permissions](permission-relay.md) and [change lifecycle](changes.md).
 
+Worker launch-policy changes use the [live provisioning procedure](provisioning.md)
+before continuation; its completed restart creates one fresh boundary after a
+new pane observation.
+
 Focused agent repair for structured faults: [babysitter resolution](babysitter-resolution.md).

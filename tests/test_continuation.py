@@ -29,6 +29,7 @@ class ContinuationTest(unittest.TestCase):
         self.queue = Mock(state=Path(self.temp.name), worker=self.issue['assignee'])
         self.queue.show.return_value = self.issue
         self.beads = Mock(enabled=True)
+        self.beads.environment.return_value = {}
         self.beads._queue.return_value = self.queue
         self.beads.ready.return_value = []
         self.beads._allowed.return_value = True

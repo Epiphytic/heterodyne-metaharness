@@ -40,13 +40,13 @@ def native_event(run, event, now):
                                         'turn': event['turn_id'], 'at': now, 'applied': True}
 
 
-def safe(run):
+def safe(run, *, require_pickup=True):
     beads = run.get('beads', {})
     observation = run.get('observation', {})
     tail = '\n'.join(observation.get('summary', '').splitlines()[-8:])
     return (run.get('native_turn_state') == 'idle'
             and run.get('state') in ('active', 'working', 'idle')
-            and beads.get('pickup_enabled') is True
+            and (not require_pickup or beads.get('pickup_enabled') is True)
             and not beads.get('recovery_required') and not run.get('resume_required')
             and run.get('observed_state') not in ('awaiting_approval', 'awaiting_question')
             and observation.get('pane_alive') is True

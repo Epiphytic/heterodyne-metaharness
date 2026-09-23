@@ -17,6 +17,7 @@ from harness.supervisor import REPORT_INTERVAL, Supervisor
 class FakeTmux:
     def __init__(self):
         self.panes = {}
+        self.processes = {}
         self.launches = []
         self.stops = []
         self.sent = []
@@ -33,11 +34,18 @@ class FakeTmux:
         pane = '%' + str(len(self.launches))
         self.panes[run['id']] = dict(alive=True, dead=False, missing=False,
                                     pane_id=pane, exit_code=None, text='>')
+        self.processes[run['id']] = dict(pid=1000 + len(self.launches), pane_id=pane,
+                                        argv=argv[:], env=dict(run.get('config', {}).get('env', {})),
+                                        workdir=run['workdir'])
         return pane
+
+    def process(self, run):
+        return dict(self.processes[run['id']])
 
     def stop(self, run):
         self.stops.append(run['id'])
         self.panes.pop(run['id'], None)
+        self.processes.pop(run['id'], None)
 
     def send(self, run, text, submit=False):
         self.sent.append((run['id'], text, submit))
@@ -175,6 +183,101 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(len(self.transport.created), 1)
         with self.assertRaises(ValueError):
             self.start(agent='codex')
+
+    def test_provisioning_reapply_waits_for_matched_ended_turn_and_resumes(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        run['config']['extra_args'].extend(['-c',
+            'sandbox_workspace_write.writable_roots=["/tmp/owned", "/tmp/owned"]'])
+        self.supervisor.persist(run)
+        self.supervisor.tick_run(run)
+        self.assertEqual(self.tmux.stops, [])
+        self.assertEqual(len(self.events('provisioning_pending')), 1)
+        run['native_turn_state'] = 'idle'
+        run['native_turn_key'] = [run['native_session_id'], 'turn-1']
+        run['native_completion'] = {'native': run['native_session_id'], 'turn': 'turn-1', 'applied': True}
+        run['observed_state'] = 'awaiting_approval'
+        self.supervisor.update_provisioning(run)
+        self.assertEqual(self.tmux.stops, [])
+        run['observed_state'] = 'awaiting_question'
+        self.supervisor.update_provisioning(run)
+        self.assertEqual(self.tmux.stops, [])
+        run['observed_state'] = 'idle'
+        self.supervisor.tick_run(run)
+        self.assertEqual(self.tmux.stops, [run['id']])
+        self.assertIn(run['native_session_id'], self.tmux.launches[-1][1])
+        self.assertEqual(self.tmux.launches[-1][1].count('sandbox_workspace_write.writable_roots=["/tmp/owned"]'), 1)
+        self.assertFalse(run['resume_required'])
+        self.assertFalse(run.get('beads', {}).get('recovery_required'))
+        self.assertNotIn('provisioning_update', run)
+        self.assertEqual(len(self.events('provisioning_applied')), 1)
+        self.supervisor.tick_run(run)
+        self.assertEqual(self.tmux.stops, [run['id']])
+
+    def test_provisioning_wait_surfaces_ask_without_stopping_native_prompt(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        run['config']['extra_args'].extend(['-c', 'model="updated"'])
+        self.tmux.panes[run['id']]['text'] = 'Press enter to confirm or esc to cancel'
+        self.supervisor.tick_run(run)
+        self.now += 301
+        self.supervisor.tick_run(run)
+        self.supervisor.tick_run(run)
+        self.assertEqual(self.tmux.stops, [])
+        self.assertEqual(len(self.events('provisioning_wait')), 1)
+
+    def test_provisioning_revision_relaunches_unchanged_worker_once(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        run['native_turn_state'] = 'idle'
+        run['native_turn_key'] = [run['native_session_id'], 'turn-1']
+        run['native_completion'] = {'native': run['native_session_id'], 'turn': 'turn-1', 'applied': True}
+        run['observation'] = {'pane_alive': True, 'summary': 'ready'}
+        self.supervisor.config['provisioning_revision'] = 'policy-v2'
+        self.assertTrue(self.supervisor.update_provisioning(run))
+        self.assertEqual(self.tmux.stops, [run['id']])
+        self.assertEqual(run['provisioning_revision'], 'policy-v2')
+        self.assertEqual(len(self.events('provisioning_applied')), 1)
+        self.assertFalse(self.supervisor.update_provisioning(run))
+        self.assertEqual(self.tmux.stops, [run['id']])
+
+    def test_provisioning_inspection_failure_asks_without_stopping_worker(self):
+        from unittest.mock import patch
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        with patch.object(self.tmux, 'process', side_effect=OSError('proc unavailable')):
+            self.assertFalse(self.supervisor.update_provisioning(run))
+        self.assertEqual(self.tmux.stops, [])
+        self.assertTrue(self.tmux.inspect(run)['alive'])
+        self.assertEqual(len(self.events('provisioning_unverified')), 1)
+
+    def test_provisioning_preserves_pending_worker_input(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        run['native_turn_state'] = 'idle'
+        run['native_turn_key'] = [run['native_session_id'], 'turn-1']
+        run['native_completion'] = {'native': run['native_session_id'], 'turn': 'turn-1', 'applied': True}
+        run['observation'] = {'pane_alive': True, 'summary': 'ready'}
+        run['config']['extra_args'].extend(['-c', 'model="updated"'])
+        with self.store.db:
+            self.store.db.execute('''INSERT INTO inbox(id,run_id,text,created_at,state,target)
+                VALUES (?,?,?,?,?,?)''', ('direct-worker', run['id'], 'Keep this input', self.now, 'pending', 'worker'))
+        self.assertFalse(self.supervisor.update_provisioning(run))
+        self.assertEqual(self.tmux.stops, [])
+
+    def test_provisioning_crash_intent_enters_recovery_hold(self):
+        run = self.start('codex')
+        run['native_session_id'] = '11111111-1111-4111-8111-111111111111'
+        run['provisioning_update'] = {'phase': 'stopping', 'signature': 'revision'}
+        self.supervisor.persist(run)
+        self.new_supervisor().tick_run(self.store.get(run['id']))
+        saved = self.store.get(run['id'])
+        self.assertTrue(saved['resume_required'])
+        self.assertTrue(saved['beads']['recovery_required'])
+        self.assertEqual(saved['provisioning_update']['phase'], 'interrupted')
+        self.assertEqual(saved['native_session_id'], run['native_session_id'])
+        self.assertTrue(self.tmux.inspect(saved)['alive'])
+        self.assertEqual(self.tmux.stops, [])
 
     def test_beads_identity_and_context_policy_survive_reboot(self):
         config = {'beads': {'enabled': True}}

@@ -1,5 +1,6 @@
 """Shared lifecycle state machine; agent-specific behavior lives in adapters."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ from .store import TERMINAL
 from .workspace import prepare
 from .marmot import MarmotError, UncertainOutcome
 from .beads import Beads, BeadsError
-from .capabilities import apply_capabilities
+from . import provisioning
 
 REPORT_INTERVAL = 240
 
@@ -155,7 +156,6 @@ class Supervisor:
         )
 
     def launch(self, run, target, recovering=False):
-        adapter = Adapter(target['agent'])
         info = self.tmux.inspect(target)
         if info['alive']:
             target['pane_id'] = info['pane_id']
@@ -164,20 +164,16 @@ class Supervisor:
             self.tmux.stop(target)
         target.pop('pane_id', None)
         target['launched_at'] = self.clock()
-        config = target.setdefault('config', {})
-        target['capabilities'] = apply_capabilities(target, config)
-        if target is run and self.beads.enabled and run['agent'] in ('codex', 'claude'):
-            config.setdefault('env', {}).update(self.beads.environment(run))
-        if target['agent'] == 'claude' and self.config.get('native_hook_command'):
-            from .hook_config import claude_args
-            config = target.setdefault('config', {})
-            config['extra_args'] = claude_args(config.get('extra_args', config.get('args', [])), self.config['native_hook_command'])
-        argv = adapter.argv(target, recover=recovering)
+        spec = provisioning.apply(self, target, recovering=recovering, worker=target is run)
+        argv = spec['argv']
         # Commit identity and launch intent before the externally visible side effect.
         target['launch_intent'] = self.boot
         self.persist(run)
         target['pane_id'] = self.tmux.launch(target, argv)
         target['launch_intent'] = None
+        if target is run:
+            run['provisioning_revision'] = self.config.get('provisioning_revision')
+            run['launch_recovering'] = recovering
         self.persist(run)
         if target['agent'] != 'command' and not self.tmux.inspect(target)['alive']:
             raise RuntimeError(f"{target['agent']} exited during launch; inspect retained pane")
@@ -412,6 +408,15 @@ class Supervisor:
                 and run.get('observed_state') != 'awaiting_approval')
 
     def recover_intents(self, run):
+        update = run.get('provisioning_update', {})
+        if update.get('phase') in ('stopping', 'launching', 'verifying'):
+            run['resume_required'] = True
+            run.setdefault('beads', {})['recovery_required'] = True
+            run['state'] = 'interrupted'
+            update['phase'] = 'interrupted'
+            self.report(run, 'interrupted',
+                        'Supervisor stopped during worker provisioning update. Inspect owned pane and exact native session before explicit recovery.',
+                        f"{run['id']}:provisioning-interrupted:{update.get('signature')}", operator_ask=True)
         targets = [run] + [run[role] for role in ('manager', 'secondary') if run.get(role)]
         uncertain = [target for target in targets if target.get('launch_intent')]
         if uncertain:
@@ -443,12 +448,102 @@ class Supervisor:
         from .secondary_worker import observe as observe_secondary
         observe_secondary(self, run)
         self.lifecycle(run)
+        if self.update_provisioning(run):
+            self.persist(run)
+            return  # Fresh pane observation is required before queue continuation.
         from .review_dispatch import tick as review_tick
         review_tick(self.store, run, self.clock(), self.config, self.beads)
         from .continuation import advance
         advance(self, run)
         self.drain_inbox(run)
         self.persist(run)
+
+    def update_provisioning(self, run):
+        """Apply changed launch settings only at a matched, ended worker turn."""
+        if (run['agent'] not in ('codex', 'claude', 'hermes') or run.get('resume_required')
+                or run.get('beads', {}).get('recovery_required')
+                or run['state'] not in ('active', 'working', 'idle')):
+            return False
+        info = self.tmux.inspect(run)
+        if not info['alive'] or not run.get('native_session_id'):
+            return False
+        try:
+            actual = self.tmux.process(run)
+        except (OSError, ValueError, RuntimeError) as exc:
+            key = f"{run['id']}:provisioning-unverified"
+            self.report(run, 'provisioning_unverified',
+                        f'Could not inspect owned worker command line: {type(exc).__name__}. Review launch settings before update.',
+                        key, operator_ask=True)
+            return False
+        if 'launch_recovering' not in run:
+            argv = actual.get('argv', [])
+            run['launch_recovering'] = ('resume' in argv[:3] if run['agent'] == 'codex'
+                                       else '--resume' in argv)
+        expected = provisioning.desired(self, run)
+        revision_changed = (self.config.get('provisioning_revision') is not None
+                            and run.get('provisioning_revision') != self.config['provisioning_revision'])
+        if not provisioning.changed(actual, expected) and not revision_changed:
+            run.pop('provisioning_update', None)
+            return False
+        signature = provisioning.signature(expected) + ':' + str(self.config.get('provisioning_revision'))
+        update = run.get('provisioning_update')
+        if not update or update.get('signature') != signature:
+            update = {'signature': signature, 'phase': 'waiting', 'since': self.clock(),
+                      'diff': provisioning.diff(actual, expected)}
+            run['provisioning_update'] = update
+            self.report(run, 'provisioning_pending', json.dumps(update['diff'], sort_keys=True),
+                        f"{run['id']}:provisioning-pending:{signature}")
+        if update['phase'] != 'waiting':
+            return False
+        if not provisioning.ended(run) or run.get('secondary') or run.get('manager_missing'):
+            if self.clock() - update['since'] >= provisioning.WAIT_SECONDS and not update.get('asked'):
+                update['asked'] = True
+                self.report(run, 'provisioning_wait',
+                            'Worker launch settings changed, but no safe ended turn is available. Preserve pending native approvals and questions; inspect the worker.',
+                            f"{run['id']}:provisioning-wait:{signature}", operator_ask=True)
+            return False
+        pending = self.store.db.execute(
+            "SELECT 1 FROM inbox WHERE run_id=? AND target='worker' AND state IN ('pending','sending','uncertain','held') LIMIT 1",
+            (run['id'],)).fetchone()
+        if pending:
+            return False
+        update['phase'] = 'stopping'
+        self.persist(run)
+        try:
+            self.tmux.stop(run)
+            update['phase'] = 'launching'
+            run['launch_prompt'] = ''
+            run['prompt_state'] = 'not_replayed'
+            run['observation'] = {}
+            self.persist(run)
+            self.launch(run, run, recovering=True)
+            update['phase'] = 'verifying'
+            self.persist(run)
+            fresh = self.tmux.process(run)
+            if provisioning.changed(fresh, provisioning.desired(self, run, recovering=True)):
+                raise RuntimeError('new worker command line does not match applied provisioning')
+            run['provisioning_revision'] = self.config.get('provisioning_revision')
+            run.pop('provisioning_update', None)
+            # A previous completion may have been consumed before this update.
+            # The fresh pane must get one ordinary continuation check after its
+            # first observation, without replaying the old prompt.
+            continuation = run.setdefault('continuation', {})
+            continuation['boundary'] = hashlib.sha256(json.dumps(
+                ['provisioning', continuation.get('boundary'), signature]).encode()).hexdigest()
+            continuation['checked'] = False
+            continuation.pop('last_progress', None)
+            self.report(run, 'provisioning_applied',
+                        json.dumps({'diff': update['diff'], 'pid': fresh['pid'],
+                                    'pane_id': fresh['pane_id']}, sort_keys=True),
+                        f"{run['id']}:provisioning-applied:{signature}")
+            return True
+        except Exception:
+            update['phase'] = 'interrupted'
+            run['resume_required'] = True
+            run.setdefault('beads', {})['recovery_required'] = True
+            run['state'] = 'interrupted'
+            self.persist(run)
+            raise
 
     def recover_dead_pane(self, run):
         """Restore a known conversation once; existing recovery holds own failures."""
