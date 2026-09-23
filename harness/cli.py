@@ -306,7 +306,7 @@ def dispatch(args, store, supervisor, config):
         return task_dispatch(args, store, supervisor, config)
     if command == 'review':
         from .review_cli import dispatch as review_dispatch
-        return review_dispatch(args, store, supervisor.beads)
+        return review_dispatch(args, store, supervisor.beads, config)
     if command == 'start':
         return supervisor.start(args.name, args.repo, args.agent, text_input(args), args.group, json.loads(args.agent_config), args.parent_session, persistent=args.persistent)
     if command == 'status':

@@ -14,15 +14,25 @@ def configure(sub):
     actions.add_parser('inspect')
     handoff = actions.add_parser('handoff')
     handoff.add_argument('--file', required=True)
+    actions.add_parser('submit').add_argument('--file', required=True)
+    receipt = actions.add_parser('receipt')
+    receipt.add_argument('review_id')
+    receipt.add_argument('--evidence-file', required=True)
     for verb in ('accept', 'retry'):
         action = actions.add_parser(verb)
         action.add_argument('review_id')
         action.add_argument('--evidence-file', required=True)
 
 
-def dispatch(args, store, beads):
+def dispatch(args, store, beads, config=None):
     run = store.get(args.name)
     reviews.initialize(store.db)
+    if args.review_action in ('submit', 'receipt'):
+        from . import review_gate
+        if args.review_action == 'submit':
+            return review_gate.submit(store, beads, run, json.loads(Path(args.file).read_text()), config or {})
+        return review_gate.receive(store, beads, run, args.review_id,
+                                   json.loads(Path(args.evidence_file).read_text()), config or {})
     if args.review_action == 'inspect':
         return [dict(r) for r in store.db.execute('SELECT * FROM review_jobs WHERE run_id=? ORDER BY created_at DESC LIMIT 50', (run['id'],))]
     if args.review_action == 'handoff':

@@ -28,8 +28,10 @@ def create(store, beads, run, plan, config):
         raise BeadsError('Policy cannot approve this gate kind')
     if plan['kind'] in ('merge', 'deployment') and selected.get('authority_basis') != 'operator':
         raise BeadsError('Merge/deployment blocker requires operator policy')
-    if plan['category'] not in ('approval', 'question', 'access-validation', 'external-result', 'pr-review'):
+    if plan['category'] not in ('approval', 'question', 'access-validation', 'external-result', 'pr-review', 'review'):
         raise BeadsError('Unknown blocker category')
+    if plan['category'] == 'review' and plan['kind'] != 'external':
+        raise BeadsError('Artifact review cannot authorize a native execution gate')
     owner = plan['assignee']
     if not isinstance(owner, dict) or set(owner) != {'type', 'id'} or owner['type'] not in ('human', 'agent', 'worker', 'external'):
         raise BeadsError('Blocker needs a typed assignee')
@@ -54,6 +56,8 @@ def create(store, beads, run, plan, config):
 
 def route_ask(store, run, gate, route):
     binding = gates.metadata(gate)['harness_gate']
+    if binding['blocker']['category'] == 'review':
+        return  # The review engagement dispatches signing only after a pass.
     owner = binding['blocker']['assignee']
     text = (f"Blocker {gate['id']} for {binding['issue_id']}: {binding['reason']}\n"
             f"Assigned to {owner['type']}:{owner['id']}; revision {binding['revision']}. "
@@ -151,7 +155,8 @@ def assert_worker_unblocked(beads, run):
     if not any(b.get('blocker') for b in gates.metadata(issue).get(gates.FIELD, {}).values()):
         return
     check_policies(issue, beads.config)
-    gates.check(queue, issue)
+    # Artifact review gates hold lifecycle advancement, not revision input.
+    gates.check(queue, issue, allow_review_edits=True)
 
 
 def receive(store, beads, run, gate_id, evidence, config):

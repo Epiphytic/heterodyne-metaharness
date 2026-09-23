@@ -1,0 +1,7 @@
+{
+  "model": "fuelix/claude-opus-5-5",
+  "provider": "custom",
+  "base_url": "https://api.fuelix.ai",
+  "api_mode": "anthropic_messages",
+  "api_key_env": "FUELIX_API_KEY"
+}

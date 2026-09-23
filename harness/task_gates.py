@@ -164,7 +164,7 @@ def resolve_gate(queue, run, gate_id, evidence):
     return fresh
 
 
-def check(queue, issue):
+def check(queue, issue, *, allow_review_edits=False):
     if issue.get('issue_type') == 'gate':
         raise BeadsError('Gates resolve through evidence; never claim them as coding work')
     bindings = metadata(issue).get(FIELD, {})
@@ -179,6 +179,9 @@ def check(queue, issue):
                 or not any(e.get('id') == key and e.get('dependency_type') == 'blocks'
                            for e in issue.get('dependencies', []))):
             raise BeadsError('Gate contract or blocking edge missing')
+        if (allow_review_edits and binding.get('kind') == 'external'
+                and binding.get('blocker', {}).get('category') == 'review'):
+            continue
         if gate.get('status') != 'closed':
             raise BeadsError('Task has an unresolved gate')
         resolution = metadata(gate).get('harness_gate_resolution', {})
