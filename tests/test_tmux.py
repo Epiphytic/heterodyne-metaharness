@@ -42,6 +42,15 @@ class TmuxTest(unittest.TestCase):
         self.tmux.stop(self.run)
         self.assertTrue(self.tmux.inspect(self.run)['missing'])
 
+    def test_owned_process_reports_live_command_environment_and_cwd(self):
+        self.run['config'] = {'env': {'HARNESS_PROVISIONING_TEST': 'current'}}
+        self.run['pane_id'] = self.tmux.launch(self.run, ['/usr/bin/sleep', '30'])
+        process = self.tmux.process(self.run)
+        self.assertEqual(process['pane_id'], self.run['pane_id'])
+        self.assertEqual(process['argv'][1:], ['30'])
+        self.assertEqual(process['env']['HARNESS_PROVISIONING_TEST'], 'current')
+        self.assertEqual(process['workdir'], self.directory.name)
+
     def test_launch_environment_is_literal_and_cannot_replace_ownership(self):
         self.run['config'] = {'env': {'HARNESS_TEST': '$(touch injected); literal'}}
         self.run['pane_id'] = self.tmux.launch(self.run, ['/usr/bin/python3', '-c',

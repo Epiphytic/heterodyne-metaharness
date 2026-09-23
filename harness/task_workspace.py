@@ -110,18 +110,6 @@ def switch(supervisor, run, record):
     # Exact owned idle worker only. No manager restart, no task prompt replay.
     supervisor.tmux.stop(run)
     run['workdir'] = record['path']
-    config = run.setdefault('config', {})
-    args = list(config.get('extra_args', config.get('args', [])))
-    clean = []
-    i = 0
-    while i < len(args):
-        if args[i] in ('-C', '--cd'):
-            i += 2
-        elif args[i].startswith('--cd='):
-            i += 1
-        else:
-            clean.append(args[i]); i += 1
-    config['extra_args'] = clean + (['-C', run['workdir']] if run['agent'] == 'codex' else [])
     run['launch_prompt'] = ''
     run['prompt_state'] = 'not_replayed'
     supervisor.persist(run)

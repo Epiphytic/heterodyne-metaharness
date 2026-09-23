@@ -98,6 +98,26 @@ class Tmux:
         return {'pane_id': pane, 'alive': dead == '0', 'dead': dead == '1',
                 'missing': False, 'exit_code': exit_code, 'exit_signal': killed or None, 'text': text}
 
+    def process(self, run):
+        """Read the owned pane's actual process launch state without logging secrets."""
+        info = self.inspect(run)
+        if not info['alive']:
+            raise RuntimeError('owned worker pane is not alive')
+        result = self._call('display-message', '-p', '-t', info['pane_id'], '#{pane_pid}\t#{pane_current_path}')
+        pid_text, workdir = result.stdout.rstrip('\n').split('\t', 1)
+        pid = int(pid_text)
+        if pid <= 0:
+            raise RuntimeError('invalid owned pane PID')
+        argv = [part.decode() for part in (Path('/proc') / str(pid) / 'cmdline').read_bytes().split(b'\0') if part]
+        raw_env = (Path('/proc') / str(pid) / 'environ').read_bytes().split(b'\0')
+        env = {}
+        for entry in raw_env:
+            key, separator, value = entry.partition(b'=')
+            if separator:
+                env[key.decode()] = value.decode()
+        return {'pid': pid, 'argv': argv, 'env': env, 'workdir': workdir,
+                'pane_id': info['pane_id']}
+
     def send(self, run, text, submit=False):
         info = self.inspect(run)
         if not info['alive']:

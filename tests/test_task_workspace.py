@@ -44,7 +44,7 @@ class TaskWorkspaceTest(unittest.TestCase):
         work.switch(supervisor,self.run,record)
         self.assertEqual(self.run['native_session_id'],'native')
         self.assertEqual(self.run['workdir'],record['path'])
-        self.assertEqual(self.run['config']['extra_args'],['-C',record['path']])
+        self.assertEqual(self.run['config']['extra_args'],['-C',str(self.repo)])
         self.assertEqual(self.run['launch_prompt'],'')
         supervisor.tmux.stop.assert_called_once_with(self.run)
         supervisor.launch.assert_called_once_with(self.run,self.run,recovering=True)
