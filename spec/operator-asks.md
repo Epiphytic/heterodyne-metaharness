@@ -3,8 +3,10 @@
 See [delivery and status](status.md), [approval evidence](permission-relay.md),
 [approval policy](approvals.md), and [authority](README.md).
 
-Explicit operator questions, native approval surfaces, delivery escalations and
-babysitter escalations are durable asks. Pure status is not an ask. Producers
+Explicit operator questions, escalated native approvals, delivery escalations and
+babysitter escalations are durable asks. A newly observed native approval goes
+to a manager Bead first; its escalation is the first operator message about it.
+Pure status is not an ask. Producers
 must use `workstream ask NAME enqueue --file PATH --summary TEXT --key KEY`
 for questions requiring operator input, rather than an unclassified status.
 An existing state report can instead carry the explicit `event --operator-ask` flag.
@@ -15,7 +17,8 @@ Each ask retains its stable identity, exact run/group, full original body, uncap
 resolution evidence. Reusing a key with changed text or routing fails. Open asks
 survive restart and native session changes. Use `workstream ask NAME list` and
 `workstream ask NAME resolve ID --evidence-file PATH` after verifying an answer.
-Consent alone does not close an ask or accept a native prompt.
+Consent alone does not close an ask or accept a native prompt. Historical
+permission relay asks remain readable and retain their original receipts.
 
 At the first send attempt, resolve the group's admins through the configured
 `wn --home HOME --secret-store file --account ACCOUNT groups admins GROUP --json`.

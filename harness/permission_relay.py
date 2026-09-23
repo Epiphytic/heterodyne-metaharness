@@ -6,7 +6,6 @@ import time
 
 # Recognition is only a routing hint, never execution/approval authority.
 PROMPT = re.compile(r'Would you like to (?:run the following command|grant these permissions|make the following edits)\?|Do you want to approve network access|needs your approval\.|permission required', re.I)
-PART_SIZE = 6000
 
 
 def approval_region(text):
@@ -38,12 +37,14 @@ def initialize(db):
             db.execute(statement)
 
 
-def observe(store, run, info):
+def observe(store, run, info, *, detected=False, beads=None):
     text = info.get('text', '')
     if not isinstance(text, str):
         raise ValueError('Approval pane must be text')
     region = approval_region(text)
-    if not info.get('alive') or region is None or not run.get('native_session_id'):
+    if region is None and detected:
+        region = text  # Unrecognized native UI: retain the whole bounded capture for inspection.
+    if not info.get('alive') or region is None:
         return None
     if not isinstance(text, str) or len(text.encode()) > 1024 * 1024:
         raise ValueError('Approval pane exceeds evidence bound; Hermes must reconcile native request')
@@ -53,27 +54,25 @@ def observe(store, run, info):
     text = region
     initialize(store.db)
     digest = hashlib.sha256(text.encode()).hexdigest()
-    identity = hashlib.sha256(json.dumps([run['id'],run['native_session_id'],pane,digest]).encode()).hexdigest()
+    native = run.get('native_session_id') or 'unknown'
+    identity = hashlib.sha256(json.dumps([run['id'],native,pane,digest]).encode()).hexdigest()
     now = time.time()
-    header = (f'Native approval evidence {identity}. This is the complete captured approval region, not a guarantee '
-              'that the terminal rendered the complete command. Inspect the native request before acceptance. '
-              f'Run {run["id"]}; native {run["native_session_id"]}; pane {pane}.\n')
     with store.db:
         store.db.execute('BEGIN IMMEDIATE')
         store.db.execute('INSERT OR IGNORE INTO permission_relays VALUES (?,?,?,?,?,?,?)',
-                         (identity,run['id'],run['native_session_id'],pane,digest,text,now))
-        store.db.execute('''INSERT OR IGNORE INTO inbox(id,run_id,text,created_at,state,target)
-            VALUES (?,?,?,?,?,?)''', ('permission:'+identity,run['id'],header+text,now,'pending','manager'))
-        if run.get('group_id'):
-            parts = [text[i:i+PART_SIZE] for i in range(0,len(text),PART_SIZE)]
-            for index, part in enumerate(parts):
-                event = f'permission:{identity}:{index}'
-                store.db.execute('INSERT OR IGNORE INTO permission_parts VALUES (?,?,?)', (event,identity,index))
-                store.db.execute('''INSERT OR IGNORE INTO outbox(id,run_id,group_id,text,created_at)
-                    VALUES (?,?,?,?,?)''', (event,run['id'],run['group_id'],header+f'Part {index+1}/{len(parts)}\n'+part,now))
-                from .operator_asks import register
-                row = store.db.execute('SELECT * FROM outbox WHERE id=?', (event,)).fetchone()
-                register(store, row, f'Inspect native approval in {run["name"]}, pane {pane}', 'permission:'+identity)
+                         (identity,run['id'],native,pane,digest,text,now))
+        from .manager_tasks import native_approval
+        request_id = native_approval(store, run, identity, pane=pane, native=native, region=text,
+                                     subject='manager' if run.get('manager', {}).get('pane_id') == pane else 'worker')
+    if beads is not None and beads.enabled:
+        from .manager_tasks import materialize
+        from .beads import BeadsError
+        row = store.db.execute('SELECT * FROM manager_tasks WHERE request_id=?', (request_id,)).fetchone()
+        if not row['issue_id']:
+            try:
+                materialize(store, beads, row)
+            except (BeadsError, RuntimeError, ValueError):
+                pass  # The one-minute pickup retries the durable request.
     return identity
 
 

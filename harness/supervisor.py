@@ -289,10 +289,8 @@ class Supervisor:
             run['native_session_id'] = observation['native_session_id']
         run['observation'] = dict(observation, at=self.clock(), pane_alive=True)
         from .permission_relay import observe as relay_permission
-        approval_relay = relay_permission(self.store, run, info)
-        if observation['state'] == 'awaiting_approval' and run.get('observed_state') != 'awaiting_approval':
-            self.report(run, 'blocked', 'Coding agent appears to need approval. Native permission prompt preserved.',
-                        operator_ask=approval_relay is None)
+        relay_permission(self.store, run, info, detected=observation['state'] == 'awaiting_approval',
+                         beads=self.beads)
         run['observed_state'] = observation['state']
         self.observe_manager(run)
 
@@ -307,15 +305,13 @@ class Supervisor:
                 native = observation.get('native_session_id')
                 if native:
                     manager['native_session_id'] = native
-                manager['observation'] = observation
+                manager['observation'] = dict(observation, at=self.clock(), pane_alive=True)
                 manager['pane_id'] = manager_info['pane_id']
                 from .permission_relay import observe as relay_permission
-                approval_relay = relay_permission(self.store, dict(
+                relay_permission(self.store, dict(
                     run, native_session_id=manager.get('native_session_id'),
-                    pane_id=manager['pane_id']), manager_info)
-                if observation['state'] == 'awaiting_approval' and manager.get('observed_state') != 'awaiting_approval':
-                    self.report(run, 'blocked', 'Manager needs native approval through Hermes.\n' + observation['summary'],
-                                operator_ask=approval_relay is None)
+                    pane_id=manager['pane_id']), manager_info,
+                    detected=observation['state'] == 'awaiting_approval', beads=self.beads)
                 manager['observed_state'] = observation['state']
             elif not run.get('manager_missing'):
                 run['state'] = 'blocked'
@@ -481,6 +477,9 @@ class Supervisor:
             return
         if run.get('beads', {}).get('issue_id'):
             return  # Native workflow mutations own visible status, never a poll.
+        if (run.get('observed_state') == 'awaiting_approval'
+                or run.get('manager', {}).get('observed_state') == 'awaiting_approval'):
+            return  # Manager Beads own approval routing; no operator heartbeat.
         now = self.clock()
         idle = is_idle(run, self.store)
         summary = run.get('task_summary') or run.get('observation', {}).get('summary', run.get('error', 'Awaiting first observation.'))
@@ -528,7 +527,11 @@ class Supervisor:
                       (id,run_id,text,created_at,state,target) VALUES (?,?,?,?,?,?)''',
                       (key + ':manager', run['id'], text, self.clock(), 'pending', 'manager'))
                 elif kind == 'approval':
-                    self.store.event(run, kind, 'Native approval required: ' + summary, key)
+                    # Native approval is routed by permission_relay to a manager
+                    # Bead. Keep the lifecycle record local: event() would send
+                    # an operator-group approval ask before manager triage.
+                    self.store.db.execute('INSERT OR IGNORE INTO events VALUES (?,?,?,?,?)',
+                                          (key, run['id'], kind, summary, self.clock()))
                 elif kind == 'compacted':
                     run['last_compacted_at'] = self.clock()
                     self.store.event(run, kind, 'Coding context compacted; session ownership and reporting retained.', key)

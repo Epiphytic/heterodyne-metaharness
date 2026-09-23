@@ -26,6 +26,15 @@ the same manager pickup as escalation requests. Approval decisions still pass
 through the signed blocker facade and its existing policy; manager resolution
 cannot grant a native permission or substitute for operator approval.
 
+Native approval observations use `manager_tasks.native_approval`. The request
+freezes the run ID, pane locator, native session, subject, and captured approval
+region. Re-observing the same prompt uses its stable evidence identity and does
+not create another Bead. The supervisor does not send an approval notice to the
+operator group. The one-minute pickup timer claims the manager Bead and steers
+the existing idle manager session. If the manager's own native prompt prevents
+steering, pickup places the Bead on operator hold and sends one escalation with
+the captured region; it does not create a replacement session.
+
 One timer invocation performs at most one eligible-work query per affected run.
 Native Beads claim and policy checks precede durable manager inbox submission.
 Only an existing idle manager receives input. Pending approval, question, missing
@@ -53,6 +62,15 @@ only following their independent probe. Approval requests require their source
 gate's retained resolution and closed state. A dispatch or restart alone is not
 verification. `manager-task evidence RUN BEAD` returns the exact verification and
 request digests to sign.
+
+For native approvals, verification instead requires a fresh post-action pane
+observation that no longer shows the prompt, with the same run, native session,
+pane, and approval evidence. The signed resolution must include the complete
+captured approval region and the exact action taken. The resolver appends the
+signed event, request, and verification to `runs/RUN/approval-log.jsonl` before
+commenting and closing the Bead. The operator receives no message on this path.
+Escalation sends one operator ask containing the full captured region and holds
+the Bead open for a human decision.
 
 Configure `manager_tasks.signers` (public Nostr hex keys), `event_kind` and optional
 `revoked` in harness-config.json. There is no default trusted key, key export or

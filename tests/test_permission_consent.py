@@ -22,7 +22,13 @@ class ConsentTest(unittest.TestCase):
         with self.store.db:
             self.store.save(self.run)
         self.text = 'Would you like to run the following command?\n$ echo safe\nPress enter to confirm or esc to cancel'
-        observe(self.store,self.run,dict(alive=True,pane_id='%1',text=self.text))
+        identity = observe(self.store,self.run,dict(alive=True,pane_id='%1',text=self.text))
+        # Historical delivered parts can still carry consent receipts. New
+        # observations create manager Beads and do not send visible parts.
+        with self.store.db:
+            self.store.db.execute('INSERT INTO outbox(id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)',
+                                  ('old-part','run','aa',self.text,1))
+            self.store.db.execute('INSERT INTO permission_parts VALUES (?,?,?)',('old-part',identity,0))
         row = self.store.db.execute('SELECT * FROM outbox LIMIT 1').fetchone()
         with self.store.db:
             delivered(self.store,Mock(account_id='bb'),row,dict(message_ids_hex=['cc']))

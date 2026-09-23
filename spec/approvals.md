@@ -13,6 +13,10 @@ semantic proof about arbitrary commands. Each unique key durably records a reque
 hash, classification, decision and evidence; a changed request cannot reuse a key.
 No command is executed. This is the manager/harness policy layer: native permission
 prompts remain native, with no typing approval keys or modifying native rules.
+The supervisor's separate native approval relay creates a manager Bead when it
+observes a prompt. A manager can act in the native dialog only under existing
+standing authority, then provide a signed resolution and fresh observation.
+Unknown or dangerous requests route to the operator before any native approval.
 
 Default allows are exact scoped reads: git status --short, git diff --no-ext-diff
 --stat, git log -5 --oneline, git rev-parse HEAD, and sed -n with a numeric print
