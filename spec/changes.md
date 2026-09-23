@@ -29,7 +29,8 @@ matching the tested commit. No remote means blocked-on-infrastructure in Bead
 notes; it is never an imaginary PR or permission to publish publicly. Worker may
 push to an explicitly configured authorized private destination and open review.
 Operator merges; merged evidence requires merge_authority operator and review_ref,
-and the PR commit must be an ancestor of the merged result. Operator updates the
+and the PR commit must be an ancestor of the merged result, or pass the
+[rewritten-merge identity check](merge-identity.md). Operator updates the
 owned checkout to that result before recording/testing it. Final-tested must pin
 that merge SHA. Deployed evidence additionally requires deployment_authority operator,
 applicable true, target, deployed_revision equal to that SHA, result passed and a

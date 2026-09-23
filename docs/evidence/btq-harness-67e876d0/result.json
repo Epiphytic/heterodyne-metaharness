@@ -1,0 +1,13 @@
+{
+  "result": "passed",
+  "full_suite": true,
+  "tests": 449,
+  "skipped": 1,
+  "log_sha256": "d913bc1932dfa4697c37c43245dde70d316b9dfed9fb31bce770973dbdc2474d",
+  "base_commit": "56ac99e8407f284038134938caa7e5106a924fc9",
+  "working_tree": true,
+  "committed": false,
+  "governance": "passed",
+  "diff_check": "passed",
+  "quality_delta": "findings retained; not green"
+}

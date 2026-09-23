@@ -18,9 +18,11 @@ gateway alone does not repair a dead connector. Never restart wn-agent here.
 With a healthy socket, heartbeat age greater than 180 seconds triggers recovery.
 Otherwise validate MARMOT_ALLOWED_USERS as a nonempty list of 64-hex keys; native
 Marmot inbound log lines are already sender-filtered. Read the newest matching
-inbound timestamp; unzoned timestamps use local timezone. Missing/malformed log
-or allowlist is an error. Inbound age strictly greater than --inbound-max-age
-(default 300 seconds, minimum 300) triggers `inbound_inactivity`.
+inbound timestamp across `--gw-log` (gateway.log) and `--agent-log` (agent.log).
+Use the newest valid record from either source; a silent/missing gateway file
+must not hide fresh agent.log ingress. Unzoned timestamps use local timezone.
+No usable timestamp in either source is an error. Inbound age strictly greater
+than --inbound-max-age (default 300 seconds, minimum 300) triggers inactivity.
 
 **Inactivity is not proof of a wedge.** A quiet chat and a wedged subscription
 have identical signals here. This manager-selected policy may restart a healthy
@@ -30,20 +32,28 @@ or activating timers; run it before deployment and assess the inactivity policy.
 
 ## Recovery and audit
 
-Hold an exclusive file lock through assessment and activation. Cooldown is 900
-seconds since a trigger; healthy assessment resets it to zero per original task.
-Only `/usr/bin/systemctl --user start hermes-gw-deploy.timer` may arm recovery.
-No direct gateway restart, retrip timer, unit edits, or .env writes.
+Hold an exclusive file lock through assessment and activation. Cooldown is 3600
+seconds since a trigger; healthy ticks and startup grace do not reset it.
+Read `hermes-gw-deploy.service` ExecMainStartTimestampMonotonic before writing
+the durable activation intent. Re-arm only the sanctioned timer with explicit
+`systemctl --user stop hermes-gw-deploy.timer`, then `start` of the same timer.
+No direct gateway restart, wn-agent restart, unit edits or .env writes.
 
-Append and fsync intent before arming; persist pending intent atomically with
-parent-directory fsync. Append result with actual exit code afterward. Each has
-activation ID, epoch, reason and available evidence timestamps. Intent records
-have armed_timer=false; only confirmed successful command return records true.
-The log is append-only before/after evidence for connector fixes. Healthy ticks
-append nothing and print nothing. A timeout/crash leaves an unresolved intent
-and blocks another arm until manager reconciliation. Failed command returns are
-logged and cooldown-limited. No uncertain automatic retry.
+Append/fsync intent and atomically persist pending state before either command.
+A command failure/timeout or interruption retains uncertain intent for operator
+reconciliation, never automatic repetition. Successful stop/start records
+`armed`, **not successful recovery**. On subsequent cron ticks, verify a strictly
+new service execution marker, completed service state, Result=success and
+ExecMainStatus=0. Record actual success/failure in the audit log before clearing
+pending state. An old marker or still-running service is pending; after 300
+seconds it is an error requiring reconciliation. Polling here is deterministic
+cron observation, with no model and no synchronous 90-second wait.
 
-Success prints one cause line plus the fixed timer/replay notice. Errors exit 1
-with marmot-wedge-watch ERROR on stderr, without secret values or message text.
-Manager owns installation, cron, live fault injection and verified deployment.
+Healthy ticks print nothing. Repeated error notices are globally limited to one
+per hour in a separate durable error checkpoint; suppressed ticks return zero
+without clearing uncertain activation state. Read-only --check is not suppressed.
+Error output contains no secret or message content.
+Manager owns script installation, cron and live verification. Native logging
+regression exercises CLI initialization followed by gateway mode across fresh
+processes using an isolated home; it does not assert a production restart.
+Deployment checks must retain actual execution and log-freshness evidence.

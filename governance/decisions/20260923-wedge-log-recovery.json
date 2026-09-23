@@ -1,0 +1,18 @@
+{
+  "id": "20260923-wedge-log-recovery",
+  "proposal": "Repair btq-6h8 watchdog log-source blindness using agent.log alongside gateway.log; explicitly stop/start the sanctioned recovery timer and verify a new successful service execution; preserve durable intent and one-hour notice damping; test native logging across fresh processes without production service changes.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-23T05:53:35.474605+00:00",
+      "by": "persistent maintenance worker"
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-23T05:53:35.474605+00:00",
+      "by": "operator authorization relayed by manager",
+      "proposal_sha256": "79baf3e82cefdc2d0c8b8b1149e14020f91797f4a2a9abd8201951ffb8aed2ec",
+      "evidence": "Existing btq-6h8 repair scope; manager directed claim and implementation in persistent conversation. No new user approval message or deployment result claimed."
+    }
+  ]
+}

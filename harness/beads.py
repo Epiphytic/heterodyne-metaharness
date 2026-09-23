@@ -71,6 +71,8 @@ class Beads:
         from .task_gates import check
         try:
             check(queue, issue)
+            from .task_blockers import check_policies
+            check_policies(issue, self.config)
         except BeadsError:
             return False
         from .task_delivery import contract, members, prior_history

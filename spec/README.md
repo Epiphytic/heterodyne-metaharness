@@ -49,3 +49,11 @@ Native observation and duplicate reporting: [status](status.md).
 - [On-demand channel status](channel-status.md)
 
 - [Independent evidence reviews](reviews.md)
+
+- [Signed blocker Beads](blockers.md)
+- [PR-watch reconciliation](pr-watch.md)
+- [Secondary workers](secondary-workers.md)
+
+- [Quota monitoring](usage-monitor.md)
+
+- [Manager escalation and approval pickup](manager-tasks.md)

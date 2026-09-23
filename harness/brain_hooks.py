@@ -35,10 +35,10 @@ def session_key(store, provider, payload):
         role = os.environ.get('HERMES_WORKSTREAM_ROLE', 'worker')
         if owner.endswith('-manager'):
             owner, role = owner[:-8], 'manager'
-        if role not in ('worker', 'manager'):
+        if role not in ('worker', 'manager', 'secondary'):
             raise ValueError('Invalid managed role')
         run = store.get(owner)
-        target = run if role == 'worker' else run['manager']
+        target = run if role == 'worker' else run[role]
         if target['agent'] != provider:
             raise ValueError('Provider does not match managed owner')
         if provider != 'hermes' and Path(payload.get('cwd', '')).resolve() != Path(target['workdir']).resolve():

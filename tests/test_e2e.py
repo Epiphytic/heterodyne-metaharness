@@ -106,7 +106,8 @@ time.sleep(60)
                 pending = store.db.execute('SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL').fetchone()[0]
                 self.assertEqual(pending, 0)
                 self.assertTrue(any('Review begun' in text for _, text in transport.messages))
-                recovered.stop(saved)
+                recovered.stop(saved, dict(run_id=saved['id'], action='stop', approved_by='operator',
+                    response='Stop fixture', evidence_ref='fixture:stop', force=False, open_beads=[]))
                 self.assertTrue(tmux.inspect(unrelated)['alive'])
                 self.assertTrue(tmux.inspect(saved)['missing'])
                 self.assertTrue(tmux.inspect(saved['manager'])['missing'])

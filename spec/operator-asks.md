@@ -11,7 +11,7 @@ An existing state report can instead carry the explicit `event --operator-ask` f
 This is routing metadata, never native approval authority. Approval and permission
 relay producers register their asks automatically; multipart evidence stays intact.
 
-Each ask retains its stable identity, exact run/group, short summary, delivery and
+Each ask retains its stable identity, exact run/group, full original body, uncapped summary, delivery and
 resolution evidence. Reusing a key with changed text or routing fails. Open asks
 survive restart and native session changes. Use `workstream ask NAME list` and
 `workstream ask NAME resolve ID --evidence-file PATH` after verifying an answer.
@@ -32,13 +32,21 @@ An uncertain retry reuses that text and idempotency key, even if membership chan
 Each subsequent distinct notice resolves membership anew when it contains an ask.
 The outbox owns retries and restores the transport deadline after an attempt.
 
-Later text in the same chat ends with a short labeled reminder of outstanding
-delivered asks. It does not resend their original bodies. The reminder is the final
-paragraph of that notice, so queued statuses cannot overtake a separate reminder.
-Show at most eight summaries plus the remaining count and inspection command.
-Existing status dedup runs before rendering; reminders add no timestamps/randomness
-to defeat dedup. Reactions do not constitute new text. This ordering covers harness
-outbox writers; unrelated chat senders are outside its ordering guarantee.
+Operator deliveries contain one ask each, with its full text and paragraph
+structure; no ask truncation or stacked reminder footer is permitted. Pure
+status messages do not carry other asks. Brain-plugin stamps are stripped from
+the operator surface. Ask and Bead identifiers are optional; when present their
+values appear only in a final References line, with numbered placeholders in
+the body. Admin mentions follow content and precede that reference line.
+
+Reminders are separate durable outbox events for one logical ask, containing
+its original body (all original parts), never a truncated summary. At most one
+reminder is queued per delivery poll, only for an idle destination, at least an
+hour after delivery or the previous reminder. Ordinary queued traffic has
+priority. Resolved asks have unattempted reminders cancelled; attempted uncertain
+sends retain frozen content. A legacy frozen render violating this contract
+fails closed for delivery reconciliation rather than changing an uncertain
+payload under the same key. Raw ask evidence remains unchanged.
 
 Hourly backstop questions must use `--hourly-backstop`, which resolves the existing
 maintenance workstream and verifies its canonical `belthanior-maintenance` group

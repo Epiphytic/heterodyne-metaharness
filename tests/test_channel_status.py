@@ -72,6 +72,17 @@ two'''
         self.assertEqual(data['tasks'][-1]['view'],'blocked')
         self.assertFalse(data['tasks'][-1]['eligible'])
 
+    def test_terminal_runs_with_open_beads_remain_visible(self):
+        for state in ('completed', 'stopped', 'archived'):
+            self.run['state'] = state
+            self.db.execute('UPDATE runs SET state=?,data=?', (state, json.dumps(self.run)))
+            self.db.commit()
+            self.assertEqual(status.snapshot(self.home, 'aa')['run']['state'], state)
+            self.assertEqual(status.snapshot(self.home, 'bb')['known'], ['mdk'])
+        self.db.execute('DELETE FROM task_current WHERE issue_id IN ("active", "pending")')
+        self.db.commit()
+        self.assertEqual(status.snapshot(self.home, 'aa'), {'known': []})
+
     def test_capture_only_owned_pane_read_commands_and_25_lines(self):
         output = ['HERMES_WORKSTREAM_RUN=run\n','%7\t0\n','\n'.join(map(str,range(60)))]
         with patch.object(status.subprocess,'run',side_effect=[Mock(stdout=v) for v in output]) as proc:

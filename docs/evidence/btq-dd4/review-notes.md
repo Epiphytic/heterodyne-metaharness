@@ -1,0 +1,5 @@
+Validation uses the assigned task checkout based on 492464a. Canonical main is newer (48fbd81 at inspection): its delivery selection has review holds. Merge must preserve held-review exclusions while applying reminder priority; no canonical files were replaced. Full suite and governance checks apply to this task checkout.
+
+Ripwire affected mapping reaches 45 test files; the entire suite is run. Quality delta exits 2: dynamic unittest entry points/mock methods and the regex callback are reported as dead code; churn and expanded test-class size are also flagged. The redundant status/group test was consolidated. No new production complexity/duplication finding remains. These static findings are retained, not represented as a passing quality gate.
+
+Legacy frozen messages containing prohibited content fail closed for delivery reconciliation to preserve uncertain-send identity. Original bodies remain in outbox; old truncated summaries are not used for reminders. No live sends, merge, or deployment performed.

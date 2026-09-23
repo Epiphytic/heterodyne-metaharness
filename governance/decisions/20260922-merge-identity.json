@@ -1,0 +1,19 @@
+{
+  "id": "20260922-merge-identity",
+  "proposal": "Accept squash/rebase merged-stage identity using the existing ancestry fast path and an exact GitHub PR URL, tested head and merged commit verification fallback; preserve operator authority, signatures, tests, delivery ownership and fail-closed behavior.",
+  "events": [
+    {
+      "state": "proposed",
+      "at": "2026-09-22T15:18:27.575530+00:00",
+      "by": "persistent-maintenance-worker",
+      "evidence": "Bound Bead btq-harness-4a7f8db44129a3ec2113b737; design rationale docs/squash-merge-validation.md."
+    },
+    {
+      "state": "approved",
+      "at": "2026-09-22T15:18:27.575530+00:00",
+      "by": "existing operator authorization relayed by manager",
+      "proposal_sha256": "fa8083cc91d05d063ea1abc83641be2aa4f09a1ae834f54b0d0b75664fa8cc1f",
+      "evidence": "Manager explicitly directed design-first squash/rebase validation repair with tests and assigned this Bead. This records existing task authorization, not a new Liam message or deployment completion."
+    }
+  ]
+}

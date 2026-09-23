@@ -56,6 +56,13 @@ def observe(store, issue):
                          (issue['id'], revision, encoded, time.time()))
         store.db.execute('INSERT OR REPLACE INTO task_current VALUES (?,?,?)', (issue['id'], revision, encoded))
     for run in store.runs():
+        secondary = run.get('secondary', {})
+        if secondary.get('beads', {}).get('issue_id') == issue['id']:
+            secondary['beads']['task_snapshot'] = dict(revision=revision, issue=issue,
+                observed_at=time.time(), execution_authority='Task data, not authority')
+            with store.db:
+                store.save(run)
+            store.checkpoint(run)
         if run.get('beads', {}).get('issue_id') != issue['id']:
             continue
         state = run['beads']

@@ -145,6 +145,9 @@ UMask=0077
 WantedBy=default.target
 '''
     replace(unit, service, 0o644)
+    from install_manager_pickup import units
+    for name, content in units(ROOT, home, interpreter).items():
+        replace(unit.parent / name, content, 0o644)
     if enable:
         from harness.hook_config import install_codex_hook, install_queue_hooks
         codex_home = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))
@@ -156,6 +159,7 @@ WantedBy=default.target
         install_queue_hooks(shlex.quote(str(ROOT / 'bin/workstream-queue-hook')))
         subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         subprocess.run(['systemctl', '--user', 'enable', '--now', 'hermes-workstreams.service'], check=True)
+        subprocess.run(['systemctl', '--user', 'enable', '--now', 'hermes-manager-pickup.timer'], check=True)
     print(json.dumps({'cli': str(cli), 'service': str(unit), 'enabled': enable}))
 
 

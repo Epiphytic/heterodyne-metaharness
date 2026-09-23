@@ -35,20 +35,22 @@ def snapshot(home, group):
     with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=.2) as db:
         db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         db.execute('BEGIN')
-        rows = db.execute("SELECT group_id,data FROM runs WHERE state NOT IN ('completed','stopped','archived') LIMIT 201").fetchall()
+        rows = db.execute('SELECT issue_id,data FROM task_current LIMIT 5001').fetchall()
+        if len(rows) > 5000:
+            raise ValueError('Cached queue exceeds bounded view')
+        cache = {key: json.loads(data) for key, data in rows}
+        rows = db.execute("SELECT group_id,data FROM runs LIMIT 201").fetchall()
         if len(rows) > 200:
-            raise ValueError('Too many active workstreams')
+            raise ValueError('Too many workstreams for bounded status view')
         runs = [(str(g or '').lower(), json.loads(data)) for g, data in rows]
+        runs = [(g, run) for g, run in runs if run['state'] not in ('completed', 'stopped', 'archived') or any(
+            i.get('status') != 'closed' and routed(run, i) for i in cache.values())]
         matches = [run for g, run in runs if g and g == group.lower()]
         if len(matches) > 1:
             raise ValueError('Ambiguous channel ownership')
         if not matches:
             return {'known': sorted({clean(r['name']) for _, r in runs})}
         run = matches[0]
-        rows = db.execute('SELECT issue_id,data FROM task_current LIMIT 5001').fetchall()
-        if len(rows) > 5000:
-            raise ValueError('Cached queue exceeds bounded view')
-        cache = {key: json.loads(data) for key, data in rows}
         selected = sorted((i for i in cache.values() if routed(run, i)), key=order_key)
         progress = build(run, selected, cache.__getitem__)
         for row in progress['tasks']:

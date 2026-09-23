@@ -1,0 +1,6 @@
+Operation: git add harness spec tests requirements-blockers.txt docs/bead-forward-workflow.md
+Outcome: fatal: Unable to create '/home/operator/repos/harness-improvements/.git/worktrees/checkout3/index.lock': Read-only file system
+Observed base HEAD: 56ac99e8407f284038134938caa7e5106a924fc9
+Classification: class b, upfront worker filesystem permission provision mismatch.
+Effect: no staging or implementation commit; no push, PR or lifecycle stage claimed.
+Manager reconciliation is required. No permission escalation or metadata relocation attempted.

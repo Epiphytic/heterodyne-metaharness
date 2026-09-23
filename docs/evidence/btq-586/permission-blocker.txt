@@ -1,0 +1,4 @@
+Attempt: git add docs/usage-monitor.md docs/evidence/btq-586 harness/usage deploy tests/test_usage_monitor.py tests/fixtures/usage spec/usage-monitor.md spec/README.md
+Result: fatal: Unable to create '/home/operator/repos/harness-improvements/.git/worktrees/checkout4/index.lock': Read-only file system
+No permission escalation, native metadata relocation, or gate bypass attempted.
+Manager must commit/push from the authorized context.

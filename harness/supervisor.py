@@ -10,7 +10,7 @@ from .agents import Adapter
 from .store import TERMINAL
 from .workspace import prepare
 from .marmot import MarmotError, UncertainOutcome
-from .beads import Beads
+from .beads import Beads, BeadsError
 from .capabilities import apply_capabilities
 
 REPORT_INTERVAL = 240
@@ -39,7 +39,7 @@ class Supervisor:
                              operator_ask=operator_ask)
             self.store.save(run)
 
-    def start(self, name, repo, agent, prompt='', group=None, agent_config=None, parent_session=None):
+    def start(self, name, repo, agent, prompt='', group=None, agent_config=None, parent_session=None, persistent=True):
         if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}', name):
             raise ValueError('name must be 1-64 letters, numbers, underscores or hyphens')
         agent = Adapter(agent).name
@@ -61,7 +61,7 @@ class Supervisor:
                    tmux_session='ws-' + identity, created_at=self.clock(),
                    boot_id=self.boot, prompt=prompt, prompt_state='pending',
                    config=agent_config or {}, group_id=group, last_report_at=self.clock(),
-                   resume_required=False, recovery_count=0)
+                   resume_required=False, recovery_count=0, persistent=persistent)
         run['session_names'] = {'worker': f'workstream-{name}-worker',
                                 'manager': f'workstream-{name}-manager'}
         run['parent_hermes_session_id'] = parent_session or os.environ.get('HERMES_SESSION_ID')
@@ -256,6 +256,15 @@ class Supervisor:
             self.report(run, 'blocked', f'Recovery blocked: {exc}')
         self.persist(run)
 
+    def observe_command_exit(self, run, info):
+        if info.get('exit_code') is None or run.get('command_exit_reported'):
+            return  # Exit status can arrive after pane_dead; report it only once.
+        run['command_exit_reported'] = True
+        run['task_state'] = 'completed' if info['exit_code'] == 0 else 'failed'
+        run['state'] = 'idle' if run['task_state'] == 'completed' else 'failed'
+        self.report(run, run['task_state'],
+                    f"Command exited with status {info['exit_code']}. {info['text'][-1000:]}")
+
     def observe(self, run):
         from .status import observe_pane
         info = self.tmux.inspect(run)
@@ -264,10 +273,7 @@ class Supervisor:
             if run['state'] in ('starting', 'blocked', 'interrupted', 'failed'):
                 return
             if run['agent'] == 'command' and not info.get('missing'):
-                if info.get('exit_code') is None:
-                    return  # tmux can publish pane_dead before the wait status.
-                run['state'] = 'completed' if info.get('exit_code') == 0 else 'failed'
-                self.report(run, run['state'], f"Command exited with status {info.get('exit_code')}. {info['text'][-1000:]}")
+                self.observe_command_exit(run, info)
             else:
                 run['state'] = 'interrupted'
                 self.report(run, 'agent-crashed' if info.get('dead') else 'interrupted',
@@ -317,7 +323,8 @@ class Supervisor:
             run['manager_missing'] = not manager_info['alive']
 
     def submit(self, run, text, target='manager', message_id=None):
-        destination = run if target == 'worker' else self.manager_run(run)
+        from .secondary_worker import submission_target
+        destination = submission_target(self, run, target)
         key = message_id or str(uuid.uuid4())
         with self.store.db:
             self.store.db.execute('INSERT OR IGNORE INTO inbox(id,run_id,text,created_at,state,target) VALUES (?,?,?,?,?,?)',
@@ -326,6 +333,8 @@ class Supervisor:
         if row['run_id'] != run['id'] or row['text'] != text or row['target'] != target:
             raise ValueError('message identity already belongs to different input')
         if row['state'] != 'pending':
+            return
+        if key.startswith(('babysitter-repair:', 'manager-task:')) and not self.inbox_ready(run, row):
             return
         if destination.get('observed_state') == 'awaiting_approval':
             raise ValueError('Native approval pending; resolve through Hermes before steering')
@@ -353,14 +362,34 @@ class Supervisor:
         self.persist(run)
 
     def drain_inbox(self, run):
-        rows = self.store.db.execute("SELECT * FROM inbox WHERE run_id=? AND state='pending' ORDER BY CASE WHEN id LIKE 'task-update:%' THEN 2 WHEN id LIKE 'continuation:%' OR id LIKE 'babysitter-idle:%' THEN 1 ELSE 0 END, created_at LIMIT 1", (run['id'],)).fetchall()
+        rows = self.store.db.execute("""SELECT * FROM (
+            SELECT inbox.*, ROW_NUMBER() OVER (PARTITION BY target ORDER BY
+                CASE WHEN id LIKE 'babysitter-repair:%' OR id LIKE 'manager-task:%' THEN 3
+                     WHEN id LIKE 'task-update:%' THEN 2
+                     WHEN id LIKE 'continuation:%' OR id LIKE 'babysitter-idle:%' THEN 1 ELSE 0 END,
+                created_at) AS target_order
+            FROM inbox WHERE run_id=? AND state='pending')
+            WHERE target_order=1 ORDER BY created_at""", (run['id'],)).fetchall()
         for row in rows:
             if not self.inbox_ready(run, row):
                 continue
             self.submit(run, row['text'], target=row['target'], message_id=row['id'])
+            break
 
     def inbox_ready(self, run, row):
         from .continuation import safe, awaiting_start
+        if row['id'].startswith('manager-task:'):
+            from .manager_tasks import delivery_ready, fresh_available
+            return delivery_ready(self.store, run, row, self.beads) and fresh_available(self, run)
+        if row['id'].startswith('babysitter-repair:'):
+            from .babysitter_resolution import ready
+            with self.store.db:
+                return ready(self.store, run, row)
+        from .secondary_worker import submission_target
+        try:
+            submission_target(self, run, row['target'])
+        except BeadsError:
+            return False
         if row['id'].startswith('babysitter-idle:'):
             from .babysitter_queue import nudge_key
             if row['id'] != nudge_key(run):
@@ -387,7 +416,7 @@ class Supervisor:
                 and run.get('observed_state') != 'awaiting_approval')
 
     def recover_intents(self, run):
-        targets = [run] + ([run['manager']] if run.get('manager') else [])
+        targets = [run] + [run[role] for role in ('manager', 'secondary') if run.get(role)]
         uncertain = [target for target in targets if target.get('launch_intent')]
         if uncertain:
             for target in uncertain:
@@ -413,6 +442,10 @@ class Supervisor:
         else:
             self.observe(run)
             self.recover_dead_pane(run)
+        from .pr_watch import tick as watch_tick
+        watch_tick(self, run, self.clock())
+        from .secondary_worker import observe as observe_secondary
+        observe_secondary(self, run)
         self.lifecycle(run)
         from .review_dispatch import tick as review_tick
         review_tick(self.store, run, self.clock(), self.config)
@@ -519,11 +552,10 @@ class Supervisor:
             finally:
                 self.heartbeat(run)
 
-    def stop(self, run):
-        # State is durable before killing anything: restart will not resurrect this run.
-        run['state'] = 'stopped'
-        self.report(run, 'stopped', 'Stopped. Worktree, branch, group and conversation history preserved.', run['id'] + ':stopped')
-        self.tmux.stop(run)
-        if run.get('manager'):
-            self.tmux.stop(run['manager'])
-        self.persist(run)
+    def stop(self, run, consent=None, force=False):
+        from .run_closure import terminate
+        return terminate(self, run, 'stop', consent, force)
+
+    def close(self, run, consent=None, force=False):
+        from .run_closure import terminate
+        return terminate(self, run, 'close', consent, force)

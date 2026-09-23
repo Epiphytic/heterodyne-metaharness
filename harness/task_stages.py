@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import subprocess
 import time
 from urllib.parse import urlparse
 
@@ -50,13 +51,25 @@ def validate_evidence(run, stage, evidence, history, require_head=True):
     elif stage == 'merged':
         if evidence.get('merge_authority') != 'operator' or not evidence.get('review_ref'):
             raise BeadsError('Operator merge/review evidence required; workers do not merge')
-        git(run['workdir'], 'merge-base', '--is-ancestor', by_stage['pr-open']['evidence']['commit'], commit)
+        validate_merge(run, evidence, by_stage['pr-open']['evidence'])
     elif stage == 'deployed':
         deployment_evidence(evidence, by_stage['final-tested']['evidence']['commit'])
     elif stage == 'close-ready':
         if commit != by_stage['deployed']['evidence']['commit']:
             raise BeadsError('Close-ready requires the deployed tested commit')
     return commit
+
+
+def validate_merge(run, evidence, submitted):
+    """Preserve ancestry fast path; verify rewritten history via exact PR identity."""
+    try:
+        git(run['workdir'], 'merge-base', '--is-ancestor', submitted['commit'], evidence['commit'])
+        return
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 1:
+            raise BeadsError('Cannot inspect merged ancestry; verify local Git objects') from exc
+    from .merge_identity import verify_github
+    verify_github(run['workdir'], evidence, submitted)
 
 
 def deployment_evidence(evidence, commit):
@@ -89,6 +102,8 @@ def record(store, beads, run, issue_id, stage, evidence):
         raise BeadsError('Only the bound current owner can record task lifecycle')
     from .task_gates import check
     check(queue, issue)
+    from .task_blockers import check_policies
+    check_policies(issue, beads.config)
     metadata = dict(issue.get('metadata') or {})
     history = list(metadata.get('harness_lifecycle') or [])
     digest = hashlib.sha256(json.dumps([stage, evidence], sort_keys=True).encode()).hexdigest()

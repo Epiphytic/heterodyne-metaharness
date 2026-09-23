@@ -1,6 +1,7 @@
 """Durable operator asks and send-time reminders; contract: spec/operator-asks.md."""
 import hashlib
 import json
+import re
 import time
 
 ASK_KINDS = {'operator_question', 'approval', 'awaiting_resume'}
@@ -24,7 +25,6 @@ def register(store, row, summary, ask_id=None):
     """Caller owns the transaction; one logical ask may span several parts."""
     initialize(store.db)
     identity = ask_id or row['id']
-    summary = ' '.join(summary.split())[:400]
     expected = (row['run_id'], row['group_id'], summary)
     prior = store.db.execute('SELECT run_id,group_id,summary FROM operator_asks WHERE id=?',
                              (identity,)).fetchone()
@@ -73,36 +73,92 @@ def resolve(store, run, identity, evidence):
     return {'ask_id': identity, 'resolved': True}
 
 
-def prepare(store, transport, row):
-    """Freeze rendered content before network I/O; retry never changes recipients.
+# Restrict removal to known stamps; retain surrounding prose and evidence.
+_STAMP = re.compile(r'\[brain-notice:[^\]\r\n]*\]|\[worker brain context received\]', re.I)
+_REFERENCE = re.compile(r'(?<![\w-])(?:operator-ask:[a-zA-Z0-9_-]+|ask:[a-fA-F0-9]{8,}|[a-fA-F0-9]{64}|btq-[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)(?![\w-])')
 
-    Reminders are the final paragraph of the new notice, not another unbounded
-    stream of messages. Status dedup still runs before enqueue. Native replies
-    and unrelated group writers cannot be ordered by this outbox.
-    """
+
+def operator_text(text, mentions=''):
+    """Keep complete prose; move opaque identifiers to the final reference line."""
+    text = _STAMP.sub('', text).strip()
+    # Our already-rendered footer is stable across retries.
+    body, separator, footer = text.rpartition('\n\nReferences: ')
+    if separator:
+        text = body
+    references = []
+
+    def reference(match):
+        value = match.group()
+        if value not in references:
+            references.append(value)
+        return f'[reference {references.index(value) + 1}]'
+
+    text = _REFERENCE.sub(reference, text)
+    if references:
+        extra = '; '.join(f'{i}: {value}' for i, value in enumerate(references, 1))
+        footer = (footer + '; ' if separator else '') + extra
+    if mentions:
+        text += '\n\n' + mentions
+    if separator or references:
+        text += '\n\nReferences: ' + footer
+    return text
+
+
+def enqueue_reminder(store, now):
+    """Queue one hourly reminder, only after ordinary destination traffic drains."""
+    initialize(store.db)
+    with store.db:
+        # A resolved unattempted reminder has no uncertain network effect.
+        store.db.execute("""DELETE FROM outbox WHERE id LIKE 'ask-reminder:%'
+            AND attempts=0 AND delivered_at IS NULL AND id IN
+            (SELECT p.event_id FROM operator_ask_parts p JOIN operator_asks a
+             ON a.id=p.ask_id WHERE a.resolved_at IS NOT NULL)""")
+        ask = store.db.execute("""SELECT a.* FROM operator_asks a
+            WHERE a.resolved_at IS NULL AND a.delivered_at<=?
+            AND NOT EXISTS (SELECT 1 FROM outbox q WHERE q.group_id=a.group_id
+                            AND q.delivered_at IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM operator_ask_parts p JOIN outbox q
+                ON q.id=p.event_id WHERE p.ask_id=a.id
+                AND q.id LIKE 'ask-reminder:%' AND q.created_at>?)
+            ORDER BY COALESCE((SELECT MAX(q.created_at) FROM operator_ask_parts p
+                JOIN outbox q ON q.id=p.event_id WHERE p.ask_id=a.id
+                AND q.id LIKE 'ask-reminder:%'), a.delivered_at), a.id LIMIT 1""",
+            (now - 3600, now - 3600)).fetchone()
+        if ask is None:
+            return
+        parts = store.db.execute("""SELECT q.text FROM operator_ask_parts p
+            JOIN outbox q ON q.id=p.event_id WHERE p.ask_id=?
+            AND q.id NOT LIKE 'ask-reminder:%' ORDER BY q.created_at,q.rowid""",
+            (ask['id'],)).fetchall()
+        if not parts:
+            return
+        identity = 'ask-reminder:' + hashlib.sha256(
+            json.dumps([ask['id'], now]).encode()).hexdigest()
+        text = 'Reminder: operator response pending.\n\n' + '\n\n'.join(p['text'] for p in parts)
+        store.db.execute('''INSERT INTO outbox
+            (id,run_id,group_id,text,created_at) VALUES (?,?,?,?,?)''',
+            (identity, ask['run_id'], ask['group_id'], text, now))
+        store.db.execute('INSERT INTO operator_ask_parts VALUES (?,?)', (identity, ask['id']))
+
+
+def prepare(store, transport, row):
+    """Freeze one message before network I/O; never append unrelated asks."""
     initialize(store.db)
     account = getattr(transport, 'account_id', '')
     prior = store.db.execute('SELECT account_id,text FROM outbox_rendered WHERE id=?', (row['id'],)).fetchone()
     if prior:
         if prior['account_id'] != account:
             raise ValueError('Rendered message account changed; reconcile before delivery')
+        if ('Still awaiting your answer:' in prior['text'] or
+                operator_text(prior['text']) != prior['text']):
+            raise ValueError('Legacy rendered ask requires delivery reconciliation')
         return prior['text']
     own = store.db.execute('SELECT ask_id FROM operator_ask_parts WHERE event_id=?', (row['id'],)).fetchone()
-    outstanding = store.db.execute('''SELECT id,summary FROM operator_asks
-        WHERE group_id=? AND resolved_at IS NULL AND delivered_at IS NOT NULL
-        ORDER BY created_at,id''', (row['group_id'],)).fetchall()
-    others = [ask for ask in outstanding if not own or ask['id'] != own[0]]
-    text = row['text']
-    if own or others:
-        # Fail closed if lookup fails; no untagged send or operator-only fallback.
+    tags = ''
+    if own:
+        # Fail closed on lookup failure; never guess admin recipients.
         tags = ' '.join('@' + reference for reference in transport.admin_references(row['group_id']))
-        if own:
-            text = tags + '\n' + text
-    if others:
-        reminders = '\n'.join(f'- {ask["summary"]} [{ask["id"]}]' for ask in others[:8])
-        if len(others) > 8:
-            reminders += f'\n{len(others)-8} further open asks; inspect workstream ask <name> list.'
-        text += '\n\n' + tags + '\nStill awaiting your answer:\n' + reminders
+    text = operator_text(row['text'], tags)
     with store.db:
         store.db.execute('INSERT INTO outbox_rendered VALUES (?,?,?)', (row['id'], account, text))
     return text
@@ -145,7 +201,7 @@ def handle_cli(args, store):
                                                  (run['id'],))]
 
 
-def babysitter_notice(pinfo, text, *, operator_ask):
+def babysitter_notice(pinfo, text, *, operator_ask, category=None, healthy=False):
     """Installed adapter: retain failed sends in the shared outbox, never local seen-only state."""
     from .store import Store
     store = Store()
@@ -154,9 +210,15 @@ def babysitter_notice(pinfo, text, *, operator_ask):
             run = store.get(pinfo['run_id'])
             if run.get('group_id') != pinfo['group']:
                 raise ValueError('Babysitter group binding changed; refresh observation')
+            from .cli import load_config
+            if load_config(store.root.parent).get('beads', {}).get('enabled'):
+                from .manager_notices import record
+                result = record(store, run, text, operator_ask=operator_ask, category=category, healthy=healthy)
+                if result:
+                    return result
             key = 'babysitter:' + hashlib.sha256(json.dumps([run['id'], text]).encode()).hexdigest()
             if operator_ask:
-                return enqueue(store, run, text, key, text[:200])
+                return enqueue(store, run, text, key, text)
             with store.db:
                 store.event(run, 'babysitter_status', text, key)
             return {'event_id': key, 'queued': True}

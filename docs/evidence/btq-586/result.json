@@ -1,0 +1,15 @@
+{
+  "task": "btq-586",
+  "base": "492464ad860193c396fb6c1a67665d20ff33c49e",
+  "full_suite": true,
+  "result": "passed",
+  "tests": 420,
+  "skipped": 1,
+  "command": "env -u PYTHONPATH -u HERMES_WORKSTREAM_RUN -u HERMES_WORKSTREAM_ROLE -u BTQ_SESSION_ID python3 -m unittest discover -s tests -q",
+  "log_sha256": "cc86da9e6318687e0c6edc7745b2085e83529262ecf8afe7062342edf0a87223",
+  "targeted_tests": 15,
+  "governance": "passed",
+  "commit": null,
+  "delivery_blocker": "git common worktree metadata is read-only",
+  "deployed": false
+}

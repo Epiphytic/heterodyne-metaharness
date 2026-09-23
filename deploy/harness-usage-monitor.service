@@ -1,0 +1,12 @@
+[Unit]
+Description=Harness LLM quota monitor
+
+[Service]
+Type=oneshot
+# Manager installs into a stable checkout and selects the host Python environment.
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m harness.usage.monitor
+WorkingDirectory=%h/repos/hermes-workstream-harness
+Environment=PYTHONPATH=%h/repos/hermes-workstream-harness:%h/.hermes/hermes-agent
+Environment=PYTHONDONTWRITEBYTECODE=1
+TimeoutStartSec=9min
+UMask=0077

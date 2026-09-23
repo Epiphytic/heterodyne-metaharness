@@ -11,6 +11,22 @@ FIELD = 'harness_gates'
 KINDS = ('design', 'merge', 'deployment', 'external')
 
 
+def metadata(issue):
+    """Decode only known gate objects; leave unknown metadata and scope bytes alone."""
+    from .blocker_receipts import decode
+    result = dict(issue.get('metadata') or {})
+    for key in (FIELD, 'harness_gate', 'harness_gate_resolution', 'harness_blocker_decision'):
+        if key not in result:
+            continue
+        value = result[key]
+        if isinstance(value, str):
+            value = decode(value)
+        if not isinstance(value, dict):
+            raise BeadsError('Malformed gate metadata: ' + key)
+        result[key] = value
+    return result
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -19,10 +35,10 @@ def scope(issue):
     """Exclude execution receipts and gate edges, retain task requirements and routing."""
     fields = ('title', 'description', 'notes', 'acceptance_criteria', 'design', 'spec_id', 'labels')
     value = {key: issue.get(key) for key in fields}
-    metadata = issue.get('metadata') or {}
-    value['metadata'] = {k: v for k, v in metadata.items() if k not in
+    fields_metadata = metadata(issue)
+    value['metadata'] = {k: v for k, v in fields_metadata.items() if k not in
                          (FIELD, 'harness_lifecycle', 'harness_delivery_artifact', 'harness_queue_order')}
-    gates = metadata.get(FIELD, {})
+    gates = fields_metadata.get(FIELD, {})
     value['dependencies'] = sorted((e['id'], e.get('dependency_type'))
                                  for e in issue.get('dependencies', []) if e['id'] not in gates)
     return digest(value)
@@ -31,7 +47,7 @@ def scope(issue):
 def write(queue, issue, key, value):
     queue.bd('update', issue['id'], '--set-metadata', key + '=' + json.dumps(value))
     fresh = queue.show(issue['id'])
-    if fresh.get('metadata', {}).get(key) != value:
+    if metadata(fresh).get(key) != value:
         raise BeadsError('Gate write uncertain; inspect and replay exact request')
     return fresh
 
@@ -41,6 +57,7 @@ def create(queue, run, plan):
     if isinstance(plan, dict):
         plan = dict(plan)
         supersedes = plan.pop('supersedes', None)
+        blocker = plan.pop('blocker', None)
     else:
         supersedes = None
     if not isinstance(plan, dict) or set(plan) != required or not all(
@@ -50,13 +67,17 @@ def create(queue, run, plan):
     if issue.get('status') == 'closed':
         raise BeadsError('Cannot gate a closed task')
     key = identity(run, 'gate:' + issue['id'] + ':' + plan['key'])
-    bindings = dict((issue.get('metadata') or {}).get(FIELD, {}))
+    bindings = dict(metadata(issue).get(FIELD, {}))
     if supersedes is not None:
         old = bindings.get(supersedes)
         if (not old or old['kind'] != plan['kind'] or supersedes == key
                 or any(b.get('supersedes') == supersedes for k, b in bindings.items() if k != key)):
             raise BeadsError('Supersession requires one existing same-kind gate')
+        if old.get('blocker') and not blocker:
+            raise BeadsError('Signed blocker requires a signed replacement')
     binding = dict(plan, issue_id=issue['id'], scope=scope(issue), version=1)
+    if blocker is not None:
+        binding['blocker'] = blocker
     if supersedes is not None:
         binding['supersedes'] = supersedes
     if key in bindings and bindings[key] != binding:
@@ -69,7 +90,7 @@ def create(queue, run, plan):
         queue.bd('create', '--id', key, '--type', 'gate', '--title', 'Gate: ' + plan['kind'],
                  '--description', plan['reason'], '--metadata', json.dumps({'harness_gate': binding}))
     gate = queue.show(key)
-    if gate.get('issue_type') != 'gate' or gate.get('metadata', {}).get('harness_gate') != binding:
+    if gate.get('issue_type') != 'gate' or metadata(gate).get('harness_gate') != binding:
         raise BeadsError('Native gate identity conflict')
     if not any(e.get('id') == key and e.get('dependency_type') == 'blocks' for e in issue.get('dependencies', [])):
         queue.bd('dep', 'add', issue['id'], key, '--type', 'blocks')
@@ -105,6 +126,9 @@ def validate_evidence(queue, issue, binding, evidence):
             or not evidence.get('issuer') or not evidence.get('evidence_ref') or evidence.get('result') != 'passed'):
         raise BeadsError('Explicit resolution authority and passing evidence required')
     retained(evidence)
+    if binding.get('blocker'):
+        from .task_blockers import validate_signed
+        validate_signed(binding, evidence)
     if binding['kind'] == 'design':
         design_evidence(queue, issue, evidence)
     if binding['kind'] in ('merge', 'deployment') and evidence.get('authority_basis') == 'verified-external':
@@ -113,15 +137,19 @@ def validate_evidence(queue, issue, binding, evidence):
 
 def resolve_gate(queue, run, gate_id, evidence):
     gate = queue.show(gate_id)
-    binding = gate.get('metadata', {}).get('harness_gate')
+    binding = metadata(gate).get('harness_gate')
     if gate.get('issue_type') != 'gate' or not binding:
         raise BeadsError('Not a harness native gate')
     issue = resolve(queue, run, binding['issue_id'])
-    if issue.get('metadata', {}).get(FIELD, {}).get(gate_id) != binding:
+    if metadata(issue).get(FIELD, {}).get(gate_id) != binding:
         raise BeadsError('Gate is not bound to this routed task')
     validate_evidence(queue, issue, binding, evidence)
+    decision = metadata(gate).get('harness_blocker_decision')
+    if decision and any(decision['evidence'].get(k) != evidence.get(k)
+                        for k in ('signed_receipt', 'decision_evidence')):
+        raise BeadsError('Resolution conflicts with retained signed decision')
     resolution = {'evidence': evidence, 'digest': digest(evidence)}
-    previous = gate.get('metadata', {}).get('harness_gate_resolution')
+    previous = metadata(gate).get('harness_gate_resolution')
     if previous and previous != resolution:
         raise BeadsError('Resolution evidence differs from retained record')
     if gate.get('status') == 'closed':
@@ -139,7 +167,7 @@ def resolve_gate(queue, run, gate_id, evidence):
 def check(queue, issue):
     if issue.get('issue_type') == 'gate':
         raise BeadsError('Gates resolve through evidence; never claim them as coding work')
-    bindings = issue.get('metadata', {}).get(FIELD, {})
+    bindings = metadata(issue).get(FIELD, {})
     superseded = {b['supersedes'] for b in bindings.values() if b.get('supersedes')}
     for key, binding in bindings.items():
         if key in superseded:
@@ -147,13 +175,13 @@ def check(queue, issue):
         if not queue.bd('list', '--id', key, '--all', '--limit', '0'):
             raise BeadsError('Reserved gate has not been created')
         gate = queue.show(key)
-        if (gate.get('issue_type') != 'gate' or gate.get('metadata', {}).get('harness_gate') != binding
+        if (gate.get('issue_type') != 'gate' or metadata(gate).get('harness_gate') != binding
                 or not any(e.get('id') == key and e.get('dependency_type') == 'blocks'
                            for e in issue.get('dependencies', []))):
             raise BeadsError('Gate contract or blocking edge missing')
         if gate.get('status') != 'closed':
             raise BeadsError('Task has an unresolved gate')
-        resolution = gate.get('metadata', {}).get('harness_gate_resolution', {})
+        resolution = metadata(gate).get('harness_gate_resolution', {})
         if resolution.get('digest') != digest(resolution.get('evidence')):
             raise BeadsError('Gate closed without verified evidence')
         validate_evidence(queue, issue, binding, resolution['evidence'])
@@ -176,14 +204,21 @@ def dispatch(args, store, beads, run):
         raise BeadsError('Reconcile recovery before gate operations')
     queue = beads._queue(run)
     if args.gate_action == 'create':
-        result = create(queue, run, json.loads(Path(args.file).read_text()))
+        plan = json.loads(Path(args.file).read_text())
+        if 'blocker' in plan:
+            raise BeadsError('Use blocker create with configured signer authority')
+        result = create(queue, run, plan)
         observe(store, result['issue'])
         from .transitions import gate
         gate(store, run, result['issue'], result['gate'])
         return result
     if args.gate_action == 'resolve':
-        result = resolve_gate(queue, run, args.gate_id, json.loads(Path(args.evidence_file).read_text()))
-        issue = queue.show(result['metadata']['harness_gate']['issue_id'])
+        evidence = json.loads(Path(args.evidence_file).read_text())
+        if metadata(queue.show(args.gate_id)).get('harness_gate', {}).get('blocker'):
+            from .task_blockers import resolve as resolve_blocker
+            return resolve_blocker(store, beads, run, args.gate_id, evidence, beads.config)
+        result = resolve_gate(queue, run, args.gate_id, evidence)
+        issue = queue.show(metadata(result)['harness_gate']['issue_id'])
         observe(store, issue)
         from .transitions import gate
         gate(store, run, issue, result, resolved=True)

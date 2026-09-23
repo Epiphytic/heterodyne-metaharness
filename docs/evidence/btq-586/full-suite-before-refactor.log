@@ -1,0 +1,28 @@
+Workstream inbound handoff unavailable; retaining queued turn for retry
+Traceback (most recent call last):
+  File "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-586/checkout/harness/routing.py", line 100, in route_with_retry
+    return await asyncio.to_thread(route_inbound, event, account_id=account_id,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1197, in _execute_mock_call
+    raise result
+sqlite3.OperationalError: locked
+Duplicate status suppressed: workstream=ba0fa791-e8d1-5ddf-b83c-44b4151c1c69 event=bc050553-879d-4630-8ec8-9ff10798a9dd
+Duplicate status suppressed: workstream=351b6723-3289-5374-9da3-581c48fc73f8 event=821814bf-58a2-4531-bae6-77b97048cce2
+----------------------------------------------------------------------
+Ran 420 tests in 92.731s
+
+OK (skipped=1)
+{"cli": "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-586/checkout/bin/workstream", "service": "/tmp/tmp3yks9fh6/.config/systemd/user/hermes-workstreams.service", "enabled": false}
+{"cli": "/home/operator/.hermes/workstreams/runs/6e82fa80-d46c-52b8-b00a-6a2e96ed8c8a/beads/btq-586/checkout/bin/workstream", "service": "/tmp/tmp3yks9fh6/.config/systemd/user/hermes-workstreams.service", "enabled": false}
