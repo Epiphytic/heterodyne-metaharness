@@ -31,6 +31,9 @@ def initialize(db):
       event_id TEXT NOT NULL,PRIMARY KEY(account_id,group_id,message_id));
     CREATE TABLE IF NOT EXISTS permission_consents(
       id TEXT PRIMARY KEY,relay_id TEXT NOT NULL,evidence TEXT NOT NULL,created_at REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS permission_active(
+      run_id TEXT NOT NULL,subject TEXT NOT NULL,relay_id TEXT NOT NULL,
+      PRIMARY KEY(run_id,subject));
     '''
     for statement in schema.split(';'):
         if statement.strip():
@@ -42,28 +45,50 @@ def observe(store, run, info, *, detected=False, beads=None):
     if not isinstance(text, str):
         raise ValueError('Approval pane must be text')
     region = approval_region(text)
+    complete = region is not None
     if region is None and detected:
         region = text  # Unrecognized native UI: retain the whole bounded capture for inspection.
-    if not info.get('alive') or region is None:
+    if not info.get('alive'):
+        return None
+    subject = 'manager' if run.get('manager', {}).get('pane_id') == info.get('pane_id') else 'worker'
+    if region is None:
+        initialize(store.db)
+        with store.db:
+            store.db.execute('DELETE FROM permission_active WHERE run_id=? AND subject=?',
+                             (run['id'], subject))
         return None
     if not isinstance(text, str) or len(text.encode()) > 1024 * 1024:
         raise ValueError('Approval pane exceeds evidence bound; Hermes must reconcile native request')
     pane = info.get('pane_id')
     if not pane or pane != run.get('pane_id'):
         raise ValueError('Approval evidence requires exact owned pane')
-    text = region
     initialize(store.db)
-    digest = hashlib.sha256(text.encode()).hexdigest()
+    digest = hashlib.sha256(region.encode()).hexdigest()
     native = run.get('native_session_id') or 'unknown'
-    identity = hashlib.sha256(json.dumps([run['id'],native,pane,digest]).encode()).hexdigest()
     now = time.time()
     with store.db:
         store.db.execute('BEGIN IMMEDIATE')
-        store.db.execute('INSERT OR IGNORE INTO permission_relays VALUES (?,?,?,?,?,?,?)',
-                         (identity,run['id'],native,pane,digest,text,now))
+        active = store.db.execute(
+            'SELECT relay_id FROM permission_active WHERE run_id=? AND subject=?',
+            (run['id'], subject)).fetchone()
+        if active:
+            identity = active['relay_id']
+            relay = store.db.execute('SELECT * FROM permission_relays WHERE id=?',
+                                     (identity,)).fetchone()
+            if not relay:
+                raise ValueError('Active approval has no retained evidence')
+        else:
+            identity = hashlib.sha256(json.dumps([run['id'],subject,native,pane,digest,now]).encode()).hexdigest()
+            store.db.execute('INSERT INTO permission_relays VALUES (?,?,?,?,?,?,?)',
+                             (identity,run['id'],native,pane,digest,region,now))
+            store.db.execute('INSERT INTO permission_active VALUES (?,?,?)',
+                             (run['id'],subject,identity))
+            relay = store.db.execute('SELECT * FROM permission_relays WHERE id=?',
+                                     (identity,)).fetchone()
         from .manager_tasks import native_approval
-        request_id = native_approval(store, run, identity, pane=pane, native=native, region=text,
-                                     subject='manager' if run.get('manager', {}).get('pane_id') == pane else 'worker')
+        request_id = native_approval(store, run, identity, pane=relay['pane_id'],
+                                     native=relay['native_id'], region=relay['evidence'],
+                                     subject=subject, complete=complete)
     if beads is not None and beads.enabled:
         from .manager_tasks import materialize
         from .beads import BeadsError

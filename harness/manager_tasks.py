@@ -56,11 +56,11 @@ def approval(store, beads, run, gate_id):
                               'Respect its configured approver and scope; escalate to Liam when authority is missing.'))
 
 
-def native_approval(store, run, relay_id, *, pane, native, region, subject):
+def native_approval(store, run, relay_id, *, pane, native, region, subject, complete):
     """Freeze one observed native prompt as a manager request, with no chat delivery."""
     return retain(store, run, dict(kind='native_approval', source=relay_id, episode=relay_id,
                   category='native approval', evidence=region, pane_id=pane,
-                  native_session_id=native, subject=subject,
+                  native_session_id=native, subject=subject, capture_complete=complete,
                   runbook='Inspect the exact live native dialog and full command before acting. '
                           'Under the standing policy, answer safe prompts once, steer the worker or fix '
                           'permissions as appropriate. Escalate credentials, deletion, force operations, '

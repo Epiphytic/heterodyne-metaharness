@@ -113,6 +113,8 @@ def resolve(store, beads, run, issue_id, event, config, now=None):
         expected['verification_sha256'] = receipts.digest(retained['verification'])
     body = validate(event, expected, config, now)
     request = json.loads(row['request'])
+    if request['kind'] == 'native_approval' and request.get('capture_complete') is not True:
+        raise BeadsError('Captured approval is incomplete; inspect live dialog and escalate')
     if request['kind'] == 'native_approval' and request['evidence'] not in body['resolution']:
         raise BeadsError('Signed resolution must include the full captured approval text')
     if body['action_completed_at_ms'] < int(row['dispatched_at'] * 1000):
