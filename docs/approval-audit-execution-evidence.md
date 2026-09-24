@@ -6,7 +6,7 @@ request. This task proposes defaults; it does not change native approval policy.
 
 ## Published artifacts
 
-Private brain repository `epiphytic/belthanior-hermes`, signed commit
+Private brain repository `liamhelmer/belthanior-hermes`, signed commit
 `687dc1dedf7c49a5f8af6b4b7329939cae9884be`, signature `G`, author
 `girt@epiphytic.dev`. Created in isolated worktree
 `/tmp/brain-326a06b-review`, branch `bead/326a06b-approval-audit`.
@@ -14,9 +14,9 @@ The authorized non-force push to GitHub main succeeded from base `a3c7268`.
 GitHub API confirmed repository privacy and the published config blob
 `f5494e614fe43933be1d3d0615dc8deaeee7134b`.
 
-- [Proposed config](https://github.com/epiphytic/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/config/codex-allowlists.json)
-- [Audit report](https://github.com/epiphytic/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/reports/approval-audit-2026-09-18.md)
-- [Audit map](https://github.com/epiphytic/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/reports/approval-audit-2026-09-18.json)
+- [Proposed config](https://github.com/liamhelmer/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/config/codex-allowlists.json)
+- [Audit report](https://github.com/liamhelmer/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/reports/approval-audit-2026-09-18.md)
+- [Audit map](https://github.com/liamhelmer/belthanior-hermes/blob/687dc1dedf7c49a5f8af6b4b7329939cae9884be/reports/approval-audit-2026-09-18.json)
 
 No raw transcript, command argument, credential, private backup or live config
 was published. Only these three paths were staged. The canonical local brain
@@ -71,7 +71,7 @@ Suggested stable key: `approval-audit:326a06b:687dc1d:published`.
 Exact body:
 
 ```
-Proposed Codex allowlists and approval audit published (not applied): https://github.com/epiphytic/belthanior-hermes/blob/main/config/codex-allowlists.json
+Proposed Codex allowlists and approval audit published (not applied): https://github.com/liamhelmer/belthanior-hermes/blob/main/config/codex-allowlists.json
 ```
 
 Target the existing bound maintenance group `1cead9a9921044b3236ddb271e9a4cac`.
