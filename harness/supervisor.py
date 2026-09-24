@@ -437,6 +437,8 @@ class Supervisor:
     def tick_run(self, run):
         if run['state'] in TERMINAL or run.get('legacy'):
             return
+        if self.store.rehydrate_native_sessions(run):
+            self.persist(run)
         self.recover_intents(run)
         if run.get('boot_id') != self.boot:
             self.recover(run)
