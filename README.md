@@ -1,12 +1,55 @@
-# Hermes workstream harness
+<p align="center">
+  <a href="https://github.com/HeterodyneNetwork/HeterodyneProtocol">
+    <img src="assets/heterodyne-metaharness.png" alt="Heterodyne Metaharness logo" width="440">
+  </a>
+</p>
 
-A durable supervisor for an interactive coding agent plus a separate Hermes manager, with Marmot project channels. Python standard library, tmux and systemd provide persistence and process ownership. Codex, Claude Code and Hermes differences live behind agent adapters.
+# Heterodyne Metaharness
 
-The [active specification](spec/README.md) is authoritative for Hermes maintenance.
-See the [maintenance deployment runbook](docs/maintenance-deployment.md),
-[execution evidence](docs/maintenance-execution-evidence.md), and [module registry](MANIFEST.md).
-SQLite runtime repair: [runbook](docs/sqlite-runtime-repair.md) and
-[deployment evidence](docs/sqlite-runtime-execution-evidence.md).
+Keep a coding workstream going across terminal exits, context compaction, and
+machine restarts. The metaharness supervises a coding agent and a separate
+[Hermes](https://github.com/NousResearch/hermes-agent) manager, gives them a
+shared [Marmot](https://github.com/marmot-protocol/mdk) project channel, and
+records enough state to recover the right conversations and task ownership.
+
+**Development status:** The metaharness is actively being developed while
+dogfooding itself. Expect interfaces and deployment procedures to evolve; use
+the [active specification](spec/README.md) and linked runbooks for current
+operational details.
+
+## How it fits together
+
+| Piece | What it does |
+| --- | --- |
+| Supervisor | Stores run state, checkpoints, inboxes, and delivery receipts in SQLite. |
+| Worker and manager | Runs a Codex or Claude Code worker alongside a Hermes manager in persistent tmux panes. |
+| Marmot channel | Carries project messages, status, and operator steering through the existing Hermes gateway. |
+| Beads queue | Keeps task ownership and handoffs durable across agent sessions. |
+| systemd user service | Restarts the supervisor after a crash or Linux reboot. |
+
+The core is Python, with agent and messaging differences behind adapters. A
+restart restores conversations and reports uncertain work; it does not replay
+an old prompt or automatically rerun a command.
+
+## Start here
+
+This is an operator-oriented project, not a one-command hosted service. A Linux
+host needs Python 3, tmux, a systemd user session, Hermes with its Marmot
+integration, a configured Beads queue, and at least one supported coding agent.
+The installers work with an existing Hermes home and Marmot configuration; read
+the deployment steps before applying them to a live installation.
+
+1. Read the [active specification](spec/README.md) for the current contract and
+   the [deployment runbook](docs/maintenance-deployment.md) for setup and review.
+2. Use the [module registry](MANIFEST.md) to find the implementation area you need.
+3. After installation, try `workstream doctor`, then use the example commands
+   below to start and inspect a workstream.
+
+For detailed results, see the [maintenance execution evidence](docs/maintenance-execution-evidence.md).
+SQLite runtime repair has a separate [runbook](docs/sqlite-runtime-repair.md) and
+[deployment record](docs/sqlite-runtime-execution-evidence.md).
+
+More feature guides:
 
 Shared brain notifications: [contract](spec/brain.md) and [deployment steps](docs/brain-notifications.md), and [execution evidence](docs/brain-notifications-execution-evidence.md).
 
@@ -140,3 +183,25 @@ Separate implementation, review and deployment ownership:
 [linked delivery contract](spec/delivery-tasks.md) and [operations](docs/delivery-tasks.md).
 
 Deterministic task notices: [contract](spec/transitions.md), [rollout](docs/transition-delivery.md).
+
+## Projects this builds on
+
+Thanks to the maintainers and contributors of the tools that make this harness
+possible:
+
+| Project | Role here |
+| --- | --- |
+| [Marmot Development Kit (mdk)](https://github.com/marmot-protocol/mdk) | Marmot and White Noise messaging stack used by the Hermes channel integration. |
+| [Beads](https://github.com/GastownHall/beads) | Task tracking foundation for the shared queue and durable handoffs. |
+| [tmux](https://github.com/tmux/tmux) | Persistent interactive worker and manager terminals. |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Manager runtime and gateway integration. |
+| [Codex](https://github.com/openai/codex) and [Claude Code](https://github.com/anthropics/claude-code) | Supported coding agent runtimes. |
+| [Python](https://www.python.org/), [SQLite](https://www.sqlite.org/), and [systemd](https://systemd.io/) | Supervisor implementation, durable local state, and service lifecycle. |
+| [Git](https://git-scm.com/) | Isolated worktrees for coding tasks. |
+| [Semble](https://github.com/MinishLab/semble), [Ripwire](https://github.com/redhat-et/ripwire), and [auto-memory](https://github.com/dezgit2025/auto-memory) | Code discovery, structural inspection, and optional session recall. |
+
+The logo above adapts the [Heterodyne Protocol logo](https://github.com/HeterodyneNetwork/HeterodyneProtocol/blob/main/docs/assets/heterodyne-logo.png): its wordmark was changed to “Metaharness” and its layout was widened. The upstream artwork is available under [CC BY 4.0](https://github.com/HeterodyneNetwork/HeterodyneProtocol/blob/main/LICENSE).
+
+## License
+
+This project's code and documentation are licensed under the [Apache License 2.0](LICENSE). The adapted logo retains the upstream CC BY 4.0 attribution and license described above.
