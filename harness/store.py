@@ -108,6 +108,31 @@ class Store:
                 self.db.execute('INSERT OR IGNORE INTO native_sessions VALUES (?,?,?,?,?)',
                                 (run['id'], role, native, old_id if old_id != native else None, time.time()))
 
+    def rehydrate_native_sessions(self, run):
+        """Repair missing projections from exact retained role registrations."""
+        changed = False
+        for role in ('worker', 'manager', 'secondary'):
+            target = run if role == 'worker' else run.get(role)
+            if target is None or target.get('native_session_id'):
+                continue
+            rows = self.db.execute(
+                'SELECT native_id,previous_id FROM native_sessions WHERE run_id=? AND role=?',
+                (run['id'], role)).fetchall()
+            lineage = {row['native_id']: row['previous_id'] for row in rows}
+            leaves = set(lineage) - set(lineage.values())
+            if len(leaves) != 1:
+                continue
+            native = next(iter(leaves))
+            seen, cursor = set(), native
+            while cursor and cursor in lineage and cursor not in seen:
+                seen.add(cursor)
+                cursor = lineage[cursor]
+            if cursor or seen != set(lineage) or not native:
+                continue  # Incomplete, cyclic or competing registrations are not authority.
+            target['native_session_id'] = native
+            changed = True
+        return changed
+
     def event(self, run, kind, text, event_id=None, group=None, operator_ask=False):
         identity = event_id or str(uuid.uuid4())
         now = time.time()

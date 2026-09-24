@@ -24,3 +24,11 @@ Ongoing tasks report every 240 seconds, with a maximum five-minute interval unde
 healthy transport. Delivery failures remain durably visible and retry independently.
 Preserve native approvals and uncertain submission outcomes; no automatic keystrokes.
 See [maintenance ownership](maintenance.md).
+
+Before recovery or observation on an active supervisor tick, a missing native
+identity may be rehydrated from retained native_sessions records for that exact
+run and role. Only a complete, acyclic registration chain with a unique successor
+is sufficient; neither timestamps nor another role's identity select a session.
+Existing identities are preserved, and absent manager/secondary slots are not
+created. Persist repairs to durable run state and checkpoint before continuing.
+This repair does not release recovery holds or provide evidence of an idle turn.

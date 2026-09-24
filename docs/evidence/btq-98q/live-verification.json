@@ -1,0 +1,10 @@
+{
+ "at": "2026-09-23 20:18-20:35 PDT",
+ "service": "hermes-workstreams.service",
+ "MainPID": 2376728,
+ "active": true,
+ "deployed_revision": "2dc275a125b134432b165f75fe424b23b14fbd9a",
+ "contains_worker_commit": "eb41e3076cb60061af79d5a7fa9cc19045de2ef3",
+ "regression": "tests/test_native_rehydration.py: 3 passed, 4 subtests passed against the deployed tree",
+ "suite": "597 passed, 2 skipped, 65 subtests (docs/evidence/btq-98q/postmerge-suite.log)"
+}
