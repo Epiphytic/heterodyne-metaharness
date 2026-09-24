@@ -227,6 +227,22 @@ def test_native_resolution_rejects_stale_observation_and_incomplete_text(setup):
     assert not (store.root / 'runs' / run['id'] / 'approval-log.jsonl').exists()
 
 
+def test_native_resolution_rejects_unrecognized_capture(setup):
+    store, supervisor, run, database, _ = setup
+    target = run
+    target['native_session_id'] = 'worker-native'
+    region = 'Partial command text without a complete native modal'
+    relay_observe(store, run, dict(alive=True,pane_id=run['pane_id'],text=region),
+                  detected=True, beads=supervisor.beads)
+    tasks.pickup(store, supervisor, now=100)
+    run['observed_state'] = 'idle'
+    run['observation'] = {'state': 'idle', 'at': 103, 'pane_alive': True}
+    event, config = signed(setup, resolution='Approved after inspection.\n' + region)
+    with pytest.raises(BeadsError, match='Captured approval is incomplete'):
+        resolution.resolve(store, supervisor.beads, run, first(setup)['issue_id'], event, config, now=104)
+    assert database[first(setup)['issue_id']]['status'] == 'in_progress'
+
+
 def test_native_bead_creation_failure_retries_at_pickup(setup):
     store, supervisor, run, database, _ = setup
     create = supervisor.beads.create.side_effect

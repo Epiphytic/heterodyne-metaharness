@@ -30,6 +30,23 @@ class RelayTest(unittest.TestCase):
         self.assertIsNotNone(observe(self.store,dict(self.run,native_session_id=None),self.info))
         with self.assertRaises(ValueError):observe(self.store,self.run,dict(self.info,pane_id='%2'))
 
+    def test_active_prompt_dedups_repaint_native_and_pane_changes(self):
+        identity = observe(self.store, dict(self.run,native_session_id=None), self.info)
+        repaint = dict(self.info,text=self.text.replace('Reason: retain complete text',
+                                                       'Reason: retain complete text (repainted)'))
+        self.assertEqual(observe(self.store,self.run,repaint), identity)
+        moved = dict(self.run,pane_id='%2')
+        self.assertEqual(observe(self.store,moved,dict(repaint,pane_id='%2')), identity)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM manager_tasks').fetchone()[0],1)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM permission_relays').fetchone()[0],1)
+        self.assertIsNone(observe(self.store,moved,dict(repaint,pane_id='%2',text='Normal output')))
+        self.assertNotEqual(observe(self.store,moved,dict(self.info,pane_id='%2')),identity)
+
+    def test_unrecognized_capture_is_marked_incomplete(self):
+        observe(self.store,self.run,dict(self.info,text='Partial command text'),detected=True)
+        request=json.loads(self.store.db.execute('SELECT request FROM manager_tasks').fetchone()[0])
+        self.assertFalse(request['capture_complete'])
+
     def test_delivery_identity_binding_and_rejection(self):
         identity=observe(self.store,self.run,self.info)
         # Historical visible relays remain verifiable after new observations
