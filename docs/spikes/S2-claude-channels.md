@@ -116,7 +116,7 @@ library) that:
 
 ### What actually happened
 
-Two blockers surfaced, in order:
+Two obstacles surfaced, in order (the first observed, the second inferred and unconfirmed):
 
 1. **Environment-replication limit (this attempt only):** copying
    `.credentials.json` into the scratch config directory was not sufficient for
@@ -190,7 +190,7 @@ than resolved.
     channels are **not** a safe replacement for `tmux send-keys` in phase 2 at this
     time. v1's choice to always use `tmux send-keys` for the Claude reviewer (§12) is
     reaffirmed by this spike; channels can be revisited later if/when they graduate
-    out of research preview and this environment's org enables them.
+    out of research preview and channel availability for this environment's org is confirmed (an Owner may already have enabled it in the admin UI; this spike could not determine that).
 
 ## Artifacts
 
