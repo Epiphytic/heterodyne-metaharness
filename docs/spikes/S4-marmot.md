@@ -344,7 +344,7 @@ join. (This is a plan-2/plan-6 implementation note, not an ADR change — see
 spike's findings):**
 
 1. **Re-posting after a join is armed on the request path and fired on a
-   confirmed join. It is never fired by an inbound `member_added` event.**
+   confirmed join. For the harness's own adds, no inbound event can fire it.**
    Step 5 confirmed that an actor performing
    `group_member_add`/`group_member_remove` never sees the resulting
    `group_state_changed` on its own subscription; that event reaches only
@@ -365,9 +365,11 @@ spike's findings):**
      response carries `member_count` but no member or welcome state, so it
      is **not** evidence of acceptance. Establishing and verifying the
      fire signal is a plan 2/6 acceptance item.
-   - A `member_added` event is a usable signal only for joins made by some
-     *other* admin identity that the harness can observe on its own
-     subscription. That case was not exercised in this spike.
+   - For adds made by some *other* admin identity, the harness's own
+     subscription does receive `member_added` (step 5). But nothing here
+     shows that the event arrives only after the new member has accepted or
+     can see messages. It is therefore an **unverified candidate** signal,
+     pending plan 2/6 validation, not an established trigger.
 2. **Verify the reaction removal contract.** `remove_reaction` and inbound
    `reaction_removed` are UNTESTED in this spike (see the request/event
    shape notes above). This is an explicit plan 6 acceptance item: verify
