@@ -141,7 +141,7 @@ def test_secret_value_rejected_in_every_layer(cfg: Path, name: str, text: str) -
 
 
 def test_secret_value_rejected_in_env_layer(cfg: Path) -> None:
-    with pytest.raises(ConfigError, match=r"environment: debug\.log_level: value looks like secret"):
+    with pytest.raises(ConfigError, match=r"environment: HETERODYNE_LOG_LEVEL: value looks like secret"):
         load(None, {**env(cfg), "HETERODYNE_LOG_LEVEL": FAKE["jwt"]})
 
 

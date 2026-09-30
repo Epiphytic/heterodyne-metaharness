@@ -20,7 +20,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 
-from heterodyne.config.policy import ConfigError
+from heterodyne.config.errors import ConfigError
 
 REFERENCE_KEYS = ("file", "command")
 
@@ -37,15 +37,19 @@ EXEMPT_NAMES = frozenset({
     "public_key",  # public by definition (identities, signing verification)
 })
 
+# A token prefix must start the string or follow a non-alphanumeric character. Unlike `\b`, this
+# still matches after `_` (for example `HETERODYNE_ghp_...`), but not inside a word (`risk-...`).
+_START = r"(?<![A-Za-z0-9])"
+
 SECRET_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("nostr nsec", re.compile(r"\bnsec1[02-9ac-hj-np-z]{20,}")),
+    ("nostr nsec", re.compile(_START + r"nsec1[02-9ac-hj-np-z]{20,}")),
     ("PEM private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
-    ("sk- API key", re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}")),
-    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")),
-    ("GitHub fine-grained token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
-    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
-    ("AWS access key ID", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("sk- API key", re.compile(_START + r"sk-[A-Za-z0-9_\-]{16,}")),
+    ("GitHub token", re.compile(_START + r"gh[pousr]_[A-Za-z0-9]{20,}")),
+    ("GitHub fine-grained token", re.compile(_START + r"github_pat_[A-Za-z0-9_]{20,}")),
+    ("Slack token", re.compile(_START + r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("AWS access key ID", re.compile(_START + r"(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
+    ("JWT", re.compile(_START + r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
 )
 
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
@@ -69,6 +73,27 @@ def secret_value(text: str) -> str | None:
         if pattern.search(text):
             return kind
     return None
+
+
+def show(value: Any, quote: bool = True) -> str:
+    """Render a user-supplied value for an error message, redacting anything `secret_value` flags.
+
+    Every ConfigError that interpolates a config value or key goes through this. `quote=False`
+    renders a string bare, for key and path segments.
+    """
+    if isinstance(value, str):
+        kind = secret_value(value)
+        if kind:
+            return f"<redacted {kind}>"
+        return repr(value) if quote else value
+    if isinstance(value, list | tuple | set | frozenset):
+        items = cast(list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any], value)
+        ordered = sorted(items, key=repr) if isinstance(items, set | frozenset) else list(items)
+        return "[" + ", ".join(show(v, quote) for v in ordered) + "]"
+    if isinstance(value, Mapping):
+        table = cast(Mapping[Any, Any], value)
+        return "{" + ", ".join(f"{show(k, quote)}: {show(v, quote)}" for k, v in table.items()) + "}"
+    return repr(value)
 
 
 def is_reference(value: Any) -> bool:

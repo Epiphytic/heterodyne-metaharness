@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from heterodyne.config import secret_scan
-from heterodyne.config.policy import POLICY_KEYS, ConfigError
+from heterodyne.config.errors import ConfigError
+from heterodyne.config.policy import POLICY_KEYS
+from heterodyne.config.secret_scan import show
 
 WORKSTREAM_KEYS = frozenset({"roles", "repos", "sandbox", "cron", "render", "timeouts", "restrict"})
 WORKSTREAM_SANDBOX_KEYS = frozenset({"extra_ro_mounts", "extra_egress"})
@@ -25,7 +27,7 @@ def read_toml(path: Path) -> dict[str, Any]:
     try:
         return tomllib.loads(path.read_text()) if path.exists() else {}
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path.name}: {exc}") from exc
+        raise ConfigError(f"{path.name}: {show(str(exc), False)}") from exc
 
 
 def merge(base: dict[str, Any], overlay: Mapping[str, Any], label: str, sources: dict[str, str],
@@ -50,7 +52,7 @@ def env_layer(env: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
         if not var.startswith("HETERODYNE_"):
             continue
         if var not in ENV_KEYS:
-            raise ConfigError(f"{var}: environment overrides are limited to {sorted(ENV_KEYS)}")
+            raise ConfigError(f"{show(var, False)}: environment overrides are limited to {sorted(ENV_KEYS)}")
         table, key = ENV_KEYS[var]
         layer.setdefault(table, {})[key] = value
         labels[f"{table}.{key}"] = f"env:{var}"
@@ -60,7 +62,7 @@ def env_layer(env: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
 def check_host(host: Mapping[str, Any]) -> None:
     misplaced = set(host) & POLICY_KEYS
     if misplaced:
-        raise ConfigError(f"config.toml: {sorted(misplaced)} belong in policy.toml")
+        raise ConfigError(f"config.toml: {show(misplaced)} belong in policy.toml")
     sandbox = table_at(host, "sandbox", "config.toml")
     _strings(sandbox, "egress_approved", "config.toml: sandbox")
     for root in _strings(sandbox, "ro_mounts_approved", "config.toml: sandbox"):
@@ -70,32 +72,32 @@ def check_host(host: Mapping[str, Any]) -> None:
 def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str, Any]) -> None:
     bad = set(ws) - WORKSTREAM_KEYS
     if bad:
-        raise ConfigError(f"workstreams/{name}.toml: {sorted(bad)} not allowed in a workstream "
+        raise ConfigError(f"workstreams/{name}.toml: {show(bad)} not allowed in a workstream "
                           f"(allowed: {sorted(WORKSTREAM_KEYS)})")
     where = f"workstreams/{name}.toml"
     profiles = table_at(merged_host, "profiles", "config.toml")
     for role, profile in table_at(ws, "roles", where).items():
         if not isinstance(profile, str):
-            raise ConfigError(f"{where}: roles.{role} must be a profile name (string)")
+            raise ConfigError(f"{where}: roles.{show(role, False)} must be a profile name (string)")
         if profile not in profiles:
-            raise ConfigError(f"workstreams/{name}.toml: role {role} names unknown profile {profile!r}")
+            raise ConfigError(f"{where}: role {show(role, False)} names unknown profile {show(profile)}")
     sandbox = table_at(ws, "sandbox", where)
     string_list(table_at(ws, "restrict", where).get("escalate", []), f"{where}: restrict.escalate")
     string_list(table_at(ws, "restrict", where).get("hard_deny", []), f"{where}: restrict.hard_deny")
     bad_sandbox = set(sandbox) - WORKSTREAM_SANDBOX_KEYS
     if bad_sandbox:
-        raise ConfigError(f"workstreams/{name}.toml: [sandbox] {sorted(bad_sandbox)} not allowed")
+        raise ConfigError(f"{where}: [sandbox] {show(bad_sandbox)} not allowed")
     host_sandbox = table_at(merged_host, "sandbox", "config.toml")
     approved = set(_strings(host_sandbox, "egress_approved", "config.toml: sandbox"))
     extra = set(_strings(sandbox, "extra_egress", f"workstreams/{name}.toml: sandbox")) - approved
     if extra:
-        raise ConfigError(f"workstreams/{name}.toml: {sorted(extra)} not in host sandbox.egress_approved")
+        raise ConfigError(f"{where}: {show(extra)} not in host sandbox.egress_approved")
     roots = [_abs_path(p, "config.toml: sandbox.ro_mounts_approved")
              for p in _strings(host_sandbox, "ro_mounts_approved", "config.toml: sandbox")]
     for mount in _strings(sandbox, "extra_ro_mounts", f"workstreams/{name}.toml: sandbox"):
         resolved = _abs_path(mount, f"workstreams/{name}.toml: sandbox.extra_ro_mounts")
         if not any(resolved.is_relative_to(root) for root in roots):
-            raise ConfigError(f"workstreams/{name}.toml: read-only mount {mount!r} is not within "
+            raise ConfigError(f"{where}: read-only mount {show(mount)} is not within "
                               "host sandbox.ro_mounts_approved")
 
 
@@ -125,7 +127,7 @@ def _abs_path(value: str, where: str) -> Path:
     `/data/x` but not `/database`.
     """
     if not Path(value).is_absolute():
-        raise ConfigError(f"{where}: {value!r} must be an absolute path")
+        raise ConfigError(f"{where}: {show(value)} must be an absolute path")
     return Path(value).resolve(strict=False)
 
 
@@ -134,13 +136,14 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
     for name, value in table_at(merged, "profiles", "config.toml").items():
         profile = as_table(value)
         if profile is None:
-            raise ConfigError(f"profiles.{name} must be a table")
+            raise ConfigError(f"profiles.{show(name, False)} must be a table")
         model = profile.get("model")
         if model is not None and not isinstance(model, str):
-            raise ConfigError(f"profiles.{name}.model must be a string, not {type(model).__name__}")
+            raise ConfigError(f"profiles.{show(name, False)}.model must be a string, "
+                              f"not {type(model).__name__}")
         adapter = profile.get("adapter")
         if not isinstance(adapter, str) or adapter not in known:
-            raise ConfigError(f"profiles.{name}: adapter {adapter!r} "
+            raise ConfigError(f"profiles.{show(name, False)}: adapter {show(adapter)} "
                               f"is not one of {sorted(known)}")
 
 
