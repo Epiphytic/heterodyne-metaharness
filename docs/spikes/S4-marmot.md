@@ -343,28 +343,31 @@ join. (This is a plan-2/plan-6 implementation note, not an ADR change — see
 **Plan 2 / Plan 6 implementation notes and acceptance items (from this
 spike's findings):**
 
-1. **The re-post trigger must be the harness's own `group_member_add`
-   response, not an inbound event.** Step 5 confirmed that an actor
-   performing `group_member_add`/`group_member_remove` never sees the
-   resulting `group_state_changed` on its own subscription — that event
-   only reaches *other* members' subscriptions. Plan 2/6 add members
-   through the harness's own `wn-agent` control socket, so the harness will
-   never receive a `member_added` event for adds it makes itself. **The
-   re-post trigger must therefore be the harness's own successful
-   `group_member_add` response on the request path** (the caller re-posts
-   open cards itself once it gets back `group_membership_updated`), not the
-   inbound `subscribe_inbound` event stream. A successful add response only
-   means the invite was sent. It does **not** mean the new member has
-   accepted or can see messages: in step 6, the operator accepted *after* the
-   add succeeded, and only saw the card that was re-posted after joining. The
-   add response therefore arms a pending re-post. Firing it needs a
-   join/visibility confirmation, which plans 2/6 must establish: for example,
-   the first inbound event from the new member in that group, or a
-   `group_info` member/welcome state showing acceptance. Verify it as a
-   plan 2/6 acceptance item. A `member_added` event is only
-   a usable trigger for joins made by some *other* admin identity that the
-   harness can observe on its own subscription — a case not exercised in
-   this spike.
+1. **Re-posting after a join is armed on the request path and fired on a
+   confirmed join. It is never fired by an inbound `member_added` event.**
+   Step 5 confirmed that an actor performing
+   `group_member_add`/`group_member_remove` never sees the resulting
+   `group_state_changed` on its own subscription; that event reaches only
+   *other* members' subscriptions. Plans 2/6 add members through the
+   harness's own `wn-agent` control socket, so the harness never receives
+   a `member_added` event for adds it makes itself.
+   - The harness's own successful `group_member_add` response
+     (`group_membership_updated`) **arms** a pending re-post of the open
+     cards. It only means the invite was sent, not that the new member has
+     accepted or can see messages. In step 6 the operator accepted *after*
+     the add succeeded, and saw only the card that was re-posted after
+     joining.
+   - The re-post **fires** on a join or visibility confirmation. No such
+     signal was established in this spike. The one candidate with any
+     evidence is the first inbound event from the new member in that group.
+     Step 6's reply arrived only after the operator had joined, but that
+     doesn't prove it's a reliable join signal. The recorded `group_info`
+     response carries `member_count` but no member or welcome state, so it
+     is **not** evidence of acceptance. Establishing and verifying the
+     fire signal is a plan 2/6 acceptance item.
+   - A `member_added` event is a usable signal only for joins made by some
+     *other* admin identity that the harness can observe on its own
+     subscription. That case was not exercised in this spike.
 2. **Verify the reaction removal contract.** `remove_reaction` and inbound
    `reaction_removed` are UNTESTED in this spike (see the request/event
    shape notes above). This is an explicit plan 6 acceptance item: verify
