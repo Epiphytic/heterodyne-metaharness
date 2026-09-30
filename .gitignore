@@ -1,0 +1,13 @@
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
+# Host layers and state never live in the repo (ADR 0001 §15).
+/config.toml
+/policy.toml
+/workstreams/
+/state/
+*.local.toml
+leakcheck.txt
