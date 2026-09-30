@@ -38,9 +38,13 @@ jobs:
       # Scope: v2 commits only (V2_BASE..HEAD). Pre-v2 history contains a public operator key that
       # gitleaks flags; operator decision 2026-09-30 is to leave that history alone and not scan it.
       # V2_BASE is the parent of the first v2 commit; fetch-depth: 0 makes it resolvable, and the
-      # job fails (rather than silently scanning nothing) if it is missing or not an ancestor of HEAD.
+      # job fails (rather than silently scanning nothing) if it is missing, not an ancestor of HEAD,
+      # or the range is empty.
       - name: gitleaks (v2 history)
         run: |
           git cat-file -e "${V2_BASE}^{commit}"
           git merge-base --is-ancestor "$V2_BASE" HEAD
+          count=$(git rev-list --count "${V2_BASE}..HEAD")
+          if [ "$count" -lt 1 ]; then echo "gitleaks range ${V2_BASE}..HEAD is empty" >&2; exit 1; fi
+          echo "scanning $count v2 commits"
           "$RUNNER_TEMP/gitleaks" git --no-banner --redact -v --log-opts="${V2_BASE}..HEAD" .
