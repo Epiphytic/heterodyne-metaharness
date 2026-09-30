@@ -26,15 +26,16 @@ def test_boot_id_is_stable_within_a_boot() -> None:
 
 
 def test_boot_id_macos_uses_sysctl(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, stdout="{ sec = 1700000000, usec = 1 } Tue\n", stderr="")
 
     monkeypatch.setattr(platform.subprocess, "run", fake_run)
     assert platform.boot_id("macos") == "{ sec = 1700000000, usec = 1 } Tue"
-    assert calls == [["sysctl", "-n", "kern.boottime"]]
+    assert [cmd for cmd, _ in calls] == [["sysctl", "-n", "kern.boottime"]]
+    assert calls[0][1].get("check") is True
 
 
 def test_boot_id_macos_sysctl_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
