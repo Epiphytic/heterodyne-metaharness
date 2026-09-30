@@ -1,0 +1,15 @@
+# Example workstream config. Allowed tables: roles, repos, sandbox, cron, render, timeouts, restrict.
+
+[roles]
+coder = "coder"                   # must name a host profile
+
+[repos]
+main = "<path-to-repo>"
+
+[sandbox]
+extra_ro_mounts = []
+extra_egress = ["pypi.org"]       # must be listed in the host's sandbox.egress_approved
+
+[restrict]                        # tightening only
+escalate = ["dependency_install"]
+hard_deny = []

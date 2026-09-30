@@ -1,0 +1,11 @@
+# Example host policy. Host-only: no other layer may set these keys (ADR 0001 §15).
+approvers = ["<approver-name>"]
+
+[identities."<approver-name>"]    # quoted: <> is not valid in a bare TOML key
+marmot_npub = "<npub>"
+github = "<github-login>"
+radicle_did = "<did>"
+
+# Optional re-tiering of action classes (locked classes cannot be lowered).
+[tiers]
+# new_egress_host = "hard_deny"

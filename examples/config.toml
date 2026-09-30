@@ -1,0 +1,29 @@
+# Example host config. `heterodyne setup` copies this to $HETERODYNE_CONFIG_DIR/config.toml.
+# Replace every <placeholder>. Policy (approvers, identities, tiers) goes in policy.toml, not here.
+
+[platform]
+os = "<linux-or-macos>"          # written by `heterodyne setup`
+
+# Profiles: adapter + model + launch options (§4.1). One profile is enough; two different
+# models are recommended so reviews are cross-model rather than adversarial (§11.1).
+[profiles.coder]
+adapter = "codex"
+model = "<model-name>"
+
+[profiles.reviewer]
+adapter = "claude-code"
+model = "<model-name>"
+
+[roles]
+coder = "coder"
+reviewer = "reviewer"
+
+[sandbox]
+egress_approved = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"]
+
+[integrations.beads]
+btq = "<path-to-btq>"
+
+[integrations.marmot]
+socket = "<path-to-wn-agent-socket>"
+auth_token = { command = "<command-that-prints-the-token>" }
