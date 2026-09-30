@@ -353,7 +353,15 @@ spike's findings):**
    re-post trigger must therefore be the harness's own successful
    `group_member_add` response on the request path** (the caller re-posts
    open cards itself once it gets back `group_membership_updated`), not the
-   inbound `subscribe_inbound` event stream. A `member_added` event is only
+   inbound `subscribe_inbound` event stream. A successful add response only
+   means the invite was sent. It does **not** mean the new member has
+   accepted or can see messages: in step 6, the operator accepted *after* the
+   add succeeded, and only saw the card that was re-posted after joining. The
+   add response therefore arms a pending re-post. Firing it needs a
+   join/visibility confirmation, which plans 2/6 must establish: for example,
+   the first inbound event from the new member in that group, or a
+   `group_info` member/welcome state showing acceptance. Verify it as a
+   plan 2/6 acceptance item. A `member_added` event is only
    a usable trigger for joins made by some *other* admin identity that the
    harness can observe on its own subscription — a case not exercised in
    this spike.
