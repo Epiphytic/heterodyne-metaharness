@@ -1,12 +1,12 @@
 """Read and merge config layers with provenance, enforcing the §15 layer rules."""
 
-import re
 import tomllib
 from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
+from heterodyne.config import secret_scan
 from heterodyne.config.policy import POLICY_KEYS, ConfigError
 
 WORKSTREAM_KEYS = frozenset({"roles", "repos", "sandbox", "cron", "render", "timeouts", "restrict"})
@@ -14,7 +14,6 @@ WORKSTREAM_SANDBOX_KEYS = frozenset({"extra_ro_mounts", "extra_egress"})
 ENV_KEYS = {"HETERODYNE_CONFIG_DIR": ("paths", "config_dir"),
             "HETERODYNE_STATE_DIR": ("paths", "state_dir"),
             "HETERODYNE_LOG_LEVEL": ("debug", "log_level")}
-SECRET_NAME = re.compile(r"password|passwd|token|secret|nsec|private_key|api_key", re.IGNORECASE)
 
 
 def read_defaults() -> dict[str, Any]:
@@ -136,51 +135,22 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
         profile = as_table(value)
         if profile is None:
             raise ConfigError(f"profiles.{name} must be a table")
+        model = profile.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ConfigError(f"profiles.{name}.model must be a string, not {type(model).__name__}")
         adapter = profile.get("adapter")
         if not isinstance(adapter, str) or adapter not in known:
             raise ConfigError(f"profiles.{name}: adapter {adapter!r} "
                               f"is not one of {sorted(known)}")
 
 
-def _is_secret_ref(value: Any) -> bool:
-    """A secret reference is a one-key table, `{ file = "..." }` or `{ command = "..." }`,
-    whose value is a non-empty string."""
-    if not isinstance(value, Mapping):
-        return False
-    ref = cast(Mapping[str, Any], value)
-    if len(ref) != 1:
-        return False
-    key, target = next(iter(ref.items()))
-    return key in ("file", "command") and isinstance(target, str) and target.strip() != ""
-
-
 def as_table(value: Any) -> Mapping[str, Any] | None:
     """`value` as a nested config table, or None for a leaf (scalar, array or secret reference)."""
-    if isinstance(value, Mapping) and not _is_secret_ref(value):
+    if isinstance(value, Mapping) and not secret_scan.is_reference(value):
         return cast(Mapping[str, Any], value)
     return None
 
 
 def check_secrets(tree: Mapping[str, Any], layer: str) -> None:
-    """Reject inline secrets in one layer: a secret-named key must hold a valid reference.
-
-    Walks every value, including arrays (of tables, and nested arrays), so nothing is skipped.
-    Error paths carry indices, e.g. `identities.op.credentials[0].api_key`.
-    """
-    _walk_secrets(tree, layer, "")
-
-
-def _walk_secrets(value: Any, layer: str, path: str) -> None:
-    if isinstance(value, list):
-        for i, item in enumerate(cast(list[Any], value)):
-            _walk_secrets(item, layer, f"{path}[{i}]")
-        return
-    table = as_table(value)
-    if table is None:
-        return
-    for key, child in table.items():
-        dotted = f"{path}.{key}" if path else key
-        if SECRET_NAME.search(key) and not _is_secret_ref(child):
-            raise ConfigError(f"{layer}: {dotted}: secrets must be a reference, "
-                              '{ file = "<path>" } or { command = "<command>" } (exactly one, non-empty)')
-        _walk_secrets(child, layer, dotted)
+    """Reject inline secrets in one layer (best effort; see `secret_scan`)."""
+    secret_scan.check(tree, layer)

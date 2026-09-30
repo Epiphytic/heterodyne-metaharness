@@ -187,8 +187,8 @@ def test_malformed_secret_reference_rejected(cfg: Path, ref: str) -> None:
 # Secrets hidden in arrays, in every layer (review round 2).
 
 def test_policy_secret_in_array_of_tables_rejected_with_indexed_path(cfg: Path) -> None:
-    write(cfg, "policy.toml", 'approvers = ["op"]\n[identities.op]\ncredentials = [{ api_key = "inline" }]\n')
-    with pytest.raises(ConfigError, match=r"policy\.toml: identities\.op\.credentials\[0\]\.api_key"):
+    write(cfg, "policy.toml", 'approvers = ["op"]\n[identities.op]\nlogins = [{ api_key = "inline" }]\n')
+    with pytest.raises(ConfigError, match=r"policy\.toml: identities\.op\.logins\[0\]\.api_key"):
         load(None, env(cfg))
 
 
