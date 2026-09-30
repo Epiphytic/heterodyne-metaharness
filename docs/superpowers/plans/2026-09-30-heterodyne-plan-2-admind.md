@@ -45,7 +45,7 @@
 | D6 | Processing is at most once. The message ID is claimed before dispatch. A message claimed but not delivered when admind stopped gets a "resend if still needed" reply after restart, and is never replayed to the agent. | Replaying a prompt, or `!restart`, twice is worse than asking the operator to resend. | §3.4 (replay) |
 | D7 | The admin agent supports the `claude-code` adapter only in this plan. A `codex` admin profile is a config error with a clear message. | §8 says any adapter can be configured. The Codex adapter and its hook questions (S1 unsettled) belong to plan 4, which adds Codex support to `admind` (carry-forward below). | §4.2, §8 |
 | D8 | The agent session is persistent through its ID: admind records it, adopts a live tmux session after a restart, resumes with `--resume <id>` after a crash, and starts fresh only on `!new`. Three launches in a row without a `SessionStart` hook stop relaunching until `!new`. | §8 "persistent interactive session". The crash-loop stop keeps a broken agent from spinning. | §8, §10 |
-| D9 | A reply is threaded to an operator message only when the agent's UserPromptSubmit hook confirms that prompt, with a whitespace-insensitive text match. Unconfirmed turns post top-level, and an unconfirmed dispatch is closed out after `start_timeout_seconds`. | ADR §8 requires threaded replies. Pasting gives no delivery receipt, and a timing-based match mis-threads after `!interrupt`, a lost hook, or a prompt typed at the terminal. A mis-threaded reply is worse than an unthreaded one. | §2, §8 |
+| D9 | A reply is threaded to an operator message only when the agent's UserPromptSubmit hook confirms that prompt, with a whitespace-insensitive text match. Unconfirmed turns post top-level. The next message is pasted only on evidence that the agent is idle: a Stop, a SessionStart, `!interrupt` or `!new`. A timeout never dispatches; after `start_timeout_seconds` (unconfirmed) or `turn_notice_seconds` (still busy) the operator is told the queue is held and pointed at `!tail` and `!interrupt`. A prompt from elsewhere that starts while a message is anchored ends that anchor with a notice, so its reply can't take the thread. | ADR §8 requires threaded replies. Pasting gives no delivery receipt, and a lost hook is indistinguishable from a slow turn: dispatching on a timer could paste into a busy session, and a timing-based match mis-threads after `!interrupt`, a lost hook, or a prompt typed at the terminal. A mis-threaded reply is worse than an unthreaded one, and a held queue the operator can release is better than either. Identical text typed at the terminal is indistinguishable from the paste and is threaded; only the operator can reach the private tmux server, and the reply answers the same words. | §2, §8 |
 
 **Carry-forwards (not done here):**
 - **Plan 4:** Codex as the admin adapter (D7).
@@ -1098,6 +1098,7 @@ chunk_chars = 4000
 alert_poll_seconds = 5
 group_check_seconds = 60
 start_timeout_seconds = 60
+turn_notice_seconds = 1800
 group_name = "heterodyne admin"
 
 [admind.marmot]
@@ -1148,7 +1149,8 @@ from heterodyne.marmot.nip19 import Nip19Error, npub_to_hex
 from heterodyne.services import UNIT_NAME
 
 ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "alert_poll_seconds",
-                         "group_check_seconds", "start_timeout_seconds", "group_name", "marmot"})
+                         "group_check_seconds", "start_timeout_seconds", "turn_notice_seconds", "group_name",
+                         "marmot"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
 MAX_SOCKET_PATH = 100  # bytes; sun_path is 108 on Linux and 104 on macOS
@@ -1164,6 +1166,7 @@ class AdmindSettings:
     alert_poll_seconds: float
     group_check_seconds: float
     start_timeout_seconds: float
+    turn_notice_seconds: float
     group_name: str
     wn_agent: str
     marmot_home: Path
@@ -1225,6 +1228,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         alert_poll_seconds=_seconds(admind, "alert_poll_seconds"),
         group_check_seconds=_seconds(admind, "group_check_seconds"),
         start_timeout_seconds=_seconds(admind, "start_timeout_seconds"),
+        turn_notice_seconds=_seconds(admind, "turn_notice_seconds"),
         group_name=_text(admind, "group_name", "[admind]"),
         wn_agent=_text(marmot, "wn_agent", "[admind.marmot]"),
         marmot_home=home, relays=relays,
@@ -1310,7 +1314,7 @@ relays = ["<wss-relay-url>"]
 - In the **Policy** section, change "Only three are interpreted today" to "Four are interpreted today", and add the bullet:
   `- operators: a list of approver names allowed to use the admin channel. Each must be in approvers. admind needs exactly one, with an identities.<name>.marmot_npub.`
 - In **Built-in defaults**, add: "It also sets each adapter's executable (`[adapters.<adapter>] binary`) and admind's defaults (see below)."
-- Add a section `### Admin channel (`[admind]`)` after **Host config**. It holds a table with one row per key: `profile` (required; claude-code only for now), `workdir` (default `~`), `restart_units`, `chunk_chars` (200–60000, default 4000), `alert_poll_seconds` (default 5), `group_check_seconds` (default 60), `start_timeout_seconds` (default 60), `group_name`, `marmot.wn_agent` (default `wn-agent`), `marmot.home` (default `<state>/admind/marmot`), and `marmot.relays` (required, ws/wss URLs). Add the rule that `[admind]` is host-only: a workstream file can't set it.
+- Add a section `### Admin channel (`[admind]`)` after **Host config**. It holds a table with one row per key: `profile` (required; claude-code only for now), `workdir` (default `~`), `restart_units`, `chunk_chars` (200–60000, default 4000), `alert_poll_seconds` (default 5), `group_check_seconds` (default 60), `start_timeout_seconds` (default 60), `turn_notice_seconds` (default 1800: how long a turn may run before the operator is told later messages are held), `group_name`, `marmot.wn_agent` (default `wn-agent`), `marmot.home` (default `<state>/admind/marmot`), and `marmot.relays` (required, ws/wss URLs). Add the rule that `[admind]` is host-only: a workstream file can't set it.
 - Update the sentence "Nothing writes to the state directory yet" to: "`admind` writes `<state>/admind/` (its database, audit log, hook socket and Marmot home) and reads `<state>/alerts/`."
 
 - [ ] **Step 10: Run the tests and the full gate**
@@ -1706,7 +1710,8 @@ def make_settings(tmp_path: Path, **overrides: Any) -> AdmindSettings:
         profile={"adapter": "claude-code", "model": "m1", "args": []},
         adapter_binary="claude", workdir=tmp_path, restart_units=("fake.service",),
         chunk_chars=4000, alert_poll_seconds=0.1, group_check_seconds=0.5, start_timeout_seconds=5,
-        group_name="heterodyne admin", wn_agent="wn-agent", marmot_home=tmp_path / "marmot",
+        turn_notice_seconds=3, group_name="heterodyne admin", wn_agent="wn-agent",
+        marmot_home=tmp_path / "marmot",
         relays=("wss://relay.example.org",), operator_hex=OPERATOR_HEX,
         operator_npub=hex_to_npub(OPERATOR_HEX), state_dir=tmp_path / "state" / "admind",
         alerts_dir=tmp_path / "state" / "alerts", service_manager="systemd")
@@ -3619,9 +3624,12 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
      - A `CommandError` becomes a reply.
      - `AgentStuck` becomes a reply.
    - Control characters: the message is refused with a reply and marked `dropped`.
-   - Otherwise the message joins the in-memory queue. **One prompt at a time**, under a dispatch lock: the head of the queue is pasted only when the agent is ready and nothing is `in_flight`. It is reserved as `in_flight` *before* the paste, then marked `dispatched` and audited (a failed paste un-reserves it).
+   - Otherwise the message joins the in-memory queue. **One prompt at a time**, under a dispatch lock: the head of the queue is pasted only when the agent is ready, nothing is `in_flight`, and the agent is not `busy`. It is reserved as `in_flight` *before* the paste, then marked `dispatched` and audited (a failed paste un-reserves it).
    - **Reply anchoring:** the agent's `UserPromptSubmit` hook confirms that it took the prompt. Its `prompt` must match the pasted text (`same_prompt`: whitespace-insensitive), and admind then records `anchor = in_flight`. A non-matching submission, such as a prompt typed at the terminal, never takes the anchor.
-   - An `in_flight` prompt still unconfirmed after `start_timeout_seconds` (lost or non-matching UserPromptSubmit) is closed out with "could not confirm…", so dispatch never stalls. A Stop threads its reply to `anchor` and clears both. A Stop with no anchor posts top-level, verbatim. This covers a late Stop from an interrupted turn, and a turn started at the terminal. Hook delivery is acknowledged, so events arrive in the order the agent produced them.
+   - **Busy:** `busy` is set when a message is pasted and on every UserPromptSubmit, and cleared only by evidence that the agent is idle: a Stop, a SessionStart, `!interrupt` or `!new`. It survives an admind restart (an adopted session may still be mid-turn). No timer ever clears it or dispatches.
+   - A Stop threads its reply to `anchor` and clears `anchor` and `in_flight`. A Stop with no anchor posts top-level, verbatim (a late Stop from an interrupted turn, a turn started at the terminal, or our own turn whose UserPromptSubmit was lost); it leaves an unconfirmed `in_flight` in place, because that paste may still be queued behind the terminal turn. Hook delivery is acknowledged, so events arrive in the order the agent produced them.
+   - A UserPromptSubmit that doesn't match while a message is anchored means that turn is over without an observed Stop: the anchored message gets "No reply to this message: …" and the new turn's reply posts top-level.
+   - **Held-queue notices** (once each, never a dispatch): an `in_flight` message unconfirmed after `start_timeout_seconds` gets `UNCONFIRMED`; a `busy` period longer than `turn_notice_seconds` gets `LONG_TURN` (in thread when anchored). Both point the operator at `!tail` and `!interrupt`, which releases the queue.
    - `in_flight` and `anchor` are also cleared by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, by a SessionStart (a restarted agent has no turn in progress), and at admind startup (an adopted session's pending Stop may have been lost). Each of these replies "No reply to this message: …" to the abandoned message.
    - If the agent is stuck (`AgentStuck`), held messages are dropped with a reply suggesting `!tail`, then `!new`.
    - If the agent is not ready, the message is held in memory. It is flushed in order on SessionStart. If it has waited longer than `start_timeout_seconds`, the operator gets `NOT_READY` once per launch.
@@ -3633,8 +3641,8 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
 4. **Hook event:**
    - A session ID other than the current one is audited and ignored.
    - SessionStart runs `agent.started(id)`, sets ready and flushes held messages.
-   - UserPromptSubmit sets `anchor` from `in_flight` (see above); otherwise it is audited as `prompt-not-from-admind`.
-   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The transcript fallback reads only the current turn, meaning text after the latest real user prompt. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `anchor` (top-level if none). `n` comes from `reply_seq` in the store. Then the next queued message is dispatched.
+   - UserPromptSubmit sets `busy`, then sets `anchor` from `in_flight` when the prompt matches (see above). Otherwise it is audited as `prompt-not-from-admind`, and a message already anchored is closed out.
+   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The transcript fallback reads only the current turn, meaning text after the latest real user prompt. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `anchor` (top-level if none). `n` comes from `reply_seq` in the store. Stop clears `busy`; then the next queued message is dispatched if nothing is `in_flight`.
 5. **Outbox:**
    - Pending rows are sent in order.
    - A retryable error is retried after `min(60, 2**attempts)` seconds, from the head of the queue. After 10 attempts, or on a non-retryable error, the row is marked failed and audited.
@@ -3659,8 +3667,10 @@ UserPromptSubmit hooks (with the line as `prompt`), then the Stop hooks with
   reads a transcript whose earlier turns do have text;
 - `__hang__`: the turn doesn't end; the fake blocks until it reads an Escape byte (`!interrupt`), then
   ends the turn without a Stop, as Claude Code does for a user interrupt;
-- `__noprompt__`: no UserPromptSubmit is fired (as if that hook's delivery was lost).
-It appends its argv to $FAKE_CLAUDE_LOG.
+- `__noprompt__`: no UserPromptSubmit is fired (as if that hook's delivery was lost);
+- `__nostop__`: the turn ends with no Stop (as if that hook's delivery was lost).
+The markers combine (`__noprompt__ __hang__` is a long turn whose prompt hook was lost). It appends its
+argv to $FAKE_CLAUDE_LOG.
 """
 
 import json
@@ -3710,11 +3720,13 @@ def wait_for_escape() -> None:
 fire("SessionStart", source="startup")
 while raw := sys.stdin.readline():
     line = raw.rstrip("\n").lstrip("\x1b")
-    if line != "__noprompt__":
+    if "__noprompt__" not in line:
         fire("UserPromptSubmit", prompt=line)
     record("user", line)
-    if line == "__hang__":
+    if "__hang__" in line:
         wait_for_escape()
+    elif "__nostop__" in line:
+        record("assistant", [{"type": "text", "text": f"echo: {line}"}])
     elif line == "__silent__":
         record("assistant", [{"type": "tool_use", "name": "Bash"}])
         fire("Stop", transcript_path=str(transcript), stop_hook_active=False)
@@ -3746,7 +3758,7 @@ from fakes.settings import OPERATOR_HEX, make_settings
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
-from heterodyne.admind.daemon import NO_REPLY, READY_NOTICE, RESTARTED_NOTICE, Admind
+from heterodyne.admind.daemon import LONG_TURN, NO_REPLY, READY_NOTICE, RESTARTED_NOTICE, UNCONFIRMED, Admind
 from heterodyne.admind.store import Store
 from heterodyne.marmot.control import ControlClient
 from heterodyne.services import UnitStatus
@@ -3985,17 +3997,61 @@ def test_empty_reply_gets_a_placeholder(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
-def test_lost_prompt_hook_is_closed_out_and_dispatch_continues(tmp_path: Path) -> None:
+def dispatched(h: Harness) -> list[str]:
+    records = [json.loads(line) for line in (h.settings.state_dir / "audit.jsonl").read_text().splitlines()]
+    return [r["message_id"] for r in records if r["kind"] == "dispatch"]
+
+
+def test_lost_prompt_hook_holds_the_queue_until_interrupt(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         lost = await h.say("__noprompt__")
         after = await h.say("after")
-        await h.until(lambda: "echo: after" in h.texts(), timeout=30)
+        await h.until(lambda: UNCONFIRMED in h.texts(), timeout=30)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["echo: __noprompt__"] is None             # unconfirmed: posted top-level
-        notice = next(r for r in h.fake.sent
-                      if r["text"].startswith("No reply to this message: admind could"))
-        assert notice["reply_to_message_id_hex"] == lost
+        assert by_text[UNCONFIRMED] == lost
+        assert after not in dispatched(h)                        # a timeout never dispatches
+        await h.say("!interrupt")
+        await h.until(lambda: "echo: after" in h.texts(), timeout=30)
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["echo: after"] == after
+        assert by_text["No reply to this message: interrupted by !interrupt."] == lost
+    run_with(tmp_path, scenario)
+
+
+def test_long_turn_with_a_lost_prompt_hook_is_never_pasted_over(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        busy = await h.say("__noprompt__ __hang__")
+        nxt = await h.say("next")
+        await h.until(lambda: UNCONFIRMED in h.texts() and LONG_TURN in h.texts(), timeout=30)
+        await asyncio.sleep(0.5)
+        assert nxt not in dispatched(h) and "echo: next" not in h.texts()
+        await h.say("!interrupt")
+        await h.until(lambda: "echo: next" in h.texts(), timeout=30)
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["echo: next"] == nxt
+        assert by_text["No reply to this message: interrupted by !interrupt."] == busy
+    run_with(tmp_path, scenario)
+
+
+def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        from heterodyne.admind.hook import HookEvent
+        stuck = await h.say("__nostop__")
+        await h.until(lambda: h.store.get("anchor") == stuck)
+        nxt = await h.say("next")
+        await asyncio.sleep(1.0)
+        assert nxt not in dispatched(h)                          # busy until the agent is seen idle
+        sid = h.agent.session_id or ""
+        await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.daemon.hooks.put(HookEvent("Stop", sid, last_assistant_message="terminal answer"))
+        await h.until(lambda: "echo: next" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["terminal answer"] is None
+        notice = next(r for r in h.fake.sent
+                      if r["text"].startswith("No reply to this message: admind did not"))
+        assert notice["reply_to_message_id_hex"] == stuck
+        assert by_text["echo: next"] == nxt
     run_with(tmp_path, scenario)
 
 
@@ -4112,6 +4168,11 @@ NO_REPLY = "(the admin agent's turn ended without a text reply)"
 NOT_READY = "The admin agent has not started yet; your message is queued. Use !tail to see its screen."
 CONTROL_REFUSED = "Not delivered: the message contains terminal control characters."
 UNVERIFIED = "Not delivered: admind could not verify the group membership. Try again shortly."
+UNCONFIRMED = ("admind has not seen the admin agent take this message yet, so later messages are held. "
+               "If the agent already answered, its answer was posted without a thread. "
+               "Use !tail to look, or !interrupt to cancel this message and release the queue.")
+LONG_TURN = ("The admin agent is still working, so later messages are held. "
+             "Use !tail to look, or !interrupt to stop it and release the queue.")
 MAX_SEND_ATTEMPTS = 10
 
 
@@ -4136,6 +4197,8 @@ class Admind:
         self.wake = asyncio.Event()
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
+        self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
+        self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
 
     # --- state helpers -------------------------------------------------------------------------
     def latched(self) -> bool:
@@ -4165,6 +4228,8 @@ class Admind:
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
+        # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
+        # or resumed agent), or the operator's !interrupt clears it.
         for mid in self.store.inbound_with_status("received"):
             self.store.set_inbound(mid, "dropped")
             self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
@@ -4278,6 +4343,7 @@ class Admind:
                 self.not_ready_sent = False
                 self.stuck = None
                 self.abandon_in_flight("the admin agent session was replaced by !new")
+                self.set_idle()
             try:
                 result = await asyncio.to_thread(self.runner.run, cmd)
             except (AgentStuck, TmuxError) as exc:
@@ -4287,6 +4353,7 @@ class Admind:
             if cmd.name == "interrupt":
                 # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
                 self.abandon_in_flight("interrupted by !interrupt")
+                self.set_idle()
             self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
             self.reply(mid, result, "cmd")
             await self.flush()
@@ -4316,19 +4383,22 @@ class Admind:
                 self.not_ready_sent = True
                 self.reply(self.held[-1][0], NOT_READY, "notready")
             return
-        # One prompt at a time. The message is reserved as in_flight before the paste, so nothing
-        # else can dispatch meanwhile; its reply anchor is set only by the agent's UserPromptSubmit.
-        if not self.held or self.store.get("in_flight") is not None:
+        # One prompt at a time, and only into an idle agent (D9). The message is reserved as in_flight
+        # before the paste, so nothing else can dispatch meanwhile; its reply anchor is set only by the
+        # agent's UserPromptSubmit.
+        if not self.held or self.store.get("in_flight") is not None or self.store.get("busy") is not None:
             return
         mid, text = self.held.pop(0)
         self.store.set("in_flight", mid)
         self.store.set("in_flight_text", text)
+        self.set_busy()
         self.dispatched_at = time.monotonic()
         try:
             await asyncio.to_thread(self.agent.send, text)
         except TmuxError as exc:
             self.store.delete("in_flight")
             self.store.delete("in_flight_text")
+            self.set_idle()
             self.held.insert(0, (mid, text))
             self.audit.write("agent", action="send-failed", error=str(exc), message_id=mid)
             await self.start_agent()
@@ -4345,14 +4415,30 @@ class Admind:
             self.reply(mid, f"No reply to this message: {why}.", "abandoned")
             self.audit.write("agent", action="abandon", message_id=mid, reason=why)
 
-    async def expire_unconfirmed(self) -> None:
-        """A pasted prompt the agent never confirmed (its UserPromptSubmit was lost, or didn't match)
-        would block dispatch for good; after start_timeout_seconds it is closed out with a notice."""
-        if (self.store.get("in_flight") is not None and self.store.get("anchor") is None
+    def set_busy(self) -> None:
+        if self.store.get("busy") is None:
+            self.store.set("busy", now())
+            self.busy_since = time.monotonic()
+            self.noticed.discard("long-turn")
+
+    def set_idle(self) -> None:
+        self.store.delete("busy")
+
+    def notify_held(self) -> None:
+        """Tell the operator, once each, that the queue is held (D9). Never dispatches: a lost hook
+        looks exactly like a slow turn, so only a Stop, SessionStart, !interrupt or !new releases it."""
+        mid = self.store.get("in_flight")
+        if (mid is not None and self.store.get("anchor") is None and f"unconfirmed:{mid}" not in self.noticed
                 and time.monotonic() - self.dispatched_at > self.s.start_timeout_seconds):
-            self.abandon_in_flight("admind could not confirm that the admin agent received this message; "
-                                   "any reply is posted separately")
-            await self.flush()
+            self.noticed.add(f"unconfirmed:{mid}")
+            self.reply(mid, UNCONFIRMED, "unconfirmed")
+            self.audit.write("agent", action="unconfirmed", message_id=mid)
+        if (self.store.get("busy") is not None and "long-turn" not in self.noticed
+                and time.monotonic() - self.busy_since > self.s.turn_notice_seconds):
+            self.noticed.add("long-turn")
+            anchor = self.store.get("anchor")
+            self.post(f"long-turn:{self.store.get('busy')}", LONG_TURN, anchor)
+            self.audit.write("agent", action="long-turn", message_id=anchor)
 
     # --- hooks ---------------------------------------------------------------------------------
     async def hook_loop(self) -> None:
@@ -4364,12 +4450,14 @@ class Admind:
             if ev.hook_event_name == "SessionStart":
                 # A (re)started session has no turn in progress: whatever was in flight is lost.
                 self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
+                self.set_idle()
                 self.agent.started(ev.session_id)
                 self.audit.write("agent", action="session-start", session=ev.session_id,
                                  transcript=ev.transcript_path)
                 self.ready.set()
                 await self.flush()
             elif ev.hook_event_name == "UserPromptSubmit":
+                self.set_busy()                     # a turn is running, whoever started it
                 in_flight = self.store.get("in_flight")
                 pasted = self.store.get("in_flight_text")
                 if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
@@ -4378,12 +4466,18 @@ class Admind:
                     self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
                 else:
                     self.audit.write("agent", action="prompt-not-from-admind", prompt=ev.prompt)
+                    if self.store.get("anchor") is not None:
+                        # The agent runs one turn at a time, so the anchored turn is over and its Stop
+                        # was lost. Release the anchor before this turn's Stop can take it.
+                        self.abandon_in_flight("admind did not see the admin agent finish it before "
+                                               "another prompt started a turn")
             elif ev.hook_event_name == "Stop":
                 seq = int(self.store.get("reply_seq") or "0") + 1
                 self.store.set("reply_seq", str(seq))
                 text = reply_text(ev) or NO_REPLY
                 # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
-                # that ended after !interrupt, or one begun at the terminal) posts top-level.
+                # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
+                # hook) posts top-level.
                 anchor = self.store.get("anchor")
                 if anchor is not None:
                     self.store.delete("anchor")
@@ -4392,6 +4486,7 @@ class Admind:
                 for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
                     self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
                 self.audit.write("reply", session=ev.session_id, reply_to=anchor, text=text)
+                self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
                 await self.flush()
 
     # --- outbound ------------------------------------------------------------------------------
@@ -4402,7 +4497,7 @@ class Admind:
             self.wake.clear()
             if self.held and not self.ready.is_set():
                 await self.flush()          # emits NOT_READY once the start timeout passes
-            await self.expire_unconfirmed()
+            self.notify_held()
             for row in self.store.pending():
                 if not self.may_post():     # rechecked per row: a latch mid-batch stops the rest
                     break
@@ -4607,7 +4702,7 @@ This task runs on the reference host with the operator. **Ask the operator befor
   - the held alert arrives;
   - the agent's reply arrives as a threaded reply to "hi".
   Record whether the operator saw each one. This establishes, or refutes, the first operator message as the join signal.
-- [ ] **Step 6: Passthrough.** Confirm the audit log shows `prompt-submitted` for each pasted message. That means the real Claude Code fires UserPromptSubmit for a bracketed paste followed by Enter, with `prompt` equal to the pasted text. Include a long paste (over 50 lines), which the TUI displays collapsed. If `prompt` differs (`prompt-not-from-admind`), record the difference. Replies then arrive top-level plus a "could not confirm" notice, which is safe but unthreaded; fix `same_prompt` before merging. Send a multi-line message with emoji and quotes, and ask the agent to repeat it exactly. Compare the audit log's `inbound.text` with what the agent echoed.
+- [ ] **Step 6: Passthrough.** Confirm the audit log shows `prompt-submitted` for each pasted message. That means the real Claude Code fires UserPromptSubmit for a bracketed paste followed by Enter, with `prompt` equal to the pasted text. Include a long paste (over 50 lines), which the TUI displays collapsed. If `prompt` differs (`prompt-not-from-admind`), record the difference. Replies then arrive top-level, followed by the `UNCONFIRMED` notice and a held queue that `!interrupt` releases. That is safe but unthreaded; fix `same_prompt` before merging. Send a multi-line message with emoji and quotes, and ask the agent to repeat it exactly. Compare the audit log's `inbound.text` with what the agent echoed.
 - [ ] **Step 7: Commands.** Check each of these:
   - `!tail 20`;
   - `!ps`, which lists the self-test unit;
