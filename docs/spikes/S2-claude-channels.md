@@ -6,8 +6,11 @@ session (as an alternative to `tmux send-keys` for phase 2)?
 
 **Result: UNAVAILABLE** (for this account/environment, within the timebox). The
 protocol contract is fully documented and well understood; the live push test could
-not be completed end-to-end because of an org-policy gate and a credential-replication
-limitation in the scratch harness (both explained below). v1 is unaffected: it uses
+not be completed end-to-end. The observed blocker was a credential-replication
+limitation in the scratch harness (below): authentication itself failed before the
+session could reach the point of showing (or not showing) an org-policy warning, so
+a possible org-policy gate is a documented, likely, but unconfirmed secondary
+constraint, not something this spike directly observed. v1 is unaffected: it uses
 `tmux send-keys` for the Claude reviewer regardless (§12).
 
 ## Step 1: Capability check
@@ -32,10 +35,14 @@ limitation in the scratch harness (both explained below). v1 is unaffected: it u
 - A channel is a normal MCP server, spawned by Claude Code as a subprocess over
   **stdio**. The only hard requirement stated by Anthropic is the
   `@modelcontextprotocol/sdk` package on a Node-compatible runtime (Bun/Node/Deno);
-  nothing in the wire format is actually Node-specific — it is plain JSON-RPC 2.0
-  over newline-delimited stdio, so a from-scratch implementation in another language
-  is possible if it correctly implements the `initialize` handshake and notification
-  framing (see below).
+  the docs name that Node SDK specifically, but nothing in the *documented* wire
+  format looks Node-specific — it reads as plain JSON-RPC 2.0 over
+  newline-delimited stdio, so a from-scratch implementation in another language
+  looks possible in principle if it correctly implements the `initialize` handshake
+  and notification framing (see below). This spike's Python probe attempts exactly
+  that, but its compatibility with Claude Code's actual channel implementation is
+  **untested** — the live session never authenticated (Step 2), so no
+  interoperability was confirmed end-to-end.
 - Server declares `capabilities.experimental["claude/channel"] = {}` in its
   `initialize` response. Presence of this key is what registers Claude Code's
   notification listener for that server.
@@ -80,7 +87,9 @@ limitation in the scratch harness (both explained below). v1 is unaffected: it u
 Since the contract is documented, a minimal channel server was built at
 `spikes/s2/channel.py`. It is a **stdlib-only Python** implementation of the MCP
 stdio transport (no `@modelcontextprotocol/sdk` dependency, since this plan's runtime
-dependency list is empty) that:
+dependency list is empty; note the docs name the Node SDK, so this is an untested,
+from-scratch reimplementation of the wire format, not a use of Anthropic's own
+library) that:
 
 1. Answers the client's `initialize` request with
    `capabilities.experimental["claude/channel"] = {}` (one-way channel: no `tools`
@@ -119,26 +128,39 @@ Two blockers surfaced, in order:
    this spike, no real OAuth login was completed in the scratch environment (that
    would create a new grant, which is out of scope for a 2-hour research spike), so
    the live push itself was never exercised end-to-end.
-2. **Org-policy gate (independent of the above, and would apply regardless):** this
+2. **Org-policy gate (documented and likely, but not directly observed):** this
    machine's Claude Code account is a managed **Enterprise** seat
    (`organizationRole: managed`, `seatTier: enterprise_usage_based`), not an
    individual Pro/Max account. No local managed-settings document with
-   `channelsEnabled: true` was found on this host. Per the documented behavior, that
-   means channels — including a `--dangerously-load-development-channels` custom
-   server — would report "blocked by org policy" and never deliver messages, even if
-   authentication had succeeded, unless an org Owner explicitly enables
-   `channelsEnabled` first.
+   `channelsEnabled: true` was found on this host, and the documented default for
+   claude.ai Team/Enterprise orgs is that channels stay blocked until an Owner
+   enables them — so the absence of a local setting is a reasonable basis for
+   suspecting this org has not enabled channels. That is not the same as observing
+   the block, though: an Owner can also enable channels through the claude.ai admin
+   UI, which would not necessarily leave any trace in local files on this host, and
+   because authentication failed first (blocker 1), the session never reached the
+   point where Claude Code would print its "blocked by org policy" startup warning
+   (or the absence of one) either way. Treat this as a documented, likely
+   constraint inferred from the lack of local evidence, not a confirmed block.
 
 Given (1) and (2) together, **Step 2 is recorded as attempted-but-not-completed**:
-the probe server and harness are in place and match the documented contract, but no
-`CHANNEL-OK` was observed in a live session within the timebox. This is an
-environment/policy limitation, not a refutation of the documented mechanism.
+the probe server and harness were written to implement the documented contract (an
+untested implementation, per the caveat above), but no `CHANNEL-OK` was observed in
+a live session within the timebox because authentication never completed. This is
+an environment limitation encountered during the spike, not a refutation of the
+documented mechanism, and it leaves the org-policy question genuinely open rather
+than resolved.
 
 ## Step 3: Findings and consequences for phase 2
 
-- **Result: UNAVAILABLE** for this environment today, primarily because of org
-  policy (`channelsEnabled` unset for a managed Enterprise seat), secondarily because
-  of a scratch-credential replication gap encountered during this spike.
+- **Result: UNAVAILABLE** for this environment today. The blocker actually observed
+  was a scratch-credential replication gap (Step 2, blocker 1): the live session
+  never authenticated, so no push was attempted against a live session at all. A
+  second constraint — org policy, since no local `channelsEnabled: true` was found
+  for this managed Enterprise seat — is documented and likely but was **not**
+  directly observed, because authentication failed before the session could show
+  (or fail to show) a "blocked by org policy" warning, and an Owner enabling
+  channels through the admin UI would not necessarily be visible locally anyway.
 - **The mechanism itself is real, documented, and coherent**: channels are a
   legitimate one-way (or two-way) MCP-based push path into a live session, distinct
   from a normal MCP server (which is pull-only). For an individual Pro/Max
@@ -151,10 +173,15 @@ environment/policy limitation, not a refutation of the documented mechanism.
     `channelsEnabled: true`, or (b) running under an individual Pro/Max/Console
     account outside org policy — this is an operational/organizational prerequisite,
     not a code problem.
-  - A custom (non-Anthropic-marketplace) channel server will always need
+  - A bare, unapproved custom channel server (like the probe used here) needs
     `--dangerously-load-development-channels`, an explicitly unstable, hidden,
     confirmation-gated flag, for as long as the feature stays in research preview.
-    That is not a good fit for an unattended harness process.
+    This is not universal, though: an organization can package a custom channel as
+    a plugin and add it to its own marketplace / `allowedChannelPlugins` list (see
+    Step 1), which lets it register via `--channels` like an Anthropic-official
+    plugin, avoiding the development flag entirely. Only a bare `.mcp.json` server
+    or a plugin the org hasn't approved is stuck on the development flag, which is
+    not a good fit for an unattended harness process.
   - Delivery is queued/next-turn, not mid-turn-interrupt, and silently dropped if the
     session didn't opt the server in — a harness relying on channels would need its
     own delivery confirmation (e.g. a reply tool) since Claude Code gives no
@@ -167,8 +194,11 @@ environment/policy limitation, not a refutation of the documented mechanism.
 
 ## Artifacts
 
-- `spikes/s2/channel.py` — stdlib-only Python probe implementing the documented
-  channel contract (kept for future re-testing once `channelsEnabled` is available).
+- `spikes/s2/channel.py` — stdlib-only Python probe that implements the documented
+  wire format (an untested, from-scratch reimplementation; the docs specify the
+  Node `@modelcontextprotocol/sdk`, and no live session ever authenticated to
+  confirm interoperability). Kept for future re-testing once authentication in a
+  scratch harness is solved and/or `channelsEnabled` is confirmed available.
 
 ## Sources
 
