@@ -62,6 +62,10 @@ def check_host(host: Mapping[str, Any]) -> None:
     misplaced = set(host) & POLICY_KEYS
     if misplaced:
         raise ConfigError(f"config.toml: {sorted(misplaced)} belong in policy.toml")
+    sandbox = table_at(host, "sandbox", "config.toml")
+    _strings(sandbox, "egress_approved", "config.toml: sandbox")
+    for root in _strings(sandbox, "ro_mounts_approved", "config.toml: sandbox"):
+        _abs_path(root, "config.toml: sandbox.ro_mounts_approved")
 
 
 def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str, Any]) -> None:
@@ -69,15 +73,20 @@ def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str,
     if bad:
         raise ConfigError(f"workstreams/{name}.toml: {sorted(bad)} not allowed in a workstream "
                           f"(allowed: {sorted(WORKSTREAM_KEYS)})")
-    profiles = merged_host.get("profiles", {})
-    for role, profile in ws.get("roles", {}).items():
+    where = f"workstreams/{name}.toml"
+    profiles = table_at(merged_host, "profiles", "config.toml")
+    for role, profile in table_at(ws, "roles", where).items():
+        if not isinstance(profile, str):
+            raise ConfigError(f"{where}: roles.{role} must be a profile name (string)")
         if profile not in profiles:
             raise ConfigError(f"workstreams/{name}.toml: role {role} names unknown profile {profile!r}")
-    sandbox = ws.get("sandbox", {})
+    sandbox = table_at(ws, "sandbox", where)
+    string_list(table_at(ws, "restrict", where).get("escalate", []), f"{where}: restrict.escalate")
+    string_list(table_at(ws, "restrict", where).get("hard_deny", []), f"{where}: restrict.hard_deny")
     bad_sandbox = set(sandbox) - WORKSTREAM_SANDBOX_KEYS
     if bad_sandbox:
         raise ConfigError(f"workstreams/{name}.toml: [sandbox] {sorted(bad_sandbox)} not allowed")
-    host_sandbox = merged_host.get("sandbox", {})
+    host_sandbox = table_at(merged_host, "sandbox", "config.toml")
     approved = set(_strings(host_sandbox, "egress_approved", "config.toml: sandbox"))
     extra = set(_strings(sandbox, "extra_egress", f"workstreams/{name}.toml: sandbox")) - approved
     if extra:
@@ -92,10 +101,22 @@ def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str,
 
 
 def _strings(table: Mapping[str, Any], key: str, where: str) -> list[str]:
-    value = table.get(key, [])
+    return string_list(table.get(key, []), f"{where}.{key}")
+
+
+def string_list(value: Any, where: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in cast(list[Any], value)):
-        raise ConfigError(f"{where}.{key} must be a list of strings")
+        raise ConfigError(f"{where} must be a list of strings")
     return cast(list[str], value)
+
+
+def table_at(tree: Mapping[str, Any], key: str, where: str) -> Mapping[str, Any]:
+    """`tree[key]` as a table (empty if absent); anything else is a ConfigError."""
+    value = tree.get(key, {})
+    table = as_table(value)
+    if table is None:
+        raise ConfigError(f"{where}.{key} must be a table")
+    return table
 
 
 def _abs_path(value: str, where: str) -> Path:
@@ -110,10 +131,14 @@ def _abs_path(value: str, where: str) -> Path:
 
 
 def check_profiles(merged: Mapping[str, Any]) -> None:
-    known = set(merged.get("adapters", {}).get("known", []))
-    for name, profile in merged.get("profiles", {}).items():
-        if profile.get("adapter") not in known:
-            raise ConfigError(f"profiles.{name}: adapter {profile.get('adapter')!r} "
+    known = set(string_list(table_at(merged, "adapters", "config").get("known", []), "adapters.known"))
+    for name, value in table_at(merged, "profiles", "config.toml").items():
+        profile = as_table(value)
+        if profile is None:
+            raise ConfigError(f"profiles.{name} must be a table")
+        adapter = profile.get("adapter")
+        if not isinstance(adapter, str) or adapter not in known:
+            raise ConfigError(f"profiles.{name}: adapter {adapter!r} "
                               f"is not one of {sorted(known)}")
 
 
@@ -136,13 +161,26 @@ def as_table(value: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def check_secrets(tree: Mapping[str, Any], layer: str, prefix: str = "") -> None:
-    """Reject inline secrets in one layer: a secret-named key must hold a valid reference."""
-    for key, value in tree.items():
-        dotted = f"{prefix}{key}"
-        if SECRET_NAME.search(key) and not _is_secret_ref(value):
+def check_secrets(tree: Mapping[str, Any], layer: str) -> None:
+    """Reject inline secrets in one layer: a secret-named key must hold a valid reference.
+
+    Walks every value, including arrays (of tables, and nested arrays), so nothing is skipped.
+    Error paths carry indices, e.g. `identities.op.credentials[0].api_key`.
+    """
+    _walk_secrets(tree, layer, "")
+
+
+def _walk_secrets(value: Any, layer: str, path: str) -> None:
+    if isinstance(value, list):
+        for i, item in enumerate(cast(list[Any], value)):
+            _walk_secrets(item, layer, f"{path}[{i}]")
+        return
+    table = as_table(value)
+    if table is None:
+        return
+    for key, child in table.items():
+        dotted = f"{path}.{key}" if path else key
+        if SECRET_NAME.search(key) and not _is_secret_ref(child):
             raise ConfigError(f"{layer}: {dotted}: secrets must be a reference, "
                               '{ file = "<path>" } or { command = "<command>" } (exactly one, non-empty)')
-        table = as_table(value)
-        if table is not None:
-            check_secrets(table, layer, dotted + ".")
+        _walk_secrets(child, layer, dotted)

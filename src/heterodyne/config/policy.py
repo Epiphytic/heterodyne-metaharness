@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 RANK = {"auto_approve": 0, "escalate": 1, "hard_deny": 2}
 POLICY_KEYS = frozenset({"approvers", "identities", "operators", "tiers", "hard_deny_rules",
@@ -35,7 +35,10 @@ def effective_tiers(default_tiers: Mapping[str, Sequence[str]], host_overrides: 
     if unknown:
         raise ConfigError(f"[restrict] allows only {sorted(RESTRICT_KEYS)}, not {sorted(unknown)}")
     for key in ("escalate", "hard_deny"):
-        for cls in restrict.get(key, []):
+        listed: Any = restrict.get(key, [])
+        if not isinstance(listed, list) or not all(isinstance(c, str) for c in cast(list[Any], listed)):
+            raise ConfigError(f"[restrict].{key} must be a list of action-class names")
+        for cls in cast(list[str], listed):
             if cls not in tier:
                 raise ConfigError(f"[restrict].{key}: unknown class {cls}")
             if RANK[key] < RANK[tier[cls]]:
@@ -50,6 +53,29 @@ def build_policy(raw: Mapping[str, Any], default_tiers: Mapping[str, Sequence[st
     unknown = set(raw) - POLICY_KEYS
     if unknown:
         raise ConfigError(f"policy.toml: unknown keys {sorted(unknown)}")
-    return Policy(approvers=tuple(raw.get("approvers", ())),
-                  identities=dict(raw.get("identities", {})),
-                  tiers=effective_tiers(default_tiers, raw.get("tiers", {}), restrict))
+    approvers: Any = raw.get("approvers", [])
+    if not isinstance(approvers, list) or not all(isinstance(a, str) for a in cast(list[Any], approvers)):
+        raise ConfigError("policy.toml: approvers must be a list of names")
+    return Policy(approvers=tuple(cast(list[str], approvers)),
+                  identities=_identities(raw.get("identities", {})),
+                  tiers=effective_tiers(default_tiers, _tier_overrides(raw.get("tiers", {})), restrict))
+
+
+def _identities(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        raise ConfigError("policy.toml: identities must be a table of tables")
+    out: dict[str, dict[str, str]] = {}
+    for name, ids in cast(dict[str, Any], value).items():
+        fields: Any = ids
+        if not isinstance(fields, dict) or not all(
+                isinstance(v, str) for v in cast(dict[str, Any], fields).values()):
+            raise ConfigError(f"policy.toml: identities.{name} must be a table of strings")
+        out[name] = dict(cast(dict[str, str], ids))
+    return out
+
+
+def _tier_overrides(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(
+            isinstance(v, str) for v in cast(dict[str, Any], value).values()):
+        raise ConfigError("policy.toml: tiers must be a table of class = \"tier\" strings")
+    return cast(dict[str, str], value)

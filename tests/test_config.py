@@ -182,3 +182,82 @@ def test_malformed_secret_reference_rejected(cfg: Path, ref: str) -> None:
     write(cfg, "config.toml", base + f"[integrations.marmot]\nauth_token = {ref}\n")
     with pytest.raises(ConfigError, match="secret"):
         load(None, env(cfg))
+
+
+# Secrets hidden in arrays, in every layer (review round 2).
+
+def test_policy_secret_in_array_of_tables_rejected_with_indexed_path(cfg: Path) -> None:
+    write(cfg, "policy.toml", 'approvers = ["op"]\n[identities.op]\ncredentials = [{ api_key = "inline" }]\n')
+    with pytest.raises(ConfigError, match=r"policy\.toml: identities\.op\.credentials\[0\]\.api_key"):
+        load(None, env(cfg))
+
+
+def test_host_secret_in_toml_array_of_tables_rejected(cfg: Path) -> None:
+    base = (cfg / "config.toml").read_text()
+    extra = '[[integrations.extra]]\nname = "a"\n[[integrations.extra]]\ntoken = "x"\n'
+    write(cfg, "config.toml", base + extra)
+    with pytest.raises(ConfigError, match=r"config\.toml: integrations\.extra\[1\]\.token"):
+        load(None, env(cfg))
+
+
+def test_workstream_secret_in_nested_array_rejected(cfg: Path) -> None:
+    write(cfg, "workstreams/w.toml", '[repos]\nmirrors = [[{ password = "x" }]]\n')
+    with pytest.raises(ConfigError, match=r"workstreams/w\.toml: repos\.mirrors\[0\]\[0\]\.password"):
+        load("w", env(cfg))
+
+
+def test_defaults_secret_in_array_rejected(cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from heterodyne.config import layers
+
+    real = layers.read_defaults
+    monkeypatch.setattr(layers, "read_defaults", lambda: {**real(), "extra": {"items": [{"nsec": "x"}]}})
+    with pytest.raises(ConfigError, match=r"defaults: extra\.items\[0\]\.nsec"):
+        load(None, env(cfg))
+
+
+def test_secret_reference_inside_array_accepted(cfg: Path) -> None:
+    base = (cfg / "config.toml").read_text()
+    write(cfg, "config.toml", base + '[integrations]\nextra = [{ token = { file = "/run/t" } }]\n')
+    assert load(None, env(cfg)).get("integrations.extra") == [{"token": {"file": "/run/t"}}]
+
+
+# Wrong-typed values must be ConfigErrors, not crashes or silent coercion (review round 2).
+
+@pytest.mark.parametrize("policy", [
+    'approvers = "op"\n',
+    'approvers = [["op"]]\n',
+    'identities = ["op"]\n',
+    '[identities.op]\ngithub = ["x"]\n',
+    '[tiers]\npush_branch = ["auto_approve"]\n',
+    'tiers = ["push_branch"]\n',
+])
+def test_malformed_policy_types_rejected(cfg: Path, policy: str) -> None:
+    write(cfg, "policy.toml", policy)
+    with pytest.raises(ConfigError):
+        load(None, env(cfg))
+
+
+@pytest.mark.parametrize("ws", [
+    '[restrict]\nescalate = [["run_tests"]]\n',
+    '[restrict]\nescalate = "run_tests"\n',
+    'restrict = ["run_tests"]\n',
+    '[roles]\ncoder = ["a"]\n',
+    'roles = ["a"]\n',
+    'sandbox = ["x"]\n',
+    '[sandbox]\nextra_egress = [["pypi.org"]]\n',
+])
+def test_malformed_workstream_types_rejected(cfg: Path, ws: str) -> None:
+    write(cfg, "workstreams/w.toml", ws)
+    with pytest.raises(ConfigError):
+        load("w", env(cfg))
+
+
+@pytest.mark.parametrize("host", [
+    'profiles = ["a"]\n',
+    '[profiles]\na = "codex"\n',
+    'sandbox = ["x"]\n',
+])
+def test_malformed_host_types_rejected(cfg: Path, host: str) -> None:
+    write(cfg, "config.toml", host)
+    with pytest.raises(ConfigError):
+        load(None, env(cfg))
