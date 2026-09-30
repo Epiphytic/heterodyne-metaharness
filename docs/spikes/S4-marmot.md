@@ -344,7 +344,8 @@ join. (This is a plan-2/plan-6 implementation note, not an ADR change — see
 spike's findings):**
 
 1. **For the harness's own adds, re-posting after a join is armed on the
-   request path and fired on a confirmed join. For the harness's own adds, no inbound event can fire it.**
+   request path and fired on a confirmed join. For the harness's own adds, no `member_added` event arrives
+   to fire it.**
    Step 5 confirmed that an actor performing
    `group_member_add`/`group_member_remove` never sees the resulting
    `group_state_changed` on its own subscription; that event reaches only
