@@ -7,7 +7,7 @@ coder = "coder"                   # must name a host profile
 main = "<path-to-repo>"
 
 [sandbox]
-extra_ro_mounts = []
+extra_ro_mounts = []              # each must be within the host's sandbox.ro_mounts_approved
 extra_egress = ["pypi.org"]       # must be listed in the host's sandbox.egress_approved
 
 [restrict]                        # tightening only

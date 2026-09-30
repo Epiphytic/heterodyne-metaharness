@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from heterodyne.config import layers, paths
-from heterodyne.config.policy import ConfigError, Policy, load_policy
+from heterodyne.config.policy import ConfigError, Policy, build_policy
 
 __all__ = ["Config", "ConfigError", "Policy", "load"]
 
@@ -31,8 +31,12 @@ class Config:
 def load(workstream: str | None = None, env: Mapping[str, str] = os.environ) -> Config:
     config_dir = paths.config_dir(env)
     defaults = layers.read_defaults()
+    layers.check_secrets(defaults, "defaults")
     host = layers.read_toml(config_dir / "config.toml")
     layers.check_host(host)
+    layers.check_secrets(host, "config.toml")
+    policy_raw = layers.read_toml(config_dir / "policy.toml")
+    layers.check_secrets(policy_raw, "policy.toml")
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
     layers.merge(values, copy.deepcopy(defaults), "defaults", sources)
@@ -41,6 +45,7 @@ def load(workstream: str | None = None, env: Mapping[str, str] = os.environ) -> 
     if workstream:
         ws = layers.read_toml(config_dir / "workstreams" / f"{workstream}.toml")
         layers.check_workstream(workstream, ws, values)
+        layers.check_secrets(ws, f"workstreams/{workstream}.toml")
         restrict = ws.pop("restrict", {})
         layers.merge(values, ws, f"workstream:{workstream}.toml", sources)
     env_values, env_labels = layers.env_layer(env)
@@ -48,6 +53,6 @@ def load(workstream: str | None = None, env: Mapping[str, str] = os.environ) -> 
         values.setdefault(table, {}).update(entries)
     sources.update(env_labels)
     layers.check_profiles(values)
-    layers.check_secrets(values)
-    policy = load_policy(config_dir / "policy.toml", defaults.get("tiers", {}), restrict)
+    layers.check_secrets(env_values, "environment")
+    policy = build_policy(policy_raw, defaults.get("tiers", {}), restrict)
     return Config(values=values, sources=sources, policy=policy)

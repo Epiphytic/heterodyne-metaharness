@@ -1,9 +1,7 @@
 """Host-only policy and effective action tiers (ADR 0001 §5.3, §15)."""
 
-import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 RANK = {"auto_approve": 0, "escalate": 1, "hard_deny": 2}
@@ -46,9 +44,9 @@ def effective_tiers(default_tiers: Mapping[str, Sequence[str]], host_overrides: 
     return tier
 
 
-def load_policy(path: Path, default_tiers: Mapping[str, Sequence[str]],
-                restrict: Mapping[str, Sequence[str]]) -> Policy:
-    raw: dict[str, Any] = tomllib.loads(path.read_text()) if path.exists() else {}
+def build_policy(raw: Mapping[str, Any], default_tiers: Mapping[str, Sequence[str]],
+                 restrict: Mapping[str, Sequence[str]]) -> Policy:
+    """Policy from the parsed host `policy.toml` (already secret-checked by the loader)."""
     unknown = set(raw) - POLICY_KEYS
     if unknown:
         raise ConfigError(f"policy.toml: unknown keys {sorted(unknown)}")

@@ -77,10 +77,36 @@ def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str,
     bad_sandbox = set(sandbox) - WORKSTREAM_SANDBOX_KEYS
     if bad_sandbox:
         raise ConfigError(f"workstreams/{name}.toml: [sandbox] {sorted(bad_sandbox)} not allowed")
-    approved = set(merged_host.get("sandbox", {}).get("egress_approved", []))
-    extra = set(sandbox.get("extra_egress", [])) - approved
+    host_sandbox = merged_host.get("sandbox", {})
+    approved = set(_strings(host_sandbox, "egress_approved", "config.toml: sandbox"))
+    extra = set(_strings(sandbox, "extra_egress", f"workstreams/{name}.toml: sandbox")) - approved
     if extra:
         raise ConfigError(f"workstreams/{name}.toml: {sorted(extra)} not in host sandbox.egress_approved")
+    roots = [_abs_path(p, "config.toml: sandbox.ro_mounts_approved")
+             for p in _strings(host_sandbox, "ro_mounts_approved", "config.toml: sandbox")]
+    for mount in _strings(sandbox, "extra_ro_mounts", f"workstreams/{name}.toml: sandbox"):
+        resolved = _abs_path(mount, f"workstreams/{name}.toml: sandbox.extra_ro_mounts")
+        if not any(resolved.is_relative_to(root) for root in roots):
+            raise ConfigError(f"workstreams/{name}.toml: read-only mount {mount!r} is not within "
+                              "host sandbox.ro_mounts_approved")
+
+
+def _strings(table: Mapping[str, Any], key: str, where: str) -> list[str]:
+    value = table.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in cast(list[Any], value)):
+        raise ConfigError(f"{where}.{key} must be a list of strings")
+    return cast(list[str], value)
+
+
+def _abs_path(value: str, where: str) -> Path:
+    """Absolute path with `..` and symlinks resolved, so containment is judged on the real target.
+
+    Containment uses `Path.is_relative_to`, which compares whole components: `/data` covers
+    `/data/x` but not `/database`.
+    """
+    if not Path(value).is_absolute():
+        raise ConfigError(f"{where}: {value!r} must be an absolute path")
+    return Path(value).resolve(strict=False)
 
 
 def check_profiles(merged: Mapping[str, Any]) -> None:
@@ -92,11 +118,15 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
 
 
 def _is_secret_ref(value: Any) -> bool:
-    """A secret reference is a one-key table, `{ file = ... }` or `{ command = ... }`."""
+    """A secret reference is a one-key table, `{ file = "..." }` or `{ command = "..." }`,
+    whose value is a non-empty string."""
     if not isinstance(value, Mapping):
         return False
     ref = cast(Mapping[str, Any], value)
-    return len(ref) == 1 and next(iter(ref)) in ("file", "command")
+    if len(ref) != 1:
+        return False
+    key, target = next(iter(ref.items()))
+    return key in ("file", "command") and isinstance(target, str) and target.strip() != ""
 
 
 def as_table(value: Any) -> Mapping[str, Any] | None:
@@ -106,12 +136,13 @@ def as_table(value: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def check_secrets(tree: Mapping[str, Any], prefix: str = "") -> None:
+def check_secrets(tree: Mapping[str, Any], layer: str, prefix: str = "") -> None:
+    """Reject inline secrets in one layer: a secret-named key must hold a valid reference."""
     for key, value in tree.items():
         dotted = f"{prefix}{key}"
         if SECRET_NAME.search(key) and not _is_secret_ref(value):
-            raise ConfigError(f"{dotted}: secrets must be a reference, "
-                              "{ file = ... } or { command = ... }")
+            raise ConfigError(f"{layer}: {dotted}: secrets must be a reference, "
+                              '{ file = "<path>" } or { command = "<command>" } (exactly one, non-empty)')
         table = as_table(value)
         if table is not None:
-            check_secrets(table, dotted + ".")
+            check_secrets(table, layer, dotted + ".")

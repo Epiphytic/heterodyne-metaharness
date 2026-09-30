@@ -3,6 +3,8 @@
 
 [platform]
 os = "<linux-or-macos>"          # written by `heterodyne setup`
+service_manager = "<service-manager>"   # systemd or launchd; written by `heterodyne setup` (§3.2)
+sandbox = "<sandbox-backend>"   # bubblewrap or seatbelt; written by `heterodyne setup` (§3.2)
 
 # Profiles: adapter + model + launch options (§4.1). One profile is enough; two different
 # models are recommended so reviews are cross-model rather than adversarial (§11.1).
@@ -20,6 +22,9 @@ reviewer = "reviewer"
 
 [sandbox]
 egress_approved = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"]
+# Directory trees a workstream may add as read-only mounts (absolute paths; a subpath of an
+# entry is allowed, a sibling like <entry>-other is not). Empty means none.
+ro_mounts_approved = []
 
 [integrations.beads]
 btq = "<path-to-btq>"

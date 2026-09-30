@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-import tomllib
 from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
@@ -46,22 +45,45 @@ def cmd_config_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _create_new(dest: Path, text: str) -> bool:
+    """Create `dest` 0600 with `text`, atomically refusing any existing entry, including a symlink.
+
+    O_EXCL fails on any existing name (a dangling symlink included), so the check and the create
+    cannot race, and the file is 0600 from creation (umask can only remove bits).
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(dest, flags, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    return True
+
+
 def cmd_setup(_: argparse.Namespace) -> int:
     target = paths.config_dir(os.environ)
-    target.mkdir(parents=True, exist_ok=True)
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
     examples = Path(str(resources.files("heterodyne"))).parent.parent / "examples"
     os_name = platform.detect()
+    chosen = platform.backends(os_name)
+    fill = {"<linux-or-macos>": os_name, "<service-manager>": chosen["service_manager"],
+            "<sandbox-backend>": chosen["sandbox"]}
     for name in ("config.toml", "policy.toml"):
         dest = target / name
-        if dest.exists():
-            print(f"kept existing {dest}")
-            continue
-        text = (examples / name).read_text().replace("<linux-or-macos>", os_name)
-        dest.write_text(text)
-        dest.chmod(0o600)
-        print(f"wrote {dest} (edit the <placeholders>)")
-    tomllib.loads((target / "config.toml").read_text())
-    print(f"platform: {os_name} {platform.backends(os_name)}")
+        text = (examples / name).read_text()
+        for placeholder, value in fill.items():
+            text = text.replace(placeholder, value)
+        if _create_new(dest, text):
+            print(f"wrote {dest} (edit the <placeholders>)")
+        else:
+            print(f"kept existing {dest} (not modified)")
+    print(f"platform: {os_name} {chosen}")
+    try:
+        hconfig.load()
+    except hconfig.ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

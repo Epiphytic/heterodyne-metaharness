@@ -113,3 +113,72 @@ def test_examples_load(tmp_path: Path) -> None:
     text = (tmp_path / "config.toml").read_text().replace("<linux-or-macos>", "linux")
     (tmp_path / "config.toml").write_text(text)
     assert load("example", env(tmp_path)).get("roles.coder") == "coder"
+
+
+def with_ro_allowlist(cfg: Path, entries: list[str]) -> None:
+    text = (cfg / "config.toml").read_text()
+    listed = ", ".join(f'"{e}"' for e in entries)
+    old = 'egress_approved = ["pypi.org"]'
+    write(cfg, "config.toml", text.replace(old, f"{old}\nro_mounts_approved = [{listed}]"))
+
+
+def ws_mounts(cfg: Path, mounts: list[str]) -> None:
+    listed = ", ".join(f'"{m}"' for m in mounts)
+    write(cfg, "workstreams/w.toml", f"[sandbox]\nextra_ro_mounts = [{listed}]\n")
+
+
+def test_ro_mounts_require_host_allowlist(cfg: Path) -> None:
+    ws_mounts(cfg, ["/srv/data"])
+    with pytest.raises(ConfigError, match="ro_mounts_approved"):
+        load("w", env(cfg))
+    with_ro_allowlist(cfg, [])
+    with pytest.raises(ConfigError, match="ro_mounts_approved"):
+        load("w", env(cfg))
+
+
+def test_ro_mounts_within_approved_tree(cfg: Path) -> None:
+    with_ro_allowlist(cfg, ["/srv/data"])
+    for ok in (["/srv/data"], ["/srv/data/sets/a"], ["/srv/data/./sets/"]):
+        ws_mounts(cfg, ok)
+        assert load("w", env(cfg)).get("sandbox.extra_ro_mounts") == ok
+    for bad in (["/srv/database"], ["/srv/data/../etc"], ["/srv"], ["relative/path"]):
+        ws_mounts(cfg, bad)
+        with pytest.raises(ConfigError, match="ro_mounts_approved|absolute"):
+            load("w", env(cfg))
+
+
+def test_ro_mount_symlink_out_of_approved_tree_rejected(
+        cfg: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    approved = tmp_path_factory.mktemp("approved")
+    outside = tmp_path_factory.mktemp("outside")
+    (approved / "escape").symlink_to(outside)
+    with_ro_allowlist(cfg, [str(approved)])
+    ws_mounts(cfg, [str(approved / "escape")])
+    with pytest.raises(ConfigError, match="ro_mounts_approved"):
+        load("w", env(cfg))
+
+
+def test_policy_toml_inline_secret_rejected(cfg: Path) -> None:
+    write(cfg, "policy.toml", 'approvers = ["op"]\n[identities.op]\napi_key = "hunter2"\n')
+    with pytest.raises(ConfigError, match="secret"):
+        load(None, env(cfg))
+
+
+def test_workstream_inline_secret_rejected(cfg: Path) -> None:
+    write(cfg, "workstreams/w.toml", '[repos]\ntoken = "hunter2"\n')
+    with pytest.raises(ConfigError, match="secret"):
+        load("w", env(cfg))
+
+
+@pytest.mark.parametrize("ref", [
+    '{ command = "" }',
+    "{ command = 5 }",
+    '{ file = "a", command = "b" }',
+    '{ command = "x", extra = "y" }',
+    "{}",
+])
+def test_malformed_secret_reference_rejected(cfg: Path, ref: str) -> None:
+    base = (cfg / "config.toml").read_text()
+    write(cfg, "config.toml", base + f"[integrations.marmot]\nauth_token = {ref}\n")
+    with pytest.raises(ConfigError, match="secret"):
+        load(None, env(cfg))
