@@ -343,8 +343,8 @@ join. (This is a plan-2/plan-6 implementation note, not an ADR change — see
 **Plan 2 / Plan 6 implementation notes and acceptance items (from this
 spike's findings):**
 
-1. **Re-posting after a join is armed on the request path and fired on a
-   confirmed join. For the harness's own adds, no inbound event can fire it.**
+1. **For the harness's own adds, re-posting after a join is armed on the
+   request path and fired on a confirmed join. For the harness's own adds, no inbound event can fire it.**
    Step 5 confirmed that an actor performing
    `group_member_add`/`group_member_remove` never sees the resulting
    `group_state_changed` on its own subscription; that event reaches only
@@ -365,8 +365,11 @@ spike's findings):**
      response carries `member_count` but no member or welcome state, so it
      is **not** evidence of acceptance. Establishing and verifying the
      fire signal is a plan 2/6 acceptance item.
-   - For adds made by some *other* admin identity, the harness's own
-     subscription does receive `member_added` (step 5). But nothing here
+   - For adds made by some *other* admin identity, there is no harness
+     request path. Step 5 observed `member_added` reaching a non-acting
+     member (the harness acted, another member received it). It's an
+     inference, not an observation, that the harness would likewise receive
+     it when another admin acts. And nothing here
      shows that the event arrives only after the new member has accepted or
      can see messages. It is therefore an **unverified candidate** signal,
      pending plan 2/6 validation, not an established trigger.
