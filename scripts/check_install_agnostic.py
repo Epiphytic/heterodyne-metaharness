@@ -11,6 +11,13 @@ Usage: check_install_agnostic.py [--root DIR] [--extra FILE] [paths...]
   strings, one per line (blank lines and `#` comments ignored), such as a username, hostname or group IDs.
 - A line may carry `install-agnostic: allow=<rule>[,<rule>...]` to suppress the named rules on that line
   only. Each use must say why in the same comment. It cannot suppress `local-denylist`.
+- Fails closed: nothing is silently skipped.
+  - Invalid UTF-8 is decoded with surrogateescape, so every other line is still scanned.
+  - Binary files (a NUL byte in the first 8 KiB, as git decides) are scanned byte-wise as latin-1 for
+    every rule and literal; allow markers do not apply in them.
+  - A symlink is scanned as its target string (which is what git stores).
+  - Submodules, unreadable or missing paths are reported as their own rule (`submodule`, `unreadable`).
+  - A failing `git ls-files` exits 2.
 """
 
 import argparse
@@ -34,14 +41,31 @@ SRC_RULES = {
 }
 LOCAL = "local-denylist"
 ALLOW = re.compile(r"install-agnostic: allow=([\w,-]+)")
+BINARY_SNIFF = 8000  # bytes; git's buffer_is_binary() heuristic
 EXEMPT_DIRS = ("examples/", "tests/fixtures/")
 EXEMPT_FILES = ("LICENSE", "scripts/check_install_agnostic.py")
 
 
-def tracked(root: Path) -> list[str]:
-    cmd = ["git", "-C", str(root), "ls-files", "-z"]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return [p for p in out.stdout.split("\0") if p]
+class GitError(Exception):
+    pass
+
+
+def tracked(root: Path) -> list[tuple[str, str]]:
+    """(mode, path) for every index entry. Raises GitError if git fails."""
+    cmd = ["git", "-C", str(root), "ls-files", "-z", "--stage"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip()
+        raise GitError(f"git ls-files failed in {root}: {stderr}") from exc
+    except OSError as exc:
+        raise GitError(f"git ls-files failed in {root}: {exc}") from exc
+    entries: list[tuple[str, str]] = []
+    for rec in out.stdout.split(b"\0"):
+        if rec:
+            meta, _, path = rec.partition(b"\t")
+            entries.append((meta.split(b" ")[0].decode(), os.fsdecode(path)))
+    return entries
 
 
 def default_extra() -> Path | None:
@@ -65,10 +89,43 @@ def exempt(rel: str) -> bool:
     return rel.startswith(EXEMPT_DIRS) or rel in EXEMPT_FILES
 
 
-def scan_line(line: str, rules: dict[str, re.Pattern[str]], literals: list[str]) -> list[str]:
-    allowed = {r for m in ALLOW.finditer(line) for r in m.group(1).split(",")} - {LOCAL}
+def scan_line(
+    line: str, rules: dict[str, re.Pattern[str]], literals: list[str], markers: bool = True
+) -> list[str]:
+    allowed = {r for m in ALLOW.finditer(line) for r in m.group(1).split(",")} - {LOCAL} if markers else set()
     found = [name for name, rx in rules.items() if name not in allowed and rx.search(line)]
     return found + [LOCAL for lit in literals if lit in line]
+
+
+def read_lines(path: Path, literals: list[str]) -> tuple[list[str], list[str], bool]:
+    """Return (lines, literals-in-matching-encoding, is_binary). Raises OSError if unreadable."""
+    if path.is_symlink():
+        return [str(path.readlink())], literals, False
+    data = path.read_bytes()
+    if b"\0" in data[:BINARY_SNIFF]:
+        # Byte-level scan: latin-1 maps each byte to one code point, so ASCII patterns still match and
+        # UTF-8 literals match once re-expressed the same way.
+        return data.decode("latin-1").splitlines(), [lit.encode().decode("latin-1") for lit in literals], True
+    return data.decode("utf-8", errors="surrogateescape").splitlines(), literals, False
+
+
+def excerpt(line: str) -> str:
+    text = line.strip()[:100].encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace")
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
+def scan_file(root: Path, rel: str, mode: str | None, literals: list[str]) -> list[str]:
+    if mode == "160000":
+        return [f"{rel}:0: submodule: contents live outside this repo and are not scanned"]
+    try:
+        lines, lits, binary = read_lines(root / rel, literals)
+    except OSError as exc:
+        return [f"{rel}:0: unreadable: {type(exc).__name__}: {exc.strerror or exc}"]
+    rules = {**RULES, **(SRC_RULES if rel.startswith("src/") else {})}
+    kind = " (binary)" if binary else ""
+    return [f"{rel}:{n}: {rule}{kind}: {excerpt(line)}"
+            for n, line in enumerate(lines, 1)
+            for rule in scan_line(line, rules, lits, markers=not binary)]
 
 
 def main() -> int:
@@ -81,20 +138,19 @@ def main() -> int:
     if args.extra is not None and not args.extra.is_file():
         parser.error(f"--extra file not found: {args.extra}")
     literals = load_literals(args.extra or default_extra())
+    try:
+        entries = [(None, p) for p in args.paths] if args.paths else tracked(root)
+    except GitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     hits = 0
-    for rel in args.paths or tracked(root):
+    for mode, rel in entries:
         rel = Path(rel).as_posix()
         if exempt(rel):
             continue
-        try:
-            lines = (root / rel).read_text().splitlines()
-        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
-            continue
-        rules = {**RULES, **(SRC_RULES if rel.startswith("src/") else {})}
-        for n, line in enumerate(lines, 1):
-            for rule in scan_line(line, rules, literals):
-                print(f"{rel}:{n}: {rule}: {line.strip()[:100]}")
-                hits += 1
+        for hit in scan_file(root, rel, mode, literals):
+            print(hit)
+            hits += 1
     return 1 if hits else 0
 
 

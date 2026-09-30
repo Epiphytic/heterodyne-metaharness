@@ -23,6 +23,7 @@ jobs:
     env:
       GITLEAKS_VERSION: 8.30.1
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  # linux_x64 tarball
+      V2_BASE: 13588b4eeb365ef076af6465654abac7a82706e9  # parent of e1cd4ae, the first v2 commit
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -34,5 +35,12 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
-      # Full-history scan; .gitleaksignore holds the justified fingerprints.
-      - run: '"$RUNNER_TEMP/gitleaks" git --no-banner --redact -v .'
+      # Scope: v2 commits only (V2_BASE..HEAD). Pre-v2 history contains a public operator key that
+      # gitleaks flags; operator decision 2026-09-30 is to leave that history alone and not scan it.
+      # V2_BASE is the parent of the first v2 commit; fetch-depth: 0 makes it resolvable, and the
+      # job fails (rather than silently scanning nothing) if it is missing or not an ancestor of HEAD.
+      - name: gitleaks (v2 history)
+        run: |
+          git cat-file -e "${V2_BASE}^{commit}"
+          git merge-base --is-ancestor "$V2_BASE" HEAD
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact -v --log-opts="${V2_BASE}..HEAD" .

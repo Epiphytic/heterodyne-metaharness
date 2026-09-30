@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_install_agnostic.py"
 
@@ -116,3 +118,96 @@ def test_default_scan_uses_git_ls_files(tmp_path: Path) -> None:
                        capture_output=True, text=True, env=hermetic_env(tmp_path))
     assert r.returncode == 1
     assert "tracked.md:1" in r.stdout and "untracked.md" not in r.stdout
+
+
+# --- Fail-closed behaviour: nothing may be silently skipped. ---
+
+
+def scan(root: Path, *paths: str, extra: str | None = None) -> subprocess.CompletedProcess[str]:
+    args = [sys.executable, str(SCRIPT), "--root", str(root)]
+    if extra is not None:
+        (root / "leak.txt").write_text(extra)
+        args += ["--extra", str(root / "leak.txt")]
+    env = {**hermetic_env(root), "GIT_CEILING_DIRECTORIES": str(root.parent)}
+    return subprocess.run([*args, *paths], capture_output=True, text=True, env=env)
+
+
+def git_repo(root: Path) -> Path:
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    return root
+
+
+def test_invalid_utf8_does_not_hide_the_rest_of_the_file(tmp_path: Path) -> None:
+    data = b"caf\xe9 " + HOME_PATH.encode() + b"\nok\nsee " + IP_PORT.encode() + b"\n"
+    (tmp_path / "a.md").write_bytes(data)
+    r = scan(tmp_path, "a.md")
+    assert r.returncode == 1
+    assert "a.md:1: home-path:" in r.stdout and "a.md:3: ip-port:" in r.stdout
+
+
+def test_binary_file_is_scanned_bytewise(tmp_path: Path) -> None:
+    blob = b"\x00\x01\x02 " + HOME_PATH.encode() + b" \xff\x00 myhostname \x00"
+    (tmp_path / "img.bin").write_bytes(blob)
+    r = scan(tmp_path, "img.bin", extra="myhostname\n")
+    assert r.returncode == 1
+    assert "img.bin:1: home-path (binary):" in r.stdout and "img.bin:1: local-denylist (binary):" in r.stdout
+
+
+def test_allow_marker_does_not_apply_in_binary_files(tmp_path: Path) -> None:
+    (tmp_path / "b.bin").write_bytes(b"\x00" + IP_PORT.encode() + b" install-agnostic: allow=ip-port\n")
+    r = scan(tmp_path, "b.bin")
+    assert r.returncode == 1 and "ip-port (binary)" in r.stdout
+
+
+def test_clean_binary_file_passes(tmp_path: Path) -> None:
+    (tmp_path / "c.bin").write_bytes(bytes(range(256)) * 4)
+    assert scan(tmp_path, "c.bin").returncode == 0
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can read mode-000 files")
+def test_unreadable_file_fails_closed(tmp_path: Path) -> None:
+    f = tmp_path / "secret.md"
+    f.write_text("fine\n")
+    f.chmod(0)
+    try:
+        r = scan(tmp_path, "secret.md")
+    finally:
+        f.chmod(0o600)
+    assert r.returncode == 1 and "secret.md:0: unreadable:" in r.stdout
+
+
+def test_missing_path_fails_closed(tmp_path: Path) -> None:
+    r = scan(tmp_path, "gone.md")
+    assert r.returncode == 1 and "gone.md:0: unreadable:" in r.stdout
+
+
+def test_directory_path_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    r = scan(tmp_path, "d")
+    assert r.returncode == 1 and "d:0: unreadable:" in r.stdout
+
+
+def test_symlink_is_scanned_as_its_target(tmp_path: Path) -> None:
+    repo = git_repo(tmp_path / "repo")
+    (repo / "bad").symlink_to(HOME_PATH)          # dangling is fine: git stores the target string
+    (repo / "good").symlink_to("docs/readme.md")
+    subprocess.run(["git", "-C", str(repo), "add", "bad", "good"], check=True)
+    r = scan(repo)
+    assert r.returncode == 1
+    assert "bad:1: home-path:" in r.stdout and "good:" not in r.stdout
+
+
+def test_submodule_fails_closed(tmp_path: Path) -> None:
+    repo = git_repo(tmp_path / "repo")
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    subprocess.run(["git", "-C", str(repo), "update-index", "--add", "--cacheinfo", f"160000,{sha},vendor/x"],
+                   check=True)
+    r = scan(repo)
+    assert r.returncode == 1 and "vendor/x:0: submodule:" in r.stdout
+
+
+def test_git_ls_files_failure_exits_2(tmp_path: Path) -> None:
+    (tmp_path / "notgit").mkdir()
+    r = scan(tmp_path / "notgit")
+    assert r.returncode == 2 and "git ls-files failed" in r.stderr
