@@ -21,11 +21,21 @@ Usage: check_install_agnostic.py [--root DIR] [--extra FILE] [paths...]
 """
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# The default deny-list lives in the same host config dir `heterodyne` uses. Load paths.py by file so
+# this script also runs under a bare system python3 (pre-commit) without the package installed.
+_PATHS_FILE = Path(__file__).resolve().parent.parent / "src" / "heterodyne" / "config" / "paths.py"
+_PATHS_SPEC = importlib.util.spec_from_file_location("_heterodyne_paths", _PATHS_FILE)
+if _PATHS_SPEC is None or _PATHS_SPEC.loader is None:
+    raise ImportError(f"cannot load {_PATHS_FILE}")
+_paths = importlib.util.module_from_spec(_PATHS_SPEC)
+_PATHS_SPEC.loader.exec_module(_paths)
 
 RULES = {
     "home-path": re.compile(r"(?<![\w$])/(?:home|Users)/[A-Za-z0-9._-]+|(?<![\w$])/root/"),
@@ -69,12 +79,7 @@ def tracked(root: Path) -> list[tuple[str, str]]:
 
 
 def default_extra() -> Path | None:
-    base = os.environ.get("HETERODYNE_CONFIG_DIR")
-    if base:
-        config_dir = Path(base)
-    else:
-        config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "heterodyne"
-    path = config_dir / "leakcheck.txt"
+    path = Path(_paths.config_dir(os.environ)) / "leakcheck.txt"
     return path if path.exists() else None
 
 

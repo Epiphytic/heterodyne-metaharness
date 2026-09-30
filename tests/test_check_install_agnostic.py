@@ -211,3 +211,28 @@ def test_git_ls_files_failure_exits_2(tmp_path: Path) -> None:
     (tmp_path / "notgit").mkdir()
     r = scan(tmp_path / "notgit")
     assert r.returncode == 2 and "git ls-files failed" in r.stderr
+
+
+@pytest.mark.parametrize("form", ["tilde", "xdg", "xdg-relative"])
+def test_default_deny_list_location_matches_config_dir(tmp_path: Path, form: str) -> None:
+    """The default leakcheck.txt is found wherever `heterodyne` itself looks for host config."""
+    home = tmp_path / "home"
+    if form == "xdg":
+        config = tmp_path / "xdg" / "heterodyne"
+        env = {"XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    else:
+        config = home / ".config" / "heterodyne"
+        # "~/..." must expand against HOME; a relative XDG_CONFIG_HOME is ignored (XDG spec).
+        env = ({"HETERODYNE_CONFIG_DIR": "~/.config/heterodyne"} if form == "tilde"
+               else {"XDG_CONFIG_HOME": "relative/xdg"})
+    config.mkdir(parents=True)
+    (config / "leakcheck.txt").write_text("sekrit-host\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("built on sekrit-host\n")
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("HETERODYNE_CONFIG_DIR", "XDG_CONFIG_HOME")}
+    result = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path), "docs/a.md"],
+                            capture_output=True, text=True, env={**base, "HOME": str(home), **env},
+                            cwd=tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "local-denylist" in result.stdout
