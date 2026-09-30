@@ -333,6 +333,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -352,6 +353,7 @@ class FakeWnAgent:
         self.sent: list[dict[str, Any]] = []
         self.fail_sends = 0          # the next N send_final calls fail with a retryable error
         self.fail_group_info = False
+        self.on_send: Callable[[dict[str, Any]], None] | None = None   # called after each new send
         self._keys: dict[str, str] = {}
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._server: asyncio.Server | None = None
@@ -445,6 +447,8 @@ class FakeWnAgent:
             self.sent.append(req)
             if key is not None:
                 self._keys[key] = message_id
+            if self.on_send is not None:
+                self.on_send(req)
         await self._reply(writer, rid, {"type": "final_sent", "message_ids_hex": [message_id],
                                         "maintenance_disposition": "ready"})
 
@@ -512,6 +516,7 @@ def test_error_frames_raise_control_error_with_code(tmp_path: Path) -> None:
         with pytest.raises(ControlError) as exc:
             await ControlClient(tmp_path / "s.sock", "wrong").account_list()
         assert exc.value.code == "unauthorized" and exc.value.retryable is False
+        assert exc.value.detail == "bad token" and "bad token" not in str(exc.value)
         await fake.stop()
     run(body())
 
@@ -629,10 +634,15 @@ MAX_FRAME = 1024 * 1024
 
 
 class ControlError(Exception):
-    def __init__(self, message: str, code: str = "agent_control_error", retryable: bool = False) -> None:
+    """`str(exc)` is always admind's own wording. A peer's free-text error message may echo keys or IDs,
+    so it is kept in `detail`, which goes only to the local audit log, never to stderr or the group."""
+
+    def __init__(self, message: str, code: str = "agent_control_error", retryable: bool = False,
+                 detail: str = "") -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.detail = detail
 
 
 class ProtocolError(ControlError):
@@ -741,7 +751,7 @@ def decode_head(line: bytes, request_id: str) -> str:
         raise ProtocolError("response id does not match the request id")
     if head.type == "error":
         err = msgspec.json.decode(line, type=_Error)
-        raise ControlError(err.message, err.code, err.retryable)
+        raise ControlError(f"wn-agent returned error {err.code}", err.code, err.retryable, detail=err.message)
     return head.type
 
 
@@ -1311,7 +1321,7 @@ git commit -m "admind settings, policy operators and adapter binaries (plan 2 ta
     - `close()`.
   - `OutboxRow(seq, key, reply_to, text, attempts)`, and `now() -> str` (UTC ISO-8601, seconds).
   - `Audit(path: Path)` with `write(kind: str, **fields: object) -> None`.
-  - Well-known `kv` keys (used by later tasks): `group_id_hex`, `account_id_hex`, `agent_session`, `session_started`, `launches_without_start`, `operator_seen_at`, `latched`, `last_dispatched`, `reply_seq`.
+  - Well-known `kv` keys (used by later tasks): `group_id_hex`, `account_id_hex`, `agent_session`, `session_started`, `launches_without_start`, `operator_seen_at`, `latched`, `in_flight`, `reply_seq`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2188,6 +2198,7 @@ Expected: PASS (or SKIPPED where tmux is absent).
 
 ```python
 import asyncio
+import contextlib
 import json
 import socket
 from pathlib import Path
@@ -2372,6 +2383,27 @@ def test_hook_server_drops_garbage(tmp_path: Path) -> None:
     assert "hook" in (tmp_path / "audit.jsonl").read_text()
 
 
+def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
+    sock = tmp_path / "hook.sock"
+
+    async def body() -> int:
+        queue: asyncio.Queue[HookEvent] = asyncio.Queue()
+        server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
+        await server.start()
+
+        def send() -> None:
+            # admind closes the connection mid-frame, so the client may see a broken pipe.
+            with contextlib.suppress(OSError), socket.socket(socket.AF_UNIX) as s:
+                s.connect(str(sock))
+                s.sendall(b'{"hook_event_name":"Stop","session_id":"S","last_assistant_message":"'
+                          + b"x" * (2 * 1024 * 1024) + b'"}\n')
+        await asyncio.to_thread(send)
+        await asyncio.sleep(0.3)
+        await server.close()
+        return queue.qsize()
+    assert asyncio.run(body()) == 0
+
+
 def test_settings_json_wires_both_hooks(tmp_path: Path) -> None:
     command = hook_command(tmp_path / "hook sock")
     assert "'" in command                      # the socket path is shell-quoted
@@ -2431,6 +2463,10 @@ agent from stopping, and admind being down must never wedge the admin agent (it 
 The agent's reply is the Stop hook's `last_assistant_message`. If a Claude Code build omits that
 optional field, the fallback is the last assistant text in the session's own transcript file
 (plan decision D2). The screen is never scraped.
+
+Trust boundary: the socket is 0600 in a 0700 directory, so only the service user can write to it, and
+events for any session but the current one are dropped. A process already running as the service user
+can still forge a reply event; that is the same-user residual risk ADR §3.4 accepts.
 """
 
 import argparse
@@ -3007,8 +3043,17 @@ from pathlib import Path
 from fakes.fake_wn_agent import FakeWnAgent
 args = sys.argv[1:]
 if args and args[0] == "bootstrap":
-    open({log!r}, "a").write("bootstrap " + " ".join(args[1:]) + "\\n")
-    sys.exit(0)
+    # Like the real CLI, bootstrap is a client of the running daemon's socket, not a second home opener.
+    import json, socket
+    token = Path(args[args.index("--auth-token-file") + 1]).read_text().strip()
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.connect(args[args.index("--socket") + 1])
+        conn.sendall(json.dumps({{"marmot_agent_control": "marmot.agent-control.v2", "id": "b",
+                                  "type": "account_list", "auth_token": token}}).encode() + b"\\n")
+        ok = b'"account_list"' in conn.recv(65536)
+    with Path({log!r}).open("a") as log:
+        log.write("bootstrap " + " ".join(args[1:]) + "\\n")
+    sys.exit(0 if ok else 1)
 sock = Path(args[args.index("--socket") + 1])
 token = Path(args[args.index("--auth-token-file") + 1]).read_text().strip()
 async def main():
@@ -3036,10 +3081,25 @@ def test_wn_agent_argv_token_and_private_home(tmp_path: Path) -> None:
     token = wn.token()
     wn.prepare()
     assert wn.token() == token and len(token) == 64
+    assert stat.S_IMODE(wn.socket_path.parent.stat().st_mode) == 0o700
     assert wn.argv() == ["wn-agent", "--home", str(tmp_path / "home"), "--socket", str(wn.socket_path),
                          "--auth-token-file", str(wn.token_path), "--relay", "wss://a", "--relay", "wss://b"]
     assert "--invite-policy" in wn.bootstrap_argv("heterodyne-admind")
     assert "deny" in wn.bootstrap_argv("heterodyne-admind")
+
+
+def test_token_file_must_be_private_and_not_a_symlink(tmp_path: Path) -> None:
+    wn = WnAgent("wn-agent", tmp_path / "home", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+    wn.prepare()
+    wn.token_path.chmod(0o644)
+    with pytest.raises(WnAgentError, match="0600"):
+        wn.token()
+    wn.token_path.unlink()
+    (tmp_path / "elsewhere").write_text("x" * 64)
+    (tmp_path / "elsewhere").chmod(0o600)
+    wn.token_path.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(WnAgentError, match="cannot open"):
+        wn.token()
 
 
 def test_start_supervise_and_stop_a_fake_wn_agent(tmp_path: Path) -> None:
@@ -3148,6 +3208,7 @@ import asyncio
 import contextlib
 import os
 import secrets
+import stat
 from pathlib import Path
 
 from heterodyne.admind.audit import Audit
@@ -3170,7 +3231,10 @@ class WnAgent:
         self.proc: asyncio.subprocess.Process | None = None
 
     def prepare(self) -> None:
+        if self.home.is_symlink():
+            raise WnAgentError("[admind.marmot] home must not be a symlink")
         private_dir(self.home)
+        private_dir(self.socket_path.parent)
         try:
             fd = os.open(self.token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                          0o600)
@@ -3180,7 +3244,19 @@ class WnAgent:
             fh.write(secrets.token_hex(32) + "\n")
 
     def token(self) -> str:
-        return self.token_path.read_text().strip()
+        """The bearer token, read only from a regular 0600 file owned by this user (never via a symlink)."""
+        try:
+            fd = os.open(self.token_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise WnAgentError(f"cannot open the control token file ({type(exc).__name__})") from None
+        with os.fdopen(fd) as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                raise WnAgentError("the control token file must be a regular file owned by this user, mode 0600")
+            value = fh.read().strip()
+        if len(value) < 32:
+            raise WnAgentError("the control token file is empty or too short")
+        return value
 
     def _relay_args(self) -> list[str]:
         return [arg for relay in self.relays for arg in ("--relay", relay)]
@@ -3192,7 +3268,7 @@ class WnAgent:
     def bootstrap_argv(self, label: str) -> list[str]:
         return [self.binary, "bootstrap", "--home", str(self.home), "--socket", str(self.socket_path),
                 "--auth-token-file", str(self.token_path), "--label", label, "--invite-policy", "deny",
-                "--no-quic", "--json", *self._relay_args()]
+                "--no-quic", "--json", "--wait-for-socket", "30", *self._relay_args()]
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.returncode is None
@@ -3346,6 +3422,9 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
         await wn.start(client)
         accounts = [a for a in (await client.account_list()).accounts if a.local_signing]
         if not accounts:
+            # bootstrap is a client of the running child's socket (it takes --socket and
+            # --wait-for-socket), so the child must be running first; S4's "runtime root is already in
+            # use" applies to direct-mode `wn` commands, not to socket clients.
             # Output holds invite details, so it is captured, never printed.
             proc = await asyncio.to_thread(subprocess.run, wn.bootstrap_argv(IDENTITY_LABEL),
                                            capture_output=True, timeout=120, check=False)
@@ -3358,7 +3437,8 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
         store.set("group_id_hex", created.group_id_hex.lower())
         audit.write("init", action="group_created")
     except (WnAgentError, ControlError) as exc:
-        print(f"admind init failed: {exc}", file=sys.stderr)
+        audit.write("init", action="failed", error=str(exc), detail=getattr(exc, "detail", ""))
+        print(f"admind init failed: {exc}", file=sys.stderr)  # admind's own wording only; see ControlError
         return 1
     finally:
         await wn.stop()
@@ -3466,7 +3546,8 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
      - A `CommandError` becomes a reply.
      - `AgentStuck` becomes a reply.
    - Control characters: the message is refused with a reply and marked `dropped`.
-   - Otherwise, if the agent is ready, it is pasted to the agent: the row becomes `dispatched`, `last_dispatched` is recorded, and the dispatch is audited.
+   - Otherwise the message joins the in-memory queue. **One prompt at a time:** the head of the queue is pasted only when the agent is ready and nothing is in flight. It is then marked `dispatched`, recorded as `in_flight` in the store, and audited.
+   - `in_flight` is cleared by the next Stop (which replies to it), by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, and by a SessionStart (a restarted agent has no turn in progress). The last three reply "No reply to this message: …" to the abandoned message.
    - If the agent is stuck (`AgentStuck`), held messages are dropped with a reply suggesting `!tail`, then `!new`.
    - If the agent is not ready, the message is held in memory. It is flushed in order on SessionStart. If it has waited longer than `start_timeout_seconds`, the operator gets `NOT_READY` once per launch.
    - If the paste fails (`TmuxError`), `ensure_running()` is called and the message is held.
@@ -3477,12 +3558,12 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
 4. **Hook event:**
    - A session ID other than the current one is audited and ignored.
    - SessionStart runs `agent.started(id)`, sets ready and flushes held messages.
-   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `last_dispatched`. `n` comes from `reply_seq` in the store.
+   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `in_flight` (top-level if none). `n` comes from `reply_seq` in the store. Then the next queued message is dispatched.
 5. **Outbox:**
    - Pending rows are sent in order.
    - A retryable error is retried after `min(60, 2**attempts)` seconds, from the head of the queue. After 10 attempts, or on a non-retryable error, the row is marked failed and audited.
    - The outbox wakes on enqueue, or every 5 seconds.
-   - While latched, nothing is sent.
+   - **Outbound gate** (`may_post`), checked before every row, not once per batch: not latched, the operator has been seen (D5), and the last group check succeeded (`group_ok`). Recovery notices, replies and alerts all wait behind it.
 6. **Alerts:** every `alert_poll_seconds`, if the operator has been seen and admind isn't latched, each unrelayed file is relayed with `store.relay_alert(name, "alert:<name>", render(...))`, then the outbox is woken.
 7. **Group check:** every `group_check_seconds`, `group_info` runs; a count other than 2 latches.
 8. **Latching** writes `latched=<reason>` to the store and audits it once. It is never cleared by admind, only by `admind rearm`.
@@ -3502,12 +3583,12 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 args = sys.argv[1:]
-with open(os.environ["FAKE_CLAUDE_LOG"], "a") as log:
+with Path(os.environ["FAKE_CLAUDE_LOG"]).open("a") as log:
     log.write(json.dumps(args) + "\n")
-with open(args[args.index("--settings") + 1]) as fh:
-    settings = json.load(fh)
+settings = json.loads(Path(args[args.index("--settings") + 1]).read_text())
 flag = "--session-id" if "--session-id" in args else "--resume"
 session = args[args.index(flag) + 1]
 
@@ -3639,6 +3720,59 @@ def test_operator_round_trip_ready_notice_and_threaded_reply(tmp_path: Path) -> 
     audit = (h.settings.state_dir / "audit.jsonl").read_text()
     assert '"kind": "inbound"' in audit and '"kind": "dispatch"' in audit
     assert TMUX_SOCKET == "heterodyne-admind"
+
+
+def test_two_quick_messages_each_get_their_own_threaded_reply(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.say("warm up")
+        await h.until(lambda: "echo: warm up" in h.texts())
+        first = await h.say("one")
+        second = await h.say("two")
+        await h.until(lambda: "echo: two" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["echo: one"] == first and by_text["echo: two"] == second
+    run_with(tmp_path, scenario)
+
+
+def test_recovery_notice_waits_for_a_good_group_check(tmp_path: Path) -> None:
+    def before(h: Harness) -> None:
+        h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
+        h.store.claim_inbound("99" * 32)
+        h.fake.fail_group_info = True
+
+    async def scenario(h: Harness) -> None:
+        await asyncio.sleep(1.5)
+        assert h.fake.sent == []                    # group unverified: nothing leaves
+        h.fake.fail_group_info = False
+        await h.until(lambda: RESTARTED_NOTICE in h.texts())
+    run_with(tmp_path, scenario, before)
+
+
+def test_recovery_notice_waits_for_the_operator(tmp_path: Path) -> None:
+    def before(h: Harness) -> None:
+        h.store.claim_inbound("99" * 32)            # claimed, but the operator was never seen
+
+    async def scenario(h: Harness) -> None:
+        await asyncio.sleep(1.5)
+        assert h.fake.sent == []
+        await h.say("hi")
+        await h.until(lambda: RESTARTED_NOTICE in h.texts())
+    run_with(tmp_path, scenario, before)
+
+
+def test_latch_mid_batch_stops_the_rest(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.say("hi")
+        await h.until(lambda: "echo: hi" in h.texts())
+        sent = len(h.fake.sent)
+        h.fake.on_send = lambda _req: h.store.set("latched", "test")
+        for i in range(3):
+            h.store.enqueue(f"batch:{i}", f"b{i}", None)
+        h.daemon.wake.set()
+        await h.until(lambda: len(h.fake.sent) > sent)
+        await asyncio.sleep(0.5)
+        assert len(h.fake.sent) == sent + 1
+    run_with(tmp_path, scenario)
 
 
 def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> None:
@@ -3805,6 +3939,7 @@ class Admind:
         self.launched_at = time.monotonic()
         self.stuck: str | None = None
         self.not_ready_sent = False
+        self.group_ok = False
         self.wake = asyncio.Event()
 
     # --- state helpers -------------------------------------------------------------------------
@@ -3815,6 +3950,12 @@ class Admind:
         if not self.latched():
             self.store.set("latched", reason)
             self.audit.write("guard", action="latch", reason=reason)
+
+    def may_post(self) -> bool:
+        """Outbound gate, checked immediately before every send: not latched, the operator has been
+        seen in the group (D5), and the last membership check succeeded."""
+        return (not self.latched() and self.group_ok
+                and self.store.get("operator_seen_at") is not None)
 
     def post(self, key: str, text: str, reply_to: str | None) -> None:
         if self.store.enqueue(key, text, reply_to):
@@ -3863,12 +4004,15 @@ class Admind:
         try:
             info = await self.client.group_info(self.account, self.group)
         except ControlError as exc:
-            self.audit.write("guard", action="group-check-failed", error=str(exc))
+            self.group_ok = False
+            self.audit.write("guard", action="group-check-failed", error=str(exc), detail=exc.detail)
             return False
         verdict = guard.judge_member_count(info.member_count)
-        if verdict.action == "latch":
+        self.group_ok = verdict.action != "latch"
+        if not self.group_ok:
             self.latch(verdict.reason)
             return False
+        self.wake.set()
         return True
 
     # --- inbound -------------------------------------------------------------------------------
@@ -3910,17 +4054,10 @@ class Admind:
             return
         text = ev.message.text
         self.audit.write("inbound", message_id=mid, sender=ev.message.sender.account_id_hex, text=text)
-        try:
-            info = await self.client.group_info(self.account, self.group)
-        except ControlError as exc:
-            self.audit.write("guard", action="group-check-failed", error=str(exc), message_id=mid)
+        if not await self.check_group():
             self.store.set_inbound(mid, "dropped")
-            self.reply(mid, UNVERIFIED, "unverified")
-            return
-        count = guard.judge_member_count(info.member_count)
-        if count.action == "latch":
-            self.latch(count.reason)
-            self.store.set_inbound(mid, "dropped")
+            if not self.latched():
+                self.reply(mid, UNVERIFIED, "unverified")   # sent once a later check succeeds
             return
         if self.store.get("operator_seen_at") is None:
             self.store.set("operator_seen_at", now())
@@ -3942,14 +4079,19 @@ class Admind:
                 self.launched_at = time.monotonic()
                 self.not_ready_sent = False
                 self.stuck = None
+                self.abandon_in_flight("the admin agent session was replaced by !new")
             try:
                 result = await asyncio.to_thread(self.runner.run, cmd)
             except (AgentStuck, TmuxError) as exc:
                 result = f"!{cmd.name} failed: {exc}"
                 if cmd.name == "new":
                     self.stuck = str(exc)
+            if cmd.name == "interrupt":
+                # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
+                self.abandon_in_flight("interrupted by !interrupt")
             self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
             self.reply(mid, result, "cmd")
+            await self.flush()
             return
         if commands.has_control_chars(text):
             self.store.set_inbound(mid, "dropped")
@@ -3972,18 +4114,27 @@ class Admind:
                 self.not_ready_sent = True
                 self.reply(self.held[-1][0], NOT_READY, "notready")
             return
-        while self.held:
-            mid, text = self.held[0]
-            try:
-                await asyncio.to_thread(self.agent.send, text)
-            except TmuxError as exc:
-                self.audit.write("agent", action="send-failed", error=str(exc), message_id=mid)
-                await self.start_agent()
-                return
-            self.held.pop(0)
-            self.store.set_inbound(mid, "dispatched")
-            self.store.set("last_dispatched", mid)
-            self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+        # One prompt at a time, so each Stop answers exactly the message in flight.
+        if not self.held or self.store.get("in_flight") is not None:
+            return
+        mid, text = self.held[0]
+        try:
+            await asyncio.to_thread(self.agent.send, text)
+        except TmuxError as exc:
+            self.audit.write("agent", action="send-failed", error=str(exc), message_id=mid)
+            await self.start_agent()
+            return
+        self.held.pop(0)
+        self.store.set_inbound(mid, "dispatched")
+        self.store.set("in_flight", mid)
+        self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+
+    def abandon_in_flight(self, why: str) -> None:
+        mid = self.store.get("in_flight")
+        if mid is not None:
+            self.store.delete("in_flight")
+            self.reply(mid, f"No reply to this message: {why}.", "abandoned")
+            self.audit.write("agent", action="abandon", message_id=mid, reason=why)
 
     # --- hooks ---------------------------------------------------------------------------------
     async def hook_loop(self) -> None:
@@ -3993,6 +4144,8 @@ class Admind:
                 self.audit.write("hook", event=ev.hook_event_name, action="ignored-other-session")
                 continue
             if ev.hook_event_name == "SessionStart":
+                # A (re)started session has no turn in progress: whatever was in flight is lost.
+                self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
                 self.agent.started(ev.session_id)
                 self.audit.write("agent", action="session-start", session=ev.session_id,
                                  transcript=ev.transcript_path)
@@ -4002,10 +4155,12 @@ class Admind:
                 seq = int(self.store.get("reply_seq") or "0") + 1
                 self.store.set("reply_seq", str(seq))
                 text = reply_text(ev) or NO_REPLY
-                reply_to = self.store.get("last_dispatched")
+                reply_to = self.store.get("in_flight")   # None: a turn the operator didn't start
+                self.store.delete("in_flight")
                 for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
                     self.post(f"reply:{ev.session_id}:{seq}:{i}", part, reply_to)
                 self.audit.write("reply", session=ev.session_id, reply_to=reply_to, text=text)
+                await self.flush()
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
@@ -4013,11 +4168,11 @@ class Admind:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.wake.wait(), 5)
             self.wake.clear()
-            if self.latched():
-                continue
             if self.held and not self.ready.is_set():
                 await self.flush()          # emits NOT_READY once the start timeout passes
             for row in self.store.pending():
+                if not self.may_post():     # rechecked per row: a latch mid-batch stops the rest
+                    break
                 try:
                     sent = await self.client.send_final(self.account, self.group, row.text, row.reply_to,
                                                         row.key)
@@ -4029,7 +4184,7 @@ class Admind:
                         self.wake.set()
                         break
                     self.store.mark_failed(row.seq)
-                    self.audit.write("send", key=row.key, action="failed", code=exc.code, error=str(exc))
+                    self.audit.write("send", key=row.key, action="failed", code=exc.code, detail=exc.detail)
                     continue
                 self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
                 self.audit.write("send", key=row.key, action="sent")
@@ -4037,7 +4192,7 @@ class Admind:
     async def alerts_loop(self) -> None:
         while True:
             await asyncio.sleep(self.s.alert_poll_seconds)
-            if self.latched() or self.store.get("operator_seen_at") is None:
+            if not self.may_post():
                 continue
             for name, alert in await asyncio.to_thread(alerts.scan, self.s.alerts_dir):
                 if self.store.relayed(name):
@@ -4051,6 +4206,8 @@ class Admind:
             await asyncio.sleep(self.s.group_check_seconds)
             await self.check_group()
 ```
+
+Residual race (documented in `docs/admind.md`): if a Stop hook is already on its way when `!interrupt` clears `in_flight`, that reply is threaded to the next dispatched message instead. Replies are still verbatim agent output, only the thread anchor can be off.
 
 `hook_loop` calls `self.agent.started()` from the event loop. That call is a store write only, so it doesn't need a thread.
 
@@ -4154,7 +4311,8 @@ Sections, in this order:
    - what triggers it (count ≠ 2, any membership or admin event);
    - that admind goes silent while latched;
    - how to check the group in the client, then run `admind rearm`;
-   - the residual risk: a one-for-one swap made on the control socket by a same-user process is invisible, as in ADR §3.4.
+   - the residual risk: a one-for-one swap made on the control socket by a same-user process is invisible, as in ADR §3.4. Likewise a same-user process can write to the hook socket and forge a reply for the current session.
+   - the `!interrupt` thread-anchor race (Task 8, Step 4 note).
 6. **Alert relay contract:** copy the `alerts.py` module docstring (directory, name pattern, atomic rename, JSON shape, relayed once, never deleted, held until the operator has been seen).
 7. **Files:** a table of what lives under `<state>/admind/` (`admind.db`, `audit.jsonl`, `hook.sock`, `claude-settings.json`, `marmot/` with its `control.token` and `ctl/`) and `<state>/alerts/`, with modes.
 8. **Troubleshooting:**
@@ -4210,7 +4368,7 @@ This task runs on the reference host with the operator. **Ask the operator befor
   - `!ps`, which lists the self-test unit;
   - `!restart heterodyne-admind-selftest.service`, which succeeds;
   - `!restart hermes-gateway.service`, which is refused and leaves the gateway untouched;
-  - `!interrupt` during a long turn;
+  - `!interrupt` during a long turn: confirm no Stop-hook reply arrives for the interrupted turn (the audit log shows `abandon`, and no `reply` for it), and that a queued second message is then answered in its own thread;
   - `!new`, after which a fresh session replies;
   - `!restrat`, which gets the unknown-command reply.
 - [ ] **Step 8: Restart resilience.** Run `systemctl --user restart heterodyne-admind`. Verify that the agent is adopted or resumed, not relaunched fresh (check the audit log), that no reply is duplicated, and that the next message works.
