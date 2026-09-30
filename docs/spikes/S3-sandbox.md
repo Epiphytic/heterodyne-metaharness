@@ -116,7 +116,7 @@ Implication: the sandbox copy holds the **operator's own refresh token**, not a 
 
 1. **`launch.py`: agent binary resolution.** `claude` on the host is a symlink to `.../claude-code/bin/claude.exe`. `binary_roots()` puts `<root>/bin` on `PATH`, but no file named `claude` exists there, so the run failed with `FileNotFoundError: 'claude'`. The fix is `resolve_agent()`, which replaces `cmd[0]` with the resolved real path when it names a known agent.
 2. **`launch.py`: `--clearenv` plus an explicit env.** bwrap passes the caller's whole environment through by default. Inside the sandbox the spike saw an operator bot token, the parent Claude session's messaging socket path and token, SSH/TMUX/DBus variables, and parent `CLAUDE_CODE_*` settings such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. That breaks "only model credentials inside", and it silently changes CLI behaviour, including the egress it attempts. The launcher now clears the environment and sets only `LANG`, `TERM`, `USER`, `HOME`, `PATH` and `HZ_SESSION_SOCKET`. The bridge adds the proxy variables.
-3. **`probes.sh`: probe 8 `host-env-not-inherited`**, which makes the leak above a fail-closed check. The 7 plan probes are unchanged.
+3. **`probes.sh`: probe 8 `host-env-not-inherited`**, which makes the leak above a fail-closed check. Probes 1–3 were later rewritten in fix round 1; see deviation 9.
 4. **Allowlist: `chatgpt.com` added.** Codex with ChatGPT auth talks only to `chatgpt.com`, not `*.openai.com`. The allowlist used for the login runs was `api.openai.com,.openai.com,chatgpt.com,api.anthropic.com,.anthropic.com,.claude.ai`.
 5. **`bridge.py`: `forward()` swallows `OSError`.** A peer closing the connection printed a `BrokenPipeError` traceback into the agent's stderr. This is cosmetic.
 6. **`launch.py`: optional `HZ_S3_RO_CREDS=1`** ro-binds the two credential files over the writable home. It exists for the Step 7.5 experiment. The bind was opt-in during the login runs. Since fix round 1 it is **on by default** in `launch.py`, and `HZ_S3_RO_CREDS=0` opts out. The login runs that used the ro bind (see the login table) are the evidence that the default works. Plan 4 should keep it on by default.
@@ -146,3 +146,8 @@ Implication: the sandbox copy holds the **operator's own refresh token**, not a 
   - The control op gets the socket's explicit `forbidden` reply.
   - Two more checks are also recommended: direct network (no non-lo interface, and ENETUNREACH on a raw connect) and host-env-not-inherited.
   - With these, the fix-round-1 self-test above is sufficient for S3 acceptance on bubblewrap.
+- **Not verified by this spike, and still required by §7 (for plan 4):**
+  - The reviewer session's read-only worktree bind.
+  - Egress for package registries and read-only git fetch.
+  - Running the self-test automatically before *every* agent launch. `launch.py --selftest` is a separate entry point here, and plan 4 must make it a mandatory pre-launch step that fails closed.
+- **§7 residual risk (egress logging):** proxy logs record CONNECT hosts only, not paths or traffic, so they cannot show *what* was sent to an allowlisted host.
