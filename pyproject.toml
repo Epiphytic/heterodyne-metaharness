@@ -35,3 +35,5 @@ ignore = ["S603", "S607"]
 include = ["src", "tests"]
 strict = ["src"]
 pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
