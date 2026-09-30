@@ -1,10 +1,8 @@
 # Spike S4: Marmot threads, reactions and sender identity
 
-Status: Steps 1-5 complete and PASS. Step 6 (real-client check) requires the
-operator and has not been run yet — see "Step 6: what the operator must do"
-below. `$S4` scratch state has been left in place (not deleted) so Step 6 can
-still be executed; the harness-side subscription keeps appending to its log
-file.
+Status: All 7 steps complete and PASS. Step 6 (real-client check) is done —
+see "Step 6: result" below. `$S4` scratch state has been removed as part of
+spike cleanup.
 
 ## Method notes: real CLI surface vs. the brief's guesses
 
@@ -270,40 +268,65 @@ once. **Pass.**
 | 3. Threads and reactions, both directions | PASS | `reply_to.message_id_hex` and `reaction_added.target_message_id_hex` both matched the card id, both directions, observed on each side's subscription. |
 | 4. Idempotent send | PASS | Two `send_final` calls, same `idempotency_key` → one message. |
 | 5. Authenticated sender + membership changes | PASS | Sender pubkey confirmed to come from `message.sender`/`actor` metadata, never text. `member_added` and `member_removed` both observed via `group_state_changed` on a non-actor subscription; a non-admin's own add attempt failed closed with `not_group_admin`. |
-| 6. Real-client check | NOT RUN | Needs the operator; see below. `$S4` and its subscriptions were left running for this. |
+| 6. Real-client check | PASS | Operator joined from their phone client, replied to the seeded card and reacted to it; the harness subscription log showed both, and the operator confirmed their client rendered the reply as a threaded reply. See "Step 6: result" below. |
 
-## Step 6: what the operator needs to do
+## Step 6: result
 
-1. Join the group named **`hz-s4-test`** from their phone's Marmot/White Noise
-   client. This requires the harness identity (the group's only admin) to
-   invite the operator's device identity first — the operator cannot self-join.
-   The controller (whoever can reach the harness's `wn-agent` control socket)
-   should:
-   - Ask the operator for their client's **npub** (visible in their app's own
-     account/profile screen — usually under a settings or "your identity" view
-     that shows a `npub1…` string or a QR code encoding it).
-   - Run one `group_member_add` request against the harness's `wn-agent`
-     socket (same shape documented above) with that npub in `members`.
-   - The operator then sees + accepts the invite in their client's UI.
-2. Once joined, ask the operator to **reply to** the harness's existing test
-   card in `hz-s4-test` (there is already a card seeded for this — the
-   controller has its id) and to **react to** any other message in the group.
-3. **Pass** if the harness-side subscription log shows both a matching
-   `inbound_message` (with `reply_to` pointing at the card) and a matching
-   `reaction_added`, **and** the operator confirms their client visually
-   rendered the reply as a threaded reply (not just a plain new message).
+The operator was invited into `hz-s4-test` via one `group_member_add` request
+against the harness's `wn-agent` control socket, as planned, and accepted the
+invite in their phone's Marmot/White Noise client.
 
-### Commands the controller can use to verify afterward
+**A wrinkle:** the original seeded test card was sent *before* the operator's
+join completed, and the Marmot client does not surface messages sent prior to
+a member joining — so the operator never saw it. The controller resent an
+equivalent card via `send_final` with a fresh `idempotency_key`
+(`s4-step6-resend-1`), after the join, and the operator replied to and
+reacted to that resent card instead.
 
-- Tail/inspect the harness-side subscription log (already running, appending
-  live) for the operator's reply and reaction events (`inbound_message` with
-  a `reply_to`, and `reaction_added`), matching the shapes documented above.
-- Re-run `group_info` for `hz-s4-test` against the harness's `wn-agent`
-  socket and confirm `member_count` increased by exactly one (the operator)
-  compared to this spike's end state (2 members: harness + `admind`).
-- Re-run `group_info` for each of the harness's other, pre-existing groups
-  and confirm `member_count`/`subject` are unchanged from this spike's
-  before/after snapshots (all six were confirmed unchanged as of Step 5).
-- Leave `hz-s4-test` from the scratch (`admind`) identity, and — once Step 6
-  evidence is captured — from the harness identity too, then remove the `$S4`
-  scratch directory.
+**Evidence (from the harness's `subscribe_inbound` log):**
+- An `inbound_message` event ("Hey!") whose top-level `reply_to.message_id_hex`
+  equals the resent card's `message_id_hex`.
+- A `reaction_added` event (👍) whose `target_message_id_hex` equals the
+  resent card's `message_id_hex`.
+- A second reply/reaction pair was observed shortly after from further
+  operator interaction — consistent, not required for pass.
+
+This also confirms the shape documented above: **`reply_to` is a top-level
+field of the `inbound_message` envelope** (a sibling of `message`, carrying
+its own `message_id_hex`/`availability`/`sender`), never a field nested
+inside `message`.
+
+The operator confirmed their phone client rendered the reply as a threaded
+reply (not a plain new message). **Pass.**
+
+**Finding:** messages sent before a member joins a group are not visible to
+that member in the client, even though the message already exists in the
+group's history from the relay/`wn-agent` point of view. Plan 6 (router,
+outbox) and plan 2 (`admind`) must not assume a newly-joined member can see
+cards posted before they joined. Either (a) (re)post any still-open card
+again after a membership-change event adds a new member, or (b) treat a
+`group_state_changed` `member_added` event as a trigger to re-render all
+currently-open cards to the group. (This is a plan-6/admind implementation
+note, not an ADR change — see `GATE.md`.)
+
+**Cleanup performed:** the scratch `admind` identity left `hz-s4-test`
+cleanly via a `group_leave` request on its own control socket (previously
+undocumented above; discovered during cleanup — see the request shapes note
+below). The harness identity could not leave: `group_leave` on its own
+socket returned `admin_cannot_self_remove` (it is the group's sole admin),
+and `group_member_remove` targeting its own `account_id_hex` also failed.
+Per the spike's cleanup instructions, the harness was left in the group
+(now down to two members: harness + operator) and this is recorded here
+rather than silently worked around. All background spike processes were
+stopped and the scratch data home was removed.
+
+### `group_leave` (self-removal; not in the brief, found during cleanup)
+
+```json
+{"type": "group_leave", "account_id_hex": "<account_id_hex>", "group_id_hex": "<group_id_hex>"}
+```
+
+Response: an `ack` envelope, followed by a `group_state_changed`
+(`"change":"member_removed"`) on the leaving identity's own subscription.
+Fails with `admin_cannot_self_remove` when the caller is the group's sole
+admin.
