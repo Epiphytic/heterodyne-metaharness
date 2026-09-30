@@ -143,8 +143,10 @@ strict = ["src"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-extraPaths = ["tests"]
+extraPaths = ["src", "tests"]
 ```
+
+(`src` must be listed explicitly: pyright adds it automatically only when `extraPaths` is unset.)
 
 (`heterodyne.admind.cli` is created in Task 7. Until then, the console script entry is only metadata, and nothing imports it.)
 
@@ -343,11 +345,15 @@ GROUP = "b2" * 32
 
 
 class FakeWnAgent:
-    def __init__(self, socket_path: Path, token: str | None = "test-token", member_count: int = 2) -> None:
+    def __init__(self, socket_path: Path, token: str | None = "test-token",  # noqa: S107 (test value)
+                 member_count: int = 2,
+                 bootstrapped: bool = True) -> None:
         self.socket_path = socket_path
         self.token = token
         self.member_count = member_count
-        self.accounts: list[dict[str, Any]] = [{"account_id_hex": ACCOUNT, "local_signing": True}]
+        self.accounts: list[dict[str, Any]] = []
+        if bootstrapped:
+            self.accounts.append({"account_id_hex": ACCOUNT, "local_signing": True})
         self.group_id = GROUP
         self.requests: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
@@ -409,6 +415,10 @@ class FakeWnAgent:
             kind = req.get("type")
             if kind == "account_list":
                 await self._reply(writer, rid, {"type": "account_list", "accounts": self.accounts})
+            elif kind == "fake_bootstrap":   # test-only stand-in for what `wn-agent bootstrap` does
+                if not self.accounts:
+                    self.accounts.append({"account_id_hex": ACCOUNT, "local_signing": True})
+                await self._reply(writer, rid, {"type": "ack"})
             elif kind == "group_info":
                 if self.fail_group_info:
                     await self._reply(writer, rid, {"type": "error", "code": "unavailable",
@@ -504,7 +514,7 @@ def test_requests_carry_protocol_id_and_token(tmp_path: Path) -> None:
         assert info.member_count == 2
         req = fake.requests[-1]
         assert req["marmot_agent_control"] == "marmot.agent-control.v2"
-        assert req["auth_token"] == "test-token" and len(req["id"]) == 32
+        assert req["auth_token"] == "test-token" and len(req["id"]) == 32  # noqa: S105 (test value)
         await fake.stop()
     run(body())
 
@@ -586,6 +596,13 @@ def test_decode_event_is_strict_for_known_types() -> None:
         decode_event(bad, "r1")
 
 
+def test_peer_error_codes_are_allowlisted() -> None:
+    frame = _frame(type="error", code="npub1-leaked value", message="m", retryable=False)
+    with pytest.raises(ControlError) as exc:
+        decode_event(frame, "r1")
+    assert exc.value.code == "unrecognised" and "leaked" not in str(exc.value)
+
+
 def test_decode_event_checks_protocol_and_id() -> None:
     with pytest.raises(ProtocolError, match="id"):
         decode_event(_frame(type="ack"), "other")
@@ -622,6 +639,7 @@ metadata, never from the text (§3.4).
 import asyncio
 import contextlib
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -631,6 +649,7 @@ import msgspec
 
 PROTOCOL = "marmot.agent-control.v2"
 MAX_FRAME = 1024 * 1024
+_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 
 
 class ControlError(Exception):
@@ -751,7 +770,9 @@ def decode_head(line: bytes, request_id: str) -> str:
         raise ProtocolError("response id does not match the request id")
     if head.type == "error":
         err = msgspec.json.decode(line, type=_Error)
-        raise ControlError(f"wn-agent returned error {err.code}", err.code, err.retryable, detail=err.message)
+        # The code is peer-supplied too: only a plain identifier is echoed, and the free text only in detail.
+        code = err.code if _ERROR_CODE.fullmatch(err.code) else "unrecognised"
+        raise ControlError(f"wn-agent returned error {code}", code, err.retryable, detail=err.message)
     return head.type
 
 
@@ -938,7 +959,7 @@ adapter = "claude-code"
 model = "m1"
 [admind]
 profile = "admin"
-restart_units = ["wsd.service", "runner@x.service"]  # install-agnostic: allow=email (systemd template unit name)
+restart_units = ["wsd.service", "runner@x.service"]  # install-agnostic: allow=email (template unit)
 [admind.marmot]
 relays = ["wss://relay.example.org"]
 """
@@ -959,7 +980,8 @@ def test_resolves_defaults_and_operator(tmp_path: Path) -> None:
     assert s.adapter_binary == "claude"
     assert s.profile["model"] == "m1"
     assert s.workdir == tmp_path
-    assert s.restart_units == ("wsd.service", "runner@x.service")  # install-agnostic: allow=email (template unit)
+    units = ("wsd.service", "runner@x.service")  # install-agnostic: allow=email (template unit)
+    assert s.restart_units == units
     assert s.chunk_chars == 4000 and s.alert_poll_seconds == 5
     assert s.state_dir == tmp_path / "state" / "admind"
     assert s.alerts_dir == tmp_path / "state" / "alerts"
@@ -1321,7 +1343,7 @@ git commit -m "admind settings, policy operators and adapter binaries (plan 2 ta
     - `close()`.
   - `OutboxRow(seq, key, reply_to, text, attempts)`, and `now() -> str` (UTC ISO-8601, seconds).
   - `Audit(path: Path)` with `write(kind: str, **fields: object) -> None`.
-  - Well-known `kv` keys (used by later tasks): `group_id_hex`, `account_id_hex`, `agent_session`, `session_started`, `launches_without_start`, `operator_seen_at`, `latched`, `in_flight`, `reply_seq`.
+  - Well-known `kv` keys (used by later tasks): `group_id_hex`, `account_id_hex`, `agent_session`, `session_started`, `launches_without_start`, `operator_seen_at`, `latched`, `in_flight`, `anchor`, `reply_seq`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1578,7 +1600,8 @@ class Store:
         """Record the alert and queue its message in one transaction; False if already relayed."""
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            cur = self.db.execute("INSERT OR IGNORE INTO alerts(name, relayed_at) VALUES (?, ?)", (name, now()))
+            cur = self.db.execute("INSERT OR IGNORE INTO alerts(name, relayed_at) VALUES (?, ?)",
+                                  (name, now()))
             if cur.rowcount != 1:
                 self.db.execute("ROLLBACK")
                 return False
@@ -1718,7 +1741,8 @@ def test_guard_accepts_only_the_operator_in_the_group() -> None:
     assert guard.judge_message(msg(), group_id=GROUP, operator_hex=OP, latched=False).action == "process"
     upper = msg(OP.upper(), group=GROUP.upper())
     assert guard.judge_message(upper, group_id=GROUP, operator_hex=OP, latched=False).action == "process"
-    assert guard.judge_message(msg("e5" * 32), group_id=GROUP, operator_hex=OP, latched=False).action == "drop"
+    stranger = guard.judge_message(msg("e5" * 32), group_id=GROUP, operator_hex=OP, latched=False)
+    assert stranger.action == "drop"
     assert guard.judge_message(msg(group="f6" * 32), group_id=GROUP, operator_hex=OP,
                                latched=False).action == "drop"
     assert guard.judge_message(msg(is_self=True), group_id=GROUP, operator_hex=OP,
@@ -1797,7 +1821,8 @@ def test_alert_scan_and_render(tmp_path: Path) -> None:
     assert found[0][1] is None and found[2][1] is None
     alert = found[1][1]
     assert alert is not None and alert.text == "card undelivered"
-    assert alerts.render("b-2", alert, 4000).startswith("🚨 wsd alert (2026-09-30T00:00:00Z): card undelivered")
+    rendered = alerts.render("b-2", alert, 4000)
+    assert rendered.startswith("🚨 wsd alert (2026-09-30T00:00:00Z): card undelivered")
     long = alerts.Alert(id="x", created_at="t", text="y" * 5000)
     assert len(alerts.render("x", long, 1000)) <= 1000
     assert "malformed" in alerts.render("a1", None, 4000)
@@ -1909,6 +1934,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 HELP = "admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps"
+FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
 TAIL_DEFAULT = 40
 TAIL_MAX = 500
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -2144,7 +2170,8 @@ class Tmux:
         self.socket_name = socket_name
         self.binary = binary
 
-    def _run(self, *args: str, data: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    def _run(self, *args: str, data: bytes | None = None,
+             check: bool = True) -> subprocess.CompletedProcess[bytes]:
         proc = subprocess.run([self.binary, "-L", self.socket_name, *args], input=data,
                               capture_output=True, timeout=15, check=False)
         if check and proc.returncode != 0:
@@ -2274,7 +2301,7 @@ def test_launch_resume_adopt_and_new(tmp_path: Path) -> None:
     sid = agent.session_id
     assert sid is not None and tmux.sessions["admin"][1:3] == ["--session-id", sid]
     settings = json.loads((tmp_path / "state" / "admind" / "claude-settings.json").read_text())
-    assert set(settings["hooks"]) == {"SessionStart", "Stop"}
+    assert set(settings["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop"}
     assert agent.ensure_running() == "adopted"
     agent.started(sid)
     tmux.dead.add("admin")                      # crashed after a successful start
@@ -2408,7 +2435,7 @@ def test_settings_json_wires_both_hooks(tmp_path: Path) -> None:
     command = hook_command(tmp_path / "hook sock")
     assert "'" in command                      # the socket path is shell-quoted
     data = json.loads(settings_json(command))
-    for event in ("SessionStart", "Stop"):
+    for event in ("SessionStart", "UserPromptSubmit", "Stop"):
         assert data["hooks"][event] == [{"hooks": [{"type": "command", "command": command}]}]
 ```
 
@@ -2457,9 +2484,12 @@ def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str
 ```python
 """The admin agent's hooks reach admind over a private Unix socket (ADR 0001 §2, §8).
 
-Claude Code runs `python -m heterodyne.admind hook --socket <path>` on SessionStart and Stop. The hook
-forwards its stdin JSON as one line and **always exits 0**: a Stop hook that exits 2 would block the
-agent from stopping, and admind being down must never wedge the admin agent (it is the recovery path).
+Claude Code runs `python -m heterodyne.admind hook --socket <path>` on SessionStart, UserPromptSubmit
+and Stop. The hook forwards its stdin JSON as one line, waits (up to 2s) for admind's `ok`, and **always
+exits 0** with nothing on stdout: a Stop hook that exits 2 would block the agent from stopping, a
+UserPromptSubmit hook's stdout would be added to the prompt, and admind being down must never wedge the
+admin agent (it is the recovery path). Waiting for the `ok` means admind has queued each event before
+Claude Code moves on, so events reach admind in the order the agent produced them.
 The agent's reply is the Stop hook's `last_assistant_message`. If a Claude Code build omits that
 optional field, the fallback is the last assistant text in the session's own transcript file
 (plan decision D2). The screen is never scraped.
@@ -2485,6 +2515,7 @@ import msgspec
 from heterodyne.admind.audit import Audit
 
 MAX_HOOK_FRAME = 1024 * 1024
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
 
 
 class HookEvent(msgspec.Struct, frozen=True):
@@ -2500,7 +2531,7 @@ def hook_command(sock: Path) -> str:
 
 def settings_json(command: str) -> str:
     entry = [{"hooks": [{"type": "command", "command": command}]}]
-    return json.dumps({"hooks": {"SessionStart": entry, "Stop": entry}}, indent=2)
+    return json.dumps({"hooks": {event: entry for event in HOOK_EVENTS}}, indent=2)
 
 
 def hook_main(argv: list[str], stdin: bytes) -> int:
@@ -2516,6 +2547,7 @@ def hook_main(argv: list[str], stdin: bytes) -> int:
             conn.settimeout(2)
             conn.connect(args.socket)
             conn.sendall(line)
+            conn.recv(16)   # admind's "ok": the event is queued (or a timeout; either way, exit 0)
     except (OSError, ValueError) as exc:
         print(f"admind hook: not delivered ({type(exc).__name__})", file=sys.stderr)
     return 0
@@ -2585,7 +2617,9 @@ class HookServer:
         try:
             line = await asyncio.wait_for(reader.readline(), 5)
             await self.queue.put(msgspec.json.decode(line, type=HookEvent))
-        except (TimeoutError, ValueError, msgspec.DecodeError) as exc:
+            writer.write(b"ok\n")
+            await writer.drain()
+        except (TimeoutError, ValueError, OSError, msgspec.DecodeError) as exc:
             self.audit.write("hook", result="dropped", error=type(exc).__name__)
         finally:
             writer.close()
@@ -2845,7 +2879,8 @@ def test_other_commands() -> None:
     r, agent, _ = runner()
     assert "fresh" in r.run(Command("new"))
     assert r.run(Command("interrupt")) == "Sent Esc to the admin agent."
-    assert r.run(Command("tail", lines=12)) == "```\n12 lines\n```"
+    fence = "`" * 3
+    assert r.run(Command("tail", lines=12)) == f"{fence}\n12 lines\n{fence}"
     assert agent.calls == ["new", "interrupt"]
     ps = r.run(Command("ps"))
     assert "wsd.service: active (running)" in ps
@@ -2958,7 +2993,7 @@ class CommandRunner:
             self.agent.interrupt()
             return "Sent Esc to the admin agent."
         if cmd.name == "tail":
-            return f"```\n{self.agent.tail(cmd.lines)}\n```"
+            return f"{FENCE}\n{self.agent.tail(cmd.lines)}\n{FENCE}"
         if cmd.name == "restart":
             unit = cmd.arg or ""
             if unit not in self.restart_units:
@@ -3049,26 +3084,27 @@ if args and args[0] == "bootstrap":
     with socket.socket(socket.AF_UNIX) as conn:
         conn.connect(args[args.index("--socket") + 1])
         conn.sendall(json.dumps({{"marmot_agent_control": "marmot.agent-control.v2", "id": "b",
-                                  "type": "account_list", "auth_token": token}}).encode() + b"\\n")
-        ok = b'"account_list"' in conn.recv(65536)
+                                  "type": "fake_bootstrap", "auth_token": token}}).encode() + b"\\n")
+        ok = b'"ack"' in conn.recv(65536)
     with Path({log!r}).open("a") as log:
         log.write("bootstrap " + " ".join(args[1:]) + "\\n")
     sys.exit(0 if ok else 1)
 sock = Path(args[args.index("--socket") + 1])
 token = Path(args[args.index("--auth-token-file") + 1]).read_text().strip()
 async def main():
-    fake = FakeWnAgent(sock, token)
+    fake = FakeWnAgent(sock, token, bootstrapped={bootstrapped})
     await fake.start()
     await asyncio.Event().wait()
 asyncio.run(main())
 """
 
 
-def fake_wn_agent(tmp_path: Path) -> tuple[str, Path]:
+def fake_wn_agent(tmp_path: Path, bootstrapped: bool = True) -> tuple[str, Path]:
     log = tmp_path / "wn.log"
     script = tmp_path / "wn-agent"
     tests = str(Path(__file__).parent)
-    script.write_text(FAKE_WN.format(python=sys.executable, tests=tests, log=str(log)))
+    script.write_text(FAKE_WN.format(python=sys.executable, tests=tests, log=str(log),
+                                     bootstrapped=bootstrapped))
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script), log
 
@@ -3138,7 +3174,7 @@ def test_account_requires_exactly_one_local_signing_account(tmp_path: Path) -> N
 
 
 def test_init_creates_identity_and_group_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    binary, log = fake_wn_agent(tmp_path)
+    binary, log = fake_wn_agent(tmp_path, bootstrapped=False)   # a fresh home: init must bootstrap
     s = make_settings(tmp_path, wn_agent=binary)
     store = Store(s.state_dir / "admind.db")
     assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 0
@@ -3252,7 +3288,8 @@ class WnAgent:
         with os.fdopen(fd) as fh:
             st = os.fstat(fh.fileno())
             if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
-                raise WnAgentError("the control token file must be a regular file owned by this user, mode 0600")
+                raise WnAgentError("the control token file must be a regular file owned by this "
+                                   "user, mode 0600")
             value = fh.read().strip()
         if len(value) < 32:
             raise WnAgentError("the control token file is empty or too short")
@@ -3352,7 +3389,8 @@ UMask=0077
 [Install]
 WantedBy=default.target
 """
-PASSED_THROUGH = ("PATH", "HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME")
+PASSED_THROUGH = ("PATH", "HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR", "XDG_CONFIG_HOME",
+                  "XDG_STATE_HOME")
 _UNSAFE = set(" \t\n\"'\\")
 
 
@@ -3546,8 +3584,9 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
      - A `CommandError` becomes a reply.
      - `AgentStuck` becomes a reply.
    - Control characters: the message is refused with a reply and marked `dropped`.
-   - Otherwise the message joins the in-memory queue. **One prompt at a time:** the head of the queue is pasted only when the agent is ready and nothing is in flight. It is then marked `dispatched`, recorded as `in_flight` in the store, and audited.
-   - `in_flight` is cleared by the next Stop (which replies to it), by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, and by a SessionStart (a restarted agent has no turn in progress). The last three reply "No reply to this message: …" to the abandoned message.
+   - Otherwise the message joins the in-memory queue. **One prompt at a time**, under a dispatch lock: the head of the queue is pasted only when the agent is ready and nothing is `in_flight`. It is reserved as `in_flight` *before* the paste, then marked `dispatched` and audited (a failed paste un-reserves it).
+   - **Reply anchoring:** the agent's `UserPromptSubmit` hook confirms that it took the prompt, and admind then records `anchor = in_flight`. A Stop threads its reply to `anchor` and clears both. A Stop with no anchor posts top-level, verbatim. This covers a late Stop from an interrupted turn, and a turn started at the terminal. Hook delivery is acknowledged, so events arrive in the order the agent produced them.
+   - `in_flight` and `anchor` are also cleared by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, by a SessionStart (a restarted agent has no turn in progress), and at admind startup (an adopted session's pending Stop may have been lost). Each of these replies "No reply to this message: …" to the abandoned message.
    - If the agent is stuck (`AgentStuck`), held messages are dropped with a reply suggesting `!tail`, then `!new`.
    - If the agent is not ready, the message is held in memory. It is flushed in order on SessionStart. If it has waited longer than `start_timeout_seconds`, the operator gets `NOT_READY` once per launch.
    - If the paste fails (`TmuxError`), `ensure_running()` is called and the message is held.
@@ -3558,7 +3597,8 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
 4. **Hook event:**
    - A session ID other than the current one is audited and ignored.
    - SessionStart runs `agent.started(id)`, sets ready and flushes held messages.
-   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `in_flight` (top-level if none). `n` comes from `reply_seq` in the store. Then the next queued message is dispatched.
+   - UserPromptSubmit sets `anchor` from `in_flight` (see above); otherwise it is audited as `prompt-not-from-admind`.
+   - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `anchor` (top-level if none). `n` comes from `reply_seq` in the store. Then the next queued message is dispatched.
 5. **Outbox:**
    - Pending rows are sent in order.
    - A retryable error is retried after `min(60, 2**attempts)` seconds, from the head of the queue. After 10 attempts, or on a non-retryable error, the row is marked failed and audited.
@@ -3575,8 +3615,11 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
 ```python
 """A fake interactive `claude` for integration tests: it fires the hooks from --settings.
 
-On start it runs the SessionStart hooks. For each line typed into its terminal it runs the Stop hooks
-with `last_assistant_message = "echo: <line>"`. It appends its argv to $FAKE_CLAUDE_LOG.
+On start it runs the SessionStart hooks. For each line typed into its terminal it runs the
+UserPromptSubmit hooks, then the Stop hooks with `last_assistant_message = "echo: <line>"`. Two lines
+are special: `__silent__` ends the turn with no text, and `__hang__` never ends its turn (as a long
+turn would; only `!interrupt` or `!new` gets past it). Escape bytes (from `!interrupt`) are discarded.
+It appends its argv to $FAKE_CLAUDE_LOG.
 """
 
 import json
@@ -3603,8 +3646,15 @@ def fire(event: str, **extra: object) -> None:
 
 
 fire("SessionStart", source="startup")
-for line in sys.stdin:
-    fire("Stop", last_assistant_message=f"echo: {line.rstrip(chr(10))}", stop_hook_active=False)
+for raw in sys.stdin:
+    line = raw.rstrip("\n").lstrip("\x1b")
+    fire("UserPromptSubmit", prompt=line)
+    if line == "__hang__":
+        continue
+    if line == "__silent__":
+        fire("Stop", stop_hook_active=False)
+    else:
+        fire("Stop", last_assistant_message=f"echo: {line}", stop_hook_active=False)
 ```
 
 - [ ] **Step 2: Write the failing daemon tests**
@@ -3859,14 +3909,56 @@ def test_outbox_retries_transient_failures_in_order(tmp_path: Path) -> None:
 
 def test_empty_reply_gets_a_placeholder(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        mid = await h.say("hi")
-        await h.until(lambda: "echo: hi" in h.texts())
-        from heterodyne.admind.hook import HookEvent
-        await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, None))
+        mid = await h.say("__silent__")
         await h.until(lambda: NO_REPLY in h.texts())
         row = next(r for r in h.fake.sent if r["text"] == NO_REPLY)
         assert row["reply_to_message_id_hex"] == mid
     run_with(tmp_path, scenario)
+
+
+def test_late_stop_after_interrupt_never_takes_the_next_anchor(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        hung = await h.say("__hang__")
+        await h.until(lambda: h.store.get("anchor") == hung)
+        await h.say("!interrupt")
+        await h.until(lambda: any(t.startswith("No reply to this message: interrupted") for t in h.texts()))
+        nxt = await h.say("next")
+        from heterodyne.admind.hook import HookEvent
+        # The interrupted turn's Stop turns up late, before the next prompt is confirmed.
+        await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "late"))
+        await h.until(lambda: "echo: next" in h.texts() and "late" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["late"] is None and by_text["echo: next"] == nxt
+    run_with(tmp_path, scenario)
+
+
+def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.say("warm up")
+        await h.until(lambda: "echo: warm up" in h.texts())
+        h.daemon.held += [("aa" * 32, "x1"), ("bb" * 32, "x2")]
+        await asyncio.gather(h.daemon.flush(), h.daemon.flush(), h.daemon.flush())
+        await h.until(lambda: "echo: x2" in h.texts())
+        records = [json.loads(line) for line in
+                   (h.settings.state_dir / "audit.jsonl").read_text().splitlines()]
+        dispatched = [r["message_id"] for r in records if r["kind"] == "dispatch"]
+        assert dispatched.count("aa" * 32) == 1 and dispatched.count("bb" * 32) == 1
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["echo: x1"] == "aa" * 32 and by_text["echo: x2"] == "bb" * 32
+    run_with(tmp_path, scenario)
+
+
+def test_stale_in_flight_is_closed_out_at_startup(tmp_path: Path) -> None:
+    def before(h: Harness) -> None:
+        h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
+        h.store.set("in_flight", "77" * 32)
+        h.store.set("anchor", "77" * 32)
+
+    async def scenario(h: Harness) -> None:
+        prefix = "No reply to this message: admind restarted"
+        await h.until(lambda: any(t.startswith(prefix) for t in h.texts()))
+        assert h.store.get("anchor") is None
+    run_with(tmp_path, scenario, before)
 
 
 def test_stop_for_another_session_is_ignored(tmp_path: Path) -> None:
@@ -3914,7 +4006,8 @@ from heterodyne.tmux import TmuxError
 
 READY_NOTICE = ("admind is listening. Your messages go to the admin agent verbatim; replies come back "
                 "in thread. " + commands.HELP)
-RESTARTED_NOTICE = "⚠️ admind restarted before this message reached the admin agent. Resend it if it is still needed."
+RESTARTED_NOTICE = ("⚠️ admind restarted before this message reached the admin agent. "
+                    "Resend it if it is still needed.")
 NO_REPLY = "(the admin agent's turn ended without a text reply)"
 NOT_READY = "The admin agent has not started yet; your message is queued. Use !tail to see its screen."
 CONTROL_REFUSED = "Not delivered: the message contains terminal control characters."
@@ -3941,6 +4034,7 @@ class Admind:
         self.not_ready_sent = False
         self.group_ok = False
         self.wake = asyncio.Event()
+        self.dispatch_lock = asyncio.Lock()
 
     # --- state helpers -------------------------------------------------------------------------
     def latched(self) -> bool:
@@ -3967,6 +4061,9 @@ class Admind:
 
     # --- lifecycle -----------------------------------------------------------------------------
     async def run(self) -> None:
+        # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
+        # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
+        self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
         for mid in self.store.inbound_with_status("received"):
             self.store.set_inbound(mid, "dropped")
             self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
@@ -4101,6 +4198,10 @@ class Admind:
         await self.flush()
 
     async def flush(self) -> None:
+        async with self.dispatch_lock:      # one dispatcher at a time: flush() is called from several tasks
+            await self._flush()
+
+    async def _flush(self) -> None:
         if self.stuck is not None:
             for mid, _ in self.held:
                 self.store.set_inbound(mid, "dropped")
@@ -4114,23 +4215,26 @@ class Admind:
                 self.not_ready_sent = True
                 self.reply(self.held[-1][0], NOT_READY, "notready")
             return
-        # One prompt at a time, so each Stop answers exactly the message in flight.
+        # One prompt at a time. The message is reserved as in_flight before the paste, so nothing
+        # else can dispatch meanwhile; its reply anchor is set only by the agent's UserPromptSubmit.
         if not self.held or self.store.get("in_flight") is not None:
             return
-        mid, text = self.held[0]
+        mid, text = self.held.pop(0)
+        self.store.set("in_flight", mid)
         try:
             await asyncio.to_thread(self.agent.send, text)
         except TmuxError as exc:
+            self.store.delete("in_flight")
+            self.held.insert(0, (mid, text))
             self.audit.write("agent", action="send-failed", error=str(exc), message_id=mid)
             await self.start_agent()
             return
-        self.held.pop(0)
         self.store.set_inbound(mid, "dispatched")
-        self.store.set("in_flight", mid)
         self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
 
     def abandon_in_flight(self, why: str) -> None:
         mid = self.store.get("in_flight")
+        self.store.delete("anchor")
         if mid is not None:
             self.store.delete("in_flight")
             self.reply(mid, f"No reply to this message: {why}.", "abandoned")
@@ -4151,15 +4255,26 @@ class Admind:
                                  transcript=ev.transcript_path)
                 self.ready.set()
                 await self.flush()
+            elif ev.hook_event_name == "UserPromptSubmit":
+                in_flight = self.store.get("in_flight")
+                if in_flight is not None and self.store.get("anchor") is None:
+                    self.store.set("anchor", in_flight)
+                    self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
+                else:
+                    self.audit.write("agent", action="prompt-not-from-admind")
             elif ev.hook_event_name == "Stop":
                 seq = int(self.store.get("reply_seq") or "0") + 1
                 self.store.set("reply_seq", str(seq))
                 text = reply_text(ev) or NO_REPLY
-                reply_to = self.store.get("in_flight")   # None: a turn the operator didn't start
-                self.store.delete("in_flight")
+                # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
+                # that ended after !interrupt, or one begun at the terminal) posts top-level.
+                anchor = self.store.get("anchor")
+                if anchor is not None:
+                    self.store.delete("anchor")
+                    self.store.delete("in_flight")
                 for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
-                    self.post(f"reply:{ev.session_id}:{seq}:{i}", part, reply_to)
-                self.audit.write("reply", session=ev.session_id, reply_to=reply_to, text=text)
+                    self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
+                self.audit.write("reply", session=ev.session_id, reply_to=anchor, text=text)
                 await self.flush()
 
     # --- outbound ------------------------------------------------------------------------------
@@ -4179,7 +4294,8 @@ class Admind:
                 except ControlError as exc:
                     attempts = self.store.mark_attempt(row.seq)
                     if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
-                        self.audit.write("send", key=row.key, action="retry", attempts=attempts, code=exc.code)
+                        self.audit.write("send", key=row.key, action="retry", attempts=attempts,
+                                         code=exc.code)
                         await asyncio.sleep(min(60, 2 ** attempts))
                         self.wake.set()
                         break
@@ -4197,7 +4313,8 @@ class Admind:
             for name, alert in await asyncio.to_thread(alerts.scan, self.s.alerts_dir):
                 if self.store.relayed(name):
                     continue
-                if self.store.relay_alert(name, f"alert:{name}", alerts.render(name, alert, self.s.chunk_chars)):
+                text = alerts.render(name, alert, self.s.chunk_chars)
+                if self.store.relay_alert(name, f"alert:{name}", text):
                     self.audit.write("alert", name=name, malformed=alert is None)
                     self.wake.set()
 
@@ -4206,8 +4323,6 @@ class Admind:
             await asyncio.sleep(self.s.group_check_seconds)
             await self.check_group()
 ```
-
-Residual race (documented in `docs/admind.md`): if a Stop hook is already on its way when `!interrupt` clears `in_flight`, that reply is threaded to the next dispatched message instead. Replies are still verbatim agent output, only the thread anchor can be off.
 
 `hook_loop` calls `self.agent.started()` from the event loop. That call is a store write only, so it doesn't need a thread.
 
@@ -4312,7 +4427,7 @@ Sections, in this order:
    - that admind goes silent while latched;
    - how to check the group in the client, then run `admind rearm`;
    - the residual risk: a one-for-one swap made on the control socket by a same-user process is invisible, as in ADR §3.4. Likewise a same-user process can write to the hook socket and forge a reply for the current session.
-   - the `!interrupt` thread-anchor race (Task 8, Step 4 note).
+   - how replies are anchored (UserPromptSubmit), and why a reply can appear top-level: a turn that ended after `!interrupt`, a turn started at the terminal, or a turn in progress across an admind restart.
 6. **Alert relay contract:** copy the `alerts.py` module docstring (directory, name pattern, atomic rename, JSON shape, relayed once, never deleted, held until the operator has been seen).
 7. **Files:** a table of what lives under `<state>/admind/` (`admind.db`, `audit.jsonl`, `hook.sock`, `claude-settings.json`, `marmot/` with its `control.token` and `ctl/`) and `<state>/alerts/`, with modes.
 8. **Troubleshooting:**
@@ -4362,7 +4477,7 @@ This task runs on the reference host with the operator. **Ask the operator befor
   - the held alert arrives;
   - the agent's reply arrives as a threaded reply to "hi".
   Record whether the operator saw each one. This establishes, or refutes, the first operator message as the join signal.
-- [ ] **Step 6: Passthrough.** Send a multi-line message with emoji and quotes, and ask the agent to repeat it exactly. Compare the audit log's `inbound.text` with what the agent echoed.
+- [ ] **Step 6: Passthrough.** Confirm the audit log shows `prompt-submitted` for each pasted message: the real Claude Code fires UserPromptSubmit for a bracketed paste followed by Enter. Send a multi-line message with emoji and quotes, and ask the agent to repeat it exactly. Compare the audit log's `inbound.text` with what the agent echoed.
 - [ ] **Step 7: Commands.** Check each of these:
   - `!tail 20`;
   - `!ps`, which lists the self-test unit;
@@ -4395,6 +4510,8 @@ The PR body lists: what ships (Tasks 1–9); D1–D8; the acceptance results (Ta
 ---
 
 ## Self-review notes (completed while writing)
+
+- **Dry run (2026-09-30):** every code block in this plan was assembled into a scratch worktree of `main` (`018daf6`), applying the prose edits (policy, paths, defaults, examples, pyproject). There, `ruff check` passed, `pyright` (strict on `src`) reported 0 errors, `pytest -q` passed 301 tests with none skipped (the real-tmux daemon integration tests included), and the install-agnostic checker was clean. Implementers should still follow TDD step by step: the dry run proves the plan is consistent, not that each step's intermediate state is.
 
 - **ADR coverage (§8):**
 
