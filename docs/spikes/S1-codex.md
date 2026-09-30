@@ -51,6 +51,21 @@ Supporting detail, section by section:
   writes the Codex adapter (plan 4) and whoever extends the §7/S3 sandbox
   launch self-test to cover it.
 
+**Open question on Q2 (unresolved, not yet re-adjudicated):** a second,
+independent re-run of the Q2 marker control (see `task-2-report.md`, "Fix
+round 1 (independent re-verification)") could not reproduce marker creation
+under `--dangerously-bypass-hook-trust`, in four separate launches across two
+scratch homes, including one with a scratch-scoped `codex app-server` +
+`--remote` to rule out missing embedded mode. No "hooks need review" trust
+dialog appeared in any of those launches, contrary to what's described above.
+Both this spike's hook config and the flat `[[hooks.SessionStart]]` /
+`[[hooks.PreToolUse]]` `config.toml` tables used throughout Q1/Q2 differ in
+shape from the real, harness-installed `$CODEX_HOME/hooks.json` (JSON, with
+required `matcher` and nested `hooks` fields) — untested as the cause, but a
+plausible one, since a malformed entry could be silently dropped rather than
+rejected. Until someone re-tests against that schema, **do not treat Q1 or Q2
+as settled** even though both are marked PASS above.
+
 ## Credential safety
 
 - Before any model call, in both the original run and the fix-round re-run:
