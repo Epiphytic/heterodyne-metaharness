@@ -2,6 +2,7 @@
 name = "heterodyne-metaharness"
 version = "0.1.0"
 description = "Deterministic control plane for sandboxed, externally run coding agents, steered over Marmot"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = []
