@@ -1,0 +1,9 @@
+> Imported copy: local paths were normalised (`<repos>/`, `~`). The canonical, digest-pinned record is the design repo at commit `e36f6d0` (bead `btq-96hm`).
+
+REJECT
+
+- **[BLOCKING]** [§15’s configuration layers](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:558) conflict with the approved [§4.1 precedence](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:136): examples are called an overriding layer but are never loaded, while §4.1’s host defaults and per-bead override are absent. Define one effective precedence order.
+- **[BLOCKING]** [§15](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:569) requires btq’s endpoint and credential locations to come from host config, and [§16](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:580) proposes calling its `Queue` in-process. The current [Queue constructor](<repos>/beads-task-queue/bin/btq:47) fixes those locations and the Dolt endpoint. Specify the required btq change or a compatible integration; the earlier “no other btq change” claim cannot stand.
+- **[BLOCKING]** [§15](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:557) forbids naming an OS anywhere in the repository, yet the same section requires Linux and macOS install docs. Its “resolved at run time” wording also conflicts with [§3.2’s install-time selection](<repos>/hermes-workstreams-v2/docs/adr/0001-workstreams-v2.md:101). Narrow the prohibition to install-specific values and align the selection timing.
+
+The single-LLM addition is compatible with [btq’s design gate](<repos>/beads-task-queue/bin/btq:28): it accepts `mode=adversarial` when author and reviewer are the same model.
