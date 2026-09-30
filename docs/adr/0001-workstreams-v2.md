@@ -1,6 +1,6 @@
 # ADR 0001: heterodyne-metaharness (workstreams v2)
 
-- Status: Proposed, revision 10 (adds §5.9, the approval-ask context rule). Cross-model review r9 approved revision 9 (`docs/reviews/`; responses in `0001-design-review-r1-response.md`). Waiting for operator approval.
+- Status: Proposed, revision 12 (amends §3.4, §4.1, §4.2, §5.3, §5.6, §7, §10, §13 and §14 to match the spike findings and the roadmap). The operator approved revision 11. Cross-model review r17 approved revision 12 (rounds r12–r17) (`docs/reviews/`; responses in `0001-design-review-r1-response.md`). Waiting for operator approval of revision 12 (§5.9: an ADR change needs a new approval).
 - Review process (set by the operator, 2026-09-29; applies to every agent and harness): **every change is reviewed by a different LLM than its author whenever possible, otherwise by an adversarial fresh-context agent** (§11.1). The two-model brainstorm requirement is retired.
 - Date: 2026-09-29
 - Author: Claude Opus 5.5 (brainstorm with the operator)
@@ -120,7 +120,11 @@ The SQLite journal is backed up with the beads backups. The recovery order on st
   - the MLS-authenticated sender pubkey (reported by `wn-agent`, never parsed from message text) is on the allowlist;
   - the group ID is a registered workstream or control group;
   - the message ID has not been seen before (replay protection).
-- **Membership changes:** a member joining or leaving a registered group, or an identity change, raises an alert in the control group. Approvals from that group are suspended until the operator runs `/trust-group`.
+- **Membership changes:** a *detected* change (a member joining or leaving a registered group, or an identity change) raises an alert in the control group. Approvals from that group are suspended until the operator runs `/trust-group`. Detection covers the cases below; the one gap is a residual risk.
+  - `wsd` learns of other members' changes from `wn-agent`'s membership events. Those events are not delivered for a change made by the harness's own identity (S4), and `wn-agent` offers no member list to compare against.
+  - So **every membership change by the harness identity goes through `wsd`**, which journals it and raises the same alert and suspension itself. No sandbox can reach the `wn-agent` control socket (§7).
+  - As a backstop, reconcile compares each registered group's member count with its last trusted value, and a mismatch is treated as a membership change.
+  - **Residual risk, for operator acceptance with revision 12:** a change made directly on the control socket, bypassing `wsd`, by something running as the service user (for example `admind`'s agent, §8) and keeping the count unchanged, such as swapping one member for another, is not detected, so it raises no alert and suspends nothing.
 - **Forge:** reviews count only from allowlisted identities. A forge review is pinned by the head SHA, which is part of the ask's `context_digest`. A review is bound to a revision (§5.5). A review that is dismissed or revoked before execution starts cancels the pending decision.
 - **Non-allowlisted input** is logged and ignored, with no reply, so the system doesn't confirm it exists.
 
@@ -171,20 +175,21 @@ fallback_reviewer    = "gpt-sol"       # used if the reviewer profile is unavail
 - **Changing configuration:** role and profile changes are harness configuration, which is hard-deny for agents (§5.3). They are made by the operator, through `admind`, or through an approved policy bead.
 - Everything above `AgentRuntime` is agent-agnostic.
 - **Session identity** is `uuid5(NS, f"{bead}:{role}:{profile}")`, labelled `<short-bead> · <role> · <title>`. The label appears in the session name, the tmux window, the Marmot thread header and `/status`.
+  - The `uuid5` is the harness's logical session key. Claude Code is launched with it as its session ID. Codex assigns its own thread ID (§4.2), so for Codex, resume, steering and reconcile use the assigned thread ID recorded in the launched-session record, or a confirmed post-launch name.
 - **Swapping agents** is done with a deterministic handoff built from the bead: description, acceptance criteria, comments and decisions, plus `git log` and diffstat on the bead branch. The new session starts from that. The old transcript is not needed, so a swap works even after a crash or context overflow.
 
-### 4.2 Adapter capabilities (verified against the installed CLIs, 2026-09-29)
+### 4.2 Adapter capabilities (verified against the installed CLIs, 2026-09-29; Codex column per spike S1)
 
 | Capability | Claude Code 2.1.283 | Codex 0.157.0 |
 |---|---|---|
-| Launch with a fixed ID | `--session-id <uuid>` | Spike S1 (fallback: record the assigned ID on the bead) |
+| Launch with a fixed ID | `--session-id <uuid>` | None. The thread ID is server-assigned: `wsd` reads it right after launch and records it on the bead. A deterministic label can be applied after launch with `/rename`, and `resume` and `queue` accept it. |
 | Display name | `-n/--name` | Session name (`resume`, `archive`, and `queue` accept a name) |
 | Resume | `--resume <id>` | `codex resume <id\|name>` |
-| Steer a live session | Channels (research preview) through hermes-channel; fallback `tmux send-keys` | `codex queue --thread <id\|name> --message` |
+| Steer a live session | Channels (research preview) through hermes-channel; fallback `tmux send-keys` | `codex queue --remote unix://<sock> --thread <id\|name> --message`. It needs a dedicated per-session `codex app-server --listen unix://<sock>`, with the TUI launched with the same `--remote`. The app-server runs inside the sandbox (§7). |
 | Permission mode inside the sandbox | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` (`--yolo`) |
-| Pre-tool hook (policy UX layer) | `PreToolUse` → allow / deny with reason (fires in every mode) | Spike S1 (`hooks` stable; pre-tool event to be confirmed) |
+| Pre-tool hook (policy UX layer) | `PreToolUse` → allow / deny with reason (fires in every mode) | **Unsettled.** S1 saw `PreToolUse` deny with a reason under `--yolo` in an interactive session, but an independent re-run of its hook control could not reproduce hooks running. Under `codex exec` no command hook runs at all. Not relied on until re-tested (§5.3). |
 | Lifecycle hooks | SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, Notification | session_start, user_prompt_submit, stop, pre/post_compact (in use today) |
-| Hook trust | Settings file | Trusted hash per hook in `config.toml` (the existing `hook_config.py` logic is carried over) |
+| Hook trust | Settings file | **Unsettled.** S1 saw `--dangerously-bypass-hook-trust` run `wsd`-generated hooks without a trust step, but the independent re-run could not reproduce it. Must be re-tested with the harness's actual `hooks.json` schema. |
 
 Both CLIs run interactively and unmodified, so subscription-plan auth is preserved. The operator can attach to a session with `tmux attach` and take over at any time.
 
@@ -217,7 +222,7 @@ Both CLIs run interactively and unmodified, so subscription-plan auth is preserv
 - **Parking** leaves the bead **claimed by `wsd`** (`in_progress`), labelled `v2:parked`, with a blocking edge to what it waits on. `wsd` never unclaims, which respects PICKUP.md.
   - The park sequence is journaled (§3.3): record intent, commit WIP (recording the SHA), apply the label, add a bead comment. Each step is idempotent and replayed after a crash.
   - A queue write with an uncertain outcome is read back before any retry.
-- **Resumable beads** are `wsd`'s own query: beads it has claimed that carry `v2:parked` and whose blocking edges are all closed. They are resumed with the same session ID in the same worktree.
+- **Resumable beads** are `wsd`'s own query: beads it has claimed that carry `v2:parked` and whose blocking edges are all closed. They are resumed as the same session (§4.1) in the same worktree.
 - A workstream runs **at most one active session per role**. A reviewer can review bead A while the coder works on bead B. Running several coder sessions at once is out of scope for v1.
 
 ## 5. Flows
@@ -251,7 +256,8 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 - **The sandbox is the security boundary.** It contains no git push credentials at all, and no deploy tokens, messaging tokens or secrets. Agents commit to the local `btq/<id>` branch in their worktree, and **nothing is pushed automatically**, consistent with PICKUP.md.
   - The only way anything leaves the host is an approved `push_branch`, `open_pr` or `merge_pr` action, executed by `wsd-act`. In v2, this approved path is how completed worktrees get integrated, the role PICKUP gives to Bel.
   - The only credential inside the sandbox is model auth (§7).
-- The `PreToolUse` hook, which fires before every tool call regardless of permission mode, is the **UX layer**. It recognises operator-only intents early and turns them into clear, parked asks, instead of letting them fail obscurely against the sandbox. Matching commands in the hook is not a security control.
+- The `PreToolUse` hook is the **UX layer**. It fires before every tool call in Claude Code, in every permission mode. It never fires under `codex exec` (S1). Whether it fires in *interactive* Codex sessions (the managed TUI model that `codex queue` needs, §4.2) is unsettled (§4.2). Until a test with the harness's actual `hooks.json` schema shows it does, **every Codex session is treated like a headless run**: the outer sandbox is its only enforcement. Where it runs (Claude Code; Codex once verified), it recognises operator-only intents early and turns them into clear, parked asks, instead of letting them fail obscurely against the sandbox. Matching commands in the hook is not a security control.
+- **Headless Codex runs** (`codex exec`), and for now every Codex session, have no hook to rely on, so there is no UX layer and no hook fail-closed path (§10). Such a run is allowed only if it is `-s read-only`, or if it runs inside the outer sandbox with the sandbox as its only enforcement. In the second case, operator-only intents simply fail against the sandbox, and the failure is caught after the fact and the bead parked.
 - **Approved operator-only actions are typed and executed by `wsd-act`** (§3.1), outside the sandbox. The agent requests; `wsd` records; the operator approves the exact payload; `wsd-act` revalidates and executes.
 - **The action registry** is a closed, allowlisted set with fixed fields. Nothing else can be approved for execution:
   - `push_branch{repo, from_ref, to_ref, expected_sha}`
@@ -331,7 +337,7 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 ### 5.6 Steering (a reply in a thread, or a forge review comment)
 
 - The reply is routed to that bead's thread. The gatekeeper rewrites it, and the minor/material rule from §5.1 applies.
-- **Running bead:** deliver through the adapter's steer path (Claude: channel; Codex: `codex queue`).
+- **Running bead:** deliver through the adapter's steer path (Claude: `tmux send-keys` in v1, channels in phase 2 (§12); Codex: `codex queue`).
 - **Parked or queued bead:** attach the text as a bead comment, delivered on resume.
 - The bead comment records both the original text and the rewrite.
 
@@ -430,13 +436,29 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
   - A workstream-level, platform-neutral `sandbox.toml`: writable paths (worktree, tmp, package caches), read-only binds, and a network allowlist.
   - It is compiled at launch to bubblewrap arguments on Linux or a Seatbelt profile on macOS, and wraps whichever agent CLI is launched.
   - Coder and reviewer share one profile; the reviewer's worktree bind is read-only.
-  - Inside the sandbox both agents run fully permissive: Codex `--yolo`, Claude `bypassPermissions`. Neither agent's native sandbox is used.
+  - Inside the sandbox both agents run fully permissive: Codex `--yolo`, Claude `bypassPermissions`. Neither agent's native sandbox is used, except `-s read-only` for a headless `codex exec` run (§5.3).
   - The sandbox is the only security boundary (§5.3). **The only credential inside is model auth.** There is no git push, forge, deploy, messaging or secret material.
-  - **Home isolation:** the sandbox gets a synthetic `$HOME` containing only the agent's config and auth files, copied in read-only. The real home (including SSH keys, forge CLI tokens and the queue client's credentials), other workstreams' worktrees, and the `wsd` journal are not mounted.
-  - **Network:** an allowlist enforced by a per-sandbox egress proxy, not just DNS. It covers model endpoints, package registries and the git remote over read-only fetch.
+  - **Environment:** the launcher clears the environment and sets only an explicit allowlist (locale, terminal, user, `HOME`, `PATH`, the session socket and the proxy settings). The host environment can carry tokens and socket paths, and it changes CLI behaviour. A self-test probe enforces this.
+  - **Home isolation:** the sandbox gets a synthetic `$HOME` containing only the agent's config and auth files. The **auth files are ro-bound**. The rest of the synthetic home is a **writable per-session copy**, because both CLIs write session state there. The real home (including SSH keys, forge CLI tokens and the queue client's credentials), other workstreams' worktrees, and the `wsd` journal are not mounted.
+  - **Shared refresh token and the launch freshness gate:** the auth files hold the operator's own login, including the refresh token that the host shares. A refresh inside the sandbox could rotate that token and break the host login, and the ro bind would stop the rotated token from being saved. So before every launch the launcher checks the access token's expiry. If it expires within the session's maximum lifetime plus a stop margin, the launcher refreshes on the host first, or refuses to launch. A session that reaches its maximum lifetime is stopped: at a turn boundary if one comes within the stop margin, otherwise by a hard interrupt, as `/stop` does (interrupt, then commit the WIP, §6.3). Either way it stops before the token expires. It is then relaunched at once as the same session (§4.1) through the gate. This is not §4.3's blocked parking: the bead stays claimed and in progress, with no blocking edge. If the gate refuses the relaunch, the bead becomes `needs-human`. Per-sandbox credentials are future work.
+  - **Model credentials may reach account connectors:** the model OAuth token probably also reaches the account's MCP connectors (for Claude, through `mcp-proxy.anthropic.com`; for Codex, under `chatgpt.com`), which can include mail, chat and drive. S3 inferred this from the traffic; what each connector can do from the sandbox was not tested. The proxy denies `mcp-proxy.anthropic.com`, and the Claude adapter config disables claude.ai MCP servers. The Codex adapter config disables connectors, because the proxy can't filter paths on `chatgpt.com`.
+  - **Network:** an allowlist enforced by a per-sandbox egress proxy, not just DNS. It names **exact hosts** per adapter (no suffix wildcards), and covers model endpoints, package registries and the git remote over read-only fetch.
+    - The proxy checks only the host in the CONNECT request. It does not check TLS SNI or the authority inside the tunnel, and it can't see paths. It is a host-level boundary, not a TLS-peer or path boundary.
   - **Session socket, not the `wsd` socket:** each session gets its own socket, bound in, authenticated by a per-launch token. It accepts only that session's hook events and `ws-request` calls, and exposes **no** control operations: no approve, no config, no other sessions.
-  - **Residual risk, accepted and documented:** a compromised agent could exfiltrate its own model credentials, or repository content, through allowlisted endpoints. That's mitigated by per-sandbox credentials where the provider supports them, and by the egress proxy's logs.
-  - **Launch self-test (fail closed):** before starting an agent, the runner probes from inside the sandbox. Reading a canary file in the real home must fail, reaching a non-allowlisted host must fail, and calling a control operation on the session socket must fail. If any probe succeeds, the launch is refused. S3's acceptance criteria are exactly these probes on both backends.
+  - **Codex app-server:** the per-session `codex app-server` that `codex queue` needs (§4.2) sets the session's working directory, and is inferred to execute the tool calls. So it runs **inside** the sandbox, not just the `--remote` TUI client. Its queue socket, which it binds from inside, is the Codex steering surface at the boundary, on a writable path of that session's own bridge directory. The launch self-test runs against this launch shape, not against a bare `codex` process.
+  - **Residual risk, accepted and documented:**
+    - A compromised agent could exfiltrate its own model credentials, or repository content, through allowlisted endpoints. In v1 those credentials are the operator's own login (per-sandbox credentials are future work).
+    - Because the allowlist checks only the CONNECT host, a client can present a different SNI behind an allowed host, which matters for shared front ends and CDNs.
+    - The proxy's logs record CONNECT hosts only, not paths or content, so they can't show *what* was sent to an allowlisted host.
+    - Codex connector traffic shares a host with model traffic, so only adapter config, not the proxy, keeps it off.
+  - **Launch self-test (mandatory, fail closed):** it runs before **every** agent launch, including resumes and relaunches, and a failing or skipped self-test refuses the launch. Each probe must prove the *specific* enforcement, because a generic failure (a missing canary, a dead proxy, a timeout) looks like enforcement:
+    - **Real home:** a canary file in the real home is checked readable *outside* the sandbox immediately before the launch (otherwise the self-test aborts), and inside it gives ENOENT or EACCES.
+    - **Egress:** a non-allowlisted host is refused *by the egress proxy*, shown by its marker in the refusal and its log entry, and a paired allowlisted-host control succeeds, so a broken proxy fails the self-test.
+    - **Direct network:** namespace evidence shows no route: no interface except loopback, and a raw connect to a literal address fails as unreachable.
+    - **Control op:** a control operation on the session socket gets the socket's explicit `forbidden` reply.
+    - **Environment:** no variable outside the launcher's allowlist is present.
+    - S3's acceptance criteria are exactly these probes on both backends.
+  - **Still to verify for v1 (implementation plan 4):** egress for package registries and read-only git fetch, the reviewer's read-only worktree bind, and the self-test and login against the managed Codex launch shape (app-server inside the sandbox). S3 tested Codex only as `codex exec`. Plan 4 also re-tests Codex `PreToolUse` deny and hook trust with the harness's actual `hooks.json` schema (§4.2).
 - **Why an outer sandbox:** a single boundary to review means swapping agents never changes the security posture. The agents' native sandboxes have different semantics.
 - **v2 (future):** a `CubeRuntime` (TencentCloud CubeSandbox microVMs, Linux/KVM only) behind the same interface, with credentials injected at the egress proxy and a snapshot on park.
 
@@ -484,8 +506,8 @@ User jobs live in `schedules.toml`. Each job either runs a fixed command or file
 | Failure | Behaviour |
 |---|---|
 | Hermes or gatekeeper down | Deterministic flows continue. Intake falls back to `unreviewed`, and grey-zone requests escalate. |
-| `wsd` down | The service manager restarts it, and agents keep running. The hook shim waits up to 5s, then **fails closed**, with one exception: tool calls the shim can classify locally, from a cached copy of the auto-approve tier, as sandbox-confined (file edits in the worktree, running tests, local git). Everything else is denied with "control plane unavailable; retry shortly". Spooled events are untrusted observations (§3.3). |
-| Agent or runner crash | Reconcile resumes `uuid5(bead, role, profile)`. After 2 failures the bead becomes `needs-human`. |
+| `wsd` down | The service manager restarts it, and agents keep running. The hook shim waits up to 5s, then **fails closed**, with one exception: tool calls the shim can classify locally, from a cached copy of the auto-approve tier, as sandbox-confined (file edits in the worktree, running tests, local git). Everything else is denied with "control plane unavailable; retry shortly". Spooled events are untrusted observations (§3.3). This applies only where the hook is known to run: Claude Code, and interactive Codex sessions once that is verified (§4.2). A Codex session without a verified hook, including every headless `codex exec` run, has no fail-closed path, so it is allowed only as §5.3 says: read-only, or enforced by the outer sandbox alone. |
+| Agent or runner crash | Reconcile resumes the session keyed by `uuid5(bead, role, profile)` (for Codex, its recorded thread ID, §4.1). After 2 failures the bead becomes `needs-human`. |
 | Reboot | Units start, reconcile resumes in-progress beads, and parked beads wait on their blockers. |
 | Dolt unreachable | Pickup, close and **new approvals** pause. Decisions and actions need the bead write first (§5.4), so they wait. Commands use the cache with a warning. Hooks decide from policy plus cache. Audit comments go to the spool and are replayed later. |
 | Marmot relay down | The outbox retries with backoff, and work continues. |
@@ -552,21 +574,20 @@ This rule is the same for every agent and harness, and for v2's own development:
 
 ## 13. Spikes (before implementation beads)
 
-- **S1, Codex parity:**
-  - Does 0.157.0 have a pre-tool hook event that can deny with a reason under `--yolo`? If not, the UX layer for Codex falls back to catching the sandbox failure after the fact and parking the bead. That is acceptable, because the sandbox is still the boundary.
-  - Can `--dangerously-bypass-hook-trust` replace per-hook trust hashes for runner-launched sessions? The hooks are generated by `wsd`, which vets their source.
-  - Can the session ID or name be set at launch?
-  - Does `codex queue` deliver into a live interactive TUI session?
-- **S2, Claude channels** (phase 2 gate): a custom hermes-channel MCP server under subscription auth. v1 uses `tmux send-keys` for the Claude reviewer.
-- **S3, sandbox:** run both CLIs inside bubblewrap (v1) and Seatbelt (phase 2 gate) with synthetic home, egress proxy and session socket. Acceptance is exactly the §7 launch self-test probes plus a working login and hooks. If a backend can't pass, that platform doesn't ship.
-- **S4, Marmot:** threads (reply-to) and reactions end-to-end on the current mdk bindings, for both a harness identity and a separate `admind` identity.
+**Status: S1–S4 are done.** Their findings and evidence are in the product repository's `docs/spikes/`, one document per spike. Revision 12 folds the findings that contradicted this ADR into §3.4, §4.1, §4.2, §5.3, §5.6, §7 and §10. Remaining open items are noted per spike.
+
+- **S1, Codex parity:** done.
+  - Does 0.157.0 have a pre-tool hook event that can deny with a reason under `--yolo`? **Unsettled.** S1 observed it in an interactive session; under `codex exec` it never fires (§5.3). Until it is re-tested with the harness's `hooks.json` schema, the fallback applies to every Codex session: catching the sandbox failure after the fact and parking the bead. That is acceptable, because the sandbox is still the boundary.
+  - Can `--dangerously-bypass-hook-trust` replace per-hook trust hashes for runner-launched sessions? **Unsettled:** S1 observed it, but an independent re-run could not reproduce it. The hooks are generated by `wsd`, which vets their source.
+  - Can the session ID or name be set at launch? **No launch flag.** `wsd` records the assigned ID; a post-launch rename is optional (§4.2).
+  - Does `codex queue` deliver into a live interactive TUI session? **Yes**, through a dedicated per-session app-server socket (§4.2). S1 ran that app-server outside any sandbox. §7 requires it to run inside, and that placement is still to be verified (plan 4).
+- **S2, Claude channels** (phase 2 gate): a custom hermes-channel MCP server under subscription auth. Done: the live push was not demonstrated within the timebox, so the gate is not passed. v1 uses `tmux send-keys` for the Claude reviewer, unchanged.
+- **S3, sandbox:** run both CLIs inside bubblewrap (v1) and Seatbelt (phase 2 gate) with synthetic home, egress proxy and session socket. Acceptance is exactly the §7 launch self-test probes plus a working login and hooks. If a backend can't pass, that platform doesn't ship. Done for bubblewrap: the shape it tested passes (both CLIs headless, plus the Claude hook). The managed Codex shape is a plan-4 item (§7). Seatbelt remains open with the phase 2 macOS work.
+- **S4, Marmot:** threads (reply-to) and reactions end-to-end on the current mdk bindings, for both a harness identity and a separate `admind` identity. Done: the harness identity through its `wn-agent` control socket, and the scratch `admind` identity through its own `wn` daemon, in both directions. The operator's real-client check is still pending.
 
 ## 14. Migration
 
-1. **Stabilise the old harness now (independent fixes):**
-   - fix exit 126 on `workstream`
-   - point the admin lookup at the live Marmot home
-   - these confirm spike S4
+1. **The old harness stays as-is.** There is no live cutover (§2), so it gets no stabilisation fixes. It is archived after step 3.
 2. **Build order:**
    - spikes S1–S4
    - `admind`

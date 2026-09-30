@@ -1,0 +1,5 @@
+- [BLOCKING] **§3.4 — membership detection.** The round 12 fix catches harness initiated changes and member count mismatches, but a change made directly on the control socket can leave the count unchanged, such as replacing one member with another. S4 says the authoring identity receives no membership event, so the promised alert and approval suspension still have a gap. Require all membership mutations to pass through an audited harness path, or specify a reliable state check beyond `member_count`; update the response file’s disposition accordingly.
+
+- [BLOCKING] **§13 — Codex sandbox evidence.** The S1 status says queue delivery worked “with the app-server inside the sandbox.” S1 tested a dedicated app-server socket, but did not test that server inside bubblewrap; §7 correctly leaves that launch shape for plan 4. State the queue result separately from the required, unverified sandbox placement.
+
+VERDICT: REJECT
