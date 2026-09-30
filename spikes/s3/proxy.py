@@ -27,7 +27,8 @@ async def handle(reader, writer, allow):
     ok = method == 'CONNECT' and port == '443' and allowed(host, allow)
     print(json.dumps({'method': method, 'target': target, 'allowed': ok}), file=sys.stderr, flush=True)
     if not ok:
-        writer.write(b'HTTP/1.1 403 Forbidden\r\n\r\n')
+        # Fix round 1: a marker header lets the in-sandbox probe prove *this proxy* refused the CONNECT.
+        writer.write(b'HTTP/1.1 403 Forbidden\r\nX-HZ-Egress: denied\r\n\r\n')
         await writer.drain()
         writer.close()
         return
