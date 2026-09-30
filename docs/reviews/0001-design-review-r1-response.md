@@ -21,7 +21,7 @@
 
 ## Finding 10: admind
 
-**Rebutted in part: the privilege level.** The operator explicitly chose (2026-09-29) that admind runs as `openclaw` with permission prompts bypassed and no root. admind exists to repair anything the harness can break, including `wsd`, `wsd-act`, the sandbox profiles and the Hermes gateway. A least-privilege identity would have to be granted each of those repair paths in turn, and would fail on whichever one was missed during an incident, which is exactly when admind is needed. Requiring per-action confirmation would turn one passthrough message into a second round trip, also during an incident.
+**Rebutted in part: the privilege level.** The operator explicitly chose (2026-09-29) that admind runs as `<operator-user>` with permission prompts bypassed and no root. admind exists to repair anything the harness can break, including `wsd`, `wsd-act`, the sandbox profiles and the Hermes gateway. A least-privilege identity would have to be granted each of those repair paths in turn, and would fail on whichever one was missed during an incident, which is exactly when admind is needed. Requiring per-action confirmation would turn one passthrough message into a second round trip, also during an incident.
 
 **Accepted:**
 - "No LLM in between" is reworded to "no *gatekeeper* LLM between the operator and the admin agent".
@@ -31,7 +31,7 @@
 - Every message and action goes to the append-only log.
 - The build order no longer says admind is "first": it comes after the spikes, and it doesn't depend on the security boundary being demonstrated, because it deliberately sits outside that boundary.
 
-**Residual risk, accepted by the operator:** anyone who can send authenticated operator messages to the admin group has `openclaw`-level control of the host. The protection is the operator's Marmot key, and nothing else.
+**Residual risk, accepted by the operator:** anyone who can send authenticated operator messages to the admin group has `<operator-user>`-level control of the host. The protection is the operator's Marmot key, and nothing else.
 
 ## Round 2 fixes (after r2 review)
 

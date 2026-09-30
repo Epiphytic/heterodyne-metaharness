@@ -41,7 +41,7 @@ except OSError as x:
 EOF
 )
 v=bad; [ -z "$ifs" ] && { [ "$e" = ENETUNREACH ] || [ "$e" = EHOSTUNREACH ]; } && v=ok
-check direct-network-blocked $v ok "non-lo interfaces='${ifs:-none}' connect(1.1.1.1:443) -> $e"
+check direct-network-blocked $v ok "non-lo interfaces='${ifs:-none}' connect(1.1.1.1:443) -> $e"  # install-agnostic: allow=ip-port (public anycast probe target, not install-specific)
 
 # 4. Control operation on the session socket, with a valid token, is refused.
 r=$(printf '{"token":"%s","type":"approve","payload":{}}\n' "$TOKEN" | sock)

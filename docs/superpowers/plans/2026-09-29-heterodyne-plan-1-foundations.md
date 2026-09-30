@@ -255,7 +255,7 @@ if __name__ == '__main__':
 - [ ] **Step 2: In-sandbox TCP→unix bridge and agent launcher: `spikes/s3/bridge.py`**
 
 ```python
-"""Inside the sandbox: listen on 127.0.0.1:3128, forward to the bound proxy socket, run the agent."""
+"""Inside the sandbox: listen on 127.0.0.1:3128, forward to the bound proxy socket, run the agent."""  # install-agnostic: allow=ip-port (loopback address inside the sandbox netns, same on every install)
 import os
 import socket
 import subprocess
@@ -283,7 +283,7 @@ def serve(unix_path: str) -> None:
 
 if __name__ == '__main__':
     threading.Thread(target=serve, args=(sys.argv[1],), daemon=True).start()
-    env = dict(os.environ, HTTPS_PROXY='http://127.0.0.1:3128', HTTP_PROXY='http://127.0.0.1:3128',
+    env = dict(os.environ, HTTPS_PROXY='http://127.0.0.1:3128', HTTP_PROXY='http://127.0.0.1:3128',  # install-agnostic: allow=ip-port (loopback address inside the sandbox netns, same on every install)
                NO_PROXY='')
     sys.exit(subprocess.call(sys.argv[3:], env=env))   # argv: bridge.py <sock> -- <cmd...>
 ```
@@ -1835,7 +1835,7 @@ def test_clean_file_passes(tmp_path: Path) -> None:
 
 
 def test_flags_install_specific_values(tmp_path: Path) -> None:
-    text = ("see /home/alice/repos/x\nserver 10.1.2.3:3307\nmail alice@corp.io\n"
+    text = ("see /home/alice/repos/x\nserver 10.1.2.3:3307\nmail alice@corp.io\n"  # install-agnostic: allow=home-path,ip-port,email (fake samples in the checker's own test)
             "npub1" + "q" * 58 + "\n")
     r = run(tmp_path, {"docs/a.md": text})
     assert r.returncode == 1
@@ -1850,7 +1850,7 @@ def test_model_names_only_flagged_in_src(tmp_path: Path) -> None:
 
 
 def test_examples_and_fixtures_exempt(tmp_path: Path) -> None:
-    assert run(tmp_path, {"examples/c.toml": "/home/alice\n", "tests/fixtures/f.txt": "10.0.0.1:22\n"}).returncode == 0
+    assert run(tmp_path, {"examples/c.toml": "/home/alice\n", "tests/fixtures/f.txt": "10.0.0.1:22\n"}).returncode == 0  # install-agnostic: allow=home-path,ip-port (fake samples in the checker's own test)
 
 
 def test_extra_local_denylist(tmp_path: Path) -> None:
@@ -1877,7 +1877,7 @@ import sys
 from pathlib import Path
 
 RULES = {
-    "home-path": re.compile(r"(?<![\w$])/(?:home|Users)/[A-Za-z0-9._-]+|(?<![\w$])/root/"),
+    "home-path": re.compile(r"(?<![\w$])/(?:home|Users)/[A-Za-z0-9._-]+|(?<![\w$])/root/"),  # install-agnostic: allow=home-path (the checker's own pattern source)
     "ip-port": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b"),
     "email": re.compile(r"\b[\w.+-]+@(?!example\.(?:com|org|net)\b)[\w-]+\.[\w.-]+\b"),
     "npub": re.compile(r"\bnpub1[02-9ac-hj-np-z]{58}\b"),

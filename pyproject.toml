@@ -32,7 +32,7 @@ ignore = ["S603", "S607"]
 "spikes/**" = ["S", "PTH", "B", "E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]
 strict = ["src"]
 pythonVersion = "3.12"
 venvPath = "."

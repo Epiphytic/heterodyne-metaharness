@@ -13,7 +13,7 @@ REJECT
 7. Resolved. The ADR specifies authenticated sender and group checks, allowlisting, replay checks, and membership-change handling.
 8. Resolved. The outage exception is limited to locally classified sandbox-confined calls.
 9. **Unresolved [BLOCKING]** for the decision record gap in finding 6. The narrowed state-ownership claim resolves the other records.
-10. Resolved. The [response](<repos>/hermes-workstreams-v2/docs/reviews/0001-design-review-r1-response.md) explicitly records the operator’s decision and the residual risk: authenticated operator-message access grants `openclaw`-level host control. The operator owns that trade-off.
+10. Resolved. The [response](<repos>/hermes-workstreams-v2/docs/reviews/0001-design-review-r1-response.md) explicitly records the operator’s decision and the residual risk: authenticated operator-message access grants `<operator-user>`-level host control. The operator owns that trade-off.
 11. Resolved. Review evidence is tied to launched sessions and the reviewed HEAD.
 12. Resolved. Missing delivery receipts have an alert and relay path.
 13. Resolved. The ADR defines a v1 slice and separate phase-2 gates.

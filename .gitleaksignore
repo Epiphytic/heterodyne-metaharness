@@ -1,0 +1,6 @@
+# gitleaks fingerprints to skip (commit:path:rule:line). Keep each entry narrow and justified.
+#
+# Pre-v2 history: an operator *public* key (not a secret) in the v1 spec, flagged by the generic-api-key
+# heuristic. The file was removed when v2 replaced the repo contents (Plan 1 Task 1); the commit remains
+# in history, which the full-history CI scan reads.
+6023a84fb01a59b5e701641964391f4f93e63ece:spec/operator-asks.md:generic-api-key:23
