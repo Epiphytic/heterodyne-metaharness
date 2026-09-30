@@ -1,0 +1,21 @@
+# Built-in defaults (ADR 0001 §15 layer 1). Adapters are defined; no models are chosen.
+
+[adapters]
+known = ["claude-code", "codex"]
+
+[review]
+mode_when_same_model = "adversarial"   # or "block"
+
+[timeouts]
+gatekeeper_seconds = 60
+hook_wait_seconds = 5
+reminder_hours = 4
+delivery_alert_minutes = 10
+
+# Action classes by tier (§5.3). Host policy may re-tier classes, except `locked` ones,
+# which can never be lowered. Workstreams may only tighten, via [restrict].
+[tiers]
+auto_approve = ["worktree_edit", "run_tests", "local_git", "dependency_install"]
+escalate = ["push_branch", "open_pr", "merge_pr", "deploy", "notify", "new_egress_host"]
+hard_deny = ["modify_harness_config", "modify_policy", "modify_sandbox"]
+locked = ["modify_harness_config", "modify_policy", "modify_sandbox"]

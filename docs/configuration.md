@@ -1,0 +1,180 @@
+# Configuration reference
+
+This page describes the configuration loader as it exists today (`src/heterodyne/config/`). The design is ADR 0001 §15. Later plans add settings; the rules below stay.
+
+## Locations
+
+| What | Chosen by (first match wins) |
+|---|---|
+| Host config directory | `HETERODYNE_CONFIG_DIR`; else `$XDG_CONFIG_HOME/heterodyne`; else `~/.config/heterodyne` |
+| State directory | `HETERODYNE_STATE_DIR`; else `$XDG_STATE_HOME/heterodyne`; else `~/.local/state/heterodyne` |
+
+- A leading `~` in `HETERODYNE_CONFIG_DIR` or `HETERODYNE_STATE_DIR` expands against `HOME`.
+- A relative `XDG_CONFIG_HOME` or `XDG_STATE_HOME` is ignored, as the XDG Base Directory spec requires.
+- An empty variable counts as unset.
+- Nothing writes to the state directory yet.
+
+The host config directory holds:
+
+- `config.toml`: host settings (profiles, default roles, platform backends, sandbox allowlists, integrations);
+- `policy.toml`: approvers, identities and tier overrides;
+- `workstreams/<ws>.toml`: one file per workstream.
+
+A missing file is an empty layer. A file that isn't valid TOML is a config error naming the file. A missing `policy.toml` gives an empty policy: no approvers and the default tiers.
+
+## Layers
+
+The loader merges these layers, lowest first. A higher layer replaces a lower one key by key. Tables merge recursively; arrays and scalars are replaced whole.
+
+| # | Layer | Location | In git? | Source label in `config check` |
+|---|---|---|---|---|
+| 1 | Built-in defaults | `defaults/defaults.toml` inside the `heterodyne` package | Yes | `defaults` |
+| 2 | Host config | `config.toml` in the host config directory | **No** | `host:config.toml` |
+| 3 | Workstream config | `workstreams/<ws>.toml`, loaded only with `--workstream <ws>` | **No** | `workstream:<ws>.toml` |
+| 4 | Bead override | a `role:<role>=<profile>` label (roles only) | n/a | not implemented yet |
+| 5 | Environment | the three `HETERODYNE_*` variables below | No | `env:<VARIABLE>` |
+
+`policy.toml` is not a layer. It is read on its own and never merged with anything (see [Policy](#policy-host-only)).
+
+`examples/` is not a layer either. Nothing loads it: `heterodyne setup` copies from it. Host config and policy never go in git; `.gitignore` excludes `config.toml`, `policy.toml`, `workstreams/` and `state/` at the repository root, and `*.local.toml` anywhere.
+
+### Built-in defaults
+
+The shipped defaults define the known adapters (`claude-code`, `codex`), the review mode when both roles use the same model (`adversarial`), timeouts, and the action-class tiers. They name no models.
+
+| Tier | Default classes |
+|---|---|
+| `auto_approve` | `worktree_edit`, `run_tests`, `local_git`, `dependency_install` |
+| `escalate` | `push_branch`, `open_pr`, `merge_pr`, `deploy`, `notify`, `new_egress_host` |
+| `hard_deny` | `modify_harness_config`, `modify_policy`, `modify_sandbox` |
+| `locked` (never lowered) | `modify_harness_config`, `modify_policy`, `modify_sandbox` |
+
+`locked` is not a tier. It lists the classes whose tier host policy can never lower.
+
+### Host config (`config.toml`)
+
+See `examples/config.toml` for a commented sample.
+
+- **No policy keys.** A top-level key that belongs in `policy.toml` (`approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor`, `policy`) is an error: "belong in policy.toml".
+- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `bubblewrap` on Linux, `launchd` and `seatbelt` on macOS (§3.2). They are recorded once, at setup, and not re-probed.
+- **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string.
+- **`[roles]`:** role name to profile name.
+- **`[sandbox]`** must be a table, and holds two host allowlists:
+  - `egress_approved`: a list of hosts a workstream may add as extra egress.
+  - `ro_mounts_approved`: a list of **absolute** directory paths a workstream may add as extra read-only mounts. A missing or empty list allows none.
+- **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. Nothing reads these settings yet.
+
+### Workstream config (`workstreams/<ws>.toml`)
+
+See `examples/workstreams/example.toml` for a commented sample. The file is loaded only by `config check --workstream <ws>`; if it doesn't exist, the workstream layer is empty.
+
+- **Allowed top-level tables:** `roles`, `repos`, `sandbox`, `cron`, `render`, `timeouts` and `restrict`. Any other key is an error, so no policy key can be set here.
+- **`[roles]`** must be a table of strings, and each value must name a profile that exists in the defaults or host config.
+- **`[sandbox]`** may contain only `extra_ro_mounts` and `extra_egress`, both lists of strings:
+  - every `extra_egress` host must be listed in the host's `sandbox.egress_approved`;
+  - every `extra_ro_mounts` entry must be an absolute path inside one of the host's `sandbox.ro_mounts_approved` entries.
+- **Read-only mount containment.** Both the workstream path and the host entries are resolved first (`..` removed, existing symlinks followed), so a path cannot climb or link out of an approved tree. Containment compares whole path components: an approved `/srv/data` covers `/srv/data/x`, but not `/srv/database`. A relative path is rejected.
+- **`[restrict]`** is policy tightening. It is validated, removed from the merged values, and applied to the policy (see [`[restrict]`](#restrict-workstream-tightening)).
+
+### Environment
+
+Only these three variables are accepted:
+
+| Variable | Sets | Source label |
+|---|---|---|
+| `HETERODYNE_CONFIG_DIR` | `paths.config_dir` (and the host config directory) | `env:HETERODYNE_CONFIG_DIR` |
+| `HETERODYNE_STATE_DIR` | `paths.state_dir` (and the state directory) | `env:HETERODYNE_STATE_DIR` |
+| `HETERODYNE_LOG_LEVEL` | `debug.log_level` | `env:HETERODYNE_LOG_LEVEL` |
+
+Any other variable starting with `HETERODYNE_` is an error: "environment overrides are limited to [...]". Variables without the prefix are ignored. The environment covers locations and debugging only; it can't change policy or roles. The only command-line flag today is `config check --workstream`.
+
+## Policy (host-only)
+
+`policy.toml` is read **only** from the host config directory. No other layer can set any of its keys: the loader rejects them as a startup error, not a silent ignore. See `examples/policy.toml`.
+
+- **Allowed keys:** `approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor` and `policy`. Any other top-level key is an error ("unknown keys").
+- Only three are interpreted today:
+  - `approvers`: a list of names.
+  - `identities`: a table of tables of strings, one table per approver, for example `marmot_npub`, `github` and `radicle_did`.
+  - `[tiers]`: re-tiering, as `class = "tier"`. The class must be a default action class and the tier one of `auto_approve`, `escalate` or `hard_deny`. A host may raise or lower any class **except a locked one, which can never be lowered**.
+- The others are reserved for later plans: accepted, but not used.
+
+The effective tiers are computed as the default tiers, then the host `[tiers]` overrides, then the workstream `[restrict]` table.
+
+## `[restrict]` (workstream tightening)
+
+A workstream can only tighten policy, and only through `[restrict]`. It has two lists of action-class names:
+
+- `escalate`: move classes to the `escalate` tier;
+- `hard_deny`: move classes to the `hard_deny` tier.
+
+Rules:
+
+- No other key is allowed in `[restrict]`.
+- Each entry must be a known action class.
+- Tightening only. An entry that would lower a class below its current tier (after the host overrides) is rejected at startup: for example `escalate = ["modify_policy"]`, because `modify_policy` is already `hard_deny`. Naming a class already at that tier is allowed and changes nothing.
+
+Example `workstreams/<ws>.toml`:
+
+```toml
+[restrict]
+escalate = ["dependency_install"]   # auto_approve -> escalate for this workstream
+hard_deny = ["deploy"]              # escalate -> hard_deny for this workstream
+```
+
+`config check` validates `[restrict]` and computes the effective tiers, but prints only the approvers from the policy, not the tiers.
+
+## Secret references
+
+Secrets never appear inline in any layer (§15). A setting that holds a secret refers to it with a **reference**: a table with exactly one key, `file` or `command`, whose value is a non-empty string.
+
+```toml
+[integrations.marmot]
+auth_token = { command = "<command-that-prints-the-token>" }
+# or
+auth_token = { file = "<path-to-token-file>" }
+```
+
+An empty value, a non-string value, both keys, an extra key or an empty table is not a reference. The loader validates references; nothing resolves them yet.
+
+### The secret scan (best effort)
+
+Every layer is scanned before any other validation of that layer: defaults, the raw `HETERODYNE_*` environment, `config.toml`, `policy.toml` and the workstream file. The scan walks every key and value, including arrays and arrays of tables. It has two checks:
+
+- **Name check.** A key whose name looks secret must hold a reference. The name is split into segments on `_`, `-`, `.` and camelCase, then lowercased. It is secret-named if any segment is one of `credential(s)`, `cred(s)`, `auth`, `authorization`, `bearer`, `cookie(s)`, `passphrase`, `pass`, `password`, `passwd`, `pwd`, `secret(s)`, `token(s)`, `nsec`, `apikey`, `privkey` or `session(s)`, or if its last segment is `key` (`key`, `api_key`, `private_key`). Matching is per segment, so `keyboard`, `author` and `key_file` are not flagged. `public_key` is exempt.
+- **Value check.** Any string (a value, a key, or a reference's target) that looks like secret material is rejected whatever its key is called. The patterns are an `nsec1` key, a PEM private key block, `sk-`, GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`) and Slack (`xoxb-`, `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`) token prefixes, AWS access key IDs, and JWTs, each with a minimum length.
+
+Both checks are heuristics and can't be complete. The second line of defence is the gitleaks gate in pre-commit and CI (see [install.md](install.md#repository-checks)). A per-table key allowlist, the complete fix, comes when later plans define those keys.
+
+### Redaction
+
+Error messages never echo a secret. A scan error names the layer, the indexed path (for example `policy.toml: identities.op.credentials[0].api_key`) and the kind of secret, but not the value. Every other config error that quotes a key or value renders it through one helper, which replaces any string the value check flags with `<redacted <kind>>`.
+
+## `heterodyne config check`
+
+```sh
+heterodyne config check [--workstream <ws>]
+```
+
+It loads and validates every layer and the policy. On success it prints each merged value as `key = value    (source)`, then the approvers, then a note if fewer than two distinct models are configured, and exits 0. On any error it prints `config error: <message>` to stderr and exits 1.
+
+Output after `heterodyne setup`, shortened:
+
+```text
+adapters.known = ['claude-code', 'codex']    (defaults)
+timeouts.gatekeeper_seconds = 60    (defaults)
+tiers.escalate = ['push_branch', 'open_pr', 'merge_pr', 'deploy', 'notify', 'new_egress_host']    (defaults)
+platform.os = 'linux'    (host:config.toml)
+platform.service_manager = 'systemd'    (host:config.toml)
+platform.sandbox = 'bubblewrap'    (host:config.toml)
+profiles.coder.adapter = 'codex'    (host:config.toml)
+sandbox.ro_mounts_approved = []    (host:config.toml)
+integrations.marmot.auth_token = {'command': '<command-that-prints-the-token>'}    (host:config.toml)
+paths.config_dir = '<config-dir>'    (env:HETERODYNE_CONFIG_DIR)
+policy: approvers=['<approver-name>']  (policy.toml)
+note: only one model configured; reviews will be adversarial (two LLMs recommended, §11.1)
+```
+
+- A reference is printed as the reference, never resolved.
+- The `tiers.*` lines are the built-in defaults as merged values, not the effective tiers.
+- The note appears when the profiles have fewer than two distinct `model` values. The examples use the same `<model-name>` placeholder for both, so it appears until you fill them in.

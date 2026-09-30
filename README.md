@@ -1,207 +1,90 @@
-<p align="center">
-  <a href="https://github.com/HeterodyneNetwork/HeterodyneProtocol">
-    <img src="assets/heterodyne-metaharness.png" alt="Heterodyne Metaharness logo" width="440">
-  </a>
-</p>
+# heterodyne-metaharness
 
-# Heterodyne Metaharness
+## What it is
 
-Keep a coding workstream going across terminal exits, context compaction, and
-machine restarts. The metaharness supervises a coding agent and a separate
-[Hermes](https://github.com/NousResearch/hermes-agent) manager, gives them a
-shared [Marmot](https://github.com/marmot-protocol/mdk) project channel, and
-records enough state to recover the right conversations and task ownership.
+heterodyne-metaharness is a control plane for coding agents. At its centre is `wsd`, a deterministic daemon that owns intake, pickup, approvals, delivery, commands, cron and reconcile. It calls an LLM for judgement, but never depends on one to make progress. The agents are the vanilla interactive CLIs (`claude`, `codex`), one session per bead and role, each running inside a platform sandbox that is the security boundary. Agent state comes from hooks, never from screen scraping. The operator works through Marmot: one group per workstream with a thread per bead, plus one control group. Beads hold task intent, decisions and the audit trail; a `wsd` journal holds operational state. An independent admin channel, `admind`, is the recovery path when anything else breaks. See ADR 0001 §2.
 
-**Development status:** The metaharness is actively being developed while
-dogfooding itself. Expect interfaces and deployment procedures to evolve; use
-the [active specification](spec/README.md) and linked runbooks for current
-operational details.
+## Status
 
-## How it fits together
+v1 in development. Implemented: platform seam, configuration layering, policy tiers. Next: admind, then the wsd core (see `docs/superpowers/plans/`).
 
-| Piece | What it does |
-| --- | --- |
-| Supervisor | Stores run state, checkpoints, inboxes, and delivery receipts in SQLite. |
-| Worker and manager | Runs a Codex or Claude Code worker alongside a Hermes manager in persistent tmux panes. |
-| Marmot channel | Carries project messages, status, and operator steering through the existing Hermes gateway. |
-| Beads queue | Keeps task ownership and handoffs durable across agent sessions. |
-| systemd user service | Restarts the supervisor after a crash or Linux reboot. |
+What exists today is the `heterodyne` command with three subcommands, `platform`, `setup` and `config check`, plus the repository checks (the install-agnostic checker, pre-commit and CI). There is no daemon, sandbox, agent adapter or Marmot integration yet. The design for those is in the ADR.
 
-The core is Python, with agent and messaging differences behind adapters. A
-restart restores conversations and reports uncertain work; it does not replay
-an old prompt or automatically rerun a command.
+## Architecture
 
-## Start here
+This is the target design from ADR 0001 §3. None of these components exists yet.
 
-This is an operator-oriented project, not a one-command hosted service. A Linux
-host needs Python 3, tmux, a systemd user session, Hermes with its Marmot
-integration, a configured Beads queue, and at least one supported coding agent.
-The installers work with an existing Hermes home and Marmot configuration; read
-the deployment steps before applying them to a live installation.
+```
+                 Marmot (workstream groups + control group)     GitHub / Radicle
+                              ▲  │                                    ▲ │
+             render (pure)    │  │ cmd / reply / reaction / new msg   │ │ reviews (poll)
+                              │  ▼                                    │ ▼
+ ┌──────────────── wsd: control plane (deterministic, service unit) ─────────────────┐
+ │ router ─ commands (/status /workstreams /approve …)              forge bridge     │
+ │ scheduler (pickup, park/resume, cron, reconcile)   approvals (state machine)      │
+ │ event bus ◄── hook socket (PreToolUse, PostToolUse, Stop, SessionStart …)       │
+ │ beads adapter (btq)   session registry   policy engine   renderer   outbox        │
+ └───────┬──────────────────────────────┬───────────────────────────┬───────────────┘
+         │ judgement requests           │ launch/resume/steer       │ read/write
+         ▼                              ▼                           ▼
+  Hermes gatekeeper (LLM)      AgentRuntime adapters          Beads (Dolt):
+  • rewrite + materiality      claude | codex, per role       source of truth
+  • grey-zone permissions      in per-bead tmux session       + audit trail
+  • answer/nudge agents        inside platform sandbox
 
-1. Read the [active specification](spec/README.md) for the current contract and
-   the [deployment runbook](docs/maintenance-deployment.md) for setup and review.
-2. Use the [module registry](MANIFEST.md) to find the implementation area you need.
-3. After installation, try `workstream doctor`, then use the example commands
-   below to start and inspect a workstream.
-
-For detailed results, see the [maintenance execution evidence](docs/maintenance-execution-evidence.md).
-SQLite runtime repair has a separate [runbook](docs/sqlite-runtime-repair.md) and
-[deployment record](docs/sqlite-runtime-execution-evidence.md).
-
-More feature guides:
-
-Shared brain notifications: [contract](spec/brain.md) and [deployment steps](docs/brain-notifications.md), and [execution evidence](docs/brain-notifications-execution-evidence.md).
-
-Task admission and addendums: [contract](spec/tasks.md) and [deployment steps](docs/task-addendums.md).
-
-Marmot reactions: [contract](spec/reactions.md) and [deployment steps](docs/marmot-reactions.md).
-
-## Commands
-
-```sh
-workstream maintenance --title 'Hermes improvement' --file task.txt --key REQUEST_ID
-workstream start project /absolute/repository codex --file task.txt
-workstream start project /absolute/repository claude --file task.txt --group EXISTING_GROUP
-workstream list
-workstream status project
-workstream send project --file steering.txt                    # to manager
-workstream send project --target worker --file steering.txt    # direct coder steering
-workstream event project --state completed --text 'Verified result and evidence'
-workstream resume project                                     # restore conversations, no task replay
-workstream stop project                                       # preserve worktrees, groups and history
-workstream doctor
+ admind (independent service): own Marmot identity + 2-member group ─► superuser agent
 ```
 
-Start is idempotent by name; repeats never replace a manifest or resubmit input. A conflicting repository/agent is rejected. Reuse the project group; only one nonterminal run owns a repository/group. Use a new name after stopping an old run if starting genuinely new work. An uncertain creation result requires `workstream bind-group NAME GROUP_ID` rather than creating duplicates. A failed startup is visible; after correcting it, recover the conversation with `resume`, then explicitly steer the task.
+## Quick start (development)
 
-The supplied `workstream-start NAME REPO AGENT [PROMPT] [GROUP]`, `workstream-stop`, `workstream-reconcile` and `twrap` entry points delegate to this implementation. No independent watchdog or progress-relay process is needed. `twrap` preserves command argv and working directory; arbitrary commands are never replayed after reboot.
-
-## Recovery and compaction
-
-State lives in `$HERMES_HOME/workstreams/harness.sqlite3`, independent of all model contexts. Each run has an inspectable `workstreams/runs/RUN_ID/checkpoint.json`, separate manager/worker identities, exact native session IDs when discoverable, last observations, input submission states and a durable message outbox.
-
-Stable aliases `workstream-NAME-worker` and `workstream-NAME-manager` resolve to the same run and Marmot group across native session-ID changes. `workstream identities NAME` shows current bindings and predecessor history. Claude receives its native display name; Codex uses the external alias because its installed CLI has no equivalent startup naming flag. Codex/Claude SessionStart hooks register successor IDs and inject checkpoint context; Hermes compression chains are followed from its persisted session lineage. Existing Codex hooks are preserved and only the exact added hook hash is trusted.
-
-A changed Linux boot ID queues an interruption report with the last observation, then restores native conversations without a prompt. Unknown native identity opens a blank worker and says so. Arbitrary command jobs remain interrupted. A recovered manager/worker waits for explicit steering; previous tests, builds and tools are not automatically replayed. A same-boot crash during a non-idempotent submit or launch is reported as uncertain, never retried blindly. `resume` restores conversation state and does not itself authorize task execution.
-
-Pre-interruption pending input becomes `held`; `workstream inbox NAME` exposes it for inspection. Fresh user messages remain routable. Recovery cannot silently execute an old queued instruction.
-
-Compaction keeps the native identity and durable supervisor state; native Codex/Claude lifecycle events retain explicit turn-completion and compacted markers. A turn ending never means the whole task completed. The manager verifies task outcome and records it through `event`. Manager responses also relay from its persisted transcript when available.
-
-## Reporting and routing
-
-Operator questions use [durable asks and admin tags](spec/operator-asks.md).
-See the [reviewed deployment procedure](docs/operator-asks-deployment.md) for
-admin lookup configuration, existing live-home constraints and verification.
-
-Every ongoing run, including unknown, blocked and failed states, queues a status at most every 240 seconds plus a 10-second observation tick. Delivery runs separately, validates acknowledged Marmot responses, retries using the same remote idempotency key, and escalates after three failures. Network outages cannot guarantee delivery; `doctor` exposes backlog and oldest pending report, and messages survive outages/restarts. Transports and tmux input do not share an exactly-once transaction: uncertain input requires inspection.
-
-The installed Marmot hook sends authenticated messages for an owned channel to its durable manager inbox, before ordinary gateway dispatch. Unowned channels use the normal gateway. New groups require no gateway restart once the hook is installed. Duplicate inbound IDs cannot create duplicate manager inputs. Inputs retain their explicit target across restart.
-
-## Context, search, and session recall
-
-Both coding adapters receive deterministic compaction and search settings at launch.
-The target is **half the real model window, capped at 500,000 tokens**. Installed
-Codex metadata currently advertises 272,000 tokens for `gpt-6-astra`, so its trigger
-is 136,000 tokens. Claude uses its native 50% override and a maximum 1,000,000-token
-compaction window. These settings apply to new or restarted native processes.
-See [context/search details](docs/context-search.md) for unknown-model behavior.
-
-Both agents can use Semble MCP for code discovery and native tools for web search.
-Existing approval settings and explicit denials remain effective. Auto-memory is
-pinned in an isolated venv; `workstream-recall AGENT list|search --repo PATH` scopes
-recall to the canonical repository and its existing worktrees. Add `--query PHRASE`
-for search. SessionStart and compaction recovery supply bounded metadata, not a
-per-prompt history dump. Upstream Codex recall currently rejects this host's newer
-schema and has no search; the harness supplies a separate read-only JSONL fallback.
-See [compatibility and limits](docs/auto-memory.md).
-
-## Passing Beads tasks
-
-The `workstream task` facade supplies a stable owner/session identity independent
-of native compaction IDs and routes operations through the shared Beads queue:
-
-New runs default to their run name as the workstream, with pickup paused. A configured
-shared queue workstream overrides that name; use `--workstream` when selecting it
-explicitly. The launcher passes deterministic `BTQ_WS` and `BTQ_SESSION_ID` to workers.
+You need Python 3.12 or newer and [uv](https://docs.astral.sh/uv/). See [docs/install.md](docs/install.md) for details.
 
 ```sh
-workstream task project --workstream SLUG create --title 'Fix delivery' --file task.txt --key delivery-fix-v1
-workstream task project --workstream SLUG bind ISSUE_ID
-workstream task project --workstream SLUG context
-workstream task project --workstream SLUG resume
-workstream task project --workstream SLUG claim ISSUE_ID
-workstream task project --workstream SLUG close ISSUE_ID --evidence-file result.txt
+uv sync
+uv run pytest
+uv run heterodyne platform
+export HETERODYNE_CONFIG_DIR=$(mktemp -d)   # a throwaway host config directory
+uv run heterodyne setup && uv run heterodyne config check
 ```
 
-Creation with the same operation key is idempotent. Bind records a reference;
-claim acquires ownership atomically. Routing, dependencies and Claude implementation
-approval remain enforced. `pause` stops pickup for direct user work; `ready` checks
-once, without polling. Closing checks once between tasks without claiming the next
-one. After reboot, `recover --evidence-file recovery.txt` reconciles durable ownership
-but leaves pickup paused until explicitly resumed. A Claude task still needs the
-shared queue's two-model ADR and separate human approval before implementation.
+- `heterodyne platform` prints the detected OS and the backends chosen for it, for example `{"os": "linux", "service_manager": "systemd", "sandbox": "bubblewrap"}`.
+- `heterodyne setup` copies the example `config.toml` and `policy.toml` into the host config directory, fills in the platform backends, and never overwrites an existing file.
+- `heterodyne config check` validates the merged configuration and prints every value with the layer it came from.
 
-## Disk usage decision
+`HETERODYNE_CONFIG_DIR` is exported so that both commands use the same directory. Written as a prefix (`HETERODYNE_CONFIG_DIR=… uv run heterodyne setup && uv run heterodyne config check`), it would apply to `setup` only, and `config check` would read your real host config directory.
 
-[agenticow](https://github.com/ruvnet/agenticow) branches vector-memory indexes using
-copy-on-write. It does not compress native Claude/Codex transcripts or Git worktrees.
-This harness does not duplicate vector indexes, and Git worktrees already share
-repository object storage. The inspected host used approximately 440 KiB for
-workstream state versus 2.4 GiB for Codex and 1.7 GiB for Claude storage. Installing
-agenticow would add another storage system without addressing the measured usage,
-so it is not installed. Any later archive/retention policy must preserve native
-resume history and durable ownership. Separately reviewed historical cleanup is
-recorded in the [maintenance execution evidence](docs/maintenance-execution-evidence.md).
+Before committing, run the repository checks: `uv run ruff check`, `uv run pyright`, `uv run pytest -q`, `python3 scripts/check_install_agnostic.py` and `uvx pre-commit run --all-files`.
 
-## Deployment
+## Configuration in one minute
 
-Run `python install.py` with Hermes's venv Python to load current Marmot member configuration, then `python install_routing.py ~/.hermes/plugins/marmot/adapter.py`. First routing installation needs a gateway restart. The installer backs up replaced files and is idempotent. It creates `~/.config/systemd/user/hermes-workstreams.service`; enable user lingering for unattended boot (`loginctl show-user "$USER" -p Linger`). A dedicated `tmux -L hermes-workstreams` server retains interactive panes and exit status.
+Settings come from one precedence order (ADR 0001 §15). Lowest first:
 
-Run `python3 install_capabilities.py` for native global context/search defaults and
-Semble registration, and `python3 install_memory.py /path/to/auto-memory` for the
-reviewed revision's isolated package, wrappers and preserved global recall blocks.
+| # | Layer | Location | In git? |
+|---|---|---|---|
+| 1 | Built-in defaults | `heterodyne/defaults/*.toml` in the package: tier rules, sandbox profile templates, timeouts, rendering. Adapters are defined, but no models are chosen. | Yes |
+| 2 | Host config | `$HETERODYNE_CONFIG_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/heterodyne/` on both OSes: `config.toml` (host settings, profiles, default roles, platform backends, integrations) and `policy.toml` (approvers and identities) | **No** |
+| 3 | Workstream config | `$HETERODYNE_CONFIG_DIR/workstreams/<ws>.toml` | **No** |
+| 4 | Bead override | a `role:<role>=<profile>` label (roles only) | n/a (in beads) |
+| 5 | Environment and CLI | `HETERODYNE_*` variables and flags, limited to locations and debugging; they can't change policy or roles | No |
 
-Configuration: `workstreams/harness-config.json` supplies `marmot` (bootstrap, socket, members, relays, timeout), `ops_group`, `tmux_socket`, `manager` executable/extra_args and CLI path. Per-worker `--agent-config` supplies explicit executable/extra_args. No permission bypass or approval-key automation is added. Worktrees and channels are preserved on stop; cleanup is a separately reviewed operation.
+This table is the ADR's. Layers 1, 2, 3 and 5 are implemented; layer 4 (the bead override) arrives with the beads adapter in a later plan. Today the defaults hold the adapters, review mode, timeouts and tiers, and the only flag is `config check --workstream`.
 
-Legacy manifests can be imported with `workstream import-legacy`; they remain archived for inspection rather than automatically resurrecting historical tasks. Resume selected records explicitly after checking them.
+**Host config and policy never go in git.** The repository is install-agnostic: it holds no host, user, home path, npub, group ID, database address, approver, credential or local repository. `examples/` holds placeholder-only samples that `heterodyne setup` copies from; nothing loads them as a layer. `policy.toml` is host-only, and a workstream can only tighten policy, through `[restrict]`.
 
-## Verification
+The full reference is [docs/configuration.md](docs/configuration.md).
 
-```sh
-python3 -m unittest discover -s tests -v
-```
+## Documentation
 
-Tests use temporary state, fake coding executables, isolated real tmux sockets and local mock Marmot servers. They never reboot the host, call real models, create real channels or send real messages.
+- [docs/install.md](docs/install.md): prerequisites, `heterodyne setup`, and the repository checks.
+- [docs/configuration.md](docs/configuration.md): layers, policy, `[restrict]`, secret references and `config check`.
+- [docs/security-model.md](docs/security-model.md): a summary of the security design.
 
-Native idle/status, per-Bead checkout boundaries and harness approval tuning:
-[contracts](spec/status.md), [worktrees](spec/worktrees.md), [approvals](spec/approvals.md),
-and [deployment/review runbook](docs/workstream-lifecycle.md).
+## Design record
 
-Separate implementation, review and deployment ownership:
-[linked delivery contract](spec/delivery-tasks.md) and [operations](docs/delivery-tasks.md).
-
-Deterministic task notices: [contract](spec/transitions.md), [rollout](docs/transition-delivery.md).
-
-## Projects this builds on
-
-Thanks to the maintainers and contributors of the tools that make this harness
-possible:
-
-| Project | Role here |
-| --- | --- |
-| [Marmot Development Kit (mdk)](https://github.com/marmot-protocol/mdk) | Marmot and White Noise messaging stack used by the Hermes channel integration. |
-| [Beads](https://github.com/GastownHall/beads) | Task tracking foundation for the shared queue and durable handoffs. |
-| [tmux](https://github.com/tmux/tmux) | Persistent interactive worker and manager terminals. |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Manager runtime and gateway integration. |
-| [Codex](https://github.com/openai/codex) and [Claude Code](https://github.com/anthropics/claude-code) | Supported coding agent runtimes. |
-| [Python](https://www.python.org/), [SQLite](https://www.sqlite.org/), and [systemd](https://systemd.io/) | Supervisor implementation, durable local state, and service lifecycle. |
-| [Git](https://git-scm.com/) | Isolated worktrees for coding tasks. |
-| [Semble](https://github.com/MinishLab/semble), [Ripwire](https://github.com/redhat-et/ripwire), and [auto-memory](https://github.com/dezgit2025/auto-memory) | Code discovery, structural inspection, and optional session recall. |
-
-The logo above adapts the [Heterodyne Protocol logo](https://github.com/HeterodyneNetwork/HeterodyneProtocol/blob/main/docs/assets/heterodyne-logo.png): its wordmark was changed to “Metaharness” and its layout was widened. The upstream artwork is available under [CC BY 4.0](https://github.com/HeterodyneNetwork/HeterodyneProtocol/blob/main/LICENSE).
+- [docs/adr/0001-workstreams-v2.md](docs/adr/0001-workstreams-v2.md): the architecture decision record.
+- [docs/reviews/](docs/reviews/): the design review rounds and the responses to them.
+- [docs/spikes/](docs/spikes/): the spike findings (S1 to S4) and the spike gate.
 
 ## License
 
-This project's code and documentation are licensed under the [Apache License 2.0](LICENSE). The adapted logo retains the upstream CC BY 4.0 attribution and license described above.
+Apache-2.0, see [LICENSE](LICENSE).

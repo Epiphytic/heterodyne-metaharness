@@ -1,0 +1,19 @@
+# ADR 0001 §15 enforcement, local layer. CI (.github/workflows/ci.yml) runs the same checks on every push/PR.
+repos:
+  - repo: local
+    hooks:
+      - id: install-agnostic
+        name: install-agnostic check (ADR 0001 §15)
+        entry: python3 scripts/check_install_agnostic.py
+        language: system
+        pass_filenames: true
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check
+        language: system
+        types: [python]
+  # Secrets gate (§15 "secrets (gitleaks)"). Pinned to the v8.30.1 commit; scans staged changes.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      - id: gitleaks

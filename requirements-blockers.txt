@@ -1,2 +1,0 @@
-# Optional signed blocker receipts; absence fails closed when verification is requested.
-coincurve==21.0.0

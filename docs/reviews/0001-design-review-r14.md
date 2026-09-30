@@ -1,0 +1,7 @@
+- [BLOCKING] **§4.2, §5.3, §10 and §13 — Codex hooks.** S1’s later independent recheck could not reproduce the hook trust result and explicitly says to treat **both** interactive pre-tool denial and hook trust as unsettled. The ADR states both as verified, and the response file repeats that claim. Mark them unverified, require a test using the harness’s actual `hooks.json` schema before relying on the interactive UX and fail-closed paths, and update the response file.
+
+- [BLOCKING] **§3.4 and the round 13 disposition — membership alerts.** The ADR still promises an alert and approval suspension for every membership change, then acknowledges that a count-preserving change made directly on the control socket is undetected. The response calls this fixed by folding it into `admind`’s previously accepted risk, but that acceptance does not establish the stated alert guarantee. Route all membership mutations through an audited path, or explicitly narrow the guarantee and present this detection gap for operator acceptance with revision 12.
+
+The other round 12 and 13 dispositions match the amended text and spike evidence. The added text contains no install-specific operator name, user, home path, npub or IP address.
+
+VERDICT: REJECT
