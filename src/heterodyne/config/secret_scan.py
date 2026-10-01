@@ -52,6 +52,12 @@ SECRET_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("JWT", re.compile(_START + r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
 )
 
+# Not secrets, but identifiers that must never be printed (ADR §15, "never print npubs"); `show` only.
+IDENTIFIER_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("npub", re.compile(_START + r"npub1[02-9ac-hj-np-z]{20,}")),
+    ("hex key", re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")),
+)
+
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 _SEPARATORS = re.compile(r"[_\-.]+")
 
@@ -76,7 +82,9 @@ def secret_value(text: str) -> str | None:
 
 
 def show(value: Any, quote: bool = True) -> str:
-    """Render a user-supplied value for an error message, redacting anything `secret_value` flags.
+    """Render a user-supplied value for an error message, redacting secrets and public identifiers.
+
+    Redacts anything `secret_value` flags, and npubs and 64-hex keys (`IDENTIFIER_VALUES`).
 
     Every ConfigError that interpolates a config value or key goes through this. `quote=False`
     renders a string bare, for key and path segments.
@@ -85,6 +93,9 @@ def show(value: Any, quote: bool = True) -> str:
         kind = secret_value(value)
         if kind:
             return f"<redacted {kind}>"
+        for ident, pattern in IDENTIFIER_VALUES:
+            if pattern.search(value):
+                return f"<redacted {ident}>"
         return repr(value) if quote else value
     if isinstance(value, list | tuple | set | frozenset):
         items = cast(list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any], value)

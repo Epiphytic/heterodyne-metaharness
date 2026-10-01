@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from heterodyne.config import Config, ConfigError, paths
 from heterodyne.config.layers import as_table, string_list, table_at
@@ -72,7 +73,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
             raise ConfigError(f"[admind] restart_units: {show(unit)} is not a unit name")
 
     relays = tuple(string_list(marmot.get("relays", []), "[admind.marmot] relays"))
-    if not relays or not all(r.startswith(("wss://", "ws://")) for r in relays):
+    if not relays or not all(_relay_ok(r) for r in relays):
         raise ConfigError("[admind.marmot] relays must be a non-empty list of ws:// or wss:// URLs")
 
     state = paths.state_dir(env)
@@ -104,6 +105,16 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
     )
+
+
+def _relay_ok(r: str) -> bool:
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in r):
+        return False
+    try:
+        parts = urlsplit(r)
+        return parts.scheme in ("ws", "wss") and bool(parts.hostname)
+    except ValueError:
+        return False
 
 
 def _operator(cfg: Config) -> tuple[str, str]:
