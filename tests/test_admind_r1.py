@@ -398,3 +398,56 @@ def test_subscription_failures_back_off_with_doubling_delays(tmp_path: Path) -> 
         run(u.daemon.inbound_loop())
     assert delays == [1, 2, 4, 8, 16, 30, 30, 30]       # doubling up to the cap, never a busy loop
     assert u.client.subscribe_calls == 8 and "reconnect" in u.audit_text()
+
+
+# --- 5. a Stop applies only to the turn it was captured for ---
+
+class SlowRead:
+    """Stands in for reading a Stop's reply text: blocks in its worker thread until released."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, ev: HookEvent) -> str:
+        self.started.set()
+        assert self.release.wait(10), "test never released the read"
+        return self.text
+
+
+def stop_during_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str) -> tuple[Unit, str]:
+    u = Unit(tmp_path)
+    held: list[str] = []
+    slow = SlowRead("A is done")
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", slow)
+
+    async def scenario() -> None:
+        await u.say("prompt A")
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+        b = await u.say("prompt B")                               # held behind A
+        stop = asyncio.create_task(u.daemon.on_hook(HookEvent("Stop", "S1")))
+        assert await asyncio.to_thread(slow.started.wait, 10)     # A's reply is being read
+        await u.daemon.handle(u.mid(), command)                   # runs, and may dispatch B, meanwhile
+        slow.release.set()
+        await stop
+        held.append(b)
+    run(scenario())
+    return u, held[0]
+
+
+def test_interrupt_dispatching_b_during_a_reply_read_leaves_b_busy(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u, b = stop_during_command(tmp_path, monkeypatch, "!interrupt")
+    assert u.tmux.pasted == ["prompt A", "prompt B"]
+    assert u.store.get("in_flight") == b
+    assert u.store.get("busy") is not None                        # A's Stop did not clear B's busy period
+    assert "A is done" not in u.texts()                           # nor post a reply for a turn that was cut
+    assert '"action": "stale-stop"' in u.audit_text()
+
+
+def test_new_during_a_reply_read_emits_no_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u, _ = stop_during_command(tmp_path, monkeypatch, "!new")
+    assert "A is done" not in u.texts()
+    assert not any(k.startswith("reply:") for k, _, _ in u.outbox())
+    assert '"action": "stale-stop"' in u.audit_text()

@@ -486,25 +486,42 @@ class Admind:
                     self.abandon_in_flight("admind did not see the admin agent finish it before "
                                            "another prompt started a turn")
         else:   # Stop
-            seq = int(self.store.get("reply_seq") or "0") + 1
-            self.store.set("reply_seq", str(seq))
-            raw = await asyncio.to_thread(reply_text, ev)    # may read the transcript file
-            text = raw if raw.strip() else NO_REPLY
-            # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
-            # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
-            # hook) posts top-level.
-            anchor = self.store.get("anchor")
-            if anchor is not None:
-                self.store.delete("anchor")
-                self.store.delete("in_flight")
-                self.store.delete("in_flight_text")
-            parts = chunk.split(text, self.s.chunk_chars)
-            for i, part in enumerate(parts):
-                self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
-            # The agent's text goes to the operator's chat only; the audit log records its size.
-            self.audit.write("reply", session=ev.session_id, reply_to=anchor, chars=len(text),
-                             chunks=len(parts))
-            self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
+            await self.on_stop(ev)
+
+    def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None]:
+        """What a Stop must still find true when it applies its effects: the session it came from, the
+        message in flight, its confirmed anchor, and the busy period."""
+        return (session_id, self.store.get("in_flight"), self.store.get("anchor"), self.store.get("busy"))
+
+    def session_current(self, session_id: str) -> bool:
+        return session_id == self.agent.session_id and session_id not in self.retired
+
+    async def on_stop(self, ev: HookEvent) -> None:
+        # Captured before the first await: reading the reply yields, and !interrupt or !new can run
+        # meanwhile (the worker is a separate task), replacing the turn this Stop belongs to.
+        identity = self.turn_identity(ev.session_id)
+        seq = int(self.store.get("reply_seq") or "0") + 1
+        self.store.set("reply_seq", str(seq))
+        raw = await asyncio.to_thread(reply_text, ev)    # may read the transcript file
+        if not self.session_current(ev.session_id) or self.turn_identity(ev.session_id) != identity:
+            self.audit.write("agent", action="stale-stop")   # fixed wording; nothing from the event
+            return
+        text = raw if raw.strip() else NO_REPLY
+        # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
+        # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
+        # hook) posts top-level.
+        anchor = identity[2]
+        if anchor is not None:
+            self.store.delete("anchor")
+            self.store.delete("in_flight")
+            self.store.delete("in_flight_text")
+        parts = chunk.split(text, self.s.chunk_chars)
+        for i, part in enumerate(parts):
+            self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
+        # The agent's text goes to the operator's chat only; the audit log records its size.
+        self.audit.write("reply", session=ev.session_id, reply_to=anchor, chars=len(text),
+                         chunks=len(parts))
+        self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
