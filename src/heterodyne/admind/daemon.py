@@ -101,6 +101,7 @@ class Admind:
         self.account = account
         self.group = group
         self.hooks: asyncio.Queue[HookEvent] = asyncio.Queue()
+        self.work: asyncio.Queue[InboundMessage] = asyncio.Queue()    # operator messages for worker_loop
         self.ready = asyncio.Event()
         self.held: list[tuple[str, str]] = []
         self.launched_at = time.monotonic()
@@ -158,9 +159,9 @@ class Admind:
         try:
             await self.start_agent()
             async with asyncio.TaskGroup() as tg:
-                for name, loop in (("inbound", self.inbound_loop), ("hooks", self.hook_loop),
-                                   ("outbox", self.outbox_loop), ("alerts", self.alerts_loop),
-                                   ("group", self.group_loop)):
+                for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
+                                   ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
+                                   ("alerts", self.alerts_loop), ("group", self.group_loop)):
                     tg.create_task(supervised(name, loop, self.audit))
         finally:
             await server.close()
@@ -197,24 +198,34 @@ class Admind:
 
     # --- inbound -------------------------------------------------------------------------------
     async def inbound_loop(self) -> None:
+        """Read the subscription and nothing else. Membership and admin events are acted on at once;
+        operator messages are only queued for worker_loop, so a slow command can never keep the reader
+        from seeing a membership change. A broken or ended stream means the group can no longer be
+        watched: group_ok drops, and the outbox sends nothing until the group is re-verified."""
         delay = 1.0
+        reconnecting = False
         while True:
+            if reconnecting:
+                await self.check_group()
             try:
                 async for event in self.client.subscribe(self.account, self.group):
                     delay = 1.0
                     try:
-                        await self.on_event(event)
+                        self.on_event(event)
                     except Exception as exc:  # noqa: BLE001 - one bad event must not end the subscription
                         self.audit.write("handler", action="failed", error=type(exc).__name__)
+                code = "stream-ended"
             except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
-                self.audit.write("subscribe", action="reconnect", code=code)
+            self.group_ok = False
+            self.audit.write("subscribe", action="reconnect", code=code)
             await self._sleep(delay)
             delay = min(delay * 2, 30.0)
+            reconnecting = True
 
-    async def on_event(self, event: object) -> None:
+    def on_event(self, event: object) -> None:
         if isinstance(event, InboundMessage):
-            await self.on_message(event)
+            self.work.put_nowait(event)
         elif isinstance(event, GroupStateChanged):
             verdict = guard.judge_group_change(event, group_id=self.group)
             if verdict.action == "latch":
@@ -225,6 +236,15 @@ class Admind:
             self.audit.write("event", action="ignored", what="reaction")
         else:
             self.audit.write("event", action="ignored", what="other")
+
+    async def worker_loop(self) -> None:
+        """Process operator messages one at a time, in arrival order, apart from the subscription reader."""
+        while True:
+            event = await self.work.get()
+            try:
+                await self.on_message(event)
+            except Exception as exc:  # noqa: BLE001 - one bad message must not end the worker
+                self.audit.write("handler", action="failed", error=type(exc).__name__)
 
     async def on_message(self, ev: InboundMessage) -> None:
         verdict = guard.judge_message(ev, group_id=self.group, operator_hex=self.s.operator_hex,

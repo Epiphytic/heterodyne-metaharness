@@ -715,34 +715,6 @@ def test_a_rejected_send_is_audited_without_peer_detail(
     assert '"code": "not_found"' in audit and token not in audit
 
 
-@needs_tmux
-def test_subscription_failures_back_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    h = Harness(tmp_path)
-    calls: list[float] = []
-
-    async def failing(account: str, group: str) -> Any:
-        calls.append(time.monotonic())
-        raise ControlError("wn-agent closed the connection", "socket_closed", True)
-        yield  # pragma: no cover - makes this an async generator
-
-    monkeypatch.setattr(h.daemon.client, "subscribe", failing)
-
-    async def body() -> None:
-        await h.fake.start()
-        task = asyncio.create_task(h.daemon.run())
-        await asyncio.sleep(2.5)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await h.fake.stop()
-    try:
-        asyncio.run(body())
-    finally:
-        drop_tmux(h)
-    assert 2 <= len(calls) <= 3                       # t = 0, 1, 3: doubling, not a busy loop
-    assert "reconnect" in audit_text(h)
-
-
 def test_supervised_restarts_with_bounded_growing_backoff(tmp_path: Path) -> None:
     npub = hex_to_npub(STRANGER)
     audit = Audit(tmp_path / "audit.jsonl")

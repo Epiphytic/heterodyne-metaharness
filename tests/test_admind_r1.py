@@ -6,6 +6,7 @@ systemctl or tmux server, or touches the network or ~/.claude.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -296,3 +297,104 @@ def test_held_prompts_are_not_pasted_once_latched_or_unverified(tmp_path: Path, 
         assert u.store.get("in_flight") is None and u.store.get("busy") is None   # only A's Stop acted
     run(scenario())
     assert '"action": "dispatch-blocked"' in u.audit_text()
+
+
+# --- 4. membership observation stays responsive ------------------------------------------------------------
+
+async def stop_task(task: "asyncio.Task[Any]") -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def test_membership_event_latches_while_a_slow_restart_runs(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    u.services.block_restart = True
+    latched = asyncio.Event()
+    subscribed = asyncio.Event()
+    restart_replied = asyncio.Event()
+    real_latch = u.daemon.latch
+    real_enqueue = u.store.enqueue
+
+    def latch(why: str) -> None:
+        real_latch(why)
+        latched.set()
+
+    def enqueue(key: str, text: str, reply_to: str | None) -> bool:
+        if text.startswith("Restarted"):
+            restart_replied.set()
+        return real_enqueue(key, text, reply_to)
+    monkeypatch.setattr(u.daemon, "latch", latch)
+    monkeypatch.setattr(u.store, "enqueue", enqueue)
+    u.client.on_subscribe = subscribed.set
+
+    async def scenario() -> None:
+        daemon = asyncio.create_task(u.daemon.run())
+        try:
+            await subscribed.wait()
+            await u.client.events.put(inbound("!restart fake.service", u.mid()))
+            assert await asyncio.to_thread(u.services.restart_started.wait, 10)   # the restart is running
+            await u.client.events.put(membership_change())
+            # The latch must happen while the restart is still blocked: the reader never waits for it.
+            await asyncio.wait_for(latched.wait(), 3)
+            assert not u.services.restart_release.is_set()
+            u.services.restart_release.set()
+            await asyncio.wait_for(restart_replied.wait(), 10)      # its reply is queued ...
+            await u.daemon.outbox_pass()
+            assert u.client.sent == []                              # ... but nothing is sent after the latch
+        finally:
+            u.services.restart_release.set()
+            await stop_task(daemon)
+    run(scenario())
+
+
+def test_subscription_failure_pauses_the_outbox_until_the_group_is_reverified(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    u.client.subscribe_failures = 1
+    asleep = asyncio.Event()
+    gate = asyncio.Event()
+    resubscribed = asyncio.Event()
+
+    async def fake_sleep(delay: float) -> None:
+        asleep.set()
+        await gate.wait()
+    u.daemon._sleep = fake_sleep
+    u.client.on_subscribe = lambda: resubscribed.set() if u.client.subscribe_calls >= 2 else None
+
+    async def scenario() -> None:
+        reader = asyncio.create_task(u.daemon.inbound_loop())
+        try:
+            await asleep.wait()                                   # the subscription failed; backing off
+            assert not u.daemon.group_ok
+            u.store.enqueue("k:1", "held back", None)
+            await u.daemon.outbox_pass()
+            assert u.client.sent == []
+            u.client.group_info_error = ControlError("down", "unavailable", True)
+            gate.set()
+            await resubscribed.wait()                             # reconnected, but not re-verified
+            await u.daemon.outbox_pass()
+            assert u.client.sent == [] and not u.daemon.group_ok
+            u.client.group_info_error = None
+            assert await u.daemon.check_group()
+            await u.daemon.outbox_pass()
+            assert [s.text for s in u.client.sent] == ["held back"]
+        finally:
+            await stop_task(reader)
+    run(scenario())
+
+
+def test_subscription_failures_back_off_with_doubling_delays(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    u.client.subscribe_failures = 10**6
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:        # a fake clock: no waiting, and a bounded run
+        delays.append(delay)
+        if len(delays) == 8:
+            raise asyncio.CancelledError
+    u.daemon._sleep = fake_sleep
+    with pytest.raises(asyncio.CancelledError):
+        run(u.daemon.inbound_loop())
+    assert delays == [1, 2, 4, 8, 16, 30, 30, 30]       # doubling up to the cap, never a busy loop
+    assert u.client.subscribe_calls == 8 and "reconnect" in u.audit_text()
