@@ -110,7 +110,7 @@ def _with_units(unit: str) -> str:
 
 def _assert_redacted(exc: pytest.ExceptionInfo[ConfigError], kind: str) -> None:
     text = str(exc.value)
-    assert NPUB not in text and OPERATOR_HEX not in text
+    assert NPUB.lower() not in text.lower() and OPERATOR_HEX not in text.lower()
     assert f"<redacted {kind}>" in text
 
 
@@ -142,12 +142,28 @@ def test_npub_in_policy_operators_is_redacted(tmp_path: Path) -> None:
     _assert_redacted(exc, "npub")
 
 
+def test_uppercase_npub_is_redacted_everywhere(tmp_path: Path) -> None:
+    upper = NPUB.upper()
+    for name in "abc":
+        (tmp_path / name).mkdir()
+    configs = [
+        write(tmp_path / "a", _with_units(upper)),
+        write(tmp_path / "b", BASE_CONFIG.replace('profile = "admin"', f'profile = "{upper}"')),
+        write(tmp_path / "c", operators=f'["{upper}"]'),
+    ]
+    for env in configs:
+        with pytest.raises(ConfigError) as exc:
+            resolve(load(None, env), env)
+        _assert_redacted(exc, "npub")
+
+
 def test_show_leaves_ordinary_values_alone() -> None:
     assert show("ordinary") == "'ordinary'"
     assert show("ordinary", quote=False) == "ordinary"
 
 
-@pytest.mark.parametrize("relay", ["wss://", "ws://h\\n", "wss://h\\u0000", "wss://a b", "ws://"])
+@pytest.mark.parametrize("relay", ["wss://", "ws://h\\n", "wss://h\\u0000", "wss://a b", "ws://",
+                                   "wss://h\\u0080", "wss://h:invalid", "wss://h:99999"])
 def test_malformed_relay_urls_are_rejected(tmp_path: Path, relay: str) -> None:
     env = write(tmp_path, BASE_CONFIG.replace("wss://relay.example.org", relay))
     with pytest.raises(ConfigError, match="relays"):
@@ -155,5 +171,5 @@ def test_malformed_relay_urls_are_rejected(tmp_path: Path, relay: str) -> None:
 
 
 def test_normal_relay_is_accepted(tmp_path: Path) -> None:
-    env = write(tmp_path, BASE_CONFIG.replace("wss://relay.example.org", "wss://relay.example"))
-    assert resolve(load(None, env), env).relays == ("wss://relay.example",)
+    env = write(tmp_path, BASE_CONFIG.replace("wss://relay.example.org", "wss://relay.example:443"))
+    assert resolve(load(None, env), env).relays == ("wss://relay.example:443",)

@@ -54,7 +54,7 @@ SECRET_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 # Not secrets, but identifiers that must never be printed (ADR §15, "never print npubs"); `show` only.
 IDENTIFIER_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("npub", re.compile(_START + r"npub1[02-9ac-hj-np-z]{20,}")),
+    ("npub", re.compile(_START + r"npub1[02-9ac-hj-np-z]{20,}", re.IGNORECASE)),
     ("hex key", re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")),
 )
 

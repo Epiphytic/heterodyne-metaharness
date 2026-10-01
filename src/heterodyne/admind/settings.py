@@ -108,10 +108,11 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
 
 
 def _relay_ok(r: str) -> bool:
-    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in r):
+    if any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 for c in r):
         return False
     try:
         parts = urlsplit(r)
+        parts.port  # noqa: B018 - raises ValueError on a non-numeric or out-of-range port
         return parts.scheme in ("ws", "wss") and bool(parts.hostname)
     except ValueError:
         return False
