@@ -7,6 +7,8 @@ recorded in the store:
 - otherwise it launches with a fresh ID;
 - every launch gets a fresh nonce, carried by its hook command, so events of an earlier launch are
   recognised as stale;
+- a launch also records the hook sequence counter's value as the floor for its events (`turn_start_seq`),
+  so a hook that ran before the launch can never pass for one of its own;
 - three launches in a row without a SessionStart hook raise AgentStuck until `new()`.
 It runs as the service user, unsandboxed, with permission prompts bypassed: a deliberate operator
 decision (§8).
@@ -17,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
-from heterodyne.admind.hook import hook_command, new_launch_nonce, settings_json
+from heterodyne.admind.hook import hook_command, new_launch_nonce, read_seq, settings_json
 from heterodyne.admind.settings import AdmindSettings
 from heterodyne.admind.store import Store
 from heterodyne.agents.claude_code import interactive_argv
@@ -48,6 +50,7 @@ class AdminAgent:
         self.settings = settings
         self.hook_socket = hook_socket
         self.settings_file = settings.state_dir / "claude-settings.json"
+        self.seq_file = settings.state_dir / "hook-seq"     # the hooks' counter
 
     @property
     def session_id(self) -> str | None:
@@ -58,6 +61,11 @@ class AdminAgent:
         """The nonce of the current launch, persisted so an adopted pane keeps its own."""
         return self.store.get("launch_nonce")
 
+    def invalidate_launch(self) -> None:
+        """Forget the departing launch's nonce, synchronously, before a replacement is started in a
+        thread: until the replacement has its own nonce, no event validates as current."""
+        self.store.delete("launch_nonce")
+
     def alive(self) -> bool:
         return self.tmux.has_session(SESSION) and not self.tmux.pane_dead(SESSION)
 
@@ -65,7 +73,7 @@ class AdminAgent:
         tmp = self.settings_file.with_name(f".{self.settings_file.name}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            fh.write(settings_json(hook_command(self.hook_socket, self.launch_nonce or "")))
+            fh.write(settings_json(hook_command(self.hook_socket, self.launch_nonce or "", self.seq_file)))
         tmp.replace(self.settings_file)
 
     def ensure_running(self, relaunch: bool = False) -> str:
@@ -83,7 +91,10 @@ class AdminAgent:
             sid = str(uuid.uuid4())
             self.store.set("agent_session", sid)
         self.store.set("launches_without_start", str(launches + 1))
-        self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
+        floor = read_seq(self.seq_file)
+        with self.store.transaction():
+            self.store.set("turn_start_seq", str(floor))     # events of this launch all number above it
+            self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
         self._write_settings()
         argv = interactive_argv(self.settings.adapter_binary, self.settings.profile, session_id=sid,
                                 resume=resume, settings_file=self.settings_file, name=SESSION)

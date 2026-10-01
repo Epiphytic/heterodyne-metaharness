@@ -28,7 +28,7 @@ from heterodyne.admind.daemon import (
     Admind,
     supervised,
 )
-from heterodyne.admind.hook import HookEvent
+from heterodyne.admind.hook import HookEvent, next_seq
 from heterodyne.admind.store import Store
 from heterodyne.marmot.control import ControlClient, ControlError
 from heterodyne.marmot.nip19 import hex_to_npub
@@ -78,11 +78,15 @@ class Harness:
         await self.fake.push_event(self.fake.message_event(text, sender, mid))
         return mid
 
+    def hook_seq(self) -> int:
+        """The next hook sequence number, as the hook command would take it from the counter file."""
+        return next_seq(str(self.agent.seq_file)) or 0
+
     def event(self, name: str, session: str, transcript: str | None = None, reply: str | None = None,
               **kw: Any) -> HookEvent:
         """A hook event as the current launch's hook command would deliver it (with its nonce)."""
         kw.setdefault("last_assistant_message", reply)
-        return HookEvent(name, session, transcript, launch=self.agent.launch_nonce, **kw)
+        return HookEvent(name, session, transcript, launch=self.agent.launch_nonce, seq=self.hook_seq(), **kw)
 
     def texts(self) -> list[str]:
         return [r["text"] for r in self.fake.sent]

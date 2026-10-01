@@ -165,13 +165,13 @@ def test_hook_round_trip_over_the_socket(tmp_path: Path) -> None:
         await server.start()
         stdin = json.dumps({"hook_event_name": "Stop", "session_id": "S", "last_assistant_message": "ok",
                             "stop_hook_active": False, "cwd": "/x"}).encode()
-        rc = await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "n1"], stdin)
+        rc = await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "a1" * 16], stdin)
         assert rc == 0
         ev = await asyncio.wait_for(queue.get(), 5)
         await server.close()
         return ev
     ev = asyncio.run(body())
-    assert ev == HookEvent("Stop", "S", None, "ok", launch="n1")
+    assert ev == HookEvent("Stop", "S", None, "ok", launch="a1" * 16)
 
 
 def test_hook_main_takes_the_nonce_from_its_command_line_only(tmp_path: Path) -> None:
@@ -182,12 +182,12 @@ def test_hook_main_takes_the_nonce_from_its_command_line_only(tmp_path: Path) ->
         server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
         await server.start()
         stdin = json.dumps({"hook_event_name": "Stop", "session_id": "S", "launch": "forged"}).encode()
-        await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "real"], stdin)
+        await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "ab" * 16], stdin)
         await asyncio.to_thread(hook_main, ["--socket", str(sock)], stdin)     # no --launch: none forwarded
         events = [await asyncio.wait_for(queue.get(), 5), await asyncio.wait_for(queue.get(), 5)]
         await server.close()
         return events
-    assert [e.launch for e in asyncio.run(body())] == ["real", None]
+    assert [e.launch for e in asyncio.run(body())] == ["ab" * 16, None]
 
 
 def test_hook_socket_is_private(tmp_path: Path) -> None:
@@ -261,9 +261,10 @@ def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
 
 
 def test_settings_json_wires_both_hooks(tmp_path: Path) -> None:
-    command = hook_command(tmp_path / "hook sock", "0123456789abcdef0123456789abcdef")
+    command = hook_command(tmp_path / "hook sock", "0123456789abcdef0123456789abcdef", tmp_path / "seq")
     assert "'" in command                      # the socket path is shell-quoted
-    assert command.endswith(" --launch 0123456789abcdef0123456789abcdef")
+    assert " --launch 0123456789abcdef0123456789abcdef --seq-file " in command
+    assert command.endswith(str(tmp_path / "seq"))
     data = json.loads(settings_json(command))
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
         assert data["hooks"][event] == [{"hooks": [{"type": "command", "command": command}]}]

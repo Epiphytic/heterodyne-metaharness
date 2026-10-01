@@ -10,6 +10,12 @@ The agent's reply is the Stop hook's `last_assistant_message`. If a Claude Code 
 optional field, the fallback is the last assistant text in the session's own transcript file
 (plan decision D2). The screen is never scraped.
 
+Each invocation also takes a sequence number from a counter file in admind's private state directory
+(`--seq-file`), under an exclusive lock, before it does any socket I/O. The numbers increase in the order
+Claude Code ran the hooks, so a Stop delivered late can be told from the turn that is running now. If the
+counter cannot be used the frame is sent without `seq` and admind treats it as stale (fail closed). The
+sequence number is correlation, not authentication: a same-user process can write the counter too.
+
 Trust boundary: the socket is 0600 in a 0700 directory, so only the service user can write to it, and
 events for any session but the current one are dropped. Each launch of the agent has its own nonce in its
 hook command (`--launch`); the daemon treats an event from any other launch, or with no nonce, as stale.
@@ -20,6 +26,7 @@ residual risk ADR §3.4 accepts.
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
 import secrets
@@ -27,8 +34,9 @@ import shlex
 import socket
 import stat
 import sys
+import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import msgspec
 
@@ -37,6 +45,9 @@ from heterodyne.admind.audit import Audit
 MAX_HOOK_FRAME = 1024 * 1024
 MAX_TRANSCRIPT = 8 * 1024 * 1024    # the fallback reads at most this much from the end of the file
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
+SEQ_MAX = 2**62
+SEQ_WIDTH = 20          # the counter is rewritten in place at a fixed width, so it is never half empty
+SEQ_LOCK_SECONDS = 2.0  # a hook gives up on a stuck lock rather than wedge the agent
 
 
 class HookEvent(msgspec.Struct, frozen=True):
@@ -46,7 +57,10 @@ class HookEvent(msgspec.Struct, frozen=True):
     last_assistant_message: str | None = None
     prompt: str | None = None
     source: str | None = None      # SessionStart only: startup, resume, clear or compact
-    launch: str | None = None      # the launch nonce admind put in the hook command (set by hook_main)
+    # Both are set by hook_main, never by the agent's own payload. Their shapes are enforced when a frame
+    # is decoded, so a malformed value drops that frame instead of reaching a comparison.
+    launch: Annotated[str, msgspec.Meta(pattern=r"\A[0-9a-f]{32}\Z")] | None = None   # the launch nonce
+    seq: Annotated[int, msgspec.Meta(ge=0, le=SEQ_MAX)] | None = None    # the hook's sequence number
 
 
 def same_prompt(a: str, b: str) -> bool:
@@ -60,9 +74,79 @@ def new_launch_nonce() -> str:
     return secrets.token_hex(16)
 
 
-def hook_command(sock: Path, launch: str) -> str:
+def hook_command(sock: Path, launch: str, seq_file: Path) -> str:
     return (f"{shlex.quote(sys.executable)} -m heterodyne.admind hook --socket {shlex.quote(str(sock))} "
-            f"--launch {shlex.quote(launch)}")
+            f"--launch {shlex.quote(launch)} --seq-file {shlex.quote(str(seq_file))}")
+
+
+def _open_counter(path: str) -> int:
+    """The counter file, opened without following a symlink; it must be a regular file we own."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            raise PermissionError("the sequence counter is not a regular file owned by this user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _lock(fd: int, mode: int) -> None:
+    deadline = time.monotonic() + SEQ_LOCK_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("the sequence counter is locked") from None
+            time.sleep(0.001)
+
+
+def _parse_counter(fd: int) -> int:
+    raw = os.pread(fd, 64, 0).strip()
+    value = int(raw) if raw else 0
+    if not 0 <= value < SEQ_MAX:
+        raise ValueError("the sequence counter is out of range")
+    return value
+
+
+def next_seq(path: str) -> int | None:
+    """Take the next sequence number: lock the counter, read, add one, write in place, fsync. None if
+    anything fails (a missing directory, a symlink, a corrupt counter, a lock that stays held): the hook
+    then sends its frame without one. The counter is never reset on corruption here."""
+    try:
+        fd = _open_counter(path)
+    except OSError:
+        return None
+    try:
+        _lock(fd, fcntl.LOCK_EX)
+        n = _parse_counter(fd) + 1
+        os.pwrite(fd, f"{n:0{SEQ_WIDTH}d}\n".encode(), 0)
+        os.fsync(fd)
+        return n
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)        # releases the lock
+
+
+def read_seq(path: Path) -> int:
+    """admind's view of the counter, for the floor of a new launch. A missing counter is created; a
+    corrupt one is reset (admind owns the directory, and the floor is read in the same step)."""
+    fd = _open_counter(str(path))
+    try:
+        _lock(fd, fcntl.LOCK_EX)
+        try:
+            return _parse_counter(fd)
+        except ValueError:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{0:0{SEQ_WIDTH}d}\n".encode(), 0)
+            os.fsync(fd)
+            return 0
+    finally:
+        os.close(fd)
 
 
 def settings_json(command: str) -> str:
@@ -74,13 +158,16 @@ def hook_main(argv: list[str], stdin: bytes) -> int:
     parser = argparse.ArgumentParser(prog="admind hook", add_help=False)
     parser.add_argument("--socket")
     parser.add_argument("--launch")
+    parser.add_argument("--seq-file")
     try:
         args, _ = parser.parse_known_args(argv)
     except SystemExit:      # argparse exits 2 on a malformed flag; a hook never fails the agent
-        args = argparse.Namespace(socket=None, launch=None)
+        args = argparse.Namespace(socket=None, launch=None, seq_file=None)
     if not args.socket:
         print("admind hook: --socket is required", file=sys.stderr)
         return 0
+    # First, before any network or socket I/O: the order Claude Code ran the hooks in.
+    seq = next_seq(args.seq_file) if args.seq_file else None
     try:
         payload: Any = json.loads(stdin)
         if isinstance(payload, dict):
@@ -88,8 +175,11 @@ def hook_main(argv: list[str], stdin: bytes) -> int:
             # frame without one is treated as stale by the daemon.
             frame = cast(dict[str, Any], payload)
             frame.pop("launch", None)
+            frame.pop("seq", None)
             if args.launch:
                 frame["launch"] = args.launch
+            if seq is not None:
+                frame["seq"] = seq
         line = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(2)
@@ -169,10 +259,12 @@ def last_assistant_text(path: Path, limit: int = MAX_TRANSCRIPT) -> str:
     return text
 
 
-def reply_text(ev: HookEvent) -> str:
+def reply_text(ev: HookEvent, fallback: bool = True) -> str:
+    """The reply of a Stop. `fallback=False` (a stale Stop) never reads the transcript: it would hold the
+    text of whatever turn ran last, not necessarily this one."""
     if ev.last_assistant_message:
         return ev.last_assistant_message
-    if ev.transcript_path:
+    if fallback and ev.transcript_path:
         path = Path(ev.transcript_path)
         if path.name == f"{ev.session_id}.jsonl":
             return last_assistant_text(path)
@@ -210,7 +302,7 @@ class HookServer:
             await self.queue.put(msgspec.json.decode(line, type=HookEvent))
             writer.write(b"ok\n")
             await writer.drain()
-        except (TimeoutError, ValueError, OSError, msgspec.DecodeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - one bad frame (decode or shape) is dropped, by type only
             self.audit.write("hook", result="dropped", error=type(exc).__name__)
         finally:
             writer.close()
