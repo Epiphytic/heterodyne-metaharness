@@ -368,12 +368,15 @@ class Admind:
                 self.deny(mid, "command")
                 return
             target = self.store.get("in_flight")
+            anchor = self.store.get("anchor")
             period = self.store.get("busy")
             result, ok = await self.execute(cmd)
             if ok:
                 # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
                 if target is not None and self.store.get("in_flight") == target:
                     self.abandon_in_flight("interrupted by !interrupt")
+                elif target is None and anchor is not None and self.store.get("anchor") == anchor:
+                    self.store.delete("anchor")     # no reservation owns it any more
                 # A prompt that started a turn while the Escape was pending opened a new busy period;
                 # the Escape is no evidence that that turn ended.
                 if self.store.get("busy") == period:
@@ -460,6 +463,10 @@ class Admind:
                 if reserved:
                     self.store.delete("in_flight")
                     self.store.delete("in_flight_text")
+                    if self.store.get("anchor") == mid:
+                        # A terminal prompt with identical text anchored the reservation while the
+                        # send was pending; the message was not delivered, so its retry must start clean.
+                        self.store.delete("anchor")
                     self.store.set_inbound(mid, "received")
                     if self.generation == generation:
                         self.set_idle()
