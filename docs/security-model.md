@@ -2,7 +2,7 @@
 
 This is a summary of the security design in [ADR 0001](adr/0001-workstreams-v2.md). The ADR is authoritative; read the cited sections for detail.
 
-**Implementation status.** Only the configuration side exists today: the action-class tiers, host-only policy, `[restrict]` tightening, and the rejection of inline secrets (see [configuration.md](configuration.md)). The policy engine, approvals, sandbox, self-test and `admind` described below are the target design for later plans.
+**Implementation status.** Two parts exist today. The configuration side: the action-class tiers, host-only policy, `[restrict]` tightening, and the rejection of inline secrets (see [configuration.md](configuration.md)). And `admind` (plan 2): the admin channel described in its section below, with its runbook in [admind.md](admind.md). The policy engine, approvals, sandbox and self-test described below are the target design for later plans.
 
 ## The sandbox is the boundary, and tiers decide what escalates (§5.3)
 
@@ -55,7 +55,25 @@ The sandbox spike's findings are in [spikes/S3-sandbox.md](spikes/S3-sandbox.md)
 - **Deliberately privileged.** The agent runs as the harness's service user, with permission prompts bypassed, no sandbox and no root. Its purpose is to repair anything the harness can break, so a least-privilege identity would defeat it. This is an operator decision (2026-09-29); the design review's objection and the rebuttal are recorded in the r1 response.
 - **Mitigations:** the sender must be MLS-authenticated as the operator's npub (§3.4); the two-member group check; admind's own Marmot keys are readable only by its unit; every message and action goes to an append-only log.
 - **Built-in commands** need no LLM: `!new`, `!interrupt`, `!tail [n]`, `!ps`, and `!restart <unit>`, which accepts only units from a fixed allowlist in admind's config.
-- **Audit** is a local append-only JSONL log plus the agent transcript, kept separate from beads on purpose. admind also relays `wsd`'s local alerts to the operator.
+- **Audit** is a local append-only JSONL log (0600) plus the agent transcript, kept separate from beads on purpose. It records actions and outcomes, not content: see "Output policy" below. admind also relays `wsd`'s local alerts to the operator.
+
+What the implementation adds to the ADR's mitigations (details in [admind.md](admind.md)):
+
+- **Latch (D4).** Any membership or admin event in the group, or a member count other than 2, latches admind: every inbound message is dropped and nothing is posted until the operator checks the group in their client and runs `admind rearm` on the host. Posting and dispatch also need a live membership subscription and a verified group (resubscribe, then verify the count, then observe), and authorisation is rechecked immediately before each side effect, so a latch that lands mid-command stops it. Accepted residual risks (ADR §3.4): `group_info` gives a count, not members, so a one-for-one swap made on the control socket by a same-user process is invisible, and re-verification after an outage is by count only. A same-user process can also forge a reply event on the hook socket.
+- **Control-character refusal (D3).** Operator text containing a C0 or C1 control character (other than tab and newline) is refused with a reply and never altered, before commands are parsed. Text starting with `!` is always a command and never reaches the agent.
+- **A private `wn-agent` child with its own token (D1).** admind spawns and supervises its own `wn-agent`: own home (0700), own control socket, and a bearer token (0600) that admind generates and never prints. The child's output goes to a private log in its home, not to the journal. Nothing else may share the home.
+- **At-most-once delivery (D6).** A message ID is claimed before dispatch and is never replayed. A message accepted but not delivered when admind stopped is answered with a "resend if still needed" reply. A paste whose delivery is uncertain is never retried; the operator is told, and the queue is held until `!interrupt` or `!new`.
+- **At the CLI boundary.** `admind unit` refuses (exit 78) any value that holds a secret, an npub, a 64-hex value, a control character or something systemd would split, rather than redacting it, because the unit must be installable verbatim. argparse errors never echo a rejected argument. Filesystem and other unexpected errors print one line naming only the exception type, never a traceback or a path.
+
+### Output policy: value-free and redacted
+
+admind handles npubs, tokens and the operator's text, so what it prints, sends or logs is constrained:
+
+- One helper (`show`) renders anything user-supplied: a secret, npub or 64-hex value is replaced by `<redacted …>` and control characters are escaped as `\xNN`. Errors, command replies, unit names, alert names and the operator's own text in the audit log all pass through it.
+- Failures are reported with fixed wording or an exception type, never `str(exc)` of a tmux, OS or peer error.
+- The audit log holds no peer detail: a stranger's message is recorded as an 8-character sender prefix, a reason and a length; peer error details are dropped (only an allowlisted code is kept); the group ID, transcript paths and hook session IDs are not recorded. Agent replies and command results are recorded by length. Message IDs are recorded in full.
+- Alert files: a symlink, FIFO or oversize file is treated as malformed; an alert holding a secret or identifier is withheld (a fixed notice names the file and the kind); the outbox key is `alert:` plus a hash of the file name, so the name never appears in the key.
+- The agent's reply and the `!tail` screen are relayed verbatim to the operator, by design, and are never written to the audit log.
 
 The accepted residual risk, verbatim from the r1 response ([docs/reviews/0001-design-review-r1-response.md](reviews/0001-design-review-r1-response.md), "Finding 10: admind"):
 

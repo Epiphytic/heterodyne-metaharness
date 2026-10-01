@@ -6,13 +6,13 @@ heterodyne-metaharness is a control plane for coding agents. At its centre is `w
 
 ## Status
 
-v1 in development. Implemented: platform seam, configuration layering, policy tiers. Next: admind, then the wsd core (see `docs/superpowers/plans/`).
+v1 in development. Implemented: platform seam, configuration layering, policy tiers, and `admind`, the admin override channel (runbook: [docs/admind.md](docs/admind.md)). Next: the wsd core (see `docs/superpowers/plans/`).
 
-What exists today is the `heterodyne` command with three subcommands, `platform`, `setup` and `config check`, plus the repository checks (the install-agnostic checker, pre-commit and CI). There is no daemon, sandbox, agent adapter or Marmot integration yet. The design for those is in the ADR.
+What exists today is the `heterodyne` command with three subcommands, `platform`, `setup` and `config check`; the `admind` command and service, which gives the operator a Marmot-driven recovery path to a privileged admin agent; and the repository checks (the install-agnostic checker, pre-commit and CI). There is no `wsd`, sandbox or workstream agent adapter yet. The design for those is in the ADR.
 
 ## Architecture
 
-This is the target design from ADR 0001 §3. None of these components exists yet.
+This is the target design from ADR 0001 §3. Only `admind` exists so far; the other components are not built yet.
 
 ```
                  Marmot (workstream groups + control group)     GitHub / Radicle
@@ -77,6 +77,7 @@ The full reference is [docs/configuration.md](docs/configuration.md).
 
 - [docs/install.md](docs/install.md): prerequisites, `heterodyne setup`, and the repository checks.
 - [docs/configuration.md](docs/configuration.md): layers, policy, `[restrict]`, secret references and `config check`.
+- [docs/admind.md](docs/admind.md): the `admind` runbook, alert-file contract, files and troubleshooting.
 - [docs/security-model.md](docs/security-model.md): a summary of the security design.
 
 ## Design record
