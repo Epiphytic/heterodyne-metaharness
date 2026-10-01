@@ -755,7 +755,7 @@ class Admind:
             token = _RUN.set(run)
             try:
                 try:
-                    async with asyncio.timeout(None) as deadline:
+                    async with asyncio.timeout(self.hook_deadline) as deadline:
                         run.deadline = deadline
                         await self.route_hook(ev, arrival)
                     ok = True
