@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from test_admind_r1 import FakeTmux, Unit, inbound, run
 
-from heterodyne.admind.daemon import UNCERTAIN
+from heterodyne.admind.daemon import READY_NOTICE, UNCERTAIN
 from heterodyne.admind.hook import HookEvent
 from heterodyne.tmux import Tmux, TmuxError
 
@@ -178,3 +178,33 @@ def test_a_stop_from_a_retired_session_is_still_suppressed(
     run(scenario())
     assert not any(k.startswith("reply:") for k, _, _ in u.outbox())
     assert '"action": "stale-stop"' in u.audit_text()
+
+
+# --- 6. the first-contact marker and the READY notice commit together ---
+
+def test_a_crash_between_the_ready_marker_and_the_notice_still_sends_the_notice_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    u.store.delete("operator_seen_at")                  # the operator has not been seen yet
+    real_enqueue = u.store.enqueue
+
+    def crashing_enqueue(key: str, text: str, reply_to: str | None) -> bool:
+        raise OSError("simulated crash while queueing the notice")
+    monkeypatch.setattr(u.store, "enqueue", crashing_enqueue)
+
+    async def first() -> None:
+        with pytest.raises(OSError):
+            await u.daemon.on_message(inbound("hello", u.mid()))
+    run(first())
+    assert u.store.get("operator_seen_at") is None      # the marker rolled back with the notice
+    monkeypatch.setattr(u.store, "enqueue", real_enqueue)
+    u.build()                                           # restart over the same store
+    u.daemon.recover()
+    u.daemon.ready.set()
+
+    async def second() -> None:
+        await u.say("hello again")
+        await u.daemon.outbox_pass()
+        await u.daemon.outbox_pass()
+    run(second())
+    assert [s.text for s in u.client.sent].count(READY_NOTICE) == 1

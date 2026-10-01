@@ -308,8 +308,9 @@ class Admind:
             self.deny(mid, "message")
             return
         if self.store.get("operator_seen_at") is None:
-            self.store.set("operator_seen_at", now())
-            self.post("ready", READY_NOTICE, None)
+            with self.store.transaction():      # the marker and the notice: both or neither
+                self.store.set("operator_seen_at", now())
+                self.post("ready", READY_NOTICE, None)
         await self.handle(mid, text)
 
     async def execute(self, cmd: commands.Command) -> tuple[str, bool]:
