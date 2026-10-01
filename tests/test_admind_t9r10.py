@@ -1,18 +1,14 @@
 """Task 9 review round 10: (1) a live pane adopted at startup is held (a terminal prompt accepted by the
 previous process and never applied cannot be told from a running turn) until a current Stop, a successful
-!interrupt or !new; (2) the hook acceptance gate starts in the acceptance callback itself and the
-dispatcher refuses to paste while a connection waits in the listening backlog; (3) a foreign-session or
-unknown event is marked a no-op before its audit. Fakes, tmp_path and bounded waits only; no real
-wn-agent, claude, systemctl, network or ~/.claude.
+!interrupt or !new; (2) the dispatcher refuses to paste while a connection waits in the listening
+backlog; (3) a foreign-session or unknown event is marked a no-op before its audit. Fakes, tmp_path
+and bounded waits only; no real wn-agent, claude, systemctl, network or ~/.claude.
 """
 
 import asyncio
 import socket
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
-import pytest
 from admind_waits import stays, wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r5 import NONCE, arm, frame, serving
@@ -96,55 +92,6 @@ def test_new_releases_an_adopted_hold(tmp_path: Path) -> None:
 
 
 # --- 2. the acceptance gate ---
-
-class StubTransport(asyncio.Transport):
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed = False
-
-    def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return default
-
-    def is_closing(self) -> bool:
-        return self.closed
-
-    def close(self) -> None:
-        self.closed = True
-
-    def write(self, data: object) -> None:
-        pass
-
-
-def test_the_acceptance_callback_counts_the_connection_before_a_scheduled_dispatcher_runs(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    u = Unit(tmp_path)
-    captured: list[Callable[..., Any]] = []
-    real = asyncio.start_unix_server
-
-    async def capture(cb: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        captured.append(cb)
-        return await real(cb, *args, **kwargs)
-    monkeypatch.setattr(asyncio, "start_unix_server", capture)
-
-    async def scenario() -> None:
-        arm(u)
-        async with serving(u) as (server, _):
-            loop = asyncio.get_running_loop()
-            reader = asyncio.StreamReader(loop=loop)
-            protocol = asyncio.StreamReaderProtocol(reader, captured[0], loop=loop)
-            u.daemon.held.append(("m" * 64, "job B"))
-            dispatcher = asyncio.create_task(u.daemon.flush())      # already scheduled, not yet run
-            protocol.connection_made(StubTransport())               # the real acceptance callback
-            try:
-                assert server.pending_hooks == 1 and server.accepted == 1   # counted synchronously
-                await dispatcher
-                assert u.tmux.pasted == [] and u.daemon.held       # the connection gates it
-            finally:
-                protocol.eof_received()
-                protocol.connection_lost(None)
-                await wait_until(lambda: server.pending_hooks == 0)
-    run(scenario())
-
 
 def test_the_dispatcher_defers_while_a_connection_waits_in_the_listening_backlog(tmp_path: Path) -> None:
     u = Unit(tmp_path)

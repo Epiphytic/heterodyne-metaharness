@@ -19,9 +19,10 @@ async def stays(pred: Callable[[], object], seconds: float = 0.05) -> None:
     `wait_until` has shown the system reached the state whose consequences are being ruled out."""
     loop = asyncio.get_running_loop()
     end = loop.time() + seconds
+    assert pred(), "condition does not hold"        # checked even if the window has already passed
     while loop.time() < end:
-        assert pred(), "condition stopped holding"
         await asyncio.sleep(0.001)
+        assert pred(), "condition stopped holding"
 
 
 def lock_waiters(lock: asyncio.Lock) -> int:

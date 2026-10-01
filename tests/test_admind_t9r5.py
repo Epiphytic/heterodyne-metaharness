@@ -337,22 +337,26 @@ def test_a_stalled_transcript_read_times_out_and_releases_the_slot(
     u.daemon.extract_timeout = 0.05
 
     async def scenario() -> None:
-        async with serving(u) as (_server, sock):
-            r1, w1 = await send(sock, frame("Stop"))                # no text: fallback, which stalls
-            assert await asyncio.to_thread(read.started.wait, 10)
-            assert await answer(r1) == b"ok\n"                      # the slot was released at the deadline
-            assert replies(u) == [] and "reply-extraction-timeout" in u.audit_text()
-            r2, w2 = await send(sock, frame("Stop"))                # the first thread is still running
-            assert await answer(r2) == b"ok\n"
-            assert read.calls == 1                                  # at most one extraction thread
-            assert u.audit_text().count("reply-extraction-timeout") == 2
-            read.release.set()                                      # the abandoned thread finishes
-            await wait_until(lambda: u.daemon._extraction is not None and u.daemon._extraction.done())  # pyright: ignore[reportPrivateUsage]
-            r3, w3 = await send(sock, frame("Stop"))                # and the next fallback may run again
-            assert await answer(r3) == b"ok\n"
-            assert read.calls == 2 and replies(u) == [("late text", None)]
-            for w in (w1, w2, w3):
-                w.close()
+        try:
+            async with serving(u) as (_server, sock):
+                r1, w1 = await send(sock, frame("Stop"))                # no text: fallback, which stalls
+                assert await asyncio.to_thread(read.started.wait, 10)
+                assert await answer(r1) == b"ok\n"                      # slot released at the deadline
+                assert replies(u) == [] and "reply-extraction-timeout" in u.audit_text()
+                r2, w2 = await send(sock, frame("Stop"))                # the first thread is still running
+                assert await answer(r2) == b"ok\n"
+                assert read.calls == 1                                  # at most one extraction thread
+                assert u.audit_text().count("reply-extraction-timeout") == 2
+                read.release.set()                                      # the abandoned thread finishes
+                await wait_until(lambda: u.daemon._extraction is not None and u.daemon._extraction.done())  # pyright: ignore[reportPrivateUsage]
+                u.daemon.extract_timeout = 10.0                         # the last read must not race it
+                r3, w3 = await send(sock, frame("Stop"))                # and the next fallback may run again
+                assert await answer(r3) == b"ok\n"
+                assert read.calls == 2 and replies(u) == [("late text", None)]
+                for w in (w1, w2, w3):
+                    w.close()
+        finally:
+            read.release.set()                                          # never leave the worker stalled
     run(scenario())
 
 

@@ -34,7 +34,7 @@ import socket
 import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -48,6 +48,7 @@ MAX_TRANSCRIPT = 8 * 1024 * 1024    # the fallback reads at most this much from 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
 ACK_SECONDS = 8.0       # the hook's total wait for admind's answer
 HOOK_TIMEOUT = 15       # Claude Code kills the hook only after the client above has given up
+ACCEPT_BACKOFF = 0.1     # pause before accepting again after an accept() error such as EMFILE
 FRAME_SECONDS = 5.0     # admind's wait for one connection's frame before it drops that connection
 
 
@@ -71,6 +72,19 @@ class Delivery:
     event: HookEvent
     done: "asyncio.Future[bool]"
     arrival: int | None = None      # the connection's accept-order index; never taken from the frame
+
+
+class _Conn:
+    """One accepted connection: its socket, arrival index and ordering slot."""
+    __slots__ = ("sock", "index", "slot", "released", "queued", "wrapped")
+
+    def __init__(self, sock: socket.socket, index: int, slot: "asyncio.Future[None]") -> None:
+        self.sock = sock
+        self.index = index
+        self.slot = slot
+        self.released = False
+        self.wrapped = False    # a stream transport owns the socket
+        self.queued = False     # its event reached the daemon's queue (or it was fully handled)
 
 
 def same_prompt(a: str, b: str) -> bool:
@@ -231,7 +245,12 @@ class HookServer:
         self.on_drop = on_drop      # called synchronously, first, for a dropped frame (cannot fail)
         self.accepted = 0           # the arrival index of the newest accepted connection (first is 1)
         self.pending_hooks = 0      # accepted connections whose slot has not completed yet
-        self._server: asyncio.Server | None = None
+        self._listen: socket.socket | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._reading = False       # the listening socket is registered with the loop
+        self._backoff: asyncio.TimerHandle | None = None
+        self._closing = False
+        self._tasks: set[asyncio.Task[None]] = set()
         self._tail: asyncio.Future[None] | None = None   # the newest connection's slot in the order
 
     def _audit(self, **fields: object) -> None:
@@ -241,56 +260,137 @@ class HookServer:
     async def start(self) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path.unlink(missing_ok=True)
+        loop = asyncio.get_running_loop()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._accept, path=str(self.path),
-                                                           limit=MAX_HOOK_FRAME + 1)
+            sock.setblocking(False)
+            sock.bind(str(self.path))
+            sock.listen(100)
+        except BaseException:
+            sock.close()
+            raise
         finally:
             os.umask(old)
         self.path.chmod(0o600)
+        self._loop = loop
+        self._listen = sock
+        self._closing = False
+        loop.add_reader(sock.fileno(), self._on_readable)
+        self._reading = True
 
     async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
+        self._closing = True
+        self._stop_reading()
+        if self._backoff is not None:
+            self._backoff.cancel()
+            self._backoff = None
+        if self._listen is not None:
+            self._listen.close()
+            self._listen = None
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()       # each task's done callback releases its slot and closes its socket
+        if tasks:
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._server.wait_closed(), 2)
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
         self.path.unlink(missing_ok=True)
+
+    def _stop_reading(self) -> None:
+        if self._reading and self._loop is not None and self._listen is not None:
+            self._loop.remove_reader(self._listen.fileno())
+        self._reading = False
 
     def backlog_waiting(self) -> bool:
         """A connection is queued on the listening socket and not accepted yet (readable with timeout 0).
-        Checked by the dispatcher immediately before a paste. Inherent residual: a terminal prompt typed at
-        the same instant as the paste races at the agent itself, which no admind check can order."""
-        server = self._server
-        if server is None:
+        Checked by the dispatcher immediately before a paste. It also covers an accept that failed (for
+        example out of descriptors) and is being retried: the connection stays in the backlog. Inherent
+        residual: a terminal prompt typed at the same instant as the paste races at the agent itself,
+        which no admind check can order."""
+        sock = self._listen
+        if sock is None:
             return False
-        for sock in server.sockets:
-            try:
-                ready, _, _ = select.select([sock], [], [], 0)
-            except (OSError, ValueError):
-                return True     # cannot tell: fail closed (a later flush retries)
-            if ready:
-                return True
-        return False
-
-    def _accept(self, reader: asyncio.StreamReader,
-                writer: asyncio.StreamWriter) -> Coroutine[Any, Any, None]:
-        """The client-connected callback, deliberately synchronous: StreamReaderProtocol calls it from
-        connection_made, so the count and the ordering slot are taken in the acceptance callback itself,
-        before any task (a dispatcher already scheduled included) can run. It returns the coroutine that
-        processes the connection."""
-        loop = asyncio.get_running_loop()
-        self.accepted += 1
-        index = self.accepted
-        self.pending_hooks += 1     # counted from accept, so the dispatch gate sees a frame still arriving
-        previous = self._tail
-        slot: asyncio.Future[None] = loop.create_future()
-        self._tail = slot
-        return self._handle(reader, writer, index, previous, slot)
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, index: int,
-                      previous: "asyncio.Future[None] | None", slot: "asyncio.Future[None]") -> None:
-        loop = asyncio.get_running_loop()
         try:
+            ready, _, _ = select.select([sock], [], [], 0)
+        except (OSError, ValueError):
+            return True     # cannot tell: fail closed (a later flush retries)
+        return bool(ready)
+
+    def _accept_conn(self) -> socket.socket:
+        if self._listen is None:
+            raise BlockingIOError
+        return self._listen.accept()[0]
+
+    def _on_readable(self) -> None:
+        """The listening socket's reader, a plain synchronous callback. For each connection it accepts, in
+        this one callback with no await between: make it non-blocking, count it (`pending_hooks`), take its
+        ordering slot, and schedule its processing. An accepted connection is therefore always counted
+        before control returns to the loop; until accepted it is in the backlog, which the dispatcher
+        polls."""
+        loop = self._loop
+        if loop is None or self._closing:
+            return
+        while True:
+            try:
+                conn = self._accept_conn()
+            except (BlockingIOError, InterruptedError):
+                return
+            except ConnectionAbortedError:
+                continue        # the peer left before accept
+            except OSError as exc:      # e.g. EMFILE: do not spin; the backlog keeps the gate closed
+                self._audit(result="accept-error", error=type(exc).__name__)
+                self._stop_reading()
+                self._backoff = loop.call_later(ACCEPT_BACKOFF, self._resume_reading)
+                return
+            try:
+                conn.setblocking(False)
+                self.accepted += 1
+                index = self.accepted
+                self.pending_hooks += 1     # counted from accept, so the gate sees a frame still arriving
+                previous = self._tail
+                slot: asyncio.Future[None] = loop.create_future()
+                self._tail = slot
+                state = _Conn(conn, index, slot)
+                task = loop.create_task(self._handle(state, previous))
+            except BaseException:
+                conn.close()
+                raise
+            self._tasks.add(task)
+            task.add_done_callback(lambda t, st=state: self._finished(t, st))
+
+    def _resume_reading(self) -> None:
+        self._backoff = None
+        if self._closing or self._listen is None or self._loop is None or self._reading:
+            return
+        self._loop.add_reader(self._listen.fileno(), self._on_readable)
+        self._reading = True
+
+    def _finished(self, task: asyncio.Task[None], state: "_Conn") -> None:
+        """Backstop for a task cancelled before it ever ran (its own cleanup never executes then)."""
+        self._tasks.discard(task)
+        if task.cancelled() and not state.queued and self.on_drop is not None:
+            with contextlib.suppress(Exception):
+                self.on_drop()      # an accepted frame that never reached the daemon: hold dispatch
+        if not state.wrapped:
+            state.sock.close()      # no transport ever took the socket
+        self._release(state)
+
+    def _release(self, state: "_Conn") -> None:
+        if state.released:
+            return
+        state.released = True
+        if not state.slot.done():
+            state.slot.set_result(None)
+        self.pending_hooks -= 1     # processed or dropped; after the answer was written
+        if self.pending_hooks == 0 and self.on_idle is not None and not self._closing:
+            self.on_idle()
+
+    async def _handle(self, state: "_Conn", previous: "asyncio.Future[None] | None") -> None:
+        loop = asyncio.get_running_loop()
+        writer: asyncio.StreamWriter | None = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock=state.sock, limit=MAX_HOOK_FRAME + 1)
+            state.wrapped = True
             event: HookEvent | None = None
             try:
                 line = await asyncio.wait_for(reader.readline(), FRAME_SECONDS)
@@ -305,19 +405,18 @@ class HookServer:
             if event is None and self.on_lost is not None:
                 await self.on_lost()    # it might have been a turn start: the daemon holds dispatch
             if event is not None:
-                delivery = Delivery(event, loop.create_future(), index)
+                delivery = Delivery(event, loop.create_future(), state.index)
                 await self.queue.put(delivery)
+                state.queued = True
                 ok = await delivery.done
                 writer.write(b"ok\n" if ok else b"err\n")
                 await writer.drain()
+            state.queued = True
         except Exception as exc:  # noqa: BLE001 - a failed answer (the hook gave up and left) is by type only
             self._audit(result="not-answered", error=type(exc).__name__)
         finally:
-            if not slot.done():
-                slot.set_result(None)
-            self.pending_hooks -= 1     # processed or dropped; after the answer was written
-            if self.pending_hooks == 0 and self.on_idle is not None:
-                self.on_idle()
-            writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
+            self._release(state)
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
