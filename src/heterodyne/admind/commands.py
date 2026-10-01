@@ -5,8 +5,11 @@ mistyped command must not become a prompt, and a leading `!` switches Claude Cod
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
+
+from heterodyne.services import ServiceManager
 
 HELP = "admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps"
 FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
@@ -63,3 +66,42 @@ def parse(text: str) -> Command | None:
             raise CommandError("Usage: !restart <unit>")
         return Command("restart", arg=args[0])
     raise CommandError(f"Unknown command !{name}. {HELP}")
+
+
+class AgentControl(Protocol):
+    def new(self) -> str: ...
+    def interrupt(self) -> None: ...
+    def tail(self, lines: int) -> str: ...
+    def alive(self) -> bool: ...
+
+
+class CommandRunner:
+    """Executes parsed commands and returns the reply text. Synchronous: the daemon runs it in a thread."""
+
+    def __init__(self, agent: AgentControl, services: ServiceManager, restart_units: tuple[str, ...],
+                 wn_alive: Callable[[], bool]) -> None:
+        self.agent = agent
+        self.services = services
+        self.restart_units = restart_units
+        self.wn_alive = wn_alive
+
+    def run(self, cmd: Command) -> str:
+        if cmd.name == "new":
+            self.agent.new()
+            return "Started a fresh admin agent session."
+        if cmd.name == "interrupt":
+            self.agent.interrupt()
+            return "Sent Esc to the admin agent."
+        if cmd.name == "tail":
+            return f"{FENCE}\n{self.agent.tail(cmd.lines)}\n{FENCE}"
+        if cmd.name == "restart":
+            unit = cmd.arg or ""
+            if unit not in self.restart_units:
+                allowed = ", ".join(self.restart_units) or "empty"
+                return f"Refused: {unit} is not in admind's restart allowlist ({allowed})."
+            ok, detail = self.services.restart(unit)
+            return f"Restarted {unit}." if ok else f"Restart of {unit} failed: {detail}"
+        lines = [self.services.status(unit).line() for unit in self.restart_units]
+        lines.append(f"wn-agent (admind): {'running' if self.wn_alive() else 'down'}")
+        lines.append(f"admin agent: {'running' if self.agent.alive() else 'not running'}")
+        return "\n".join(lines)
