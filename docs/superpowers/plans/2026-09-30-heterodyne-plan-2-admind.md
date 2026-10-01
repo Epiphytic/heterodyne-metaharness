@@ -3626,10 +3626,11 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
    - Control characters: the message is refused with a reply and marked `dropped`.
    - Otherwise the message joins the in-memory queue. **One prompt at a time**, under a dispatch lock: the head of the queue is pasted only when the agent is ready, nothing is `in_flight`, and the agent is not `busy`. It is reserved as `in_flight` *before* the paste, then marked `dispatched` and audited (a failed paste un-reserves it).
    - **Reply anchoring:** the agent's `UserPromptSubmit` hook confirms that it took the prompt. Its `prompt` must match the pasted text (`same_prompt`: whitespace-insensitive), and admind then records `anchor = in_flight`. A non-matching submission, such as a prompt typed at the terminal, never takes the anchor.
-   - **Busy:** `busy` is set when a message is pasted and on every UserPromptSubmit, and cleared only by evidence that the agent is idle: a Stop, a SessionStart, `!interrupt` or `!new`. It survives an admind restart (an adopted session may still be mid-turn). No timer ever clears it or dispatches.
+   - **Busy:** `busy` is set (a fresh busy period, numbered from `turn_seq`) when a message is pasted and on every UserPromptSubmit, and cleared only by evidence that the agent is idle: a Stop, a SessionStart, `!interrupt` or `!new`. It survives an admind restart (an adopted session may still be mid-turn). No timer ever clears it or dispatches.
    - A Stop threads its reply to `anchor` and clears `anchor` and `in_flight`. A Stop with no anchor posts top-level, verbatim (a late Stop from an interrupted turn, a turn started at the terminal, or our own turn whose UserPromptSubmit was lost); it leaves an unconfirmed `in_flight` in place, because that paste may still be queued behind the terminal turn. Hook delivery is acknowledged, so events arrive in the order the agent produced them.
    - A UserPromptSubmit that doesn't match while a message is anchored means that turn is over without an observed Stop: the anchored message gets "No reply to this message: …" and the new turn's reply posts top-level.
    - **Held-queue notices** (once each, never a dispatch): an `in_flight` message unconfirmed after `start_timeout_seconds` gets `UNCONFIRMED`; a `busy` period longer than `turn_notice_seconds` gets `LONG_TURN` (in thread when anchored). Both point the operator at `!tail` and `!interrupt`, which releases the queue.
+   - **`!interrupt`** holds the dispatch lock from before the Escape until state is settled, so a Stop arriving meanwhile can't dispatch into the Escape. Only once the Escape was sent does it abandon the message that was in flight when the command arrived (if it's still in flight) and clear `busy`. A failed Escape changes nothing and says the queue is still held.
    - `in_flight` and `anchor` are also cleared by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, by a SessionStart (a restarted agent has no turn in progress), and at admind startup (an adopted session's pending Stop may have been lost). Each of these replies "No reply to this message: …" to the abandoned message.
    - If the agent is stuck (`AgentStuck`), held messages are dropped with a reply suggesting `!tail`, then `!new`.
    - If the agent is not ready, the message is held in memory. It is flushed in order on SessionStart. If it has waited longer than `start_timeout_seconds`, the operator gets `NOT_READY` once per launch.
@@ -3746,6 +3747,8 @@ import os
 import shutil
 import stat
 import sys
+import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -3762,7 +3765,7 @@ from heterodyne.admind.daemon import LONG_TURN, NO_REPLY, READY_NOTICE, RESTARTE
 from heterodyne.admind.store import Store
 from heterodyne.marmot.control import ControlClient
 from heterodyne.services import UnitStatus
-from heterodyne.tmux import Tmux
+from heterodyne.tmux import Tmux, TmuxError
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "fake_claude.py"
@@ -4032,6 +4035,53 @@ def test_long_turn_with_a_lost_prompt_hook_is_never_pasted_over(tmp_path: Path) 
         assert by_text["echo: next"] == nxt
         assert by_text["No reply to this message: interrupted by !interrupt."] == busy
     run_with(tmp_path, scenario)
+
+
+def test_failed_interrupt_keeps_the_queue_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def before(h: Harness) -> None:
+        def fail() -> None:
+            raise TmuxError("send-keys failed")
+        monkeypatch.setattr(h.agent, "interrupt", fail)
+
+    async def scenario(h: Harness) -> None:
+        hung = await h.say("__hang__")
+        await h.until(lambda: h.store.get("anchor") == hung)
+        nxt = await h.say("next")
+        await h.say("!interrupt")
+        await h.until(lambda: any(t.startswith("!interrupt failed: send-keys failed") for t in h.texts()))
+        await asyncio.sleep(0.5)
+        assert nxt not in dispatched(h)
+        assert h.store.get("anchor") == hung and h.store.get("busy") is not None
+    run_with(tmp_path, scenario, before)
+
+
+def test_stop_during_interrupt_never_dispatches_into_the_escape(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    def before(h: Harness) -> None:
+        real = h.agent.interrupt
+
+        def slow() -> None:
+            started.set()
+            time.sleep(1.0)                          # the turn's Stop lands while the Escape is pending
+            real()
+        monkeypatch.setattr(h.agent, "interrupt", slow)
+
+    async def scenario(h: Harness) -> None:
+        from heterodyne.admind.hook import HookEvent
+        hung = await h.say("__hang__")
+        await h.until(lambda: h.store.get("anchor") == hung)
+        nxt = await h.say("next")
+        await h.say("!interrupt")
+        await h.until(started.is_set)
+        await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "finished anyway"))
+        await h.until(lambda: "echo: next" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["finished anyway"] == hung
+        assert by_text["echo: next"] == nxt
+        assert not any(t.startswith("No reply to this message") for t in h.texts())
+    run_with(tmp_path, scenario, before)
 
 
 def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> None:
@@ -4336,6 +4386,10 @@ class Admind:
             return
         if cmd is not None:
             self.store.set_inbound(mid, "dispatched")
+            if cmd.name == "interrupt":
+                await self.interrupt(mid, cmd)
+                await self.flush()
+                return
             if cmd.name == "new":
                 # Before the command runs: the new session's SessionStart may arrive while it runs.
                 self.ready.clear()
@@ -4350,10 +4404,6 @@ class Admind:
                 result = f"!{cmd.name} failed: {exc}"
                 if cmd.name == "new":
                     self.stuck = str(exc)
-            if cmd.name == "interrupt":
-                # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
-                self.abandon_in_flight("interrupted by !interrupt")
-                self.set_idle()
             self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
             self.reply(mid, result, "cmd")
             await self.flush()
@@ -4364,6 +4414,25 @@ class Admind:
             return
         self.held.append((mid, text))
         await self.flush()
+
+    async def interrupt(self, mid: str, cmd: commands.Command) -> None:
+        """!interrupt holds the dispatch lock from before the Escape until the turn's state is settled, so
+        a Stop arriving meanwhile can't dispatch a prompt that the Escape, or this cleanup, would hit.
+        Only the turn in flight when the command arrived is abandoned, and only once the Escape was sent:
+        a failed send is no evidence that the agent is idle, so the queue stays held."""
+        async with self.dispatch_lock:
+            target = self.store.get("in_flight")
+            try:
+                result = await asyncio.to_thread(self.runner.run, cmd)
+            except (AgentStuck, TmuxError) as exc:
+                result = f"!interrupt failed: {exc}. Later messages are still held."
+            else:
+                # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
+                if target is not None and self.store.get("in_flight") == target:
+                    self.abandon_in_flight("interrupted by !interrupt")
+                self.set_idle()
+        self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
+        self.reply(mid, result, "cmd")
 
     async def flush(self) -> None:
         async with self.dispatch_lock:      # one dispatcher at a time: flush() is called from several tasks
@@ -4416,10 +4485,13 @@ class Admind:
             self.audit.write("agent", action="abandon", message_id=mid, reason=why)
 
     def set_busy(self) -> None:
-        if self.store.get("busy") is None:
-            self.store.set("busy", now())
-            self.busy_since = time.monotonic()
-            self.noticed.discard("long-turn")
+        """Start a busy period: at dispatch, and on every UserPromptSubmit (each prompt is a new turn, so
+        LONG_TURN times and describes the current one, even after a lost Stop)."""
+        turn = int(self.store.get("turn_seq") or "0") + 1
+        self.store.set("turn_seq", str(turn))
+        self.store.set("busy", str(turn))
+        self.busy_since = time.monotonic()
+        self.noticed.discard("long-turn")
 
     def set_idle(self) -> None:
         self.store.delete("busy")
