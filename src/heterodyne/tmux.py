@@ -53,12 +53,13 @@ class Tmux:
         # set-option afterwards races an immediately-exiting process.
         args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
                 "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
-        if self.launcher is None or self._server_running():
-            # A running server is already where it should be; the client only asks it.
+        if self.launcher is None:
             self._run(*args)
             return
         # The server is forked by this invocation and stays wherever it starts, so only this call is
-        # wrapped. A failing launcher is an error: never fall back to starting the server unwrapped.
+        # wrapped, always (no probe, so no race with a server dying between probe and start). If a server
+        # is already running the wrapped client just asks it and its scope is collected on exit.
+        # A failing launcher is an error: never fall back to starting the server unwrapped.
         try:
             proc = subprocess.run([*self.launcher(), self.binary, "-L", self.socket_name, *args],
                                   capture_output=True, timeout=30, check=False)
@@ -66,17 +67,6 @@ class Tmux:
             raise TmuxError(LAUNCHER_FAILED) from None
         if proc.returncode != 0:
             raise TmuxError(LAUNCHER_FAILED)
-
-    def _server_running(self) -> bool:
-        """True only when the server answers. "No server" (including a stale or missing socket) is
-        False. Any other outcome (another error, a timeout) is also False: the caller then wraps the
-        start, which is safe, because a wrapped client that merely asks a live server does no harm
-        and the launcher's names are unique."""
-        try:
-            proc = self._run("list-sessions", check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return proc.returncode == 0
 
     def pane_dead(self, name: str) -> bool:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")

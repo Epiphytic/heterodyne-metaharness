@@ -69,8 +69,7 @@ def test_new_session_prefixes_only_the_server_start(monkeypatch: pytest.MonkeyPa
     t.capture("s", 5)
     t.kill("s")
     t.kill_server()
-    probe, start, *others = rec.calls
-    assert "list-sessions" in probe and probe[0] == "tmux"
+    start, *others = rec.calls
     assert start[:5] == ["systemd-run", "--user", "--scope", "tmux", "-L"]
     assert "start-server" in start and "new-session" in start
     assert others and all(c[0] == "tmux" for c in others)
@@ -108,27 +107,11 @@ def _start(rec: Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, n: in
     return rec.starts
 
 
-def test_running_server_is_asked_without_the_launcher(monkeypatch: pytest.MonkeyPatch,
-                                                      tmp_path: Path) -> None:
-    (start,) = _start(Recorder(probe=(0, b"")), monkeypatch, tmp_path)
-    assert start[0] == "tmux"
-
-
-@pytest.mark.parametrize("stderr", [b"no server running on /tmp/x",
-                                    b"error connecting to /tmp/x (No such file or directory)",
-                                    b"error connecting to /tmp/x (Connection refused)"])
-def test_absent_server_starts_through_a_fresh_scope_each_time(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-                                                              stderr: bytes) -> None:
-    first, second = _start(Recorder(probe=(1, stderr)), monkeypatch, tmp_path, n=2)
+def test_start_always_uses_the_launcher_and_never_probes(monkeypatch: pytest.MonkeyPatch,
+                                                         tmp_path: Path) -> None:
+    # Even with a live server (probe would say 0) the start is wrapped: no probe race, and the wrapped
+    # client only asks the server; its scope holds just that short-lived client.
+    rec = Recorder(probe=(0, b""))
+    first, second = _start(rec, monkeypatch, tmp_path, n=2)
     assert first[:2] == ["systemd-run", "--unit=s-u0"] and second[:2] == ["systemd-run", "--unit=s-u1"]
-
-
-@pytest.mark.parametrize("rec", [Recorder(probe=(1, b"protocol version mismatch")),
-                                 Recorder(probe_exc=subprocess.TimeoutExpired("tmux", 1)),
-                                 Recorder(probe_exc=OSError("boom"))])
-def test_uncertain_probe_still_uses_the_launcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-                                                 rec: Recorder) -> None:
-    # Conservative: never start a server inside the unit's cgroup. A wrapped client that only asks an
-    # existing server is harmless, and the scope name is unique, so it cannot collide.
-    (start,) = _start(rec, monkeypatch, tmp_path)
-    assert start[0] == "systemd-run"
+    assert not any("list-sessions" in c for c in rec.calls)
