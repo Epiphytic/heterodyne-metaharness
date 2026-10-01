@@ -138,6 +138,20 @@ class Admind:
         return (not self.latched() and self.group_ok and self.observing
                 and self.store.get("operator_seen_at") is not None)
 
+    def authorised(self) -> bool:
+        """May admind act for the operator right now: not latched, group verified, subscription live.
+        Checked after every await that verifies and again immediately before a side effect."""
+        return not self.latched() and self.group_ok and self.observing
+
+    def deny(self, mid: str, what: str) -> None:
+        """Refuse a message that was accepted before admind stopped being authorised. Fixed wording; no
+        reply is queued (a latch is final, and an unverified group re-answers via UNVERIFIED)."""
+        with self.store.transaction():
+            self.store.set_inbound(mid, "dropped")
+            if not self.latched():
+                self.reply(mid, UNVERIFIED, "unverified")
+        self.audit.write("drop", message_id=mid, reason="no longer authorised", what=what)
+
     def post(self, key: str, text: str, reply_to: str | None) -> None:
         if self.store.enqueue(key, text, reply_to):
             self.wake.set()
@@ -289,11 +303,8 @@ class Admind:
             return
         text = ev.message.text
         self.audit.write("inbound", message_id=mid, text=own_text(text))
-        if not await self.check_group():
-            with self.store.transaction():
-                self.store.set_inbound(mid, "dropped")
-                if not self.latched():
-                    self.reply(mid, UNVERIFIED, "unverified")   # sent once a later check succeeds
+        if not await self.check_group() or not self.authorised():   # the latch may have come meanwhile
+            self.deny(mid, "message")
             return
         if self.store.get("operator_seen_at") is None:
             self.store.set("operator_seen_at", now())
@@ -329,9 +340,12 @@ class Admind:
             # Persisted before anything runs (or waits for the dispatch lock): a crash from here until
             # `done` is answered after the restart instead of being lost.
             self.store.set_inbound(mid, "executing")
-            if cmd.name in ("interrupt", "new"):
+            if cmd.name in ("interrupt", "new"):   # these recheck once they hold the dispatch lock
                 await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
+                return
+            if not self.authorised():
+                self.deny(mid, "command")
                 return
             result, _ = await self.execute(cmd)
             self.audit.write("command", message_id=mid, command=cmd.name,
@@ -348,6 +362,9 @@ class Admind:
         Only the turn in flight when the command arrived is abandoned, and only once the Escape was sent:
         a failed send is no evidence that the agent is idle, so the queue stays held."""
         async with self.dispatch_lock:
+            if not self.authorised():       # the lock wait may have spanned a latch
+                self.deny(mid, "command")
+                return
             target = self.store.get("in_flight")
             period = self.store.get("busy")
             result, ok = await self.execute(cmd)
@@ -369,6 +386,9 @@ class Admind:
         The old session ID is retired first: its hooks (a late SessionStart included) are ignored from
         here on, whenever they arrive. The new session's SessionStart sets ready as usual."""
         async with self.dispatch_lock:
+            if not self.authorised():
+                self.deny(mid, "command")
+                return
             old = self.agent.session_id
             if old is not None:
                 self.retired.add(old)

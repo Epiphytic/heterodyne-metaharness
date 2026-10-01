@@ -155,8 +155,6 @@ class Unit:
         self.agent.started("S1")
         self.store.set("operator_seen_at", now())
         self.daemon.ready.set()
-        self.daemon.group_ok = True
-        self.daemon.observing = True
         self.seq = 0
 
     def build(self) -> None:
@@ -165,6 +163,8 @@ class Unit:
         runner = CommandRunner(self.agent, self.services, ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, self.client, self.store, self.audit, self.agent, runner,  # type: ignore[arg-type]
                              ACCOUNT, GROUP)
+        self.daemon.group_ok = True         # as if the subscription were confirmed and the group verified
+        self.daemon.observing = True
 
     def mid(self) -> str:
         self.seq += 1
