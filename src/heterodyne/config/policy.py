@@ -22,6 +22,7 @@ class Policy:
     approvers: tuple[str, ...] = ()
     identities: dict[str, dict[str, str]] = field(default_factory=dict[str, dict[str, str]])
     tiers: dict[str, str] = field(default_factory=dict[str, str])
+    operators: tuple[str, ...] = ()
 
 
 def effective_tiers(default_tiers: Mapping[str, Sequence[str]], host_overrides: Mapping[str, str],
@@ -60,9 +61,16 @@ def build_policy(raw: Mapping[str, Any], default_tiers: Mapping[str, Sequence[st
     approvers: Any = raw.get("approvers", [])
     if not isinstance(approvers, list) or not all(isinstance(a, str) for a in cast(list[Any], approvers)):
         raise ConfigError("policy.toml: approvers must be a list of names")
+    operators: Any = raw.get("operators", [])
+    if not isinstance(operators, list) or not all(isinstance(o, str) for o in cast(list[Any], operators)):
+        raise ConfigError("policy.toml: operators must be a list of approver names")
+    missing = [o for o in cast(list[str], operators) if o not in approvers]
+    if missing:
+        raise ConfigError(f"policy.toml: operators {show(missing)} are not in approvers")
     return Policy(approvers=tuple(cast(list[str], approvers)),
                   identities=_identities(raw.get("identities", {})),
-                  tiers=effective_tiers(default_tiers, _tier_overrides(raw.get("tiers", {})), restrict))
+                  tiers=effective_tiers(default_tiers, _tier_overrides(raw.get("tiers", {})), restrict),
+                  operators=tuple(cast(list[str], operators)))
 
 
 def _identities(value: Any) -> dict[str, dict[str, str]]:

@@ -49,3 +49,13 @@ def test_restrict_never_less_strict_than_host(esc: list[str], deny: list[str]) -
     except ConfigError:
         return
     assert all(RANK[tightened[c]] >= RANK[host[c]] for c in CLASSES)
+
+
+def test_operators_must_be_approvers() -> None:
+    from heterodyne.config.policy import build_policy
+    policy = build_policy({"approvers": ["op"], "operators": ["op"]}, {}, {})
+    assert policy.operators == ("op",)
+    with pytest.raises(ConfigError, match="not in approvers"):
+        build_policy({"approvers": ["op"], "operators": ["other"]}, {}, {})
+    with pytest.raises(ConfigError, match="list of approver names"):
+        build_policy({"approvers": ["op"], "operators": "op"}, {}, {})

@@ -19,3 +19,25 @@ auto_approve = ["worktree_edit", "run_tests", "local_git", "dependency_install"]
 escalate = ["push_branch", "open_pr", "merge_pr", "deploy", "notify", "new_egress_host"]
 hard_deny = ["modify_harness_config", "modify_policy", "modify_sandbox"]
 locked = ["modify_harness_config", "modify_policy", "modify_sandbox"]
+
+# Executable of each adapter's CLI. Hosts override with an absolute path if it is not on PATH.
+[adapters.claude-code]
+binary = "claude"
+
+[adapters.codex]
+binary = "codex"
+
+# Admin override channel (§8). `profile` has no default: the host must name one.
+[admind]
+workdir = "~"
+restart_units = []
+chunk_chars = 4000
+alert_poll_seconds = 5
+group_check_seconds = 60
+start_timeout_seconds = 60
+turn_notice_seconds = 1800
+group_name = "heterodyne admin"
+
+[admind.marmot]
+wn_agent = "wn-agent"
+relays = []

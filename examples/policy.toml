@@ -1,5 +1,6 @@
 # Example host policy. Host-only: no other layer may set these keys (ADR 0001 §15).
 approvers = ["<approver-name>"]
+operators = ["<approver-name>"]   # the one approver admind accepts messages from (ADR §8)
 
 [identities."<approver-name>"]    # quoted: <> is not valid in a bare TOML key
 marmot_npub = "<npub>"
