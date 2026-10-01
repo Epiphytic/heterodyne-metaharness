@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from heterodyne.config.secret_scan import identifier_kind
+from heterodyne.config.secret_scan import sensitive_kind
 
 TEMPLATE = """\
 [Unit]
@@ -38,9 +38,9 @@ def render(python: str, env: Mapping[str, str]) -> str:
         if _UNSAFE & set(value) or any(_control(ch) for ch in value):
             raise ValueError(f"{name} contains whitespace, a quote, a backslash or a control "
                              "character; systemd would split or unquote it")
-        kind = identifier_kind(value)
+        kind = sensitive_kind(value)
         if kind:  # the unit must be installable verbatim, so refuse rather than redact
-            raise ValueError(f"{name} contains an {kind}, which must not be printed; "
+            raise ValueError(f"{name} contains sensitive material ({kind}), which must not be printed; "
                              "use a path without it")
     environment = "".join(f"Environment={k}={env[k].replace('%', '%%')}\n"
                           for k in PASSED_THROUGH if env.get(k))

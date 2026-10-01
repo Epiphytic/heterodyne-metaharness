@@ -11,6 +11,8 @@ import contextlib
 import os
 import secrets
 import stat
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from heterodyne.admind.audit import Audit
@@ -101,11 +103,11 @@ class WnAgent:
                     raise WnAgentError(f"wn-agent did not answer on its socket within {wait:.0f}s") from None
                 await asyncio.sleep(0.25)
 
-    async def supervise(self, client: ControlClient) -> None:
+    async def supervise(self, client: ControlClient, clock: Callable[[], float] | None = None) -> None:
         """Restart the child whenever it exits, with backoff up to 60s (reset only after the child
         stayed up for `healthy_reset` seconds). Runs until cancelled."""
         delay = 1.0
-        clock = asyncio.get_running_loop().time
+        clock = clock or time.monotonic
         while True:
             if self.proc is None:
                 raise WnAgentError("supervise() before start()")

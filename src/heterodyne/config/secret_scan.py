@@ -91,6 +91,12 @@ def identifier_kind(text: str) -> str | None:
     return None
 
 
+def sensitive_kind(text: str) -> str | None:
+    """The kind of secret or public identifier `text` contains, or None. For emitters that cannot
+    redact (their output must be usable verbatim) and so refuse the value instead."""
+    return secret_value(text) or identifier_kind(text)
+
+
 def show(value: Any, quote: bool = True) -> str:
     """Render a user-supplied value for an error message, redacting secrets and public identifiers.
 

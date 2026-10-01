@@ -356,17 +356,46 @@ def test_supervise_does_not_reset_backoff_on_mere_readiness(tmp_path: Path,
     assert sleeps.delays[:5] == [1.0, 2.0, 4.0, 8.0, 16.0]
 
 
-def test_supervise_resets_backoff_after_a_sustained_healthy_interval(
+def test_supervise_resets_backoff_only_after_a_child_outlives_the_threshold(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps = Sleeps(monkeypatch)
+    now = [0.0]
+    lifetimes = iter([1.0, 1.0, 1.0, 61.0, 1.0, 1.0])  # seconds each child lives, on the fake clock
+
+    class Lives(_Exits):
+        async def wait(self) -> int:
+            now[0] += next(lifetimes, 1.0)
+            return 1
 
     async def body() -> None:
-        wn, client = _flapping(tmp_path, healthy_reset=0.0)
-        task = asyncio.create_task(wn.supervise(client))
-        await until(lambda: len(sleeps.delays) >= 3)
+        wn, client = _flapping(tmp_path, healthy_reset=60.0)
+
+        async def start(_client: ControlClient, wait: float = 30.0) -> None:
+            wn.proc = Lives()  # type: ignore[assignment]
+        wn.start = start  # type: ignore[method-assign]
+        wn.proc = Lives()  # type: ignore[assignment]
+        task = asyncio.create_task(wn.supervise(client, clock=lambda: now[0]))
+        await until(lambda: len(sleeps.delays) >= 6)
         task.cancel()
     asyncio.run(body())
-    assert sleeps.delays[:3] == [1.0, 1.0, 1.0]
+    # grows while children die young; the 61s child (>= 60) resets it; then it grows again
+    assert sleeps.delays[:6] == [1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+
+
+def test_unit_refuses_secret_values_naming_only_the_variable() -> None:
+    token = "sk-" + "A1b2" * 6
+    with pytest.raises(ValueError) as info:
+        unit.render("/opt/venv/bin/python", {"HETERODYNE_CONFIG_DIR": f"/srv/{token}/x"})
+    assert "HETERODYNE_CONFIG_DIR" in str(info.value) and token not in str(info.value)
+
+
+def test_unit_subcommand_exits_config_without_printing_a_token(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    token = "sk-" + "Zy9x" * 6
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(tmp_path / token))
+    assert cli.main(["unit"]) == cli.EX_CONFIG
+    seen = capsys.readouterr()
+    assert token not in seen.out + seen.err and "HETERODYNE_CONFIG_DIR" in seen.err and seen.out == ""
 
 
 def test_supervise_cancellation_leaves_a_child_that_stop_ends(tmp_path: Path,
