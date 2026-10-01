@@ -138,7 +138,7 @@ def decode_head(line: bytes, request_id: str) -> str:
     try:
         head = msgspec.json.decode(line, type=_Head)
     except msgspec.DecodeError as exc:
-        raise ProtocolError(f"malformed control frame: {exc}") from exc
+        raise ProtocolError("malformed control frame") from exc
     if head.marmot_agent_control != PROTOCOL:
         raise ProtocolError("wrong control protocol")
     if head.id != request_id:

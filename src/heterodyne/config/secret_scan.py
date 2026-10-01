@@ -60,6 +60,14 @@ IDENTIFIER_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("hex key", re.compile(r"[0-9A-Fa-f]{64}")),
 )
 
+_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _escape_controls(text: str) -> str:
+    """C0, DEL and C1 characters as `\\xNN`, so no value can drive a terminal."""
+    return _CONTROLS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 _SEPARATORS = re.compile(r"[_\-.]+")
 
@@ -100,7 +108,8 @@ def sensitive_kind(text: str) -> str | None:
 def show(value: Any, quote: bool = True) -> str:
     """Render a user-supplied value for an error message, redacting secrets and public identifiers.
 
-    Redacts anything `secret_value` flags, and npubs and 64-hex keys (`IDENTIFIER_VALUES`).
+    Redacts anything `secret_value` flags, and npubs and 64-hex keys (`IDENTIFIER_VALUES`), and
+    escapes C0/DEL/C1 control characters (`\\xNN`), so it is the one helper for human-readable output.
 
     Every ConfigError that interpolates a config value or key goes through this. `quote=False`
     renders a string bare, for key and path segments.
@@ -112,7 +121,7 @@ def show(value: Any, quote: bool = True) -> str:
         ident = identifier_kind(value)
         if ident:
             return f"<redacted {ident}>"
-        return repr(value) if quote else value
+        return repr(value) if quote else _escape_controls(value)
     if isinstance(value, list | tuple | set | frozenset):
         items = cast(list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any], value)
         ordered = sorted(items, key=repr) if isinstance(items, set | frozenset) else list(items)
@@ -142,7 +151,7 @@ def check(tree: Mapping[str, Any], layer: str) -> None:
 def _reject_value(text: str, layer: str, path: str) -> None:
     kind = secret_value(text)
     if kind:
-        raise ConfigError(f"{layer}: {path}: value looks like secret material ({kind}); "
+        raise ConfigError(f"{show(layer, False)}: {path}: value looks like secret material ({kind}); "
                           '{ file = "<path>" } or { command = "<command>" } references only')
 
 
@@ -154,10 +163,10 @@ def _walk(value: Any, layer: str, path: str) -> None:
             _walk(item, layer, f"{path}[{i}]")
     elif isinstance(value, Mapping):
         for key, child in cast(Mapping[str, Any], value).items():
-            dotted = f"{path}.{key}" if path else key
+            dotted = f"{path}.{show(key, False)}" if path else show(key, False)  # keys may be identifiers
             _reject_value(key, layer, f"{path or '<top>'} key")
             if secret_name(key) and not is_reference(child):
-                raise ConfigError(f"{layer}: {dotted}: secrets must be a reference, "
+                raise ConfigError(f"{show(layer, False)}: {dotted}: secrets must be a reference, "
                                   '{ file = "<path>" } or { command = "<command>" } '
                                   "(exactly one, non-empty)")
             _walk(child, layer, dotted)

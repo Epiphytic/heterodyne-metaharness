@@ -66,8 +66,10 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
         store.set("group_id_hex", created.group_id_hex.lower())
         audit.write("init", action="group_created")
     except (WnAgentError, ControlError) as exc:
-        audit.write("init", action="failed", error=str(exc), detail=getattr(exc, "detail", ""))
-        print(f"admind init failed: {exc}", file=sys.stderr)  # admind's own wording only; see ControlError
+        # Never the peer's `detail`: it can echo the bearer token. Only the allowlisted code and flag.
+        peer = {"code": exc.code, "retryable": exc.retryable} if isinstance(exc, ControlError) else {}
+        audit.write("init", action="failed", error=str(exc), **peer)
+        print(f"admind init failed: {show(str(exc), False)}", file=sys.stderr)  # own wording only
         return 1
     finally:
         await wn.stop()
@@ -89,10 +91,10 @@ def _with_settings(fn: str) -> int:
     try:
         s, store, audit = _load()
     except hconfig.ConfigError as exc:
-        print(f"config error: {exc}", file=sys.stderr)
+        print(f"config error: {show(str(exc), False)}", file=sys.stderr)
         return EX_CONFIG
     except StateDirError as exc:
-        print(exc, file=sys.stderr)
+        print(show(str(exc), False), file=sys.stderr)
         return EX_CONFIG
     if fn == "init":
         return asyncio.run(init(s, store, audit))
@@ -148,7 +150,7 @@ def _dispatch(argv: list[str]) -> int:
         try:
             print(unit.render(sys.executable, os.environ), end="")
         except ValueError as exc:
-            print(f"cannot render the unit: {exc}", file=sys.stderr)
+            print(f"cannot render the unit: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
         return 0
     return _with_settings(args.command)

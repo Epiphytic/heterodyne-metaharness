@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import io
 import os
 import stat
@@ -538,3 +539,161 @@ def test_stop_tolerates_child_exit_race(tmp_path: Path) -> None:
         wn.proc = RacyProc()  # type: ignore[assignment]
         await wn.stop()
     asyncio.run(body())
+
+
+def test_stop_kills_and_reaps_when_terminate_times_out(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class StubbornProc:
+        returncode = None
+
+        def terminate(self) -> None:
+            calls.append("terminate")
+
+        def kill(self) -> None:
+            calls.append("kill")
+            raise ProcessLookupError  # it exited between the timeout and the kill
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            if calls.count("wait") == 1:
+                await asyncio.sleep(3600)  # outlives the (patched) grace period
+            self.returncode = -9  # type: ignore[assignment]
+            return -9
+
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait_for(aw: object, timeout: float) -> object:
+        return await real_wait_for(aw, 0.01)  # type: ignore[arg-type]
+    monkeypatch.setattr(asyncio, "wait_for", short_wait_for)
+    proc = StubbornProc()
+
+    async def body() -> None:
+        wn = WnAgent("wn-agent", tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+        wn.proc = proc  # type: ignore[assignment]
+        await wn.stop()
+    asyncio.run(body())
+    assert calls == ["terminate", "wait", "kill", "wait"] and proc.returncode == -9
+
+
+def test_stop_terminates_and_reaps(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class Proc:
+        returncode = None
+
+        def terminate(self) -> None:
+            calls.append("terminate")
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            self.returncode = -15  # type: ignore[assignment]
+            return -15
+    proc = Proc()
+
+    async def body() -> None:
+        wn = WnAgent("wn-agent", tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+        wn.proc = proc  # type: ignore[assignment]
+        await wn.stop()
+    asyncio.run(body())
+    assert calls == ["terminate", "wait"] and proc.returncode == -15
+
+
+def test_child_output_goes_to_a_private_log_not_admind_streams(tmp_path: Path,
+                                                                capfd: pytest.CaptureFixture[str]) -> None:
+    npub = hex_to_npub("ab" * 32)
+    token = "sk-" + "Q7w8" * 6
+    script = tmp_path / "noisy"
+    script.write_text(f"#!{sys.executable}\nimport sys, time\n"
+                      f"print({npub!r}); print({token!r}, file=sys.stderr); sys.stdout.flush()\n"
+                      "time.sleep(60)\n")
+    script.chmod(0o700)
+    log = tmp_path / "h" / "wn-agent.log"
+
+    async def body() -> None:
+        wn = WnAgent(str(script), tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+        wn.prepare()
+        log.write_text("stale " * 1000)  # a previous run's output is truncated at the next start
+        log.chmod(0o644)
+        wn.proc = None
+        client = ControlClient(wn.socket_path, wn.token(), timeout=0.2)
+        with pytest.raises(WnAgentError):
+            await wn.start(client, wait=1.5)  # the noisy child never serves the socket
+        await wn.stop()
+    asyncio.run(body())
+    seen = capfd.readouterr()
+    assert npub not in seen.out + seen.err and token not in seen.out + seen.err
+    text = log.read_text()
+    assert npub in text and token in text and "stale" not in text
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_init_failure_audit_omits_the_peers_detail(tmp_path: Path,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    s = make_settings(tmp_path)
+    token = "bearer-" + "Z9y8" * 8
+    audit = Audit(s.state_dir / "audit.jsonl")
+
+    class Leaky(WnAgent):
+        def prepare(self) -> None:
+            super().prepare()
+
+        async def start(self, client: ControlClient, wait: float = 30.0) -> None:
+            raise ControlError("wn-agent returned error unauthorized", "unauthorized", True,
+                               detail=f"bad token {token}")
+    import heterodyne.admind.cli as mod
+    orig = mod.WnAgent
+    mod.WnAgent = Leaky  # type: ignore[misc,assignment]
+    try:
+        assert asyncio.run(cli.init(s, Store(s.state_dir / "admind.db"), audit)) == 1
+    finally:
+        mod.WnAgent = orig  # type: ignore[misc]
+    seen = capsys.readouterr()
+    record = audit.path.read_text()
+    assert token not in record + seen.out + seen.err
+    assert '"code": "unauthorized"' in record and '"retryable": true' in record
+
+
+def test_config_error_for_an_npub_env_key_is_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv(f"HETERODYNE_{NPUB}_TOKEN", "plain")
+    assert cli.main(["init"]) == cli.EX_CONFIG
+    _assert_quiet(capsys)
+
+
+def test_config_error_for_a_nested_npub_key_is_safe() -> None:
+    from heterodyne.config import ConfigError
+    from heterodyne.config.secret_scan import check
+    for tree in ({"a": {NPUB: {"token": "plain"}}}, {"a": {"b" + "ab" * 32: {"x": "1"}, "token": "p"}}):
+        with pytest.raises(ConfigError) as info:
+            check(tree, "config.toml")
+        assert NPUB not in str(info.value) and "ab" * 32 not in str(info.value)
+
+
+def test_cli_boundary_redacts_and_escapes_a_config_error(monkeypatch: pytest.MonkeyPatch,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    from heterodyne.config import ConfigError
+
+    def boom() -> None:
+        raise ConfigError(f"x: {NPUB} \x1b[31m")
+    monkeypatch.setattr(cli.hconfig, "load", boom)
+    assert cli.main(["init"]) == cli.EX_CONFIG
+    _assert_quiet(capsys)
+
+
+@pytest.mark.parametrize("bad", ["\x1b[2J", "a\x00b", "\x7f", "\x9b", "a\nb"])
+def test_human_output_escapes_controls(bad: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    s = make_settings(tmp_path)
+    store = Store(s.state_dir / "admind.db")
+    store.set("group_id_hex", "b2" * 32)
+    audit = Audit(s.state_dir / "audit.jsonl")
+    shown = dataclasses.replace(s, state_dir=tmp_path / f"d{bad}" / "admind")  # only printed, never opened
+    assert asyncio.run(cli.init(shown, store, audit)) == 1
+    store.set("latched", f"reason{bad}")
+    assert cli.rearm(s, store, audit) == 0
+    out = capsys.readouterr().out
+    assert not any(ord(c) < 32 and c != "\n" or 0x7f <= ord(c) <= 0x9f for c in out)
+    assert out.count("\n") == 2  # only the two prints' own newlines
+    assert "\\x" in out

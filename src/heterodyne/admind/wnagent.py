@@ -36,6 +36,7 @@ class WnAgent:
         self.audit = audit
         self.socket_path = home / "ctl" / "wn-agent.sock"
         self.token_path = home / "control.token"
+        self.log_path = home / "wn-agent.log"
         self.proc: asyncio.subprocess.Process | None = None
 
     def prepare(self) -> None:
@@ -97,10 +98,22 @@ class WnAgent:
 
     async def start(self, client: ControlClient, wait: float = 30.0) -> None:
         self.prepare()
+        # The child's output may carry an npub-bearing path, a token or terminal escapes, so it never
+        # reaches admind's terminal or journal: it goes to a private log in the 0700 home, truncated at
+        # each start so it can't grow without bound across restarts.
         try:
-            self.proc = await asyncio.create_subprocess_exec(*self.argv(), stdin=asyncio.subprocess.DEVNULL)
+            log_fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+                             | os.O_CLOEXEC, 0o600)
+            os.fchmod(log_fd, 0o600)  # an older log may have been created with another mode
+        except OSError as exc:
+            raise WnAgentError(f"cannot open the wn-agent log file ({type(exc).__name__})") from None
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *self.argv(), stdin=asyncio.subprocess.DEVNULL, stdout=log_fd, stderr=log_fd)
         except OSError as exc:
             raise WnAgentError(f"cannot start wn-agent ({type(exc).__name__})") from None
+        finally:
+            os.close(log_fd)
         self.audit.write("wn-agent", action="start", pid=self.proc.pid)
         deadline = asyncio.get_running_loop().time() + wait
         while True:
