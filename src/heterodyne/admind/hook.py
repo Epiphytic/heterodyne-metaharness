@@ -33,6 +33,7 @@ import socket
 import stat
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -68,6 +69,7 @@ class Delivery:
     True once the event's effects are applied, False if processing failed."""
     event: HookEvent
     done: "asyncio.Future[bool]"
+    arrival: int | None = None      # the connection's accept-order index; never taken from the frame
 
 
 def same_prompt(a: str, b: str) -> bool:
@@ -213,12 +215,17 @@ class HookServer:
     the connections were accepted, one at a time. Connection i+1's event is queued only after connection
     i's was processed or dropped (EOF, a partial, oversized or invalid frame, or a frame that took longer
     than FRAME_SECONDS). The handler answers `ok` only after the event was processed, `err` if processing
-    failed."""
+    failed. Every accepted connection is counted in `pending_hooks` from the moment it is accepted until
+    its slot completes, so the daemon can tell that a hook is still on its way."""
 
-    def __init__(self, path: Path, queue: "asyncio.Queue[HookEvent | Delivery]", audit: Audit) -> None:
+    def __init__(self, path: Path, queue: "asyncio.Queue[HookEvent | Delivery]", audit: Audit,
+                 on_idle: Callable[[], None] | None = None) -> None:
         self.path = path
         self.queue = queue
         self.audit = audit
+        self.on_idle = on_idle      # called when `pending_hooks` returns to zero
+        self.accepted = 0           # the arrival index of the newest accepted connection (first is 1)
+        self.pending_hooks = 0      # accepted connections whose slot has not completed yet
         self._server: asyncio.Server | None = None
         self._tail: asyncio.Future[None] | None = None   # the newest connection's slot in the order
 
@@ -244,6 +251,9 @@ class HookServer:
         # The first statements run before any await, in the order the connections were accepted: the slot
         # is this connection's place in line, whatever order the frames finish arriving in.
         loop = asyncio.get_running_loop()
+        self.accepted += 1
+        index = self.accepted
+        self.pending_hooks += 1     # counted from accept, so the dispatch gate sees a frame still arriving
         previous = self._tail
         slot: asyncio.Future[None] = loop.create_future()
         self._tail = slot
@@ -257,7 +267,7 @@ class HookServer:
             if previous is not None:
                 await previous      # dropped or not, the slot is released only after the earlier ones
             if event is not None:
-                delivery = Delivery(event, loop.create_future())
+                delivery = Delivery(event, loop.create_future(), index)
                 await self.queue.put(delivery)
                 ok = await delivery.done
                 writer.write(b"ok\n" if ok else b"err\n")
@@ -267,6 +277,9 @@ class HookServer:
         finally:
             if not slot.done():
                 slot.set_result(None)
+            self.pending_hooks -= 1     # processed or dropped; after the answer was written
+            if self.pending_hooks == 0 and self.on_idle is not None:
+                self.on_idle()
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()

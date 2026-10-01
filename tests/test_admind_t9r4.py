@@ -118,7 +118,7 @@ def test_the_daemon_answers_ok_after_route_hook_and_err_when_it_raised(
     gate: asyncio.Future[None] | None = None
     calls = [0]
 
-    async def route(ev: HookEvent) -> None:
+    async def route(ev: HookEvent, arrival: int | None = None) -> None:
         calls[0] += 1
         assert gate is not None
         await gate
