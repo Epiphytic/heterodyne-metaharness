@@ -503,14 +503,23 @@ def scripted_tmux(monkeypatch: pytest.MonkeyPatch, fail: dict[str, BaseException
     return t, calls
 
 
-@pytest.mark.parametrize("step", ["load-buffer", "paste-buffer"])
-def test_a_paste_that_fails_before_enter_is_a_definite_non_submission(
-        monkeypatch: pytest.MonkeyPatch, step: str) -> None:
-    t, calls = scripted_tmux(monkeypatch, {step: TmuxError("failed")})
+@pytest.mark.parametrize("fail", [TmuxError("failed"), subprocess.TimeoutExpired("tmux", 15)])
+def test_a_load_buffer_failure_is_a_definite_non_delivery(
+        monkeypatch: pytest.MonkeyPatch, fail: BaseException) -> None:
+    t, calls = scripted_tmux(monkeypatch, {"load-buffer": fail})
     with pytest.raises(TmuxError) as info:
         t.paste("s", "hi")
     assert not isinstance(info.value, TmuxPasteUncertain)
-    assert "send-keys" not in calls                                # Enter was never reached
+    assert "paste-buffer" not in calls and "send-keys" not in calls   # nothing reached the pane
+
+
+@pytest.mark.parametrize("fail", [TmuxError("failed"), subprocess.TimeoutExpired("tmux", 15), OSError("x")])
+def test_a_paste_buffer_failure_is_uncertain_because_text_may_have_reached_the_pane(
+        monkeypatch: pytest.MonkeyPatch, fail: BaseException) -> None:
+    t, calls = scripted_tmux(monkeypatch, {"paste-buffer": fail})
+    with pytest.raises(TmuxPasteUncertain):
+        t.paste("s", "hi")
+    assert "send-keys" not in calls                                # Enter was not attempted
 
 
 @pytest.mark.parametrize("fail", [

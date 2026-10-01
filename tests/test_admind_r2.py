@@ -4,12 +4,16 @@ sleeps, no real wn-agent, claude, systemctl, network or ~/.claude.
 """
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_admind_r1 import Unit, inbound, run
+from test_admind_r1 import FakeTmux, Unit, inbound, run
+
+from heterodyne.admind.daemon import UNCERTAIN
+from heterodyne.tmux import Tmux
 
 # --- 2. authorisation is re-checked after every await and under the lock, before a side effect ---
 
@@ -54,3 +58,51 @@ def test_a_latch_while_waiting_for_the_dispatch_lock_stops_interrupt_and_new(
     run(scenario())
     assert u.tmux.keys == [] and u.tmux.sessions == sessions_before
     assert u.store.get("agent_session") == "S1" and "S1" not in u.daemon.retired
+
+
+# --- 3. a paste that times out after delivering text is never retried ---
+
+class PaneTmux(FakeTmux):
+    """The real Tmux.paste over a scripted tmux: `paste-buffer` puts the text in the pane, then fails."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        super().__init__()
+        self.pane = ""
+        self.buffers: dict[str, str] = {}
+        self.fail_paste_buffer: BaseException | None = None
+        self.real = Tmux("hz-test-never-started")
+        monkeypatch.setattr(self.real, "_run", self._run)
+        monkeypatch.setattr("heterodyne.tmux.time.sleep", lambda _s: None)
+
+    def _run(self, *args: str, data: bytes | None = None, check: bool = True) -> Any:
+        if args[0] == "load-buffer":
+            assert data is not None
+            self.buffers[args[2]] = data.decode()
+        elif args[0] == "paste-buffer":
+            self.pane += self.buffers[args[args.index("-b") + 1]]       # delivered ...
+            if self.fail_paste_buffer is not None:
+                raise self.fail_paste_buffer                            # ... and then it times out
+        elif args[0] == "send-keys":
+            self.pane += "<Enter>"
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def paste(self, name: str, text: str) -> None:
+        self.real.paste(name, text)
+
+
+def test_a_paste_buffer_timeout_after_delivery_is_not_retried_and_not_duplicated(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    pane = PaneTmux(monkeypatch)
+    u.tmux.paste = pane.paste                       # type: ignore[method-assign]
+    pane.fail_paste_buffer = subprocess.TimeoutExpired("tmux", 15)
+
+    async def scenario() -> None:
+        a = await u.say("A")
+        pane.fail_paste_buffer = None
+        await u.daemon.flush()
+        await u.daemon.flush()
+        assert pane.pane == "A"                     # once; never "AA"
+        assert u.daemon.held == []
+        assert (f"No reply to this message: {UNCERTAIN}.", a) in [(t, r) for _, t, r in u.outbox()]
+    run(scenario())
