@@ -12,9 +12,9 @@ import json
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import pytest
+from admind_waits import lock_waiters, stays, wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r3 import Gate
 
@@ -63,11 +63,6 @@ async def answer(reader: asyncio.StreamReader) -> bytes:
     return await asyncio.wait_for(reader.readline(), 10)
 
 
-async def spin(times: int = 40) -> None:
-    for _ in range(times):
-        await asyncio.sleep(0)
-
-
 def replies(u: Unit) -> list[tuple[str, str | None]]:
     return [(t, r) for k, t, r in u.outbox() if k.startswith("reply:")]
 
@@ -109,7 +104,7 @@ def test_an_old_session_start_that_waited_for_the_lock_cannot_ready_the_replacem
         await asyncio.wait_for(gate.entered.wait(), 10)
         old = HookEvent("SessionStart", "S1", source="startup", launch=old_nonce)
         hook = asyncio.create_task(u.daemon.route_hook(old))        # passes any early check, waits
-        await spin()
+        await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)     # parked on the lock
         assert not hook.done()
         gate.release.set()
         await asyncio.wait_for(check, 10)                           # the relaunch: same session, new nonce
@@ -141,7 +136,7 @@ def test_a_stale_stop_that_waited_for_the_lock_posts_only_its_own_text(tmp_path:
         stop = HookEvent("Stop", "S1", launch=NONCE, last_assistant_message="old launch's reply")
         async with u.daemon.dispatch_lock:                          # supervision is mid-relaunch
             task = asyncio.create_task(u.daemon.route_hook(stop))
-            await spin()
+            await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)
             u.store.set("launch_nonce", "cd" * 16)                  # the replacement's nonce
         await asyncio.wait_for(task, 10)
         assert u.store.get("anchor") == a and u.store.get("busy") is not None   # state untouched
@@ -164,18 +159,18 @@ def test_a_held_message_is_not_pasted_before_an_accepted_prompt_behind_a_slow_st
         assert u.store.get("anchor") == a
         c = await u.say("job C")                                    # held behind A's busy turn
         assert u.daemon.held == [(c, "job C")]
-        async with serving(u) as (_server, sock):
+        async with serving(u) as (server, sock):
             ra, wa = await send(sock, frame("Stop"))                # A's Stop: slow transcript fallback
             assert await asyncio.to_thread(read.started.wait, 10)
             rb, wb = await send(sock, frame("UserPromptSubmit", prompt="typed at the terminal"))
-            await spin()                                            # B's frame is complete, behind A
+            await wait_until(lambda: server.accepted == 2)          # B is accepted, behind A
             read.release.set()                                      # A clears busy ...
             assert await answer(ra) == b"ok\n"
-            await spin()
-            assert u.tmux.pasted == ["job A"]                       # ... but C waits for B
+            await wait_until(lambda: server.pending_hooks == 1)     # A's slot is done; B is still on its way
+            await stays(lambda: u.tmux.pasted == ["job A"])         # ... but C waits for B
             assert await answer(rb) == b"ok\n"
-            await spin()
-            assert u.tmux.pasted == ["job A"]                       # B set busy: C stays held
+            await wait_until(lambda: server.pending_hooks == 0 and not u.daemon._idle_tasks)
+            await stays(lambda: u.tmux.pasted == ["job A"])         # B set busy: C stays held
             assert u.store.get("busy") is not None and u.daemon.held == [(c, "job C")]
             for w in (wa, wb):
                 w.close()
@@ -200,11 +195,6 @@ def test_the_held_message_is_pasted_when_the_last_accepted_hook_is_done(tmp_path
     run(scenario())
 
 
-async def wait_until(pred: Any) -> None:
-    while not pred():
-        await asyncio.sleep(0)
-
-
 def test_the_server_counts_a_connection_from_accept_until_its_slot_completes(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     idle: list[int] = []
@@ -215,19 +205,19 @@ def test_the_server_counts_a_connection_from_accept_until_its_slot_completes(tmp
         try:
             r1, w1 = await asyncio.open_unix_connection(str(tmp_path / "h.sock"))
             r2, w2 = await asyncio.open_unix_connection(str(tmp_path / "h.sock"))
-            await spin()
-            assert server.accepted == 2 and server.pending_hooks == 2   # counted before any frame arrived
+            await wait_until(lambda: server.accepted == 2)
+            assert server.pending_hooks == 2                         # counted before any frame arrived
             w1.write(frame("Stop", arrival=0))                       # a frame cannot choose its own index
             await w1.drain()
             first = await asyncio.wait_for(u.daemon.hooks.get(), 10)
             assert first.arrival == 1                                # type: ignore[union-attr]
             first.done.set_result(True)                              # type: ignore[union-attr]
             assert await answer(r1) == b"ok\n"
-            await spin()
-            assert server.pending_hooks == 1 and idle == []          # the second is still on its way
+            await wait_until(lambda: server.pending_hooks == 1)
+            await stays(lambda: idle == [])                          # the second is still on its way
             w2.close()                                               # EOF: dropped
-            await spin()
-            assert server.pending_hooks == 0 and idle == [1]
+            await wait_until(lambda: server.pending_hooks == 0)
+            assert idle == [1]
             w1.close()
         finally:
             await server.close()
@@ -252,7 +242,7 @@ async def interrupt_with_prompt_behind(u: Unit, sock: str, gate: Gate, before: b
     interrupt = asyncio.create_task(u.say("!interrupt"))
     await asyncio.wait_for(gate.entered.wait(), 10)                 # the Escape is in flight, lock held
     r, w = await send(sock, frame("UserPromptSubmit", prompt="job A"))
-    await spin()
+    await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)     # A's prompt waits for the lock
     gate.release.set()
     await asyncio.wait_for(interrupt, 10)
     assert await answer(r) == b"ok\n"
@@ -265,14 +255,14 @@ def test_a_prompt_that_waited_behind_interrupt_does_not_restore_busy(tmp_path: P
 
     async def scenario() -> None:
         await u.say("job A")
-        async with serving(u) as (_server, sock):
+        async with serving(u) as (server, sock):
             await interrupt_with_prompt_behind(u, sock, Gate(asyncio.get_running_loop()), None)
             assert u.store.get("in_flight") is None and u.store.get("busy") is None
             assert u.store.get("anchor") is None
             assert "stale-prompt" in u.audit_text()
             c = await u.say("job C")                                # dispatches normally
             assert u.tmux.pasted == ["job A", "job C"] and u.store.get("in_flight") == c
-            await spin()
+            await wait_until(lambda: server.pending_hooks == 0)     # the earlier hooks are all done
             r, w = await send(sock, frame("UserPromptSubmit", prompt="job C"))      # C's own prompt counts
             assert await answer(r) == b"ok\n"
             assert u.store.get("anchor") == c
@@ -322,7 +312,7 @@ def test_a_stop_accepted_before_the_release_posts_only_its_own_text_and_changes_
             interrupt = asyncio.create_task(u.say("!interrupt"))
             await asyncio.wait_for(gate.entered.wait(), 10)
             r1, w1 = await send(sock, frame("Stop"))                # textless: no transcript fallback
-            await spin()
+            await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)
             gate.release.set()
             await asyncio.wait_for(interrupt, 10)
             assert await answer(r1) == b"ok\n"

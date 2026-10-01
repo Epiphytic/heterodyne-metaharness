@@ -154,6 +154,8 @@ class Unit:
         self.store.set("agent_session", "S1")
         self.agent.started("S1")
         self.store.set("operator_seen_at", now())
+        self.store.set("launch_nonce", "ab" * 16)       # a pane without a current nonce is never adopted
+        self.daemon.ready_nonce = "ab" * 16
         self.daemon.ready.set()
         self.seq = 0
 

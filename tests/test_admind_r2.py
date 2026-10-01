@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from admind_waits import lock_waiters, wait_until
 from test_admind_r1 import FakeTmux, Unit, inbound, run
 
 from heterodyne.admind.daemon import READY_NOTICE, UNCERTAIN
@@ -53,7 +54,7 @@ def test_a_latch_while_waiting_for_the_dispatch_lock_stops_interrupt_and_new(
     async def scenario() -> None:
         await u.daemon.dispatch_lock.acquire()
         task = asyncio.create_task(u.daemon.handle(u.mid(), command))
-        await asyncio.sleep(0)                  # the command is now parked on the lock
+        await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)    # parked on the lock
         u.daemon.latch("group membership changed (member_added)")
         u.daemon.dispatch_lock.release()
         await task
@@ -129,7 +130,7 @@ def test_a_prompt_hook_during_a_failing_send_is_applied_after_it_and_keeps_the_a
         assert await asyncio.to_thread(started.wait, 10)        # A's paste is in its worker thread
         hook = asyncio.create_task(u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1",
                                                               prompt="typed at the terminal")))
-        await asyncio.sleep(0)
+        await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)    # parked behind the dispatch
         assert not hook.done() and u.store.get("anchor") is None   # not applied mid-dispatch
         release.set()
         a = await sending

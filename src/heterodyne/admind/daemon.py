@@ -112,9 +112,14 @@ async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: A
         try:
             await factory()
         except Exception as exc:  # noqa: BLE001 - the task boundary: contain, record the type, retry
-            audit.write("task", name=name, action="crashed", error=type(exc).__name__)
+            crashed = type(exc).__name__
         else:
-            audit.write("task", name=name, action="returned")
+            crashed = None
+        with contextlib.suppress(Exception):    # a broken log must not end the supervisor (and the TaskGroup)
+            if crashed is None:
+                audit.write("task", name=name, action="returned")
+            else:
+                audit.write("task", name=name, action="crashed", error=crashed)
         if clock() - started >= healthy:
             delay = base
         await sleep(delay)
@@ -298,7 +303,7 @@ class Admind:
     async def start_agent(self, relaunch: bool = False) -> None:
         self.ready.clear()
         self.ready_nonce = None
-        if relaunch:
+        if relaunch or self.agent.replace_pending() is not None:
             # The departing launch stops validating now, before this coroutine yields: ensure_running
             # (in a thread) gives the replacement its own nonce before it starts the pane.
             self.agent.invalidate_launch()
@@ -337,7 +342,10 @@ class Admind:
             timed_out = not self.is_ready() and self.clock() - self.launched_at > self.ready_timeout
             if alive and not timed_out:
                 return
-            self.abandon_in_flight("the admin agent restarted before answering; resend if needed", idle=True)
+            # The replacement intent is committed with the abandonment: a crash before the pane is
+            # replaced must not let a restart adopt the old pane and dispatch into it.
+            self.abandon_in_flight("the admin agent restarted before answering; resend if needed", idle=True,
+                                   replace="died" if not alive else "ready-timeout")
             self.audit_quietly("agent", action="died" if not alive else "ready-timeout")
             await self.start_agent(relaunch=True)
             self.raise_floor()
@@ -566,7 +574,7 @@ class Admind:
             self.launched_at = self.clock()
             self.not_ready_sent = False
             self.stuck = None
-            self.abandon_in_flight("the admin agent session was replaced by !new", idle=True)
+            self.abandon_in_flight("the admin agent session was replaced by !new", idle=True, replace="new")
             result, ok = await self.execute(cmd)
             self.raise_floor()
             if not ok:
@@ -655,13 +663,16 @@ class Admind:
         finally:
             self.audit_quietly("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
 
-    def abandon_in_flight(self, why: str, floor: int | None = None, idle: bool = False) -> None:
+    def abandon_in_flight(self, why: str, floor: int | None = None, idle: bool = False,
+                          replace: str | None = None) -> None:
         """Release the reservation and its anchor. Hooks accepted so far (a hook releasing the turn passes
         its own index instead: what was accepted behind it is newer) can no longer start or end it.
         Three steps, in this order. (a) One transaction holds only the safety and state change: the anchor
         and reservation cleared, and the idle state if `idle`. It commits on its own, so call this outside
         any transaction a later fallible step could roll back. (b) The operator's notice is queued in its
-        own transaction; a failure there is contained and undoes nothing from (a). (c) A quiet audit."""
+        own transaction; a failure there is contained and undoes nothing from (a). (c) A quiet audit.
+        `replace` (a fixed word) is the caller's intent to replace the pane: it is stored in (a), so no
+        restart can see the turn idle without also seeing that the old pane must not be adopted."""
         self.raise_floor(floor)
         with self.store.transaction():
             mid = self.store.get("in_flight")
@@ -670,6 +681,8 @@ class Admind:
             self.store.delete("stopped_flight")
             if mid is not None:
                 self.store.delete("in_flight")
+            if replace is not None:
+                self.store.set("replace_pending", replace)
             if idle:
                 self.set_idle()
         if mid is None:
@@ -1095,21 +1108,25 @@ class Admind:
         key = alerts.outbox_key(raw)
         text = alerts.render(name, alert, self.s.chunk_chars)
         if self.store.relay_alert(raw, key, text):
-            self.audit.write("alert", name=show(alerts.display_name(name), False)[:64], key=show(key, False),
-                             malformed=alert is None)
             self.wake.set()
+            self.audit_quietly("alert", name=show(alerts.display_name(name), False)[:64],
+                               key=show(key, False), malformed=alert is None)
 
     def alert_failed(self, raw: bytes, exc: Exception) -> None:
         """Report an alert admind could not relay: by exception type and opaque key only, and tell the
         operator with fixed wording. If even that fails the alert is skipped for this process."""
         key = alerts.outbox_key(raw)
-        self.audit.write("alert", key=show(key, False), action="failed", error=type(exc).__name__)
+        skipped: str | None = None
         try:
             if self.store.relay_alert(raw, key, ALERT_FAILED.format(ref=key.partition(":")[2][:12])):
                 self.wake.set()
         except Exception as inner:  # noqa: BLE001 - nothing more can be done for this file
             self.bad_alerts.add(raw)
-            self.audit.write("alert", key=show(key, False), action="skipped", error=type(inner).__name__)
+            skipped = type(inner).__name__
+        # The fallback or the skip is recorded first; the audit (quiet) cannot undo or pre-empt either.
+        self.audit_quietly("alert", key=show(key, False), action="failed", error=type(exc).__name__)
+        if skipped is not None:
+            self.audit_quietly("alert", key=show(key, False), action="skipped", error=skipped)
 
     async def group_loop(self) -> None:
         while True:

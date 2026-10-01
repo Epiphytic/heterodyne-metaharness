@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from admind_waits import stays, wait_until
 from test_admind_r1 import Unit, run
 
 from heterodyne.admind import hook as hook_module
@@ -49,11 +50,6 @@ class Consumer:
             done.set_result(ok)
 
 
-async def yield_loop(times: int = 30) -> None:
-    for _ in range(times):
-        await asyncio.sleep(0)
-
-
 @contextlib.asynccontextmanager
 async def server_for(tmp_path: Path) -> AsyncIterator[tuple[HookServer, Consumer, Path]]:
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -71,19 +67,18 @@ async def server_for(tmp_path: Path) -> AsyncIterator[tuple[HookServer, Consumer
 def test_a_hook_whose_connect_came_first_is_processed_first_though_its_frame_finishes_later(
         tmp_path: Path) -> None:
     async def scenario() -> None:
-        async with server_for(tmp_path) as (_server, consumer, sock):
+        async with server_for(tmp_path) as (server, consumer, sock):
             ra, wa = await asyncio.open_unix_connection(str(sock))      # A connects first ...
             rb, wb = await asyncio.open_unix_connection(str(sock))      # ... then B
             wb.write(frame(last_assistant_message="B"))                 # B's frame is complete first
             await wb.drain()
-            await yield_loop()
-            assert consumer.queue.empty()                               # B waits for A
+            await wait_until(lambda: server.accepted == 2)
+            await stays(lambda: consumer.queue.empty())                 # B waits for A
             wa.write(frame(last_assistant_message="A"))                 # A's frame finishes later
             await wa.drain()
             first = await consumer.take()
             assert first.last_assistant_message == "A"
-            await yield_loop()
-            assert consumer.queue.empty()                               # B is held until A is processed
+            await stays(lambda: consumer.queue.empty())                 # B is held until A is processed
             consumer.finish()
             second = await consumer.take()
             assert second.last_assistant_message == "B"
@@ -104,8 +99,7 @@ def test_an_event_is_answered_only_after_it_was_processed_and_a_failure_is_answe
             await writer.drain()
             await consumer.take()
             answer = asyncio.create_task(reader.readline())
-            await yield_loop()
-            assert not answer.done()                                    # not acknowledged while queued
+            await stays(lambda: not answer.done())                      # not acknowledged while queued
             consumer.finish(ok=False)
             assert await asyncio.wait_for(answer, 10) == b"err\n"
             writer.close()
@@ -138,8 +132,7 @@ def test_the_daemon_answers_ok_after_route_hook_and_err_when_it_raised(
             w1.write(frame())
             await w1.drain()
             answer = asyncio.create_task(r1.readline())
-            await yield_loop()
-            assert not answer.done()                                    # route_hook is still running
+            await stays(lambda: not answer.done())                      # route_hook is still running
             gate.set_result(None)
             assert await asyncio.wait_for(answer, 10) == b"ok\n"
             r2, w2 = await asyncio.open_unix_connection(sock)
@@ -162,7 +155,7 @@ def test_a_dropped_connection_releases_the_next_one_and_a_slow_frame_times_out(
     monkeypatch.setattr(hook_module, "FRAME_SECONDS", 0.2)
 
     async def scenario() -> None:
-        async with server_for(tmp_path) as (_server, consumer, sock):
+        async with server_for(tmp_path) as (server, consumer, sock):
             _ra, wa = await asyncio.open_unix_connection(str(sock))     # connects, sends nothing, EOF
             _rb, wb = await asyncio.open_unix_connection(str(sock))     # partial frame, then silence
             rc, wc = await asyncio.open_unix_connection(str(sock))
@@ -170,8 +163,8 @@ def test_a_dropped_connection_releases_the_next_one_and_a_slow_frame_times_out(
             await wb.drain()
             wc.write(frame(last_assistant_message="C"))
             await wc.drain()
-            await yield_loop()
-            assert consumer.queue.empty()                               # C waits behind A and B
+            await wait_until(lambda: server.accepted == 3)
+            await stays(lambda: consumer.queue.empty())                 # C waits behind A and B
             wa.close()                                                  # A: EOF
             ev = await consumer.take()                                  # B times out; then C
             assert ev.last_assistant_message == "C"

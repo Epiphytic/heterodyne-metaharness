@@ -2,7 +2,9 @@
 
 One interactive `claude` runs in tmux session `admin` on admind's private tmux server. Its session ID is
 recorded in the store:
-- `ensure_running` adopts a live session;
+- `ensure_running` adopts a live session, but only one that has a current launch nonce and no unfinished
+  replacement (the store's `replace_pending`, written in the same transaction that abandoned the old
+  turn and cleared only once the replacement pane is started);
 - it resumes the recorded ID (with `--resume`) once that ID has been seen to start;
 - otherwise it launches with a fresh ID;
 - every launch gets a fresh nonce, carried by its hook command, so events of an earlier launch are
@@ -73,11 +75,26 @@ class AdminAgent:
             fh.write(settings_json(hook_command(self.hook_socket, self.launch_nonce or "")))
         tmp.replace(self.settings_file)
 
+    def replace_pending(self) -> str | None:
+        """Why an earlier run began replacing the pane without finishing (a fixed word), or None."""
+        return self.store.get("replace_pending")
+
     def ensure_running(self, relaunch: bool = False) -> str:
         """`relaunch` skips adoption: a live pane that never reported SessionStart is replaced, under the
-        same crash-loop limit as any other launch."""
-        if not relaunch and self.alive() and self.session_id is not None:
+        same crash-loop limit as any other launch. So does an unfinished replacement (`replace_pending`,
+        persisted by whoever abandoned the old pane's turn): the old pane may still be busy and is never
+        adopted. A pane with no current launch nonce is never adopted either. The intent is cleared only
+        after the replacement pane is started with its own nonce, so a crash before that repeats it."""
+        pending = self.replace_pending()
+        if relaunch and pending is None:
+            self.store.set("replace_pending", "relaunch")
+            pending = "relaunch"
+        if (pending is None and self.alive() and self.session_id is not None
+                and self.launch_nonce is not None):
             return "adopted"
+        if pending == "new":    # !new: a new session, and a fresh crash-loop count
+            self.store.delete("agent_session")
+            self.store.set("launches_without_start", "0")
         launches = int(self.store.get("launches_without_start") or "0")
         if launches >= MAX_LAUNCHES_WITHOUT_START:   # checked first: the dead pane stays for !tail
             raise AgentStuck(f"the admin agent did not start after {launches} launches; use !tail, then !new")
@@ -93,6 +110,7 @@ class AdminAgent:
         argv = interactive_argv(self.settings.adapter_binary, self.settings.profile, session_id=sid,
                                 resume=resume, settings_file=self.settings_file, name=SESSION)
         self.tmux.new_session(SESSION, self.settings.workdir, argv)
+        self.store.delete("replace_pending")     # established: nonce installed, pane started
         return "resumed" if resume else "launched"
 
     def started(self, session_id: str) -> None:
@@ -100,6 +118,7 @@ class AdminAgent:
         self.store.set("launches_without_start", "0")
 
     def new(self) -> str:
+        self.store.set("replace_pending", "new")     # before the kill: a crash after it repeats the !new
         self.tmux.kill(SESSION)
         self.store.delete("agent_session")
         self.store.set("launches_without_start", "0")

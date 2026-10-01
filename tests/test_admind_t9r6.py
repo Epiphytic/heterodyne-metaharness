@@ -8,9 +8,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from admind_waits import wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r3 import Gate
-from test_admind_t9r5 import GatedRead, answer, arm, frame, send, serving, spin, wait_until
+from test_admind_t9r5 import GatedRead, answer, arm, frame, send, serving
 
 from heterodyne.admind.hook import HookEvent, HookServer
 from heterodyne.tmux import TmuxError
@@ -49,7 +50,7 @@ def test_a_prompt_expired_behind_a_dispatch_is_not_followed_by_a_retry_into_its_
             gate.wait()
             raise TmuxError("tmux paste failed")
         u.tmux.paste = failing_paste       # type: ignore[method-assign]
-        async with serving(u) as (_server, sock):
+        async with serving(u) as (server, sock):
             a = asyncio.create_task(u.say("job A"))                 # holds dispatch_lock, send pending
             await asyncio.wait_for(gate.entered.wait(), 10)
             rb, wb = await send(sock, frame("UserPromptSubmit", prompt="typed at the terminal"))
@@ -57,7 +58,7 @@ def test_a_prompt_expired_behind_a_dispatch_is_not_followed_by_a_retry_into_its_
             gate.release.set()                                      # A's send now fails definitively
             await asyncio.wait_for(a, 10)
             wb.close()
-            await spin()
+            await wait_until(lambda: server.pending_hooks == 0)
         assert u.tmux.pasted == []                                  # A was not retried into B's turn
         assert u.store.get("busy") is not None                      # the hold stands
         assert len(u.daemon.held) == 1
