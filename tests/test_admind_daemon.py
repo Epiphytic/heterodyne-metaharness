@@ -359,13 +359,14 @@ def test_failed_interrupt_keeps_the_queue_held(tmp_path: Path, monkeypatch: pyte
 def test_stop_during_interrupt_never_dispatches_into_the_escape(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
+    release = threading.Event()
 
     def before(h: Harness) -> None:
         real = h.agent.interrupt
 
         def slow() -> None:
             started.set()
-            time.sleep(1.0)                          # the turn's Stop lands while the Escape is pending
+            assert release.wait(30), "test never released the Escape"   # the Stop lands while it is pending
             real()
         monkeypatch.setattr(h.agent, "interrupt", slow)
 
@@ -376,6 +377,10 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
         await h.say("!interrupt")
         await h.until(started.is_set)
         await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "finished anyway"))
+        # Processed while the Escape is pending: the reply is queued (the outbox loop itself is parked
+        # behind the dispatch lock the !interrupt holds, so it cannot have been sent yet).
+        await h.until(lambda: any(r.text == "finished anyway" for r in h.store.pending()))
+        release.set()
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["finished anyway"] == hung
@@ -384,13 +389,15 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
     run_with(tmp_path, scenario, before)
 
 
-def slow(monkeypatch: pytest.MonkeyPatch, h: Harness, method: str, started: threading.Event) -> None:
-    """Delay AdminAgent.<method> by a second, so events can land while the command is in progress."""
+def slow(monkeypatch: pytest.MonkeyPatch, h: Harness, method: str, started: threading.Event,
+         release: threading.Event) -> None:
+    """Hold AdminAgent.<method> until `release` is set, so events can land while the command is in
+    progress: the test sets `release` only after injecting them."""
     real = getattr(h.agent, method)
 
     def delayed() -> Any:
         started.set()
-        time.sleep(1.0)
+        assert release.wait(30), "test never released the command"
         return real()
     monkeypatch.setattr(h.agent, method, delayed)
 
@@ -399,15 +406,19 @@ def slow(monkeypatch: pytest.MonkeyPatch, h: Harness, method: str, started: thre
 def test_prompt_during_interrupt_keeps_the_new_turn_busy(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
+    release = threading.Event()
 
     async def scenario(h: Harness) -> None:
         hung = await h.say("__hang__")
         await h.until(lambda: h.store.get("anchor") == hung)
         nxt = await h.say("next")
+        before = h.store.get("busy")
         await h.say("!interrupt")
         await h.until(started.is_set)
         sid = h.agent.session_id or ""
         await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.until(lambda: h.store.get("busy") != before)       # the terminal turn began: new period
+        release.set()
         await h.until(lambda: "Sent Esc to the admin agent." in h.texts())
         await asyncio.sleep(0.5)
         assert nxt not in dispatched(h)                          # the terminal turn is still running
@@ -415,7 +426,7 @@ def test_prompt_during_interrupt_keeps_the_new_turn_busy(
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["terminal answer"] is None and by_text["echo: next"] == nxt
-    h = run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "interrupt", started))
+    h = run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "interrupt", started, release))
     audit = audit_text(h)
     assert "typed at the terminal" not in audit and "terminal answer" not in audit
 
@@ -424,6 +435,7 @@ def test_prompt_during_interrupt_keeps_the_new_turn_busy(
 def test_new_ignores_the_replaced_sessions_late_session_start(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
+    release = threading.Event()
 
     async def scenario(h: Harness) -> None:
         hung = await h.say("__hang__")
@@ -433,11 +445,13 @@ def test_new_ignores_the_replaced_sessions_late_session_start(
         await h.say("!new")
         await h.until(started.is_set)
         await h.daemon.hooks.put(HookEvent("SessionStart", old))   # late, from the session being replaced
+        await h.until(lambda: "ignored-other-session" in audit_text(h))   # handled while !new is pending
+        release.set()
         await h.until(lambda: "echo: next" in h.texts(), timeout=30)
         assert h.agent.session_id != old
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["echo: next"] == nxt and dispatched(h).count(nxt) == 1
-    run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started))
+    run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started, release))
 
 
 @needs_tmux
