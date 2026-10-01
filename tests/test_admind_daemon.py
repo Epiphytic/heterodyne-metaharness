@@ -35,7 +35,7 @@ from heterodyne.marmot.nip19 import hex_to_npub
 from heterodyne.services import UnitStatus
 from heterodyne.tmux import Tmux, TmuxError
 
-pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "fake_claude.py"
 STRANGER = "e5" * 32
 
@@ -119,6 +119,7 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
     return h
 
 
+@needs_tmux
 def test_operator_round_trip_ready_notice_and_threaded_reply(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         mid = await h.say("hello there")
@@ -133,6 +134,7 @@ def test_operator_round_trip_ready_notice_and_threaded_reply(tmp_path: Path) -> 
     assert TMUX_SOCKET == "heterodyne-admind"
 
 
+@needs_tmux
 def test_two_quick_messages_each_get_their_own_threaded_reply(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("warm up")
@@ -145,6 +147,7 @@ def test_two_quick_messages_each_get_their_own_threaded_reply(tmp_path: Path) ->
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_recovery_notice_waits_for_a_good_group_check(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
@@ -159,6 +162,7 @@ def test_recovery_notice_waits_for_a_good_group_check(tmp_path: Path) -> None:
     run_with(tmp_path, scenario, before)
 
 
+@needs_tmux
 def test_recovery_notice_waits_for_the_operator(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.claim_inbound("99" * 32)            # claimed, but the operator was never seen
@@ -171,6 +175,7 @@ def test_recovery_notice_waits_for_the_operator(tmp_path: Path) -> None:
     run_with(tmp_path, scenario, before)
 
 
+@needs_tmux
 def test_latch_mid_batch_stops_the_rest(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("hi")
@@ -186,6 +191,7 @@ def test_latch_mid_batch_stops_the_rest(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("let me in", sender=STRANGER)
@@ -200,6 +206,7 @@ def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> 
     assert "sender is not the operator" in (h.settings.state_dir / "audit.jsonl").read_text()
 
 
+@needs_tmux
 def test_member_count_latches_and_stops_all_posting(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("first")
@@ -221,6 +228,7 @@ def test_member_count_latches_and_stops_all_posting(tmp_path: Path) -> None:
     assert "group has 3 members" in (h.store.get("latched") or "")
 
 
+@needs_tmux
 def test_membership_event_latches(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.fake.push_event({"type": "group_state_changed", "account_id_hex": ACCOUNT,
@@ -230,6 +238,7 @@ def test_membership_event_latches(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_alerts_wait_for_the_operator_then_relay_once(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.settings.alerts_dir.mkdir(parents=True)
@@ -246,6 +255,7 @@ def test_alerts_wait_for_the_operator_then_relay_once(tmp_path: Path) -> None:
     run_with(tmp_path, scenario, before)
 
 
+@needs_tmux
 def test_restart_recovery_answers_undelivered_messages(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
@@ -259,6 +269,7 @@ def test_restart_recovery_answers_undelivered_messages(tmp_path: Path) -> None:
     assert h.store.inbound_with_status("dropped") == ["99" * 32]
 
 
+@needs_tmux
 def test_outbox_retries_transient_failures_in_order(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         h.fake.fail_sends = 2
@@ -268,6 +279,7 @@ def test_outbox_retries_transient_failures_in_order(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_empty_reply_gets_a_placeholder(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("earlier")                       # the transcript now holds an earlier text reply
@@ -289,6 +301,7 @@ def dispatched(h: Harness) -> list[str]:
     return [r["message_id"] for r in records if r["kind"] == "dispatch"]
 
 
+@needs_tmux
 def test_lost_prompt_hook_holds_the_queue_until_interrupt(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         lost = await h.say("__noprompt__")
@@ -306,6 +319,7 @@ def test_lost_prompt_hook_holds_the_queue_until_interrupt(tmp_path: Path) -> Non
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_long_turn_with_a_lost_prompt_hook_is_never_pasted_over(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         busy = await h.say("__noprompt__ __hang__")
@@ -321,6 +335,7 @@ def test_long_turn_with_a_lost_prompt_hook_is_never_pasted_over(tmp_path: Path) 
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_failed_interrupt_keeps_the_queue_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def before(h: Harness) -> None:
         def fail() -> None:
@@ -340,6 +355,7 @@ def test_failed_interrupt_keeps_the_queue_held(tmp_path: Path, monkeypatch: pyte
     run_with(tmp_path, scenario, before)
 
 
+@needs_tmux
 def test_stop_during_interrupt_never_dispatches_into_the_escape(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
@@ -379,6 +395,7 @@ def slow(monkeypatch: pytest.MonkeyPatch, h: Harness, method: str, started: thre
     monkeypatch.setattr(h.agent, method, delayed)
 
 
+@needs_tmux
 def test_prompt_during_interrupt_keeps_the_new_turn_busy(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
@@ -403,6 +420,7 @@ def test_prompt_during_interrupt_keeps_the_new_turn_busy(
     assert "typed at the terminal" not in audit and "terminal answer" not in audit
 
 
+@needs_tmux
 def test_new_ignores_the_replaced_sessions_late_session_start(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
@@ -422,6 +440,7 @@ def test_new_ignores_the_replaced_sessions_late_session_start(
     run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started))
 
 
+@needs_tmux
 def test_ignored_hook_last_in_the_queue_still_releases_dispatch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         stuck = await h.say("__nostop__")
@@ -437,6 +456,7 @@ def test_ignored_hook_last_in_the_queue_still_releases_dispatch(tmp_path: Path) 
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         stuck = await h.say("__nostop__")
@@ -457,6 +477,7 @@ def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> 
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_terminal_prompt_never_takes_a_pending_anchor(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("warm up")
@@ -473,21 +494,27 @@ def test_terminal_prompt_never_takes_a_pending_anchor(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_late_stop_after_interrupt_never_takes_the_next_anchor(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         hung = await h.say("__hang__")
         await h.until(lambda: h.store.get("anchor") == hung)
         await h.say("!interrupt")
         await h.until(lambda: any(t.startswith("No reply to this message: interrupted") for t in h.texts()))
-        nxt = await h.say("next")
-        # The interrupted turn's Stop turns up late, before the next prompt is confirmed.
-        await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "late"))
-        await h.until(lambda: "echo: next" in h.texts() and "late" in h.texts())
+        # Hold the dispatch lock so "next" cannot be pasted (let alone confirmed) until the interrupted
+        # turn's late Stop has been processed and its reply sent: the order is explicit, not timing.
+        async with h.daemon.dispatch_lock:
+            nxt = await h.say("next")
+            await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "late"))
+            await h.until(lambda: "late" in h.texts())
+            assert "echo: next" not in h.texts()
+        await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["late"] is None and by_text["echo: next"] == nxt
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("warm up")
@@ -504,6 +531,7 @@ def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
     run_with(tmp_path, scenario)
 
 
+@needs_tmux
 def test_stale_in_flight_is_closed_out_at_startup(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         h.store.set("operator_seen_at", "2026-09-30T00:00:00+00:00")
@@ -517,6 +545,7 @@ def test_stale_in_flight_is_closed_out_at_startup(tmp_path: Path) -> None:
     run_with(tmp_path, scenario, before)
 
 
+@needs_tmux
 def test_stop_for_another_session_is_ignored(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("hi")
@@ -535,6 +564,7 @@ def secret_token() -> str:
     return "sk" + "-" + "Q" * 24
 
 
+@needs_tmux
 def test_audit_holds_no_peer_text_agent_text_or_account_identifiers(tmp_path: Path) -> None:
     stranger_npub = hex_to_npub(STRANGER)
     token = secret_token()
@@ -555,6 +585,7 @@ def test_audit_holds_no_peer_text_agent_text_or_account_identifiers(tmp_path: Pa
     assert "<redacted" in audit                      # the operator's own text is redacted, not dropped
 
 
+@needs_tmux
 def test_a_crashing_loop_restarts_with_a_value_free_audit(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     npub = hex_to_npub(STRANGER)
@@ -578,6 +609,7 @@ def test_a_crashing_loop_restarts_with_a_value_free_audit(
     assert npub not in audit and "boom" not in audit
 
 
+@needs_tmux
 def test_handler_failures_are_contained_and_value_free(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     npub = hex_to_npub(STRANGER)
@@ -608,6 +640,7 @@ def test_handler_failures_are_contained_and_value_free(
     assert "RuntimeError" in audit and npub not in audit and token not in audit
 
 
+@needs_tmux
 def test_tmux_failure_detail_never_reaches_the_chat_or_audit(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     npub = hex_to_npub(STRANGER)
@@ -626,6 +659,7 @@ def test_tmux_failure_detail_never_reaches_the_chat_or_audit(
     assert npub not in audit and token not in audit
 
 
+@needs_tmux
 def test_command_errors_and_control_characters_never_echo_values(tmp_path: Path) -> None:
     npub = hex_to_npub(STRANGER)
     token = secret_token()
@@ -644,6 +678,7 @@ def test_command_errors_and_control_characters_never_echo_values(tmp_path: Path)
     assert token not in audit and npub not in audit
 
 
+@needs_tmux
 def test_peer_error_detail_is_never_audited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     npub = hex_to_npub(STRANGER)
     token = secret_token()
@@ -663,6 +698,7 @@ def test_peer_error_detail_is_never_audited(tmp_path: Path, monkeypatch: pytest.
     assert token not in audit and npub not in audit
 
 
+@needs_tmux
 def test_a_rejected_send_is_audited_without_peer_detail(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     token = secret_token()
@@ -679,6 +715,7 @@ def test_a_rejected_send_is_audited_without_peer_detail(
     assert '"code": "not_found"' in audit and token not in audit
 
 
+@needs_tmux
 def test_subscription_failures_back_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     h = Harness(tmp_path)
     calls: list[float] = []
@@ -867,6 +904,7 @@ def test_run_refuses_an_uninitialised_install(tmp_path: Path, capsys: pytest.Cap
     assert code == cli.EX_CONFIG and "admind init" in err and "Traceback" not in err
 
 
+@needs_tmux
 def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import signal
 
@@ -911,4 +949,3 @@ def test_serve_startup_failure_is_a_value_free_line(
     out = capsys.readouterr()
     assert code == 1 and stub.stopped
     assert npub not in out.out + out.err and "Traceback" not in out.err
-
