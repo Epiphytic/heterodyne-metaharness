@@ -475,8 +475,9 @@ def test_interrupt_dispatching_b_during_a_reply_read_leaves_b_busy(
     assert u.tmux.pasted == ["prompt A", "prompt B"]
     assert u.store.get("in_flight") == b
     assert u.store.get("busy") is not None                        # A's Stop did not clear B's busy period
-    assert "A is done" not in u.texts()                           # nor post a reply for a turn that was cut
-    assert '"action": "stale-stop"' in u.audit_text()
+    assert u.store.get("anchor") is None                          # nor touch B's turn state
+    assert [(t, r) for k, t, r in u.outbox() if k.startswith("reply:")] == [("A is done", None)]
+    assert '"action": "late-stop"' in u.audit_text()              # A's reply is posted, unthreaded
 
 
 def test_new_during_a_reply_read_emits_no_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

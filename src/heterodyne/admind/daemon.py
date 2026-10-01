@@ -600,23 +600,29 @@ class Admind:
         seq = int(self.store.get("reply_seq") or "0") + 1
         self.store.set("reply_seq", str(seq))
         raw = await asyncio.to_thread(reply_text, ev)    # may read the transcript file
-        if not self.session_current(ev.session_id) or self.turn_identity(ev.session_id) != identity:
-            self.audit.write("agent", action="stale-stop")   # fixed wording; nothing from the event
+        if not self.session_current(ev.session_id):
+            self.audit.write("agent", action="stale-stop")   # a retired session: fixed wording only
             return
         text = raw if raw.strip() else NO_REPLY
-        # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
-        # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
-        # hook) posts top-level.
-        anchor = identity[2]
         parts = chunk.split(text, self.s.chunk_chars)
+        # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
+        # captured for is still the current one. A Stop with no anchor (a turn that ended after
+        # !interrupt, one begun at the terminal, or ours with a lost prompt hook) posts top-level, and
+        # so does a late Stop whose turn a newer dispatch has replaced: its reply is real and goes out
+        # unthreaded, and the newer turn's state is left exactly as it is.
+        current = self.turn_identity(ev.session_id) == identity
+        anchor = identity[2] if current else None
         with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
-            if anchor is not None:
-                self.store.delete("anchor")
-                self.store.delete("in_flight")
-                self.store.delete("in_flight_text")
             for i, part in enumerate(parts):
                 self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
-            self.set_idle()                 # the turn ended; an unconfirmed in_flight still holds
+            if current:
+                if anchor is not None:
+                    self.store.delete("anchor")
+                    self.store.delete("in_flight")
+                    self.store.delete("in_flight_text")
+                self.set_idle()             # the turn ended; an unconfirmed in_flight still holds
+        if not current:
+            self.audit.write("agent", action="late-stop")   # fixed wording; nothing from the event
         # The agent's text goes to the operator's chat only; the audit log records its size.
         self.audit.write("reply", session=ev.session_id, reply_to=anchor, chars=len(text),
                          chunks=len(parts))

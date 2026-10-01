@@ -137,3 +137,44 @@ def test_a_send_failure_does_not_clear_the_busy_state_of_a_newer_turn(tmp_path: 
         await u.daemon.flush()
         assert u.tmux.pasted == []                              # but nothing is dispatched into a busy agent
     run(scenario())
+
+
+# --- 5. a late Stop of the current session still posts its reply, top-level, and changes no state ---
+
+def test_an_unanchored_late_stop_posts_top_level_when_another_prompt_dispatches_during_the_read(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_read(ev: HookEvent) -> str:
+        started.set()
+        assert release.wait(10), "test never released the read"
+        return "the late reply"
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", slow_read)
+
+    async def scenario() -> None:
+        stop = asyncio.create_task(u.daemon.on_hook(HookEvent("Stop", "S1")))   # idle: no anchor
+        assert await asyncio.to_thread(started.wait, 10)
+        b = await u.say("prompt B")                       # dispatches while the reply is being read
+        assert u.tmux.pasted == ["prompt B"]
+        release.set()
+        await stop
+        assert u.store.get("in_flight") == b and u.store.get("busy") is not None
+        assert u.store.get("anchor") is None
+        replies = [(t, r) for k, t, r in u.outbox() if k.startswith("reply:")]
+        assert replies == [("the late reply", None)]      # posted, and not threaded to B
+    run(scenario())
+
+
+def test_a_stop_from_a_retired_session_is_still_suppressed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "old session reply")
+
+    async def scenario() -> None:
+        u.daemon.retired.add("S1")
+        await u.daemon.on_stop(HookEvent("Stop", "S1"))
+    run(scenario())
+    assert not any(k.startswith("reply:") for k, _, _ in u.outbox())
+    assert '"action": "stale-stop"' in u.audit_text()
