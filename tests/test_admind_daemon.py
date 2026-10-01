@@ -88,6 +88,13 @@ class Harness:
         await asyncio.wait_for(poll(), timeout)
 
 
+def drop_tmux(h: Harness) -> None:
+    """Kill the test's private tmux server and remove its socket."""
+    h.tmux.kill_server()
+    tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
+    (tmpdir / h.tmux.socket_name).unlink(missing_ok=True)
+
+
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
              before: Callable[[Harness], Any] | None = None) -> Harness:
     h = Harness(tmp_path)
@@ -108,9 +115,7 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
     try:
         asyncio.run(body())
     finally:
-        h.tmux.kill_server()
-        tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
-        (tmpdir / h.tmux.socket_name).unlink(missing_ok=True)
+        drop_tmux(h)
     return h
 
 
@@ -696,7 +701,7 @@ def test_subscription_failures_back_off(tmp_path: Path, monkeypatch: pytest.Monk
     try:
         asyncio.run(body())
     finally:
-        h.tmux.kill_server()
+        drop_tmux(h)
     assert 2 <= len(calls) <= 3                       # t = 0, 1, 3: doubling, not a busy loop
     assert "reconnect" in audit_text(h)
 
@@ -883,9 +888,7 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     try:
         code = asyncio.run(body())
     finally:
-        h.tmux.kill_server()
-        tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
-        (tmpdir / h.tmux.socket_name).unlink(missing_ok=True)
+        drop_tmux(h)
     assert code == 0 and stub.stopped
     audit = audit_text(h)
     assert '"action": "stop"' in audit and "b2" * 32 not in audit and ACCOUNT not in audit
