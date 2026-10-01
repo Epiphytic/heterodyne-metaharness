@@ -1,19 +1,21 @@
 """admind's durable state: one SQLite file in WAL mode (ADR 0001 §8).
 
 - `inbound`: every operator message ID admind has accepted, for replay protection and at-most-once
-  delivery (a `received` row that never reached `dispatched` is answered after a restart, never
-  replayed to the agent).
+  delivery. A prompt goes `received` then `dispatched` (claimed before it is pasted); a command goes
+  `received`, `executing` (persisted before it runs), then `done` with its reply queued in the same
+  transaction. After a restart a `received` or `executing` row is answered, never replayed.
 - `outbox`: replies and notices, sent in order with a stable idempotency key, so a resend after a crash
   is deduplicated by wn-agent (S4 step 4).
 - `alerts`: alert files already relayed, by raw file-name bytes (a name need not be valid UTF-8).
 - `kv`: small named values (group, account, agent session, latch, ...).
 """
 
+import contextlib
 import functools
 import os
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,7 +24,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbound (
     message_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL CHECK (status IN ('received', 'dispatched', 'dropped')),
+    status TEXT NOT NULL CHECK (status IN ('received', 'dispatched', 'executing', 'done', 'dropped')),
     received_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +72,7 @@ class Store:
         os.close(fd)
         path.chmod(0o600)
         self.lock = threading.RLock()
+        self._depth = 0         # open transaction() nesting, guarded by self.lock
         # check_same_thread=False: calls are serialized by self.lock (see _locked), not by thread.
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -140,15 +143,37 @@ class Store:
     def relayed(self, name: bytes) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE name = ?", (name,)).fetchone() is not None
 
+    @contextlib.contextmanager
+    def transaction(self) -> Generator[None]:
+        """Run the block's store calls as one SQLite transaction: all of them commit, or (on any
+        exception, a simulated crash included) none do. Re-entrant: a nested block joins the outer one.
+        The store lock is held throughout, so keep the block short and free of awaits."""
+        with self.lock:
+            if self._depth:
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            self.db.execute("BEGIN IMMEDIATE")
+            self._depth = 1
+            try:
+                yield
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            finally:
+                self._depth = 0
+
     @_locked
     def relay_alert(self, name: bytes, key: str, text: str) -> bool:
         """Record the alert and queue its message in one transaction; False if already relayed."""
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
+        with self.transaction():
             cur = self.db.execute("INSERT OR IGNORE INTO alerts(name, relayed_at) VALUES (?, ?)",
                                   (name, now()))
             if cur.rowcount != 1:
-                self.db.execute("ROLLBACK")
                 return False
             cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status) "
                                   "VALUES (?, NULL, ?, 'pending')", (key, text))
@@ -156,8 +181,4 @@ class Store:
                 row = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
                 if row is None or row[0] != text:
                     raise ValueError(f"outbox key already in use with different text: {key}")
-            self.db.execute("COMMIT")
             return True
-        except BaseException:
-            self.db.execute("ROLLBACK")
-            raise

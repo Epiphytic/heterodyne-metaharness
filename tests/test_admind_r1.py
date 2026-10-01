@@ -24,7 +24,7 @@ from fakes.settings import OPERATOR_HEX, make_settings
 from heterodyne.admind.agent import SESSION, AdminAgent
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
-from heterodyne.admind.daemon import UNCERTAIN, Admind
+from heterodyne.admind.daemon import RESTARTED_NOTICE, UNCERTAIN, Admind
 from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, now
 from heterodyne.marmot.control import ControlError, InboundMessage, decode_event
@@ -529,3 +529,124 @@ def test_an_uncertain_send_is_never_retried_and_tells_the_operator(tmp_path: Pat
     run(scenario())
     audit = u.audit_text()
     assert "disk" not in audit and "bug" not in audit and "unsure" not in audit
+
+
+# --- 7. crash windows: each transition and its outbox batch are one transaction ---
+class Crash(BaseException):
+    """Stands in for the process dying: nothing in admind catches it."""
+
+
+def fail_nth_enqueue(u: Unit, monkeypatch: pytest.MonkeyPatch, n: int) -> None:
+    real = u.store.enqueue
+    calls = [0]
+
+    def enqueue(key: str, text: str, reply_to: str | None) -> bool:
+        calls[0] += 1
+        if calls[0] == n:
+            raise Crash
+        return real(key, text, reply_to)
+    monkeypatch.setattr(u.store, "enqueue", enqueue)
+
+
+def test_recovery_notice_and_state_change_are_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    mid = "99" * 32
+    u.store.claim_inbound(mid)
+    fail_nth_enqueue(u, monkeypatch, 1)
+    with pytest.raises(Crash):
+        u.daemon.recover()                                  # dies between the transition and the notice
+    assert u.store.inbound_with_status("received") == [mid] and u.outbox() == []
+    monkeypatch.undo()
+    u.build()                                               # the restarted process
+    u.daemon.recover()
+    u.daemon.recover()                                      # recovery is idempotent
+    assert [(t, r) for _, t, r in u.outbox()] == [(RESTARTED_NOTICE, mid)]
+    assert u.store.inbound_with_status("dropped") == [mid]
+
+
+def test_a_stop_is_all_or_nothing_and_recovery_then_answers_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)   # three chunks
+
+    async def scenario() -> str:
+        a = await u.say("prompt A")
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+        fail_nth_enqueue(u, monkeypatch, 2)                 # dies after the first chunk is queued
+        with pytest.raises(Crash):
+            await u.daemon.on_hook(HookEvent("Stop", "S1"))
+        return a
+    a = run(scenario())
+    assert u.outbox() == []                                  # no partial chunk set is ever visible
+    assert u.store.get("anchor") == a and u.store.get("in_flight") == a and u.store.get("busy") is not None
+    monkeypatch.undo()
+    u.build()
+    u.daemon.recover()
+    notice = ("No reply to this message: admind restarted during this turn; "
+              "a late reply may appear unthreaded.")
+    assert [(t, r) for _, t, r in u.outbox()] == [(notice, a)]
+
+
+def test_a_stop_commits_its_chunks_and_state_together(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)
+
+    async def scenario() -> str:
+        a = await u.say("prompt A")
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+        await u.daemon.on_hook(HookEvent("Stop", "S1"))
+        return a
+    a = run(scenario())
+    assert [r for _, _, r in u.outbox()] == [a, a, a]
+    assert u.store.get("anchor") is None and u.store.get("in_flight") is None and u.store.get("busy") is None
+
+
+def test_a_command_is_executing_before_it_runs_and_recovery_answers_it_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+
+    def dies(unit: str) -> tuple[bool, str]:
+        assert u.store.inbound_with_status("executing") == [mid]     # persisted before execution
+        raise Crash
+    mid = u.mid()
+    monkeypatch.setattr(u.services, "restart", dies)
+    with pytest.raises(Crash):
+        run(u.daemon.on_message(inbound("!restart fake.service", mid)))
+    u.build()
+    u.daemon.recover()
+    u.daemon.recover()
+    assert [(t, r) for _, t, r in u.outbox()] == [(RESTARTED_NOTICE, mid)]
+
+
+def test_a_command_waiting_for_the_dispatch_lock_is_recovered_not_lost(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    mid = u.mid()
+
+    async def scenario() -> None:
+        async with u.daemon.dispatch_lock:                   # !new waits here for the lock
+            task = asyncio.create_task(u.daemon.on_message(inbound("!new", mid)))
+            while u.store.inbound_with_status("executing") != [mid]:
+                await asyncio.sleep(0)                       # yield until the command has been persisted
+            task.cancel()                                    # shutdown
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    run(scenario())
+    u.build()
+    u.daemon.recover()
+    assert [(t, r) for _, t, r in u.outbox()] == [(RESTARTED_NOTICE, mid)]
+
+
+def test_a_finished_command_and_its_reply_are_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    u = Unit(tmp_path)
+    mid = u.mid()
+    fail_nth_enqueue(u, monkeypatch, 1)
+    with pytest.raises(Crash):
+        run(u.daemon.on_message(inbound("!ps", mid)))        # the command ran; its reply can't be queued
+    assert u.store.inbound_with_status("done") == [] and u.outbox() == []
+    monkeypatch.undo()
+    u.build()
+    u.daemon.recover()
+    assert [(t, r) for _, t, r in u.outbox()] == [(RESTARTED_NOTICE, mid)]
+    run(u.daemon.on_message(inbound("!ps", u.mid())))
+    assert len(u.store.inbound_with_status("done")) == 1     # a normal command ends up done

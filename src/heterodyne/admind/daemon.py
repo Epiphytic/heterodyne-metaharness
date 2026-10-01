@@ -144,16 +144,24 @@ class Admind:
             self.post(f"{tag}:{mid}:{i}", part, mid)
 
     # --- lifecycle -----------------------------------------------------------------------------
-    async def run(self) -> None:
+    def recover(self) -> None:
+        """Settle what a previous run left half done (D6). Idempotent."""
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
-        for mid in self.store.inbound_with_status("received"):
-            self.store.set_inbound(mid, "dropped")
-            self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
-            self.audit.write("recover", message_id=mid, action="answered-restarted")
+        # Received (held, never pasted) or executing (a command that may not have run to the end): each
+        # is answered once, and the state change and its notice commit together.
+        for status in ("received", "executing"):
+            for mid in self.store.inbound_with_status(status):
+                with self.store.transaction():
+                    self.store.set_inbound(mid, "dropped")
+                    self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
+                self.audit.write("recover", message_id=mid, action="answered-restarted")
+
+    async def run(self) -> None:
+        self.recover()
         await self.check_group()
         server = HookServer(self.s.state_dir / "hook.sock", self.hooks, self.audit)
         await server.start()
@@ -268,9 +276,10 @@ class Admind:
         text = ev.message.text
         self.audit.write("inbound", message_id=mid, text=own_text(text))
         if not await self.check_group():
-            self.store.set_inbound(mid, "dropped")
-            if not self.latched():
-                self.reply(mid, UNVERIFIED, "unverified")   # sent once a later check succeeds
+            with self.store.transaction():
+                self.store.set_inbound(mid, "dropped")
+                if not self.latched():
+                    self.reply(mid, UNVERIFIED, "unverified")   # sent once a later check succeeds
             return
         if self.store.get("operator_seen_at") is None:
             self.store.set("operator_seen_at", now())
@@ -285,21 +294,27 @@ class Admind:
             self.audit.write("command", command=cmd.name, action="failed", error=type(exc).__name__)
             return f"!{cmd.name} failed: {reason(exc)}", False
 
+    def finish(self, mid: str, status: str, text: str, tag: str) -> None:
+        """Settle an inbound message and queue its reply as one step: a crash leaves both or neither."""
+        with self.store.transaction():
+            self.store.set_inbound(mid, status)
+            self.reply(mid, text, tag)
+
     async def handle(self, mid: str, text: str) -> None:
         # Control characters are refused before anything else: they can break out of bracketed paste,
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
-            self.store.set_inbound(mid, "dropped")
-            self.reply(mid, CONTROL_REFUSED, "refused")
+            self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
         try:
             cmd = commands.parse(text)
         except commands.CommandError as exc:
-            self.store.set_inbound(mid, "dispatched")
-            self.reply(mid, show(str(exc), False), "cmd")   # may echo the operator's mistyped word
+            self.finish(mid, "done", show(str(exc), False), "cmd")   # may echo the operator's mistyped word
             return
         if cmd is not None:
-            self.store.set_inbound(mid, "dispatched")
+            # Persisted before anything runs (or waits for the dispatch lock): a crash from here until
+            # `done` is answered after the restart instead of being lost.
+            self.store.set_inbound(mid, "executing")
             if cmd.name in ("interrupt", "new"):
                 await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
@@ -307,7 +322,7 @@ class Admind:
             result, _ = await self.execute(cmd)
             self.audit.write("command", message_id=mid, command=cmd.name,
                              arg=None if cmd.arg is None else own_text(cmd.arg), result_chars=len(result))
-            self.reply(mid, result, "cmd")
+            self.finish(mid, "done", result, "cmd")
             await self.flush()
             return
         self.held.append((mid, text))
@@ -333,7 +348,7 @@ class Admind:
             else:
                 result += ". Later messages are still held."
         self.audit.write("command", message_id=mid, command=cmd.name, result_chars=len(result))
-        self.reply(mid, result, "cmd")
+        self.finish(mid, "done", result, "cmd")
 
     async def new_session(self, mid: str, cmd: commands.Command) -> None:
         """!new holds the dispatch lock while the old session is replaced, so nothing is pasted into it.
@@ -353,7 +368,7 @@ class Admind:
             if not ok:
                 self.stuck = result.partition(": ")[2] or "internal error"
         self.audit.write("command", message_id=mid, command=cmd.name, result_chars=len(result))
-        self.reply(mid, result, "cmd")
+        self.finish(mid, "done", result, "cmd")
 
     async def flush(self) -> None:
         async with self.dispatch_lock:      # one dispatcher at a time: flush() is called from several tasks
@@ -371,9 +386,8 @@ class Admind:
         self.dispatch_blocked = False
         if self.stuck is not None:
             for mid, _ in self.held:
-                self.store.set_inbound(mid, "dropped")
-                self.reply(mid, f"Not delivered: the admin agent is not running ({self.stuck}). "
-                                "Use !tail, then !new.", "stuck")
+                self.finish(mid, "dropped", f"Not delivered: the admin agent is not running ({self.stuck}). "
+                                            "Use !tail, then !new.", "stuck")
             self.held.clear()
             return
         if not self.ready.is_set():
@@ -390,10 +404,11 @@ class Admind:
         if not self.hooks.empty():
             return      # an acknowledged hook (maybe a new turn) is queued; hook_loop flushes after it
         mid, text = self.held.pop(0)
-        self.store.set("in_flight", mid)
-        self.store.set("in_flight_text", text)
-        self.store.set_inbound(mid, "dispatched")   # claimed before the paste: never replayed (D6)
-        self.set_busy()
+        with self.store.transaction():
+            self.store.set("in_flight", mid)
+            self.store.set("in_flight_text", text)
+            self.store.set_inbound(mid, "dispatched")   # claimed before the paste: never replayed (D6)
+            self.set_busy()
         self.dispatched_at = time.monotonic()
         try:
             await asyncio.to_thread(self.agent.send, text)
@@ -401,10 +416,11 @@ class Admind:
             self.paste_uncertain(mid, exc)
         except TmuxError as exc:
             # Failed before the submit step: definitely not delivered, so the message is kept.
-            self.store.delete("in_flight")
-            self.store.delete("in_flight_text")
-            self.store.set_inbound(mid, "received")
-            self.set_idle()
+            with self.store.transaction():
+                self.store.delete("in_flight")
+                self.store.delete("in_flight_text")
+                self.store.set_inbound(mid, "received")
+                self.set_idle()
             self.held.insert(0, (mid, text))
             self.audit.write("agent", action="send-failed", error=type(exc).__name__, message_id=mid)
             await self.start_agent()
@@ -421,12 +437,14 @@ class Admind:
         self.abandon_in_flight(UNCERTAIN)
 
     def abandon_in_flight(self, why: str) -> None:
-        mid = self.store.get("in_flight")
-        self.store.delete("anchor")
-        self.store.delete("in_flight_text")
+        with self.store.transaction():
+            mid = self.store.get("in_flight")
+            self.store.delete("anchor")
+            self.store.delete("in_flight_text")
+            if mid is not None:
+                self.store.delete("in_flight")
+                self.reply(mid, f"No reply to this message: {why}.", "abandoned")
         if mid is not None:
-            self.store.delete("in_flight")
-            self.reply(mid, f"No reply to this message: {why}.", "abandoned")
             self.audit.write("agent", action="abandon", message_id=mid, reason=why)
 
     def set_busy(self) -> None:
@@ -525,17 +543,18 @@ class Admind:
         # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
         # hook) posts top-level.
         anchor = identity[2]
-        if anchor is not None:
-            self.store.delete("anchor")
-            self.store.delete("in_flight")
-            self.store.delete("in_flight_text")
         parts = chunk.split(text, self.s.chunk_chars)
-        for i, part in enumerate(parts):
-            self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
+        with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
+            if anchor is not None:
+                self.store.delete("anchor")
+                self.store.delete("in_flight")
+                self.store.delete("in_flight_text")
+            for i, part in enumerate(parts):
+                self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
+            self.set_idle()                 # the turn ended; an unconfirmed in_flight still holds
         # The agent's text goes to the operator's chat only; the audit log records its size.
         self.audit.write("reply", session=ev.session_id, reply_to=anchor, chars=len(text),
                          chunks=len(parts))
-        self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
