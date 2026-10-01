@@ -7,6 +7,7 @@ not submit it early. The pane is kept after its process exits (`remain-on-exit`)
 can still be read.
 """
 
+import contextlib
 import subprocess
 import time
 import uuid
@@ -15,6 +16,11 @@ from pathlib import Path
 
 class TmuxError(RuntimeError):
     pass
+
+
+class TmuxPasteUncertain(TmuxError):
+    """A paste may or may not have been submitted: the Enter step, or something after it, failed or
+    timed out. Unlike any earlier TmuxError, retrying could deliver the text twice."""
 
 
 class Tmux:
@@ -45,14 +51,26 @@ class Tmux:
         return proc.stdout.decode().strip() == "1"
 
     def paste(self, name: str, text: str) -> None:
+        """Paste `text` and submit it. A failure before the Enter step raises a plain TmuxError: the text
+        was definitely not submitted. A failure at or after Enter raises TmuxPasteUncertain: it may have
+        been, so the caller must not paste it again."""
         buffer = f"hz-{uuid.uuid4().hex}"
-        self._run("load-buffer", "-b", buffer, "-", data=text.encode("utf-8"))
         try:
-            self._run("paste-buffer", "-p", "-d", "-b", buffer, "-t", f"={name}:")
-            time.sleep(0.3)  # let the application finish reading the paste before Enter arrives
+            self._run("load-buffer", "-b", buffer, "-", data=text.encode("utf-8"))
+            try:
+                self._run("paste-buffer", "-p", "-d", "-b", buffer, "-t", f"={name}:")
+                time.sleep(0.3)  # let the application finish reading the paste before Enter arrives
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self._run("delete-buffer", "-b", buffer, check=False)
+                raise
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise TmuxError(f"tmux paste failed ({type(exc).__name__})") from None
+        try:
             self._run("send-keys", "-t", f"={name}:", "Enter")
-        finally:
             self._run("delete-buffer", "-b", buffer, check=False)
+        except Exception as exc:  # noqa: BLE001 - whatever failed, the text may already be submitted
+            raise TmuxPasteUncertain(f"tmux paste may have been submitted ({type(exc).__name__})") from None
 
     def send_key(self, name: str, key: str) -> None:
         self._run("send-keys", "-t", f"={name}:", key)

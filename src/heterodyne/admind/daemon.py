@@ -31,7 +31,7 @@ from heterodyne.marmot.control import (
     InboundMessage,
     ReactionAdded,
 )
-from heterodyne.tmux import TmuxError
+from heterodyne.tmux import TmuxError, TmuxPasteUncertain
 
 READY_NOTICE = ("admind is listening. Your messages go to the admin agent verbatim; replies come back "
                 "in thread. " + commands.HELP)
@@ -48,6 +48,7 @@ LONG_TURN = ("The admin agent is still working, so later messages are held. "
              "Use !tail to look, or !interrupt to stop it and release the queue.")
 ALERT_FAILED = ("🚨 A wsd alert file could not be relayed (ref {ref}). "
                 "Check the alert directory on the host.")
+UNCERTAIN = "delivery to the admin agent is uncertain; not retried — resend if needed"
 MAX_SEND_ATTEMPTS = 10
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
 AUDIT_TEXT_CHARS = 2000
@@ -391,20 +392,33 @@ class Admind:
         mid, text = self.held.pop(0)
         self.store.set("in_flight", mid)
         self.store.set("in_flight_text", text)
+        self.store.set_inbound(mid, "dispatched")   # claimed before the paste: never replayed (D6)
         self.set_busy()
         self.dispatched_at = time.monotonic()
         try:
             await asyncio.to_thread(self.agent.send, text)
-        except Exception as exc:  # noqa: BLE001 - TmuxError, timeout or OS failure; the message is kept
+        except TmuxPasteUncertain as exc:
+            self.paste_uncertain(mid, exc)
+        except TmuxError as exc:
+            # Failed before the submit step: definitely not delivered, so the message is kept.
             self.store.delete("in_flight")
             self.store.delete("in_flight_text")
+            self.store.set_inbound(mid, "received")
             self.set_idle()
             self.held.insert(0, (mid, text))
             self.audit.write("agent", action="send-failed", error=type(exc).__name__, message_id=mid)
             await self.start_agent()
-            return
-        self.store.set_inbound(mid, "dispatched")
-        self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+        except Exception as exc:  # noqa: BLE001 - anything else: delivery can't be ruled out
+            self.paste_uncertain(mid, exc)
+        else:
+            self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+
+    def paste_uncertain(self, mid: str, exc: Exception) -> None:
+        """The paste may have been submitted: never retry it (D6). The operator is told, in fixed words,
+        to resend. The reservation and any anchor are cleared; the agent is still treated as busy,
+        because nothing shows it idle (a Stop, a SessionStart, !interrupt or !new will release the queue)."""
+        self.audit.write("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
+        self.abandon_in_flight(UNCERTAIN)
 
     def abandon_in_flight(self, why: str) -> None:
         mid = self.store.get("in_flight")

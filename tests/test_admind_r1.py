@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -23,12 +24,13 @@ from fakes.settings import OPERATOR_HEX, make_settings
 from heterodyne.admind.agent import SESSION, AdminAgent
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
-from heterodyne.admind.daemon import Admind
+from heterodyne.admind.daemon import UNCERTAIN, Admind
 from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, now
 from heterodyne.marmot.control import ControlError, InboundMessage, decode_event
 from heterodyne.marmot.nip19 import hex_to_npub
 from heterodyne.services import UnitStatus
+from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
 
 GROUP = "b2" * 32
 STRANGER = "e5" * 32
@@ -183,7 +185,7 @@ def run(coro: Awaitable[Any]) -> Any:
     return asyncio.run(bounded())
 
 
-# --- 1. alert outbox keys never carry the alert's name ----------------------------------------------------
+# --- 1. alert outbox keys never carry the alert's name ---
 
 def secret_token() -> str:
     return "sk" + "-" + "Q" * 24
@@ -224,7 +226,7 @@ def test_alert_keys_and_audit_never_hold_a_name_that_is_an_identifier_or_a_secre
     assert any(k in u.audit_text() for k in expected)           # the audit correlates on the opaque key
 
 
-# --- 2. an alert file whose name is not UTF-8 -------------------------------------------------------------
+# --- 2. an alert file whose name is not UTF-8 ---
 
 def test_a_non_utf8_alert_name_is_reported_safely_and_never_blocks_later_alerts(tmp_path: Path) -> None:
     u = Unit(tmp_path)
@@ -274,7 +276,7 @@ def test_an_alert_that_fails_to_relay_is_audited_by_type_and_never_blocks_the_re
     assert "ValueError" in audit and hex_to_npub(STRANGER) not in audit and "boom" not in audit
 
 
-# --- 3. a latch (or an unverified group) stops held prompts reaching the agent ----------------------------
+# --- 3. a latch (or an unverified group) stops held prompts reaching the agent ---
 
 @pytest.mark.parametrize("how", ["latched", "unverified"])
 def test_held_prompts_are_not_pasted_once_latched_or_unverified(tmp_path: Path, how: str) -> None:
@@ -299,7 +301,7 @@ def test_held_prompts_are_not_pasted_once_latched_or_unverified(tmp_path: Path, 
     assert '"action": "dispatch-blocked"' in u.audit_text()
 
 
-# --- 4. membership observation stays responsive ------------------------------------------------------------
+# --- 4. membership observation stays responsive ---
 
 async def stop_task(task: "asyncio.Task[Any]") -> None:
     task.cancel()
@@ -451,3 +453,79 @@ def test_new_during_a_reply_read_emits_no_reply(tmp_path: Path, monkeypatch: pyt
     assert "A is done" not in u.texts()
     assert not any(k.startswith("reply:") for k, _, _ in u.outbox())
     assert '"action": "stale-stop"' in u.audit_text()
+
+
+# --- 6. uncertain delivery is never retried ---
+
+def scripted_tmux(monkeypatch: pytest.MonkeyPatch, fail: dict[str, BaseException]) -> tuple[Tmux, list[str]]:
+    """A Tmux whose subprocess calls are replaced: the named subcommands raise, the rest succeed."""
+    t = Tmux("hz-test-never-started")
+    calls: list[str] = []
+
+    def fake_run(*args: str, data: bytes | None = None, check: bool = True) -> Any:
+        calls.append(args[0])
+        if args[0] in fail:
+            raise fail[args[0]]
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+    monkeypatch.setattr(t, "_run", fake_run)
+    monkeypatch.setattr("heterodyne.tmux.time.sleep", lambda _s: None)
+    return t, calls
+
+
+@pytest.mark.parametrize("step", ["load-buffer", "paste-buffer"])
+def test_a_paste_that_fails_before_enter_is_a_definite_non_submission(
+        monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    t, calls = scripted_tmux(monkeypatch, {step: TmuxError("failed")})
+    with pytest.raises(TmuxError) as info:
+        t.paste("s", "hi")
+    assert not isinstance(info.value, TmuxPasteUncertain)
+    assert "send-keys" not in calls                                # Enter was never reached
+
+
+@pytest.mark.parametrize("fail", [
+    {"send-keys": TmuxError("failed")},
+    {"send-keys": subprocess.TimeoutExpired("tmux", 15)},
+    {"delete-buffer": subprocess.TimeoutExpired("tmux", 15)},
+])
+def test_a_paste_that_fails_at_or_after_enter_is_uncertain(
+        monkeypatch: pytest.MonkeyPatch, fail: dict[str, BaseException]) -> None:
+    t, _ = scripted_tmux(monkeypatch, fail)
+    with pytest.raises(TmuxPasteUncertain):
+        t.paste("s", "hi")
+
+
+def test_a_definite_send_failure_requeues_the_prompt_once_more(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    u.tmux.paste_error = TmuxError("failed")
+
+    async def scenario() -> None:
+        a = await u.say("prompt A")
+        assert u.daemon.held == [(a, "prompt A")]                  # kept, to be sent again
+        assert u.store.get("in_flight") is None and u.store.get("busy") is None
+        assert u.store.inbound_with_status("received") == [a]
+        u.tmux.paste_error = None
+        await u.daemon.flush()
+        assert u.tmux.pasted == ["prompt A"]
+    run(scenario())
+
+
+@pytest.mark.parametrize("error", [TmuxPasteUncertain("unsure"), OSError("disk"), RuntimeError("bug")])
+def test_an_uncertain_send_is_never_retried_and_tells_the_operator(tmp_path: Path, error: Exception) -> None:
+    u = Unit(tmp_path)
+    u.tmux.paste_error = error
+
+    async def scenario() -> None:
+        a = await u.say("prompt A")
+        assert u.daemon.held == []                                 # not requeued
+        u.tmux.paste_error = None
+        await u.daemon.flush()
+        await u.daemon.flush()
+        assert u.tmux.pasted == []                                 # and not pasted again
+        assert u.store.get("in_flight") is None and u.store.get("anchor") is None
+        assert u.store.get("in_flight_text") is None
+        assert u.store.get("busy") is not None                     # no evidence the agent is idle
+        notice = [(t, r) for _, t, r in u.outbox() if "uncertain" in t]
+        assert notice == [(f"No reply to this message: {UNCERTAIN}.", a)]
+    run(scenario())
+    audit = u.audit_text()
+    assert "disk" not in audit and "bug" not in audit and "unsure" not in audit
