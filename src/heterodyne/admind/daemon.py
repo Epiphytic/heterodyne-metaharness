@@ -114,6 +114,7 @@ class Admind:
         self.wake = asyncio.Event()
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
+        self.generation = 0     # bumped by every dispatch and every turn-starting hook; see _flush
         self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
         self.dispatch_blocked = False           # the block has been audited; reset when it lifts
@@ -444,18 +445,25 @@ class Admind:
             self.store.set_inbound(mid, "dispatched")   # claimed before the paste: never replayed (D6)
             self.set_busy()
         self.dispatched_at = time.monotonic()
+        self.generation += 1
+        generation = self.generation        # a UserPromptSubmit or SessionStart meanwhile makes it stale
         try:
             await asyncio.to_thread(self.agent.send, text)
         except TmuxPasteUncertain as exc:
             self.paste_uncertain(mid, exc)
         except TmuxError as exc:
-            # Failed before the submit step: definitely not delivered, so the message is kept.
+            # Failed before anything reached the pane: definitely not delivered, so the message is kept.
+            # The busy state is cleared only if no newer turn started while the send was running.
+            reserved = self.store.get("in_flight") == mid   # else a restart already answered it as abandoned
             with self.store.transaction():
-                self.store.delete("in_flight")
-                self.store.delete("in_flight_text")
-                self.store.set_inbound(mid, "received")
-                self.set_idle()
-            self.held.insert(0, (mid, text))
+                if reserved:
+                    self.store.delete("in_flight")
+                    self.store.delete("in_flight_text")
+                    self.store.set_inbound(mid, "received")
+                    if self.generation == generation:
+                        self.set_idle()
+            if reserved:
+                self.held.insert(0, (mid, text))
             self.audit.write("agent", action="send-failed", error=type(exc).__name__, message_id=mid)
             await self.start_agent()
         except Exception as exc:  # noqa: BLE001 - anything else: delivery can't be ruled out
@@ -529,8 +537,10 @@ class Admind:
         if ev.hook_event_name not in KNOWN_HOOKS:
             self.audit.write("hook", action="ignored-unknown-event")
         elif ev.hook_event_name == "SessionStart":
+            self.generation += 1
             self.on_session_start(ev)
         elif ev.hook_event_name == "UserPromptSubmit":
+            self.generation += 1
             self.set_busy()                     # a turn is running, whoever started it
             in_flight = self.store.get("in_flight")
             pasted = self.store.get("in_flight_text")

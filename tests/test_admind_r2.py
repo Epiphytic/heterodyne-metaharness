@@ -5,6 +5,7 @@ sleeps, no real wn-agent, claude, systemctl, network or ~/.claude.
 
 import asyncio
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +14,8 @@ import pytest
 from test_admind_r1 import FakeTmux, Unit, inbound, run
 
 from heterodyne.admind.daemon import UNCERTAIN
-from heterodyne.tmux import Tmux
+from heterodyne.admind.hook import HookEvent
+from heterodyne.tmux import Tmux, TmuxError
 
 # --- 2. authorisation is re-checked after every await and under the lock, before a side effect ---
 
@@ -105,4 +107,33 @@ def test_a_paste_buffer_timeout_after_delivery_is_not_retried_and_not_duplicated
         assert pane.pane == "A"                     # once; never "AA"
         assert u.daemon.held == []
         assert (f"No reply to this message: {UNCERTAIN}.", a) in [(t, r) for _, t, r in u.outbox()]
+    run(scenario())
+
+
+# --- 4. cleanup after a definite send failure applies only to the dispatch that failed ---
+
+def test_a_send_failure_does_not_clear_the_busy_state_of_a_newer_turn(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_paste(name: str, text: str) -> None:
+        started.set()
+        assert release.wait(10), "test never released the paste"
+        raise TmuxError("load-buffer failed")
+    u.tmux.paste = blocking_paste                   # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        sending = asyncio.create_task(u.say("prompt A"))
+        assert await asyncio.to_thread(started.wait, 10)        # A's paste is in its worker thread
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="typed at the terminal"))
+        busy = u.store.get("busy")
+        assert busy is not None
+        release.set()
+        a = await sending
+        assert u.store.get("busy") == busy                      # the terminal turn is still running
+        assert u.daemon.held == [(a, "prompt A")] and u.store.get("in_flight") is None
+        assert u.store.inbound_with_status("received") == [a]   # A was not delivered: kept, not lost
+        await u.daemon.flush()
+        assert u.tmux.pasted == []                              # but nothing is dispatched into a busy agent
     run(scenario())
