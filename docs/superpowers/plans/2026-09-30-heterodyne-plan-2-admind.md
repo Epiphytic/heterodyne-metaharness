@@ -3630,7 +3630,9 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
    - A Stop threads its reply to `anchor` and clears `anchor` and `in_flight`. A Stop with no anchor posts top-level, verbatim (a late Stop from an interrupted turn, a turn started at the terminal, or our own turn whose UserPromptSubmit was lost); it leaves an unconfirmed `in_flight` in place, because that paste may still be queued behind the terminal turn. Hook delivery is acknowledged, so events arrive in the order the agent produced them.
    - A UserPromptSubmit that doesn't match while a message is anchored means that turn is over without an observed Stop: the anchored message gets "No reply to this message: …" and the new turn's reply posts top-level.
    - **Held-queue notices** (once each, never a dispatch): an `in_flight` message unconfirmed after `start_timeout_seconds` gets `UNCONFIRMED`; a `busy` period longer than `turn_notice_seconds` gets `LONG_TURN` (in thread when anchored). Both point the operator at `!tail` and `!interrupt`, which releases the queue.
-   - **`!interrupt`** holds the dispatch lock from before the Escape until state is settled, so a Stop arriving meanwhile can't dispatch into the Escape. Only once the Escape was sent does it abandon the message that was in flight when the command arrived (if it's still in flight) and clear `busy`. A failed Escape changes nothing and says the queue is still held.
+   - **`!interrupt`** holds the dispatch lock from before the Escape until state is settled, so a Stop arriving meanwhile can't dispatch into the Escape. Only once the Escape was sent does it abandon the message that was in flight when the command arrived (if it's still in flight) and clear `busy`, and only if no new busy period began meanwhile (a prompt that started a turn during the Escape keeps the agent busy). A failed Escape changes nothing and says the queue is still held.
+   - **`!new`** also holds the dispatch lock while it runs, and retires the old session ID first: that session's hooks, including a late SessionStart, are ignored whenever they arrive.
+   - **Hooks before dispatch:** nothing is pasted while acknowledged hook events are still queued; `hook_loop` re-runs dispatch after each event once its queue is empty.
    - `in_flight` and `anchor` are also cleared by `!interrupt` (Claude Code runs no Stop hook for a user interrupt), by `!new`, by a SessionStart (a restarted agent has no turn in progress), and at admind startup (an adopted session's pending Stop may have been lost). Each of these replies "No reply to this message: …" to the abandoned message.
    - If the agent is stuck (`AgentStuck`), held messages are dropped with a reply suggesting `!tail`, then `!new`.
    - If the agent is not ready, the message is held in memory. It is flushed in order on SessionStart. If it has waited longer than `start_timeout_seconds`, the operator gets `NOT_READY` once per launch.
@@ -3640,8 +3642,8 @@ git commit -m "admind: private wn-agent supervision, init/rearm/unit/hook CLI (p
    - Any other kind, a reaction or an unknown event is audited only.
    - A `ProtocolError` or `ControlError` from the subscription is audited, and the subscription reconnects with backoff (1s doubling to 30s).
 4. **Hook event:**
-   - A session ID other than the current one is audited and ignored.
-   - SessionStart runs `agent.started(id)`, sets ready and flushes held messages.
+   - A session ID other than the current one, or one retired by `!new`, is audited and ignored.
+   - SessionStart runs `agent.started(id)` and sets ready; held messages are then flushed (after each event, once the hook queue is empty).
    - UserPromptSubmit sets `busy`, then sets `anchor` from `in_flight` when the prompt matches (see above). Otherwise it is audited as `prompt-not-from-admind`, and a message already anchored is closed out.
    - Stop takes `reply_text(ev)`, or `NO_REPLY` if it is empty. The transcript fallback reads only the current turn, meaning text after the latest real user prompt. The text is chunked, and each chunk is enqueued with key `reply:<session>:<n>:<i>` as a reply to `anchor` (top-level if none). `n` comes from `reply_seq` in the store. Stop clears `busy`; then the next queued message is dispatched if nothing is `in_flight`.
 5. **Outbox:**
@@ -4084,6 +4086,60 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
     run_with(tmp_path, scenario, before)
 
 
+def slow(monkeypatch: pytest.MonkeyPatch, h: Harness, method: str, started: threading.Event) -> None:
+    """Delay AdminAgent.<method> by a second, so events can land while the command is in progress."""
+    real = getattr(h.agent, method)
+
+    def delayed() -> Any:
+        started.set()
+        time.sleep(1.0)
+        return real()
+    monkeypatch.setattr(h.agent, method, delayed)
+
+
+def test_prompt_during_interrupt_keeps_the_new_turn_busy(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    async def scenario(h: Harness) -> None:
+        from heterodyne.admind.hook import HookEvent
+        hung = await h.say("__hang__")
+        await h.until(lambda: h.store.get("anchor") == hung)
+        nxt = await h.say("next")
+        await h.say("!interrupt")
+        await h.until(started.is_set)
+        sid = h.agent.session_id or ""
+        await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.until(lambda: "Sent Esc to the admin agent." in h.texts())
+        await asyncio.sleep(0.5)
+        assert nxt not in dispatched(h)                          # the terminal turn is still running
+        await h.daemon.hooks.put(HookEvent("Stop", sid, last_assistant_message="terminal answer"))
+        await h.until(lambda: "echo: next" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["terminal answer"] is None and by_text["echo: next"] == nxt
+    run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "interrupt", started))
+
+
+def test_new_ignores_the_replaced_sessions_late_session_start(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    async def scenario(h: Harness) -> None:
+        from heterodyne.admind.hook import HookEvent
+        hung = await h.say("__hang__")
+        await h.until(lambda: h.store.get("anchor") == hung)
+        old = h.agent.session_id or ""
+        nxt = await h.say("next")                                # held: the agent is busy
+        await h.say("!new")
+        await h.until(started.is_set)
+        await h.daemon.hooks.put(HookEvent("SessionStart", old))   # late, from the session being replaced
+        await h.until(lambda: "echo: next" in h.texts(), timeout=30)
+        assert h.agent.session_id != old
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["echo: next"] == nxt and dispatched(h).count(nxt) == 1
+    run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started))
+
+
 def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         from heterodyne.admind.hook import HookEvent
@@ -4249,6 +4305,7 @@ class Admind:
         self.dispatched_at = 0.0
         self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
+        self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
 
     # --- state helpers -------------------------------------------------------------------------
     def latched(self) -> bool:
@@ -4386,24 +4443,14 @@ class Admind:
             return
         if cmd is not None:
             self.store.set_inbound(mid, "dispatched")
-            if cmd.name == "interrupt":
-                await self.interrupt(mid, cmd)
+            if cmd.name in ("interrupt", "new"):
+                await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
                 return
-            if cmd.name == "new":
-                # Before the command runs: the new session's SessionStart may arrive while it runs.
-                self.ready.clear()
-                self.launched_at = time.monotonic()
-                self.not_ready_sent = False
-                self.stuck = None
-                self.abandon_in_flight("the admin agent session was replaced by !new")
-                self.set_idle()
             try:
                 result = await asyncio.to_thread(self.runner.run, cmd)
             except (AgentStuck, TmuxError) as exc:
                 result = f"!{cmd.name} failed: {exc}"
-                if cmd.name == "new":
-                    self.stuck = str(exc)
             self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
             self.reply(mid, result, "cmd")
             await self.flush()
@@ -4422,6 +4469,7 @@ class Admind:
         a failed send is no evidence that the agent is idle, so the queue stays held."""
         async with self.dispatch_lock:
             target = self.store.get("in_flight")
+            period = self.store.get("busy")
             try:
                 result = await asyncio.to_thread(self.runner.run, cmd)
             except (AgentStuck, TmuxError) as exc:
@@ -4430,7 +4478,32 @@ class Admind:
                 # Claude Code does not run the Stop hook for a user interrupt, so the turn ends here.
                 if target is not None and self.store.get("in_flight") == target:
                     self.abandon_in_flight("interrupted by !interrupt")
-                self.set_idle()
+                # A prompt that started a turn while the Escape was pending opened a new busy period;
+                # the Escape is no evidence that that turn ended.
+                if self.store.get("busy") == period:
+                    self.set_idle()
+        self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
+        self.reply(mid, result, "cmd")
+
+    async def new_session(self, mid: str, cmd: commands.Command) -> None:
+        """!new holds the dispatch lock while the old session is replaced, so nothing is pasted into it.
+        The old session ID is retired first: its hooks (a late SessionStart included) are ignored from
+        here on, whenever they arrive. The new session's SessionStart sets ready as usual."""
+        async with self.dispatch_lock:
+            old = self.agent.session_id
+            if old is not None:
+                self.retired.add(old)
+            self.ready.clear()
+            self.launched_at = time.monotonic()
+            self.not_ready_sent = False
+            self.stuck = None
+            self.abandon_in_flight("the admin agent session was replaced by !new")
+            self.set_idle()
+            try:
+                result = await asyncio.to_thread(self.runner.run, cmd)
+            except (AgentStuck, TmuxError) as exc:
+                result = f"!new failed: {exc}"
+                self.stuck = str(exc)
         self.audit.write("command", message_id=mid, command=cmd.name, arg=cmd.arg, result=result)
         self.reply(mid, result, "cmd")
 
@@ -4457,6 +4530,8 @@ class Admind:
         # agent's UserPromptSubmit.
         if not self.held or self.store.get("in_flight") is not None or self.store.get("busy") is not None:
             return
+        if not self.hooks.empty():
+            return      # an acknowledged hook (maybe a new turn) is queued; hook_loop flushes after it
         mid, text = self.held.pop(0)
         self.store.set("in_flight", mid)
         self.store.set("in_flight_text", text)
@@ -4516,50 +4591,54 @@ class Admind:
     async def hook_loop(self) -> None:
         while True:
             ev = await self.hooks.get()
-            if ev.session_id != self.agent.session_id:
+            if ev.session_id != self.agent.session_id or ev.session_id in self.retired:
                 self.audit.write("hook", event=ev.hook_event_name, action="ignored-other-session")
                 continue
-            if ev.hook_event_name == "SessionStart":
-                # A (re)started session has no turn in progress: whatever was in flight is lost.
-                self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
-                self.set_idle()
-                self.agent.started(ev.session_id)
-                self.audit.write("agent", action="session-start", session=ev.session_id,
-                                 transcript=ev.transcript_path)
-                self.ready.set()
+            await self.on_hook(ev)
+            if self.hooks.empty():
                 await self.flush()
-            elif ev.hook_event_name == "UserPromptSubmit":
-                self.set_busy()                     # a turn is running, whoever started it
-                in_flight = self.store.get("in_flight")
-                pasted = self.store.get("in_flight_text")
-                if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
-                        and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
-                    self.store.set("anchor", in_flight)
-                    self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
-                else:
-                    self.audit.write("agent", action="prompt-not-from-admind", prompt=ev.prompt)
-                    if self.store.get("anchor") is not None:
-                        # The agent runs one turn at a time, so the anchored turn is over and its Stop
-                        # was lost. Release the anchor before this turn's Stop can take it.
-                        self.abandon_in_flight("admind did not see the admin agent finish it before "
-                                               "another prompt started a turn")
-            elif ev.hook_event_name == "Stop":
-                seq = int(self.store.get("reply_seq") or "0") + 1
-                self.store.set("reply_seq", str(seq))
-                text = reply_text(ev) or NO_REPLY
-                # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
-                # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
-                # hook) posts top-level.
-                anchor = self.store.get("anchor")
-                if anchor is not None:
-                    self.store.delete("anchor")
-                    self.store.delete("in_flight")
-                    self.store.delete("in_flight_text")
-                for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
-                    self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
-                self.audit.write("reply", session=ev.session_id, reply_to=anchor, text=text)
-                self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
-                await self.flush()
+
+    async def on_hook(self, ev: HookEvent) -> None:
+        """One event from the current session. hook_loop flushes after it once the queue is empty."""
+        if ev.hook_event_name == "SessionStart":
+            # A (re)started session has no turn in progress: whatever was in flight is lost.
+            self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
+            self.set_idle()
+            self.agent.started(ev.session_id)
+            self.audit.write("agent", action="session-start", session=ev.session_id,
+                             transcript=ev.transcript_path)
+            self.ready.set()
+        elif ev.hook_event_name == "UserPromptSubmit":
+            self.set_busy()                     # a turn is running, whoever started it
+            in_flight = self.store.get("in_flight")
+            pasted = self.store.get("in_flight_text")
+            if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
+                    and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
+                self.store.set("anchor", in_flight)
+                self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
+            else:
+                self.audit.write("agent", action="prompt-not-from-admind", prompt=ev.prompt)
+                if self.store.get("anchor") is not None:
+                    # The agent runs one turn at a time, so the anchored turn is over and its Stop
+                    # was lost. Release the anchor before this turn's Stop can take it.
+                    self.abandon_in_flight("admind did not see the admin agent finish it before "
+                                           "another prompt started a turn")
+        elif ev.hook_event_name == "Stop":
+            seq = int(self.store.get("reply_seq") or "0") + 1
+            self.store.set("reply_seq", str(seq))
+            text = reply_text(ev) or NO_REPLY
+            # Thread only to a prompt the agent confirmed receiving. A Stop with no anchor (a turn
+            # that ended after !interrupt, one begun at the terminal, or ours with a lost prompt
+            # hook) posts top-level.
+            anchor = self.store.get("anchor")
+            if anchor is not None:
+                self.store.delete("anchor")
+                self.store.delete("in_flight")
+                self.store.delete("in_flight_text")
+            for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
+                self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
+            self.audit.write("reply", session=ev.session_id, reply_to=anchor, text=text)
+            self.set_idle()                     # the turn ended; an unconfirmed in_flight still holds
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
