@@ -290,8 +290,8 @@ class Admind:
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
-        await server.start()
         try:
+            await server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),

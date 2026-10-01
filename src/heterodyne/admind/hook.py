@@ -48,6 +48,8 @@ MAX_TRANSCRIPT = 8 * 1024 * 1024    # the fallback reads at most this much from 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
 ACK_SECONDS = 8.0       # the hook's total wait for admind's answer
 HOOK_TIMEOUT = 15       # Claude Code kills the hook only after the client above has given up
+ACCEPT_BATCH = 64        # accept() attempts (successes and aborts alike) per reader callback
+ACCEPT_ABORTS = 8        # aborted accepts within one callback before backing off
 ACCEPT_BACKOFF = 0.1     # pause before accepting again after an accept() error such as EMFILE
 FRAME_SECONDS = 5.0     # admind's wait for one connection's frame before it drops that connection
 
@@ -76,12 +78,16 @@ class Delivery:
 
 class _Conn:
     """One accepted connection: its socket, arrival index and ordering slot."""
-    __slots__ = ("sock", "index", "slot", "released", "queued", "wrapped")
+    __slots__ = ("sock", "index", "slot", "released", "queued", "wrapped", "previous", "held", "settled")
 
-    def __init__(self, sock: socket.socket, index: int, slot: "asyncio.Future[None]") -> None:
+    def __init__(self, sock: socket.socket, index: int, slot: "asyncio.Future[None]",
+                 previous: "asyncio.Future[None] | None") -> None:
         self.sock = sock
         self.index = index
         self.slot = slot
+        self.previous = previous    # the predecessor's slot: ours resolves only after it
+        self.held = False           # the lost-hook hold was applied for this connection
+        self.settled = False        # the finish path ran (the release may still wait for the predecessor)
         self.released = False
         self.wrapped = False    # a stream transport owns the socket
         self.queued = False     # its event reached the daemon's queue (or it was fully handled)
@@ -251,6 +257,7 @@ class HookServer:
         self._backoff: asyncio.TimerHandle | None = None
         self._closing = False
         self._tasks: set[asyncio.Task[None]] = set()
+        self._conns: set[_Conn] = set()     # accepted, slot not yet released
         self._tail: asyncio.Future[None] | None = None   # the newest connection's slot in the order
 
     def _audit(self, **fields: object) -> None:
@@ -276,7 +283,13 @@ class HookServer:
         self._loop = loop
         self._listen = sock
         self._closing = False
-        loop.add_reader(sock.fileno(), self._on_readable)
+        try:
+            loop.add_reader(sock.fileno(), self._on_readable)
+        except BaseException:
+            self._listen = None
+            sock.close()
+            self.path.unlink(missing_ok=True)
+            raise
         self._reading = True
 
     async def close(self) -> None:
@@ -294,6 +307,9 @@ class HookServer:
         if tasks:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
+        for state in list(self._conns):      # shutting down: no order left to keep
+            self._settle(state)
+            self._release(state)
         self.path.unlink(missing_ok=True)
 
     def _stop_reading(self) -> None:
@@ -330,60 +346,108 @@ class HookServer:
         loop = self._loop
         if loop is None or self._closing:
             return
-        while True:
+        aborts = 0
+        for _ in range(ACCEPT_BATCH):       # bounded: the reader fires again for the rest of the backlog
             try:
                 conn = self._accept_conn()
             except (BlockingIOError, InterruptedError):
                 return
-            except ConnectionAbortedError:
-                continue        # the peer left before accept
+            except ConnectionAbortedError:      # the peer left before accept
+                aborts += 1
+                if aborts > ACCEPT_ABORTS:
+                    self._back_off(loop)
+                    return
+                continue
             except OSError as exc:      # e.g. EMFILE: do not spin; the backlog keeps the gate closed
                 self._audit(result="accept-error", error=type(exc).__name__)
-                self._stop_reading()
-                self._backoff = loop.call_later(ACCEPT_BACKOFF, self._resume_reading)
+                self._back_off(loop)
                 return
+            self.accepted += 1
+            self.pending_hooks += 1     # counted from accept, so the gate sees a frame still arriving
+            previous = self._tail
+            slot: asyncio.Future[None] = loop.create_future()
+            self._tail = slot
+            state = _Conn(conn, self.accepted, slot, previous)
+            self._conns.add(state)
             try:
                 conn.setblocking(False)
-                self.accepted += 1
-                index = self.accepted
-                self.pending_hooks += 1     # counted from accept, so the gate sees a frame still arriving
-                previous = self._tail
-                slot: asyncio.Future[None] = loop.create_future()
-                self._tail = slot
-                state = _Conn(conn, index, slot)
-                task = loop.create_task(self._handle(state, previous))
-            except BaseException:
-                conn.close()
-                raise
+                coro = self._handle(state, previous)
+                try:
+                    task = loop.create_task(coro)
+                except BaseException:
+                    coro.close()
+                    raise
+            except BaseException as exc:
+                self._settle(state)     # hold, close, and release after the predecessor
+                self._audit(result="accept-error", error=type(exc).__name__)
+                if not isinstance(exc, Exception):
+                    raise
+                self._back_off(loop)
+                return
             self._tasks.add(task)
             task.add_done_callback(lambda t, st=state: self._finished(t, st))
+
+    def _back_off(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._stop_reading()
+        if self._backoff is None:
+            self._backoff = loop.call_later(ACCEPT_BACKOFF, self._resume_reading)
 
     def _resume_reading(self) -> None:
         self._backoff = None
         if self._closing or self._listen is None or self._loop is None or self._reading:
             return
-        self._loop.add_reader(self._listen.fileno(), self._on_readable)
+        try:
+            self._loop.add_reader(self._listen.fileno(), self._on_readable)
+        except Exception as exc:  # noqa: BLE001 - e.g. the selector's watch limit: try again, never stay deaf
+            self._audit(result="accept-error", error=type(exc).__name__)
+            self._back_off(self._loop)
+            return
         self._reading = True
 
     def _finished(self, task: asyncio.Task[None], state: "_Conn") -> None:
-        """Backstop for a task cancelled before it ever ran (its own cleanup never executes then)."""
+        """Backstop: a task cancelled before it ever ran never executes its own cleanup."""
         self._tasks.discard(task)
-        if task.cancelled() and not state.queued and self.on_drop is not None:
+        self._settle(state)
+
+    def _hold(self, state: "_Conn") -> None:
+        """The lost-hook hold, once per connection, for one whose event never reached the daemon."""
+        if state.held or state.queued:
+            return
+        state.held = True
+        if self.on_drop is not None:
             with contextlib.suppress(Exception):
-                self.on_drop()      # an accepted frame that never reached the daemon: hold dispatch
+                self.on_drop()
+
+    def _settle(self, state: "_Conn") -> None:
+        """The one finish path. Every accepted connection ends here, applied (its event was routed) or lost
+        (anything else): a lost one applies the hold first; the socket is closed unless a transport owns
+        it; and the slot and pending count are released only after the predecessor's slot has resolved.
+        Synchronous and idempotent, so it is safe from a finally block, a done callback or the accept."""
+        if state.settled:
+            return
+        state.settled = True
+        self._hold(state)
         if not state.wrapped:
             state.sock.close()      # no transport ever took the socket
-        self._release(state)
+        previous = state.previous
+        if previous is None or previous.done():
+            self._release(state)
+        else:
+            previous.add_done_callback(lambda _f, st=state: self._release(st))
 
     def _release(self, state: "_Conn") -> None:
         if state.released:
             return
         state.released = True
+        self._conns.discard(state)
         if not state.slot.done():
             state.slot.set_result(None)
         self.pending_hooks -= 1     # processed or dropped; after the answer was written
         if self.pending_hooks == 0 and self.on_idle is not None and not self._closing:
-            self.on_idle()
+            try:
+                self.on_idle()
+            except Exception as exc:  # noqa: BLE001 - the release is done; the handler's cleanup must go on
+                self._audit(result="idle-error", error=type(exc).__name__)
 
     async def _handle(self, state: "_Conn", previous: "asyncio.Future[None] | None") -> None:
         loop = asyncio.get_running_loop()
@@ -396,9 +460,7 @@ class HookServer:
                 line = await asyncio.wait_for(reader.readline(), FRAME_SECONDS)
                 event = msgspec.json.decode(line, type=HookEvent)
             except Exception as exc:  # noqa: BLE001 - one bad frame (decode or shape) is dropped, by type only
-                if self.on_drop is not None:
-                    with contextlib.suppress(Exception):
-                        self.on_drop()      # before the audit: a failing log cannot skip the hold
+                self._hold(state)       # before the audit: a failing log cannot skip the hold
                 self._audit(result="dropped", error=type(exc).__name__)
             if previous is not None:
                 await previous      # dropped or not, the slot is released only after the earlier ones
@@ -415,7 +477,7 @@ class HookServer:
         except Exception as exc:  # noqa: BLE001 - a failed answer (the hook gave up and left) is by type only
             self._audit(result="not-answered", error=type(exc).__name__)
         finally:
-            self._release(state)
+            self._settle(state)
             if writer is not None:
                 writer.close()
                 with contextlib.suppress(OSError):
