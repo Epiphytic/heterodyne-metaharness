@@ -3,19 +3,25 @@
 import argparse
 import asyncio
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from heterodyne import config as hconfig
 from heterodyne.admind import unit
+from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit
+from heterodyne.admind.commands import CommandRunner
+from heterodyne.admind.daemon import Admind, supervised
 from heterodyne.admind.settings import AdmindSettings, resolve
 from heterodyne.admind.store import Store
 from heterodyne.admind.wnagent import WnAgent, WnAgentError
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import ControlClient, ControlError
+from heterodyne.services import ServiceManager, for_backend
+from heterodyne.tmux import Tmux
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
 IDENTITY_LABEL = "heterodyne-admind"
@@ -104,7 +110,69 @@ def _with_settings(fn: str) -> int:
 
 
 def run(s: AdmindSettings, store: Store, audit: Audit) -> int:
-    raise NotImplementedError  # Task 8
+    group = store.get("group_id_hex")
+    if group is None:
+        print("admind is not initialised: run `admind init` first", file=sys.stderr)
+        return EX_CONFIG
+    try:
+        services = for_backend(s.service_manager)
+    except hconfig.ConfigError as exc:
+        print(f"config error: {show(str(exc), False)}", file=sys.stderr)
+        return EX_CONFIG
+    return asyncio.run(_serve(s, store, audit, group, services))
+
+
+def _leaf(exc: BaseException) -> str:
+    """The type name of the first leaf of a (nested) exception group."""
+    current: BaseException = exc
+    while isinstance(current, BaseExceptionGroup):
+        members = cast(tuple[BaseException, ...], current.exceptions)  # pyright: ignore[reportUnknownMemberType]
+        if not members:
+            break
+        current = members[0]
+    return type(cast(object, current)).__name__
+
+
+async def _serve(s: AdmindSettings, store: Store, audit: Audit, group: str, services: ServiceManager) -> int:
+    wn = WnAgent(s.wn_agent, s.marmot_home, s.relays, audit)
+    try:
+        wn.prepare()
+        client = ControlClient(wn.socket_path, wn.token())
+        await wn.start(client)
+        account = await wn.account(client)
+    except (WnAgentError, ControlError) as exc:
+        audit.write("admind", action="start-failed", error=type(exc).__name__)
+        print(f"admind: {show(str(exc), False)}", file=sys.stderr)    # own wording only
+        await wn.stop()
+        return 1
+    agent = AdminAgent(Tmux(TMUX_SOCKET), store, s, s.state_dir / "hook.sock")
+    runner = CommandRunner(agent, services, s.restart_units, wn.alive)
+    daemon = Admind(s, client, store, audit, agent, runner, account, group)
+    audit.write("admind", action="start")
+    main_task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    handled: list[signal.Signals] = []
+    if main_task is not None:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, main_task.cancel)
+            handled.append(sig)
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(supervised("wn-agent", lambda: wn.supervise(client), audit))
+            tg.create_task(daemon.run())
+    except asyncio.CancelledError:
+        audit.write("admind", action="stop")
+        return 0
+    except Exception as exc:  # noqa: BLE001 - the daemon failed; one value-free line, never a traceback
+        leaf = _leaf(exc)
+        audit.write("admind", action="failed", error=leaf)
+        print(f"admind: run failed ({leaf})", file=sys.stderr)
+        return 1
+    finally:
+        for sig in handled:
+            loop.remove_signal_handler(sig)
+        await wn.stop()
+    return 0
 
 
 class _QuietParser(argparse.ArgumentParser):

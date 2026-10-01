@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import socket
+import stat
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +32,7 @@ import msgspec
 from heterodyne.admind.audit import Audit
 
 MAX_HOOK_FRAME = 1024 * 1024
+MAX_TRANSCRIPT = 8 * 1024 * 1024    # the fallback reads at most this much from the end of the file
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
 
 
@@ -88,13 +90,43 @@ def _blocks(record: dict[str, Any]) -> list[dict[str, Any]] | str | None:
     return None
 
 
-def last_assistant_text(path: Path) -> str:
+def _read_tail(path: Path, limit: int) -> str | None:
+    """The last `limit` bytes of a regular file, or None. The path comes from a hook payload, so it is
+    opened without following symlinks and without blocking (a FIFO would hang a plain open)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        start = max(0, st.st_size - limit)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while data := os.read(fd, min(1 << 20, 2 * limit - total)):  # the file may grow while we read
+            chunks.append(data)
+            total += len(data)
+            if total >= 2 * limit:
+                break
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if start:
+        raw = raw.partition(b"\n")[2]      # drop the line the cut landed in
+    return raw.decode("utf-8", errors="replace")
+
+
+def last_assistant_text(path: Path, limit: int = MAX_TRANSCRIPT) -> str:
     """The last assistant text of the **current turn**: text before the latest real user prompt belongs
     to an earlier turn and is never returned (a silent turn must not resend an old reply)."""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    content = _read_tail(path, limit)
+    if content is None:
         return ""
+    lines = content.splitlines()
     text = ""
     for line in lines:
         try:
