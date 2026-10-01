@@ -198,8 +198,7 @@ def test_a_failed_abandon_notice_cannot_roll_back_the_busy_period_of_a_new_promp
         await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="job A"))     # A anchored
         u.store.delete("busy")
         monkeypatch.setattr(Store, "enqueue", enqueue)
-        with pytest.raises(OSError):
-            await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="typed at the terminal"))
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="typed at the terminal"))
         assert u.store.get("busy") is not None          # the new turn is running, whatever the notice did
     run(scenario())
 

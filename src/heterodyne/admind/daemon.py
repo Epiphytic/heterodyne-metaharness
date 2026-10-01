@@ -277,7 +277,7 @@ class Admind:
                 with self.store.transaction():
                     self.store.set_inbound(mid, "dropped")
                     self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
-                self.audit.write("recover", message_id=mid, action="answered-restarted")
+                self.audit_quietly("recover", message_id=mid, action="answered-restarted")
 
     async def run(self) -> None:
         self.recover()
@@ -311,7 +311,7 @@ class Admind:
             self.audit.write("agent", action="start-failed", error=type(exc).__name__)
             return
         self.stuck = None
-        self.audit.write("agent", action=mode, session=self.agent.session_id)
+        self.audit_quietly("agent", action=mode, session=self.agent.session_id)
         if mode == "adopted":
             self.mark_ready()
         else:
@@ -337,9 +337,7 @@ class Admind:
             timed_out = not self.is_ready() and self.clock() - self.launched_at > self.ready_timeout
             if alive and not timed_out:
                 return
-            with self.store.transaction():
-                self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
-                self.set_idle()
+            self.abandon_in_flight("the admin agent restarted before answering; resend if needed", idle=True)
             self.audit_quietly("agent", action="died" if not alive else "ready-timeout")
             await self.start_agent(relaunch=True)
             self.raise_floor()
@@ -548,7 +546,7 @@ class Admind:
                     self.set_idle()
             else:
                 result += ". Later messages are still held."
-        self.audit.write("command", message_id=mid, command=cmd.name, result_chars=len(result))
+        self.audit_quietly("command", message_id=mid, command=cmd.name, result_chars=len(result))
         self.finish(mid, "done", result, "cmd")
 
     async def new_session(self, mid: str, cmd: commands.Command) -> None:
@@ -568,13 +566,12 @@ class Admind:
             self.launched_at = self.clock()
             self.not_ready_sent = False
             self.stuck = None
-            self.abandon_in_flight("the admin agent session was replaced by !new")
-            self.set_idle()
+            self.abandon_in_flight("the admin agent session was replaced by !new", idle=True)
             result, ok = await self.execute(cmd)
             self.raise_floor()
             if not ok:
                 self.stuck = result.partition(": ")[2] or "internal error"
-        self.audit.write("command", message_id=mid, command=cmd.name, result_chars=len(result))
+        self.audit_quietly("command", message_id=mid, command=cmd.name, result_chars=len(result))
         self.finish(mid, "done", result, "cmd")
 
     async def flush(self) -> None:
@@ -642,7 +639,7 @@ class Admind:
                         self.set_idle()
             if reserved:
                 self.held.insert(0, (mid, text))
-            self.audit.write("agent", action="send-failed", error=type(exc).__name__, message_id=mid)
+            self.audit_quietly("agent", action="send-failed", error=type(exc).__name__, message_id=mid)
             await self.start_agent()
         except Exception as exc:  # noqa: BLE001 - anything else: delivery can't be ruled out
             self.paste_uncertain(mid, exc)
@@ -658,9 +655,13 @@ class Admind:
         finally:
             self.audit_quietly("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
 
-    def abandon_in_flight(self, why: str, floor: int | None = None) -> None:
+    def abandon_in_flight(self, why: str, floor: int | None = None, idle: bool = False) -> None:
         """Release the reservation and its anchor. Hooks accepted so far (a hook releasing the turn passes
-        its own index instead: what was accepted behind it is newer) can no longer start or end it."""
+        its own index instead: what was accepted behind it is newer) can no longer start or end it.
+        Three steps, in this order. (a) One transaction holds only the safety and state change: the anchor
+        and reservation cleared, and the idle state if `idle`. It commits on its own, so call this outside
+        any transaction a later fallible step could roll back. (b) The operator's notice is queued in its
+        own transaction; a failure there is contained and undoes nothing from (a). (c) A quiet audit."""
         self.raise_floor(floor)
         with self.store.transaction():
             mid = self.store.get("in_flight")
@@ -669,9 +670,16 @@ class Admind:
             self.store.delete("stopped_flight")
             if mid is not None:
                 self.store.delete("in_flight")
-                self.reply(mid, f"No reply to this message: {why}.", "abandoned")
-        if mid is not None:
-            self.audit.write("agent", action="abandon", message_id=mid, reason=why)
+            if idle:
+                self.set_idle()
+        if mid is None:
+            return
+        self.contained("abandon-notice-failed", lambda: self.notify_abandoned(mid, why))
+        self.audit_quietly("agent", action="abandon", message_id=mid, reason=why)
+
+    def notify_abandoned(self, mid: str, why: str) -> None:
+        with self.store.transaction():
+            self.reply(mid, f"No reply to this message: {why}.", "abandoned")
 
     def set_busy(self) -> None:
         """Start a busy period: at dispatch, and on every UserPromptSubmit (each prompt is a new turn, so
@@ -919,16 +927,15 @@ class Admind:
             return
         if same and source in ("startup", "resume") and self.store.get("busy") is None:
             self.agent.started(ev.session_id)
-            self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
-                             effect="ready")
+            self.audit_quietly("agent", action="session-start", session=ev.session_id, source=source,
+                               effect="ready")
             self.mark_ready(ev.launch)
             return
-        with self.store.transaction():
-            self.abandon_in_flight("the admin agent restarted before answering; resend if needed", arrival)
-            self.set_idle()
+        self.abandon_in_flight("the admin agent restarted before answering; resend if needed", arrival,
+                               idle=True)
         self.agent.started(ev.session_id)
-        self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
-                         effect="restart")
+        self.audit_quietly("agent", action="session-start", session=ev.session_id, source=source,
+                           effect="restart")
         self.mark_ready(ev.launch)
 
     def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None, str | None]:
