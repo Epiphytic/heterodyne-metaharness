@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from heterodyne.config.errors import ConfigError
+from heterodyne.config.secret_scan import show
 
 # A unit name that can't be read as an option, a path or a glob.
 UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9@_.:-]*\.(?:service|target|timer|socket)")
@@ -37,21 +38,32 @@ def _check(unit: str) -> None:
 
 
 class Systemd:
-    def __init__(self, binary: str = "systemctl") -> None:
+    def __init__(self, binary: str = "systemctl", timeout: float = 120) -> None:
         self.binary = binary
+        self.timeout = timeout
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([self.binary, "--user", *args], capture_output=True, encoding="utf-8",
-                              errors="replace", timeout=120, check=False)
+    def _run(self, unit: str, *args: str) -> subprocess.CompletedProcess[str] | str:
+        """The finished process, or a short admind-worded reason it could not run."""
+        try:
+            return subprocess.run([self.binary, "--user", *args], capture_output=True, encoding="utf-8",
+                                  errors="replace", timeout=self.timeout, check=False)
+        except subprocess.TimeoutExpired:
+            return f"admind: service manager timed out for {unit}"
+        except OSError:
+            return f"admind: could not run the service manager for {unit}"
 
     def restart(self, unit: str) -> tuple[bool, str]:
         _check(unit)
-        proc = self._run("restart", "--", unit)
+        proc = self._run(unit, "restart", "--", unit)
+        if isinstance(proc, str):
+            return False, proc
         return proc.returncode == 0, (proc.stderr or proc.stdout).strip()[:500]
 
     def status(self, unit: str) -> UnitStatus:
         _check(unit)
-        proc = self._run("show", "--property=ActiveState,SubState,ActiveEnterTimestamp", "--", unit)
+        proc = self._run(unit, "show", "--property=ActiveState,SubState,ActiveEnterTimestamp", "--", unit)
+        if isinstance(proc, str):
+            return UnitStatus(unit, "unknown", "unknown", "")
         fields = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
         return UnitStatus(unit, fields.get("ActiveState", "unknown"), fields.get("SubState", "unknown"),
                           fields.get("ActiveEnterTimestamp", ""))
@@ -60,5 +72,5 @@ class Systemd:
 def for_backend(name: str) -> ServiceManager:
     if name == "systemd":
         return Systemd()
-    raise ConfigError(f"service manager {name!r} is not supported yet; v1 supports systemd only "
-                      "(launchd is phase 2)")
+    raise ConfigError(f"[platform] service_manager {show(name)} is not supported yet; v1 supports "
+                      "systemd only (launchd is phase 2)")

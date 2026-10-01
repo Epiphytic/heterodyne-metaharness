@@ -97,8 +97,8 @@ class CommandRunner:
         if cmd.name == "restart":
             unit = cmd.arg or ""
             if unit not in self.restart_units:
-                allowed = ", ".join(self.restart_units) or "empty"
-                return f"Refused: {unit} is not in admind's restart allowlist ({allowed})."
+                allowed = ", ".join(self.restart_units) or "none"
+                return f"!restart: that unit is not in [admind] restart_units (allowed: {allowed})"
             ok, detail = self.services.restart(unit)
             return f"Restarted {unit}." if ok else f"Restart of {unit} failed: {detail}"
         lines = [self.services.status(unit).line() for unit in self.restart_units]

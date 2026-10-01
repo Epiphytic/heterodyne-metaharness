@@ -50,3 +50,32 @@ def test_backend_selection() -> None:
     with pytest.raises(ConfigError, match="launchd"):
         for_backend("launchd")
     assert os.name == "posix"
+
+
+def test_backend_error_redacts_npub_and_names_key() -> None:
+    from heterodyne.marmot.nip19 import hex_to_npub
+
+    key = "ab" * 32
+    npub = hex_to_npub(key)
+    with pytest.raises(ConfigError) as exc:
+        for_backend(npub)
+    text = str(exc.value)
+    assert npub not in text and key not in text
+    assert "[platform] service_manager" in text
+
+
+def test_missing_binary_is_a_failed_result(tmp_path: Path) -> None:
+    sd = Systemd(str(tmp_path / "no-such-systemctl"))
+    ok, detail = sd.restart("wsd.service")
+    assert not ok and "wsd.service" in detail and str(tmp_path) not in detail
+    assert sd.status("wsd.service").active == "unknown"
+
+
+def test_hung_systemctl_is_a_failed_result(tmp_path: Path) -> None:
+    script = tmp_path / "systemctl"
+    script.write_text("#!/bin/sh\nexec sleep 5\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    sd = Systemd(str(script), timeout=0.2)
+    ok, detail = sd.restart("wsd.service")
+    assert not ok and "timed out" in detail and "wsd.service" in detail
+    assert sd.status("wsd.service").active == "unknown"

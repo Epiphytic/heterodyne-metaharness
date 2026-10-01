@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from heterodyne.admind.commands import Command, CommandRunner
-from heterodyne.services import UnitStatus
+from heterodyne.services import Systemd, UnitStatus
 
 
 class Agent:
@@ -43,7 +45,7 @@ def test_restart_only_allowlisted_units() -> None:
     assert r.run(Command("restart", arg="wsd.service")) == "Restarted wsd.service."
     assert "failed" in r.run(Command("restart", arg="broken.service"))
     refused = r.run(Command("restart", arg="sshd.service"))
-    assert refused.startswith("Refused") and services.restarted == ["wsd.service", "broken.service"]
+    assert refused.startswith("!restart:") and services.restarted == ["wsd.service", "broken.service"]
 
 
 def test_other_commands() -> None:
@@ -56,3 +58,24 @@ def test_other_commands() -> None:
     ps = r.run(Command("ps"))
     assert "wsd.service: active (running)" in ps
     assert "wn-agent (admind): down" in ps and "admin agent: running" in ps
+
+
+def test_restart_refusal_does_not_echo_argument() -> None:
+    from heterodyne.marmot.nip19 import hex_to_npub
+
+    r, _, services = runner()
+    token = "sk-ant-api03-" + "Zx9" * 10
+    npub = hex_to_npub("cd" * 32)
+    for bad in (token, npub):
+        reply = r.run(Command("restart", arg=bad))
+        assert bad not in reply and "cd" * 32 not in reply
+        assert "wsd.service, broken.service" in reply and "[admind] restart_units" in reply
+    assert services.restarted == []
+    empty = CommandRunner(Agent(), services, (), lambda: False)  # type: ignore[arg-type]
+    assert "allowed: none" in empty.run(Command("restart", arg="x.service"))
+
+
+def test_launch_failure_gives_normal_failure_reply(tmp_path: Path) -> None:
+    sd = Systemd(str(tmp_path / "missing"))
+    r = CommandRunner(Agent(), sd, ("wsd.service",), lambda: False)  # type: ignore[arg-type]
+    assert r.run(Command("restart", arg="wsd.service")).startswith("Restart of wsd.service failed:")
