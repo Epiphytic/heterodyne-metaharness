@@ -133,8 +133,57 @@ def _leaf(exc: BaseException) -> str:
     return type(cast(object, current)).__name__
 
 
+async def _stop_child(wn: WnAgent) -> None:
+    """Stop and reap the child, and finish doing so even if this task is cancelled again meanwhile. Safe
+    when the child never started."""
+    stopping = asyncio.ensure_future(wn.stop())
+    cancelled = False
+    while not stopping.done():
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            cancelled = True
+    stopping.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _serve(s: AdmindSettings, store: Store, audit: Audit, group: str, services: ServiceManager) -> int:
+    """Run until SIGTERM or SIGINT. The child's lifetime is bounded from before it is started: the
+    `finally` stops it whatever ends the run (a signal, any exception, a cancellation, a failed audit
+    write), and the signal handlers are in place before the (up to 30 s) startup."""
     wn = WnAgent(s.wn_agent, s.marmot_home, s.relays, audit)
+    main_task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    signalled = False
+    handled: list[signal.Signals] = []
+
+    def on_signal() -> None:
+        nonlocal signalled
+        signalled = True
+        if main_task is not None:
+            main_task.cancel()
+    try:
+        if main_task is not None:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, on_signal)
+                handled.append(sig)
+        return await _run_with_child(s, store, audit, group, services, wn)
+    except asyncio.CancelledError:
+        if not signalled:
+            raise
+        audit.write("admind", action="stop")
+        return 0
+    finally:
+        try:
+            await _stop_child(wn)
+        finally:
+            for sig in handled:
+                loop.remove_signal_handler(sig)
+
+
+async def _run_with_child(s: AdmindSettings, store: Store, audit: Audit, group: str, services: ServiceManager,
+                          wn: WnAgent) -> int:
     try:
         wn.prepare()
         client = ControlClient(wn.socket_path, wn.token())
@@ -143,35 +192,20 @@ async def _serve(s: AdmindSettings, store: Store, audit: Audit, group: str, serv
     except (WnAgentError, ControlError) as exc:
         audit.write("admind", action="start-failed", error=type(exc).__name__)
         print(f"admind: {show(str(exc), False)}", file=sys.stderr)    # own wording only
-        await wn.stop()
         return 1
     agent = AdminAgent(Tmux(TMUX_SOCKET), store, s, s.state_dir / "hook.sock")
     runner = CommandRunner(agent, services, s.restart_units, wn.alive)
     daemon = Admind(s, client, store, audit, agent, runner, account, group)
     audit.write("admind", action="start")
-    main_task = asyncio.current_task()
-    loop = asyncio.get_running_loop()
-    handled: list[signal.Signals] = []
-    if main_task is not None:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, main_task.cancel)
-            handled.append(sig)
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(supervised("wn-agent", lambda: wn.supervise(client), audit))
             tg.create_task(daemon.run())
-    except asyncio.CancelledError:
-        audit.write("admind", action="stop")
-        return 0
     except Exception as exc:  # noqa: BLE001 - the daemon failed; one value-free line, never a traceback
         leaf = _leaf(exc)
         audit.write("admind", action="failed", error=leaf)
         print(f"admind: run failed ({leaf})", file=sys.stderr)
         return 1
-    finally:
-        for sig in handled:
-            loop.remove_signal_handler(sig)
-        await wn.stop()
     return 0
 
 

@@ -27,7 +27,7 @@ from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import RESTARTED_NOTICE, UNCERTAIN, Admind
 from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, now
-from heterodyne.marmot.control import ControlError, InboundMessage, decode_event
+from heterodyne.marmot.control import ControlClient, ControlError, InboundMessage, decode_event
 from heterodyne.marmot.nip19 import hex_to_npub
 from heterodyne.services import UnitStatus
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
@@ -733,3 +733,123 @@ def test_a_session_start_with_a_different_session_id_is_a_restart(tmp_path: Path
         assert [r for _, _, r in u.outbox()] == [a] and u.store.get("session_started") == "S2"
         assert u.store.get("busy") is None
     run(scenario())
+
+
+# --- 8. `admind run` owns the child's lifetime from before it starts ---
+class StubChild:
+    """The WnAgent surface cli._serve uses. It can block in start() or account(), and records stop()."""
+
+    def __init__(self, sock: Path, *, block_in: str | None = None,
+                 die_with: BaseException | None = None) -> None:
+        self.socket_path = sock
+        self.block_in = block_in
+        self.die_with = die_with
+        self.entered = asyncio.Event()
+        self.stops = 0
+
+    def prepare(self) -> None:
+        pass
+
+    def token(self) -> str:
+        return "test-token"
+
+    async def _maybe_block(self, where: str) -> None:
+        if self.block_in == where:
+            self.entered.set()
+            await asyncio.Event().wait()
+        if self.die_with is not None and where == "account":
+            raise self.die_with
+
+    async def start(self, client: ControlClient) -> None:
+        await self._maybe_block("start")
+
+    async def account(self, client: ControlClient) -> str:
+        await self._maybe_block("account")
+        return ACCOUNT
+
+    async def supervise(self, client: ControlClient) -> None:
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        self.stops += 1
+
+    def alive(self) -> bool:
+        return True
+
+
+class AuditFailsOnStart(Audit):
+    def write(self, kind: str, **fields: object) -> None:
+        if kind == "admind" and fields.get("action") == "start":
+            raise OSError("disk full")
+        super().write(kind, **fields)
+
+
+@pytest.mark.parametrize("where", ["start", "account"])
+def test_cancellation_during_startup_stops_the_child(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    from heterodyne.admind import cli
+    s = make_settings(tmp_path)
+    child = StubChild(tmp_path / "wn.sock", block_in=where)
+    monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: child)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(cli._serve(s, Store(s.state_dir / "admind.db"),
+                                              Audit(s.state_dir / "audit.jsonl"), GROUP, Services()))
+        await child.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    run(scenario())
+    assert child.stops == 1
+
+
+def test_a_signal_during_startup_stops_the_child_and_exits_cleanly(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    from heterodyne.admind import cli
+    s = make_settings(tmp_path)
+    child = StubChild(tmp_path / "wn.sock", block_in="start")
+    monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: child)
+
+    async def scenario() -> int:
+        task = asyncio.create_task(cli._serve(s, Store(s.state_dir / "admind.db"),
+                                              Audit(s.state_dir / "audit.jsonl"), GROUP, Services()))
+        await child.entered.wait()
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await task
+    assert run(scenario()) == 0 and child.stops == 1
+
+
+def test_an_audit_failure_after_start_stops_the_child(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from heterodyne.admind import cli
+    s = make_settings(tmp_path)
+    child = StubChild(tmp_path / "wn.sock")
+    monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: child)
+    audit = AuditFailsOnStart(s.state_dir / "audit.jsonl")
+    with pytest.raises(OSError, match="disk full"):
+        run(cli._serve(s, Store(s.state_dir / "admind.db"), audit, GROUP, Services()))
+    assert child.stops == 1
+
+
+def test_a_keyboard_interrupt_during_startup_stops_the_child(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from heterodyne.admind import cli
+    s = make_settings(tmp_path)
+    child = StubChild(tmp_path / "wn.sock", die_with=KeyboardInterrupt())
+    monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: child)
+
+    async def scenario() -> None:
+        await cli._serve(s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl"), GROUP,
+                         Services())
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(scenario())
+    assert child.stops == 1
+
+
+def test_stopping_a_child_that_never_started_is_safe(tmp_path: Path) -> None:
+    from heterodyne.admind.wnagent import WnAgent
+    wn = WnAgent("wn-agent", tmp_path / "home", ("wss://relay.example.org",), Audit(tmp_path / "a.jsonl"))
+    asyncio.run(wn.stop())
+    asyncio.run(wn.stop())
