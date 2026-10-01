@@ -14,7 +14,7 @@ from heterodyne.admind.hook import HookEvent
 from heterodyne.tmux import TmuxError
 
 
-def test_a_definite_send_failure_leaves_no_orphan_anchor_for_the_retry(
+def test_a_prompt_hook_during_a_failing_send_leaves_no_orphan_anchor_for_the_retry(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
     started = threading.Event()
@@ -28,17 +28,18 @@ def test_a_definite_send_failure_leaves_no_orphan_anchor_for_the_retry(
             assert release.wait(10), "test never released the paste"
             raise TmuxError("load-buffer failed")      # definite: nothing reached the pane
     u.tmux.paste = paste                                # type: ignore[method-assign]
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "the answer to A")
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, fallback=True: "the answer to A")
 
     async def scenario() -> None:
         sending = asyncio.create_task(u.say("prompt A"))
         assert await asyncio.to_thread(started.wait, 10)         # A is reserved; its paste is pending
-        # A terminal prompt with text identical to A's arrives meanwhile and establishes the anchor.
-        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+        # A terminal prompt with text identical to A's arrives meanwhile; it waits for the dispatch.
+        hook = asyncio.create_task(u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A")))
         a = u.store.get("in_flight")
-        assert a is not None and u.store.get("anchor") == a
+        assert a is not None and not hook.done() and u.store.get("anchor") is None
         release.set()
         assert await sending == a
+        await hook
         assert u.daemon.held == [(a, "prompt A")] and u.store.get("in_flight") is None
         assert u.store.get("anchor") is None                     # not delivered: nothing to anchor to
         assert u.store.get("busy") is not None                   # the newer turn's busy state is kept

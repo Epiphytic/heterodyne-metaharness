@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from heterodyne.admind import alerts, chunk, commands, guard
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
-from heterodyne.admind.hook import HOOK_EVENTS, HookEvent, HookServer, reply_text, same_prompt
+from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
 from heterodyne.admind.settings import AdmindSettings
 from heterodyne.admind.store import Store, now
 from heterodyne.config.secret_scan import show
@@ -106,7 +106,7 @@ class Admind:
         self.runner = runner
         self.account = account
         self.group = group
-        self.hooks: asyncio.Queue[HookEvent] = asyncio.Queue()
+        self.hooks: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         self.work: asyncio.Queue[InboundMessage] = asyncio.Queue()    # operator messages for worker_loop
         self.ready = asyncio.Event()
         self.ready_nonce: str | None = None     # the nonce of the launch that set `ready`
@@ -578,6 +578,7 @@ class Admind:
             mid = self.store.get("in_flight")
             self.store.delete("anchor")
             self.store.delete("in_flight_text")
+            self.store.delete("stopped_flight")
             if mid is not None:
                 self.store.delete("in_flight")
                 self.reply(mid, f"No reply to this message: {why}.", "abandoned")
@@ -614,12 +615,21 @@ class Admind:
 
     # --- hooks ---------------------------------------------------------------------------------
     async def hook_loop(self) -> None:
+        """Process hook events one at a time, in the order the hook server queued them. The hook's
+        connection is answered only after its event was processed, so Claude Code (which waits for its
+        synchronous hooks) never runs ahead of admind's view of the turn."""
         while True:
-            ev = await self.hooks.get()
+            item = await self.hooks.get()
+            ev, done = (item.event, item.done) if isinstance(item, Delivery) else (item, None)
+            ok = False
             try:
                 await self.route_hook(ev)
+                ok = True
             except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop
                 self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
+            finally:
+                if done is not None and not done.done():
+                    done.set_result(ok)
             if self.hooks.empty():      # after every event, ignored ones too: _flush skipped while it queued
                 await self.flush()
 
@@ -627,7 +637,7 @@ class Admind:
         if ev.session_id != self.agent.session_id or ev.session_id in self.retired:
             # Neither the session ID nor the event name is recorded: any local process can send both.
             self.audit.write("hook", action="ignored-other-session")
-        elif self.hook_stale(ev):
+        elif not self.launch_current(ev):
             await self.on_stale_hook(ev)
         else:
             await self.on_hook(ev)
@@ -640,62 +650,55 @@ class Admind:
             return False
         return hmac.compare_digest(ev.launch.encode(), nonce.encode())
 
-    def turn_start_seq(self) -> int:
-        """The hook sequence number that established the current turn (or, before any turn of this
-        launch, the counter's value when the launch began)."""
-        return int(self.store.get("turn_start_seq") or "0")
-
-    def hook_stale(self, ev: HookEvent) -> bool:
-        """An event is stale if it is from another launch, carries no valid sequence number, or was
-        produced before the turn (or launch) it would now apply to began. Fail closed throughout."""
-        if not self.launch_current(ev):
-            return True
-        return ev.seq is None or ev.seq < 0 or ev.seq <= self.turn_start_seq()
-
-    def note_seq(self, ev: HookEvent) -> None:
-        """Record `ev` as the newest event that established turn state. Part of the caller's transaction."""
-        if ev.seq is not None and ev.seq > self.turn_start_seq():
-            self.store.set("turn_start_seq", str(ev.seq))
-
     async def on_stale_hook(self, ev: HookEvent) -> None:
-        """An event from an earlier launch (a crashed process whose hook arrived late), an earlier turn of
-        this launch, or one without a valid launch nonce or sequence number. It never changes turn, busy,
-        anchor or reservation state. A Stop's reply is real: if the event itself carries the text it is
-        posted top-level, as for any late reply. The transcript is never used for it (it would hold
-        whatever ran last, not this turn). Anything else is audited with fixed wording and dropped."""
+        """An event from an earlier launch (a crashed process whose hook arrived late) or one without a
+        valid launch nonce. It never changes turn, busy, anchor or reservation state. A Stop's reply is
+        real: if the event itself carries the text it is posted top-level, as for any late reply. The
+        transcript is never used for it (it would hold whatever ran last, not this turn). Anything else is
+        audited with fixed wording and dropped."""
         if ev.hook_event_name != "Stop":
             self.audit.write("hook", action="ignored-stale-launch")
             return
         await self.on_stop(ev, stale=True)
 
     async def on_hook(self, ev: HookEvent) -> None:
-        """One event from the current session. hook_loop flushes after it once the queue is empty."""
+        """One event from the current session, applied under the turn-state lock (never mid-dispatch,
+        never mid-!interrupt). hook_loop flushes after it once the queue is empty."""
         if ev.hook_event_name not in KNOWN_HOOKS:
             self.audit.write("hook", action="ignored-unknown-event")
-        elif ev.hook_event_name == "SessionStart":
-            self.generation += 1
-            self.on_session_start(ev)
-        elif ev.hook_event_name == "UserPromptSubmit":
-            self.generation += 1
-            with self.store.transaction():      # the busy period, the anchor and the turn's seq: one step
-                self.note_seq(ev)
-                self.set_busy()                 # a turn is running, whoever started it
-                in_flight = self.store.get("in_flight")
-                pasted = self.store.get("in_flight_text")
-                if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
-                        and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
-                    self.store.set("anchor", in_flight)
-                    self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
-                else:
-                    self.audit.write("agent", action="prompt-not-from-admind",
-                                     prompt_chars=None if ev.prompt is None else len(ev.prompt))
-                    if self.store.get("anchor") is not None:
-                        # The agent runs one turn at a time, so the anchored turn is over and its Stop
-                        # was lost. Release the anchor before this turn's Stop can take it.
-                        self.abandon_in_flight("admind did not see the admin agent finish it before "
-                                               "another prompt started a turn")
-        else:   # Stop
+        elif ev.hook_event_name == "Stop":
             await self.on_stop(ev)
+        else:
+            async with self.dispatch_lock:
+                if ev.hook_event_name == "SessionStart":
+                    self.generation += 1
+                    self.on_session_start(ev)
+                else:
+                    self.generation += 1
+                    self.on_prompt(ev)
+
+    def on_prompt(self, ev: HookEvent) -> None:
+        in_flight = self.store.get("in_flight")
+        if in_flight is not None and self.store.get("stopped_flight") == in_flight:
+            # The reservation's turn already ended (its Stop was processed first): this prompt is late.
+            # It must not anchor the reservation or start a busy period for a turn that is over.
+            self.audit.write("agent", action="ignored-late-prompt", message_id=in_flight)
+            return
+        with self.store.transaction():      # the busy period and the anchor: one step
+            self.set_busy()                 # a turn is running, whoever started it
+            pasted = self.store.get("in_flight_text")
+            if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
+                    and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
+                self.store.set("anchor", in_flight)
+                self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
+            else:
+                self.audit.write("agent", action="prompt-not-from-admind",
+                                 prompt_chars=None if ev.prompt is None else len(ev.prompt))
+                if self.store.get("anchor") is not None:
+                    # The agent runs one turn at a time, so the anchored turn is over and its Stop
+                    # was lost. Release the anchor before this turn's Stop can take it.
+                    self.abandon_in_flight("admind did not see the admin agent finish it before "
+                                           "another prompt started a turn")
 
     def on_session_start(self, ev: HookEvent) -> None:
         """Whether a SessionStart proves the agent idle depends on its `source` (D9). It is only trusted
@@ -713,7 +716,6 @@ class Admind:
             self.agent.started(ev.session_id)
             self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
                              effect="ready")
-            self.note_seq(ev)
             self.mark_ready()
             return
         with self.store.transaction():
@@ -722,7 +724,6 @@ class Admind:
         self.agent.started(ev.session_id)
         self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
                          effect="restart")
-        self.note_seq(ev)
         self.mark_ready()
 
     def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None, str | None]:
@@ -735,47 +736,59 @@ class Admind:
         return session_id == self.agent.session_id and session_id not in self.retired
 
     async def on_stop(self, ev: HookEvent, stale: bool = False) -> None:
-        # Captured before the first await: reading the reply yields, and !interrupt or !new can run
-        # meanwhile (the worker is a separate task), replacing the turn this Stop belongs to.
-        identity = self.turn_identity(ev.session_id)
-        raw = ""
-        if stale:
-            # No transcript fallback: its last assistant text may belong to a newer turn. A stale Stop
-            # with no text of its own cannot be recovered; it is audited and nothing is posted.
-            raw = reply_text(ev, fallback=False)
-            if not raw.strip() and self.session_current(ev.session_id):
+        """A Stop ends a turn only if admind has already processed the prompt that anchored it (or no
+        reservation is in flight at all: a turn begun at the terminal, or after a lost prompt hook). A Stop
+        that finds a reservation in flight but unanchored, or that is stale, changes no turn state: its
+        own text is posted top-level, otherwise nothing is and the record says so."""
+        async with self.dispatch_lock:
+            # The identity is captured here, before the transcript read yields: !interrupt, !new, a
+            # new dispatch or a relaunch can run meanwhile (they take the lock the read does not hold).
+            identity = self.turn_identity(ev.session_id)
+            in_flight, anchor = identity[1], identity[2]
+            unanchored = in_flight is not None and anchor is None
+            own = ev.last_assistant_message or ""
+            if unanchored and not stale and self.session_current(ev.session_id):
+                self.store.set("stopped_flight", in_flight or "")    # a prompt for it is now late
+            if (stale or unanchored) and not own.strip():
+                # No transcript fallback: its last assistant text may belong to another turn.
+                if self.session_current(ev.session_id):
+                    self.audit.write("agent", action="stale-stop-unrecoverable")
+                return
+            need_fallback = not stale and not unanchored and not ev.last_assistant_message
+        raw = own
+        if need_fallback:
+            raw = await asyncio.to_thread(reply_text, ev)    # may read the transcript file (lock not held)
+        async with self.dispatch_lock:
+            if not self.session_current(ev.session_id):
+                self.audit.write("agent", action="stale-stop")   # a retired session: fixed wording only
+                return
+            current = not (stale or unanchored) and self.turn_identity(ev.session_id) == identity
+            if need_fallback and not current:
+                # The turn changed while the transcript was read: its last text may be the new turn's.
                 self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
-        seq = int(self.store.get("reply_seq") or "0") + 1
-        self.store.set("reply_seq", str(seq))
-        if not stale:
-            raw = await asyncio.to_thread(reply_text, ev)    # may read the transcript file
-        if not self.session_current(ev.session_id):
-            self.audit.write("agent", action="stale-stop")   # a retired session: fixed wording only
-            return
-        text = raw if raw.strip() else NO_REPLY
-        parts = chunk.split(text, self.s.chunk_chars)
-        # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
-        # captured for is still the current one. A Stop with no anchor (a turn that ended after
-        # !interrupt, one begun at the terminal, or ours with a lost prompt hook) posts top-level, and
-        # so does a late Stop whose turn a newer dispatch has replaced: its reply is real and goes out
-        # unthreaded, and the newer turn's state is left exactly as it is.
-        current = not stale and self.turn_identity(ev.session_id) == identity
-        anchor = identity[2] if current else None
-        with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
-            for i, part in enumerate(parts):
-                self.post(f"reply:{ev.session_id}:{seq}:{i}", part, anchor)
-            if current:
-                if anchor is not None:
-                    self.store.delete("anchor")
-                    self.store.delete("in_flight")
-                    self.store.delete("in_flight_text")
-                self.set_idle()             # the turn ended; an unconfirmed in_flight still holds
-        if not current:
-            self.audit.write("agent", action="late-stop")   # fixed wording; nothing from the event
-        # The agent's text goes to the operator's chat only; the audit log records its size.
-        self.audit.write("reply", session=ev.session_id, reply_to=anchor, chars=len(text),
-                         chunks=len(parts))
+            text = raw if raw.strip() else NO_REPLY
+            parts = chunk.split(text, self.s.chunk_chars)
+            reply_seq = int(self.store.get("reply_seq") or "0") + 1
+            self.store.set("reply_seq", str(reply_seq))
+            # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
+            # captured for is still the current one. Otherwise the reply is real and goes out unthreaded,
+            # and the current turn's state is left exactly as it is.
+            reply_to = anchor if current else None
+            with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
+                for i, part in enumerate(parts):
+                    self.post(f"reply:{ev.session_id}:{reply_seq}:{i}", part, reply_to)
+                if current:
+                    if anchor is not None:
+                        self.store.delete("anchor")
+                        self.store.delete("in_flight")
+                        self.store.delete("in_flight_text")
+                    self.set_idle()             # the turn ended; an unconfirmed in_flight still holds
+            if not current:
+                self.audit.write("agent", action="late-stop")   # fixed wording; nothing from the event
+            # The agent's text goes to the operator's chat only; the audit log records its size.
+            self.audit.write("reply", session=ev.session_id, reply_to=reply_to, chars=len(text),
+                             chunks=len(parts))
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:

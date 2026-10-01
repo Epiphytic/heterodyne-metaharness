@@ -9,6 +9,8 @@ from fakes.settings import make_settings
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import (
+    HOOK_TIMEOUT,
+    Delivery,
     HookEvent,
     HookServer,
     hook_command,
@@ -160,16 +162,19 @@ def test_hook_round_trip_over_the_socket(tmp_path: Path) -> None:
     sock = tmp_path / "hook.sock"
 
     async def body() -> HookEvent:
-        queue: asyncio.Queue[HookEvent] = asyncio.Queue()
+        queue: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
         await server.start()
         stdin = json.dumps({"hook_event_name": "Stop", "session_id": "S", "last_assistant_message": "ok",
                             "stop_hook_active": False, "cwd": "/x"}).encode()
-        rc = await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "a1" * 16], stdin)
-        assert rc == 0
-        ev = await asyncio.wait_for(queue.get(), 5)
+        argv = ["--socket", str(sock), "--launch", "a1" * 16]
+        hook = asyncio.create_task(asyncio.to_thread(hook_main, argv, stdin))
+        item = await asyncio.wait_for(queue.get(), 5)
+        assert isinstance(item, Delivery) and not hook.done()      # the hook waits for the processing
+        item.done.set_result(True)
+        assert await hook == 0
         await server.close()
-        return ev
+        return item.event
     ev = asyncio.run(body())
     assert ev == HookEvent("Stop", "S", None, "ok", launch="a1" * 16)
 
@@ -178,13 +183,22 @@ def test_hook_main_takes_the_nonce_from_its_command_line_only(tmp_path: Path) ->
     sock = tmp_path / "hook.sock"
 
     async def body() -> list[HookEvent]:
-        queue: asyncio.Queue[HookEvent] = asyncio.Queue()
+        queue: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
         await server.start()
         stdin = json.dumps({"hook_event_name": "Stop", "session_id": "S", "launch": "forged"}).encode()
+        events: list[HookEvent] = []
+
+        async def consume() -> None:
+            for _ in range(2):
+                item = await asyncio.wait_for(queue.get(), 5)
+                assert isinstance(item, Delivery)
+                events.append(item.event)
+                item.done.set_result(True)
+        consumer = asyncio.create_task(consume())
         await asyncio.to_thread(hook_main, ["--socket", str(sock), "--launch", "ab" * 16], stdin)
         await asyncio.to_thread(hook_main, ["--socket", str(sock)], stdin)     # no --launch: none forwarded
-        events = [await asyncio.wait_for(queue.get(), 5), await asyncio.wait_for(queue.get(), 5)]
+        await consumer
         await server.close()
         return events
     assert [e.launch for e in asyncio.run(body())] == ["ab" * 16, None]
@@ -224,7 +238,7 @@ def test_hook_server_drops_garbage(tmp_path: Path) -> None:
     sock = tmp_path / "hook.sock"
 
     async def body() -> int:
-        queue: asyncio.Queue[HookEvent] = asyncio.Queue()
+        queue: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
         await server.start()
 
@@ -243,7 +257,7 @@ def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
     sock = tmp_path / "hook.sock"
 
     async def body() -> int:
-        queue: asyncio.Queue[HookEvent] = asyncio.Queue()
+        queue: asyncio.Queue[HookEvent | Delivery] = asyncio.Queue()
         server = HookServer(sock, queue, Audit(tmp_path / "audit.jsonl"))
         await server.start()
 
@@ -261,10 +275,12 @@ def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
 
 
 def test_settings_json_wires_both_hooks(tmp_path: Path) -> None:
-    command = hook_command(tmp_path / "hook sock", "0123456789abcdef0123456789abcdef", tmp_path / "seq")
+    command = hook_command(tmp_path / "hook sock", "0123456789abcdef0123456789abcdef")
     assert "'" in command                      # the socket path is shell-quoted
-    assert " --launch 0123456789abcdef0123456789abcdef --seq-file " in command
-    assert command.endswith(str(tmp_path / "seq"))
+    assert command.endswith(" --launch 0123456789abcdef0123456789abcdef")
+    assert "seq" not in command
     data = json.loads(settings_json(command))
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
-        assert data["hooks"][event] == [{"hooks": [{"type": "command", "command": command}]}]
+        assert data["hooks"][event] == [{"hooks": [{"type": "command", "command": command,
+                                                    "timeout": HOOK_TIMEOUT}]}]
+        assert "async" not in data["hooks"][event][0]["hooks"][0]     # the ordering relies on sync hooks

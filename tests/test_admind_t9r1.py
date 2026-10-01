@@ -144,9 +144,7 @@ def test_an_agent_that_dies_mid_turn_abandons_the_turn_and_releases_the_queue(tm
         assert u.store.get("in_flight") is None and u.store.get("busy") is None
         assert launches == ["admin"] and u.daemon.stuck is None
         assert u.tmux.pasted == ["long job"]            # not yet: the relaunched agent is not ready
-        await u.daemon.hooks.put(HookEvent("SessionStart", "S1", source="startup"))
-        ev = u.daemon.hooks.get_nowait()
-        await u.daemon.on_hook(ev)
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="startup"))
         await u.daemon.flush()
         assert u.tmux.pasted == ["long job", "next job"]    # the queue is released
     run(scenario())

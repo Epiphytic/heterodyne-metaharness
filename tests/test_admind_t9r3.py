@@ -1,66 +1,23 @@
-"""Task 9 review round 3, code fixes: a delayed Stop is tied to its own turn by a hook sequence number,
-a relaunch invalidates the departing launch before it yields, a stale Stop never uses the transcript
-fallback, and malformed launch or seq values are dropped per event. Fakes, tmp_path and explicit barriers
-only (threading events, futures, queues); no sleeps, no real wn-agent, claude, systemctl, network or
-~/.claude.
+"""Task 9 review round 3, code fixes still in force after round 4 replaced the sequence counter: a
+relaunch invalidates the departing launch before it yields, a stale (old launch) Stop never uses the
+transcript fallback, and malformed launch values are dropped per event. Fakes, tmp_path and explicit
+barriers only (threading events, futures, queues); no sleeps, no real wn-agent, claude, systemctl,
+network or ~/.claude.
 """
 
 import asyncio
 import contextlib
 import json
-import os
 import threading
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-import msgspec
 from test_admind_r1 import Unit, run
 from test_admind_t9r2 import fire, hook_args
 
 from heterodyne.admind.hook import HookEvent, HookServer, hook_main
 
 LONG_AGO = "0" * 32
-
-
-class Network:
-    """A socket that accepts a hook's frame, answers `ok` at once (so the hook returns) and keeps the event
-    back: a delivery delayed in transit. `release` hands the held events to the daemon."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.held: list[HookEvent] = []
-        self.raw: list[dict[str, Any]] = []
-        self._server: asyncio.Server | None = None
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path))
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        line = await reader.readline()
-        self.raw.append(json.loads(line))
-        self.held.append(msgspec.json.decode(line, type=HookEvent))
-        writer.write(b"ok\n")
-        await writer.drain()
-        writer.close()
-
-    async def release(self, queue: asyncio.Queue[HookEvent]) -> None:
-        held, self.held = self.held, []
-        for ev in held:
-            await queue.put(ev)
-
-    async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-
-
-def via(args: list[str], sock: Path) -> list[str]:
-    """The same hook command line, aimed at another socket."""
-    out = list(args)
-    out[out.index("--socket") + 1] = str(sock)
-    return out
 
 
 async def invoke(args: list[str], event: str, **extra: object) -> None:
@@ -98,68 +55,7 @@ async def serving(u: Unit):                             # type: ignore[no-untype
         await server.close()
 
 
-# --- 1 and 3. a delayed Stop from an older turn of the same launch ---
-
-def delayed_stop_scenario(tmp_path: Path, stop_extra: dict[str, object],
-                          transcript_text: str | None = None) -> tuple[Unit, str, str, str]:
-    u = Unit(tmp_path)
-    flushed, _reached = instrument(u)
-    net = Network(tmp_path / "d.sock")
-    out: dict[str, str] = {}
-
-    async def scenario() -> None:
-        await net.start()
-        async with serving(u):
-            try:
-                await u.daemon.start_agent(relaunch=True)
-                args = hook_args(u.agent.settings_file)
-                await fire(args, "SessionStart", flushed, source="startup")
-                a = await u.say("job A")
-                await fire(args, "UserPromptSubmit", flushed, prompt="job A")
-                assert u.store.get("anchor") == a
-                # A's Stop hook runs now (Claude Code finished A) but its delivery is delayed.
-                await invoke(via(args, tmp_path / "d.sock"), "Stop", **stop_extra)
-                assert len(net.held) == 1
-                await u.say("!interrupt")                       # the operator gives up on A
-                b = await u.say("job B")
-                assert u.tmux.pasted == ["job A", "job B"]
-                await fire(args, "UserPromptSubmit", flushed, prompt="job B")
-                assert u.store.get("anchor") == b and u.store.get("busy") is not None
-                c = await u.say("job C")                        # held behind B
-                assert u.daemon.held == [(c, "job C")]
-                if transcript_text is not None:                 # B has produced text in the transcript
-                    (tmp_path / "S1.jsonl").write_text(
-                        json.dumps({"type": "user", "message": {"content": "job B"}}) + "\n"
-                        + json.dumps({"type": "assistant", "message": {
-                            "content": [{"type": "text", "text": transcript_text}]}}) + "\n")
-                flushed.clear()
-                await net.release(u.daemon.hooks)               # now A's Stop arrives
-                await asyncio.wait_for(flushed.wait(), 10)
-                out.update(a=a, b=b, c=c)
-            finally:
-                await net.close()
-    run(scenario())
-    return u, out["a"], out["b"], out["c"]
-
-
-def test_a_delayed_stop_of_an_interrupted_turn_cannot_steal_the_newer_turn(tmp_path: Path) -> None:
-    u, _a, b, c = delayed_stop_scenario(tmp_path, {"last_assistant_message": "old reply"})
-    assert u.store.get("anchor") == b and u.store.get("in_flight") == b
-    assert u.store.get("busy") is not None
-    assert u.tmux.pasted == ["job A", "job B"]                  # C is not pasted while B runs
-    assert u.daemon.held == [(c, "job C")]
-    sent = [(t, r) for _k, t, r in u.outbox()]
-    assert ("old reply", None) in sent and ("old reply", b) not in sent
-
-
-def test_a_stale_stop_without_text_does_not_use_the_transcript_fallback(tmp_path: Path) -> None:
-    transcript = tmp_path / "S1.jsonl"
-    u, _a, b, c = delayed_stop_scenario(tmp_path, {"transcript_path": str(transcript)},
-                                        transcript_text="B's text, not A's")
-    assert "B's text, not A's" not in u.texts()
-    assert u.store.get("anchor") == b and u.store.get("busy") is not None
-    assert u.tmux.pasted == ["job A", "job B"] and u.daemon.held == [(c, "job C")]
-
+# --- 3. a Stop from an old launch ---
 
 def test_a_stop_from_an_old_launch_without_text_does_not_use_the_transcript_fallback(tmp_path: Path) -> None:
     u = Unit(tmp_path)
@@ -180,29 +76,6 @@ def test_a_stop_from_an_old_launch_without_text_does_not_use_the_transcript_fall
             assert u.store.get("anchor") == a and u.store.get("busy") is not None
             assert "the replacement's text" not in u.texts()
             assert "stale" in u.audit_text()
-    run(scenario())
-
-
-def test_a_frame_without_a_sequence_number_is_stale(tmp_path: Path) -> None:
-    u = Unit(tmp_path)
-    flushed, _ = instrument(u)
-
-    async def scenario() -> None:
-        async with serving(u):
-            await u.daemon.start_agent(relaunch=True)
-            args = hook_args(u.agent.settings_file)
-            await fire(args, "SessionStart", flushed, source="startup")
-            a = await u.say("job")
-            await fire(args, "UserPromptSubmit", flushed, prompt="job")
-            seq_less = [x for pair in zip(args[::2], args[1::2], strict=False) if pair[0] != "--seq-file"
-                        for x in pair]
-            assert "--seq-file" not in seq_less and "--launch" in seq_less
-            await fire(seq_less, "Stop", flushed, last_assistant_message="no seq")
-            assert u.store.get("anchor") == a and u.store.get("busy") is not None
-            assert ("no seq", None) in [(t, r) for _k, t, r in u.outbox()]
-            await fire(seq_less, "UserPromptSubmit", flushed, prompt="intruder")
-            await fire(seq_less, "SessionStart", flushed, source="clear")
-            assert u.store.get("anchor") == a and u.store.get("in_flight") == a
     run(scenario())
 
 
@@ -270,13 +143,14 @@ def test_an_old_launchs_session_start_during_relaunch_does_not_ready_the_replace
             armed[0] = True
             check = asyncio.create_task(u.daemon.check_agent())
             await asyncio.wait_for(gate.entered.wait(), 10)     # ensure_running is killing the old pane
-            reached.clear()
-            await invoke(first, "SessionStart", source="resume")    # the OLD launch's hook, now
-            await asyncio.wait_for(reached.wait(), 10)              # hook_loop has handled it
-            held_job = asyncio.create_task(u.say("held job"))       # queues behind the dispatch lock
+            # The OLD launch's hook, now: it waits for the turn-state lock the relaunch holds.
+            old_hook = asyncio.create_task(invoke(first, "SessionStart", source="resume"))
+            held_job = asyncio.create_task(u.say("held job"))       # queues behind the dispatch lock too
             gate.release.set()
             await asyncio.wait_for(check, 10)
+            await asyncio.wait_for(old_hook, 10)
             await asyncio.wait_for(held_job, 10)
+            assert "ignored-stale-launch" in u.audit_text()
             assert not u.daemon.ready.is_set()
             assert "held job" not in u.tmux.pasted
             # the readiness timeout still applies to the replacement
@@ -306,18 +180,18 @@ def test_the_replacements_early_session_start_during_launch_is_accepted(tmp_path
             await asyncio.wait_for(gate.entered.wait(), 10)     # the replacement is being started
             second = hook_args(u.agent.settings_file)
             assert second != first
-            reached.clear()
-            await invoke(second, "SessionStart", source="resume")   # the replacement is already up
-            await asyncio.wait_for(reached.wait(), 10)
+            # The replacement is already up and fires its SessionStart; it waits for the relaunch's lock.
+            hook = asyncio.create_task(invoke(second, "SessionStart", source="resume"))
             gate.release.set()
             await asyncio.wait_for(check, 10)
+            await asyncio.wait_for(hook, 10)
             assert u.daemon.ready.is_set()
     run(scenario())
 
 
-# --- 4. malformed launch and seq values ---
+# --- 4. malformed launch values ---
 
-def test_a_malformed_launch_or_seq_is_dropped_without_restarting_the_hook_loop(tmp_path: Path) -> None:
+def test_a_malformed_launch_is_dropped_without_restarting_the_hook_loop(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     flushed, _ = instrument(u)
 
@@ -327,8 +201,7 @@ def test_a_malformed_launch_or_seq_is_dropped_without_restarting_the_hook_loop(t
             args = hook_args(u.agent.settings_file)
             await fire(args, "SessionStart", flushed, source="startup")
             sock = str(u.settings.state_dir / "hook.sock")
-            for extra in ({"launch": "é"}, {"launch": "abc"}, {"launch": "A" * 32}, {"seq": -1},
-                          {"seq": "7"}, {"seq": 1.5}, {"seq": True}):
+            for extra in ({"launch": "é"}, {"launch": "abc"}, {"launch": "A" * 32}, {"launch": 7}):
                 frame = {"hook_event_name": "Stop", "session_id": "S1",
                          "last_assistant_message": "malformed", **extra}
                 reader, writer = await asyncio.open_unix_connection(sock)
@@ -345,78 +218,3 @@ def test_a_malformed_launch_or_seq_is_dropped_without_restarting_the_hook_loop(t
             await fire(args, "Stop", flushed, last_assistant_message="still alive")
             assert "still alive" in u.texts()
     run(scenario())
-
-
-# --- 5. the hook's sequence number ---
-
-class Capture:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.frames: list[dict[str, Any]] = []
-        self._server: asyncio.Server | None = None
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path))
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self.frames.append(json.loads(await reader.readline()))
-        writer.write(b"ok\n")
-        await writer.drain()
-        writer.close()
-
-    async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-
-
-def hook_frames(tmp_path: Path, seq_file: Path, count: int = 1, extra: dict[str, object] | None = None,
-                before: Callable[[], None] | None = None) -> list[dict[str, Any]]:
-    cap = Capture(tmp_path / "c.sock")
-
-    async def scenario() -> None:
-        await cap.start()
-        try:
-            if before is not None:
-                before()
-            payload = json.dumps({"hook_event_name": "Stop", "session_id": "S1", **(extra or {})}).encode()
-            for _ in range(count):
-                args = ["--socket", str(cap.path), "--launch", LONG_AGO, "--seq-file", str(seq_file)]
-                assert await asyncio.to_thread(hook_main, args, payload) == 0
-        finally:
-            await cap.close()
-    run(scenario())
-    return cap.frames
-
-
-def test_each_hook_invocation_gets_a_strictly_increasing_private_sequence_number(tmp_path: Path) -> None:
-    seq_file = tmp_path / "seq"
-    frames = hook_frames(tmp_path, seq_file, 3, {"seq": 999})      # a payload's own seq is never trusted
-    assert [f["seq"] for f in frames] == [1, 2, 3]
-    assert (seq_file.stat().st_mode & 0o777) == 0o600
-
-
-def test_concurrent_hooks_get_distinct_sequence_numbers(tmp_path: Path) -> None:
-    from heterodyne.admind.hook import next_seq
-    seq_file = tmp_path / "seq"
-    with ThreadPoolExecutor(8) as pool:
-        got = list(pool.map(lambda _i: next_seq(str(seq_file)), range(64)))
-    assert sorted(g for g in got if g is not None) == list(range(1, 65))
-
-
-def test_a_sequence_failure_still_sends_the_frame_without_seq(tmp_path: Path) -> None:
-    target = tmp_path / "real"
-    target.write_text("5")
-    link = tmp_path / "link"
-    link.symlink_to(target)
-    for bad in (link, tmp_path / "missing-dir" / "seq", tmp_path):
-        frames = hook_frames(tmp_path, bad, extra={"seq": 12})
-        assert len(frames) == 1 and "seq" not in frames[0] and frames[0]["launch"] == LONG_AGO
-    assert target.read_text() == "5"                    # the symlink was not followed
-    corrupt = tmp_path / "corrupt"
-    corrupt.write_text("not a number")
-    frames = hook_frames(tmp_path, corrupt)
-    assert "seq" not in frames[0] and corrupt.read_text() == "not a number"
-    target.chmod(0o400)
-    if os.geteuid() != 0:
-        assert "seq" not in hook_frames(tmp_path, target)[0]

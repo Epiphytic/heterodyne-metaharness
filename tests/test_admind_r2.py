@@ -112,7 +112,8 @@ def test_a_paste_buffer_timeout_after_delivery_is_not_retried_and_not_duplicated
 
 # --- 4. cleanup after a definite send failure applies only to the dispatch that failed ---
 
-def test_a_send_failure_does_not_clear_the_busy_state_of_a_newer_turn(tmp_path: Path) -> None:
+def test_a_prompt_hook_during_a_failing_send_is_applied_after_it_and_keeps_the_agent_busy(
+        tmp_path: Path) -> None:
     u = Unit(tmp_path)
     started = threading.Event()
     release = threading.Event()
@@ -126,12 +127,14 @@ def test_a_send_failure_does_not_clear_the_busy_state_of_a_newer_turn(tmp_path: 
     async def scenario() -> None:
         sending = asyncio.create_task(u.say("prompt A"))
         assert await asyncio.to_thread(started.wait, 10)        # A's paste is in its worker thread
-        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="typed at the terminal"))
-        busy = u.store.get("busy")
-        assert busy is not None
+        hook = asyncio.create_task(u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1",
+                                                              prompt="typed at the terminal")))
+        await asyncio.sleep(0)
+        assert not hook.done() and u.store.get("anchor") is None   # not applied mid-dispatch
         release.set()
         a = await sending
-        assert u.store.get("busy") == busy                      # the terminal turn is still running
+        await hook
+        assert u.store.get("busy") is not None                  # the terminal turn is running
         assert u.daemon.held == [(a, "prompt A")] and u.store.get("in_flight") is None
         assert u.store.inbound_with_status("received") == [a]   # A was not delivered: kept, not lost
         await u.daemon.flush()
@@ -139,15 +142,15 @@ def test_a_send_failure_does_not_clear_the_busy_state_of_a_newer_turn(tmp_path: 
     run(scenario())
 
 
-# --- 5. a late Stop of the current session still posts its reply, top-level, and changes no state ---
+# --- 5. a Stop whose fallback read straddles a new dispatch posts nothing and changes no state ---
 
-def test_an_unanchored_late_stop_posts_top_level_when_another_prompt_dispatches_during_the_read(
+def test_a_transcript_read_that_straddles_a_new_dispatch_is_discarded(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
     started = threading.Event()
     release = threading.Event()
 
-    def slow_read(ev: HookEvent) -> str:
+    def slow_read(ev: HookEvent, fallback: bool = True) -> str:
         started.set()
         assert release.wait(10), "test never released the read"
         return "the late reply"
@@ -162,8 +165,8 @@ def test_an_unanchored_late_stop_posts_top_level_when_another_prompt_dispatches_
         await stop
         assert u.store.get("in_flight") == b and u.store.get("busy") is not None
         assert u.store.get("anchor") is None
-        replies = [(t, r) for k, t, r in u.outbox() if k.startswith("reply:")]
-        assert replies == [("the late reply", None)]      # posted, and not threaded to B
+        assert not any(k.startswith("reply:") for k, _, _ in u.outbox())   # B's text could be in it
+        assert '"action": "stale-stop-unrecoverable"' in u.audit_text()
     run(scenario())
 
 

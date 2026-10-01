@@ -443,7 +443,7 @@ class SlowRead:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, ev: HookEvent) -> str:
+    def __call__(self, ev: HookEvent, fallback: bool = True) -> str:
         self.started.set()
         assert self.release.wait(10), "test never released the read"
         return self.text
@@ -476,8 +476,10 @@ def test_interrupt_dispatching_b_during_a_reply_read_leaves_b_busy(
     assert u.store.get("in_flight") == b
     assert u.store.get("busy") is not None                        # A's Stop did not clear B's busy period
     assert u.store.get("anchor") is None                          # nor touch B's turn state
-    assert [(t, r) for k, t, r in u.outbox() if k.startswith("reply:")] == [("A is done", None)]
-    assert '"action": "late-stop"' in u.audit_text()              # A's reply is posted, unthreaded
+    # The turn changed while A's reply was read from the transcript: that text may be B's, so it is
+    # discarded and said so, rather than posted.
+    assert not any(k.startswith("reply:") for k, _, _ in u.outbox())
+    assert '"action": "stale-stop-unrecoverable"' in u.audit_text()
 
 
 def test_new_during_a_reply_read_emits_no_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
