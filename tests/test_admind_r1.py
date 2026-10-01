@@ -23,6 +23,7 @@ from heterodyne.admind.agent import SESSION, AdminAgent
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import Admind
+from heterodyne.admind.hook import HookEvent
 from heterodyne.admind.store import Store, now
 from heterodyne.marmot.control import ControlError, InboundMessage, decode_event
 from heterodyne.marmot.nip19 import hex_to_npub
@@ -270,3 +271,28 @@ def test_an_alert_that_fails_to_relay_is_audited_by_type_and_never_blocks_the_re
     assert any("second goes out" in s.text for s in u.client.sent)
     audit = u.audit_text()
     assert "ValueError" in audit and hex_to_npub(STRANGER) not in audit and "boom" not in audit
+
+
+# --- 3. a latch (or an unverified group) stops held prompts reaching the agent ----------------------------
+
+@pytest.mark.parametrize("how", ["latched", "unverified"])
+def test_held_prompts_are_not_pasted_once_latched_or_unverified(tmp_path: Path, how: str) -> None:
+    u = Unit(tmp_path)
+
+    async def scenario() -> None:
+        a = await u.say("prompt A")
+        b = await u.say("prompt B")                       # held behind A
+        assert u.tmux.pasted == ["prompt A"] and u.daemon.held == [(b, "prompt B")]
+        await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+        if how == "latched":
+            u.daemon.latch("group membership changed (member_added)")
+        else:
+            u.daemon.group_ok = False
+        assert u.store.get("anchor") == a
+        await u.daemon.on_hook(HookEvent("Stop", "S1", None, "A is done"))
+        await u.daemon.flush()
+        assert u.tmux.pasted == ["prompt A"]               # B stays held: nothing reaches the agent
+        assert u.daemon.held == [(b, "prompt B")]
+        assert u.store.get("in_flight") is None and u.store.get("busy") is None   # only A's Stop acted
+    run(scenario())
+    assert '"action": "dispatch-blocked"' in u.audit_text()

@@ -112,6 +112,7 @@ class Admind:
         self.dispatched_at = 0.0
         self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
+        self.dispatch_blocked = False           # the block has been audited; reset when it lifts
         self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
@@ -338,6 +339,15 @@ class Admind:
             await self._flush()
 
     async def _flush(self) -> None:
+        # Same gate as the outbound side (D4): while latched, or while the group is not verified as
+        # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
+        if self.latched() or not self.group_ok:
+            if self.held and not self.dispatch_blocked:
+                self.dispatch_blocked = True
+                self.audit.write("agent", action="dispatch-blocked", held=len(self.held),
+                                 latched=self.latched())
+            return
+        self.dispatch_blocked = False
         if self.stuck is not None:
             for mid, _ in self.held:
                 self.store.set_inbound(mid, "dropped")
