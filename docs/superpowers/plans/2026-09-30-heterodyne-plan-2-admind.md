@@ -4140,6 +4140,22 @@ def test_new_ignores_the_replaced_sessions_late_session_start(
     run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started))
 
 
+def test_ignored_hook_last_in_the_queue_still_releases_dispatch(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        from heterodyne.admind.hook import HookEvent
+        stuck = await h.say("__nostop__")
+        await h.until(lambda: h.store.get("anchor") == stuck)
+        nxt = await h.say("next")
+        await asyncio.sleep(0.5)
+        # Queued together: this session's Stop, then a hook from another (e.g. retired) session.
+        h.daemon.hooks.put_nowait(HookEvent("Stop", h.agent.session_id or "", None, "done"))
+        h.daemon.hooks.put_nowait(HookEvent("UserPromptSubmit", "a-retired-session", prompt="x"))
+        await h.until(lambda: "echo: next" in h.texts())
+        by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
+        assert by_text["done"] == stuck and by_text["echo: next"] == nxt
+    run_with(tmp_path, scenario)
+
+
 def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         from heterodyne.admind.hook import HookEvent
@@ -4593,9 +4609,9 @@ class Admind:
             ev = await self.hooks.get()
             if ev.session_id != self.agent.session_id or ev.session_id in self.retired:
                 self.audit.write("hook", event=ev.hook_event_name, action="ignored-other-session")
-                continue
-            await self.on_hook(ev)
-            if self.hooks.empty():
+            else:
+                await self.on_hook(ev)
+            if self.hooks.empty():      # after every event, ignored ones too: _flush skipped while it queued
                 await self.flush()
 
     async def on_hook(self, ev: HookEvent) -> None:
