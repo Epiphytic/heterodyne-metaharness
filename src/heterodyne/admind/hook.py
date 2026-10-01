@@ -42,6 +42,7 @@ class HookEvent(msgspec.Struct, frozen=True):
     transcript_path: str | None = None
     last_assistant_message: str | None = None
     prompt: str | None = None
+    source: str | None = None      # SessionStart only: startup, resume, clear or compact
 
 
 def same_prompt(a: str, b: str) -> bool:

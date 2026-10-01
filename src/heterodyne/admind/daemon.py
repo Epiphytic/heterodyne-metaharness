@@ -53,6 +53,7 @@ MAX_SEND_ATTEMPTS = 10
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
 AUDIT_TEXT_CHARS = 2000
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
+SESSION_SOURCES = frozenset({"startup", "resume", "clear", "compact"})   # Claude Code's SessionStart sources
 
 
 def reason(exc: BaseException) -> str:
@@ -495,12 +496,7 @@ class Admind:
         if ev.hook_event_name not in KNOWN_HOOKS:
             self.audit.write("hook", action="ignored-unknown-event")
         elif ev.hook_event_name == "SessionStart":
-            # A (re)started session has no turn in progress: whatever was in flight is lost.
-            self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
-            self.set_idle()
-            self.agent.started(ev.session_id)
-            self.audit.write("agent", action="session-start", session=ev.session_id)
-            self.ready.set()
+            self.on_session_start(ev)
         elif ev.hook_event_name == "UserPromptSubmit":
             self.set_busy()                     # a turn is running, whoever started it
             in_flight = self.store.get("in_flight")
@@ -519,6 +515,32 @@ class Admind:
                                            "another prompt started a turn")
         else:   # Stop
             await self.on_stop(ev)
+
+    def on_session_start(self, ev: HookEvent) -> None:
+        """Whether a SessionStart proves the agent idle depends on its `source` (D9). It is only trusted
+        for the session admind has already seen start: `compact` is the same session shrinking its
+        context, mid-turn or not, and says nothing about the turn; `startup` and `resume` of an idle
+        session change nothing. Everything else (`clear`, an unknown or missing source, a busy session
+        being started again, or any other session ID) is a restart: whatever was in flight is lost."""
+        source = ev.source if ev.source in SESSION_SOURCES else "other"  # allowlisted: logged
+        same = ev.session_id == self.store.get("session_started")
+        if same and source == "compact":
+            self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
+                             effect="none")
+            return
+        if same and source in ("startup", "resume") and self.store.get("busy") is None:
+            self.agent.started(ev.session_id)
+            self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
+                             effect="ready")
+            self.ready.set()
+            return
+        with self.store.transaction():
+            self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
+            self.set_idle()
+        self.agent.started(ev.session_id)
+        self.audit.write("agent", action="session-start", session=ev.session_id, source=source,
+                         effect="restart")
+        self.ready.set()
 
     def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None]:
         """What a Stop must still find true when it applies its effects: the session it came from, the

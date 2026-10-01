@@ -650,3 +650,86 @@ def test_a_finished_command_and_its_reply_are_atomic(tmp_path: Path, monkeypatch
     assert [(t, r) for _, t, r in u.outbox()] == [(RESTARTED_NOTICE, mid)]
     run(u.daemon.on_message(inbound("!ps", u.mid())))
     assert len(u.store.inbound_with_status("done")) == 1     # a normal command ends up done
+
+
+# --- 9. SessionStart: the hook's `source` decides whether a turn ended ---
+def test_the_hook_event_keeps_the_sessionstart_source() -> None:
+    import msgspec
+    ev = msgspec.json.decode(b'{"hook_event_name":"SessionStart","session_id":"x","source":"compact"}',
+                             type=HookEvent)
+    assert ev.source == "compact"
+    assert msgspec.json.decode(b'{"hook_event_name":"Stop","session_id":"x"}', type=HookEvent).source is None
+
+
+async def busy_turn_with_a_held_prompt(u: Unit) -> tuple[str, str]:
+    a = await u.say("prompt A")
+    await u.daemon.on_hook(HookEvent("UserPromptSubmit", "S1", prompt="prompt A"))
+    b = await u.say("prompt B")
+    return a, b
+
+
+def test_compact_with_the_same_session_is_not_a_restart(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+
+    async def scenario() -> None:
+        a, b = await busy_turn_with_a_held_prompt(u)
+        busy = u.store.get("busy")
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="compact"))
+        await u.daemon.flush()
+        assert u.store.get("in_flight") == a and u.store.get("anchor") == a
+        assert u.store.get("busy") == busy                        # the turn is still running
+        assert u.daemon.held == [(b, "prompt B")] and u.tmux.pasted == ["prompt A"]
+        assert u.outbox() == []                                   # no abandonment notice
+    run(scenario())
+    assert '"source": "compact"' in u.audit_text()
+
+
+def test_clear_keeps_the_restart_semantics(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+
+    async def scenario() -> None:
+        a, b = await busy_turn_with_a_held_prompt(u)
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source="clear"))
+        await u.daemon.flush()
+        assert [(r) for _, _, r in u.outbox()] == [a]             # A abandoned, with a notice
+        assert u.tmux.pasted == ["prompt A", "prompt B"]          # and the held prompt goes out
+        assert u.store.get("in_flight") == b
+    run(scenario())
+
+
+@pytest.mark.parametrize("source", ["startup", "resume"])
+def test_startup_or_resume_of_the_same_idle_session_is_a_no_op(tmp_path: Path, source: str) -> None:
+    u = Unit(tmp_path)
+    u.daemon.ready.clear()
+
+    async def scenario() -> None:
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source))
+        assert u.store.get("busy") is None and u.store.get("in_flight") is None
+        assert u.outbox() == [] and u.daemon.ready.is_set()
+    run(scenario())
+    assert f'"source": "{source}"' in u.audit_text()
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", None, "bogus"])
+def test_a_same_session_start_while_busy_or_of_unknown_source_is_a_restart(
+        tmp_path: Path, source: str | None) -> None:
+    u = Unit(tmp_path)
+
+    async def scenario() -> None:
+        a, _ = await busy_turn_with_a_held_prompt(u)
+        await u.daemon.on_hook(HookEvent("SessionStart", "S1", source=source))
+        assert [r for _, _, r in u.outbox()] == [a] and u.store.get("anchor") is None
+    run(scenario())
+    assert "bogus" not in u.audit_text()
+
+
+def test_a_session_start_with_a_different_session_id_is_a_restart(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+
+    async def scenario() -> None:
+        a, _ = await busy_turn_with_a_held_prompt(u)
+        u.store.set("agent_session", "S2")                        # e.g. launched fresh after !new
+        await u.daemon.on_hook(HookEvent("SessionStart", "S2", source="compact"))
+        assert [r for _, _, r in u.outbox()] == [a] and u.store.get("session_started") == "S2"
+        assert u.store.get("busy") is None
+    run(scenario())
