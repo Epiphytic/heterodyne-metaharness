@@ -89,3 +89,58 @@ def test_audit_refuses_a_symlink(tmp_path: Path) -> None:
     (tmp_path / "audit.jsonl").symlink_to(tmp_path / "target")
     with pytest.raises(OSError):
         Audit(tmp_path / "audit.jsonl").write("x")
+
+
+def test_audit_isolates_a_preseeded_torn_fragment(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(b'{"ts": "x", "kind": "tor')
+    Audit(path).write("after", n=1)
+    last = json.loads(path.read_text().splitlines()[-1])
+    assert last["kind"] == "after" and last["n"] == 1
+    assert path.read_bytes().endswith(b"\n")
+
+
+def test_audit_recovers_after_a_partial_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    from heterodyne.admind import audit as audit_mod
+
+    real_write = os.write
+    state = {"armed": True}
+
+    def flaky(fd: int, data: "bytes | memoryview") -> int:
+        if state["armed"]:
+            state["armed"] = False
+            real_write(fd, bytes(data)[:10])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(fd, data)
+
+    a = Audit(tmp_path / "audit.jsonl")
+    monkeypatch.setattr(audit_mod.os, "write", flaky)
+    with pytest.raises(OSError):
+        a.write("lost", n=1)
+    a.write("kept", n=2)
+    a.write("kept2", n=3)
+    lines = (tmp_path / "audit.jsonl").read_text().splitlines()
+    assert [json.loads(x)["kind"] for x in lines[-2:]] == ["kept", "kept2"]
+
+
+def test_relay_alert_rejects_outbox_key_collision(tmp_path: Path) -> None:
+    s = Store(tmp_path / "db")
+    s.enqueue("alert:a1", "unrelated", None)
+    with pytest.raises(ValueError, match="alert:a1") as exc:
+        s.relay_alert("a1", "alert:a1", "text")
+    assert "unrelated" not in str(exc.value)
+    assert not s.relayed("a1")
+    assert [r.text for r in s.pending()] == ["unrelated"]
+
+
+def test_relay_alert_rolls_back_when_outbox_insert_fails(tmp_path: Path) -> None:
+    s = Store(tmp_path / "db")
+    s.db.execute("CREATE TRIGGER boom BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'boom'); END")
+    with pytest.raises(Exception, match="boom"):
+        s.relay_alert("a1", "alert:a1", "text")
+    s.db.execute("DROP TRIGGER boom")
+    assert not s.relayed("a1")
+    assert s.pending() == []
+    assert s.relay_alert("a1", "alert:a1", "text") is True

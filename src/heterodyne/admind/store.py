@@ -150,8 +150,12 @@ class Store:
             if cur.rowcount != 1:
                 self.db.execute("ROLLBACK")
                 return False
-            self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status) "
-                            "VALUES (?, NULL, ?, 'pending')", (key, text))
+            cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status) "
+                                  "VALUES (?, NULL, ?, 'pending')", (key, text))
+            if cur.rowcount != 1:
+                row = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
+                if row is None or row[0] != text:
+                    raise ValueError(f"outbox key already in use with different text: {key}")
             self.db.execute("COMMIT")
             return True
         except BaseException:
