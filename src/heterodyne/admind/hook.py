@@ -28,12 +28,13 @@ import contextlib
 import json
 import os
 import secrets
+import select
 import shlex
 import socket
 import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -242,7 +243,7 @@ class HookServer:
         self.path.unlink(missing_ok=True)
         old = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._handle, path=str(self.path),
+            self._server = await asyncio.start_unix_server(self._accept, path=str(self.path),
                                                            limit=MAX_HOOK_FRAME + 1)
         finally:
             os.umask(old)
@@ -255,9 +256,28 @@ class HookServer:
                 await asyncio.wait_for(self._server.wait_closed(), 2)
         self.path.unlink(missing_ok=True)
 
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # The first statements run before any await, in the order the connections were accepted: the slot
-        # is this connection's place in line, whatever order the frames finish arriving in.
+    def backlog_waiting(self) -> bool:
+        """A connection is queued on the listening socket and not accepted yet (readable with timeout 0).
+        Checked by the dispatcher immediately before a paste. Inherent residual: a terminal prompt typed at
+        the same instant as the paste races at the agent itself, which no admind check can order."""
+        server = self._server
+        if server is None:
+            return False
+        for sock in server.sockets:
+            try:
+                ready, _, _ = select.select([sock], [], [], 0)
+            except (OSError, ValueError):
+                return True     # cannot tell: fail closed (a later flush retries)
+            if ready:
+                return True
+        return False
+
+    def _accept(self, reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter) -> Coroutine[Any, Any, None]:
+        """The client-connected callback, deliberately synchronous: StreamReaderProtocol calls it from
+        connection_made, so the count and the ordering slot are taken in the acceptance callback itself,
+        before any task (a dispatcher already scheduled included) can run. It returns the coroutine that
+        processes the connection."""
         loop = asyncio.get_running_loop()
         self.accepted += 1
         index = self.accepted
@@ -265,6 +285,11 @@ class HookServer:
         previous = self._tail
         slot: asyncio.Future[None] = loop.create_future()
         self._tail = slot
+        return self._handle(reader, writer, index, previous, slot)
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, index: int,
+                      previous: "asyncio.Future[None] | None", slot: "asyncio.Future[None]") -> None:
+        loop = asyncio.get_running_loop()
         try:
             event: HookEvent | None = None
             try:

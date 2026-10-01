@@ -65,6 +65,8 @@ HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the s
 HOOK_LOCK_WAIT = 120.0      # an event's wait for the turn lock; expiry also holds dispatch (R6)
 HOOK_LOST_NOTICE = ("admind lost an agent hook event; new messages are held. "
                     "When the agent is idle, send !interrupt (or !new) to resume.")
+ADOPT_HOLD_NOTICE = ("admind restarted and adopted the running agent; new messages are held until the agent "
+                     "finishes its current turn or you send !interrupt (or !new).")
 SESSION_SOURCES = frozenset({"startup", "resume", "clear", "compact"})   # Claude Code's SessionStart sources
 
 
@@ -290,7 +292,7 @@ class Admind:
         server = self.make_server(self.s.state_dir / "hook.sock")
         await server.start()
         try:
-            await self.start_agent()
+            await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
@@ -300,7 +302,7 @@ class Admind:
         finally:
             await server.close()
 
-    async def start_agent(self, relaunch: bool = False) -> None:
+    async def start_agent(self, relaunch: bool = False, startup: bool = False) -> None:
         self.ready.clear()
         self.ready_nonce = None
         if relaunch or self.agent.replace_pending() is not None:
@@ -318,9 +320,26 @@ class Admind:
         self.stuck = None
         self.audit_quietly("agent", action=mode, session=self.agent.session_id)
         if mode == "adopted":
+            if startup:
+                self.hold_adopted()
             self.mark_ready()
         else:
             self.is_ready()     # an event from a launch that has since been replaced is not readiness
+
+    def hold_adopted(self) -> None:
+        """Startup adopted a live pane (not a fresh launch). Whether it is mid-turn cannot be known: a
+        terminal prompt may have been accepted by the hook server and lost with the previous process. So
+        readiness (the pane is there) is separate from permission to paste: the same fail-closed hold as
+        a lost hook is set, in memory first and then persisted, before any flush can run. Only a current
+        Stop, a successful !interrupt or !new releases it."""
+        self.hold_now()
+        self.contained("hold-persist-failed", self.persist_hold)
+        self.audit_quietly("agent", action="adopted-hold")
+        self.contained("hold-notice-failed", self.notify_adopted)
+
+    def notify_adopted(self) -> None:
+        with self.store.transaction():
+            self.post(f"adopt-hold:{self.next_seq('adopt_seq')}", ADOPT_HOLD_NOTICE, None)
 
     async def agent_loop(self) -> None:
         while True:
@@ -617,6 +636,8 @@ class Admind:
             return      # a lost hook event holds dispatch, whatever the store says (see hold_now)
         if self.pending_hooks() > 0 or not self.hooks.empty():
             return      # an accepted hook (maybe a new turn) is not applied yet; the idle edge flushes
+        if self.hook_server is not None and self.hook_server.backlog_waiting():
+            return      # a connection is waiting to be accepted (maybe a new turn); its idle edge flushes
         mid, text = self.held.pop(0)
         with self.store.transaction():
             self.store.set("in_flight", mid)
@@ -860,8 +881,8 @@ class Admind:
         # same critical section that applies the event's effects, because the lock wait can span a relaunch.
         if self.classify(ev) == "other":
             # Neither the session ID nor the event name is recorded: any local process can send both.
-            self.audit.write("hook", action="ignored-other-session")
             noop_event()
+            self.audit.write("hook", action="ignored-other-session")
             return
         await self.on_hook(ev, arrival, validate=True)
 
@@ -872,8 +893,8 @@ class Admind:
         own text is posted. `arrival` is the connection's accept-order index (None: not from the server).
         hook_loop flushes after it once nothing else is pending."""
         if ev.hook_event_name not in KNOWN_HOOKS:
-            self.audit.write("hook", action="ignored-unknown-event")
             noop_event()
+            self.audit.write("hook", action="ignored-unknown-event")
         elif ev.hook_event_name == "Stop":
             await self.on_stop(ev, arrival, validate=validate)
         else:

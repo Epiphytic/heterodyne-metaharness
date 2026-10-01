@@ -352,7 +352,8 @@ def test_membership_event_latches_while_a_slow_restart_runs(
             u.services.restart_release.set()
             await asyncio.wait_for(restart_replied.wait(), 10)      # its reply is queued ...
             await u.daemon.outbox_pass()
-            assert u.client.sent == []                              # ... but nothing is sent after the latch
+            # ... but nothing is sent after the latch (the startup adoption notice went out before it)
+            assert [m.key for m in u.client.sent if not m.key.startswith("adopt-hold:")] == []
         finally:
             u.services.restart_release.set()
             await stop_task(daemon)
