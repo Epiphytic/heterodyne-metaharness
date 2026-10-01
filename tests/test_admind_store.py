@@ -68,9 +68,9 @@ def test_store_is_usable_from_worker_threads(tmp_path: Path) -> None:
 
 def test_relay_alert_is_atomic_and_once(tmp_path: Path) -> None:
     s = Store(tmp_path / "db")
-    assert s.relay_alert("a1", "alert:a1", "text") is True
-    assert s.relay_alert("a1", "alert:a1", "text") is False
-    assert s.relayed("a1") and not s.relayed("a2")
+    assert s.relay_alert(b"a1", "alert:a1", "text") is True
+    assert s.relay_alert(b"a1", "alert:a1", "text") is False
+    assert s.relayed(b"a1") and not s.relayed(b"a2")
     assert [r.key for r in s.pending()] == ["alert:a1"]
 
 
@@ -129,9 +129,9 @@ def test_relay_alert_rejects_outbox_key_collision(tmp_path: Path) -> None:
     s = Store(tmp_path / "db")
     s.enqueue("alert:a1", "unrelated", None)
     with pytest.raises(ValueError, match="alert:a1") as exc:
-        s.relay_alert("a1", "alert:a1", "text")
+        s.relay_alert(b"a1", "alert:a1", "text")
     assert "unrelated" not in str(exc.value)
-    assert not s.relayed("a1")
+    assert not s.relayed(b"a1")
     assert [r.text for r in s.pending()] == ["unrelated"]
 
 
@@ -139,8 +139,8 @@ def test_relay_alert_rolls_back_when_outbox_insert_fails(tmp_path: Path) -> None
     s = Store(tmp_path / "db")
     s.db.execute("CREATE TRIGGER boom BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'boom'); END")
     with pytest.raises(Exception, match="boom"):
-        s.relay_alert("a1", "alert:a1", "text")
+        s.relay_alert(b"a1", "alert:a1", "text")
     s.db.execute("DROP TRIGGER boom")
-    assert not s.relayed("a1")
+    assert not s.relayed(b"a1")
     assert s.pending() == []
-    assert s.relay_alert("a1", "alert:a1", "text") is True
+    assert s.relay_alert(b"a1", "alert:a1", "text") is True

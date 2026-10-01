@@ -12,6 +12,7 @@ Peer- and child-supplied text (a stranger's message, an agent reply, a terminal 
 
 import asyncio
 import contextlib
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -45,6 +46,8 @@ UNCONFIRMED = ("admind has not seen the admin agent take this message yet, so la
                "Use !tail to look, or !interrupt to cancel this message and release the queue.")
 LONG_TURN = ("The admin agent is still working, so later messages are held. "
              "Use !tail to look, or !interrupt to stop it and release the queue.")
+ALERT_FAILED = ("🚨 A wsd alert file could not be relayed (ref {ref}). "
+                "Check the alert directory on the host.")
 MAX_SEND_ATTEMPTS = 10
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
 AUDIT_TEXT_CHARS = 2000
@@ -109,7 +112,9 @@ class Admind:
         self.dispatched_at = 0.0
         self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
+        self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
+        self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
 
     # --- state helpers -------------------------------------------------------------------------
     def latched(self) -> bool:
@@ -203,7 +208,7 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
                 self.audit.write("subscribe", action="reconnect", code=code)
-            await asyncio.sleep(delay)
+            await self._sleep(delay)
             delay = min(delay * 2, 30.0)
 
     async def on_event(self, event: object) -> None:
@@ -477,41 +482,74 @@ class Admind:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.wake.wait(), 5)
             self.wake.clear()
-            if self.held and not self.ready.is_set():
-                await self.flush()          # emits NOT_READY once the start timeout passes
-            self.notify_held()
-            for row in self.store.pending():
-                if not self.may_post():     # rechecked per row: a latch mid-batch stops the rest
+            await self.outbox_pass()
+
+    async def outbox_pass(self) -> None:
+        """One sweep of the outbox (a loop iteration, callable on its own)."""
+        if self.held:
+            await self.flush()              # emits NOT_READY once the start timeout passes
+        self.notify_held()
+        for row in self.store.pending():
+            if not self.may_post():         # rechecked per row: a latch mid-batch stops the rest
+                break
+            try:
+                sent = await self.client.send_final(self.account, self.group, row.text, row.reply_to,
+                                                    row.key)
+            except ControlError as exc:
+                attempts = self.store.mark_attempt(row.seq)
+                if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
+                    self.audit.write("send", key=show(row.key, False), action="retry", attempts=attempts,
+                                     code=exc.code)
+                    await self._sleep(min(60, 2 ** attempts))
+                    self.wake.set()
                     break
-                try:
-                    sent = await self.client.send_final(self.account, self.group, row.text, row.reply_to,
-                                                        row.key)
-                except ControlError as exc:
-                    attempts = self.store.mark_attempt(row.seq)
-                    if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
-                        self.audit.write("send", key=row.key, action="retry", attempts=attempts,
-                                         code=exc.code)
-                        await asyncio.sleep(min(60, 2 ** attempts))
-                        self.wake.set()
-                        break
-                    self.store.mark_failed(row.seq)
-                    self.audit.write("send", key=row.key, action="failed", code=exc.code)
-                    continue
-                self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
-                self.audit.write("send", key=row.key, action="sent")
+                self.store.mark_failed(row.seq)
+                self.audit.write("send", key=show(row.key, False), action="failed", code=exc.code)
+                continue
+            self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
+            self.audit.write("send", key=show(row.key, False), action="sent")
 
     async def alerts_loop(self) -> None:
         while True:
-            await asyncio.sleep(self.s.alert_poll_seconds)
-            if not self.may_post():
+            await self._sleep(self.s.alert_poll_seconds)
+            await self.relay_alerts()
+
+    async def relay_alerts(self) -> None:
+        """One sweep of the alert directory (a loop iteration, callable on its own). Each alert is
+        handled on its own: a failure is audited by type and that alert is marked, never retried and
+        never in the way of the alerts after it."""
+        if not self.may_post():
+            return
+        for name, alert in await asyncio.to_thread(alerts.scan, self.s.alerts_dir):
+            raw = os.fsencode(name)
+            if raw in self.bad_alerts:
                 continue
-            for name, alert in await asyncio.to_thread(alerts.scan, self.s.alerts_dir):
-                if self.store.relayed(name):
-                    continue
-                text = alerts.render(name, alert, self.s.chunk_chars)
-                if self.store.relay_alert(name, f"alert:{name}", text):
-                    self.audit.write("alert", name=show(name, False)[:64], malformed=alert is None)
-                    self.wake.set()
+            try:
+                self.relay_alert(name, raw, alert)
+            except Exception as exc:  # noqa: BLE001 - one hostile file must not stop the others
+                self.alert_failed(raw, exc)
+
+    def relay_alert(self, name: str, raw: bytes, alert: alerts.Alert | None) -> None:
+        if self.store.relayed(raw):
+            return
+        key = alerts.outbox_key(raw)
+        text = alerts.render(name, alert, self.s.chunk_chars)
+        if self.store.relay_alert(raw, key, text):
+            self.audit.write("alert", name=show(alerts.display_name(name), False)[:64], key=show(key, False),
+                             malformed=alert is None)
+            self.wake.set()
+
+    def alert_failed(self, raw: bytes, exc: Exception) -> None:
+        """Report an alert admind could not relay: by exception type and opaque key only, and tell the
+        operator with fixed wording. If even that fails the alert is skipped for this process."""
+        key = alerts.outbox_key(raw)
+        self.audit.write("alert", key=show(key, False), action="failed", error=type(exc).__name__)
+        try:
+            if self.store.relay_alert(raw, key, ALERT_FAILED.format(ref=key.partition(":")[2][:12])):
+                self.wake.set()
+        except Exception as inner:  # noqa: BLE001 - nothing more can be done for this file
+            self.bad_alerts.add(raw)
+            self.audit.write("alert", key=show(key, False), action="skipped", error=type(inner).__name__)
 
     async def group_loop(self) -> None:
         while True:

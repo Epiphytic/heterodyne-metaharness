@@ -16,6 +16,7 @@ text holds a secret, an npub or a 64-hex identifier is withheld (a fixed notice 
 kind of thing found), and control characters are escaped, so a hostile file cannot drive the chat client.
 """
 
+import hashlib
 import os
 import re
 import stat
@@ -94,12 +95,24 @@ def scan(directory: Path) -> list[tuple[str, Alert | None]]:
     return found
 
 
+def display_name(name: str) -> str:
+    """A file name safe to show: undecodable bytes become `\\xNN` text instead of surrogate escapes
+    (which no storage, socket or log can encode). Callers still pass the result through `show`."""
+    return os.fsencode(name).decode("utf-8", "backslashreplace")
+
+
+def outbox_key(raw_name: bytes) -> str:
+    """The idempotency key of an alert's message: opaque and stable. It never contains the name, which
+    may be an npub or a secret; 32 hex characters, because a 64-hex value is redacted as an identifier."""
+    return "alert:" + hashlib.sha256(raw_name).hexdigest()[:32]
+
+
 def _escape(text: str) -> str:
     return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
 
 
 def render(name: str, alert: Alert | None, limit: int) -> str:
-    safe_name = show(name, False)[:64]
+    safe_name = show(display_name(name), False)[:64]
     if alert is None:
         return MALFORMED.format(name=safe_name)[:limit]
     kind = sensitive_kind(alert.created_at) or sensitive_kind(alert.text)

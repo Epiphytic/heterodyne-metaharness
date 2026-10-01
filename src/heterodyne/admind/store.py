@@ -5,7 +5,7 @@
   replayed to the agent).
 - `outbox`: replies and notices, sent in order with a stable idempotency key, so a resend after a crash
   is deduplicated by wn-agent (S4 step 4).
-- `alerts`: alert files already relayed.
+- `alerts`: alert files already relayed, by raw file-name bytes (a name need not be valid UTF-8).
 - `kv`: small named values (group, account, agent session, latch, ...).
 """
 
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
     message_id TEXT);
-CREATE TABLE IF NOT EXISTS alerts (name TEXT PRIMARY KEY, relayed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alerts (name BLOB PRIMARY KEY, relayed_at TEXT NOT NULL);
 """
 
 
@@ -137,11 +137,11 @@ class Store:
         self.db.execute("UPDATE outbox SET status = 'failed' WHERE seq = ?", (seq,))
 
     @_locked
-    def relayed(self, name: str) -> bool:
+    def relayed(self, name: bytes) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE name = ?", (name,)).fetchone() is not None
 
     @_locked
-    def relay_alert(self, name: str, key: str, text: str) -> bool:
+    def relay_alert(self, name: bytes, key: str, text: str) -> bool:
         """Record the alert and queue its message in one transaction; False if already relayed."""
         self.db.execute("BEGIN IMMEDIATE")
         try:
