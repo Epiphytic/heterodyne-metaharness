@@ -157,6 +157,32 @@ def test_uppercase_npub_is_redacted_everywhere(tmp_path: Path) -> None:
         _assert_redacted(exc, "npub")
 
 
+def test_embedded_npub_is_redacted_everywhere(tmp_path: Path) -> None:
+    for name in "abcdef":
+        (tmp_path / name).mkdir()
+    embedded = "operator" + NPUB
+    upper = "operator" + NPUB.upper()
+    configs = [
+        write(tmp_path / "a", _with_units(embedded)),
+        write(tmp_path / "b", BASE_CONFIG.replace('profile = "admin"', f'profile = "{embedded}"')),
+        write(tmp_path / "c", operators=f'["{embedded}"]'),
+        write(tmp_path / "d", _with_units(upper)),
+        write(tmp_path / "e", BASE_CONFIG.replace('profile = "admin"', f'profile = "{upper}"')),
+        write(tmp_path / "f", operators=f'["{upper}"]'),
+    ]
+    for env in configs:
+        with pytest.raises(ConfigError) as exc:
+            resolve(load(None, env), env)
+        _assert_redacted(exc, "npub")
+
+
+def test_embedded_hex_key_is_redacted(tmp_path: Path) -> None:
+    env = write(tmp_path, _with_units("a" + OPERATOR_HEX))
+    with pytest.raises(ConfigError) as exc:
+        resolve(load(None, env), env)
+    assert OPERATOR_HEX not in str(exc.value).lower()
+
+
 def test_show_leaves_ordinary_values_alone() -> None:
     assert show("ordinary") == "'ordinary'"
     assert show("ordinary", quote=False) == "ordinary"

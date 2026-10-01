@@ -53,9 +53,11 @@ SECRET_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 # Not secrets, but identifiers that must never be printed (ADR §15, "never print npubs"); `show` only.
+# Redaction deliberately matches anywhere in the string (no boundaries): these never reject a config,
+# so an embedded identifier ("operator" + npub, "a" + 64 hex) must still be hidden.
 IDENTIFIER_VALUES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("npub", re.compile(_START + r"npub1[02-9ac-hj-np-z]{20,}", re.IGNORECASE)),
-    ("hex key", re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")),
+    ("npub", re.compile(r"npub1[02-9ac-hj-np-z]{20,}", re.IGNORECASE)),
+    ("hex key", re.compile(r"[0-9A-Fa-f]{64}")),
 )
 
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
