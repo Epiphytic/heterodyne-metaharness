@@ -55,5 +55,5 @@ def render(name: str, alert: Alert | None, limit: int) -> str:
     text = f"🚨 wsd alert ({alert.created_at}): {alert.text}"
     if len(text) > limit:
         marker = " … (truncated; see the alert file)"
-        text = text[: limit - len(marker)] + marker
+        text = (text[: max(0, limit - len(marker))] + marker)[: max(0, limit)]
     return text

@@ -113,3 +113,14 @@ def test_alert_scan_and_render(tmp_path: Path) -> None:
 def test_alert_id_must_match_file_name(tmp_path: Path) -> None:
     (tmp_path / "a.json").write_text(json.dumps({"id": "b", "created_at": "t", "text": "x"}))
     assert alerts.scan(tmp_path) == [("a", None)]
+
+
+def test_tail_oversize_number_is_command_error() -> None:
+    with pytest.raises(commands.CommandError):
+        commands.parse("!tail " + "9" * 4301)
+
+
+@pytest.mark.parametrize("limit", [0, 1, 10, 35, 200])
+def test_alert_render_never_exceeds_limit(limit: int) -> None:
+    alert = alerts.Alert(id="x", created_at="2026-09-30T00:00:00Z", text="y" * 5000)
+    assert len(alerts.render("x", alert, limit)) <= limit

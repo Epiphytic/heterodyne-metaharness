@@ -48,11 +48,15 @@ def parse(text: str) -> Command | None:
             return Command("interrupt")
         return Command("ps")
     if name == "tail":
-        if len(args) > 1 or (args and not args[0].isdecimal()):
-            raise CommandError(f"Usage: !tail [n], with n from 1 to {TAIL_MAX}.")
-        lines = int(args[0]) if args else TAIL_DEFAULT
+        usage = f"Usage: !tail [n], with n from 1 to {TAIL_MAX}."
+        if len(args) > 1 or (args and (not args[0].isdecimal() or len(args[0]) > 20)):
+            raise CommandError(usage)
+        try:
+            lines = int(args[0]) if args else TAIL_DEFAULT
+        except ValueError:
+            raise CommandError(usage) from None
         if not 1 <= lines <= TAIL_MAX:
-            raise CommandError(f"Usage: !tail [n], with n from 1 to {TAIL_MAX}.")
+            raise CommandError(usage)
         return Command("tail", lines=lines)
     if name == "restart":
         if len(args) != 1:
