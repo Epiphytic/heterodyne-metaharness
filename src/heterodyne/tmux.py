@@ -11,7 +11,7 @@ import contextlib
 import subprocess
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 LAUNCHER_FAILED = "tmux server could not be started through the launcher"
@@ -27,13 +27,14 @@ class TmuxPasteUncertain(TmuxError):
 
 
 class Tmux:
-    def __init__(self, socket_name: str, binary: str = "tmux", launcher: Sequence[str] = ()) -> None:
-        """`launcher` is a command prefix used only for the invocation that starts the server (see
-        `new_session`), for example a service manager's way to run it in a cgroup of its own. Every
-        other call runs tmux directly."""
+    def __init__(self, socket_name: str, binary: str = "tmux",
+                 launcher: Callable[[], Sequence[str]] | None = None) -> None:
+        """`launcher` returns a command prefix (called afresh for each start, so it can carry a unique
+        name) used only for the invocation that starts the server (see `new_session`), for example a
+        service manager's way to run it in a cgroup of its own. Every other call runs tmux directly."""
         self.socket_name = socket_name
         self.binary = binary
-        self.launcher = tuple(launcher)
+        self.launcher = launcher
 
     def _run(self, *args: str, data: bytes | None = None,
              check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -52,18 +53,30 @@ class Tmux:
         # set-option afterwards races an immediately-exiting process.
         args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
                 "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
-        if not self.launcher:
+        if self.launcher is None or self._server_running():
+            # A running server is already where it should be; the client only asks it.
             self._run(*args)
             return
         # The server is forked by this invocation and stays wherever it starts, so only this call is
         # wrapped. A failing launcher is an error: never fall back to starting the server unwrapped.
         try:
-            proc = subprocess.run([*self.launcher, self.binary, "-L", self.socket_name, *args],
+            proc = subprocess.run([*self.launcher(), self.binary, "-L", self.socket_name, *args],
                                   capture_output=True, timeout=30, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise TmuxError(LAUNCHER_FAILED) from None
         if proc.returncode != 0:
             raise TmuxError(LAUNCHER_FAILED)
+
+    def _server_running(self) -> bool:
+        """True only when the server answers. "No server" (including a stale or missing socket) is
+        False. Any other outcome (another error, a timeout) is also False: the caller then wraps the
+        start, which is safe, because a wrapped client that merely asks a live server does no harm
+        and the launcher's names are unique."""
+        try:
+            proc = self._run("list-sessions", check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0
 
     def pane_dead(self, name: str) -> bool:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")

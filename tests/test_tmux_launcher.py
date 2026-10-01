@@ -1,5 +1,6 @@
 """The launcher prefix wraps only the server start; no real tmux, systemd or systemd-run is run."""
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -13,33 +14,53 @@ from heterodyne.tmux import LAUNCHER_FAILED, Tmux, TmuxError
 
 
 class Recorder:
-    def __init__(self, returncode: int = 0, exc: BaseException | None = None) -> None:
+    """Fake subprocess.run. The list-sessions probe answers `probe` (returncode, stderr) or raises
+    `probe_exc`; every other call answers `returncode` or raises `exc`."""
+
+    def __init__(self, returncode: int = 0, exc: BaseException | None = None,
+                 probe: tuple[int, bytes] = (1, b"no server running on /tmp/x"),
+                 probe_exc: BaseException | None = None) -> None:
         self.calls: list[list[str]] = []
         self.returncode = returncode
         self.exc = exc
+        self.probe = probe
+        self.probe_exc = probe_exc
 
     def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(list(argv))
+        if "list-sessions" in argv:
+            if self.probe_exc:
+                raise self.probe_exc
+            return subprocess.CompletedProcess(argv, self.probe[0], b"", self.probe[1])
         if self.exc:
             raise self.exc
         return subprocess.CompletedProcess(argv, self.returncode, b"", b"secret detail")
 
+    @property
+    def starts(self) -> list[list[str]]:
+        return [c for c in self.calls if "new-session" in c]
 
-def test_systemd_launcher_is_a_user_scope(tmp_path: Path) -> None:
-    prefix = tmux_launcher(make_settings(tmp_path, service_manager="systemd"))
-    assert prefix[0].endswith("systemd-run")
-    assert {"--user", "--scope", "--collect", f"--unit={TMUX_SCOPE}"} <= set(prefix)
-    assert any(a.startswith("--description=") for a in prefix)
+
+def test_systemd_launcher_is_a_user_scope_with_a_unique_name(tmp_path: Path) -> None:
+    launcher = tmux_launcher(make_settings(tmp_path, service_manager="systemd"))
+    assert launcher is not None
+    a, b = launcher(), launcher()
+    assert a[0].endswith("systemd-run")
+    assert {"--user", "--scope", "--collect"} <= set(a)
+    assert any(x.startswith("--description=") for x in a)
+    units = [next(x for x in p if x.startswith("--unit=")) for p in (a, b)]
+    assert all(re.fullmatch(rf"--unit={TMUX_SCOPE}-[0-9a-f]{{8,}}", u) for u in units)
+    assert units[0] != units[1]
 
 
 def test_launchd_has_no_launcher(tmp_path: Path) -> None:
-    assert tmux_launcher(make_settings(tmp_path, service_manager="launchd")) == ()
+    assert tmux_launcher(make_settings(tmp_path, service_manager="launchd")) is None
 
 
 def test_new_session_prefixes_only_the_server_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rec = Recorder()
     monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
-    t = Tmux("hz-test-x", launcher=("systemd-run", "--user", "--scope"))
+    t = Tmux("hz-test-x", launcher=lambda: ("systemd-run", "--user", "--scope"))
     t.new_session("s", tmp_path, ["true"])
     t.has_session("s")
     t.pane_dead("s")
@@ -48,7 +69,8 @@ def test_new_session_prefixes_only_the_server_start(monkeypatch: pytest.MonkeyPa
     t.capture("s", 5)
     t.kill("s")
     t.kill_server()
-    start, *others = rec.calls
+    probe, start, *others = rec.calls
+    assert "list-sessions" in probe and probe[0] == "tmux"
     assert start[:5] == ["systemd-run", "--user", "--scope", "tmux", "-L"]
     assert "start-server" in start and "new-session" in start
     assert others and all(c[0] == "tmux" for c in others)
@@ -67,11 +89,46 @@ def test_failing_launcher_raises_fixed_error_without_fallback(monkeypatch: pytes
                                                               tmp_path: Path, rec: Recorder) -> None:
     monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
     with pytest.raises(TmuxError) as info:
-        Tmux("hz-test-x", launcher=("systemd-run",)).new_session("s", tmp_path, ["true"])
+        Tmux("hz-test-x", launcher=lambda: ("systemd-run",)).new_session("s", tmp_path, ["true"])
     assert str(info.value) == LAUNCHER_FAILED
-    assert len(rec.calls) == 1 and rec.calls[0][0] == "systemd-run"
+    assert [c[0] for c in rec.starts] == ["systemd-run"]
 
 
 def test_unit_keeps_control_group_kill_mode() -> None:
     from heterodyne.admind import unit
     assert "\nKillMode=control-group\n" in unit.render("/opt/venv/bin/python", {"PATH": "/usr/bin"})
+
+
+def _start(rec: Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, n: int = 1) -> list[list[str]]:
+    monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
+    seq = iter(f"u{i}" for i in range(10))
+    t = Tmux("hz-test-x", launcher=lambda: ("systemd-run", f"--unit=s-{next(seq)}"))
+    for _ in range(n):
+        t.new_session("s", tmp_path, ["true"])
+    return rec.starts
+
+
+def test_running_server_is_asked_without_the_launcher(monkeypatch: pytest.MonkeyPatch,
+                                                      tmp_path: Path) -> None:
+    (start,) = _start(Recorder(probe=(0, b"")), monkeypatch, tmp_path)
+    assert start[0] == "tmux"
+
+
+@pytest.mark.parametrize("stderr", [b"no server running on /tmp/x",
+                                    b"error connecting to /tmp/x (No such file or directory)",
+                                    b"error connecting to /tmp/x (Connection refused)"])
+def test_absent_server_starts_through_a_fresh_scope_each_time(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                              stderr: bytes) -> None:
+    first, second = _start(Recorder(probe=(1, stderr)), monkeypatch, tmp_path, n=2)
+    assert first[:2] == ["systemd-run", "--unit=s-u0"] and second[:2] == ["systemd-run", "--unit=s-u1"]
+
+
+@pytest.mark.parametrize("rec", [Recorder(probe=(1, b"protocol version mismatch")),
+                                 Recorder(probe_exc=subprocess.TimeoutExpired("tmux", 1)),
+                                 Recorder(probe_exc=OSError("boom"))])
+def test_uncertain_probe_still_uses_the_launcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                 rec: Recorder) -> None:
+    # Conservative: never start a server inside the unit's cgroup. A wrapped client that only asks an
+    # existing server is harmless, and the scope name is unique, so it cannot collide.
+    (start,) = _start(rec, monkeypatch, tmp_path)
+    assert start[0] == "systemd-run"

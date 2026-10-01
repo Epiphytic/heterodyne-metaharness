@@ -17,6 +17,7 @@ decision (§8).
 import os
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -27,20 +28,22 @@ from heterodyne.agents.claude_code import interactive_argv
 
 SESSION = "admin"
 TMUX_SOCKET = "heterodyne-admind"
-TMUX_SCOPE = "heterodyne-admind-tmux"   # transient systemd scope that holds the private tmux server
+TMUX_SCOPE = "heterodyne-admind-tmux"   # prefix of the transient systemd scopes that hold the tmux server
 MAX_LAUNCHES_WITHOUT_START = 3
 
 
-def tmux_launcher(settings: AdmindSettings) -> tuple[str, ...]:
-    """The command prefix that starts the private tmux server outside admind's own cgroup.
+def tmux_launcher(settings: AdmindSettings) -> Callable[[], tuple[str, ...]] | None:
+    """A factory for the command prefix that starts the private tmux server outside admind's cgroup.
 
     On systemd the unit uses KillMode=control-group, so a server forked from admind would die with every
-    stop or restart, taking the agent with it. A transient scope puts the server in a cgroup of its own.
-    On launchd nothing is needed: tmux daemonises with setsid and launchd does not kill by cgroup."""
+    stop or restart, taking the agent with it. A transient scope puts the server in a cgroup of its own;
+    each start gets a unique scope name, so a predecessor still being collected cannot collide.
+    On launchd nothing is needed (None): tmux daemonises with setsid and launchd does not kill by cgroup."""
     if settings.service_manager != "systemd":
-        return ()
-    return (shutil.which("systemd-run") or "systemd-run", "--user", "--scope", "--collect", "--quiet",
-            f"--unit={TMUX_SCOPE}", "--description=heterodyne admind private tmux server (admin agent)")
+        return None
+    return lambda: (shutil.which("systemd-run") or "systemd-run", "--user", "--scope", "--collect",
+                    "--quiet", f"--unit={TMUX_SCOPE}-{uuid.uuid4().hex[:12]}",
+                    "--description=heterodyne admind private tmux server (admin agent)")
 
 
 class AgentStuck(RuntimeError):
