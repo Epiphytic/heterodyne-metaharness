@@ -34,7 +34,7 @@ uv sync
 uv run heterodyne platform
 ```
 
-The package has no runtime dependencies. `uv sync` also installs the development tools (pytest, hypothesis, ruff and pyright).
+The package's only runtime dependency is `msgspec`. `uv sync` also installs the development tools (pytest, hypothesis, ruff and pyright).
 
 ## `heterodyne setup`
 
