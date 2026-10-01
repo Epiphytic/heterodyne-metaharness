@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os
+import sqlite3
 import subprocess
 import sys
 
@@ -19,9 +20,17 @@ EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
 IDENTITY_LABEL = "heterodyne-admind"
 
 
+class StateDirError(Exception):
+    """The state directory could not be prepared; the message is built here and holds no path."""
+
+
 def _load() -> tuple[AdmindSettings, Store, Audit]:
     s = resolve(hconfig.load(), os.environ)
-    return s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl")
+    try:
+        return s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl")
+    except (OSError, sqlite3.Error) as exc:  # the path may hold an npub; name only the kind of failure
+        raise StateDirError(
+            f"admind: cannot prepare the admind state directory ({type(exc).__name__})") from None
 
 
 async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
@@ -81,6 +90,9 @@ def _with_settings(fn: str) -> int:
     except hconfig.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return EX_CONFIG
+    except StateDirError as exc:
+        print(exc, file=sys.stderr)
+        return EX_CONFIG
     if fn == "init":
         return asyncio.run(init(s, store, audit))
     if fn == "rearm":
@@ -105,7 +117,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run a subcommand. Last resort: an unexpected exception becomes one line naming only its type,
+    never a traceback or `str(exc)` (paths and values in those can hold identifiers)."""
     argv = sys.argv[1:] if argv is None else argv
+    command = argv[0] if argv and not argv[0].startswith("-") else "admind"
+    try:
+        return _dispatch(argv)
+    except Exception as exc:  # noqa: BLE001 - the output boundary; SystemExit (argparse) passes through
+        print(f"admind: {command} failed ({type(exc).__name__})", file=sys.stderr)
+        return 0 if command == "hook" else 1
+
+
+def _dispatch(argv: list[str]) -> int:
     if argv[:1] == ["hook"]:
         from heterodyne.admind.hook import hook_main
         return hook_main(argv[1:], sys.stdin.buffer.read())

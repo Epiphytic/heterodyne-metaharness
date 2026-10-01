@@ -185,7 +185,8 @@ class ControlClient:
             return await asyncio.wait_for(
                 asyncio.open_unix_connection(str(self.socket_path), limit=MAX_FRAME + 1), self.timeout)
         except (OSError, TimeoutError) as exc:
-            raise ControlError(f"cannot connect to wn-agent: {exc}", "socket_io", True) from exc
+            raise ControlError(f"cannot connect to wn-agent ({type(exc).__name__})",
+                               "socket_io", True) from exc
 
     async def _readline(self, reader: asyncio.StreamReader, timeout: float | None) -> bytes:
         try:
@@ -198,7 +199,7 @@ class ControlClient:
         except ValueError as exc:  # LimitOverrunError surfaces as ValueError from readline()
             raise ProtocolError("control frame too large") from exc
         except OSError as exc:
-            raise ControlError(f"wn-agent socket error: {exc}", "socket_io", True) from exc
+            raise ControlError(f"wn-agent socket error ({type(exc).__name__})", "socket_io", True) from exc
         if not line:
             raise ControlError("wn-agent closed the connection", "socket_closed", True)
         return line
@@ -208,7 +209,7 @@ class ControlClient:
         try:
             await asyncio.wait_for(writer.drain(), self.timeout)
         except (OSError, TimeoutError) as exc:
-            raise ControlError(f"cannot write to wn-agent: {exc}", "socket_io", True) from exc
+            raise ControlError(f"cannot write to wn-agent ({type(exc).__name__})", "socket_io", True) from exc
 
     async def call[T](self, payload: dict[str, Any], expected_type: str, kind: type[T]) -> T:
         request_id = uuid.uuid4().hex

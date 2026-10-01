@@ -41,15 +41,23 @@ class WnAgent:
     def prepare(self) -> None:
         if self.home.is_symlink():
             raise WnAgentError("[admind.marmot] home must not be a symlink")
-        private_dir(self.home)
-        private_dir(self.socket_path.parent)
+        try:
+            private_dir(self.home)
+            private_dir(self.socket_path.parent)
+        except OSError as exc:
+            raise WnAgentError(f"cannot prepare [admind.marmot] home ({type(exc).__name__})") from None
         try:
             fd = os.open(self.token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                          0o600)
         except FileExistsError:
             return
-        with os.fdopen(fd, "w") as fh:
-            fh.write(secrets.token_hex(32) + "\n")
+        except OSError as exc:
+            raise WnAgentError(f"cannot create the control token file ({type(exc).__name__})") from None
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(secrets.token_hex(32) + "\n")
+        except OSError as exc:
+            raise WnAgentError(f"cannot write the control token file ({type(exc).__name__})") from None
 
     def token(self) -> str:
         """The bearer token, read only from a regular 0600 file owned by this user (never via a symlink)."""
@@ -58,12 +66,16 @@ class WnAgent:
             fd = os.open(self.token_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         except OSError as exc:
             raise WnAgentError(f"cannot open the control token file ({type(exc).__name__})") from None
-        with os.fdopen(fd) as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o600:
-                raise WnAgentError("the control token file must be a regular file owned by this "
-                                   "user, mode 0600")
-            value = fh.read().strip()
+        try:
+            with os.fdopen(fd) as fh:
+                st = os.fstat(fh.fileno())
+                if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
+                        or stat.S_IMODE(st.st_mode) != 0o600):
+                    raise WnAgentError("the control token file must be a regular file owned by this "
+                                       "user, mode 0600")
+                value = fh.read().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise WnAgentError(f"cannot read the control token file ({type(exc).__name__})") from None
         if len(value) < 32:
             raise WnAgentError("the control token file is empty or too short")
         return value

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import stat
 import sys
@@ -416,3 +417,82 @@ def test_supervise_cancellation_leaves_a_child_that_stop_ends(tmp_path: Path,
         await wn.stop()
         assert proc is not None and proc.returncode is not None and not wn.alive()
     asyncio.run(body())
+
+
+# --- review R3: filesystem failures and the no-traceback boundary ---------------------------------
+
+NPUB = hex_to_npub("ab" * 32)
+needs_nonroot = pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0500 does not bind root")
+
+
+def _assert_quiet(capsys: pytest.CaptureFixture[str]) -> str:
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert NPUB not in text and "ab" * 32 not in text and "Traceback" not in text
+    return text
+
+
+def _via_main(monkeypatch: pytest.MonkeyPatch, s: object) -> None:
+    monkeypatch.setattr(cli.hconfig, "load", lambda: None)
+    monkeypatch.setattr(cli, "resolve", lambda cfg, env: s)
+
+
+@needs_nonroot
+def test_init_unwritable_marmot_home_is_a_safe_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        s = make_settings(tmp_path, marmot_home=locked / NPUB / "marmot")
+        _via_main(monkeypatch, s)
+        assert cli.main(["init"]) != 0
+    finally:
+        locked.chmod(0o700)
+    assert "PermissionError" in _assert_quiet(capsys)
+
+
+@needs_nonroot
+def test_unwritable_state_dir_is_a_safe_config_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                    capsys: pytest.CaptureFixture[str]) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        _via_main(monkeypatch, make_settings(tmp_path, state_dir=locked / NPUB / "admind"))
+        assert cli.main(["init"]) == cli.EX_CONFIG
+    finally:
+        locked.chmod(0o700)
+    assert "PermissionError" in _assert_quiet(capsys)
+
+
+@pytest.mark.parametrize("command", ["init", "rearm", "unit", "run"])
+def test_unexpected_exception_prints_one_safe_line(command: str, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError(f"leaked {NPUB} at /x/{NPUB}")
+    monkeypatch.setattr(cli, "_with_settings", boom)
+    monkeypatch.setattr(cli.unit, "render", boom)
+    assert cli.main([command]) == 1
+    text = _assert_quiet(capsys)
+    assert text.strip() == f"admind: {command} failed (RuntimeError)"
+
+
+def test_unexpected_exception_in_hook_still_exits_zero(monkeypatch: pytest.MonkeyPatch,
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
+    import heterodyne.admind.hook as hook
+
+    def boom(*_a: object, **_k: object) -> int:
+        raise OSError(f"cannot open {NPUB}")
+    monkeypatch.setattr(hook, "hook_main", boom)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"")))
+    assert cli.main(["hook"]) == 0
+    assert _assert_quiet(capsys).strip() == "admind: hook failed (OSError)"
+
+
+def test_socket_errors_do_not_echo_the_path(tmp_path: Path) -> None:
+    client = ControlClient(tmp_path / NPUB / "missing.sock", "t" * 32)
+    with pytest.raises(ControlError) as info:
+        asyncio.run(client.account_list())
+    assert NPUB not in str(info.value) and "missing.sock" not in str(info.value)
