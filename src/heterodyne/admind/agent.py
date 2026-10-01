@@ -64,10 +64,10 @@ class AdminAgent:
     def ensure_running(self) -> str:
         if self.alive() and self.session_id is not None:
             return "adopted"
-        self.tmux.kill(SESSION)  # a dead pane kept for !tail, or a session admind has no record of
         launches = int(self.store.get("launches_without_start") or "0")
-        if launches >= MAX_LAUNCHES_WITHOUT_START:
+        if launches >= MAX_LAUNCHES_WITHOUT_START:   # checked first: the dead pane stays for !tail
             raise AgentStuck(f"the admin agent did not start after {launches} launches; use !tail, then !new")
+        self.tmux.kill(SESSION)  # a dead pane kept for !tail, or a session admind has no record of
         sid = self.session_id
         resume = sid is not None and self.store.get("session_started") == sid
         if sid is None or not resume:

@@ -59,7 +59,10 @@ def settings_json(command: str) -> str:
 def hook_main(argv: list[str], stdin: bytes) -> int:
     parser = argparse.ArgumentParser(prog="admind hook", add_help=False)
     parser.add_argument("--socket")
-    args, _ = parser.parse_known_args(argv)
+    try:
+        args, _ = parser.parse_known_args(argv)
+    except SystemExit:      # argparse exits 2 on a malformed flag; a hook never fails the agent
+        args = argparse.Namespace(socket=None)
     if not args.socket:
         print("admind hook: --socket is required", file=sys.stderr)
         return 0

@@ -1,5 +1,7 @@
+import os
 import shutil
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -17,6 +19,8 @@ def tmux() -> Iterator[Tmux]:
     t = Tmux(f"hz-test-{uuid.uuid4().hex[:8]}")
     yield t
     t.kill_server()
+    tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
+    (tmpdir / t.socket_name).unlink(missing_ok=True)
 
 
 def wait_for(pred, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]
@@ -45,3 +49,30 @@ def test_dead_pane_is_kept_for_capture(tmux: Tmux, tmp_path: Path) -> None:
     assert "bye" in tmux.capture("s", 20)
     tmux.kill("s")
     assert not tmux.has_session("s")
+
+
+def test_immediate_exit_keeps_output_deterministically(tmux: Tmux, tmp_path: Path) -> None:
+    for i in range(15):   # the race was timing-dependent; repeat so a regression cannot slip through
+        name = f"s{i}"
+        tmux.new_session(name, tmp_path, ["sh", "-c", "echo diag; exit 3"])
+        wait_for(lambda n=name: tmux.has_session(n) and tmux.pane_dead(n))
+        assert "diag" in tmux.capture(name, 20)
+
+
+def test_multiline_paste_is_one_bracketed_paste(tmux: Tmux, tmp_path: Path) -> None:
+    out = tmp_path / "raw"
+    script = (
+        "import sys, os, termios, tty\n"
+        "tty.setraw(0)\n"
+        "sys.stdout.write('\\x1b[?2004h'); sys.stdout.flush()\n"
+        "data = b''\n"
+        "while not data.endswith(b'\\r'):\n"
+        "    data += os.read(0, 4096)\n"
+        f"open({str(out)!r}, 'wb').write(data)\n"
+    )
+    tmux.new_session("s", tmp_path, [sys.executable, "-c", script])
+    time.sleep(0.5)
+    tmux.paste("s", "line one\nline two\nline three")
+    wait_for(lambda: out.exists() and out.stat().st_size > 0)
+    # tmux turns LF into CR inside the paste
+    assert out.read_bytes() == b"\x1b[200~line one\rline two\rline three\x1b[201~\r"

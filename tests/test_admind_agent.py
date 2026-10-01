@@ -100,6 +100,22 @@ def test_crash_loop_stops_after_three_launches(tmp_path: Path) -> None:
     assert agent.new() == "launched"            # !new resets the counter
 
 
+def test_crash_loop_keeps_the_dead_pane_for_tail(tmp_path: Path) -> None:
+    agent, tmux, _ = make_agent(tmp_path)
+    for _ in range(3):
+        tmux.kill("admin")
+        agent.ensure_running()
+    tmux.dead.add("admin")                      # the pane exited and is retained
+    try:
+        agent.ensure_running()
+    except AgentStuck:
+        pass
+    else:
+        raise AssertionError("expected AgentStuck")
+    assert tmux.has_session("admin")
+    assert agent.tail(5) == "screen of admin, 5 lines"
+
+
 def test_send_interrupt_tail(tmp_path: Path) -> None:
     agent, tmux, _ = make_agent(tmp_path)
     assert agent.tail(5) == "(no admin agent session)"
@@ -175,6 +191,17 @@ def test_hook_never_fails_the_agent(tmp_path: Path) -> None:
     assert hook_main(["--socket", str(tmp_path / "absent.sock")], b'{"hook_event_name":"Stop"}') == 0
     assert hook_main(["--socket", str(tmp_path / "absent.sock")], b"not json") == 0
     assert hook_main([], b"{}") == 0
+    assert hook_main(["--socket"], b"{}") == 0      # argparse would otherwise exit 2
+
+
+async def wait_for_drop(audit: Path, timeout: float = 5.0) -> None:
+    """Poll until the server has audited a dropped frame (the observable rejection)."""
+    end = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < end:
+        if audit.exists() and '"dropped"' in audit.read_text():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("no dropped-frame audit record")
 
 
 def test_hook_server_drops_garbage(tmp_path: Path) -> None:
@@ -190,11 +217,10 @@ def test_hook_server_drops_garbage(tmp_path: Path) -> None:
                 s.connect(str(sock))
                 s.sendall(b'{"no": "fields"}\n')
         await asyncio.to_thread(send)
-        await asyncio.sleep(0.2)
+        await wait_for_drop(tmp_path / "audit.jsonl")
         await server.close()
         return queue.qsize()
     assert asyncio.run(body()) == 0
-    assert "hook" in (tmp_path / "audit.jsonl").read_text()
 
 
 def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
@@ -212,7 +238,7 @@ def test_hook_server_drops_oversized_frames(tmp_path: Path) -> None:
                 s.sendall(b'{"hook_event_name":"Stop","session_id":"S","last_assistant_message":"'
                           + b"x" * (2 * 1024 * 1024) + b'"}\n')
         await asyncio.to_thread(send)
-        await asyncio.sleep(0.3)
+        await wait_for_drop(tmp_path / "audit.jsonl")
         await server.close()
         return queue.qsize()
     assert asyncio.run(body()) == 0

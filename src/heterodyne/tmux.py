@@ -35,8 +35,10 @@ class Tmux:
         return self._run("has-session", "-t", f"={name}", check=False).returncode == 0
 
     def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
-        self._run("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
-        self._run("set-option", "-w", "-t", f"={name}:", "remain-on-exit", "on")
+        # One invocation, so retention is set before the process can start (and exit): a separate
+        # set-option afterwards races an immediately-exiting process.
+        self._run("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
+                  "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
 
     def pane_dead(self, name: str) -> bool:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")
