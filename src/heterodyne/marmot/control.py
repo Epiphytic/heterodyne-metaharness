@@ -20,7 +20,8 @@ import msgspec
 
 PROTOCOL = "marmot.agent-control.v2"
 MAX_FRAME = 1024 * 1024
-_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+# Letters and underscores only (no digits), so token-like peer material is never echoed.
+_ERROR_CODE = re.compile(r"[a-z][a-z_]{0,39}")
 
 
 class ControlError(Exception):
@@ -140,7 +141,10 @@ def decode_head(line: bytes, request_id: str) -> str:
     if head.id != request_id:
         raise ProtocolError("response id does not match the request id")
     if head.type == "error":
-        err = msgspec.json.decode(line, type=_Error)
+        try:
+            err = msgspec.json.decode(line, type=_Error)
+        except msgspec.DecodeError as exc:
+            raise ProtocolError("malformed error frame") from exc
         # The code is peer-supplied too: only a plain identifier is echoed, and the free text only in detail.
         code = err.code if _ERROR_CODE.fullmatch(err.code) else "unrecognised"
         raise ControlError(f"wn-agent returned error {code}", code, err.retryable, detail=err.message)
@@ -203,14 +207,15 @@ class ControlClient:
         except (OSError, TimeoutError) as exc:
             raise ControlError(f"cannot write to wn-agent: {exc}", "socket_io", True) from exc
 
-    async def call[T](self, payload: dict[str, Any], kind: type[T]) -> T:
+    async def call[T](self, payload: dict[str, Any], expected_type: str, kind: type[T]) -> T:
         request_id = uuid.uuid4().hex
         frame = self._frame(payload, request_id)
         reader, writer = await self._open()
         try:
             await self._write(writer, frame)
             line = await self._readline(reader, self.timeout)
-            decode_head(line, request_id)
+            if decode_head(line, request_id) != expected_type:
+                raise ProtocolError(f"unexpected response type for {payload['type']}")
             try:
                 return msgspec.json.decode(line, type=kind)
             except msgspec.DecodeError as exc:
@@ -221,21 +226,22 @@ class ControlClient:
                 await writer.wait_closed()
 
     async def account_list(self) -> AccountList:
-        return await self.call({"type": "account_list"}, AccountList)
+        return await self.call({"type": "account_list"}, "account_list", AccountList)
 
     async def group_info(self, account: str, group: str) -> GroupInfo:
         return await self.call({"type": "group_info", "account_id_hex": account, "group_id_hex": group},
-                               GroupInfo)
+                               "group_info", GroupInfo)
 
     async def group_create(self, account: str, name: str, members: list[str]) -> GroupCreated:
         return await self.call({"type": "group_create", "account_id_hex": account, "name": name,
-                                "members": members, "description": None, "relays": None}, GroupCreated)
+                                "members": members, "description": None, "relays": None},
+                               "group_created", GroupCreated)
 
     async def send_final(self, account: str, group: str, text: str, reply_to: str | None,
                          key: str) -> FinalSent:
         return await self.call({"type": "send_final", "account_id_hex": account, "group_id_hex": group,
                                 "text": text, "reply_to_message_id_hex": reply_to,
-                                "idempotency_key": key}, FinalSent)
+                                "idempotency_key": key}, "final_sent", FinalSent)
 
     async def subscribe(self, account: str, group: str) -> AsyncIterator[Event]:
         """Yield inbound events until the connection ends, which raises a retryable ControlError."""

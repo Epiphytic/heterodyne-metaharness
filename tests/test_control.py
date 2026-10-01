@@ -134,3 +134,36 @@ def test_oversized_frames_are_rejected_before_sending(tmp_path: Path) -> None:
     client = ControlClient(tmp_path / "s.sock", None)
     with pytest.raises(ControlError, match="too large"):
         run(client.send_final(ACCOUNT, "b2" * 32, "x" * MAX_FRAME, None, "k"))
+
+
+def test_call_rejects_a_response_of_the_wrong_type(tmp_path: Path) -> None:
+    async def body() -> None:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            req = json.loads(await reader.readline())
+            writer.write(json.dumps({"marmot_agent_control": "marmot.agent-control.v2", "id": req["id"],
+                                     "type": "ack", "message_ids_hex": ["aa"]}).encode() + b"\n")
+            await writer.drain()
+            writer.close()
+        server = await asyncio.start_unix_server(handle, path=str(tmp_path / "s.sock"))
+        try:
+            with pytest.raises(ProtocolError, match="unexpected response type"):
+                await ControlClient(tmp_path / "s.sock", None).send_final(ACCOUNT, "bb", "hi", None, "k")
+        finally:
+            server.close()
+    run(body())
+
+
+def test_malformed_error_frames_are_protocol_errors() -> None:
+    with pytest.raises(ProtocolError) as exc:
+        decode_event(_frame(type="error", code=7, message="secret-ish", retryable=False), "r1")
+    assert str(exc.value) == "malformed error frame"
+
+
+def test_error_codes_with_digits_are_not_echoed() -> None:
+    with pytest.raises(ControlError) as exc:
+        decode_event(_frame(type="error", code="abc123secret", message="m", retryable=False), "r1")
+    assert "unrecognised" in str(exc.value) and exc.value.code == "unrecognised"
+    assert "abc123secret" not in str(exc.value)
+    with pytest.raises(ControlError) as exc2:
+        decode_event(_frame(type="error", code="not_group_admin", message="m", retryable=False), "r1")
+    assert exc2.value.code == "not_group_admin" and "not_group_admin" in str(exc2.value)
