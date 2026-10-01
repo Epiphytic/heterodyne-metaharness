@@ -167,3 +167,10 @@ def test_error_codes_with_digits_are_not_echoed() -> None:
     with pytest.raises(ControlError) as exc2:
         decode_event(_frame(type="error", code="not_group_admin", message="m", retryable=False), "r1")
     assert exc2.value.code == "not_group_admin" and "not_group_admin" in str(exc2.value)
+
+
+def test_all_letter_unknown_error_code_is_not_echoed() -> None:
+    with pytest.raises(ControlError) as exc:
+        decode_event(_frame(type="error", code="secrettoken", message="m", retryable=False), "r1")
+    assert exc.value.code == "unrecognised"
+    assert "secrettoken" not in str(exc.value)

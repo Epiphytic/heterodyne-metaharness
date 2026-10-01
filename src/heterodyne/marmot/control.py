@@ -10,7 +10,6 @@ metadata, never from the text (§3.4).
 import asyncio
 import contextlib
 import json
-import re
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -20,8 +19,12 @@ import msgspec
 
 PROTOCOL = "marmot.agent-control.v2"
 MAX_FRAME = 1024 * 1024
-# Letters and underscores only (no digits), so token-like peer material is never echoed.
-_ERROR_CODE = re.compile(r"[a-z][a-z_]{0,39}")
+# Peer error codes admind echoes. Anything else, which could be token material, becomes "unrecognised";
+# the peer's free text stays in `detail` only.
+KNOWN_ERROR_CODES = frozenset({
+    "unauthorized", "unavailable", "unsupported", "relay_unavailable", "not_group_admin",
+    "not_found", "rate_limited", "auth_failed", "message_send_failed", "group_create_failed",
+})
 
 
 class ControlError(Exception):
@@ -145,8 +148,8 @@ def decode_head(line: bytes, request_id: str) -> str:
             err = msgspec.json.decode(line, type=_Error)
         except msgspec.DecodeError as exc:
             raise ProtocolError("malformed error frame") from exc
-        # The code is peer-supplied too: only a plain identifier is echoed, and the free text only in detail.
-        code = err.code if _ERROR_CODE.fullmatch(err.code) else "unrecognised"
+        # The code is peer-supplied too: only allowlisted codes are echoed, and the free text only in detail.
+        code = err.code if err.code in KNOWN_ERROR_CODES else "unrecognised"
         raise ControlError(f"wn-agent returned error {code}", code, err.retryable, detail=err.message)
     return head.type
 
