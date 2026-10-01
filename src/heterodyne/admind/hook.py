@@ -78,7 +78,8 @@ class Delivery:
 
 class _Conn:
     """One accepted connection: its socket, arrival index and ordering slot."""
-    __slots__ = ("sock", "index", "slot", "released", "queued", "wrapped", "previous", "held", "settled")
+    __slots__ = ("sock", "index", "slot", "released", "queued", "wrapped", "previous", "held", "settled",
+                 "counted")
 
     def __init__(self, sock: socket.socket, index: int, slot: "asyncio.Future[None]",
                  previous: "asyncio.Future[None] | None") -> None:
@@ -88,6 +89,7 @@ class _Conn:
         self.previous = previous    # the predecessor's slot: ours resolves only after it
         self.held = False           # the lost-hook hold was applied for this connection
         self.settled = False        # the finish path ran (the release may still wait for the predecessor)
+        self.counted = False        # it is included in `pending_hooks`; only then does its release decrement
         self.released = False
         self.wrapped = False    # a stream transport owns the socket
         self.queued = False     # its event reached the daemon's queue (or it was fully handled)
@@ -354,7 +356,7 @@ class HookServer:
                 return
             except ConnectionAbortedError:      # the peer left before accept
                 aborts += 1
-                if aborts > ACCEPT_ABORTS:
+                if aborts >= ACCEPT_ABORTS:
                     self._back_off(loop)
                     return
                 continue
@@ -363,13 +365,15 @@ class HookServer:
                 self._back_off(loop)
                 return
             self.accepted += 1
-            self.pending_hooks += 1     # counted from accept, so the gate sees a frame still arriving
-            previous = self._tail
-            slot: asyncio.Future[None] = loop.create_future()
-            self._tail = slot
-            state = _Conn(conn, self.accepted, slot, previous)
-            self._conns.add(state)
+            state: _Conn | None = None
             try:
+                previous = self._tail
+                slot: asyncio.Future[None] = loop.create_future()
+                state = _Conn(conn, self.accepted, slot, previous)
+                self._conns.add(state)
+                self.pending_hooks += 1     # counted from accept, so the gate sees a frame still arriving
+                state.counted = True        # (never counted without a releasable record, see _release)
+                self._tail = slot
                 conn.setblocking(False)
                 coro = self._handle(state, previous)
                 try:
@@ -378,7 +382,13 @@ class HookServer:
                     coro.close()
                     raise
             except BaseException as exc:
-                self._settle(state)     # hold, close, and release after the predecessor
+                if state is not None:
+                    self._settle(state)     # hold, close, and release after the predecessor
+                else:       # not even a record could be made: nothing was counted
+                    conn.close()
+                    if self.on_drop is not None:
+                        with contextlib.suppress(Exception):
+                            self.on_drop()
                 self._audit(result="accept-error", error=type(exc).__name__)
                 if not isinstance(exc, Exception):
                     raise
@@ -433,7 +443,16 @@ class HookServer:
         if previous is None or previous.done():
             self._release(state)
         else:
-            previous.add_done_callback(lambda _f, st=state: self._release(st))
+            previous.add_done_callback(lambda _f, st=state: self._release_after(st))
+
+    def _release_after(self, state: "_Conn") -> None:
+        """The ordered release of a connection that waited for its predecessor. The predecessor may have
+        processed a Stop that lifted the hold this (lost) connection applied, so it is applied again before
+        the count drops. `on_drop` is idempotent apart from the notice-once rule."""
+        if state.held and not state.released and self.on_drop is not None:
+            with contextlib.suppress(Exception):
+                self.on_drop()
+        self._release(state)
 
     def _release(self, state: "_Conn") -> None:
         if state.released:
@@ -442,7 +461,8 @@ class HookServer:
         self._conns.discard(state)
         if not state.slot.done():
             state.slot.set_result(None)
-        self.pending_hooks -= 1     # processed or dropped; after the answer was written
+        if state.counted:
+            self.pending_hooks -= 1     # processed or dropped; after the answer was written
         if self.pending_hooks == 0 and self.on_idle is not None and not self._closing:
             try:
                 self.on_idle()

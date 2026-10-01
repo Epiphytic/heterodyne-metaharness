@@ -171,6 +171,7 @@ class Admind:
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
         self.block_audited = False              # the dispatch block has been audited; reset when it lifts
         self.dispatch_blocked = False           # a lost hook holds dispatch (in memory); see hold_now()
+        self.shutting_down = False              # set synchronously when shutdown begins: nothing is pasted
         self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
@@ -211,13 +212,15 @@ class Admind:
 
     def hooks_idle(self) -> None:
         """The last accepted hook finished: held prompts may now be dispatched."""
-        if not self.held:
+        if self.shutting_down or not self.held:
             return
         task = asyncio.get_running_loop().create_task(self._idle_flush())
         self._idle_tasks.add(task)
         task.add_done_callback(self._idle_tasks.discard)
 
     async def _idle_flush(self) -> None:
+        if self.shutting_down:
+            return
         try:
             await self.flush()
         except Exception as exc:  # noqa: BLE001 - a failed flush is retried by the next outbox pass
@@ -298,9 +301,22 @@ class Admind:
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
                                    ("agent", self.agent_loop)):
-                    tg.create_task(supervised(name, loop, self.audit))
+                    tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+        except BaseException:
+            self.shutting_down = True
+            raise
         finally:
+            self.shutting_down = True
             await server.close()
+
+    async def guarded(self, coro: Awaitable[None]) -> None:
+        """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets
+        `shutting_down` synchronously, before anything it unblocks can run."""
+        try:
+            await coro
+        except asyncio.CancelledError:
+            self.shutting_down = True
+            raise
 
     async def start_agent(self, relaunch: bool = False, startup: bool = False) -> None:
         self.ready.clear()
@@ -606,6 +622,8 @@ class Admind:
             await self._flush()
 
     async def _flush(self) -> None:
+        if self.shutting_down:
+            return      # under dispatch_lock, with the other gates: nothing is pasted once shutdown began
         # Same gate as the outbound side (D4): while latched, or while the group is not verified as
         # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
         if self.latched() or not self.group_ok or not self.observing:
@@ -843,6 +861,14 @@ class Admind:
                         run.deadline = deadline
                         await self.route_hook(ev, arrival)
                     ok = True
+                except asyncio.CancelledError:
+                    # Shutdown while this event was being processed: it may have started a turn. The
+                    # hold is applied synchronously, before the delivery is resolved (the finally).
+                    self.shutting_down = True
+                    if not run.noop:
+                        self.hold_now()
+                        self.contained("hold-persist-failed", self.persist_hold)
+                    raise
                 except TimeoutError:
                     failure = ("hook", {"action": "hook-deadline"})     # fixed wording; the event is dropped
                 except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop

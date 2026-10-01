@@ -79,7 +79,7 @@ def test_setup_failure_holds_and_resolves_after_the_predecessor(
             await stays(lambda: rig.server.pending_hooks == 2)  # B's slot waits for A, whatever happened to B
             delivery.done.set_result(True)
             await wait_until(lambda: rig.server.pending_hooks == 0)
-            assert rig.holds == 1
+            assert rig.holds == 2      # applied at the failure and re-asserted at the ordered release
             a.close()
             b.close()
         finally:
@@ -220,10 +220,10 @@ def test_persistent_aborts_back_off(tmp_path: Path) -> None:
 
             rig.server._accept_conn = aborting      # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
             rig.server._on_readable()               # pyright: ignore[reportPrivateUsage]
-            assert calls[0] == ACCEPT_ABORTS + 1
+            assert calls[0] == ACCEPT_ABORTS
             assert not rig.server._reading and rig.server._backoff is not None      # pyright: ignore[reportPrivateUsage]
             await wait_until(lambda: rig.server._reading)       # pyright: ignore[reportPrivateUsage]
-            assert calls[0] == ACCEPT_ABORTS + 1
+            assert calls[0] == ACCEPT_ABORTS
         finally:
             await rig.server.close()
     run(scenario())
