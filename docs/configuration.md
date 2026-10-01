@@ -93,7 +93,7 @@ Any other variable starting with `HETERODYNE_` is an error: "environment overrid
 | Key | Meaning |
 |---|---|
 | `profile` | Required. The admin agent's profile from `[profiles]`; claude-code only for now. |
-| `workdir` | Working directory of the admin agent. Default `~`. |
+| `workdir` | Working directory of the admin agent. Default `~`, but set a dedicated directory: Claude Code does not persist workspace trust for the home directory (see [admind.md](admind.md#8-troubleshooting)). |
 | `restart_units` | The only units `!restart` accepts. Default none. |
 | `chunk_chars` | Reply chunk size, 200 to 60000. Default 4000. |
 | `alert_poll_seconds` | How often the alerts directory is polled. Default 5. |

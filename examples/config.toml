@@ -37,6 +37,9 @@ auth_token = { command = "<command-that-prints-the-token>" }
 [admind]
 profile = "reviewer"                  # the admin agent's profile; its adapter must be claude-code
 restart_units = ["<unit-name>.service"]   # the only units `!restart` accepts
+# Use a dedicated directory: Claude Code does not remember workspace trust for the home directory
+# (the default), so every relaunch would block on the trust dialog and end in AgentStuck.
+workdir = "<dedicated-admin-workdir>"
 
 [admind.marmot]
 relays = ["<wss-relay-url>"]

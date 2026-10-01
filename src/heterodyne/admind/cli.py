@@ -11,7 +11,7 @@ from typing import NoReturn, cast
 
 from heterodyne import config as hconfig
 from heterodyne.admind import unit
-from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
+from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import Admind, supervised
@@ -193,7 +193,7 @@ async def _run_with_child(s: AdmindSettings, store: Store, audit: Audit, group: 
         audit.write("admind", action="start-failed", error=type(exc).__name__)
         print(f"admind: {show(str(exc), False)}", file=sys.stderr)    # own wording only
         return 1
-    agent = AdminAgent(Tmux(TMUX_SOCKET), store, s, s.state_dir / "hook.sock")
+    agent = AdminAgent(Tmux(TMUX_SOCKET, launcher=tmux_launcher(s)), store, s, s.state_dir / "hook.sock")
     runner = CommandRunner(agent, services, s.restart_units, wn.alive)
     daemon = Admind(s, client, store, audit, agent, runner, account, group)
     audit.write("admind", action="start")

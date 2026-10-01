@@ -14,6 +14,10 @@ Wants=network-online.target
 Type=simple
 ExecStart={python} -m heterodyne.admind run
 Restart=always
+# control-group (the default, stated here on purpose) kills only what is in this unit: wn-agent, which
+# must die with admind because its Marmot home has a single opener. The admin agent's tmux server runs
+# in its own transient scope, outside this cgroup, so a stop or restart leaves the agent running.
+KillMode=control-group
 RestartSec=5
 RestartPreventExitStatus=78
 UMask=0077

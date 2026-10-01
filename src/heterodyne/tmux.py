@@ -11,7 +11,10 @@ import contextlib
 import subprocess
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
+
+LAUNCHER_FAILED = "tmux server could not be started through the launcher"
 
 
 class TmuxError(RuntimeError):
@@ -24,9 +27,13 @@ class TmuxPasteUncertain(TmuxError):
 
 
 class Tmux:
-    def __init__(self, socket_name: str, binary: str = "tmux") -> None:
+    def __init__(self, socket_name: str, binary: str = "tmux", launcher: Sequence[str] = ()) -> None:
+        """`launcher` is a command prefix used only for the invocation that starts the server (see
+        `new_session`), for example a service manager's way to run it in a cgroup of its own. Every
+        other call runs tmux directly."""
         self.socket_name = socket_name
         self.binary = binary
+        self.launcher = tuple(launcher)
 
     def _run(self, *args: str, data: bytes | None = None,
              check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -43,8 +50,20 @@ class Tmux:
     def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
         # One invocation, so retention is set before the process can start (and exit): a separate
         # set-option afterwards races an immediately-exiting process.
-        self._run("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
-                  "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
+        args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
+                "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
+        if not self.launcher:
+            self._run(*args)
+            return
+        # The server is forked by this invocation and stays wherever it starts, so only this call is
+        # wrapped. A failing launcher is an error: never fall back to starting the server unwrapped.
+        try:
+            proc = subprocess.run([*self.launcher, self.binary, "-L", self.socket_name, *args],
+                                  capture_output=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise TmuxError(LAUNCHER_FAILED) from None
+        if proc.returncode != 0:
+            raise TmuxError(LAUNCHER_FAILED)
 
     def pane_dead(self, name: str) -> bool:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")
