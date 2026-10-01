@@ -12,11 +12,13 @@ Peer- and child-supplied text (a stranger's message, an agent reply, a terminal 
 
 import asyncio
 import contextlib
+import contextvars
 import hmac
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from heterodyne.admind import alerts, chunk, commands, guard
@@ -60,7 +62,28 @@ AUDIT_TEXT_CHARS = 2000
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
 EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled filesystem must not hold a slot)
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
+HOOK_LOCK_WAIT = 120.0      # an event's wait for the turn lock; expiry also holds dispatch (R6)
+HOOK_LOST_NOTICE = ("admind lost an agent hook event; new messages are held. "
+                    "When the agent is idle, send !interrupt (or !new) to resume.")
 SESSION_SOURCES = frozenset({"startup", "resume", "clear", "compact"})   # Claude Code's SessionStart sources
+
+
+@dataclass
+class HookRun:
+    """The event hook_loop is processing: its deadline (rescheduled when the turn lock is taken, so only
+    processing counts) and whether it was decided to be a no-op (stale, or outside the session)."""
+    deadline: asyncio.Timeout | None = None
+    noop: bool = False
+
+
+_RUN: contextvars.ContextVar[HookRun | None] = contextvars.ContextVar("admind_hook_run", default=None)
+
+
+def noop_event() -> None:
+    """The event being processed was found stale or foreign: failing later must not hold dispatch."""
+    run = _RUN.get()
+    if run is not None:
+        run.noop = True
 
 
 def reason(exc: BaseException) -> str:
@@ -119,6 +142,7 @@ class Admind:
         self.turn_floor = 0
         self.extract_timeout = EXTRACT_SECONDS      # replaced in tests
         self.hook_deadline = HOOK_DEADLINE          # replaced in tests
+        self.hook_lock_wait = HOOK_LOCK_WAIT        # replaced in tests
         self._extraction: asyncio.Future[str] | None = None     # the one transcript-read thread allowed
         self._idle_tasks: set[asyncio.Task[None]] = set()
         self.held: list[tuple[str, str]] = []
@@ -159,7 +183,7 @@ class Admind:
     def make_server(self, path: Path) -> HookServer:
         """The hook server, wired to this daemon: its accept count gates dispatch and its idle edge
         triggers a flush."""
-        self.hook_server = HookServer(path, self.hooks, self.audit, self.hooks_idle)
+        self.hook_server = HookServer(path, self.hooks, self.audit, self.hooks_idle, self.hold_dispatch)
         return self.hook_server
 
     def pending_hooks(self) -> int:
@@ -654,6 +678,51 @@ class Admind:
 
     def set_idle(self) -> None:
         self.store.delete("busy")
+        self.store.delete("hook_lost")      # a release ends the hook-lost episode
+
+    async def hold_dispatch(self) -> None:
+        """A hook event that might have started a turn was lost (deadline, failure, dropped frame): hold
+        dispatch until a Stop, !interrupt or !new releases it. Taken under the dispatch lock; if the lock
+        cannot be had within `hook_lock_wait` the hold is applied anyway (it is one synchronous
+        transaction, so it cannot interleave with another). `generation` advances so that a send
+        failing meanwhile cannot clear the busy state."""
+        locked = False
+        try:
+            await asyncio.wait_for(self.dispatch_lock.acquire(), self.hook_lock_wait)
+            locked = True
+        except TimeoutError:
+            pass
+        try:
+            with self.store.transaction():
+                if self.store.get("busy") is None:
+                    self.set_busy()
+                self.generation += 1
+                if self.store.get("hook_lost") is None:     # one notice per hold episode
+                    self.store.set("hook_lost", "1")
+                    self.post(f"hook-lost:{self.store.get('busy')}", HOOK_LOST_NOTICE, None)
+            self.audit.write("hook", action="hook-lost-hold")
+        finally:
+            if locked:
+                self.dispatch_lock.release()
+
+    @contextlib.asynccontextmanager
+    async def turn_lock(self) -> AsyncGenerator[None]:
+        """dispatch_lock for hook processing. Under hook_loop the event's deadline covers only the time the
+        lock is held: waiting for it (behind a dispatch, bounded by tmux's own timeouts) has its own,
+        longer bound."""
+        run = _RUN.get()
+        if run is None or run.deadline is None:
+            async with self.dispatch_lock:
+                yield
+            return
+        loop = asyncio.get_running_loop()
+        run.deadline.reschedule(loop.time() + self.hook_lock_wait)
+        await self.dispatch_lock.acquire()
+        run.deadline.reschedule(loop.time() + self.hook_deadline)
+        try:
+            yield
+        finally:
+            self.dispatch_lock.release()
 
     def notify_held(self) -> None:
         """Tell the operator, once each, that the queue is held (D9). Never dispatches: a lost hook
@@ -682,14 +751,26 @@ class Admind:
             ev, done, arrival = ((item.event, item.done, item.arrival) if isinstance(item, Delivery)
                                  else (item, None, None))
             ok = False
+            run = HookRun()
+            token = _RUN.set(run)
             try:
-                await asyncio.wait_for(self.route_hook(ev, arrival), self.hook_deadline)
-                ok = True
-            except TimeoutError:
-                self.audit.write("hook", action="hook-deadline")    # fixed wording; the event is dropped
-            except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop
-                self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
+                try:
+                    async with asyncio.timeout(None) as deadline:
+                        run.deadline = deadline
+                        await self.route_hook(ev, arrival)
+                    ok = True
+                except TimeoutError:
+                    self.audit.write("hook", action="hook-deadline")    # fixed wording; the event is dropped
+                except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop
+                    self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
+                if not ok and not run.noop:
+                    # The event might have started a turn: dispatch stays held until idle evidence.
+                    try:
+                        await self.hold_dispatch()
+                    except Exception as exc:  # noqa: BLE001
+                        self.audit.write("handler", action="hold-failed", error=type(exc).__name__)
             finally:
+                _RUN.reset(token)
                 if done is not None and not done.done():
                     done.set_result(ok)
             if self.pending_hooks() == 0 and self.hooks.empty():
@@ -711,6 +792,7 @@ class Admind:
         if self.classify(ev) == "other":
             # Neither the session ID nor the event name is recorded: any local process can send both.
             self.audit.write("hook", action="ignored-other-session")
+            noop_event()
             return
         await self.on_hook(ev, arrival, validate=True)
 
@@ -722,14 +804,17 @@ class Admind:
         hook_loop flushes after it once nothing else is pending."""
         if ev.hook_event_name not in KNOWN_HOOKS:
             self.audit.write("hook", action="ignored-unknown-event")
+            noop_event()
         elif ev.hook_event_name == "Stop":
             await self.on_stop(ev, arrival, validate=validate)
         else:
-            async with self.dispatch_lock:
+            async with self.turn_lock():
                 kind = self.classify(ev) if validate else "current"
                 if kind == "other":
+                    noop_event()
                     self.audit.write("hook", action="ignored-other-session")
                 elif kind == "stale":
+                    noop_event()
                     self.audit.write("hook", action="ignored-stale-launch")
                 elif ev.hook_event_name == "SessionStart":
                     self.generation += 1
@@ -739,6 +824,7 @@ class Admind:
 
     def on_prompt(self, ev: HookEvent, arrival: int | None = None) -> None:
         if self.below_floor(arrival):
+            noop_event()
             # Accepted before the turn it would start or anchor was released (!interrupt, a relaunch, !new,
             # an abandon, or the Stop that ended it): it must not set busy, anchor or touch a reservation.
             self.audit.write("agent", action="stale-prompt")
@@ -822,14 +908,17 @@ class Admind:
         that finds a reservation in flight but unanchored, that is stale (an earlier launch, or accepted
         before the turn was released) changes no turn state: its own text is posted top-level, otherwise
         nothing is and the record says so."""
-        async with self.dispatch_lock:
+        async with self.turn_lock():
             if validate:
                 kind = self.classify(ev)        # under the lock: it protects the effects applied below
                 if kind == "other":
+                    noop_event()
                     self.audit.write("hook", action="ignored-other-session")
                     return
                 stale = stale or kind == "stale"
             stale = stale or self.below_floor(arrival)
+            if stale:
+                noop_event()        # a stale Stop changes no state: failing later holds nothing
             # The identity is captured here, before the transcript read yields: !interrupt, !new, a
             # new dispatch or a relaunch can run meanwhile (they take the lock the read does not hold).
             identity = self.turn_identity(ev.session_id)
@@ -851,8 +940,9 @@ class Admind:
                 self.audit.write("agent", action="reply-extraction-timeout")
                 return
             raw = extracted
-        async with self.dispatch_lock:
+        async with self.turn_lock():
             if not self.session_current(ev.session_id):
+                noop_event()
                 self.audit.write("agent", action="stale-stop")   # a retired session: fixed wording only
                 return
             current = (not (stale or unanchored) and not self.below_floor(arrival)

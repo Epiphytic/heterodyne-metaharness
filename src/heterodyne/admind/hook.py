@@ -33,7 +33,7 @@ import socket
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -219,11 +219,13 @@ class HookServer:
     its slot completes, so the daemon can tell that a hook is still on its way."""
 
     def __init__(self, path: Path, queue: "asyncio.Queue[HookEvent | Delivery]", audit: Audit,
-                 on_idle: Callable[[], None] | None = None) -> None:
+                 on_idle: Callable[[], None] | None = None,
+                 on_lost: Callable[[], Awaitable[None]] | None = None) -> None:
         self.path = path
         self.queue = queue
         self.audit = audit
         self.on_idle = on_idle      # called when `pending_hooks` returns to zero
+        self.on_lost = on_lost      # awaited, in order, for an accepted frame that was dropped
         self.accepted = 0           # the arrival index of the newest accepted connection (first is 1)
         self.pending_hooks = 0      # accepted connections whose slot has not completed yet
         self._server: asyncio.Server | None = None
@@ -266,6 +268,8 @@ class HookServer:
                 self.audit.write("hook", result="dropped", error=type(exc).__name__)
             if previous is not None:
                 await previous      # dropped or not, the slot is released only after the earlier ones
+            if event is None and self.on_lost is not None:
+                await self.on_lost()    # it might have been a turn start: the daemon holds dispatch
             if event is not None:
                 delivery = Delivery(event, loop.create_future(), index)
                 await self.queue.put(delivery)
