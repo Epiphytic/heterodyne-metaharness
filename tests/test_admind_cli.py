@@ -496,3 +496,45 @@ def test_socket_errors_do_not_echo_the_path(tmp_path: Path) -> None:
     with pytest.raises(ControlError) as info:
         asyncio.run(client.account_list())
     assert NPUB not in str(info.value) and "missing.sock" not in str(info.value)
+
+
+@pytest.mark.parametrize("make_argv", [
+    lambda npub, tok: ["init", "--operator", npub, "--bogus"],
+    lambda npub, tok: ["init", tok],
+    lambda npub, tok: ["init", "--token", tok],
+    lambda npub, tok: [npub],
+    lambda npub, tok: ["hook2", tok, npub],
+    lambda npub, tok: ["unit", f"--x={npub}"],
+])
+def test_argparse_errors_are_value_free(make_argv: object, capsys: pytest.CaptureFixture[str]) -> None:
+    npub = hex_to_npub("ab" * 32)
+    token = "sk-" + "Q7w8" * 6
+    argv = make_argv(npub, token)  # type: ignore[operator]
+    with pytest.raises(SystemExit) as info:
+        cli.main(argv)
+    assert info.value.code == 2
+    seen = capsys.readouterr()
+    text = seen.out + seen.err
+    assert npub not in text and "ab" * 32 not in text and token not in text
+    assert "usage: admind" in seen.err and "invalid arguments" in seen.err
+
+
+def test_stop_tolerates_child_exit_race(tmp_path: Path) -> None:
+    class RacyProc:
+        returncode = None
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+        async def wait(self) -> int:
+            self.returncode = 0  # type: ignore[assignment]
+            return 0
+
+    async def body() -> None:
+        wn = WnAgent("wn-agent", tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+        wn.proc = RacyProc()  # type: ignore[assignment]
+        await wn.stop()
+    asyncio.run(body())

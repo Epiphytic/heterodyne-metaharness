@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from typing import NoReturn
 
 from heterodyne import config as hconfig
 from heterodyne.admind import unit
@@ -104,9 +105,19 @@ def run(s: AdmindSettings, store: Store, audit: Audit) -> int:
     raise NotImplementedError  # Task 8
 
 
+class _QuietParser(argparse.ArgumentParser):
+    """argparse echoes rejected argument values (invalid choice, unrecognised arguments, bad types),
+    and those can be an npub or a token. Report a fixed message instead: usage lists only fixed
+    names; the exit status stays 2."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(2, "admind: invalid arguments (see --help)\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="admind", description="heterodyne admin override channel")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = _QuietParser(prog="admind", description="heterodyne admin override channel")
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=_QuietParser)
     sub.add_parser("init", help="create admind's Marmot identity and its group with the operator")
     sub.add_parser("run", help="run the daemon (normally from its service unit)")
     sub.add_parser("rearm", help="clear the membership latch after checking the group")

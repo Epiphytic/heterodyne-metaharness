@@ -139,7 +139,8 @@ class WnAgent:
     async def stop(self) -> None:
         if self.proc is None or self.proc.returncode is not None:
             return
-        self.proc.terminate()
+        with contextlib.suppress(ProcessLookupError):  # the child may have exited just now
+            self.proc.terminate()
         try:
             await asyncio.wait_for(self.proc.wait(), 10)
         except TimeoutError:
