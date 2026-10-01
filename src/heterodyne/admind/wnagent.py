@@ -18,6 +18,7 @@ from pathlib import Path
 
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.store import private_dir
+from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import ControlClient, ControlError
 
 HEALTHY_RESET = 60.0  # seconds a restarted child must stay up before the backoff resets
@@ -163,7 +164,8 @@ class WnAgent:
                 await self.start(client)
                 delay = min(delay * 2, 60.0)
             except WnAgentError as exc:
-                self.audit.write("wn-agent", action="restart-failed", error=str(exc))
+                self.audit.write("wn-agent", action="restart-failed", error=type(exc).__name__,
+                                 message=show(str(exc), False))
                 delay = min(delay * 2, 60.0)
 
     async def stop(self) -> None:

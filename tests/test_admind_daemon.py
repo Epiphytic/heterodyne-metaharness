@@ -78,6 +78,12 @@ class Harness:
         await self.fake.push_event(self.fake.message_event(text, sender, mid))
         return mid
 
+    def event(self, name: str, session: str, transcript: str | None = None, reply: str | None = None,
+              **kw: Any) -> HookEvent:
+        """A hook event as the current launch's hook command would deliver it (with its nonce)."""
+        kw.setdefault("last_assistant_message", reply)
+        return HookEvent(name, session, transcript, launch=self.agent.launch_nonce, **kw)
+
     def texts(self) -> list[str]:
         return [r["text"] for r in self.fake.sent]
 
@@ -376,7 +382,7 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
         nxt = await h.say("next")
         await h.say("!interrupt")
         await h.until(started.is_set)
-        await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "finished anyway"))
+        await h.daemon.hooks.put(h.event("Stop", h.agent.session_id or "", None, "finished anyway"))
         # Processed while the Escape is pending: the reply is queued (the outbox loop itself is parked
         # behind the dispatch lock the !interrupt holds, so it cannot have been sent yet).
         await h.until(lambda: any(r.text == "finished anyway" for r in h.store.pending()))
@@ -416,13 +422,13 @@ def test_prompt_during_interrupt_keeps_the_new_turn_busy(
         await h.say("!interrupt")
         await h.until(started.is_set)
         sid = h.agent.session_id or ""
-        await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, prompt="typed at the terminal"))
         await h.until(lambda: h.store.get("busy") != before)       # the terminal turn began: new period
         release.set()
         await h.until(lambda: "Sent Esc to the admin agent." in h.texts())
         await asyncio.sleep(0.5)
         assert nxt not in dispatched(h)                          # the terminal turn is still running
-        await h.daemon.hooks.put(HookEvent("Stop", sid, last_assistant_message="terminal answer"))
+        await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["terminal answer"] is None and by_text["echo: next"] == nxt
@@ -462,7 +468,7 @@ def test_ignored_hook_last_in_the_queue_still_releases_dispatch(tmp_path: Path) 
         nxt = await h.say("next")
         await asyncio.sleep(0.5)
         # Queued together: this session's Stop, then a hook from another (e.g. retired) session.
-        h.daemon.hooks.put_nowait(HookEvent("Stop", h.agent.session_id or "", None, "done"))
+        h.daemon.hooks.put_nowait(h.event("Stop", h.agent.session_id or "", None, "done"))
         h.daemon.hooks.put_nowait(HookEvent("UserPromptSubmit", "a-retired-session", prompt="x"))
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
@@ -479,8 +485,8 @@ def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> 
         await asyncio.sleep(1.0)
         assert nxt not in dispatched(h)                          # busy until the agent is seen idle
         sid = h.agent.session_id or ""
-        await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
-        await h.daemon.hooks.put(HookEvent("Stop", sid, last_assistant_message="terminal answer"))
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["terminal answer"] is None
@@ -499,8 +505,8 @@ def test_terminal_prompt_never_takes_a_pending_anchor(tmp_path: Path) -> None:
         sid = h.agent.session_id or ""
         h.store.set("in_flight", "aa" * 32)
         h.store.set("in_flight_text", "from admind")
-        await h.daemon.hooks.put(HookEvent("UserPromptSubmit", sid, prompt="typed at the terminal"))
-        await h.daemon.hooks.put(HookEvent("Stop", sid, last_assistant_message="terminal answer"))
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, prompt="typed at the terminal"))
+        await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
         await h.until(lambda: "terminal answer" in h.texts())
         row = next(r for r in h.fake.sent if r["text"] == "terminal answer")
         assert row["reply_to_message_id_hex"] is None
@@ -519,7 +525,7 @@ def test_late_stop_after_interrupt_never_takes_the_next_anchor(tmp_path: Path) -
         # turn's late Stop has been processed and its reply sent: the order is explicit, not timing.
         async with h.daemon.dispatch_lock:
             nxt = await h.say("next")
-            await h.daemon.hooks.put(HookEvent("Stop", h.agent.session_id or "", None, "late"))
+            await h.daemon.hooks.put(h.event("Stop", h.agent.session_id or "", None, "late"))
             await h.until(lambda: "late" in h.texts())
             assert "echo: next" not in h.texts()
         await h.until(lambda: "echo: next" in h.texts())

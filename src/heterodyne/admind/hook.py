@@ -11,8 +11,10 @@ optional field, the fallback is the last assistant text in the session's own tra
 (plan decision D2). The screen is never scraped.
 
 Trust boundary: the socket is 0600 in a 0700 directory, so only the service user can write to it, and
-events for any session but the current one are dropped. A process already running as the service user
-can still forge a reply event; that is the same-user residual risk ADR §3.4 accepts.
+events for any session but the current one are dropped. Each launch of the agent has its own nonce in its
+hook command (`--launch`); the daemon treats an event from any other launch, or with no nonce, as stale.
+A process already running as the service user can still forge a reply event; that is the same-user
+residual risk ADR §3.4 accepts.
 """
 
 import argparse
@@ -20,6 +22,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import shlex
 import socket
 import stat
@@ -43,6 +46,7 @@ class HookEvent(msgspec.Struct, frozen=True):
     last_assistant_message: str | None = None
     prompt: str | None = None
     source: str | None = None      # SessionStart only: startup, resume, clear or compact
+    launch: str | None = None      # the launch nonce admind put in the hook command (set by hook_main)
 
 
 def same_prompt(a: str, b: str) -> bool:
@@ -50,8 +54,15 @@ def same_prompt(a: str, b: str) -> bool:
     return a.split() == b.split()
 
 
-def hook_command(sock: Path) -> str:
-    return f"{shlex.quote(sys.executable)} -m heterodyne.admind hook --socket {shlex.quote(str(sock))}"
+def new_launch_nonce() -> str:
+    """A fresh identifier for one agent launch: 128 random bits as 32 hex characters (not 64, which the
+    identifier scanner would redact). It correlates hook events with the launch that produced them."""
+    return secrets.token_hex(16)
+
+
+def hook_command(sock: Path, launch: str) -> str:
+    return (f"{shlex.quote(sys.executable)} -m heterodyne.admind hook --socket {shlex.quote(str(sock))} "
+            f"--launch {shlex.quote(launch)}")
 
 
 def settings_json(command: str) -> str:
@@ -62,15 +73,24 @@ def settings_json(command: str) -> str:
 def hook_main(argv: list[str], stdin: bytes) -> int:
     parser = argparse.ArgumentParser(prog="admind hook", add_help=False)
     parser.add_argument("--socket")
+    parser.add_argument("--launch")
     try:
         args, _ = parser.parse_known_args(argv)
     except SystemExit:      # argparse exits 2 on a malformed flag; a hook never fails the agent
-        args = argparse.Namespace(socket=None)
+        args = argparse.Namespace(socket=None, launch=None)
     if not args.socket:
         print("admind hook: --socket is required", file=sys.stderr)
         return 0
     try:
-        line = json.dumps(json.loads(stdin), separators=(",", ":")).encode() + b"\n"
+        payload: Any = json.loads(stdin)
+        if isinstance(payload, dict):
+            # The nonce comes from the command line admind wrote, never from the agent's own payload; a
+            # frame without one is treated as stale by the daemon.
+            frame = cast(dict[str, Any], payload)
+            frame.pop("launch", None)
+            if args.launch:
+                frame["launch"] = args.launch
+        line = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(2)
             conn.connect(args.socket)

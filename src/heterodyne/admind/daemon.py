@@ -12,6 +12,7 @@ Peer- and child-supplied text (a stranger's message, an agent reply, a terminal 
 
 import asyncio
 import contextlib
+import hmac
 import os
 import re
 import time
@@ -118,6 +119,7 @@ class Admind:
         self.group_ok = False
         self.observing = False      # a membership subscription is confirmed active (acked, then verified)
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
+        self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
@@ -225,8 +227,8 @@ class Admind:
         """One supervision pass (D8). If the agent's pane has died, or a launch has gone `ready_timeout`
         without a SessionStart, whatever was in flight is abandoned as after a restart, the busy state is
         cleared and the agent is relaunched through ensure_running, so its crash-loop limit applies. Once
-        that limit is hit the agent stays down until `!new` (or an admind restart): this pass then does
-        nothing, so a broken agent is never relaunched in a tight loop."""
+        that limit is hit the agent stays down until `!new` (only `!new` resets the count): this pass
+        then does nothing, so a broken agent is never relaunched in a tight loop."""
         if self.stuck is not None:
             return
         async with self.dispatch_lock:      # !new and the dispatcher's own relaunch hold this lock
@@ -255,6 +257,13 @@ class Admind:
         return n
 
     async def check_group(self) -> bool:
+        """Verify the member count. The result is bound to the subscription it was started on: a check
+        begun on an acknowledged subscription may establish observation only if that same subscription
+        is still the current one when the answer arrives. An answer from an earlier subscription (or one
+        started before the acknowledgement) can still fail closed, latching on a bad count, but never
+        establishes observation or group_ok, so a replacement is always verified by its own check."""
+        generation = self.sub_gen
+        acked_at_start = self.acked
         try:
             info = await self.client.group_info(self.account, self.group)
         except ControlError as exc:
@@ -262,11 +271,15 @@ class Admind:
             self.audit.write("guard", action="group-check-failed", code=exc.code)   # never the peer's detail
             return False
         verdict = guard.judge_member_count(info.member_count)
-        self.group_ok = verdict.action != "latch"
-        if not self.group_ok:
+        if verdict.action == "latch":
+            self.group_ok = False
             self.latch(verdict.reason)
             return False
-        if self.acked:      # a passing check after a rearm restores service on a live subscription
+        if generation != self.sub_gen:
+            self.audit.write("guard", action="group-check-superseded")
+            return False        # the subscription this check was made for is gone
+        self.group_ok = True
+        if acked_at_start and self.acked:   # a passing check after a rearm restores a live subscription
             self.observing = True
         self.wake.set()
         return True
@@ -282,6 +295,7 @@ class Admind:
         while True:
             self.observing = False
             self.acked = False
+            self.sub_gen += 1
             try:
                 async for event in self.client.subscribe(self.account, self.group,
                                                          on_ack=self.confirm_observing):
@@ -295,6 +309,7 @@ class Admind:
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
             self.observing = False
             self.acked = False
+            self.sub_gen += 1
             self.group_ok = False
             self.audit.write("subscribe", action="reconnect", code=code)
             await self._sleep(delay)
@@ -581,6 +596,8 @@ class Admind:
             if ev.session_id != self.agent.session_id or ev.session_id in self.retired:
                 # Neither the session ID nor the event name is recorded: any local process can send both.
                 self.audit.write("hook", action="ignored-other-session")
+            elif not self.launch_current(ev):
+                await self.on_stale_hook(ev)
             else:
                 try:
                     await self.on_hook(ev)
@@ -588,6 +605,25 @@ class Admind:
                     self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
             if self.hooks.empty():      # after every event, ignored ones too: _flush skipped while it queued
                 await self.flush()
+
+    def launch_current(self, ev: HookEvent) -> bool:
+        """Whether the event came from the agent's current launch. A missing nonce, on either side, is
+        stale: fail closed."""
+        nonce = self.agent.launch_nonce
+        return nonce is not None and ev.launch is not None and hmac.compare_digest(ev.launch, nonce)
+
+    async def on_stale_hook(self, ev: HookEvent) -> None:
+        """An event from an earlier launch (a crashed process whose hook arrived late), or one carrying
+        no launch nonce. It never changes turn, busy, anchor or reservation state. A Stop's reply is real
+        and is posted top-level, as for any late reply (its turn was abandoned when the launch died);
+        anything else is audited with fixed wording and dropped."""
+        if ev.hook_event_name != "Stop":
+            self.audit.write("hook", action="ignored-stale-launch")
+            return
+        try:
+            await self.on_stop(ev, stale=True)
+        except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop
+            self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
 
     async def on_hook(self, ev: HookEvent) -> None:
         """One event from the current session. hook_loop flushes after it once the queue is empty."""
@@ -642,15 +678,16 @@ class Admind:
                          effect="restart")
         self.ready.set()
 
-    def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None]:
+    def turn_identity(self, session_id: str) -> tuple[str, str | None, str | None, str | None, str | None]:
         """What a Stop must still find true when it applies its effects: the session it came from, the
-        message in flight, its confirmed anchor, and the busy period."""
-        return (session_id, self.store.get("in_flight"), self.store.get("anchor"), self.store.get("busy"))
+        message in flight, its confirmed anchor, the busy period and the launch."""
+        return (session_id, self.store.get("in_flight"), self.store.get("anchor"), self.store.get("busy"),
+                self.agent.launch_nonce)
 
     def session_current(self, session_id: str) -> bool:
         return session_id == self.agent.session_id and session_id not in self.retired
 
-    async def on_stop(self, ev: HookEvent) -> None:
+    async def on_stop(self, ev: HookEvent, stale: bool = False) -> None:
         # Captured before the first await: reading the reply yields, and !interrupt or !new can run
         # meanwhile (the worker is a separate task), replacing the turn this Stop belongs to.
         identity = self.turn_identity(ev.session_id)
@@ -667,7 +704,7 @@ class Admind:
         # !interrupt, one begun at the terminal, or ours with a lost prompt hook) posts top-level, and
         # so does a late Stop whose turn a newer dispatch has replaced: its reply is real and goes out
         # unthreaded, and the newer turn's state is left exactly as it is.
-        current = self.turn_identity(ev.session_id) == identity
+        current = not stale and self.turn_identity(ev.session_id) == identity
         anchor = identity[2] if current else None
         with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
             for i, part in enumerate(parts):

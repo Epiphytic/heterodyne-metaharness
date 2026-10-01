@@ -5,6 +5,8 @@ recorded in the store:
 - `ensure_running` adopts a live session;
 - it resumes the recorded ID (with `--resume`) once that ID has been seen to start;
 - otherwise it launches with a fresh ID;
+- every launch gets a fresh nonce, carried by its hook command, so events of an earlier launch are
+  recognised as stale;
 - three launches in a row without a SessionStart hook raise AgentStuck until `new()`.
 It runs as the service user, unsandboxed, with permission prompts bypassed: a deliberate operator
 decision (§8).
@@ -15,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
-from heterodyne.admind.hook import hook_command, settings_json
+from heterodyne.admind.hook import hook_command, new_launch_nonce, settings_json
 from heterodyne.admind.settings import AdmindSettings
 from heterodyne.admind.store import Store
 from heterodyne.agents.claude_code import interactive_argv
@@ -51,6 +53,11 @@ class AdminAgent:
     def session_id(self) -> str | None:
         return self.store.get("agent_session")
 
+    @property
+    def launch_nonce(self) -> str | None:
+        """The nonce of the current launch, persisted so an adopted pane keeps its own."""
+        return self.store.get("launch_nonce")
+
     def alive(self) -> bool:
         return self.tmux.has_session(SESSION) and not self.tmux.pane_dead(SESSION)
 
@@ -58,7 +65,7 @@ class AdminAgent:
         tmp = self.settings_file.with_name(f".{self.settings_file.name}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            fh.write(settings_json(hook_command(self.hook_socket)))
+            fh.write(settings_json(hook_command(self.hook_socket, self.launch_nonce or "")))
         tmp.replace(self.settings_file)
 
     def ensure_running(self, relaunch: bool = False) -> str:
@@ -76,6 +83,7 @@ class AdminAgent:
             sid = str(uuid.uuid4())
             self.store.set("agent_session", sid)
         self.store.set("launches_without_start", str(launches + 1))
+        self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
         self._write_settings()
         argv = interactive_argv(self.settings.adapter_binary, self.settings.profile, session_id=sid,
                                 resume=resume, settings_file=self.settings_file, name=SESSION)
