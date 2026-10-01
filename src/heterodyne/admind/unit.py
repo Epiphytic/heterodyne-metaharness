@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from heterodyne.config.secret_scan import identifier_kind
+
 TEMPLATE = """\
 [Unit]
 Description=heterodyne admind (admin override channel)
@@ -24,14 +26,22 @@ PASSED_THROUGH = ("PATH", "HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR", "XDG_
 _UNSAFE = set(" \t\n\"'\\")
 
 
+def _control(ch: str) -> bool:
+    return ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F
+
+
 def render(python: str, env: Mapping[str, str]) -> str:
     """The unit text. PATH and location variables are captured from `env` so the service finds the
     same `claude`, `wn-agent` and config as the shell that rendered it; `%` is escaped for systemd."""
     values = {"python": python, **{k: env[k] for k in PASSED_THROUGH if env.get(k)}}
     for name, value in values.items():
-        if _UNSAFE & set(value):
-            raise ValueError(f"{name} contains whitespace, a quote or a backslash; "
-                             "systemd would split or unquote it")
+        if _UNSAFE & set(value) or any(_control(ch) for ch in value):
+            raise ValueError(f"{name} contains whitespace, a quote, a backslash or a control "
+                             "character; systemd would split or unquote it")
+        kind = identifier_kind(value)
+        if kind:  # the unit must be installable verbatim, so refuse rather than redact
+            raise ValueError(f"{name} contains an {kind}, which must not be printed; "
+                             "use a path without it")
     environment = "".join(f"Environment={k}={env[k].replace('%', '%%')}\n"
                           for k in PASSED_THROUGH if env.get(k))
     return TEMPLATE.format(python=python.replace("%", "%%"), environment=environment)

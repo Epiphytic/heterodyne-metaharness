@@ -2,6 +2,7 @@ import asyncio
 import os
 import stat
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,8 @@ from heterodyne.admind import cli, unit
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.store import Store
 from heterodyne.admind.wnagent import WnAgent, WnAgentError
-from heterodyne.marmot.control import ControlClient
+from heterodyne.marmot.control import ControlClient, ControlError
+from heterodyne.marmot.nip19 import hex_to_npub
 
 FAKE_WN = """#!{python}
 import asyncio, sys
@@ -163,3 +165,225 @@ def test_run_without_init_is_a_config_exit(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv("HETERODYNE_STATE_DIR", str(tmp_path / "state"))
     assert cli.main(["run"]) == cli.EX_CONFIG      # no [admind] profile configured
     assert os.environ["HETERODYNE_CONFIG_DIR"] == str(cfg)
+
+
+def test_token_fifo_is_rejected_promptly(tmp_path: Path) -> None:
+    wn = WnAgent("wn-agent", tmp_path / "home", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+    wn.prepare()
+    wn.token_path.unlink()
+    os.mkfifo(wn.token_path, 0o600)
+    outcome: list[BaseException | None] = []
+
+    def attempt() -> None:
+        try:
+            wn.token()
+            outcome.append(None)
+        except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+            outcome.append(exc)
+    thread = threading.Thread(target=attempt, daemon=True)
+    thread.start()
+    thread.join(5)
+    if thread.is_alive():   # regression: release the blocked open so the thread can end
+        fd = os.open(wn.token_path, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        thread.join(2)
+        pytest.fail("token() blocked on a FIFO")
+    assert len(outcome) == 1 and isinstance(outcome[0], WnAgentError)
+
+
+@pytest.mark.parametrize(("mode", "ok"), [(0o600, True), (0o400, False), (0o700, False), (0o640, False)])
+def test_token_mode_must_be_exactly_0600(tmp_path: Path, mode: int, ok: bool) -> None:
+    wn = WnAgent("wn-agent", tmp_path / "home", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+    wn.prepare()
+    wn.token_path.chmod(mode)
+    if ok:
+        assert len(wn.token()) == 64
+    else:
+        with pytest.raises(WnAgentError, match="0600"):
+            wn.token()
+
+
+@pytest.mark.parametrize("bad", ["\r", "\x0b", "\x0c", "\x00", "\x1b", "\x01", "\x7f", "\x85", "\x9f"])
+def test_unit_rejects_control_characters(bad: str) -> None:
+    with pytest.raises(ValueError, match="PATH"):
+        unit.render("/opt/venv/bin/python", {"PATH": f"/usr/bin{bad}/x"})
+    with pytest.raises(ValueError, match="python"):
+        unit.render(f"/opt/py{bad}", {"PATH": "/usr/bin"})
+
+
+@pytest.mark.parametrize("var", ["HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR", "PATH"])
+@pytest.mark.parametrize("make", [lambda: hex_to_npub("ab" * 32), lambda: "cd" * 32])
+def test_unit_refuses_identifier_values_naming_only_the_variable(var: str, make: object) -> None:
+    ident = make()  # type: ignore[operator]
+    with pytest.raises(ValueError) as info:
+        unit.render("/opt/venv/bin/python", {var: f"/srv/{ident}/x"})
+    assert var in str(info.value) and ident not in str(info.value)
+
+
+@pytest.mark.parametrize("var", ["HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR"])
+def test_unit_subcommand_exits_config_without_printing_the_identifier(
+        var: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    npub = hex_to_npub("ab" * 32)
+    monkeypatch.setenv(var, str(tmp_path / npub))
+    assert cli.main(["unit"]) == cli.EX_CONFIG
+    seen = capsys.readouterr()
+    assert npub not in seen.out + seen.err and "ab" * 32 not in seen.out + seen.err
+    assert var in seen.err and seen.out == ""
+
+
+@pytest.mark.parametrize("make", [lambda: hex_to_npub("ab" * 32), lambda: "cd" * 32])
+def test_init_repeat_does_not_print_an_identifier_in_the_state_dir(
+        make: object, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ident = make()  # type: ignore[operator]
+    s = make_settings(tmp_path, state_dir=tmp_path / str(ident) / "admind")
+    store = Store(s.state_dir / "admind.db")
+    store.set("group_id_hex", "b2" * 32)
+    assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 1
+    seen = capsys.readouterr()
+    assert "already initialised" in seen.out and str(ident) not in seen.out + seen.err
+
+
+# supervise() against the fake wn-agent. Sleeps are patched to a bare yield (recording the
+# supervisor's backoff delays, i.e. those >= 1s) so the tests take as long as the fake's startup.
+
+class Sleeps:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.delays: list[float] = []
+        real = asyncio.sleep
+
+        async def fast(delay: float, *a: object) -> None:
+            if delay >= 1:
+                self.delays.append(delay)
+            await real(0.01)
+        monkeypatch.setattr(asyncio, "sleep", fast)
+
+
+async def until(predicate: object, timeout: float = 20.0) -> None:
+    end = asyncio.get_running_loop().time() + timeout
+    while not predicate():  # type: ignore[operator]
+        assert asyncio.get_running_loop().time() < end, "timed out"
+        await asyncio.sleep(0.05)
+
+
+def supervised(tmp_path: Path, binary: str, **kw: float) -> tuple[WnAgent, ControlClient]:
+    wn = WnAgent(binary, tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"), **kw)
+    wn.prepare()
+    return wn, ControlClient(wn.socket_path, wn.token(), timeout=2)
+
+
+def test_supervise_restarts_a_child_that_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binary, _ = fake_wn_agent(tmp_path)
+    sleeps = Sleeps(monkeypatch)
+
+    async def body() -> None:
+        wn, client = supervised(tmp_path, binary)
+        await wn.start(client, wait=15)
+        first = wn.proc
+        assert first is not None
+        task = asyncio.create_task(wn.supervise(client))
+        first.kill()
+        await until(lambda: wn.proc is not first and wn.alive())
+        assert wn.proc is not None and wn.proc.pid != first.pid
+        ready: list[str] = []
+
+        async def answered() -> None:
+            while not ready:
+                try:
+                    ready.append(await wn.account(client))
+                except (WnAgentError, ControlError):
+                    await asyncio.sleep(0.05)
+        await asyncio.wait_for(answered(), 20)
+        assert ready == [ACCOUNT] and wn.alive()
+        task.cancel()
+        await wn.stop()
+        assert not wn.alive()
+    asyncio.run(body())
+    assert sleeps.delays[0] == 1.0
+    log = (tmp_path / "audit.jsonl").read_text()
+    assert '"exited"' in log and log.count('"start"') == 2
+
+
+def test_supervise_backs_off_when_restarts_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binary, _ = fake_wn_agent(tmp_path)
+    sleeps = Sleeps(monkeypatch)
+
+    async def body() -> None:
+        wn, client = supervised(tmp_path, binary)
+        await wn.start(client, wait=15)
+        first = wn.proc
+        assert first is not None
+        wn.binary = str(tmp_path / "missing-binary")      # every restart now fails to spawn
+        task = asyncio.create_task(wn.supervise(client))
+        first.kill()
+        await until(lambda: len(sleeps.delays) >= 4)
+        task.cancel()
+        assert wn.proc is first and not wn.alive()
+    asyncio.run(body())
+    assert sleeps.delays[:4] == [1.0, 2.0, 4.0, 8.0]
+    assert (tmp_path / "audit.jsonl").read_text().count("restart-failed") >= 3
+
+
+class _Exits:
+    """A stand-in child whose life ends immediately."""
+    pid = 1
+    returncode: int | None = None
+
+    async def wait(self) -> int:
+        return 1
+
+
+def _flapping(tmp_path: Path, **kw: float) -> tuple[WnAgent, ControlClient]:
+    wn, client = supervised(tmp_path, "unused", **kw)
+
+    async def start(_client: ControlClient, wait: float = 30.0) -> None:    # ready, then dies again
+        wn.proc = _Exits()  # type: ignore[assignment]
+    wn.start = start  # type: ignore[method-assign]
+    wn.proc = _Exits()  # type: ignore[assignment]
+    return wn, client
+
+
+def test_supervise_does_not_reset_backoff_on_mere_readiness(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = Sleeps(monkeypatch)
+
+    async def body() -> None:
+        wn, client = _flapping(tmp_path)
+        task = asyncio.create_task(wn.supervise(client))
+        await until(lambda: len(sleeps.delays) >= 5)
+        task.cancel()
+    asyncio.run(body())
+    assert sleeps.delays[:5] == [1.0, 2.0, 4.0, 8.0, 16.0]
+
+
+def test_supervise_resets_backoff_after_a_sustained_healthy_interval(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = Sleeps(monkeypatch)
+
+    async def body() -> None:
+        wn, client = _flapping(tmp_path, healthy_reset=0.0)
+        task = asyncio.create_task(wn.supervise(client))
+        await until(lambda: len(sleeps.delays) >= 3)
+        task.cancel()
+    asyncio.run(body())
+    assert sleeps.delays[:3] == [1.0, 1.0, 1.0]
+
+
+def test_supervise_cancellation_leaves_a_child_that_stop_ends(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    binary, _ = fake_wn_agent(tmp_path)
+    Sleeps(monkeypatch)
+
+    async def body() -> None:
+        wn, client = supervised(tmp_path, binary)
+        await wn.start(client, wait=15)
+        task = asyncio.create_task(wn.supervise(client))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert wn.alive()                       # cancelling supervision never orphans or kills silently
+        proc = wn.proc
+        await wn.stop()
+        assert proc is not None and proc.returncode is not None and not wn.alive()
+    asyncio.run(body())

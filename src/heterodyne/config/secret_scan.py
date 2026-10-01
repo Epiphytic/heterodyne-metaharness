@@ -83,6 +83,14 @@ def secret_value(text: str) -> str | None:
     return None
 
 
+def identifier_kind(text: str) -> str | None:
+    """The kind of public identifier (npub, 64-hex key) embedded in `text`, or None."""
+    for ident, pattern in IDENTIFIER_VALUES:
+        if pattern.search(text):
+            return ident
+    return None
+
+
 def show(value: Any, quote: bool = True) -> str:
     """Render a user-supplied value for an error message, redacting secrets and public identifiers.
 
@@ -95,9 +103,9 @@ def show(value: Any, quote: bool = True) -> str:
         kind = secret_value(value)
         if kind:
             return f"<redacted {kind}>"
-        for ident, pattern in IDENTIFIER_VALUES:
-            if pattern.search(value):
-                return f"<redacted {ident}>"
+        ident = identifier_kind(value)
+        if ident:
+            return f"<redacted {ident}>"
         return repr(value) if quote else value
     if isinstance(value, list | tuple | set | frozenset):
         items = cast(list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any], value)

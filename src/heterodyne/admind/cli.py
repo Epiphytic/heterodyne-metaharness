@@ -28,7 +28,7 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
     """Create admind's identity (if its home has none) and the two-member group with the operator."""
     if store.get("group_id_hex"):
         print("admind is already initialised; its group exists. To start over, stop admind and remove "
-              f"{s.state_dir} (this abandons the old identity and group).")
+              f"{show(str(s.state_dir), False)} (this abandons the old identity and group).")
         return 1
     wn = WnAgent(s.wn_agent, s.marmot_home, s.relays, audit)
     try:
@@ -115,6 +115,6 @@ def main(argv: list[str] | None = None) -> int:
             print(unit.render(sys.executable, os.environ), end="")
         except ValueError as exc:
             print(f"cannot render the unit: {exc}", file=sys.stderr)
-            return 1
+            return EX_CONFIG
         return 0
     return _with_settings(args.command)

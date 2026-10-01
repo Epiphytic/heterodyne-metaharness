@@ -17,13 +17,17 @@ from heterodyne.admind.audit import Audit
 from heterodyne.admind.store import private_dir
 from heterodyne.marmot.control import ControlClient, ControlError
 
+HEALTHY_RESET = 60.0  # seconds a restarted child must stay up before the backoff resets
+
 
 class WnAgentError(RuntimeError):
     pass
 
 
 class WnAgent:
-    def __init__(self, binary: str, home: Path, relays: tuple[str, ...], audit: Audit) -> None:
+    def __init__(self, binary: str, home: Path, relays: tuple[str, ...], audit: Audit,
+                 healthy_reset: float = HEALTHY_RESET) -> None:
+        self.healthy_reset = healthy_reset
         self.binary = binary
         self.home = home
         self.relays = relays
@@ -48,12 +52,13 @@ class WnAgent:
     def token(self) -> str:
         """The bearer token, read only from a regular 0600 file owned by this user (never via a symlink)."""
         try:
-            fd = os.open(self.token_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            # O_NONBLOCK so a FIFO without a writer can't hang the open before fstat rejects it.
+            fd = os.open(self.token_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         except OSError as exc:
             raise WnAgentError(f"cannot open the control token file ({type(exc).__name__})") from None
         with os.fdopen(fd) as fh:
             st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o600:
                 raise WnAgentError("the control token file must be a regular file owned by this "
                                    "user, mode 0600")
             value = fh.read().strip()
@@ -97,17 +102,22 @@ class WnAgent:
                 await asyncio.sleep(0.25)
 
     async def supervise(self, client: ControlClient) -> None:
-        """Restart the child whenever it exits, with backoff up to 60s. Runs until cancelled."""
+        """Restart the child whenever it exits, with backoff up to 60s (reset only after the child
+        stayed up for `healthy_reset` seconds). Runs until cancelled."""
         delay = 1.0
+        clock = asyncio.get_running_loop().time
         while True:
             if self.proc is None:
                 raise WnAgentError("supervise() before start()")
+            started = clock()
             status = await self.proc.wait()
             self.audit.write("wn-agent", action="exited", status=status)
+            if clock() - started >= self.healthy_reset:
+                delay = 1.0
             await asyncio.sleep(delay)
             try:
                 await self.start(client)
-                delay = 1.0
+                delay = min(delay * 2, 60.0)
             except WnAgentError as exc:
                 self.audit.write("wn-agent", action="restart-failed", error=str(exc))
                 delay = min(delay * 2, 60.0)
