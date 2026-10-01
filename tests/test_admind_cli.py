@@ -5,6 +5,7 @@ import os
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -523,6 +524,7 @@ def test_argparse_errors_are_value_free(make_argv: object, capsys: pytest.Captur
 def test_stop_tolerates_child_exit_race(tmp_path: Path) -> None:
     class RacyProc:
         returncode = None
+        reaped = False
 
         def terminate(self) -> None:
             raise ProcessLookupError
@@ -531,14 +533,18 @@ def test_stop_tolerates_child_exit_race(tmp_path: Path) -> None:
             raise ProcessLookupError
 
         async def wait(self) -> int:
+            self.reaped = True
             self.returncode = 0  # type: ignore[assignment]
             return 0
 
+    proc = RacyProc()
+
     async def body() -> None:
         wn = WnAgent("wn-agent", tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
-        wn.proc = RacyProc()  # type: ignore[assignment]
+        wn.proc = proc  # type: ignore[assignment]
         await wn.stop()
     asyncio.run(body())
+    assert proc.reaped  # a stop() that swallows the race and returns without waiting must fail
 
 
 def test_stop_kills_and_reaps_when_terminate_times_out(tmp_path: Path,
@@ -666,7 +672,7 @@ def test_config_error_for_an_npub_env_key_is_safe(tmp_path: Path, monkeypatch: p
 def test_config_error_for_a_nested_npub_key_is_safe() -> None:
     from heterodyne.config import ConfigError
     from heterodyne.config.secret_scan import check
-    for tree in ({"a": {NPUB: {"token": "plain"}}}, {"a": {"b" + "ab" * 32: {"x": "1"}, "token": "p"}}):
+    for tree in ({"a": {NPUB: {"token": "plain"}}}, {"a": {"b" + "ab" * 32: {"token": "plain"}}}):
         with pytest.raises(ConfigError) as info:
             check(tree, "config.toml")
         assert NPUB not in str(info.value) and "ab" * 32 not in str(info.value)
@@ -697,3 +703,54 @@ def test_human_output_escapes_controls(bad: str, tmp_path: Path, capsys: pytest.
     assert not any(ord(c) < 32 and c != "\n" or 0x7f <= ord(c) <= 0x9f for c in out)
     assert out.count("\n") == 2  # only the two prints' own newlines
     assert "\\x" in out
+
+
+def test_log_open_rejects_a_fifo_promptly(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    wn = WnAgent("wn-agent", home, ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+    wn.prepare()
+    os.mkfifo(wn.log_path)
+
+    # A regression blocks synchronously in os.open, which no asyncio timeout can interrupt, so a
+    # watchdog opens a reader after 3s to unblock it; the test then fails on the elapsed time.
+    def release() -> None:
+        reader = os.open(wn.log_path, os.O_RDONLY | os.O_NONBLOCK)
+        threading.Timer(1, os.close, (reader,)).start()
+    watchdog = threading.Timer(3, release)
+    watchdog.start()
+    began = time.monotonic()
+    try:
+        with pytest.raises(WnAgentError, match="cannot open the wn-agent log file"):
+            asyncio.run(wn.start(ControlClient(home / "x.sock", None)))
+    finally:
+        watchdog.cancel()
+    assert time.monotonic() - began < 2
+    assert wn.proc is None
+
+
+def test_log_fd_is_closed_when_fchmod_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import heterodyne.admind.wnagent as mod
+    wn = WnAgent("wn-agent", tmp_path / "h", ("wss://a",), Audit(tmp_path / "audit.jsonl"))
+    wn.prepare()
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open, real_close = os.open, os.close
+
+    def spy_open(path: object, *a: object, **k: object) -> int:
+        fd = real_open(path, *a, **k)  # type: ignore[call-overload]
+        if str(path) == str(wn.log_path):
+            opened.append(fd)
+        return fd
+
+    def spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def bad_fchmod(fd: int, mode: int) -> None:
+        raise PermissionError
+    monkeypatch.setattr(mod.os, "open", spy_open)
+    monkeypatch.setattr(mod.os, "close", spy_close)
+    monkeypatch.setattr(mod.os, "fchmod", bad_fchmod)
+    with pytest.raises(WnAgentError, match="cannot open the wn-agent log file"):
+        asyncio.run(wn.start(ControlClient(tmp_path / "x.sock", None)))
+    assert len(opened) == 1 and opened[0] in closed

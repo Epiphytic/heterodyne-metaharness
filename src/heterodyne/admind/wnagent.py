@@ -8,6 +8,7 @@ while admind runs.
 
 import asyncio
 import contextlib
+import fcntl
 import os
 import secrets
 import stat
@@ -96,17 +97,33 @@ class WnAgent:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.returncode is None
 
+    def _open_log(self) -> int:
+        """Open the private child log without ever blocking (a FIFO would hang a plain open) and
+        without leaking the descriptor on any failure. Returns a blocking, regular-file descriptor."""
+        try:
+            fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+                         | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+        except OSError as exc:
+            raise WnAgentError(f"cannot open the wn-agent log file ({type(exc).__name__})") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise WnAgentError("the wn-agent log file is not a regular file")
+            os.fchmod(fd, 0o600)  # an older log may have been created with another mode
+            fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        except WnAgentError:
+            os.close(fd)
+            raise
+        except OSError as exc:
+            os.close(fd)
+            raise WnAgentError(f"cannot open the wn-agent log file ({type(exc).__name__})") from None
+        return fd
+
     async def start(self, client: ControlClient, wait: float = 30.0) -> None:
         self.prepare()
         # The child's output may carry an npub-bearing path, a token or terminal escapes, so it never
         # reaches admind's terminal or journal: it goes to a private log in the 0700 home, truncated at
         # each start so it can't grow without bound across restarts.
-        try:
-            log_fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-                             | os.O_CLOEXEC, 0o600)
-            os.fchmod(log_fd, 0o600)  # an older log may have been created with another mode
-        except OSError as exc:
-            raise WnAgentError(f"cannot open the wn-agent log file ({type(exc).__name__})") from None
+        log_fd = self._open_log()
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *self.argv(), stdin=asyncio.subprocess.DEVNULL, stdout=log_fd, stderr=log_fd)
