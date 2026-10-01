@@ -97,6 +97,7 @@ class StubClient:
         self.subscribe_calls = 0
         self.subscribe_failures = 0           # the next N subscribe() calls raise a retryable error
         self.on_subscribe: Callable[[], None] | None = None
+        self.acked = asyncio.Event()          # set once a subscription was acknowledged and confirmed
 
     async def group_info(self, account: str, group: str) -> Any:
         if self.group_info_error is not None:
@@ -108,13 +109,17 @@ class StubClient:
         self.sent.append(SimpleNamespace(text=text, reply_to=reply_to, key=key))
         return SimpleNamespace(message_ids_hex=[hashlib.sha256(f"{len(self.sent)}".encode()).hexdigest()])
 
-    async def subscribe(self, account: str, group: str) -> AsyncIterator[Any]:
+    async def subscribe(self, account: str, group: str,
+                        on_ack: Callable[[], Awaitable[None]] | None = None) -> AsyncIterator[Any]:
         self.subscribe_calls += 1
         if self.on_subscribe is not None:
             self.on_subscribe()
         if self.subscribe_failures > 0:
             self.subscribe_failures -= 1
             raise ControlError("wn-agent closed the connection", "socket_closed", True)
+        if on_ack is not None:
+            await on_ack()
+        self.acked.set()
         while True:
             yield await self.events.get()
 
@@ -151,6 +156,7 @@ class Unit:
         self.store.set("operator_seen_at", now())
         self.daemon.ready.set()
         self.daemon.group_ok = True
+        self.daemon.observing = True
         self.seq = 0
 
     def build(self) -> None:
@@ -351,18 +357,17 @@ def test_membership_event_latches_while_a_slow_restart_runs(
     run(scenario())
 
 
-def test_subscription_failure_pauses_the_outbox_until_the_group_is_reverified(tmp_path: Path) -> None:
+def test_subscription_failure_pauses_the_outbox_until_resubscribed_and_reverified(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     u.client.subscribe_failures = 1
     asleep = asyncio.Event()
     gate = asyncio.Event()
-    resubscribed = asyncio.Event()
 
     async def fake_sleep(delay: float) -> None:
         asleep.set()
         await gate.wait()
+        await asyncio.sleep(0)
     u.daemon._sleep = fake_sleep
-    u.client.on_subscribe = lambda: resubscribed.set() if u.client.subscribe_calls >= 2 else None
 
     async def scenario() -> None:
         reader = asyncio.create_task(u.daemon.inbound_loop())
@@ -372,15 +377,41 @@ def test_subscription_failure_pauses_the_outbox_until_the_group_is_reverified(tm
             u.store.enqueue("k:1", "held back", None)
             await u.daemon.outbox_pass()
             assert u.client.sent == []
-            u.client.group_info_error = ControlError("down", "unavailable", True)
-            gate.set()
-            await resubscribed.wait()                             # reconnected, but not re-verified
-            await u.daemon.outbox_pass()
-            assert u.client.sent == [] and not u.daemon.group_ok
-            u.client.group_info_error = None
+            # group_info keeps succeeding while nobody watches the group: that alone must not post.
             assert await u.daemon.check_group()
             await u.daemon.outbox_pass()
+            assert u.client.sent == []
+            gate.set()
+            await u.client.acked.wait()                           # resubscribed, then re-verified
+            await u.daemon.outbox_pass()
             assert [s.text for s in u.client.sent] == ["held back"]
+        finally:
+            await stop_task(reader)
+    run(scenario())
+
+
+def test_reverification_after_an_outage_that_finds_a_wrong_count_latches(tmp_path: Path) -> None:
+    u = Unit(tmp_path)
+    u.client.subscribe_failures = 1
+    asleep = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def fake_sleep(delay: float) -> None:
+        asleep.set()
+        await gate.wait()
+        await asyncio.sleep(0)
+    u.daemon._sleep = fake_sleep
+
+    async def scenario() -> None:
+        reader = asyncio.create_task(u.daemon.inbound_loop())
+        try:
+            await asleep.wait()
+            u.store.enqueue("k:1", "held back", None)
+            u.client.member_count = 3                             # someone joined during the outage
+            gate.set()
+            await u.client.acked.wait()
+            await u.daemon.outbox_pass()
+            assert u.client.sent == [] and u.daemon.latched()
         finally:
             await stop_task(reader)
     run(scenario())

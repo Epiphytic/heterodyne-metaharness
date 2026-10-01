@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -247,8 +247,11 @@ class ControlClient:
                                 "text": text, "reply_to_message_id_hex": reply_to,
                                 "idempotency_key": key}, "final_sent", FinalSent)
 
-    async def subscribe(self, account: str, group: str) -> AsyncIterator[Event]:
-        """Yield inbound events until the connection ends, which raises a retryable ControlError."""
+    async def subscribe(self, account: str, group: str,
+                        on_ack: Callable[[], Awaitable[None]] | None = None) -> AsyncIterator[Event]:
+        """Yield inbound events until the connection ends, which raises a retryable ControlError.
+        `on_ack` is awaited once the subscription is acknowledged and before the first event is read;
+        if it raises, the subscription ends with that exception."""
         request_id = uuid.uuid4().hex
         frame = self._frame({"type": "subscribe_inbound", "account_id_hex": account,
                              "group_id_hex": group}, request_id)
@@ -259,6 +262,8 @@ class ControlClient:
             decode_head(ack, request_id)
             if msgspec.json.decode(ack, type=_Ack).type != "ack":
                 raise ProtocolError("subscribe_inbound was not acknowledged")
+            if on_ack is not None:
+                await on_ack()
             while True:
                 yield decode_event(await self._readline(reader, None), request_id)
         finally:

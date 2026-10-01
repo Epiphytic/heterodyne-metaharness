@@ -110,6 +110,7 @@ class Admind:
         self.stuck: str | None = None
         self.not_ready_sent = False
         self.group_ok = False
+        self.observing = False      # a membership subscription is confirmed active (acked, then verified)
         self.wake = asyncio.Event()
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
@@ -132,8 +133,9 @@ class Admind:
 
     def may_post(self) -> bool:
         """Outbound gate, checked immediately before every send: not latched, the operator has been
-        seen in the group (D5), and the last membership check succeeded."""
-        return (not self.latched() and self.group_ok
+        seen in the group (D5), the last membership check succeeded and the membership subscription is
+        confirmed active. A count check alone never counts: with nobody watching, a swap goes unseen."""
+        return (not self.latched() and self.group_ok and self.observing
                 and self.store.get("operator_seen_at") is not None)
 
     def post(self, key: str, text: str, reply_to: str | None) -> None:
@@ -211,14 +213,14 @@ class Admind:
         """Read the subscription and nothing else. Membership and admin events are acted on at once;
         operator messages are only queued for worker_loop, so a slow command can never keep the reader
         from seeing a membership change. A broken or ended stream means the group can no longer be
-        watched: group_ok drops, and the outbox sends nothing until the group is re-verified."""
+        watched: group_ok and observing drop, and nothing is sent until the subscription is back and the
+        group re-verified (confirm_observing)."""
         delay = 1.0
-        reconnecting = False
         while True:
-            if reconnecting:
-                await self.check_group()
+            self.observing = False
             try:
-                async for event in self.client.subscribe(self.account, self.group):
+                async for event in self.client.subscribe(self.account, self.group,
+                                                         on_ack=self.confirm_observing):
                     delay = 1.0
                     try:
                         self.on_event(event)
@@ -227,11 +229,22 @@ class Admind:
                 code = "stream-ended"
             except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
+            self.observing = False
             self.group_ok = False
             self.audit.write("subscribe", action="reconnect", code=code)
             await self._sleep(delay)
             delay = min(delay * 2, 30.0)
-            reconnecting = True
+
+    async def confirm_observing(self) -> None:
+        """Called once a subscription is acknowledged, before any event is read: resubscribe first, then
+        re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
+        a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
+        if not await self.check_group():
+            if self.latched():
+                return
+            raise ControlError("group could not be re-verified", "unverified", True)
+        self.observing = True
+        self.wake.set()
 
     def on_event(self, event: object) -> None:
         if isinstance(event, InboundMessage):
@@ -378,7 +391,7 @@ class Admind:
     async def _flush(self) -> None:
         # Same gate as the outbound side (D4): while latched, or while the group is not verified as
         # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
-        if self.latched() or not self.group_ok:
+        if self.latched() or not self.group_ok or not self.observing:
             if self.held and not self.dispatch_blocked:
                 self.dispatch_blocked = True
                 self.audit.write("agent", action="dispatch-blocked", held=len(self.held),
