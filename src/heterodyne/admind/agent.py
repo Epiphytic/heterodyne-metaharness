@@ -61,8 +61,10 @@ class AdminAgent:
             fh.write(settings_json(hook_command(self.hook_socket)))
         tmp.replace(self.settings_file)
 
-    def ensure_running(self) -> str:
-        if self.alive() and self.session_id is not None:
+    def ensure_running(self, relaunch: bool = False) -> str:
+        """`relaunch` skips adoption: a live pane that never reported SessionStart is replaced, under the
+        same crash-loop limit as any other launch."""
+        if not relaunch and self.alive() and self.session_id is not None:
             return "adopted"
         launches = int(self.store.get("launches_without_start") or "0")
         if launches >= MAX_LAUNCHES_WITHOUT_START:   # checked first: the dead pane stays for !tail

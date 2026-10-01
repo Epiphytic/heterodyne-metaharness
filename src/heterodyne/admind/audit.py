@@ -2,12 +2,13 @@
 
 Each record carries `ts` (UTC) and `kind`, plus the fields of the event (sender, text, action, result).
 The file is opened per write with O_APPEND and fsync'd, so a crash never leaves a half-written earlier
-record, and rotation by an external tool is safe. It is created 0600 and never followed through a
-symlink. It is kept separate from beads on purpose.
+record, and rotation by an external tool is safe. It is chmod'ed to 0600 on every open, must be a regular
+file, and is never followed through a symlink. It is kept separate from beads on purpose.
 """
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from heterodyne.admind.store import now, private_dir
@@ -24,6 +25,9 @@ class Audit:
         flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
         fd = os.open(self.path, flags, 0o600)
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise PermissionError(f"{self.path} is not a regular file")
+            os.fchmod(fd, 0o600)    # on every open: a file that already existed may have looser bits
             # A torn earlier record (crash, or a write that failed part-way) leaves the file without a
             # trailing newline; start with one so the fragment stays on its own line and this record
             # is whole. Checked on every open, so it also covers a failed write in this process.

@@ -746,7 +746,12 @@ def test_log_fd_is_closed_when_fchmod_fails(tmp_path: Path, monkeypatch: pytest.
         closed.append(fd)
         real_close(fd)
 
+    real_fchmod = os.fchmod
+
     def bad_fchmod(fd: int, mode: int) -> None:
+        if fd not in opened:        # the audit log's own fchmod must keep working
+            real_fchmod(fd, mode)
+            return
         raise PermissionError
     monkeypatch.setattr(mod.os, "open", spy_open)
     monkeypatch.setattr(mod.os, "close", spy_close)

@@ -28,8 +28,8 @@ class UnitStatus:
     since: str
 
     def line(self) -> str:
-        text = f"{shown(self.unit)}: {self.active} ({self.sub})"
-        return f"{text} since {self.since}" if self.since else text
+        text = f"{shown(self.unit)}: {shown(self.active)} ({shown(self.sub)})"
+        return f"{text} since {shown(self.since)}" if self.since else text
 
 
 class ServiceManager(Protocol):

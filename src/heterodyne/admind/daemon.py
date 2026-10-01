@@ -33,8 +33,8 @@ from heterodyne.marmot.control import (
 )
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
 
-READY_NOTICE = ("admind is listening. Your messages go to the admin agent verbatim; replies come back "
-                "in thread. " + commands.HELP)
+READY_NOTICE = ("admind is listening. Your messages go to the admin agent verbatim; "
+                "replies normally come back in thread. " + commands.HELP)
 RESTARTED_NOTICE = ("⚠️ admind restarted before this message reached the admin agent. "
                     "Resend it if it is still needed.")
 NO_REPLY = "(the admin agent's turn ended without a text reply)"
@@ -50,6 +50,9 @@ ALERT_FAILED = ("🚨 A wsd alert file could not be relayed (ref {ref}). "
                 "Check the alert directory on the host.")
 UNCERTAIN = "delivery to the admin agent is uncertain; not retried — resend if needed"
 MAX_SEND_ATTEMPTS = 10
+AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
+READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
+AGENT_STUCK_NOTICE = "The admin agent is not running ({why}). Use !tail, then !new."
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
 AUDIT_TEXT_CHARS = 2000
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
@@ -106,11 +109,15 @@ class Admind:
         self.work: asyncio.Queue[InboundMessage] = asyncio.Queue()    # operator messages for worker_loop
         self.ready = asyncio.Event()
         self.held: list[tuple[str, str]] = []
-        self.launched_at = time.monotonic()
+        self.clock: Callable[[], float] = time.monotonic    # replaced in tests
+        self.agent_poll = AGENT_POLL                        # replaced in tests
+        self.ready_timeout = READY_TIMEOUT                  # replaced in tests
+        self.launched_at = self.clock()
         self.stuck: str | None = None
         self.not_ready_sent = False
         self.group_ok = False
         self.observing = False      # a membership subscription is confirmed active (acked, then verified)
+        self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.wake = asyncio.Event()
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
@@ -188,17 +195,18 @@ class Admind:
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
-                                   ("alerts", self.alerts_loop), ("group", self.group_loop)):
+                                   ("alerts", self.alerts_loop), ("group", self.group_loop),
+                                   ("agent", self.agent_loop)):
                     tg.create_task(supervised(name, loop, self.audit))
         finally:
             await server.close()
 
-    async def start_agent(self) -> None:
+    async def start_agent(self, relaunch: bool = False) -> None:
         self.ready.clear()
-        self.launched_at = time.monotonic()
+        self.launched_at = self.clock()
         self.not_ready_sent = False
         try:
-            mode = await asyncio.to_thread(self.agent.ensure_running)
+            mode = await asyncio.to_thread(self.agent.ensure_running, relaunch)
         except Exception as exc:  # noqa: BLE001 - AgentStuck, tmux or filesystem failure; reported by type
             self.stuck = reason(exc)
             self.audit.write("agent", action="start-failed", error=type(exc).__name__)
@@ -207,6 +215,44 @@ class Admind:
         self.audit.write("agent", action=mode, session=self.agent.session_id)
         if mode == "adopted":
             self.ready.set()
+
+    async def agent_loop(self) -> None:
+        while True:
+            await self._sleep(self.agent_poll)
+            await self.check_agent()
+
+    async def check_agent(self) -> None:
+        """One supervision pass (D8). If the agent's pane has died, or a launch has gone `ready_timeout`
+        without a SessionStart, whatever was in flight is abandoned as after a restart, the busy state is
+        cleared and the agent is relaunched through ensure_running, so its crash-loop limit applies. Once
+        that limit is hit the agent stays down until `!new` (or an admind restart): this pass then does
+        nothing, so a broken agent is never relaunched in a tight loop."""
+        if self.stuck is not None:
+            return
+        async with self.dispatch_lock:      # !new and the dispatcher's own relaunch hold this lock
+            if self.stuck is not None:
+                return
+            alive = await asyncio.to_thread(self.agent.alive)
+            timed_out = not self.ready.is_set() and self.clock() - self.launched_at > self.ready_timeout
+            if alive and not timed_out:
+                return
+            self.audit.write("agent", action="died" if not alive else "ready-timeout")
+            with self.store.transaction():
+                self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
+                self.set_idle()
+            await self.start_agent(relaunch=True)
+            if self.stuck is None:
+                return
+            if self.held:
+                await self._flush()         # the held messages are answered with the stuck notice
+            else:
+                self.post(f"agent-stuck:{self.next_seq('stuck_seq')}",
+                          AGENT_STUCK_NOTICE.format(why=self.stuck), None)
+
+    def next_seq(self, key: str) -> int:
+        n = int(self.store.get(key) or "0") + 1
+        self.store.set(key, str(n))
+        return n
 
     async def check_group(self) -> bool:
         try:
@@ -220,6 +266,8 @@ class Admind:
         if not self.group_ok:
             self.latch(verdict.reason)
             return False
+        if self.acked:      # a passing check after a rearm restores service on a live subscription
+            self.observing = True
         self.wake.set()
         return True
 
@@ -233,6 +281,7 @@ class Admind:
         delay = 1.0
         while True:
             self.observing = False
+            self.acked = False
             try:
                 async for event in self.client.subscribe(self.account, self.group,
                                                          on_ack=self.confirm_observing):
@@ -245,6 +294,7 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - ControlError, or anything the stream raised
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
             self.observing = False
+            self.acked = False
             self.group_ok = False
             self.audit.write("subscribe", action="reconnect", code=code)
             await self._sleep(delay)
@@ -254,12 +304,11 @@ class Admind:
         """Called once a subscription is acknowledged, before any event is read: resubscribe first, then
         re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
         a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
+        self.acked = True       # check_group observes on success, here and on every later passing check
         if not await self.check_group():
             if self.latched():
-                return
+                return      # acknowledged but not observing; a passing check after a rearm restores it
             raise ControlError("group could not be re-verified", "unverified", True)
-        self.observing = True
-        self.wake.set()
 
     def on_event(self, event: object) -> None:
         if isinstance(event, InboundMessage):
@@ -398,7 +447,7 @@ class Admind:
             if old is not None:
                 self.retired.add(old)
             self.ready.clear()
-            self.launched_at = time.monotonic()
+            self.launched_at = self.clock()
             self.not_ready_sent = False
             self.stuck = None
             self.abandon_in_flight("the admin agent session was replaced by !new")
@@ -430,7 +479,7 @@ class Admind:
             self.held.clear()
             return
         if not self.ready.is_set():
-            waited = time.monotonic() - self.launched_at
+            waited = self.clock() - self.launched_at
             if self.held and waited > self.s.start_timeout_seconds and not self.not_ready_sent:
                 self.not_ready_sent = True
                 self.reply(self.held[-1][0], NOT_READY, "notready")
