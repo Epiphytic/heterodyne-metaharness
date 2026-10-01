@@ -184,5 +184,3 @@ def test_a_current_stop_releases_the_hold(tmp_path: Path) -> None:
             w2.close()
             assert u.store.get("busy") is None and u.store.get("hook_lost") is None
     run(scenario())
-
-

@@ -220,16 +220,22 @@ class HookServer:
 
     def __init__(self, path: Path, queue: "asyncio.Queue[HookEvent | Delivery]", audit: Audit,
                  on_idle: Callable[[], None] | None = None,
-                 on_lost: Callable[[], Awaitable[None]] | None = None) -> None:
+                 on_lost: Callable[[], Awaitable[None]] | None = None,
+                 on_drop: Callable[[], None] | None = None) -> None:
         self.path = path
         self.queue = queue
         self.audit = audit
         self.on_idle = on_idle      # called when `pending_hooks` returns to zero
         self.on_lost = on_lost      # awaited, in order, for an accepted frame that was dropped
+        self.on_drop = on_drop      # called synchronously, first, for a dropped frame (cannot fail)
         self.accepted = 0           # the arrival index of the newest accepted connection (first is 1)
         self.pending_hooks = 0      # accepted connections whose slot has not completed yet
         self._server: asyncio.Server | None = None
         self._tail: asyncio.Future[None] | None = None   # the newest connection's slot in the order
+
+    def _audit(self, **fields: object) -> None:
+        with contextlib.suppress(Exception):    # the log failing must not skip what follows it
+            self.audit.write("hook", **fields)
 
     async def start(self) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -265,7 +271,10 @@ class HookServer:
                 line = await asyncio.wait_for(reader.readline(), FRAME_SECONDS)
                 event = msgspec.json.decode(line, type=HookEvent)
             except Exception as exc:  # noqa: BLE001 - one bad frame (decode or shape) is dropped, by type only
-                self.audit.write("hook", result="dropped", error=type(exc).__name__)
+                if self.on_drop is not None:
+                    with contextlib.suppress(Exception):
+                        self.on_drop()      # before the audit: a failing log cannot skip the hold
+                self._audit(result="dropped", error=type(exc).__name__)
             if previous is not None:
                 await previous      # dropped or not, the slot is released only after the earlier ones
             if event is None and self.on_lost is not None:
@@ -277,7 +286,7 @@ class HookServer:
                 writer.write(b"ok\n" if ok else b"err\n")
                 await writer.drain()
         except Exception as exc:  # noqa: BLE001 - a failed answer (the hook gave up and left) is by type only
-            self.audit.write("hook", result="not-answered", error=type(exc).__name__)
+            self._audit(result="not-answered", error=type(exc).__name__)
         finally:
             if not slot.done():
                 slot.set_result(None)

@@ -162,7 +162,8 @@ class Admind:
         self.generation = 0     # bumped by every dispatch and every turn-starting hook; see _flush
         self.busy_since = time.monotonic()      # meaningful only while the store's `busy` is set
         self.noticed: set[str] = set()          # held-queue notices already sent, see notify_held()
-        self.dispatch_blocked = False           # the block has been audited; reset when it lifts
+        self.block_audited = False              # the dispatch block has been audited; reset when it lifts
+        self.dispatch_blocked = False           # a lost hook holds dispatch (in memory); see hold_now()
         self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
@@ -183,7 +184,8 @@ class Admind:
     def make_server(self, path: Path) -> HookServer:
         """The hook server, wired to this daemon: its accept count gates dispatch and its idle edge
         triggers a flush."""
-        self.hook_server = HookServer(path, self.hooks, self.audit, self.hooks_idle, self.hold_dispatch)
+        self.hook_server = HookServer(path, self.hooks, self.audit, self.hooks_idle, self.hold_dispatch,
+                                      self.hold_now)
         return self.hook_server
 
     def pending_hooks(self) -> int:
@@ -335,10 +337,10 @@ class Admind:
             timed_out = not self.is_ready() and self.clock() - self.launched_at > self.ready_timeout
             if alive and not timed_out:
                 return
-            self.audit.write("agent", action="died" if not alive else "ready-timeout")
             with self.store.transaction():
                 self.abandon_in_flight("the admin agent restarted before answering; resend if needed")
                 self.set_idle()
+            self.audit_quietly("agent", action="died" if not alive else "ready-timeout")
             await self.start_agent(relaunch=True)
             self.raise_floor()
             if self.stuck is None:
@@ -583,12 +585,12 @@ class Admind:
         # Same gate as the outbound side (D4): while latched, or while the group is not verified as
         # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
         if self.latched() or not self.group_ok or not self.observing:
-            if self.held and not self.dispatch_blocked:
-                self.dispatch_blocked = True
+            if self.held and not self.block_audited:
+                self.block_audited = True
                 self.audit.write("agent", action="dispatch-blocked", held=len(self.held),
                                  latched=self.latched())
             return
-        self.dispatch_blocked = False
+        self.block_audited = False
         if self.stuck is not None:
             for mid, _ in self.held:
                 self.finish(mid, "dropped", f"Not delivered: the admin agent is not running ({self.stuck}). "
@@ -606,6 +608,8 @@ class Admind:
         # agent's UserPromptSubmit.
         if not self.held or self.store.get("in_flight") is not None or self.store.get("busy") is not None:
             return
+        if self.dispatch_blocked:
+            return      # a lost hook event holds dispatch, whatever the store says (see hold_now)
         if self.pending_hooks() > 0 or not self.hooks.empty():
             return      # an accepted hook (maybe a new turn) is not applied yet; the idle edge flushes
         mid, text = self.held.pop(0)
@@ -649,8 +653,10 @@ class Admind:
         """The paste may have been submitted: never retry it (D6). The operator is told, in fixed words,
         to resend. The reservation and any anchor are cleared; the agent is still treated as busy,
         because nothing shows it idle (a Stop, a SessionStart, !interrupt or !new will release the queue)."""
-        self.audit.write("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
-        self.abandon_in_flight(UNCERTAIN)
+        try:
+            self.abandon_in_flight(UNCERTAIN)
+        finally:
+            self.audit_quietly("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
 
     def abandon_in_flight(self, why: str, floor: int | None = None) -> None:
         """Release the reservation and its anchor. Hooks accepted so far (a hook releasing the turn passes
@@ -679,13 +685,29 @@ class Admind:
     def set_idle(self) -> None:
         self.store.delete("busy")
         self.store.delete("hook_lost")      # a release ends the hook-lost episode
+        self.dispatch_blocked = False       # ... and lifts the in-memory hold with it
+
+    def audit_quietly(self, kind: str, **fields: object) -> None:
+        """An audit record on a path whose safeguard is already established: a failure to log must not
+        undo, skip or delay anything after it."""
+        with contextlib.suppress(Exception):    # the log is what failed; there is nowhere left to report it
+            self.audit.write(kind, **fields)
+
+    def hold_now(self) -> None:
+        """The first action on every lost-hook path, before any audit, store write or notice: dispatch is
+        refused from this instant. Synchronous, no I/O and cannot fail. `generation` advances so that a
+        send failing meanwhile cannot clear the busy state. Lifted only by `set_idle` (a current Stop,
+        !interrupt, !new, a relaunch)."""
+        self.dispatch_blocked = True
+        self.generation += 1
 
     async def hold_dispatch(self) -> None:
         """A hook event that might have started a turn was lost (deadline, failure, dropped frame): hold
-        dispatch until a Stop, !interrupt or !new releases it. Taken under the dispatch lock; if the lock
-        cannot be had within `hook_lock_wait` the hold is applied anyway (it is one synchronous
-        transaction, so it cannot interleave with another). `generation` advances so that a send
-        failing meanwhile cannot clear the busy state."""
+        dispatch until a Stop, !interrupt or !new releases it. The in-memory hold is set first and cannot
+        fail; persisting busy, the audit record and the operator notice are separate, best-effort steps,
+        so a failure of one changes nothing already established. Taken under the dispatch lock; if the
+        lock cannot be had within `hook_lock_wait` the hold is applied anyway."""
+        self.hold_now()
         locked = False
         try:
             await asyncio.wait_for(self.dispatch_lock.acquire(), self.hook_lock_wait)
@@ -693,17 +715,36 @@ class Admind:
         except TimeoutError:
             pass
         try:
-            with self.store.transaction():
-                if self.store.get("busy") is None:
-                    self.set_busy()
-                self.generation += 1
-                if self.store.get("hook_lost") is None:     # one notice per hold episode
-                    self.store.set("hook_lost", "1")
-                    self.post(f"hook-lost:{self.store.get('busy')}", HOOK_LOST_NOTICE, None)
-            self.audit.write("hook", action="hook-lost-hold")
+            self.hold_now()     # again: a release while this waited for the lock must not undo the hold
+            self.contained("hold-persist-failed", self.persist_hold)
+            self.audit_quietly("hook", action="hook-lost-hold")
+            self.contained("hold-notice-failed", self.notify_hook_lost)
         finally:
             if locked:
                 self.dispatch_lock.release()
+
+    def contained(self, what: str, step: Callable[[], None]) -> None:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - a failed step must not undo the hold; by type only
+            self.audit_quietly("handler", action=what, error=type(exc).__name__)
+
+    def persist_hold(self) -> None:
+        with self.store.transaction():
+            if self.store.get("busy") is None:
+                self.set_busy()
+            self.generation += 1
+
+    def notify_hook_lost(self) -> None:
+        """One fixed notice per hold episode, in its own transaction: the episode flag is set only if the
+        notice was queued, so a notice that failed is retried by the next lost event."""
+        if self.store.get("hook_lost") is not None:
+            return
+        busy = self.store.get("busy")
+        key = f"hook-lost:{busy}" if busy is not None else f"hook-lost:g{self.generation}"
+        with self.store.transaction():
+            self.store.set("hook_lost", "1")
+            self.post(key, HOOK_LOST_NOTICE, None)
 
     @contextlib.asynccontextmanager
     async def turn_lock(self) -> AsyncGenerator[None]:
@@ -754,21 +795,28 @@ class Admind:
             run = HookRun()
             token = _RUN.set(run)
             try:
+                failure: tuple[str, dict[str, object]] | None = None
                 try:
                     async with asyncio.timeout(self.hook_deadline) as deadline:
                         run.deadline = deadline
                         await self.route_hook(ev, arrival)
                     ok = True
                 except TimeoutError:
-                    self.audit.write("hook", action="hook-deadline")    # fixed wording; the event is dropped
+                    failure = ("hook", {"action": "hook-deadline"})     # fixed wording; the event is dropped
                 except Exception as exc:  # noqa: BLE001 - one bad event must not end the hook loop
-                    self.audit.write("handler", action="hook-failed", error=type(exc).__name__)
-                if not ok and not run.noop:
-                    # The event might have started a turn: dispatch stays held until idle evidence.
-                    try:
-                        await self.hold_dispatch()
-                    except Exception as exc:  # noqa: BLE001
-                        self.audit.write("handler", action="hold-failed", error=type(exc).__name__)
+                    failure = ("handler", {"action": "hook-failed", "error": type(exc).__name__})
+                if failure is not None:
+                    # The event might have started a turn: dispatch stays held until idle evidence. The
+                    # hold comes first; neither the audit nor the persisting can skip it.
+                    holding = not run.noop
+                    if holding:
+                        self.hold_now()
+                    self.audit_quietly(failure[0], **failure[1])
+                    if holding:
+                        try:
+                            await self.hold_dispatch()
+                        except Exception as exc:  # noqa: BLE001
+                            self.audit_quietly("handler", action="hold-failed", error=type(exc).__name__)
             finally:
                 _RUN.reset(token)
                 if done is not None and not done.done():
@@ -836,21 +884,26 @@ class Admind:
             # It must not anchor the reservation or start a busy period for a turn that is over.
             self.audit.write("agent", action="ignored-late-prompt", message_id=in_flight)
             return
+        anchored = False
         with self.store.transaction():      # the busy period and the anchor: one step
             self.set_busy()                 # a turn is running, whoever started it
             pasted = self.store.get("in_flight_text")
             if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
                     and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
                 self.store.set("anchor", in_flight)
-                self.audit.write("agent", action="prompt-submitted", message_id=in_flight)
-            else:
-                self.audit.write("agent", action="prompt-not-from-admind",
-                                 prompt_chars=None if ev.prompt is None else len(ev.prompt))
-                if self.store.get("anchor") is not None:
-                    # The agent runs one turn at a time, so the anchored turn is over and its Stop
-                    # was lost. Release the anchor before this turn's Stop can take it.
-                    self.abandon_in_flight("admind did not see the admin agent finish it before "
-                                           "another prompt started a turn", arrival)
+                anchored = True
+        # Audits and the abandon's notice come after the busy period is committed: a failure of either
+        # must not roll back the busy state.
+        if anchored:
+            self.audit_quietly("agent", action="prompt-submitted", message_id=in_flight)
+            return
+        self.audit_quietly("agent", action="prompt-not-from-admind",
+                           prompt_chars=None if ev.prompt is None else len(ev.prompt))
+        if self.store.get("anchor") is not None:
+            # The agent runs one turn at a time, so the anchored turn is over and its Stop
+            # was lost. Release the anchor before this turn's Stop can take it.
+            self.abandon_in_flight("admind did not see the admin agent finish it before "
+                                   "another prompt started a turn", arrival)
 
     def on_session_start(self, ev: HookEvent, arrival: int | None = None) -> None:
         """Whether a SessionStart proves the agent idle depends on its `source` (D9). It is only trusted
