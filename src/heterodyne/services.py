@@ -15,6 +15,11 @@ from heterodyne.config.secret_scan import show
 UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9@_.:-]*\.(?:service|target|timer|socket)")
 
 
+def shown(text: str) -> str:
+    """A unit name or backend text for reply messages: unchanged unless it holds a secret or npub."""
+    return show(text, quote=False)
+
+
 @dataclass(frozen=True)
 class UnitStatus:
     unit: str
@@ -23,7 +28,7 @@ class UnitStatus:
     since: str
 
     def line(self) -> str:
-        text = f"{self.unit}: {self.active} ({self.sub})"
+        text = f"{shown(self.unit)}: {self.active} ({self.sub})"
         return f"{text} since {self.since}" if self.since else text
 
 
@@ -48,16 +53,16 @@ class Systemd:
             return subprocess.run([self.binary, "--user", *args], capture_output=True, encoding="utf-8",
                                   errors="replace", timeout=self.timeout, check=False)
         except subprocess.TimeoutExpired:
-            return f"admind: service manager timed out for {unit}"
+            return f"admind: service manager timed out for {shown(unit)}"
         except OSError:
-            return f"admind: could not run the service manager for {unit}"
+            return f"admind: could not run the service manager for {shown(unit)}"
 
     def restart(self, unit: str) -> tuple[bool, str]:
         _check(unit)
         proc = self._run(unit, "restart", "--", unit)
         if isinstance(proc, str):
             return False, proc
-        return proc.returncode == 0, (proc.stderr or proc.stdout).strip()[:500]
+        return proc.returncode == 0, shown((proc.stderr or proc.stdout).strip()[:500])
 
     def status(self, unit: str) -> UnitStatus:
         _check(unit)

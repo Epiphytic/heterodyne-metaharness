@@ -79,3 +79,36 @@ def test_launch_failure_gives_normal_failure_reply(tmp_path: Path) -> None:
     sd = Systemd(str(tmp_path / "missing"))
     r = CommandRunner(Agent(), sd, ("wsd.service",), lambda: False)  # type: ignore[arg-type]
     assert r.run(Command("restart", arg="wsd.service")).startswith("Restart of wsd.service failed:")
+
+
+def test_unit_names_with_npub_are_redacted_in_replies(tmp_path: Path) -> None:
+    from heterodyne.marmot.nip19 import hex_to_npub
+
+    hexkey = "ab" * 32
+    secret_unit = hex_to_npub(hexkey) + ".service"
+    ok_unit = "ok-" + hex_to_npub(hexkey) + ".service"
+
+    class Fake(Services):
+        def restart(self, unit: str) -> tuple[bool, str]:
+            self.restarted.append(unit)
+            return (unit == secret_unit, f"Unit {unit} failed")
+
+    services = Fake()
+    r = CommandRunner(Agent(), services, (secret_unit, ok_unit, "wsd.service"), lambda: False)  # type: ignore[arg-type]
+    replies = [r.run(Command("restart", arg=secret_unit)), r.run(Command("restart", arg=ok_unit)),
+               r.run(Command("ps")), r.run(Command("restart", arg="other.service"))]
+    for reply in replies:
+        assert hex_to_npub(hexkey) not in reply and hexkey not in reply
+    assert services.restarted == [secret_unit, ok_unit]
+    assert "wsd.service" in replies[2] and "wsd.service" in replies[3]
+    assert replies[0].startswith("Restarted ") and "failed" in replies[1]
+
+
+def test_systemd_results_redact_unit_names(tmp_path: Path) -> None:
+    from heterodyne.marmot.nip19 import hex_to_npub
+
+    unit = hex_to_npub("ab" * 32) + ".service"
+    sd = Systemd(str(tmp_path / "missing"))
+    ok, detail = sd.restart(unit)
+    assert not ok and unit not in detail and "ab" * 32 not in detail
+    assert unit not in sd.status(unit).line()

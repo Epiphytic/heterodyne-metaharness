@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from heterodyne.services import ServiceManager
+from heterodyne.services import ServiceManager, shown
 
 HELP = "admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps"
 FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
@@ -97,10 +97,10 @@ class CommandRunner:
         if cmd.name == "restart":
             unit = cmd.arg or ""
             if unit not in self.restart_units:
-                allowed = ", ".join(self.restart_units) or "none"
+                allowed = ", ".join(shown(u) for u in self.restart_units) or "none"
                 return f"!restart: that unit is not in [admind] restart_units (allowed: {allowed})"
             ok, detail = self.services.restart(unit)
-            return f"Restarted {unit}." if ok else f"Restart of {unit} failed: {detail}"
+            return f"Restarted {shown(unit)}." if ok else f"Restart of {shown(unit)} failed: {shown(detail)}"
         lines = [self.services.status(unit).line() for unit in self.restart_units]
         lines.append(f"wn-agent (admind): {'running' if self.wn_alive() else 'down'}")
         lines.append(f"admin agent: {'running' if self.agent.alive() else 'not running'}")
