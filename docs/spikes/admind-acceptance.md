@@ -26,7 +26,7 @@ This was run on the reference host (Linux, systemd user units) on 2026-10-01 and
 - **Workspace trust is not kept for `~`.** With the default `workdir = "~"`, a relaunch stopped at Claude Code's workspace-trust dialog. Three 120-second ready timeouts then led to `AgentStuck`, which only `!new` clears. The operator set the admin agent's root to `~/.hermes`. The docs and example config now recommend a dedicated workdir.
 - **Permission mode.** admind launches with `--permission-mode bypassPermissions`, but on this host Claude Code reports **auto mode**, presumably because of an Enterprise policy. The operator accepts auto mode on one condition: the agent's permission prompts and approvals must be relayed over Marmot to the operator and back to the Claude Code instance. That relay is ADR r13 work.
 - **A hook error that isn't admind's.** A Node SessionStart hook from the user's global Claude settings fails, without blocking, in the admin pane. admind's own hooks work.
-- **Audit records the operator's text.** `inbound` audit records carry the operator's text verbatim. This is the open ADR §8 logging-scope decision for the final review.
+- **Audit records the operator's text.** `inbound` audit records carry the operator's text through the output policy: secrets, npubs and 64-hex values are redacted, control characters are escaped, and the text is truncated at 2,000 characters. Whether to keep recording it at all is the open ADR §8 logging-scope decision.
 
 ## Claude Code hook behaviour seen live
 
