@@ -18,7 +18,6 @@ import json
 import os
 import subprocess
 import sys
-import termios
 import tty
 from pathlib import Path
 
@@ -47,20 +46,31 @@ def record(kind: str, content: object) -> None:
         fh.write(json.dumps({"type": kind, "message": {"content": content}}) + "\n")
 
 
+# The pane's tty stays in cbreak mode for the fake's whole life and lines are assembled here. Switching
+# between cbreak and canonical mode around a hang raced with a paste arriving right after the Escape:
+# bytes queued while non-canonical could leave readline() blocked on a line that had already arrived.
+FD = sys.stdin.fileno()
+if os.isatty(FD):
+    tty.setcbreak(FD)
+
+
+def read_line() -> str | None:
+    buf = bytearray()
+    while (b := os.read(FD, 1)) != b"":
+        if b == b"\n":   # ICRNL stays on in cbreak mode, so Enter (CR) arrives as LF
+            return buf.decode(errors="replace")
+        buf += b
+    return buf.decode(errors="replace") if buf else None
+
+
 def wait_for_escape() -> None:
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    try:
-        while os.read(fd, 1) != b"\x1b":
-            pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    while os.read(FD, 1) not in (b"\x1b", b""):
+        pass
 
 
 fire("SessionStart", source="startup")
-while raw := sys.stdin.readline():
-    line = raw.rstrip("\n").lstrip("\x1b")
+while (raw := read_line()) is not None:
+    line = raw.lstrip("\x1b")
     if "__noprompt__" not in line:
         fire("UserPromptSubmit", prompt=line)
     record("user", line)
