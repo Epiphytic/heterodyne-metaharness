@@ -74,11 +74,11 @@
 | B6 | Host commands reach the daemon over `state_dir/ctl.sock`: 0600, in the 0700 state directory, one JSON request per connection. `admind rearm` now needs a running daemon, because only the daemon can read the member count (S4: a wn-agent home can't be opened by a second process). The client waits up to 300 s (a transition first waits for the operator message in hand). A handler that raises answers `failed` with fixed wording; the CLI exits 1. | ADR: "The command asks the running daemon". `rearm` "takes the current member count as trusted". | §8 Group membership |
 | B7 | A transition runs under `transition_lock` (one add, remove or rearm at a time). It refuses unless the subscription is observing and the group verified. It then takes `work_lock`, which `worker_loop` holds for each operator message, so the message in hand finishes and no new one starts; sets the in-memory flag `changing`, which blocks dispatch and posting through `authorised()`, `may_post()` and `_flush`; and drains a paste in progress (`dispatch_lock`) and a send in progress (`send_lock`, which `outbox_pass` holds across each send) before it reads the count and journals. Every await is followed by a recheck of the latch, observation and subscription generation. `check_group` takes no lock: a check begun during a transition, or overtaken by one (`membership_epoch`), returns "deferred" and changes nothing, so the subscription reader never waits on a transition. An exception after journaling latches; `changing` is cleared only once the change is settled or latched, otherwise it stays set until a restart latches on the pending record (B15) or `rearm`. | Step 1: "serializes it with every guard check and holds dispatch and outbound posting". A flag alone blocks new work but does not drain work already running. Holding `dispatch_lock` for the whole transition would stall the hooks, which also take it. | §8 transition step 1 |
 | B8 | Summarizer launch: `claude -p --model M --tools "" --setting-sources project --settings '{"disableAllHooks": true}' --strict-mcp-config --no-session-persistence --output-format text`, prompt on stdin. It runs in an empty private directory `state_dir/summarizer` and the profile's `args` are **not** appended. Admind appends the footer. Output that is empty, or longer than 10 lines or 2,000 characters, is a failure; stdout is read incrementally and the process is killed once it passes 8,000 bytes. | Headless, read-only, without tools, and unaffected by user-level hooks or MCP servers. `--bare` would need an API key. The ADR's "about 8 lines" gets two lines of slack; the limits stop a runaway "summary" from replacing the backstop, and the byte bound stops one from filling memory. | §8 Replies |
-| B9 | Every stage of a reply is durable. `on_stop` writes the turn record, its verbatim posts and the turn-state change in one transaction; if that fails, a second transaction records the turn straight into the backstop with the same state change, and if that fails too the error reaches `hook_loop`, which holds dispatch. An extraction timeout records a fixed-text turn straight into the backstop. Summary jobs are rows with `turns.status = 'summarizing'`; `summary_loop` polls them from the database (woken by an event, at least every 5 s), so a failure at any step leaves the row for the next pass, without a restart. A summary or verbatim post the outbox gives up on sends its turn to the backstop in the same transaction that marks it failed. | A reply must reach the operator whatever fails: summary, backstop, or at worst dispatch is held. | §8 Replies, Backstop |
+| B9 | Every stage of a reply is durable. `on_stop` writes the turn record, its verbatim posts and the turn-state change in one transaction; if that fails, a second transaction records the turn straight into the backstop with the same state change, and if that fails too the error reaches `hook_loop`, which holds dispatch. An extraction that times out or cannot read the transcript (no span, a bad path, a read error) records a fixed-text turn (`EXTRACT_FAILED`) straight into the backstop; only a readable turn with no assistant text is `NO_REPLY`. Summary jobs are rows with `turns.status = 'summarizing'`; `summary_loop` polls them from the database (woken by an event, at least every 5 s), so a failure at any step leaves the row for the next pass, without a restart. A summary or verbatim post the outbox gives up on sends its turn to the backstop in the same transaction that marks it failed. | A reply must reach the operator whatever fails: summary, backstop, or at worst dispatch is held. | §8 Replies, Backstop |
 | B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. It renders `tool_use` and `tool_result` blocks whole; thinking blocks are never read out. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. It renders `tool_use` and `tool_result` blocks whole (non-text results as JSON with sorted keys; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure or a missing span is `EXTRACT_FAILED` (B9), never `NO_REPLY`. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
 | B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
 | B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
@@ -87,7 +87,7 @@
 | B19 | A turn's transcript span: `UserPromptSubmit` measures the transcript size before taking the turn lock and stores it as kv `turn_start = "<busy>:<offset>"` in the transaction that starts the busy period. `Stop` measures the size on entry, before the lock. The turn record keeps both only if the Stop is `current` and `turn_start` belongs to the busy period the Stop was captured with; otherwise both are NULL and `!details full` says the tool calls are not available. | A stale Stop, a lost prompt hook or a turn that changed during extraction can't be tied to its bytes; saying so is better than showing another turn's tool calls. | §8 `!details full` |
 | B20 | One transcript reader at a time: reply extraction, offset measurement and `!details full` share one reader slot (`Admind.bounded_read`). A read that finds the slot busy or runs past its deadline returns None; the thread runs to completion in the background. Offsets wait 2 s, extraction 10 s, `!details full` 30 s. | A stalled filesystem must not pile up threads (plan 2's extraction rule, extended to the new readers). | §8 `!details full` |
 | B21 | Who may command admind is durable: kv `group_operators` holds the sorted hex keys admind has **confirmed** are in the group. `policy.toml` makes a key eligible; `Admind.operators` is the policy operators whose key is confirmed, and no others. `init` writes all of them; a committed transition writes the change in the same transaction as `expected_members`; `rearm` reconciles it (B22); startup loads it. Upgrading a plan-2 database (no `group_operators`): with exactly one policy operator, that one is confirmed (plan 2 allowed only one); with several, admind latches until a rearm. | A restart must not authorise a policy operator who was never added, nor forget one who was; a lost reply must not leave the map behind the group (Codex r2 finding 4). | §8 Operators, `rearm` |
-| B22 | `rearm` refuses, changing nothing, unless the subscription is acknowledged; it records `sub_gen`, a count of membership events and the latch before reading the count, and refuses if any changed meanwhile. It reconciles the confirmed operators with the trusted count: a pending change whose `to` count matches took effect, one whose `from` count matches did not; the confirmed keys stand if `count == 1 + len(keys)`; else, if `count == 1 +` the number of policy operators, all of them become confirmed (the operator's `rearm` asserts it); else it refuses and explains. **Deviation, flagged:** §8 says rearm takes the count as trusted without conditions; these refusals are added so a rearm can't clear a latch an event set while it ran (Codex r2 finding 3) or authorise operators it can't account for. | A rearm that clears a fresh latch, or trusts a count without knowing who the members are, defeats the latch. | §8 `rearm` |
+| B22 | `rearm` refuses, changing nothing, unless the subscription's events are being read (`reading`: `confirm_observing` has returned; an acknowledged subscription whose check is still running holds its events unread); it records `sub_gen`, a count of membership events and the latch before reading the count, and refuses if any changed meanwhile. It reconciles the confirmed operators with the trusted count: a pending change whose `to` count matches took effect, one whose `from` count matches did not; the confirmed keys stand if `count == 1 + len(keys)`; else, if `count == 1 +` the number of policy operators, all of them become confirmed (the operator's `rearm` asserts it); else it refuses and explains. **Deviation, flagged:** §8 says rearm takes the count as trusted without conditions; these refusals are added so a rearm can't clear a latch an event set while it ran (Codex r2 finding 3) or authorise operators it can't account for. | A rearm that clears a fresh latch, or trusts a count without knowing who the members are, defeats the latch. | §8 `rearm` |
 
 ## File map
 
@@ -103,7 +103,7 @@
 | `src/heterodyne/admind/guard.py` | several operators, an expected count |
 | `src/heterodyne/admind/store.py` | lanes, the upgrade's `redact_pending_outbox`, `prompts`, `turns`, `batches`, `posts` |
 | `src/heterodyne/admind/commands.py` | `!details [full]` |
-| `src/heterodyne/admind/hook.py` | `transcript_size`, `turn_tool_calls` |
+| `src/heterodyne/admind/hook.py` | `transcript_size`, `turn_records` and the span-based `reply_text` (Task 8); `turn_tool_calls` (Task 9) |
 | `src/heterodyne/admind/daemon.py` | wiring (Tasks 2–9) |
 | `src/heterodyne/admind/cli.py` | `init` for all operators, `operators add|remove`, `rearm` via the daemon |
 | `src/heterodyne/agents/claude_code.py` | `headless_argv` |
@@ -1118,7 +1118,7 @@ Review against §8 Delivery lanes and Redaction, and B14 and B17.
   - `membership.settle(reported: Reported, count: int | None, pending: Pending) -> Outcome`;
   - `Admind.change_membership(op: str, name: str) -> tuple[str, str]`, whose result is one of `committed`, `aborted`, `latched` or `refused`;
   - `Admind.rearm() -> tuple[str, str]`, whose result is `rearmed` or `refused`;
-  - `Admind.changing: bool`, `Admind.membership_epoch: int`, `Admind.group_events: int`;
+  - `Admind.changing: bool`, `Admind.membership_epoch: int`, `Admind.group_events: int`, `Admind.reading: bool`;
   - `Admind.transition_lock` and `Admind.work_lock`, both `asyncio.Lock`;
   - in the fake: `membership_mode` (`ok`, `fail`, `ok-no-count`, `fail-count`, `hang`, `lost`, `gated`), `membership_gate: asyncio.Event`, `info_gate: asyncio.Event | None` and `drop_subscriptions()`.
 
@@ -1174,8 +1174,9 @@ Daemon scenarios, in the same file, with the shared harness, `FakeWnAgent(member
 11. **if even the latch fails, the hold stays:** as in (10), and also replace `h.daemon.latch` with a function that raises `OSError`. `change_membership` raises; `changing` is still true, `may_post()` is false, `membership_pending` is kept, and the audit has `{"kind": "membership", "action": "held-unsettled"}`. (The restart that follows latches: scenario 13.)
 12. **refusals, each changing nothing and sending no `group_member_*` request:** unknown name; adding `b` when it is already in `h.daemon.operators`; removing the last operator (`expected_members` 2, remove `op`); latched; a pending record already present; not observing (call it before the join signal's check has run: set `h.daemon.observing = False` first); `load_operators` raising `ConfigError`.
 13. **startup latch:** with `membership_pending` set before `run()`, the daemon latches before dispatching anything and audits the reason.
-14. **rearm:** after (3), `rearm()` reads the count, sets `expected_members` to it, clears `latched` and `membership_pending`, and posting resumes. After (11), `rearm()` also clears `changing`. With `fake.fail_group_info = True` it returns `("refused", …)` and changes nothing. With a count of 1 it is refused. With `h.daemon.acked = False` (not watching) it is refused before any `group_info` request.
+14. **rearm:** after (3), `rearm()` reads the count, sets `expected_members` to it, clears `latched` and `membership_pending`, and posting resumes. After (11), `rearm()` also clears `changing`. With `fake.fail_group_info = True` it returns `("refused", …)` and changes nothing. With a count of 1 it is refused. With `h.daemon.reading = False` (events not being read) it is refused before any `group_info` request.
 15. **rearm races an event (Codex r2 finding 3):** latch via (3), then `h.fake.info_gate = asyncio.Event()`; start `task = asyncio.create_task(h.daemon.rearm())`; wait until the fake has a new `group_info` request; push a `group_state_changed` `member_added` event and wait until `h.daemon.group_events` grows; set the gate. `rearm` returns `("refused", …)`; `latched` is still set and `expected_members` unchanged. The same with `drop_subscriptions()` instead of the event (`sub_gen` changes): refused.
+    **Acknowledged but not yet reading (Codex r3 finding 3):** latch via (3); set `h.fake.info_gate = asyncio.Event()` and `await h.fake.drop_subscriptions()`; wait until the new subscription's `group_info` request arrives (its `confirm_observing` is now blocked, `acked` true, `reading` false); push a `group_state_changed` `member_added` event (buffered: the reader is not reading). `await h.daemon.rearm()` returns `("refused", …)` at once without a further `group_info` request. Open the gate: the reader processes the buffered event, and `latched` is still set.
 16. **lost reply on an add, then rearm (Codex r2 finding 4):** `membership_mode = "lost"` (the fake applies the change, then never answers) and a `ControlClient` timeout of 0.5 s: `("latched", …)`; `group_operators` is still `[OPERATOR_HEX]`. `rearm()` reads 3, which is the pending record's `to` count: it returns `rearmed`, `group_operators` holds both keys, and a message from `SECOND_HEX` is processed.
 17. **lost reply on a remove, then rearm:** start with `group_operators` both keys, `expected_members = "3"`, `member_count=3`; `"lost"` on `change_membership("remove", "b")` latches; `rearm()` reads 2 (`to`): `group_operators == [OPERATOR_HEX]` and a message from `SECOND_HEX` is dropped. A variant where the fake did **not** apply the change (`"hang"`): `rearm()` reads 3 (`from`): `group_operators` keeps both keys.
 18. **rearm reconciliation without a record:** latched, no pending record, `group_operators` absent or out of step:
@@ -1313,7 +1314,19 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
         self.changing = False                   # a transition holds dispatch and posting (B7)
         self.membership_epoch = 0               # bumped when a transition or rearm begins; see check_group
         self.group_events = 0                   # membership events seen; rearm refuses if one arrives meanwhile
+        self.reading = False                    # the subscription's events are being read (B22)
 ```
+
+  - `confirm_observing` ends by setting `self.reading = True`, on both paths that return (a passing check, or a failing one while latched): `subscribe` reads events as soon as it returns, with no await in between. Its body becomes:
+
+```python
+        self.acked = True       # check_group observes on success, here and on every later passing check
+        if not await self.check_group() and not self.latched():
+            raise ControlError("group could not be re-verified", "unverified", True)
+        self.reading = True     # acknowledged but not observing if latched; a rearm then restores it
+```
+
+  - `inbound_loop` sets `self.reading = False` next to `self.acked = False` when a subscription ends.
 
   - `on_event`: the `GroupStateChanged` branch starts with `self.group_events += 1`, before it judges the event.
 
@@ -1522,9 +1535,11 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
         operators are confirmed in the group (B21), and refuses, changing nothing, if the count can't be
         reconciled with them or if the group changed while the count was read (B22)."""
         async with self.transition_lock:
-            if not self.acked:
-                return "refused", ("admind is not subscribed to the group's events right now, so a change "
-                                   "during rearm could be missed; nothing changed. Try again shortly.")
+            if not self.reading:
+                # Acknowledged is not enough: until confirm_observing returns, events wait unread in the
+                # stream, and a resubscription would drop them (Codex r3 finding 3).
+                return "refused", ("admind is not reading the group's events right now, so a change during "
+                                   "rearm could be missed; nothing changed. Try again shortly.")
             try:
                 policy = self.load_operators()
             except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
@@ -1535,7 +1550,7 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
                 count = (await self.client.group_info(self.account, self.group)).member_count
             except ControlError as exc:
                 return "refused", f"could not read the group's member count ({exc.code}); nothing changed."
-            if (not self.acked or generation != self.sub_gen or events != self.group_events
+            if (not self.reading or generation != self.sub_gen or events != self.group_events
                     or self.store.get("latched") != latched_before):
                 self.audit_quietly("guard", action="rearm-refused", why="changed-meanwhile")
                 return "refused", ("the group changed while rearm read it (a membership event, a new latch or "
@@ -2322,7 +2337,7 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
     - `open_batch(at: float) -> int`, `due_batches(at: float, seconds: float) -> list[tuple[int, int]]` (batch and attempt), `batch_turns(batch_id) -> list[TurnRow]`, `close_batch(batch_id)` and `reopen_batch(batch_id, at: float)`;
     - `record_post(key, kind, turn_id, batch_id)` and `post_record(key) -> PostRow | None`;
     - `details_target(message_id: str | None) -> PostRow | None`.
-  - Hook module: `transcript_size(ev: HookEvent) -> int | None`.
+  - Hook module: `transcript_size(ev: HookEvent) -> int | None`; `READ_WINDOW`, `MAX_RECORD`, `_lines`, `_is_prompt`, `_has_result`, `turn_records(path, start, end)` (Task 9 uses them too); and `reply_text(ev, start, end) -> str | None`, which replaces the tail-reading fallback (`last_assistant_text`, `_read_tail` and `MAX_TRANSCRIPT` are deleted).
   - Daemon:
     - constants `OFFSET_SECONDS = 2.0`, `SUMMARY_POLL = 5.0` and `EXTRACT_FAILED`;
     - `bounded_read(timeout, fn, *args)`, which replaces the `_extraction` slot with `_reader` (B20);
@@ -2358,7 +2373,8 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
    - the turn is idle afterwards (`busy` is cleared);
    - the audit has `{"kind": "reply", "action": "record-failed"}`.
 10. **Delivery gives up on a summary:** set `h.daemon._sleep` to a no-op coroutine. Once the ready notice is delivered and the outbox is empty, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS`, then send a long prompt (summarizer `echo "short summary"`). Every attempt to send the summary fails as retryable. Afterwards the summary row is `failed`, and in the same transaction its turn became `batched`. The batch arrives and holds the full reply.
-11. **Extraction fails:** set `extract_timeout = 0.1`, and monkeypatch `heterodyne.admind.daemon.reply_text` with a function that waits on a `threading.Event` (at most 5 s; the test sets it at the end). Then put a Stop for the current turn without `last_assistant_message`. A batch arrives holding `EXTRACT_FAILED`, and the turn is idle.
+11. **Extraction fails:** set `extract_timeout = 0.1`, and monkeypatch `heterodyne.admind.daemon.reply_text` with a function `(ev, start, end)` that waits on a `threading.Event` (at most 5 s; the test sets it at the end). Then put a Stop for the current turn without `last_assistant_message`. A batch arrives holding `EXTRACT_FAILED`, and the turn is idle. Variants without the monkeypatch, each also giving a batch holding `EXTRACT_FAILED` (never `NO_REPLY`): the transcript path is a symlink; the turn has no span (no `UserPromptSubmit` was seen for it).
+16. **Fallback reads the whole turn (Codex r3 finding 2):** a `UserPromptSubmit` for `<tmp>/<sid>.jsonl`, then the test appends `said("Which unit, gateway or relay?")`, a tool call and result, and `said("Checked both.")`, then a current Stop without `last_assistant_message`. The reply (summarized or verbatim, per its size) and its `!details` record hold both texts in order.
 12. **Transcript span:**
     - **Current turn:** write `<tmp>/<sid>.jsonl` with 100 bytes, then put a `UserPromptSubmit` for that path. Append 50 bytes, then put a current `Stop` with a reply. The turn row has `transcript_start == 100` and `transcript_end == 150`.
     - **Stale launch:** a Stop from a stale launch (`launch=None`) that carries its own text gets `transcript_start` and `transcript_end` both NULL.
@@ -2366,6 +2382,48 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
 13. **Redaction:** a hex value in the reply never appears in any sent text.
 14. **Delivery gives up on a batch (Codex r2 finding 7):** `h.daemon._sleep` is a no-op coroutine. A failing summary is batched; just before the batch is due, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS`. The batch's outbox row (`batch:<id>.0`) becomes `failed`, and in the same transaction the batch is open again with `attempt == 1` and a fresh `opened_at`; the audit has `{"kind": "backstop", "action": "reopened"}`. Once `batch_seconds` passes again the batch arrives (key `batch:<id>.1`), holding the reply, and `!details` without a target returns it.
 15. **Restart after a failed batch:** as (14), but with `batch_seconds = 3600` once the batch is reopened, end the first `run_with`. A second `run_with` on the same `tmp_path` with `batch_seconds = 0.3` posts the reopened batch with the reply.
+
+Unit tests of the fallback, in the same file (`append`, `prompt`, `tool`, `result` and `said` are the same small JSONL helpers Task 9's tests define; define them in this file too):
+
+```python
+def stop(path: Path, sid: str = "s") -> HookEvent:
+    return HookEvent("Stop", sid, str(path), None, None)
+
+
+def test_fallback_keeps_every_assistant_text_of_the_turn(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    start = append(t, [prompt("old"), said("old answer")])
+    end = append(t, [prompt("check it"), said("Which unit?"), tool("Bash", command="ls"), result("a b"),
+                     said("Done.")])
+    append(t, [prompt("next"), said("next answer")])
+    assert reply_text(stop(t), start, end) == "Which unit?\n\nDone."
+
+
+def test_fallback_reads_a_record_larger_than_the_old_tail_limit(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), said("x" * (9 * 1024 * 1024))])
+    assert reply_text(stop(t), 0, end) == "x" * (9 * 1024 * 1024)
+
+
+def test_fallback_silent_turn_is_empty_not_a_failure(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), tool("Bash", command="true"), result("")])
+    assert reply_text(stop(t), 0, end) == ""
+
+
+def test_fallback_failures_are_none(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), said("hi")])
+    link = tmp_path / "l" / "s.jsonl"
+    link.parent.mkdir()
+    link.symlink_to(t)
+    assert reply_text(stop(link), 0, end) is None                 # a symlink is never followed
+    assert reply_text(stop(t), None, None) is None                # no span
+    assert reply_text(stop(tmp_path / "missing" / "s.jsonl"), 0, 10) is None
+    assert reply_text(stop(t, sid="other"), 0, end) is None       # not this session's transcript
+```
+
+(`HookEvent`'s fields are `hook_event_name, session_id, transcript_path, last_assistant_message, prompt`. Existing tests that monkeypatch `heterodyne.admind.daemon.reply_text` with `lambda ev: ...` take `(ev, start, end)` instead; `grep -rn "daemon.reply_text" tests/`. Tests of `last_assistant_text` in `tests/test_admind_agent.py` and `tests/test_admind_daemon.py` are deleted with it; the ones above replace them.)
 
 - [ ] **Step 2: Run the tests and confirm they fail.** Expected: `AttributeError: 'Admind' object has no attribute 'summarizer_argv'`.
 
@@ -2547,7 +2605,7 @@ Store unit tests, in the same file:
 - `details_target(mid)` for a row that is still pending returns None;
 - `add_turn` with the same key twice returns the same `turn_id`.
 
-- [ ] **Step 4: Implement `transcript_size` in `hook.py`.**
+- [ ] **Step 4: Implement `transcript_size` and the turn reader in `hook.py`.**
 
 ```python
 def transcript_size(ev: HookEvent) -> int | None:
@@ -2569,6 +2627,115 @@ def transcript_size(ev: HookEvent) -> int | None:
     finally:
         os.close(fd)
 ```
+
+
+The turn's records, shared by the reply fallback here and by `!details full` (Task 9). Add `from collections.abc import Iterator`:
+
+```python
+READ_WINDOW = 1024 * 1024               # a turn's bytes are read this much at a time
+MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record is named, not parsed: memory (plan 2b B13)
+
+
+def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
+    """The complete lines in bytes [start, end), read READ_WINDOW at a time. A line longer than MAX_RECORD
+    is not kept: its size in bytes is yielded instead. A last line without its newline is not yielded."""
+    pos, buf, skipped = start, bytearray(), 0
+    while pos < end:
+        data = os.pread(fd, min(READ_WINDOW, end - pos), pos)
+        if not data:
+            return
+        pos += len(data)
+        while data:
+            nl = data.find(b"\n")
+            piece, data = (data, b"") if nl < 0 else (data[:nl], data[nl + 1:])
+            if skipped:
+                skipped += len(piece)
+            else:
+                buf += piece
+                if len(buf) > MAX_RECORD:
+                    skipped, buf = len(buf), bytearray()
+            if nl >= 0:
+                if skipped:
+                    yield skipped
+                else:
+                    yield bytes(buf)
+                skipped, buf = 0, bytearray()
+
+
+def _is_prompt(record: dict[str, Any]) -> bool:
+    """A real user prompt: text from the user, as opposed to a record that carries tool results or one
+    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output)."""
+    blocks = _blocks(record)
+    return record.get("type") == "user" and not record.get("isMeta") and (
+        isinstance(blocks, str) or bool(blocks and any(b.get("type") == "text" for b in blocks)))
+
+
+def _has_result(record: dict[str, Any]) -> bool:
+    blocks = _blocks(record)
+    return (record.get("type") == "user" and isinstance(blocks, list)
+            and any(b.get("type") == "tool_result" for b in blocks))
+
+
+def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | int]:
+    """The content records of one turn: transcript bytes [start, end), from its UserPromptSubmit to its
+    Stop (plan 2b B13, B19). The turn begins at its first content (an assistant record or a tool result);
+    a real prompt before that is the turn's own and is skipped, one after it is the next turn's and ends
+    this one. Anything else is metadata (such as `queue-operation`) and skipped. A record over MAX_RECORD
+    is yielded as its size in bytes and never begins the turn: it may be metadata. Raises OSError if the
+    file can't be read; never follows a symlink or blocks on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        begun = False
+        for item in _lines(fd, start, end):
+            if isinstance(item, int):
+                yield item
+                continue
+            try:
+                record: Any = json.loads(item)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            rec = cast(dict[str, Any], record)
+            if _is_prompt(rec):
+                if begun:
+                    return                  # the next turn's prompt
+                continue                    # this turn's own prompt
+            if rec.get("type") == "assistant" or _has_result(rec):
+                begun = True
+                yield rec
+    finally:
+        os.close(fd)
+
+
+def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
+    """A current Stop's reply (B9, B19). The event's own text if it has one; otherwise every assistant text
+    of the turn's span, in order, so an early question or error is kept. None when it can't be read: no
+    span, a path that is not this session's transcript, or a read error. "" is a turn that said nothing."""
+    if ev.last_assistant_message:
+        return ev.last_assistant_message
+    if start is None or end is None or not ev.transcript_path:
+        return None
+    path = Path(ev.transcript_path)
+    if path.name != f"{ev.session_id}.jsonl" or not path.is_absolute():
+        return None
+    parts: list[str] = []
+    try:
+        for rec in turn_records(path, start, end):
+            if isinstance(rec, int):
+                parts.append(f"(a transcript record of {rec} bytes was skipped: too large to read)")
+                continue
+            blocks = _blocks(rec)
+            if rec.get("type") == "assistant" and isinstance(blocks, list):
+                parts.extend(b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
+    except OSError:
+        return None
+    return "\n\n".join(parts)
+```
+
+Delete `last_assistant_text`, `_read_tail` and `MAX_TRANSCRIPT`.
 
 - [ ] **Step 5: Implement the daemon changes.**
   - Imports: `from heterodyne.admind import backstop, summarize`, `from heterodyne.admind.hook import transcript_size`, `from heterodyne.admind.store import TurnRow` and `from heterodyne.agents.claude_code import headless_argv`.
@@ -2596,7 +2763,7 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
         self.wallclock: Callable[[], float] = time.time     # replaced in tests; batches persist across restarts
 ```
 
-  - The reader slot. `extract` keeps its docstring and becomes `return await self.bounded_read(self.extract_timeout, reply_text, ev)`.
+  - The reader slot. `extract(self, ev, start, end)` becomes `return await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)`, with the docstring "The reply of a Stop without its own text, read from the turn's span (B19) in the reader slot. None if it can't be read in time or at all; the caller then sends `EXTRACT_FAILED` to the backstop (B9)."
 
 ```python
     async def bounded_read[T](self, timeout: float, fn: Callable[..., T], *args: object) -> T | None:
@@ -2635,21 +2802,22 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
   - `run()` adds two supervised loops to the task group, `("summaries", self.summary_loop)` and `("batches", self.batch_loop)`. There is no startup requeue: both loops read the database.
   - `on_stop`:
     - Its first line, before the first `async with self.turn_lock()`, becomes `end = await self.transcript_offset(ev)`: the turn's bytes end here, before any later turn can write.
+    - In the first `async with self.turn_lock()`, right after `identity = self.turn_identity(ev.session_id)`, add `span = self.turn_span(identity[3], end)`: the turn's bytes, known before the read.
     - The extraction block becomes:
 
 ```python
         raw: str | None = own
         if need_fallback:
-            raw = await self.extract(ev)            # may read the transcript file (lock not held)
+            raw = await self.extract(ev, *span)     # may read the transcript file (lock not held)
             if raw is None:
-                self.audit.write("agent", action="reply-extraction-timeout")
+                self.audit.write("agent", action="reply-extraction-failed")
 ```
 
     - In the second `async with self.turn_lock()`, keep everything up to and including the `if need_fallback and not current:` return. Replace the rest of the block (from `text = raw if raw.strip() else NO_REPLY` to the final `reply` audit record) with:
 
 ```python
             reply_to = anchor if current else None
-            start, stop = self.turn_span(identity[3], end) if current else (None, None)
+            start, stop = span if current else (None, None)
             origin = self.origin_for(reply_to)
             if raw is None:                         # current, but the reply could not be read (B9)
                 text, mode = EXTRACT_FAILED, "backstop"
@@ -2817,7 +2985,7 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
 
 - [ ] **Step 6: Run the gate.** Existing tests that expect a long reply to come back verbatim must be adapted:
   - **Settings.** They set `reply_verbatim_lines` and `reply_verbatim_chars` high (`make_settings(..., reply_verbatim_lines=200, reply_verbatim_chars=60000)`). That keeps their intent: those tests are about turn state, not summaries.
-  - **Extraction timeouts.** Tests that expected one to post nothing now expect a backstop batch holding `EXTRACT_FAILED` once `batch_seconds` passes.
+  - **Extraction timeouts and failures.** Tests that expected one to post nothing, or a missing transcript to post `NO_REPLY`, now expect a backstop batch holding `EXTRACT_FAILED` once `batch_seconds` passes.
   - **The reader slot.** Tests that reached into `_extraction` use `_reader` instead.
 
 - [ ] **Step 7: Commit and review.**
@@ -2842,7 +3010,7 @@ Review against B9, B10, B12, B19 and B20.
 - Produces:
   - `commands.Command("details", arg="full" | None)`;
   - `hook.turn_tool_calls(path: Path, start: int, end: int) -> str`;
-  - in `hook`: `READ_WINDOW = 1 MiB` and `MAX_RECORD = 64 MiB` (no cap on what is shown; B13);
+  - it consumes Task 8's `hook.turn_records`, `READ_WINDOW` and `MAX_RECORD` (64 MiB; nothing shown is capped, B13);
   - in the daemon: `DETAILS_READ_SECONDS = 30.0`, `DETAILS_BUSY`, `Admind.details(mid, cmd, target)`, `Admind.tool_calls(row)` and the replaceable attribute `details_timeout`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2945,6 +3113,35 @@ def test_record_larger_than_a_read_window_is_shown_whole(tmp_path: Path) -> None
     assert "◂ " + "r" * (2 * 1024 * 1024) + "\n" in out and "▸ After" in out
 
 
+def test_oversized_metadata_before_the_prompt_does_not_start_the_turn(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Codex r3 finding 3.
+    monkeypatch.setattr(hook, "MAX_RECORD", 1000)
+    t = tmp_path / "s.jsonl"
+    end = append(t, [{"type": "queue-operation", "content": "q" * 5000}, prompt("mine"), tool("Mine"),
+                     prompt("next"), tool("Next")])
+    out = turn_tool_calls(t, 0, end)
+    assert "▸ Mine" in out and "Next" not in out
+
+
+def test_non_text_results_are_kept_distinct(tmp_path: Path) -> None:
+    # Codex r3 finding 4: structured and image results are rendered, not collapsed to one placeholder.
+    t = tmp_path / "s.jsonl"
+    img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    end = append(t, [prompt("go"), tool("Shot"),
+                     {"type": "user", "message": {"content": [{"type": "tool_result", "content": [
+                         {"type": "text", "text": "saved"}, img, {"type": "resource", "uri": "file:///x"}]}]}},
+                     {"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                "content": {"rows": 2, "ok": True}}]}},
+                     {"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True,
+                                                                "content": "denied"}]}}])
+    out = turn_tool_calls(t, 0, end)
+    assert "◂ saved\n[image image/png, 12 base64 characters, sha256 " in out
+    assert '{"type": "resource", "uri": "file:///x"}' in out
+    assert '◂ {"ok": true, "rows": 2}' in out
+    assert "◂ (error) denied" in out
+
+
 def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hook, "MAX_RECORD", 1000)
     t = tmp_path / "s.jsonl"
@@ -2998,55 +3195,32 @@ Daemon scenarios with the shared harness:
 
   `CommandRunner.run` never receives `details`, because the daemon handles it. Raise `CommandError("internal")` there if it ever does.
 
-- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `from collections.abc import Iterator`, and:
+- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `import hashlib`, and:
 
 ```python
-READ_WINDOW = 1024 * 1024               # `!details full` reads the turn's bytes this much at a time
-MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record is named, not parsed: memory (plan 2b B13)
-
-
-def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
-    """The complete lines in bytes [start, end), read READ_WINDOW at a time. A line longer than MAX_RECORD
-    is not kept: its size in bytes is yielded instead. A last line without its newline is not yielded."""
-    pos, buf, skipped = start, bytearray(), 0
-    while pos < end:
-        data = os.pread(fd, min(READ_WINDOW, end - pos), pos)
-        if not data:
-            return
-        pos += len(data)
-        while data:
-            nl = data.find(b"\n")
-            piece, data = (data, b"") if nl < 0 else (data[:nl], data[nl + 1:])
-            if skipped:
-                skipped += len(piece)
-            else:
-                buf += piece
-                if len(buf) > MAX_RECORD:
-                    skipped, buf = len(buf), bytearray()
-            if nl >= 0:
-                if skipped:
-                    yield skipped
-                else:
-                    yield bytes(buf)
-                skipped, buf = 0, bytearray()
-
-
-def _is_prompt(record: dict[str, Any]) -> bool:
-    """A real user prompt: text from the user, as opposed to a record that carries tool results or one
-    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output)."""
-    blocks = _blocks(record)
-    return record.get("type") == "user" and not record.get("isMeta") and (
-        isinstance(blocks, str) or bool(blocks and any(b.get("type") == "text" for b in blocks)))
+def _block_text(block: Any) -> str:
+    """One block of a tool result, deterministically. Text is shown as it is; an image is named by its
+    type, size and digest (a text chat can't show it; flagged, B13); anything else is its JSON, keys
+    sorted."""
+    if isinstance(block, dict):
+        b = cast(dict[str, Any], block)
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            return b["text"]
+        source = b.get("source")
+        if b.get("type") == "image" and isinstance(source, dict):
+            data = str(cast(dict[str, Any], source).get("data", ""))
+            digest = hashlib.sha256(data.encode()).hexdigest()[:12]
+            return (f"[image {cast(dict[str, Any], source).get('media_type', '?')}, {len(data)} base64 "
+                    f"characters, sha256 {digest}]")
+    return json.dumps(block, ensure_ascii=False, sort_keys=True)
 
 
 def _result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [b.get("text") if isinstance(b, dict) and b.get("type") == "text" else "[non-text result]"
-                 for b in cast(list[Any], content)]
-        return "\n".join(p for p in parts if isinstance(p, str))
-    return "[non-text result]"
+        return "\n".join(_block_text(b) for b in cast(list[Any], content))
+    return json.dumps(content, ensure_ascii=False, sort_keys=True)
 
 
 def _tool_lines(record: dict[str, Any]) -> list[str]:
@@ -3055,7 +3229,8 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
     if not isinstance(blocks, list):
         return []
     if record.get("type") == "user":
-        return [f"◂ {_result_text(b.get('content'))}" for b in blocks if b.get("type") == "tool_result"]
+        return [f"◂ {'(error) ' if b.get('is_error') else ''}{_result_text(b.get('content'))}"
+                for b in blocks if b.get("type") == "tool_result"]
     if record.get("type") == "assistant":
         return [f"▸ {b.get('name')} {json.dumps(b.get('input'), ensure_ascii=False)}"
                 for b in blocks if b.get("type") == "tool_use"]
@@ -3063,49 +3238,21 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
 
 
 def turn_tool_calls(path: Path, start: int, end: int) -> str:
-    """The tool calls and results of one turn: transcript bytes [start, end), from the UserPromptSubmit to
-    the Stop (plan 2b B13, B19). Records that are neither a prompt nor turn content (metadata such as
-    `queue-operation`) are ignored. The turn begins at its first content (an assistant record, a tool
-    result or an unreadably large record); a real prompt before that is the turn's own and is skipped, and
-    one after it is the next turn's and ends this one. Nothing is shortened: §8 puts no cap on `!details`.
-    A record over MAX_RECORD is named with its size instead of parsed."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    except OSError:
-        return "(the transcript could not be read)"
+    """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records` (Task 8).
+    Nothing is shortened: §8 puts no cap on `!details`. A record over MAX_RECORD is named with its size."""
     out: list[str] = []
-    begun = False
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return "(the transcript could not be read)"
-        for item in _lines(fd, start, end):
-            if isinstance(item, int):
-                begun = True
-                lines = [f"(a transcript record of {item} bytes was skipped: too large to read)"]
+        for rec in turn_records(path, start, end):
+            if isinstance(rec, int):
+                out.append(f"(a transcript record of {rec} bytes was skipped: too large to read)")
             else:
-                try:
-                    record: Any = json.loads(item)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                rec = cast(dict[str, Any], record)
-                if _is_prompt(rec):
-                    if begun:
-                        break                   # the next turn's prompt
-                    continue                    # this turn's own prompt
-                lines = _tool_lines(rec)
-                if rec.get("type") == "assistant" or lines:
-                    begun = True                # turn content; anything else is metadata
-            out.extend(lines)
+                out.extend(_tool_lines(rec))
     except OSError:
         return "(the transcript could not be read)"
-    finally:
-        os.close(fd)
     return "\n".join(out) if out else "(no tool calls in this turn)"
 ```
 
-  `_lines` keeps at most one record plus one window in memory while reading; the rendered lines are kept whole. `MAX_RECORD` is read when the function is called, so tests can lower it. The lines are redacted whole, never after a cut: `details` redacts the joined text (B1), and nothing in between shortens it.
+  `turn_records` keeps at most one record plus one window in memory while reading; the rendered lines are kept whole. `MAX_RECORD` is read when `_lines` runs, so tests can lower it. The lines are redacted whole, never after a cut: `details` redacts the joined text (B1), and nothing in between shortens it.
 
 - [ ] **Step 5: Implement the daemon changes.**
   - Constants and `__init__`:
@@ -3283,10 +3430,12 @@ The PR body ends with the attribution lines the session requires. Merging is the
   - kv `group_operators`, `confirmed_operators()`, `authorise()` and `policy_operators` are defined in Task 3; Task 5's commit and `rearm` write them (`applied`, `reconcile`).
   - `settings.MAX_NAME` and `NAME_CONTROLS` are defined in Task 3 and imported by Task 6's control server.
   - `backstop.BATCH_MAX_CHARS` is defined in Task 7, confirmed by Task 1's fact 8 and used by Task 8's `close_due_batches`; `reopen_batch` (Task 8) is called by `send_failed`.
-  - `Admind.group_events` is defined in Task 5 and read by `rearm`.
+  - `Admind.group_events` and `Admind.reading` are defined in Task 5 and read by `rearm`.
+  - `hook.turn_records`, `_lines`, `_is_prompt`, `READ_WINDOW` and `MAX_RECORD` are defined in Task 8 (the reply fallback) and reused by Task 9's `turn_tool_calls`.
 - **Lock order** (Task 5): `transition_lock` → `work_lock` → `dispatch_lock` → `send_lock`, each held briefly after the second. Nothing holding a later lock waits for an earlier one.
 - **Deviations from the ADR's wording, for the operator:**
-  - `!details full` names (does not parse) a single transcript record over 64 MiB, to bound memory; nothing else in `!details` is capped (B13);
+  - `!details full` names (does not parse) a single transcript record over 64 MiB, to bound memory, and shows an image result as its type, size and digest; nothing else in `!details` is capped (B13);
+  - a Stop without its own text gets every assistant text of its turn as its reply (Claude Code's own field holds only the last one; B13);
   - a backstop batch over 60,000 characters (50 lines averaging over 1,000 characters) has its lines shortened so it stays one deliverable message; below that it is sent exactly as the ADR's line rules render it (B10). This needs the operator's agreement or an ADR note;
   - `rearm` can refuse: when not subscribed, when the group changes while it reads the count, or when it can't reconcile the count with the operators it knows (B22). The ADR says rearm takes the count as trusted unconditionally;
   - who may command admind is durable state (`group_operators`), not just `policy.toml`; a plan-2 upgrade with several operators already in `policy.toml` latches until a rearm, which then trusts the count against `policy.toml` (B21);
