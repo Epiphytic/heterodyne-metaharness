@@ -1,6 +1,6 @@
 # Install
 
-heterodyne-metaharness is in development. Today you can install it from a source checkout, create a host configuration and validate it. There is no service to run yet. See the status section of the [README](../README.md).
+heterodyne-metaharness is in development. Today you can install it from a source checkout, create a host configuration and validate it. The one service that exists is `admind` (below); the rest is not built yet. See the status section of the [README](../README.md).
 
 ## Platforms
 
@@ -20,7 +20,8 @@ The platform is detected once, when `heterodyne setup` runs, and the chosen back
 | git | the repository checks | yes (the install-agnostic checker lists tracked files with git) |
 | bubblewrap (Linux) | the agent sandbox | not yet (plan 4) |
 | btq, the Beads task-queue client | beads integration | not yet; its location goes in `config.toml` `[integrations.beads]` |
-| `wn-agent`, the Marmot client | the Marmot surface | not yet; its socket and token command go in `config.toml` `[integrations.marmot]` |
+| `wn-agent`, the Marmot client | the Marmot surface; `admind` runs its own private copy | by `admind`; the `wsd` surface goes in `config.toml` `[integrations.marmot]` later |
+| tmux, `claude` | the `admind` admin agent | yes |
 
 btq and `wn-agent` are external integrations. They are not vendored, and their locations and credentials come only from host config.
 
@@ -33,7 +34,7 @@ uv sync
 uv run heterodyne platform
 ```
 
-The package has no runtime dependencies. `uv sync` also installs the development tools (pytest, hypothesis, ruff and pyright).
+The package's only runtime dependency is `msgspec`. `uv sync` also installs the development tools (pytest, hypothesis, ruff and pyright).
 
 ## `heterodyne setup`
 
@@ -57,6 +58,10 @@ uv run heterodyne config check --workstream <ws>
 ```
 
 The configuration rules are in [configuration.md](configuration.md).
+
+## Admin channel (`admind`)
+
+`admind` is implemented. It is a separate service with its own Marmot identity, set up after `heterodyne setup` and a validated configuration: add `[admind]` to `config.toml` and `operators` to `policy.toml`, run `admind init`, render the systemd user unit with `admind unit`, and enable it. It needs `claude` and `wn-agent` on the `PATH` of the shell that renders the unit, and tmux. The full steps, the first-launch dialogs, the latch and the troubleshooting guide are in [admind.md](admind.md).
 
 ## Repository checks
 

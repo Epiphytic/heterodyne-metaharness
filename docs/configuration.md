@@ -12,7 +12,7 @@ This page describes the configuration loader as it exists today (`src/heterodyne
 - A leading `~` in `HETERODYNE_CONFIG_DIR` or `HETERODYNE_STATE_DIR` expands against `HOME`.
 - A relative `XDG_CONFIG_HOME` or `XDG_STATE_HOME` is ignored, as the XDG Base Directory spec requires.
 - An empty variable counts as unset.
-- Nothing writes to the state directory yet.
+- `admind` writes `<state>/admind/` (its database, audit log, hook socket and Marmot home) and reads `<state>/alerts/`.
 
 The host config directory holds:
 
@@ -40,7 +40,7 @@ The loader merges these layers, lowest first. A higher layer replaces a lower on
 
 ### Built-in defaults
 
-The shipped defaults define the known adapters (`claude-code`, `codex`), the review mode when both roles use the same model (`adversarial`), timeouts, and the action-class tiers. They name no models.
+The shipped defaults define the known adapters (`claude-code`, `codex`), the review mode when both roles use the same model (`adversarial`), timeouts, and the action-class tiers. They name no models. It also sets each adapter's executable (`[adapters.<adapter>] binary`) and admind's defaults (see below).
 
 | Tier | Default classes |
 |---|---|
@@ -88,14 +88,34 @@ Only these three variables are accepted:
 
 Any other variable starting with `HETERODYNE_` is an error: "environment overrides are limited to [...]". Variables without the prefix are ignored. The environment covers locations and debugging only; it can't change policy or roles. The only command-line flag today is `config check --workstream`.
 
+### Admin channel (`[admind]`)
+
+| Key | Meaning |
+|---|---|
+| `profile` | Required. The admin agent's profile from `[profiles]`; claude-code only for now. |
+| `workdir` | Working directory of the admin agent. Default `~`, but set a dedicated directory: Claude Code does not persist workspace trust for the home directory (see [admind.md](admind.md#8-troubleshooting)). |
+| `restart_units` | The only units `!restart` accepts. Default none. |
+| `chunk_chars` | Reply chunk size, 200 to 60000. Default 4000. |
+| `alert_poll_seconds` | How often the alerts directory is polled. Default 5. |
+| `group_check_seconds` | How often the admin group is checked. Default 60. |
+| `start_timeout_seconds` | How long to wait for the agent to start. Default 60. |
+| `turn_notice_seconds` | How long a turn may run before the operator is told later messages are held. Default 1800. |
+| `group_name` | Name of the admin group. Default `heterodyne admin`. |
+| `marmot.wn_agent` | The wn-agent executable. Default `wn-agent`. |
+| `marmot.home` | Marmot home directory. Default `<state>/admind/marmot`. |
+| `marmot.relays` | Required. A list of ws:// or wss:// relay URLs. |
+
+`[admind]` is host-only: a workstream file can't set it.
+
 ## Policy (host-only)
 
 `policy.toml` is read **only** from the host config directory. No other layer can set any of its keys: the loader rejects them as a startup error, not a silent ignore. See `examples/policy.toml`.
 
 - **Allowed keys:** `approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor` and `policy`. Any other top-level key is an error ("unknown keys").
-- Only three are interpreted today:
+- Four are interpreted today:
   - `approvers`: a list of names.
   - `identities`: a table of tables of strings, one table per approver, for example `marmot_npub`, `github` and `radicle_did`.
+  - `operators`: a list of approver names allowed to use the admin channel. Each must be in approvers. admind needs exactly one, with an identities.<name>.marmot_npub.
   - `[tiers]`: re-tiering, as `class = "tier"`. The class must be a default action class and the tier one of `auto_approve`, `escalate` or `hard_deny`. A host may raise or lower any class **except a locked one, which can never be lowered**.
 - The others are reserved for later plans: accepted, but not used.
 
