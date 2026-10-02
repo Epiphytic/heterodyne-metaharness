@@ -66,8 +66,8 @@
 
 | # | Decision | Why | ADR |
 |---|---|---|---|
-| B1 | A new `admind/redact.py` replaces each matched secret, npub or 64-or-more-hex run with a marker, and escapes every C0, DEL and C1 character except newline and tab as `\xNN`. The order is fixed: PEM blocks, then the other secrets, then npubs (all on the raw text), then the control escapes, and the hex runs **last**. That order makes it idempotent: an escape starts with a backslash, which no pattern body contains; the patterns' `(?<![A-Za-z0-9])` start rule stops a match from beginning inside an escape; and hex digits that an escape adds next to a hex run are caught in the same pass. Every post goes through it (in `Admind.post`, on the whole text before chunking, and again at delivery), as do the audit (B16), the summarizer's input and `!details`. | `config.secret_scan.show` replaces the **whole** string when anything in it matches. An operator message that holds a commit hash would vanish from the audit, and a reply would become one marker. Newline and tab are layout, not terminal control, and a reply without newlines is unreadable. Escaping after the hex pass is not idempotent: `"\x1b" + "f" * 63` would gain two hex digits on the second pass. | §8 Redaction, Audit |
-| B2 | `AdmindSettings.operators` is a tuple of `Operator(name, npub, hex)`. Operators without `marmot_npub` are skipped; none left, or two with one key, is a `ConfigError`. The daemon re-reads `policy.toml` through an injected `load_operators()` before each add or remove. The authorization map after a commit is computed **before** the commit (B7), so a policy file that can't be read afterwards cannot leave a half-applied change. | "Every entry in `operators` with a Marmot npub is an admind operator"; a temporary operator is added to `policy.toml` while admind runs. | §8 Operators |
+| B1 | A new `admind/redact.py` replaces each matched secret, npub or 64-or-more-hex run with a marker, and escapes every C0, DEL and C1 character except newline and tab as `\xNN`. One pass runs in a fixed order: PEM blocks, then the other secrets, then npubs, then the control escapes, and the hex runs **last** (so hex digits an escape adds next to a run are caught in the same pass). `redact` repeats the pass until the text stops changing (at most 10 passes; text still changing after that becomes `<redacted text>` whole), so it is idempotent by construction: a marker is a boundary, and a token glued to a hex run is only matched once the run is a marker (Codex r2 finding 1). Every post goes through it (in `Admind.post`, on the whole text before chunking, and again at delivery), as do the audit (B16), the summarizer's input and `!details`. | `config.secret_scan.show` replaces the **whole** string when anything in it matches. An operator message that holds a commit hash would vanish from the audit, and a reply would become one marker. Newline and tab are layout, not terminal control, and a reply without newlines is unreadable. Escaping after the hex pass is not idempotent: `"\x1b" + "f" * 63` would gain two hex digits on the second pass. | §8 Redaction, Audit |
+| B2 | `AdmindSettings.operators` is a tuple of `Operator(name, npub, hex)`. Operators without `marmot_npub` are skipped; none left, two with one key, or a name the control socket can't carry (over 128 characters, or a control character) is a `ConfigError`. The daemon re-reads `policy.toml` through an injected `load_operators()` before each add, remove or rearm; the policy read before the change is the one used to authorise after it (B7, B21), so a policy file that can't be read afterwards cannot leave a half-applied change. | "Every entry in `operators` with a Marmot npub is an admind operator"; a temporary operator is added to `policy.toml` while admind runs. | §8 Operators |
 | B3 | The trusted member count is kv `expected_members`. On an initialised install that lacks it (a plan-2 group, which always had exactly two members) it is set to `2` at startup and audited as `migrated`. | Upgrading in place must not latch or trust a wrong count. | §8 Group membership |
 | B4 | `PeerError(ControlError)` is raised only for a wn-agent `error` frame: "wn-agent reported failure". Any other `ControlError` (timeout, closed socket, protocol error) is "unknown". | The commit/abort rule needs exactly that distinction. | §8 transition step 4 |
 | B5 | `membership.settle(reported, count, pending)` is a pure function: `ok` with `to` commits, `failed` with `from` aborts, everything else latches. The daemon also latches, whatever `settle` says, if during the transition a latch was set, the subscription stopped observing, or the subscription generation changed (a replaced subscription may have dropped an event). | Directly testable; matches steps 3–4. Membership events are seen only by a live subscription, so a transition that lost it can't know nothing else happened. | §8 transition |
@@ -75,17 +75,19 @@
 | B7 | A transition runs under `transition_lock` (one add, remove or rearm at a time). It refuses unless the subscription is observing and the group verified. It then takes `work_lock`, which `worker_loop` holds for each operator message, so the message in hand finishes and no new one starts; sets the in-memory flag `changing`, which blocks dispatch and posting through `authorised()`, `may_post()` and `_flush`; and drains a paste in progress (`dispatch_lock`) and a send in progress (`send_lock`, which `outbox_pass` holds across each send) before it reads the count and journals. Every await is followed by a recheck of the latch, observation and subscription generation. `check_group` takes no lock: a check begun during a transition, or overtaken by one (`membership_epoch`), returns "deferred" and changes nothing, so the subscription reader never waits on a transition. An exception after journaling latches; `changing` is cleared only once the change is settled or latched, otherwise it stays set until a restart latches on the pending record (B15) or `rearm`. | Step 1: "serializes it with every guard check and holds dispatch and outbound posting". A flag alone blocks new work but does not drain work already running. Holding `dispatch_lock` for the whole transition would stall the hooks, which also take it. | §8 transition step 1 |
 | B8 | Summarizer launch: `claude -p --model M --tools "" --setting-sources project --settings '{"disableAllHooks": true}' --strict-mcp-config --no-session-persistence --output-format text`, prompt on stdin. It runs in an empty private directory `state_dir/summarizer` and the profile's `args` are **not** appended. Admind appends the footer. Output that is empty, or longer than 10 lines or 2,000 characters, is a failure; stdout is read incrementally and the process is killed once it passes 8,000 bytes. | Headless, read-only, without tools, and unaffected by user-level hooks or MCP servers. `--bare` would need an API key. The ADR's "about 8 lines" gets two lines of slack; the limits stop a runaway "summary" from replacing the backstop, and the byte bound stops one from filling memory. | §8 Replies |
 | B9 | Every stage of a reply is durable. `on_stop` writes the turn record, its verbatim posts and the turn-state change in one transaction; if that fails, a second transaction records the turn straight into the backstop with the same state change, and if that fails too the error reaches `hook_loop`, which holds dispatch. An extraction timeout records a fixed-text turn straight into the backstop. Summary jobs are rows with `turns.status = 'summarizing'`; `summary_loop` polls them from the database (woken by an event, at least every 5 s), so a failure at any step leaves the row for the next pass, without a restart. A summary or verbatim post the outbox gives up on sends its turn to the backstop in the same transaction that marks it failed. | A reply must reach the operator whatever fails: summary, backstop, or at worst dispatch is held. | §8 Replies, Backstop |
-| B10 | A backstop batch is **one** unthreaded message. If the rendered batch (title, origins and the first-10/last-40 lines) is longer than `chunk_chars`, each line after the title is cut to an equal share with `…(+N chars)`; if that still doesn't fit, the end is cut with `… (cut at the message size limit)`. A fixed title line, not counted in the 50, opens every batch. Nothing is lost: `!details` on the batch returns every reply whole. | ADR: "Each batch is one unthreaded message". A message has a size limit, so the only way to keep it one message is to shorten lines, which `!details` undoes. | §8 Backstop |
+| B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time, from the first record after the turn's own prompt up to a later real user prompt. It renders `tool_use` and `tool_result` blocks; thinking blocks are never read out. Each record is capped at 20,000 characters and the whole at 200,000, each with a count of what was cut; a record over 16 MiB is replaced by a line giving its size. | It must show the tool calls of that turn, not of a later one, and must not silently drop the start of a long turn. The caps keep one turn with huge tool output from flooding the chat; this is a deviation from "`!details` has no cap" (flagged to the operator). | §8 `!details full` |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. It renders `tool_use` and `tool_result` blocks whole; thinking blocks are never read out. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
 | B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
 | B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
-| B17 | Upgrading a plan-2 database: when `outbox.lane` is missing, the column is added and the kv marker `outbox_needs_redaction` set in one transaction. At startup, before `recover()`, `Store.redact_pending_outbox` joins each reply's pending chunks in order, redacts the whole, re-chunks it under new keys (`<prefix>:r<i>`), and clears the marker, all in one transaction. A value that straddles the boundary with an already-sent chunk is hidden to its end (`<redacted fragment>`). `outbox_pass` also redacts every row at delivery. | A plan-2 outbox can hold unredacted, chunked replies. The re-keyed chunks may repeat text the operator already received; accuracy over deduplication. | §8 Redaction |
+| B17 | Upgrading a plan-2 database: when `outbox.lane` is missing, the column is added and the kv marker `outbox_needs_redaction` set in one transaction. At startup, before `recover()`, `Store.redact_pending_outbox` joins each reply's pending chunks in order, redacts the whole, re-chunks it under new keys (`<prefix>:r<i>`), and clears the marker, all in one transaction. A value that straddles the boundary with the already-sent chunks is hidden to its end (`<redacted fragment>`); the check runs on **all** the reply's sent chunks joined in order, since a value can span several of them. If any earlier chunk of the reply is missing or not sent, the pending text is replaced whole by `<redacted continuation of a partly sent reply>` (fail closed). `outbox_pass` also redacts every row at delivery. | A plan-2 outbox can hold unredacted, chunked replies. The re-keyed chunks may repeat text the operator already received; accuracy over deduplication. | §8 Redaction |
 | B18 | Failures fail closed. A membership transition that raises after journaling latches (with a fixed reason) before the exception propagates; if even the latch can't be written, `changing` stays set. The control server answers a raising handler with fixed wording. | Step 5 covers a crash; the same must hold for a daemon that keeps running. | §8 transition step 5 |
 | B19 | A turn's transcript span: `UserPromptSubmit` measures the transcript size before taking the turn lock and stores it as kv `turn_start = "<busy>:<offset>"` in the transaction that starts the busy period. `Stop` measures the size on entry, before the lock. The turn record keeps both only if the Stop is `current` and `turn_start` belongs to the busy period the Stop was captured with; otherwise both are NULL and `!details full` says the tool calls are not available. | A stale Stop, a lost prompt hook or a turn that changed during extraction can't be tied to its bytes; saying so is better than showing another turn's tool calls. | §8 `!details full` |
 | B20 | One transcript reader at a time: reply extraction, offset measurement and `!details full` share one reader slot (`Admind.bounded_read`). A read that finds the slot busy or runs past its deadline returns None; the thread runs to completion in the background. Offsets wait 2 s, extraction 10 s, `!details full` 30 s. | A stalled filesystem must not pile up threads (plan 2's extraction rule, extended to the new readers). | §8 `!details full` |
+| B21 | Who may command admind is durable: kv `group_operators` holds the sorted hex keys admind has **confirmed** are in the group. `policy.toml` makes a key eligible; `Admind.operators` is the policy operators whose key is confirmed, and no others. `init` writes all of them; a committed transition writes the change in the same transaction as `expected_members`; `rearm` reconciles it (B22); startup loads it. Upgrading a plan-2 database (no `group_operators`): with exactly one policy operator, that one is confirmed (plan 2 allowed only one); with several, admind latches until a rearm. | A restart must not authorise a policy operator who was never added, nor forget one who was; a lost reply must not leave the map behind the group (Codex r2 finding 4). | §8 Operators, `rearm` |
+| B22 | `rearm` refuses, changing nothing, unless the subscription is acknowledged; it records `sub_gen`, a count of membership events and the latch before reading the count, and refuses if any changed meanwhile. It reconciles the confirmed operators with the trusted count: a pending change whose `to` count matches took effect, one whose `from` count matches did not; the confirmed keys stand if `count == 1 + len(keys)`; else, if `count == 1 +` the number of policy operators, all of them become confirmed (the operator's `rearm` asserts it); else it refuses and explains. **Deviation, flagged:** §8 says rearm takes the count as trusted without conditions; these refusals are added so a rearm can't clear a latch an event set while it ran (Codex r2 finding 3) or authorise operators it can't account for. | A rearm that clears a fresh latch, or trusts a count without knowing who the members are, defeats the latch. | §8 `rearm` |
 
 ## File map
 
@@ -172,6 +174,7 @@ Run it with `uv run python "$S4B/ctl.py" HOME 'JSON'` from `$HZ`. `call(..., dic
   5. `group_member_remove` of opB again (not a member): error code and count.
   6. With admin subscribed through `subscribe_inbound` during 2–3: confirm **no** `group_state_changed` reaches admin's own subscription. With opA subscribed: record the `change` values opA sees.
   7. Kill the admin child (by PID) between sending a `group_member_add` and reading its reply, and record what the client raises. This is the "lost reply" path.
+  8. Admin sends opA one message of exactly 60,000 characters (`backstop.BATCH_MAX_CHARS`: lines of `x` with a line number, newline-separated). Record whether opA receives it whole (compare length and a SHA-256 of the text). If it doesn't, halve the size until one arrives whole, record the largest that did, and set `BATCH_MAX_CHARS` in Task 7 to it.
 
 - [ ] **Step 4: Check the summarizer launch shape with the real CLI.** This is the only place the real `claude` runs in this plan. Use an empty directory and send nothing sensitive.
 
@@ -279,6 +282,14 @@ def test_an_escape_next_to_hex_is_redacted_in_one_pass() -> None:
     assert redact(once) == once
 
 
+def test_a_marker_that_makes_a_boundary_is_redacted_again() -> None:
+    # Codex r2 finding 1: a hex run glued to a token hides it from the token pattern until the run
+    # becomes a marker; the fixpoint loop catches it in the same call.
+    once = redact("f" * 64 + TOKEN)
+    assert once == "<redacted hex key><redacted GitHub token>"
+    assert redact(once) == once
+
+
 def test_a_control_before_a_secret_does_not_hide_it() -> None:
     assert redact("a\x01" + TOKEN) == "a\\x01<redacted GitHub token>"
 
@@ -306,6 +317,8 @@ def test_continuation_hides_the_rest_of_a_split_value() -> None:
     pem_rest = "IN " + "PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\nafter"   # split: gitleaks
     assert redact_continuation("see " + pem_head, pem_rest) == "<redacted fragment>\nafter"
     assert redact_continuation("plain words. ", "more words") == "more words"
+    # A value glued to a hex run that straddles the boundary is found the way redact finds it.
+    assert redact_continuation("f" * 64 + "ghp_AAAA", "A" * 26 + " rest") == "<redacted fragment> rest"
 
 
 def records(path: Path) -> list[dict[str, object]]:
@@ -369,11 +382,13 @@ Each match is replaced by a marker and the rest of the text is kept: secrets (th
 digits. Newline and tab are kept (they are layout); every other C0, DEL and C1 character is escaped as
 `\\xNN`.
 
-The order makes it idempotent. Secrets and npubs are matched on the raw text; then controls are
-escaped; then hex runs are replaced, last, so hex digits an escape adds next to a run are caught in
-the same pass. An escape starts with a backslash, which no pattern body contains, and every secret
-pattern refuses to start right after a letter or digit, so no match can begin inside an escape.
-Markers contain nothing that matches again.
+One pass matches secrets and npubs on the text, then escapes controls, then replaces hex runs, so hex
+digits an escape adds next to a run are caught in the same pass. A pass can still make a new match: a
+marker is a boundary, and a secret pattern that refused to start right after a hex digit starts right
+after `>`. So `redact` repeats the pass until the text stops changing, which makes it idempotent by
+construction. Each pass that changes the text replaces at least one match by a marker, and markers
+match nothing, so this ends quickly; `MAX_PASSES` is a backstop, and text that is still changing after
+it becomes `UNSTABLE` whole (fail closed).
 """
 
 import re
@@ -388,9 +403,11 @@ _NPUB = dict(IDENTIFIER_VALUES)["npub"]
 _HEX_RUN = re.compile(r"[0-9A-Fa-f]{64,}")
 _CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 FRAGMENT = "<redacted fragment>"
+UNSTABLE = "<redacted text>"
+MAX_PASSES = 10
 
 
-def redact(text: str) -> str:
+def _pass(text: str) -> str:
     text = _PEM.sub("<redacted PEM private key>", text)
     for kind, pattern in _SECRETS:
         text = pattern.sub(f"<redacted {kind}>", text)
@@ -399,10 +416,27 @@ def redact(text: str) -> str:
     return _HEX_RUN.sub("<redacted hex key>", text)
 
 
+def redact(text: str) -> str:
+    for _ in range(MAX_PASSES):
+        after = _pass(text)
+        if after == text:
+            return text
+        text = after
+    return UNSTABLE
+
+
 def _spans(text: str) -> Iterator[tuple[int, int]]:
-    for pattern in (_PEM, *(p for _, p in _SECRETS), _NPUB, _HEX_RUN):
-        for m in pattern.finditer(text):
-            yield m.start(), m.end()
+    """Every span `redact` would hide, in offsets of `text`. Like `redact`, it repeats: found spans are
+    masked with `<` (a boundary, as a marker is) at the same length, and the text is scanned again."""
+    patterns = (_PEM, *(p for _, p in _SECRETS), _NPUB, _HEX_RUN)
+    for _ in range(MAX_PASSES):
+        found = [(m.start(), m.end()) for p in patterns for m in p.finditer(text)]
+        if not found:
+            return
+        yield from found
+        for start, end in found:
+            text = text[:start] + "<" * (end - start) + text[end:]
+    yield 0, len(text)          # still finding after the backstop: treat it all as one value
 
 
 def redact_continuation(previous: str, text: str) -> str:
@@ -513,7 +547,11 @@ git commit -m "feat(admind): one redaction for posts and audit; untruncated audi
   - `guard.judge_member_count(count: int, expected: int) -> Verdict`;
   - `Admind.expected_members() -> int`;
   - `Admind.load_operators: Callable[[], tuple[Operator, ...]]`;
-  - `Admind.operators: dict[str, str]` (hex → name);
+  - `Admind.policy_operators: tuple[Operator, ...]` (the policy's operators with an npub, as last loaded);
+  - kv `group_operators`: a JSON sorted list of the hex keys of the operators admind has confirmed are in the group (B21);
+  - `Admind.confirmed_operators() -> set[str] | None` and `Admind.authorise(confirmed: Iterable[str]) -> None`;
+  - `Admind.operators: dict[str, str]` (hex → name): the policy operators whose key is in `group_operators`, and no others;
+  - `settings.MAX_NAME = 128` and `settings.NAME_CONTROLS`, shared with the control server (Task 6);
   - `tests/fakes/settings.py` exports `OPERATOR_HEX`, `SECOND_HEX = "d4" * 32` and `operator(name, hex) -> Operator`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -568,6 +606,16 @@ def test_duplicate_keys_are_an_error(tmp_path: Path) -> None:
         resolve(load(None, env), env)
 
 
+@pytest.mark.parametrize("name", ["x" * 129, "bad\x1bname", "tab\tname"])
+def test_operator_names_follow_the_control_contract(tmp_path: Path, name: str) -> None:
+    # Codex r2 finding 10: a name `admind operators remove NAME` can't carry is refused in policy too.
+    body = (f'approvers = ["{name}"]\noperators = ["{name}"]\n'
+            f'[identities."{name}"]\nmarmot_npub = "{hex_to_npub(OPERATOR_HEX)}"\n')
+    env = policy(tmp_path, body.replace("\x1b", "\\u001b").replace("\t", "\\t"))
+    with pytest.raises(ConfigError, match="operator name"):
+        resolve(load(None, env), env)
+
+
 def msg(sender: str) -> InboundMessage:
     return InboundMessage("a1" * 32, GROUP, Message("0" * 64, Sender(sender, False), "hi", 1))
 
@@ -585,15 +633,18 @@ def test_member_count_against_expected() -> None:
     assert v.action == "latch" and v.reason == "group has 2 members, expected 3"
 ```
 
-Add a daemon test, built with the shared harness:
+Add daemon tests, built with the shared harness:
 - two operators (`make_settings(tmp_path, operators=(operator("a", OPERATOR_HEX), operator("b", SECOND_HEX)))`);
 - `FakeWnAgent(member_count=3)`;
-- kv `expected_members = "3"`.
+- kv `expected_members = "3"` and kv `group_operators = json.dumps(sorted([OPERATOR_HEX, SECOND_HEX]))`.
 
-It asserts:
+They assert:
 1. a message from `SECOND_HEX` is processed, and its audit `inbound` record has `operator == "b"`;
 2. a stranger is dropped;
-3. with `expected_members` absent and `member_count=2`, startup sets it to `"2"` and audits `{"kind": "guard", "action": "migrated"}`.
+3. with `expected_members` absent and `member_count=2`, startup sets it to `"2"` and audits `{"kind": "guard", "action": "migrated"}`;
+4. **configured is not confirmed:** with kv `group_operators = json.dumps([OPERATOR_HEX])` and `member_count=2, expected_members="2"`, a message from `SECOND_HEX` (in policy, not in the group) is dropped as "sender is not an operator";
+5. **the plan-2 upgrade with one policy operator:** the default settings (one operator), `group_operators` absent: startup sets it to `[OPERATOR_HEX]`, audits `{"kind": "guard", "action": "migrated-operators", "operators": 1}`, and that operator's message is processed;
+6. **the plan-2 upgrade with several policy operators:** two operators, `group_operators` absent, `member_count=2`: startup latches (reason starts "admind does not know which operators are in the group") and leaves `group_operators` absent; `h.daemon.operators == {}`. (Task 5's scenario 18 rearms it.)
 
 (`Harness.__init__` takes the settings from `make_settings`; add an optional `settings_overrides` argument to `Harness` in `tests/test_admind_daemon.py` and pass it through.)
 
@@ -609,14 +660,23 @@ class Operator:
     hex: str
 
 
+MAX_NAME = 128
+NAME_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
 def operators(cfg: Config) -> tuple[Operator, ...]:
-    """Every `policy.toml` operator with `identities.<name>.marmot_npub` (ADR 0001 §8, revision 13)."""
+    """Every `policy.toml` operator with `identities.<name>.marmot_npub` (ADR 0001 §8, revision 13).
+    Its name must be one `admind operators add|remove NAME` can carry: 1 to `MAX_NAME` characters and no
+    control characters (the control server checks the same, Task 6)."""
     found: list[Operator] = []
     seen: set[str] = set()
     for name in cfg.policy.operators:
         npub = cfg.policy.identities.get(name, {}).get("marmot_npub")
         if not npub:
             continue
+        if not 1 <= len(name) <= MAX_NAME or NAME_CONTROLS.search(name):
+            raise ConfigError(f"policy.toml: operator name {show(name, False)!r} must be 1-{MAX_NAME} "
+                              "characters with no control characters")
         where = f"policy.toml: identities.{show(name, False)}.marmot_npub"
         try:
             key = npub_to_hex(npub).lower()
@@ -632,7 +692,7 @@ def operators(cfg: Config) -> tuple[Operator, ...]:
     return tuple(found)
 ```
 
-Delete `_operator`. In `AdmindSettings`, replace `operator_hex` and `operator_npub` with `operators: tuple[Operator, ...]`, and in `resolve` pass `operators=operators(cfg)`.
+Delete `_operator`. Add `import re`. In `AdmindSettings`, replace `operator_hex` and `operator_npub` with `operators: tuple[Operator, ...]`, and in `resolve` pass `operators=operators(cfg)`.
 
 `tests/fakes/settings.py`:
 
@@ -687,7 +747,22 @@ Update the module docstring:
 
 ```python
         self.load_operators = load_operators or (lambda: settings.operators)
-        self.operators: dict[str, str] = {o.hex: o.name for o in settings.operators}
+        self.policy_operators = settings.operators
+        self.operators: dict[str, str] = {}     # set by run() from group_operators (B21)
+```
+
+  - The durable authorization state (B21). Being in `policy.toml` makes a key **eligible**; only a confirmed group membership (a committed transition, `init`, or a rearm) makes it **authorised**:
+
+```python
+    def confirmed_operators(self) -> set[str] | None:
+        """The keys admind has confirmed are in the group; None before the plan-2 migration."""
+        raw = self.store.get("group_operators")
+        return None if raw is None else {str(k) for k in json.loads(raw)}
+
+    def authorise(self, confirmed: Iterable[str]) -> None:
+        """Who may command admind: the policy operators whose key is confirmed in the group."""
+        keys = set(confirmed)
+        self.operators = {o.hex: o.name for o in self.policy_operators if o.hex in keys}
 ```
 
   - `expected_members`:
@@ -704,13 +779,27 @@ Update the module docstring:
         if self.store.get("expected_members") is None:     # a plan-2 group: always two members (B3)
             self.store.set("expected_members", "2")
             self.audit.write("guard", action="migrated", expected_members=2)
+        confirmed = self.confirmed_operators()
+        if confirmed is None:          # a plan-2 database (B21)
+            if len(self.policy_operators) == 1:     # plan 2 allowed exactly one operator, so it is that one
+                confirmed = {self.policy_operators[0].hex}
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.audit.write("guard", action="migrated-operators", operators=1)
+            else:
+                confirmed = set()
+                self.latch("admind does not know which operators are in the group (upgraded with several "
+                           "operators in policy.toml); make policy.toml's operators match the group's, then "
+                           "run `admind rearm` on the host")
+        self.authorise(confirmed)
 ```
+
+  Imports: `json`, and `Iterable` from `collections.abc`.
 
   - `check_group`: `verdict = guard.judge_member_count(info.member_count, self.expected_members())`.
   - `on_message`: `verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators, latched=self.latched())`. The `inbound` audit record gets `operator=verdict.operator`.
   - `cli.init`:
     - `created = await client.group_create(account, s.group_name, [o.npub for o in s.operators])`;
-    - in the same block, `store.set("expected_members", str(1 + len(s.operators)))`;
+    - in the same block, in one `store.transaction()`, `store.set("expected_members", str(1 + len(s.operators)))` and `store.set("group_operators", json.dumps(sorted(o.hex for o in s.operators)))`;
     - the final message becomes "Created admind's identity and its group with N operator(s). Each operator accepts the invite in their Marmot client; then start admind and send any message in the group: admind answers once it sees one of you."
   - `cli._run_with_child` passes `load_operators=lambda: resolve(hconfig.load(), os.environ).operators` to `Admind`.
 
@@ -817,13 +906,33 @@ def test_upgrade_hides_the_rest_of_a_value_begun_in_a_sent_chunk(tmp_path: Path)
     assert pending(s) == [("reply:s:2:r0", "<redacted fragment> end")]
 
 
+def test_upgrade_hides_a_value_that_spans_several_sent_chunks(tmp_path: Path) -> None:
+    # Codex r2 finding 2: the chunk just before the pending one holds no token prefix.
+    long_token = "ghp_" + "Z" * 600
+    old_database(tmp_path / "old.db", [("reply:s:3:0", long_token[:250], "sent"),
+                                       ("reply:s:3:1", long_token[250:500], "sent"),
+                                       ("reply:s:3:2", long_token[500:] + " end", "pending")])
+    s = Store(tmp_path / "old.db")
+    s.redact_pending_outbox(4000)
+    assert pending(s) == [("reply:s:3:r0", "<redacted fragment> end")]
+
+
+def test_upgrade_hides_a_continuation_whose_start_is_gone(tmp_path: Path) -> None:
+    old_database(tmp_path / "old.db", [("reply:s:4:0", "start", "sent"),
+                                       ("reply:s:4:2", "Z" * 40 + " end", "pending")])   # :1 is missing
+    s = Store(tmp_path / "old.db")
+    s.redact_pending_outbox(4000)
+    assert pending(s) == [("reply:s:4:r0", "<redacted continuation of a partly sent reply>")]
+
+
 def test_upgrade_rechunks(tmp_path: Path) -> None:
-    old_database(tmp_path / "old.db", [("cmd:x:0", "a" * 300, "pending"), ("cmd:x:1", "b" * 300, "pending")])
+    # Not hex: a 600-character hex run would be one marker.
+    old_database(tmp_path / "old.db", [("cmd:x:0", "x" * 300, "pending"), ("cmd:x:1", "y" * 300, "pending")])
     s = Store(tmp_path / "old.db")
     s.redact_pending_outbox(250)
     rows = pending(s)
     assert [k for k, _ in rows] == ["cmd:x:r0", "cmd:x:r1", "cmd:x:r2"]
-    assert "".join(t for _, t in rows) == "a" * 300 + "b" * 300
+    assert "".join(t for _, t in rows) == "x" * 300 + "y" * 300
 
 
 def test_a_new_database_needs_no_upgrade(tmp_path: Path) -> None:
@@ -859,6 +968,12 @@ Daemon tests with the shared harness:
 
 ```python
 _CHUNKED = re.compile(r"\A(.*):(\d+)\Z", re.DOTALL)
+PARTLY_SENT = "<redacted continuation of a partly sent reply>"
+
+
+def _like(text: str) -> str:
+    """`text` as a literal LIKE prefix (escape `\\`, `%` and `_`)."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
     @_locked
@@ -875,8 +990,9 @@ _CHUNKED = re.compile(r"\A(.*):(\d+)\Z", re.DOTALL)
         """Once, after the upgrade to revision 13 (B17): redact what a plan-2 admind queued and never sent.
         The pending chunks of one reply (keys `<prefix>:<i>`) are joined in order first, so a value split
         across their boundaries is still found, then re-chunked under new keys `<prefix>:r<i>`. If the
-        chunk before them was already sent, a value it began is hidden to its end. Returns the number of
-        rows rewritten; one transaction."""
+        reply's earlier chunks were already sent, they are joined in order and a value they began is hidden
+        to its end (it can span several of them); if one of them is missing or not sent, the pending text is
+        replaced whole (fail closed). Returns the number of rows rewritten; one transaction."""
         if self.get("outbox_needs_redaction") is None:
             return 0
         with self.transaction():
@@ -892,10 +1008,18 @@ _CHUNKED = re.compile(r"\A(.*):(\d+)\Z", re.DOTALL)
                 parts.sort()
                 first, reply_to = parts[0][0], parts[0][2]
                 joined = "".join(p[3] for p in parts)
-                before = None if first <= 0 else self.db.execute(
-                    "SELECT text FROM outbox WHERE key = ? AND status != 'pending'",
-                    (f"{prefix}:{first - 1}",)).fetchone()
-                clean = redact(joined) if before is None else redact_continuation(str(before[0]), joined)
+                if first <= 0:
+                    clean = redact(joined)
+                else:
+                    sent = self.db.execute(
+                        "SELECT key, text FROM outbox WHERE key LIKE ? ESCAPE '\\' AND status = 'sent'",
+                        (_like(prefix) + ":%",)).fetchall()
+                    earlier = {int(m.group(2)): str(t) for k, t in sent
+                               if (m := _CHUNKED.match(str(k))) and m.group(1) == prefix}
+                    if all(i in earlier for i in range(first)):
+                        clean = redact_continuation("".join(earlier[i] for i in range(first)), joined)
+                    else:
+                        clean = PARTLY_SENT
                 self.db.executemany("DELETE FROM outbox WHERE seq = ?", [(p[1],) for p in parts])
                 if first < 0:       # an unchunked key keeps its key
                     pieces = [(prefix, clean)]
@@ -983,7 +1107,7 @@ Review against §8 Delivery lanes and Redaction, and B14 and B17.
 
 **Interfaces:**
 - Consumes:
-  - `Admind.expected_members()`, `Admind.load_operators` and `Admind.operators` (Task 3);
+  - `Admind.expected_members()`, `Admind.load_operators`, `Admind.policy_operators`, `Admind.operators`, `confirmed_operators()`, `authorise()` and kv `group_operators` (Task 3);
   - `Admind.send_lock` (Task 4);
   - `docs/spikes/S4b-membership.md` (Task 1): the error codes to allowlist.
 - Produces:
@@ -994,9 +1118,9 @@ Review against §8 Delivery lanes and Redaction, and B14 and B17.
   - `membership.settle(reported: Reported, count: int | None, pending: Pending) -> Outcome`;
   - `Admind.change_membership(op: str, name: str) -> tuple[str, str]`, whose result is one of `committed`, `aborted`, `latched` or `refused`;
   - `Admind.rearm() -> tuple[str, str]`, whose result is `rearmed` or `refused`;
-  - `Admind.changing: bool`, `Admind.membership_epoch: int`;
+  - `Admind.changing: bool`, `Admind.membership_epoch: int`, `Admind.group_events: int`;
   - `Admind.transition_lock` and `Admind.work_lock`, both `asyncio.Lock`;
-  - in the fake: `membership_mode` (`ok`, `fail`, `ok-no-count`, `fail-count`, `hang`, `gated`), `membership_gate: asyncio.Event` and `drop_subscriptions()`.
+  - in the fake: `membership_mode` (`ok`, `fail`, `ok-no-count`, `fail-count`, `hang`, `lost`, `gated`), `membership_gate: asyncio.Event`, `info_gate: asyncio.Event | None` and `drop_subscriptions()`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1026,7 +1150,7 @@ def test_pending_round_trips() -> None:
     assert Pending.load(P.dump()) == P
 ```
 
-Daemon scenarios, in the same file, with the shared harness, `FakeWnAgent(member_count=2)`, and a `load_operators` stub that returns operators `op` and `b`. Each scenario first sends the join signal and waits for "listening", so the subscription is observing and the group verified. Start a transition with `task = asyncio.create_task(h.daemon.change_membership("add", "b"))`; `requested(h, kind)` is `any(r.get("type") == kind for r in h.fake.requests)`.
+Daemon scenarios, in the same file, with the shared harness, `FakeWnAgent(member_count=2)`, a `load_operators` stub that returns operators `op` and `b` (`policy` below), kv `expected_members = "2"` and kv `group_operators = [OPERATOR_HEX]`. Each scenario first sends the join signal and waits for "listening", so the subscription is observing and the group verified. Start a transition with `task = asyncio.create_task(h.daemon.change_membership("add", "b"))`; `requested(h, kind)` is `any(r.get("type") == kind for r in h.fake.requests)`.
 
 1. **commit:** the call returns `("committed", …)`:
    - `expected_members == "3"`;
@@ -1034,7 +1158,7 @@ Daemon scenarios, in the same file, with the shared harness, `FakeWnAgent(member
    - the fake received a `group_member_add` with `members == [SECOND_HEX]`;
    - the audit records `pending` then `committed`;
    - a notice "Operator b was added to the group." is posted;
-   - `h.daemon.operators` now maps `SECOND_HEX` to `"b"`, and `changing` is false.
+   - `h.daemon.operators` now maps `SECOND_HEX` to `"b"`, kv `group_operators` holds both keys, and `changing` is false.
 2. **abort:** with `fake.membership_mode = "fail"`, the call returns `("aborted", …)`, `expected_members == "2"`, and nothing is latched.
 3. **latch on disagreement:** `"ok-no-count"` (success, count unchanged) and `"fail-count"` (error, count changed) each return `("latched", …)`, with `latched` set and `membership_pending` kept.
 4. **latch on a lost reply:** with `"hang"`, a `ControlClient` timeout of 0.5 s gives `("latched", …)`.
@@ -1043,14 +1167,23 @@ Daemon scenarios, in the same file, with the shared harness, `FakeWnAgent(member
 7. **holds and drains:**
    - **A paste in progress:** the test acquires `h.daemon.dispatch_lock` itself, then starts the add. For 0.3 s: `changing` is true, `may_post()` and `authorised()` are false, and the fake has **no** `group_info` or `group_member_add` request after the one the join signal caused (count them before). After `dispatch_lock.release()` the add commits.
    - **A send in progress:** the same, holding `h.daemon.send_lock`.
-   - **The operator message in hand:** the same, holding `h.daemon.work_lock`.
+   - **The operator message in hand:** the test holds `h.daemon.work_lock`, then starts the add. For 0.3 s the fake has no new `group_info` or `group_member_add` request. (`changing` stays false meanwhile: the transition sets it only once it holds `work_lock`, so the message in hand is finished under the old rules rather than deferred.) After `work_lock.release()` the add commits.
 8. **a message during a transition waits and is then processed:** with `"gated"`, wait for the request, `mid = await h.say("hello during the change")`, sleep 0.3 s and assert the message is not in `h.store.inbound_with_status("dropped")` and the fake claude log (`h.log`) doesn't contain it. Open the gate. The add commits, then the prompt is pasted (the log contains it) and no `UNVERIFIED` text is sent.
 9. **group checks during a transition are deferred:** with `"gated"`, wait for the request, then `assert await h.daemon.check_group() is False`. The audit has `{"kind": "guard", "action": "group-check-deferred"}`, nothing is latched and `group_ok` is still true. Open the gate; the add commits.
 10. **an exception after journaling latches:** replace `h.daemon.client.group_member_add` with an async function that raises `RuntimeError`. `change_membership` raises `RuntimeError`; afterwards `latched` is set (reason starts "a membership change failed before it was settled"), `membership_pending` is kept and `changing` is false.
 11. **if even the latch fails, the hold stays:** as in (10), and also replace `h.daemon.latch` with a function that raises `OSError`. `change_membership` raises; `changing` is still true, `may_post()` is false, `membership_pending` is kept, and the audit has `{"kind": "membership", "action": "held-unsettled"}`. (The restart that follows latches: scenario 13.)
 12. **refusals, each changing nothing and sending no `group_member_*` request:** unknown name; adding `b` when it is already in `h.daemon.operators`; removing the last operator (`expected_members` 2, remove `op`); latched; a pending record already present; not observing (call it before the join signal's check has run: set `h.daemon.observing = False` first); `load_operators` raising `ConfigError`.
 13. **startup latch:** with `membership_pending` set before `run()`, the daemon latches before dispatching anything and audits the reason.
-14. **rearm:** after (3), `rearm()` reads the count, sets `expected_members` to it, clears `latched` and `membership_pending`, and posting resumes. After (11), `rearm()` also clears `changing`. With `fake.fail_group_info = True` it returns `("refused", …)` and changes nothing. With a count of 1 it is refused.
+14. **rearm:** after (3), `rearm()` reads the count, sets `expected_members` to it, clears `latched` and `membership_pending`, and posting resumes. After (11), `rearm()` also clears `changing`. With `fake.fail_group_info = True` it returns `("refused", …)` and changes nothing. With a count of 1 it is refused. With `h.daemon.acked = False` (not watching) it is refused before any `group_info` request.
+15. **rearm races an event (Codex r2 finding 3):** latch via (3), then `h.fake.info_gate = asyncio.Event()`; start `task = asyncio.create_task(h.daemon.rearm())`; wait until the fake has a new `group_info` request; push a `group_state_changed` `member_added` event and wait until `h.daemon.group_events` grows; set the gate. `rearm` returns `("refused", …)`; `latched` is still set and `expected_members` unchanged. The same with `drop_subscriptions()` instead of the event (`sub_gen` changes): refused.
+16. **lost reply on an add, then rearm (Codex r2 finding 4):** `membership_mode = "lost"` (the fake applies the change, then never answers) and a `ControlClient` timeout of 0.5 s: `("latched", …)`; `group_operators` is still `[OPERATOR_HEX]`. `rearm()` reads 3, which is the pending record's `to` count: it returns `rearmed`, `group_operators` holds both keys, and a message from `SECOND_HEX` is processed.
+17. **lost reply on a remove, then rearm:** start with `group_operators` both keys, `expected_members = "3"`, `member_count=3`; `"lost"` on `change_membership("remove", "b")` latches; `rearm()` reads 2 (`to`): `group_operators == [OPERATOR_HEX]` and a message from `SECOND_HEX` is dropped. A variant where the fake did **not** apply the change (`"hang"`): `rearm()` reads 3 (`from`): `group_operators` keeps both keys.
+18. **rearm reconciliation without a record:** latched, no pending record, `group_operators` absent or out of step:
+   - the count equals 1 + the confirmed keys: those stay;
+   - otherwise, the count equals 1 + the policy operators: all of them become confirmed (the operator asserts it by running `rearm`; audit `{"action": "rearm", "operators": "policy"}`);
+   - otherwise refused ("the group has 3 members but policy.toml lists 1 operator…"), nothing changed, still latched.
+   Covers Task 3's scenario 6 (count 3, two policy operators → rearmed, both confirmed; count 2 → refused).
+19. **restart after a commit:** commit the add of `b` as in (1), close the daemon, and start a new `Admind` on the same state directory with the same two-operator settings: `b` is authorised from `group_operators` (its message is processed) without any rearm. A second restart with a policy that no longer lists `b`: `b`'s message is dropped (policy makes a key eligible; the group makes it authorised).
 
 - [ ] **Step 2: Run the tests and confirm they fail.** Expected: `ModuleNotFoundError: heterodyne.admind.membership`.
 
@@ -1129,7 +1262,10 @@ class MembershipUpdated(msgspec.Struct, frozen=True):
 ```python
         self.membership_mode = "ok"         # ok, fail, ok-no-count, fail-count, hang, gated
         self.membership_gate = asyncio.Event()      # "gated": the request waits until the test sets it
+        self.info_gate: asyncio.Event | None = None # when set to an Event, group_info waits for it
 ```
+
+and the existing `group_info` branch of `_handle` starts with `if self.info_gate is not None: await self.info_gate.wait()`.
 
 In `_handle`:
 
@@ -1143,6 +1279,9 @@ In `_handle`:
         mode = self.membership_mode
         delta = len(req["members"]) * (1 if kind == "group_member_add" else -1)
         if mode == "hang":
+            await asyncio.sleep(3600)
+        if mode == "lost":                  # the change happens; the reply never comes
+            self.member_count += delta
             await asyncio.sleep(3600)
         if mode == "gated":
             await self.membership_gate.wait()
@@ -1173,7 +1312,10 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
         self.work_lock = asyncio.Lock()         # held by worker_loop for each operator message
         self.changing = False                   # a transition holds dispatch and posting (B7)
         self.membership_epoch = 0               # bumped when a transition or rearm begins; see check_group
+        self.group_events = 0                   # membership events seen; rearm refuses if one arrives meanwhile
 ```
+
+  - `on_event`: the `GroupStateChanged` branch starts with `self.group_events += 1`, before it judges the event.
 
   - `may_post()` and `authorised()` both gain `and not self.changing`, and `_flush`'s first gate becomes `if self.latched() or not self.group_ok or not self.observing or self.changing:`.
   - `worker_loop` holds `work_lock` for each message:
@@ -1261,13 +1403,12 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
                 if target.hex in self.operators:
                     return "refused", f"{name} is already an operator in the group; nothing changed."
                 member_hex = target.hex
-                new_ops = {**self.operators, target.hex: target.name}
             else:
                 found = [key for key, known in self.operators.items() if known == name]
                 if not found:
                     return "refused", f"{name} is not an operator in the group; nothing changed."
                 member_hex = found[0]
-                new_ops = {key: known for key, known in self.operators.items() if key != member_hex}
+            policy = tuple(loaded.values())
             # Step 1: hold. The message in hand finishes first; then nothing new is dispatched or sent, and
             # a paste or a send already under way is waited for, before the count is read.
             async with self.work_lock:
@@ -1318,7 +1459,7 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
                     outcome = membership.settle(reported, after, pending)
                     if self.latched() or not self.observing or generation != self.sub_gen:
                         outcome = "latch"   # an event, a latch or a lost subscription during it (step 3, B5)
-                    result = self.settle_membership(pending, outcome, reported, after, new_ops)
+                    result = self.settle_membership(pending, outcome, reported, after, policy)
                     settled = True
                     return result
                 except BaseException:
@@ -1349,17 +1490,20 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
         return "ok"
 
     def settle_membership(self, pending: membership.Pending, outcome: membership.Outcome, reported: str,
-                          after: int | None, new_ops: dict[str, str]) -> tuple[str, str]:
-        """Apply the outcome. A commit writes the count, clears the record and queues the notice in one
-        transaction, then switches to the authorization map computed before the change (B2)."""
+                          after: int | None, policy: tuple[Operator, ...]) -> tuple[str, str]:
+        """Apply the outcome. A commit writes the count, the confirmed operators (B21) and the notice and
+        clears the record in one transaction, then authorises from them (B2)."""
         if outcome == "commit":
             verb = "added to" if pending.op == "add" else "removed from"
+            confirmed = applied(self.confirmed_operators() or set(), pending)
             with self.store.transaction():
                 self.store.set("expected_members", str(pending.to_count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
                 self.store.delete("membership_pending")
                 self.post(f"membership:{pending.started}:{pending.op}",
                           f"Operator {pending.name} was {verb} the group.", None)
-            self.operators = new_ops
+            self.policy_operators = policy
+            self.authorise(confirmed)
             self.audit_quietly("membership", action="committed", op=pending.op, operator=pending.name,
                                member_count=pending.to_count)
             return "committed", f"Operator {pending.name} was {verb} the group ({pending.to_count} members)."
@@ -1374,28 +1518,86 @@ In `_subscribe`, end the stream on that marker: after `event = await queue.get()
 
     async def rearm(self) -> tuple[str, str]:
         """`admind rearm`: trust the current member count and clear the latch, any pending change and a
-        held transition (§8: "takes the current member count as trusted")."""
+        held transition (§8: "takes the current member count as trusted"). It also reconciles which
+        operators are confirmed in the group (B21), and refuses, changing nothing, if the count can't be
+        reconciled with them or if the group changed while the count was read (B22)."""
         async with self.transition_lock:
+            if not self.acked:
+                return "refused", ("admind is not subscribed to the group's events right now, so a change "
+                                   "during rearm could be missed; nothing changed. Try again shortly.")
+            try:
+                policy = self.load_operators()
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("guard", action="rearm-refused", why="policy-unreadable", error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
+            generation, events, latched_before = self.sub_gen, self.group_events, self.store.get("latched")
             try:
                 count = (await self.client.group_info(self.account, self.group)).member_count
             except ControlError as exc:
                 return "refused", f"could not read the group's member count ({exc.code}); nothing changed."
+            if (not self.acked or generation != self.sub_gen or events != self.group_events
+                    or self.store.get("latched") != latched_before):
+                self.audit_quietly("guard", action="rearm-refused", why="changed-meanwhile")
+                return "refused", ("the group changed while rearm read it (a membership event, a new latch or "
+                                   "a resubscription); nothing changed. Check the group's members, then run "
+                                   "`admind rearm` again.")
             if count < 2:
                 return "refused", f"the group has {count} member(s) and no operator; nothing changed."
+            confirmed, how = reconcile(count, self.confirmed_operators(), self.store.get("membership_pending"),
+                                       policy)
+            if confirmed is None:
+                self.audit_quietly("guard", action="rearm-refused", why="operators-unknown", member_count=count,
+                                   policy_operators=len(policy))
+                return "refused", (f"the group has {count} members but policy.toml lists {len(policy)} "
+                                   f"operator(s) and admind has confirmed {how}; make policy.toml's operators "
+                                   "match the group's members, then run `admind rearm` again. Nothing changed.")
             previous = self.store.get("latched")
             with self.store.transaction():
                 self.store.set("expected_members", str(count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
                 self.store.delete("membership_pending")
                 self.store.delete("latched")
+            self.policy_operators = policy
+            self.authorise(confirmed)
             self.changing = False           # a transition held unsettled (B18) ends here
             self.membership_epoch += 1      # a check begun before this one judged against the old count
-            self.audit_quietly("guard", action="rearm", member_count=count, previous=previous)
+            self.audit_quietly("guard", action="rearm", member_count=count, previous=previous, operators=how)
         await self.check_group()
         self.wake.set()
         return "rearmed", f"Cleared the latch; the trusted member count is now {count}."
 ```
 
-  Imports: `from heterodyne.admind import membership` and `from heterodyne.marmot.control import PeerError`.
+  - Module-level helpers (pure; unit-tested in the same file with a table like `test_settle`):
+
+```python
+def applied(confirmed: set[str], pending: membership.Pending) -> set[str]:
+    """The confirmed keys once `pending` took effect."""
+    return confirmed | {pending.member_hex} if pending.op == "add" else confirmed - {pending.member_hex}
+
+
+def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
+              policy: tuple[Operator, ...]) -> tuple[set[str] | None, str]:
+    """Which operators rearm confirms for a trusted `count` (B21). Returns (keys, how), or (None, what
+    admind had) when the count can't be reconciled. A pending change whose `to` count matches took effect;
+    one whose `from` count matches did not. Then the confirmed keys stand if the count fits them; else,
+    if the count fits every policy operator, the operator's rearm asserts they are all in the group."""
+    keys = set() if confirmed is None else set(confirmed)
+    if pending_raw is not None:
+        pending = membership.Pending.load(pending_raw)
+        if count == pending.to_count:
+            keys = applied(keys, pending)
+    eligible = {o.hex for o in policy}
+    keys &= eligible
+    if confirmed is not None and count == 1 + len(keys):
+        return keys, "confirmed"
+    if count == 1 + len(eligible):
+        return eligible, "policy"
+    return None, f"{len(keys)}"
+```
+
+  (`keys &= eligible` drops a confirmed key whose operator left `policy.toml`: it can no longer be authorised, and the count check then tells whether it is still in the group.)
+
+  Imports: `json`, `from heterodyne.admind import membership`, `from heterodyne.admind.settings import Operator` and `from heterodyne.marmot.control import PeerError`.
 
   Lock order, which keeps this free of deadlock: `transition_lock` → `work_lock` → `dispatch_lock` (briefly) → `send_lock` (briefly). `worker_loop` takes `work_lock` → `dispatch_lock` (`!interrupt`, `!new`, `flush`); `outbox_pass` calls `flush` before it takes `send_lock`, never under it; hooks take only `dispatch_lock`. Nothing that holds `dispatch_lock` or `send_lock` waits for `work_lock` or `transition_lock`.
 
@@ -1544,7 +1746,6 @@ The socket is 0600 inside the 0700 state directory; anything able to use it can 
 import asyncio
 import contextlib
 import os
-import re
 import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -1553,13 +1754,12 @@ from typing import Literal
 import msgspec
 
 from heterodyne.admind.audit import Audit
+from heterodyne.admind.settings import MAX_NAME, NAME_CONTROLS as CONTROL   # one contract with policy (B2)
 from heterodyne.admind.store import private_dir
 
 CTL_SOCKET = "ctl.sock"
 MAX_REQUEST = 4096
 READ_SECONDS = 5.0
-MAX_NAME = 128
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 INTERNAL_ERROR = "admind hit an internal error; see the audit log."
 
 
@@ -1737,7 +1937,7 @@ git commit -m "feat(admind): host control socket; operators add|remove and rearm
   - `AdmindSettings` gains `summarizer: Mapping[str, Any] | None`, `summarizer_binary: str | None`, `reply_verbatim_lines: int` and `reply_verbatim_chars: int`;
   - from `summarize`: `SUMMARY_TIMEOUT = 60.0`, `FOOTER`, `SummaryFailed(reason)`, `needs_summary(text, lines, chars) -> bool`, and `async summarize(argv, cwd, reply, timeout) -> str`;
   - from `summarize` also `MAX_LINES = 10`, `MAX_CHARS = 2000` and `MAX_BYTES = 8000`;
-  - from `backstop`: `BATCH_SECONDS = 60.0`, `TITLE`, `CUT`, `Entry(origin, text)`, `first_words(text) -> str`, `origin(operator, at_iso, words) -> str`, `collapse(lines) -> list[str]`, `render(entries) -> str` and `fit(text, limit) -> str`.
+  - from `backstop`: `BATCH_SECONDS = 60.0`, `BATCH_MAX_CHARS = 60000`, `TITLE`, `CUT`, `Entry(origin, text)`, `first_words(text) -> str`, `origin(operator, at_iso, words) -> str`, `collapse(lines) -> list[str]`, `render(entries) -> str` and `fit(text, limit) -> str`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1844,6 +2044,12 @@ def test_counts_are_after_collapse() -> None:
 def test_fit_leaves_a_short_batch_alone() -> None:
     text = backstop.render([backstop.Entry("H", "one\ntwo")])
     assert backstop.fit(text, 4000) == text
+
+
+def test_a_batch_of_long_lines_is_sent_whole_below_the_transport_limit() -> None:
+    # Codex r2 finding 8: 49 lines of 300 characters are well under BATCH_MAX_CHARS; nothing is cut.
+    text = backstop.render([backstop.Entry("H", "\n".join(f"{i:03d}" + "z" * 300 for i in range(49)))])
+    assert backstop.fit(text, backstop.BATCH_MAX_CHARS) == text
 
 
 def test_fit_shortens_each_line_to_keep_one_message() -> None:
@@ -2024,6 +2230,7 @@ TITLE = "⚠️ Replies batched (summaries unavailable) · reply `!details` for 
 WORDS = 8
 WORDS_CHARS = 60
 CUT = "\n… (cut at the message size limit)"
+BATCH_MAX_CHARS = 60000     # the largest message Task 1 confirmed is delivered whole (chunk_chars's maximum)
 
 
 @dataclass(frozen=True)
@@ -2071,9 +2278,11 @@ def render(entries: list[Entry]) -> str:
 
 
 def fit(text: str, limit: int) -> str:
-    """Keep a rendered batch to one message of at most `limit` characters (B10). Each line after the title
-    is cut to an equal share, with a count of what was cut; if that is still too long, the end is cut.
-    `!details` on the batch still returns every reply whole."""
+    """Keep a rendered batch to one message of at most `limit` characters (B10). The caller passes
+    `BATCH_MAX_CHARS`, the transport's limit, so a batch the ADR's line rules produce is sent exactly as
+    rendered unless it can't be delivered as one message at all (over 60,000 characters: 50 lines of over
+    1,000 characters each). Only then is each line after the title cut to an equal share, with a count of
+    what was cut, and if that is still too long, the end. `!details` on the batch returns every reply whole."""
     if len(text) <= limit:
         return text
     title, *lines = text.split("\n")
@@ -2110,7 +2319,7 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
     - `add_turn(key, session, reply_to, origin, text, transcript, start, end, status) -> int`;
     - `turn(turn_id) -> TurnRow | None` and `turns_with_status(status) -> list[TurnRow]`;
     - `set_turn_status(turn_id, status, batch_id=None)`;
-    - `open_batch(at: float) -> int`, `due_batches(at: float, seconds: float) -> list[int]`, `batch_turns(batch_id) -> list[TurnRow]` and `close_batch(batch_id)`;
+    - `open_batch(at: float) -> int`, `due_batches(at: float, seconds: float) -> list[tuple[int, int]]` (batch and attempt), `batch_turns(batch_id) -> list[TurnRow]`, `close_batch(batch_id)` and `reopen_batch(batch_id, at: float)`;
     - `record_post(key, kind, turn_id, batch_id)` and `post_record(key) -> PostRow | None`;
     - `details_target(message_id: str | None) -> PostRow | None`.
   - Hook module: `transcript_size(ev: HookEvent) -> int | None`.
@@ -2140,7 +2349,7 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
 
    The audit has `{"kind": "summary", "action": "failed", "reason": <word>}` and `{"kind": "backstop", "action": "posted"}`.
 4. **One batch:** two failing long replies within one window produce **one** batch message holding both, in order, each under its own origin.
-5. **A big batch is still one message:** three failing replies of 100 lines × 200 characters each, with `chunk_chars` 4000, give exactly one batch message (`len(text) <= 4000`), and `!details` on it returns every line of all three.
+5. **A big batch is still one message, lines whole:** three failing replies of 100 lines × 200 characters each, with `chunk_chars` 4000, give exactly one batch message: the title, then exactly the first 10 and last 40 collapsed lines, each whole (no `…(+` marker), so `len(text) > 4000` (`chunk_chars` does not apply to a batch). `!details` on it returns every line of all three. A variant with 50 lines of 2,000 characters (over `BATCH_MAX_CHARS`) gives one message of at most 60,000 characters whose lines end with `…(+N chars)`.
 6. **Restart with a summary pending:** a turn left `summarizing` (insert it with `add_turn` in `before=`) is summarized after startup, with no requeue step.
 7. **Restart with a batch open:** in a first `run_with`, a failing reply is batched with `batch_seconds = 3600`, and the scenario ends before the batch is due. A second `run_with` on the same `tmp_path` sets `batch_seconds = 0.3` and opens nothing new; the batch, holding the first run's reply, is posted.
 8. **Transient failure in the backstop itself:** wrap `h.store.open_batch` so its first call raises `sqlite3.OperationalError`. A failing summary is still batched and posted without a restart: the row stayed `summarizing`, and the next pass of `summary_loop` (`summary_poll` 0.1 s) succeeds.
@@ -2155,6 +2364,8 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
     - **Stale launch:** a Stop from a stale launch (`launch=None`) that carries its own text gets `transcript_start` and `transcript_end` both NULL.
     - **Turn changed during extraction:** hold extraction as in (11), with `extract_timeout = 5`. Run `h.daemon.on_stop(h.event("Stop", sid, path), validate=True)` as a task. While it waits, `await h.daemon.on_hook(h.event("UserPromptSubmit", sid, path, prompt="next"), validate=True)` starts another turn. Release the event. The Stop is audited `stale-stop-unrecoverable` and adds no `turns` row.
 13. **Redaction:** a hex value in the reply never appears in any sent text.
+14. **Delivery gives up on a batch (Codex r2 finding 7):** `h.daemon._sleep` is a no-op coroutine. A failing summary is batched; just before the batch is due, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS`. The batch's outbox row (`batch:<id>.0`) becomes `failed`, and in the same transaction the batch is open again with `attempt == 1` and a fresh `opened_at`; the audit has `{"kind": "backstop", "action": "reopened"}`. Once `batch_seconds` passes again the batch arrives (key `batch:<id>.1`), holding the reply, and `!details` without a target returns it.
+15. **Restart after a failed batch:** as (14), but with `batch_seconds = 3600` once the batch is reopened, end the first `run_with`. A second `run_with` on the same `tmp_path` with `batch_seconds = 0.3` posts the reopened batch with the reply.
 
 - [ ] **Step 2: Run the tests and confirm they fail.** Expected: `AttributeError: 'Admind' object has no attribute 'summarizer_argv'`.
 
@@ -2179,7 +2390,8 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE TABLE IF NOT EXISTS batches (
     batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
     opened_at REAL NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('open', 'sent')));
+    status TEXT NOT NULL CHECK (status IN ('open', 'posted')),
+    attempt INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS posts (
     key TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('verbatim', 'summary', 'batch')),
@@ -2284,10 +2496,10 @@ def _post(r: tuple[object, ...]) -> PostRow:
         return int(self.db.execute("INSERT INTO batches(opened_at, status) VALUES (?, 'open')", (at,)).lastrowid or 0)
 
     @_locked
-    def due_batches(self, at: float, seconds: float) -> list[int]:
-        rows = self.db.execute("SELECT batch_id FROM batches WHERE status = 'open' AND opened_at + ? <= ? "
-                               "ORDER BY batch_id", (seconds, at)).fetchall()
-        return [int(r[0]) for r in rows]
+    def due_batches(self, at: float, seconds: float) -> list[tuple[int, int]]:
+        rows = self.db.execute("SELECT batch_id, attempt FROM batches WHERE status = 'open' "
+                               "AND opened_at + ? <= ? ORDER BY batch_id", (seconds, at)).fetchall()
+        return [(int(r[0]), int(r[1])) for r in rows]
 
     @_locked
     def batch_turns(self, batch_id: int) -> list[TurnRow]:
@@ -2296,7 +2508,14 @@ def _post(r: tuple[object, ...]) -> PostRow:
 
     @_locked
     def close_batch(self, batch_id: int) -> None:
-        self.db.execute("UPDATE batches SET status = 'sent' WHERE batch_id = ?", (batch_id,))
+        """Its message is queued; delivery is the outbox's job."""
+        self.db.execute("UPDATE batches SET status = 'posted' WHERE batch_id = ?", (batch_id,))
+
+    @_locked
+    def reopen_batch(self, batch_id: int, at: float) -> None:
+        """Its message was given up on: post it again after a new window, under a new key (the attempt)."""
+        self.db.execute("UPDATE batches SET status = 'open', opened_at = ?, attempt = attempt + 1 "
+                        "WHERE batch_id = ?", (at, batch_id))
 
     @_locked
     def record_post(self, key: str, kind: str, turn_id: int | None, batch_id: int | None) -> None:
@@ -2555,13 +2774,14 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
 
     def close_due_batches(self) -> None:
         """Post each batch whose window has passed, as one unthreaded message (B10)."""
-        for batch in self.store.due_batches(self.wallclock(), self.batch_seconds):
+        for batch, attempt in self.store.due_batches(self.wallclock(), self.batch_seconds):
             rows = self.store.batch_turns(batch)
+            key = f"batch:{batch}.{attempt}"        # a new key per attempt: the outbox ignores a known key
             text = backstop.fit(redact(backstop.render([backstop.Entry(r.origin, r.text) for r in rows])),
-                                self.s.chunk_chars)
+                                backstop.BATCH_MAX_CHARS)      # one message, not chunk_chars (B10)
             with self.store.transaction():
-                self.post(f"batch:{batch}", text, None)
-                self.store.record_post(f"batch:{batch}", "batch", None, batch)
+                self.post(key, text, None)
+                self.store.record_post(key, "batch", None, batch)
                 self.store.close_batch(batch)
             self.audit_quietly("backstop", action="posted", batch=batch, replies=len(rows),
                                lines=len(text.splitlines()), chars=len(text))
@@ -2573,9 +2793,10 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
 ```python
     def send_failed(self, seq: int, key: str) -> None:
         """A message admind gave up on. If it carried a reply or a summary, the reply goes to the backstop
-        in the same transaction (B9). A failed batch is not batched again: `!details` still has its
-        replies, and the audit records the failure."""
-        queued = None
+        in the same transaction (B9). If it was a batch, the batch opens again in the same transaction and
+        is posted after a new window under a new key, so its replies are never stranded (B10); this
+        repeats until it is delivered, and the audit records each attempt."""
+        queued = reopened = None
         with self.store.transaction():
             self.store.mark_failed(seq)
             post = self.store.post_record(key)
@@ -2583,8 +2804,13 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
             if turn is not None and turn.status in ("verbatim", "summarized"):
                 self.queue_backstop(turn.turn_id)
                 queued = turn.turn_id
+            if post is not None and post.kind == "batch" and post.batch_id is not None:
+                self.store.reopen_batch(post.batch_id, self.wallclock())
+                reopened = post.batch_id
         if queued is not None:
             self.audit_quietly("backstop", action="queued", turn=queued, why="send-failed")
+        if reopened is not None:
+            self.audit_quietly("backstop", action="reopened", batch=reopened, why="send-failed")
 ```
 
   The other chunks of a verbatim reply may still be delivered. Its turn is batched by the first failure, so later failures don't queue it again.
@@ -2616,7 +2842,7 @@ Review against B9, B10, B12, B19 and B20.
 - Produces:
   - `commands.Command("details", arg="full" | None)`;
   - `hook.turn_tool_calls(path: Path, start: int, end: int) -> str`;
-  - in `hook`: `READ_WINDOW = 1 MiB`, `MAX_RECORD = 16 MiB`, `RECORD_CHARS = 20_000` and `DETAILS_FULL_MAX_CHARS = 200_000`;
+  - in `hook`: `READ_WINDOW = 1 MiB` and `MAX_RECORD = 64 MiB` (no cap on what is shown; B13);
   - in the daemon: `DETAILS_READ_SECONDS = 30.0`, `DETAILS_BUSY`, `Admind.details(mid, cmd, target)`, `Admind.tool_calls(row)` and the replaceable attribute `details_timeout`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2680,6 +2906,17 @@ def test_tool_calls_of_this_turn_only(tmp_path: Path) -> None:
     assert "Old" not in out and "secret plan" not in out and "Later" not in out
 
 
+def test_metadata_before_the_prompt_does_not_start_the_turn(tmp_path: Path) -> None:
+    # Codex r2 finding 6: a queue-operation record before the turn's own prompt.
+    t = tmp_path / "s.jsonl"
+    end = append(t, [{"type": "queue-operation", "operation": "enqueue", "content": "mine"},
+                     prompt("mine"),
+                     {"type": "user", "isMeta": True, "message": {"content": "a caveat"}},
+                     tool("Mine"), result("done"), prompt("queued next"), tool("Next")])
+    out = turn_tool_calls(t, 0, end)
+    assert "▸ Mine" in out and "◂ done" in out and "Next" not in out
+
+
 def test_a_later_prompt_inside_the_span_ends_the_turn(tmp_path: Path) -> None:
     t = tmp_path / "s.jsonl"
     end = append(t, [prompt("mine"), tool("Mine"), prompt("queued next"), tool("Next")])
@@ -2701,12 +2938,11 @@ def test_long_turn_keeps_its_first_calls(tmp_path: Path) -> None:
     assert "▸ Early" in out and "▸ Late" in out
 
 
-def test_record_larger_than_a_read_window_is_shown_capped(tmp_path: Path) -> None:
+def test_record_larger_than_a_read_window_is_shown_whole(tmp_path: Path) -> None:
     t = tmp_path / "s.jsonl"
     end = append(t, [prompt("go"), tool("Cat"), result("r" * (2 * 1024 * 1024)), tool("After")])
     out = turn_tool_calls(t, 0, end)
-    over = 2 + 2 * 1024 * 1024 - hook.RECORD_CHARS          # "◂ " and the result, less the cap
-    assert f"…(+{over} chars)" in out and "▸ After" in out
+    assert "◂ " + "r" * (2 * 1024 * 1024) + "\n" in out and "▸ After" in out
 
 
 def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2718,12 +2954,12 @@ def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.
     assert "rrrr" not in out
 
 
-def test_total_cap_counts_what_it_left_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hook, "DETAILS_FULL_MAX_CHARS", 100)
+def test_no_total_cap(tmp_path: Path) -> None:
+    # §8: `!details` has no length cap (Codex r2 finding 5).
     t = tmp_path / "s.jsonl"
-    end = append(t, [prompt("go"), *[tool(f"T{i}", n="x" * 20) for i in range(10)]])
+    end = append(t, [prompt("go"), *[tool(f"T{i}", n="x" * 1000) for i in range(300)]])
     out = turn_tool_calls(t, 0, end)
-    assert len(out) < 300 and "more tool lines not shown" in out
+    assert all(f"▸ T{i} " in out for i in range(300)) and len(out) > 300_000
 
 
 def test_unreadable_transcript(tmp_path: Path) -> None:
@@ -2766,9 +3002,7 @@ Daemon scenarios with the shared harness:
 
 ```python
 READ_WINDOW = 1024 * 1024               # `!details full` reads the turn's bytes this much at a time
-MAX_RECORD = 16 * 1024 * 1024           # a longer JSONL record is named, not read (plan 2b B13)
-RECORD_CHARS = 20_000                   # one rendered tool line, at most
-DETAILS_FULL_MAX_CHARS = 200_000        # all of a turn's tool lines, at most
+MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record is named, not parsed: memory (plan 2b B13)
 
 
 def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
@@ -2798,9 +3032,10 @@ def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
 
 
 def _is_prompt(record: dict[str, Any]) -> bool:
-    """A real user prompt: text from the user, as opposed to a record that carries tool results."""
+    """A real user prompt: text from the user, as opposed to a record that carries tool results or one
+    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output)."""
     blocks = _blocks(record)
-    return record.get("type") == "user" and (
+    return record.get("type") == "user" and not record.get("isMeta") and (
         isinstance(blocks, str) or bool(blocks and any(b.get("type") == "text" for b in blocks)))
 
 
@@ -2829,14 +3064,16 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
 
 def turn_tool_calls(path: Path, start: int, end: int) -> str:
     """The tool calls and results of one turn: transcript bytes [start, end), from the UserPromptSubmit to
-    the Stop (plan 2b B13, B19). The turn's own prompt is skipped; a later real prompt ends the turn. Each
-    line and the whole are capped, and what was cut is counted."""
+    the Stop (plan 2b B13, B19). Records that are neither a prompt nor turn content (metadata such as
+    `queue-operation`) are ignored. The turn begins at its first content (an assistant record, a tool
+    result or an unreadably large record); a real prompt before that is the turn's own and is skipped, and
+    one after it is the next turn's and ends this one. Nothing is shortened: §8 puts no cap on `!details`.
+    A record over MAX_RECORD is named with its size instead of parsed."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return "(the transcript could not be read)"
     out: list[str] = []
-    size = omitted = 0
     begun = False
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -2852,30 +3089,23 @@ def turn_tool_calls(path: Path, start: int, end: int) -> str:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if _is_prompt(cast(dict[str, Any], record)):
+                rec = cast(dict[str, Any], record)
+                if _is_prompt(rec):
                     if begun:
                         break                   # the next turn's prompt
                     continue                    # this turn's own prompt
-                begun = True
-                lines = _tool_lines(cast(dict[str, Any], record))
-            for line in lines:
-                if len(line) > RECORD_CHARS:
-                    line = f"{line[:RECORD_CHARS]}…(+{len(line) - RECORD_CHARS} chars)"
-                if size + len(line) > DETAILS_FULL_MAX_CHARS:
-                    omitted += 1
-                    continue
-                out.append(line)
-                size += len(line) + 1
+                lines = _tool_lines(rec)
+                if rec.get("type") == "assistant" or lines:
+                    begun = True                # turn content; anything else is metadata
+            out.extend(lines)
     except OSError:
         return "(the transcript could not be read)"
     finally:
         os.close(fd)
-    if omitted:
-        out.append(f"… {omitted} more tool lines not shown (the {DETAILS_FULL_MAX_CHARS:,}-character limit)")
     return "\n".join(out) if out else "(no tool calls in this turn)"
 ```
 
-  `_lines` keeps at most one record plus one window in memory. `MAX_RECORD` and `DETAILS_FULL_MAX_CHARS` are read when the function is called, so tests can lower them.
+  `_lines` keeps at most one record plus one window in memory while reading; the rendered lines are kept whole. `MAX_RECORD` is read when the function is called, so tests can lower it. The lines are redacted whole, never after a cut: `details` redacts the joined text (B1), and nothing in between shortens it.
 
 - [ ] **Step 5: Implement the daemon changes.**
   - Constants and `__init__`:
@@ -2943,7 +3173,7 @@ DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 
   Import `turn_tool_calls` from the hook module (`TurnRow` came with Task 8). The paths stored for a turn passed the same session-name rule when it was recorded.
 
-  The caps (`RECORD_CHARS`, `DETAILS_FULL_MAX_CHARS`) apply to `!details full`'s tool calls only. The reply text itself is never capped (B13).
+  Nothing in `!details` or `!details full` is capped (B13); a long answer is simply more lane-2 messages, which never hold up lane 1 (B14). The only exception is a single transcript record over `MAX_RECORD` (64 MiB), named with its size because parsing it would need that much memory at once (flagged to the operator).
 
 - [ ] **Step 6: Run the gate. Then commit and review.**
 
@@ -2977,10 +3207,10 @@ cmp <(git -C "$D" show 66b3aec:docs/adr/0001-workstreams-v2.md) docs/adr/0001-wo
 - [ ] **Step 2: Update `docs/admind.md`.** Add these sections:
   - **Operators:** every `policy.toml` operator with a `marmot_npub`; adding and removing them with `admind operators add|remove NAME`.
   - **Temporary operators,** step by step: add the entry to `policy.toml`, run `admind operators add NAME`, run the test, run `admind operators remove NAME`, then delete the entry.
-  - **The latch and `admind rearm`:** check the members in your client first; rearm needs the daemon running.
-  - **Replies:** verbatim up to 8 lines and 800 characters; summaries (at most 10 lines) with the footer; the backstop batch as one message, with its title, origins, `(×k)`, skipped-lines line and per-line cuts; `!details` and `!details full`, including its caps; the two lanes.
+  - **The latch and `admind rearm`:** check the members in your client first; rearm needs the daemon running and subscribed; it refuses if the group changes while it reads the count, and it reconciles which operators are confirmed in the group (B21, B22): if it can't account for the count, make `policy.toml`'s operators match the group and rearm again.
+  - **Replies:** verbatim up to 8 lines and 800 characters; summaries (at most 10 lines) with the footer; the backstop batch as one message, with its title, origins, `(×k)`, skipped-lines line lines kept whole up to the 60,000-character message limit, and a failed batch posted again; `!details` and `!details full`, uncapped apart from the 64 MiB record guard; the two lanes.
   - **Audit:** whole messages, redacted, with operator names, and the new record kinds `membership`, `summary`, `backstop` and `ctl`.
-  - **Upgrading from plan 2:** the `expected_members` migration; the outbox upgrade, which redacts queued replies and may re-send text already received under new keys; and that a pending record latches on startup.
+  - **Upgrading from plan 2:** the `expected_members` and `group_operators` migrations (several operators in `policy.toml` at upgrade time latch until a rearm); the outbox upgrade, which redacts queued replies and may re-send text already received under new keys; and that a pending record latches on startup.
 
 - [ ] **Step 3: Update `docs/configuration.md`.** Document `summarizer`, `reply_verbatim_lines` and `reply_verbatim_chars`, with defaults and the claude-code-only note. Update `docs/security-model.md`:
   - the redaction applies to everything posted and to every audit field, with 64-hex identifiers written as `id:` references (B1, B16);
@@ -3049,11 +3279,18 @@ The PR body ends with the attribution lines the session requires. Merging is the
   - `bounded_read` and `_reader` replace `_extraction` in Task 8; Task 9's `tool_calls` uses them.
   - `TurnRow` has `transcript_start` and `transcript_end` (Task 8); `turn_tool_calls(path, start, end)` takes both (Task 9).
   - `audit.ref_id` and `redact_continuation` are defined in Task 2 and used in Tasks 2 and 4.
-  - The fake's `membership_gate` and `drop_subscriptions()` are defined in Task 5.
+  - The fake's `membership_gate`, `info_gate`, the `lost` mode and `drop_subscriptions()` are defined in Task 5.
+  - kv `group_operators`, `confirmed_operators()`, `authorise()` and `policy_operators` are defined in Task 3; Task 5's commit and `rearm` write them (`applied`, `reconcile`).
+  - `settings.MAX_NAME` and `NAME_CONTROLS` are defined in Task 3 and imported by Task 6's control server.
+  - `backstop.BATCH_MAX_CHARS` is defined in Task 7, confirmed by Task 1's fact 8 and used by Task 8's `close_due_batches`; `reopen_batch` (Task 8) is called by `send_failed`.
+  - `Admind.group_events` is defined in Task 5 and read by `rearm`.
 - **Lock order** (Task 5): `transition_lock` → `work_lock` → `dispatch_lock` → `send_lock`, each held briefly after the second. Nothing holding a later lock waits for an earlier one.
 - **Deviations from the ADR's wording, for the operator:**
-  - `!details full` caps each tool line at 20,000 characters and the whole at 200,000, and names (does not read) a record over 16 MiB; the reply text itself is never capped (B13);
-  - a backstop batch that would exceed one message has its lines shortened, so it stays one message (B10);
+  - `!details full` names (does not parse) a single transcript record over 64 MiB, to bound memory; nothing else in `!details` is capped (B13);
+  - a backstop batch over 60,000 characters (50 lines averaging over 1,000 characters) has its lines shortened so it stays one deliverable message; below that it is sent exactly as the ADR's line rules render it (B10). This needs the operator's agreement or an ADR note;
+  - `rearm` can refuse: when not subscribed, when the group changes while it reads the count, or when it can't reconcile the count with the operators it knows (B22). The ADR says rearm takes the count as trusted unconditionally;
+  - who may command admind is durable state (`group_operators`), not just `policy.toml`; a plan-2 upgrade with several operators already in `policy.toml` latches until a rearm, which then trusts the count against `policy.toml` (B21);
+  - `policy.toml` operator names over 128 characters or with control characters are now a configuration error (B2);
   - a summary may have 10 lines (the ADR says about 8; B8);
   - the audit writes 64-hex message IDs as `id:` references, not raw (B16);
   - after an upgrade, re-keyed chunks may repeat text the operator already received (B17);
