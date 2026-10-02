@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from heterodyne import platform
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -19,7 +20,7 @@ def pytest_configure(config: pytest.Config) -> None:
     (38) = 93 bytes, under both 104 and admind's own 100-byte limit. xdist workers inherit the
     controller's basetemp, so only the controller (or a plain run) creates it.
     """
-    if sys.platform != "darwin" or config.option.basetemp:
+    if platform.detect() != "macos" or config.option.basetemp:
         return
     base = Path(tempfile.mkdtemp(prefix="hz", dir="/tmp")).resolve()
     config.option.basetemp = base

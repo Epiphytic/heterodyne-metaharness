@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -22,6 +21,7 @@ import pytest
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
 
+from heterodyne import platform
 from heterodyne.admind.agent import SESSION, AdminAgent
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -237,7 +237,7 @@ def test_alert_keys_and_audit_never_hold_a_name_that_is_an_identifier_or_a_secre
 
 # --- 2. an alert file whose name is not UTF-8 ---
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="APFS rejects non-UTF-8 file names")
+@pytest.mark.skipif(platform.detect() == "macos", reason="APFS rejects non-UTF-8 file names")
 def test_a_non_utf8_alert_name_is_reported_safely_and_never_blocks_later_alerts(tmp_path: Path) -> None:
     u = Unit(tmp_path)
     write_alert(u, b"bad\xff\xfe.json")

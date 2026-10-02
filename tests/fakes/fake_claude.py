@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import termios
 import tty
 from pathlib import Path
 
@@ -52,6 +53,10 @@ def record(kind: str, content: object) -> None:
 FD = sys.stdin.fileno()
 if os.isatty(FD):
     tty.setcbreak(FD)
+    # Python 3.12.0-3.12.1's setcbreak() also clears ICRNL; keep it so Enter (CR) still arrives as LF.
+    attrs = termios.tcgetattr(FD)
+    attrs[0] |= termios.ICRNL
+    termios.tcsetattr(FD, termios.TCSANOW, attrs)
 
 
 def read_line() -> str | None:
