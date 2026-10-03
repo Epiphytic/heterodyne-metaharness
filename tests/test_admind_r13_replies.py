@@ -19,6 +19,7 @@ import pytest
 from test_admind_daemon import Harness, needs_tmux, run_with
 
 from heterodyne.admind import backstop, hook, summarize
+from heterodyne.admind.audit import clean
 from heterodyne.admind.daemon import EXTRACT_FAILED, MAX_SEND_ATTEMPTS
 from heterodyne.admind.hook import HookEvent, reply_text
 from heterodyne.admind.redact import redact
@@ -55,26 +56,10 @@ def batches(h: Harness) -> list[str]:
     return [t for t in h.texts() if t.startswith(backstop.TITLE)]
 
 
-def clean(obj: Any) -> Any:
-    """`obj` with every string in it redacted, BEFORE anything formats it: a repr or json escape turns a
-    control character into a letter (`\\n` into `n`), which hides where a token starts."""
-    if isinstance(obj, str):
-        return redact(obj)
-    if isinstance(obj, bytes | bytearray):
-        return redact(bytes(obj).decode("utf-8", "replace"))
-    if isinstance(obj, dict):
-        return {clean(k): clean(v) for k, v in obj.items()}
-    if isinstance(obj, list | tuple | set | frozenset):
-        return [clean(v) for v in obj]
-    if obj is None or isinstance(obj, bool | int | float):
-        return obj
-    return redact(str(obj))
-
-
 def diagnostics(h: Harness) -> str:
     """What the daemon was doing, for a wait that timed out: rows without their text, the last audit
-    records, what was sent, and the readiness and latch state. Everything is cleaned before it is
-    formatted, and the assembled message is redacted once more. It never raises: on any failure it says
+    records, what was sent, and the readiness and latch state. Everything is cleaned (audit.clean) before it
+    is formatted, and the assembled message is redacted once more. It never raises: on any failure it says
     which kind."""
     try:
         db = h.store.db
