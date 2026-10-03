@@ -506,6 +506,7 @@ def two_policy_unknown_group(h: Harness) -> None:
 def test_rearm_reconciles_to_policy_without_a_record(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await wait_until(h.daemon.latched)
+        await wait_until(lambda: h.daemon.reading)    # rearm refuses until startup has begun reading events
         assert (await h.daemon.rearm())[0] == "rearmed"
         assert keys(h) == sorted([OPERATOR_HEX, SECOND_HEX])
         assert any(r["kind"] == "guard" and r["action"] == "rearm" and r["operators"] == "policy"
