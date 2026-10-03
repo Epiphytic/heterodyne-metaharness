@@ -18,11 +18,12 @@ import json
 import os
 import re
 import time
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from heterodyne.admind import alerts, chunk, commands, guard
+from heterodyne.admind import alerts, chunk, commands, guard, membership
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
@@ -35,6 +36,7 @@ from heterodyne.marmot.control import (
     ControlError,
     GroupStateChanged,
     InboundMessage,
+    PeerError,
     ReactionAdded,
 )
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
@@ -130,6 +132,31 @@ async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: A
         delay = min(delay * 2, cap)
 
 
+def applied(confirmed: set[str], pending: membership.Pending) -> set[str]:
+    """The confirmed keys once `pending` took effect."""
+    return confirmed | {pending.member_hex} if pending.op == "add" else confirmed - {pending.member_hex}
+
+
+def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
+              policy: tuple[Operator, ...]) -> tuple[set[str] | None, str]:
+    """Which operators rearm confirms for a trusted `count` (B21). Returns (keys, how), or (None, what
+    admind had) when the count can't be reconciled. A pending change whose `to` count matches took effect;
+    one whose `from` count matches did not. Then the confirmed keys stand if the count fits them; else,
+    if the count fits every policy operator, the operator's rearm asserts they are all in the group."""
+    keys: set[str] = set() if confirmed is None else set(confirmed)
+    if pending_raw is not None:
+        pending = membership.Pending.load(pending_raw)
+        if count == pending.to_count:
+            keys = applied(keys, pending)
+    eligible = {o.hex for o in policy}
+    keys &= eligible
+    if confirmed is not None and count == 1 + len(keys):
+        return keys, "confirmed"
+    if count == 1 + len(eligible):
+        return eligible, "policy"
+    return None, f"{len(keys)}"
+
+
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
                  agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
@@ -171,6 +198,12 @@ class Admind:
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
         self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
+        self.transition_lock = asyncio.Lock()   # one membership change or rearm at a time (B7)
+        self.work_lock = asyncio.Lock()         # held by worker_loop for each operator message
+        self.changing = False                   # a transition holds dispatch and posting (B7)
+        self.membership_epoch = 0               # bumped when a transition or rearm begins; see check_group
+        self.group_events = 0                   # membership events seen; rearm refuses if one comes meanwhile
+        self.reading = False                    # the subscription's events are being read (B22)
         self._backoff: dict[int, asyncio.Future[None]] = {}     # each row waiting out a retry: its own timer
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
@@ -269,13 +302,13 @@ class Admind:
         """Outbound gate, checked immediately before every send: not latched, the operator has been
         seen in the group (D5), the last membership check succeeded and the membership subscription is
         confirmed active. A count check alone never counts: with nobody watching, a swap goes unseen."""
-        return (not self.latched() and self.group_ok and self.observing
+        return (not self.latched() and self.group_ok and self.observing and not self.changing
                 and self.store.get("operator_seen_at") is not None)
 
     def authorised(self) -> bool:
         """May admind act for the operator right now: not latched, group verified, subscription live.
         Checked after every await that verifies and again immediately before a side effect."""
-        return not self.latched() and self.group_ok and self.observing
+        return not self.latched() and self.group_ok and self.observing and not self.changing
 
     def deny(self, mid: str, what: str) -> None:
         """Refuse a message that was accepted before admind stopped being authorised. Fixed wording; no
@@ -317,6 +350,9 @@ class Admind:
         if self.store.get("expected_members") is None:     # a plan-2 group: always two members (B3)
             self.store.set("expected_members", "2")
             self.audit.write("guard", action="migrated", expected_members=2)
+        if self.store.get("membership_pending") is not None:      # B15: a count can't tell which change
+            self.latch("a membership change was interrupted; check the group's members in your client, "
+                       "then run `admind rearm` on the host")
         confirmed: set[str] | None = self.confirmed_operators()
         if confirmed is None:          # a plan-2 database (B21)
             if len(self.policy_operators) == 1:     # plan 2 allowed exactly one operator, so it is that one
@@ -450,11 +486,23 @@ class Admind:
         establishes observation or group_ok, so a replacement is always verified by its own check."""
         generation = self.sub_gen
         acked_at_start = self.acked
+        epoch = self.membership_epoch
+        if self.changing:
+            self.audit_quietly("guard", action="group-check-deferred")
+            return False        # the transition reads the count itself and settles (B7)
         try:
             info = await self.client.group_info(self.account, self.group)
         except ControlError as exc:
+            if self.changing or epoch != self.membership_epoch:
+                self.audit_quietly("guard", action="group-check-deferred")
+                return False
             self.group_ok = False
             self.audit.write("guard", action="group-check-failed", code=exc.code)   # never the peer's detail
+            return False
+        if self.changing or epoch != self.membership_epoch:
+            # A transition or rearm began while this check waited: its count may be from either side of
+            # the change, so it decides nothing; group_ok stays as it is.
+            self.audit_quietly("guard", action="group-check-deferred")
             return False
         verdict = guard.judge_member_count(info.member_count, self.expected_members())
         if verdict.action == "latch":
@@ -470,6 +518,211 @@ class Admind:
         self.wake.set()
         return True
 
+    # --- membership (ADR 0001 §8, revision 13) -------------------------------------------------
+    def membership_refusal(self) -> str | None:
+        """Why a membership change can't start (or go on) now; None if it can."""
+        if self.latched():
+            return "admind is latched; check the group's members, then run `admind rearm` first."
+        if self.store.get("membership_pending") is not None:
+            return "a membership change is already pending; run `admind rearm`."
+        if not (self.observing and self.group_ok):
+            return ("admind is not watching the group yet (its membership subscription is not verified); "
+                    "nothing changed. Try again shortly.")
+        return None
+
+    async def change_membership(self, op: str, name: str) -> tuple[str, str]:
+        """`admind operators add|remove NAME` (ADR 0001 §8, revision 13; B7, B18). Returns (result, message);
+        the message is admind's own wording plus the operator's policy name (the caller redacts it)."""
+        async with self.transition_lock:
+            refusal = self.membership_refusal()
+            if refusal is not None:
+                return "refused", refusal
+            try:
+                loaded = {o.name: o for o in self.load_operators()}
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("membership", action="refused", why="policy-unreadable",
+                                 error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
+            if op == "add":
+                target = loaded.get(name)
+                if target is None:
+                    return "refused", (f"{name} is not an operator with a marmot_npub in policy.toml; add it "
+                                       "there first. Nothing changed.")
+                if target.hex in self.operators:
+                    return "refused", f"{name} is already an operator in the group; nothing changed."
+                member_hex = target.hex
+            else:
+                found = [key for key, known in self.operators.items() if known == name]
+                if not found:
+                    return "refused", f"{name} is not an operator in the group; nothing changed."
+                member_hex = found[0]
+            policy = tuple(loaded.values())
+            # Step 1: hold. The message in hand finishes first; then nothing new is dispatched or sent, and
+            # a paste or a send already under way is waited for, before the count is read.
+            async with self.work_lock:
+                self.changing = True
+                self.membership_epoch += 1
+                journaled = settled = False
+                try:
+                    async with self.dispatch_lock:
+                        pass
+                    async with self.send_lock:
+                        pass
+                    generation = self.sub_gen
+                    refusal = self.membership_refusal()     # a latch or a lost subscription meanwhile
+                    if refusal is not None:
+                        settled = True
+                        return "refused", refusal
+                    try:
+                        count = (await self.client.group_info(self.account, self.group)).member_count
+                    except ControlError as exc:
+                        settled = True
+                        return "refused", (f"could not read the group's member count ({exc.code}); "
+                                           "nothing changed.")
+                    refusal = self.membership_refusal() or (
+                        None if generation == self.sub_gen else
+                        "the membership subscription was replaced; nothing changed. Try again.")
+                    if refusal is not None:
+                        settled = True
+                        return "refused", refusal
+                    expected = self.expected_members()
+                    if count != expected:
+                        self.latch(f"group has {count} members, expected {expected}")
+                        settled = True
+                        return "latched", (f"the group has {count} members, not the expected {expected}; "
+                                           "latched.")
+                    to = expected + 1 if op == "add" else expected - 1
+                    if to < 2:
+                        settled = True
+                        return "refused", "the last operator can't be removed."
+                    pending = membership.Pending("add" if op == "add" else "remove", name, member_hex,
+                                                 expected, to, now(), uuid.uuid4().hex)
+                    journaled = True        # from here an exception latches (B18)
+                    self.store.set("membership_pending", pending.dump())
+                    self.audit.write("membership", action="pending", op=pending.op, operator=name,
+                                     from_count=expected, to_count=to)
+                    reported = await self.member_call(pending)
+                    try:
+                        info = await self.client.group_info(self.account, self.group)
+                        after: int | None = info.member_count
+                    except ControlError:
+                        after = None
+                    outcome = membership.settle(reported, after, pending)
+                    if self.latched() or not self.observing or generation != self.sub_gen:
+                        outcome = "latch"   # an event, a latch or a lost subscription during it (step 3, B5)
+                    result = self.settle_membership(pending, outcome, reported, after, policy)
+                    settled = True
+                    return result
+                except BaseException:
+                    if journaled and not settled:
+                        with contextlib.suppress(Exception):
+                            self.latch("a membership change failed before it was settled; check the group's "
+                                       "members in your client, then run `admind rearm` on the host")
+                    raise
+                finally:
+                    if settled or not journaled or self.latched():
+                        self.changing = False
+                    else:   # pending, unsettled and not latched: hold until rearm or the restart latch (B15)
+                        self.audit_quietly("membership", action="held-unsettled")
+                    self.wake.set()
+
+    async def member_call(self, pending: membership.Pending) -> membership.Reported:
+        try:
+            if pending.op == "add":
+                await self.client.group_member_add(self.account, self.group, [pending.member_hex])
+            else:
+                await self.client.group_member_remove(self.account, self.group, [pending.member_hex])
+        except PeerError as exc:
+            self.audit.write("membership", action="refused-by-wn-agent", code=exc.code)
+            return "failed"
+        except ControlError as exc:
+            self.audit.write("membership", action="no-answer", code=exc.code)
+            return "unknown"
+        return "ok"
+
+    def settle_membership(self, pending: membership.Pending, outcome: membership.Outcome, reported: str,
+                          after: int | None, policy: tuple[Operator, ...]) -> tuple[str, str]:
+        """Apply the outcome. A commit writes the count, the confirmed operators (B21) and the notice and
+        clears the record in one transaction, then authorises from them (B2)."""
+        if outcome == "commit":
+            verb = "added to" if pending.op == "add" else "removed from"
+            confirmed = applied(self.confirmed_operators() or set(), pending)
+            with self.store.transaction():
+                self.store.set("expected_members", str(pending.to_count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.store.delete("membership_pending")
+                # The key holds the change's own ID, not its start time: two changes in one second differ.
+                self.post(f"membership:{pending.change_id}",
+                          f"Operator {pending.name} was {verb} the group.", None)
+            self.policy_operators = policy
+            self.authorise(confirmed)
+            self.audit_quietly("membership", action="committed", op=pending.op, operator=pending.name,
+                               member_count=pending.to_count)
+            return "committed", f"Operator {pending.name} was {verb} the group ({pending.to_count} members)."
+        if outcome == "abort":
+            self.store.delete("membership_pending")
+            self.audit_quietly("membership", action="aborted", op=pending.op, operator=pending.name)
+            return "aborted", ("wn-agent refused the change and the member count is unchanged; "
+                               "nothing changed.")
+        self.latch(f"membership change {pending.op} ended unconfirmed (reported {reported}, "
+                   f"count {'unknown' if after is None else after}, expected {pending.to_count})")
+        return "latched", ("the change could not be confirmed, so admind latched. Check the group's members "
+                           "in your client, then run `admind rearm` on the host.")
+
+    async def rearm(self) -> tuple[str, str]:
+        """`admind rearm`: trust the current member count and clear the latch, any pending change and a
+        held transition (§8: "takes the current member count as trusted"). It also reconciles which
+        operators are confirmed in the group (B21), and refuses, changing nothing, if the count can't be
+        reconciled with them or if the group changed while the count was read (B22)."""
+        async with self.transition_lock:
+            if not self.reading:
+                # Acknowledged is not enough: until confirm_observing returns, events wait unread in the
+                # stream, and a resubscription would drop them (Codex r3 finding 3).
+                return "refused", ("admind is not reading the group's events right now, so a change during "
+                                   "rearm could be missed; nothing changed. Try again shortly.")
+            try:
+                policy = self.load_operators()
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("guard", action="rearm-refused", why="policy-unreadable",
+                                 error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
+            generation, events, latched_before = self.sub_gen, self.group_events, self.store.get("latched")
+            try:
+                count = (await self.client.group_info(self.account, self.group)).member_count
+            except ControlError as exc:
+                return "refused", f"could not read the group's member count ({exc.code}); nothing changed."
+            if (not self.reading or generation != self.sub_gen or events != self.group_events
+                    or self.store.get("latched") != latched_before):
+                self.audit_quietly("guard", action="rearm-refused", why="changed-meanwhile")
+                return "refused", ("the group changed while rearm read it (a membership event, a new "
+                                   "latch or a resubscription); nothing changed. Check the group's "
+                                   "members, then run `admind rearm` again.")
+            if count < 2:
+                return "refused", f"the group has {count} member(s) and no operator; nothing changed."
+            confirmed, how = reconcile(count, self.confirmed_operators(),
+                                       self.store.get("membership_pending"), policy)
+            if confirmed is None:
+                self.audit_quietly("guard", action="rearm-refused", why="operators-unknown",
+                                   member_count=count, policy_operators=len(policy))
+                return "refused", (f"the group has {count} members but policy.toml lists {len(policy)} "
+                                   f"operator(s) and admind has confirmed {how}; make policy.toml's "
+                                   "operators match the group's members, then run `admind rearm` again. "
+                                   "Nothing changed.")
+            previous = self.store.get("latched")
+            with self.store.transaction():
+                self.store.set("expected_members", str(count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.store.delete("membership_pending")
+                self.store.delete("latched")
+            self.policy_operators = policy
+            self.authorise(confirmed)
+            self.changing = False           # a transition held unsettled (B18) ends here
+            self.membership_epoch += 1      # a check begun before this one judged against the old count
+            self.audit_quietly("guard", action="rearm", member_count=count, previous=previous, operators=how)
+        await self.check_group()
+        self.wake.set()
+        return "rearmed", f"Cleared the latch; the trusted member count is now {count}."
+
     # --- inbound -------------------------------------------------------------------------------
     async def inbound_loop(self) -> None:
         """Read the subscription and nothing else. Membership and admin events are acted on at once;
@@ -481,6 +734,7 @@ class Admind:
         while True:
             self.observing = False
             self.acked = False
+            self.reading = False
             self.sub_gen += 1
             try:
                 async for event in self.client.subscribe(self.account, self.group,
@@ -495,6 +749,7 @@ class Admind:
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
             self.observing = False
             self.acked = False
+            self.reading = False
             self.sub_gen += 1
             self.group_ok = False
             self.audit.write("subscribe", action="reconnect", code=code)
@@ -506,15 +761,15 @@ class Admind:
         re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
         a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
         self.acked = True       # check_group observes on success, here and on every later passing check
-        if not await self.check_group():
-            if self.latched():
-                return      # acknowledged but not observing; a passing check after a rearm restores it
+        if not await self.check_group() and not self.latched():
             raise ControlError("group could not be re-verified", "unverified", True)
+        self.reading = True     # acknowledged but not observing if latched; a rearm then restores it
 
     def on_event(self, event: object) -> None:
         if isinstance(event, InboundMessage):
             self.work.put_nowait(event)
         elif isinstance(event, GroupStateChanged):
+            self.group_events += 1
             verdict = guard.judge_group_change(event, group_id=self.group)
             if verdict.action == "latch":
                 self.latch(verdict.reason)
@@ -526,11 +781,14 @@ class Admind:
             self.audit.write("event", action="ignored", what="other")
 
     async def worker_loop(self) -> None:
-        """Process operator messages one at a time, in arrival order, apart from the subscription reader."""
+        """Process operator messages one at a time, in arrival order, apart from the subscription reader.
+        Each holds `work_lock`: a membership transition waits for the message in hand, and the next one
+        waits for the transition (B7), so a message is never denied just because a transition ran."""
         while True:
             event = await self.work.get()
             try:
-                await self.on_message(event)
+                async with self.work_lock:
+                    await self.on_message(event)
             except Exception as exc:  # noqa: BLE001 - one bad message must not end the worker
                 self.audit.write("handler", action="failed", error=type(exc).__name__)
 
@@ -677,7 +935,7 @@ class Admind:
             return      # under dispatch_lock, with the other gates: nothing is pasted once shutdown began
         # Same gate as the outbound side (D4): while latched, or while the group is not verified as
         # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
-        if self.latched() or not self.group_ok or not self.observing:
+        if self.latched() or not self.group_ok or not self.observing or self.changing:
             if self.held and not self.block_audited:
                 self.block_audited = True
                 self.audit.write("agent", action="dispatch-blocked", held=len(self.held),

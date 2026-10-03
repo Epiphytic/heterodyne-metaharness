@@ -24,6 +24,9 @@ MAX_FRAME = 1024 * 1024
 KNOWN_ERROR_CODES = frozenset({
     "unauthorized", "unavailable", "unsupported", "relay_unavailable", "not_group_admin",
     "not_found", "rate_limited", "auth_failed", "message_send_failed", "group_create_failed",
+    # S4b: adding a present member is `backend` (its text does not tell the causes apart, so a caller
+    # treats it as a reported failure and checks the count); removing a non-member is `unknown_member`.
+    "backend", "unknown_member",
 })
 
 
@@ -37,6 +40,11 @@ class ControlError(Exception):
         self.code = code
         self.retryable = retryable
         self.detail = detail
+
+
+class PeerError(ControlError):
+    """wn-agent answered with an `error` frame: it reported failure (B4). Every other ControlError
+    (timeout, closed socket, malformed frame) leaves the outcome unknown."""
 
 
 class ProtocolError(ControlError):
@@ -71,6 +79,10 @@ class GroupInfo(msgspec.Struct, frozen=True):
 
 
 class GroupCreated(msgspec.Struct, frozen=True):
+    group_id_hex: str
+
+
+class MembershipUpdated(msgspec.Struct, frozen=True):
     group_id_hex: str
 
 
@@ -150,7 +162,7 @@ def decode_head(line: bytes, request_id: str) -> str:
             raise ProtocolError("malformed error frame") from exc
         # The code is peer-supplied too: only allowlisted codes are echoed, and the free text only in detail.
         code = err.code if err.code in KNOWN_ERROR_CODES else "unrecognised"
-        raise ControlError(f"wn-agent returned error {code}", code, err.retryable, detail=err.message)
+        raise PeerError(f"wn-agent returned error {code}", code, err.retryable, detail=err.message)
     return head.type
 
 
@@ -240,6 +252,16 @@ class ControlClient:
         return await self.call({"type": "group_create", "account_id_hex": account, "name": name,
                                 "members": members, "description": None, "relays": None},
                                "group_created", GroupCreated)
+
+    async def group_member_add(self, account: str, group: str, members: list[str]) -> MembershipUpdated:
+        return await self.call({"type": "group_member_add", "account_id_hex": account, "group_id_hex": group,
+                                "members": members, "initial_admins": []},
+                               "group_membership_updated", MembershipUpdated)
+
+    async def group_member_remove(self, account: str, group: str, members: list[str]) -> MembershipUpdated:
+        return await self.call({"type": "group_member_remove", "account_id_hex": account,
+                                "group_id_hex": group, "members": members},
+                               "group_membership_updated", MembershipUpdated)
 
     async def send_final(self, account: str, group: str, text: str, reply_to: str | None,
                          key: str) -> FinalSent:
