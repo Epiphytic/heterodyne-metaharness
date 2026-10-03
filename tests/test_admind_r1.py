@@ -145,7 +145,7 @@ class Unit:
 
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
-        self.settings = make_settings(tmp_path)
+        self.settings = make_settings(tmp_path, reply_verbatim_lines=200, reply_verbatim_chars=60000)
         self.store = Store(self.settings.state_dir / "admind.db")
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.tmux = FakeTmux()
@@ -166,6 +166,9 @@ class Unit:
         runner = CommandRunner(self.agent, self.services, ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, self.client, self.store, self.audit, self.agent, runner,  # type: ignore[arg-type]
                              ACCOUNT, GROUP)
+        if self.store.get("group_operators") is None:
+            self.store.set("group_operators", json.dumps(sorted(o.hex for o in self.settings.operators)))
+        self.daemon.authorise(self.daemon.confirmed_operators() or ())     # as run() does
         self.daemon.group_ok = True         # as if the subscription were confirmed and the group verified
         self.daemon.observing = True
 
@@ -333,10 +336,10 @@ def test_membership_event_latches_while_a_slow_restart_runs(
         real_latch(why)
         latched.set()
 
-    def enqueue(key: str, text: str, reply_to: str | None) -> bool:
+    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         if text.startswith("Restarted"):
             restart_replied.set()
-        return real_enqueue(key, text, reply_to)
+        return real_enqueue(key, text, reply_to, lane)
     monkeypatch.setattr(u.daemon, "latch", latch)
     monkeypatch.setattr(u.store, "enqueue", enqueue)
     u.client.on_subscribe = subscribed.set
@@ -448,7 +451,7 @@ class SlowRead:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, ev: HookEvent, fallback: bool = True) -> str:
+    def __call__(self, ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         self.started.set()
         assert self.release.wait(10), "test never released the read"
         return self.text
@@ -466,7 +469,9 @@ def stop_during_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command
         b = await u.say("prompt B")                               # held behind A
         stop = asyncio.create_task(u.daemon.on_hook(HookEvent("Stop", "S1")))
         assert await asyncio.to_thread(slow.started.wait, 10)     # A's reply is being read
-        await u.daemon.handle(u.mid(), command)                   # runs, and may dispatch B, meanwhile
+        c = u.mid()
+        u.daemon.senders[c] = OPERATOR_HEX                        # as on_message records it
+        await u.daemon.handle(c, command)                         # runs, and may dispatch B, meanwhile
         slow.release.set()
         await stop
         held.append(b)
@@ -588,11 +593,11 @@ def fail_nth_enqueue(u: Unit, monkeypatch: pytest.MonkeyPatch, n: int) -> None:
     real = u.store.enqueue
     calls = [0]
 
-    def enqueue(key: str, text: str, reply_to: str | None) -> bool:
+    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         calls[0] += 1
         if calls[0] == n:
             raise Crash
-        return real(key, text, reply_to)
+        return real(key, text, reply_to, lane)
     monkeypatch.setattr(u.store, "enqueue", enqueue)
 
 
@@ -615,7 +620,7 @@ def test_recovery_notice_and_state_change_are_atomic(tmp_path: Path, monkeypatch
 def test_a_stop_is_all_or_nothing_and_recovery_then_answers_once(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)   # three chunks
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "x" * 9000)   # three chunks
 
     async def scenario() -> str:
         a = await u.say("prompt A")
@@ -638,7 +643,7 @@ def test_a_stop_is_all_or_nothing_and_recovery_then_answers_once(
 def test_a_stop_commits_its_chunks_and_state_together(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "x" * 9000)
 
     async def scenario() -> str:
         a = await u.say("prompt A")

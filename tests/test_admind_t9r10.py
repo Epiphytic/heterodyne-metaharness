@@ -9,7 +9,7 @@ import asyncio
 import socket
 from pathlib import Path
 
-from admind_waits import stays, wait_until
+from admind_waits import hold, stays, wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r5 import NONCE, arm, frame, serving
 
@@ -105,7 +105,7 @@ def test_the_dispatcher_defers_while_a_connection_waits_in_the_listening_backlog
                 client.sendall(frame("Stop", last_assistant_message="x"))
                 assert server.pending_hooks == 0
                 b = "b" * 64
-                u.daemon.held.append((b, "job B"))
+                hold(u.daemon, b, "job B")
                 await u.daemon.flush()      # no await point was reached since the connect
                 assert u.tmux.pasted == [] and u.daemon.held == [(b, "job B")]
                 await wait_until(lambda: u.tmux.pasted == ["job B"])    # the accept path flushed later

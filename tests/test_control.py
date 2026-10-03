@@ -12,6 +12,7 @@ from heterodyne.marmot.control import (
     GroupStateChanged,
     InboundMessage,
     OtherEvent,
+    PeerError,
     ProtocolError,
     decode_event,
 )
@@ -174,3 +175,36 @@ def test_all_letter_unknown_error_code_is_not_echoed() -> None:
         decode_event(_frame(type="error", code="secrettoken", message="m", retryable=False), "r1")
     assert exc.value.code == "unrecognised"
     assert "secrettoken" not in str(exc.value)
+
+
+@pytest.mark.parametrize("code", ["backend", "unknown_member"])
+def test_membership_error_codes_are_peer_errors_and_echoed(code: str) -> None:
+    # S4b: adding a present member is `backend`; removing a non-member is `unknown_member`.
+    with pytest.raises(PeerError) as exc:
+        decode_event(_frame(type="error", code=code, message="connector failed", retryable=False), "r1")
+    assert exc.value.code == code and not exc.value.retryable
+
+
+def test_only_an_error_frame_is_a_peer_error() -> None:
+    with pytest.raises(ProtocolError) as exc:
+        decode_event(b"not json", "r1")
+    assert not isinstance(exc.value, PeerError)
+
+
+def test_member_add_and_remove_requests(tmp_path: Path) -> None:
+    async def body() -> None:
+        fake = FakeWnAgent(tmp_path / "s.sock")
+        await fake.start()
+        client = ControlClient(tmp_path / "s.sock", "test-token")
+        await client.group_member_add(ACCOUNT, fake.group_id, ["d4" * 32])
+        assert fake.member_count == 3
+        await client.group_member_remove(ACCOUNT, fake.group_id, ["d4" * 32])
+        assert fake.member_count == 2
+        add, remove = fake.requests
+        assert (add["type"], add["members"], add["initial_admins"]) == ("group_member_add", ["d4" * 32], [])
+        assert remove["type"] == "group_member_remove" and remove["members"] == ["d4" * 32]
+        fake.membership_mode = "fail"
+        with pytest.raises(PeerError):
+            await client.group_member_add(ACCOUNT, fake.group_id, ["d4" * 32])
+        await fake.stop()
+    run(body())

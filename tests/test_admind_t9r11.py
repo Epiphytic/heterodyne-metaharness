@@ -10,7 +10,7 @@ import errno
 import socket
 from pathlib import Path
 
-from admind_waits import stays, wait_until
+from admind_waits import hold, stays, wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r5 import arm, frame, serving
 
@@ -60,7 +60,7 @@ def test_a_dispatcher_scheduled_right_after_the_accept_defers(tmp_path: Path) ->
             client = connect(path)
             try:
                 b = "b" * 64
-                u.daemon.held.append((b, "job B"))
+                hold(u.daemon, b, "job B")
                 await until_accepted(server)
                 dispatcher = asyncio.create_task(u.daemon.flush())      # ready in the same loop iteration
                 await dispatcher
@@ -90,7 +90,7 @@ def test_an_accept_error_backs_off_without_spinning_and_keeps_the_gate_closed(tm
             try:
                 await wait_until(lambda: calls[0] >= 1)
                 n = calls[0]
-                u.daemon.held.append(("b" * 64, "job B"))
+                hold(u.daemon, "b" * 64, "job B")
                 await u.daemon.flush()
                 assert u.tmux.pasted == [] and server.backlog_waiting()     # a waiting connection gates it
                 await asyncio.sleep(0.02)

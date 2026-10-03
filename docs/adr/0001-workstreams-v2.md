@@ -1,6 +1,6 @@
 # ADR 0001: heterodyne-metaharness (workstreams v2)
 
-- Status: Proposed, revision 12 (amends §3.4, §4.1, §4.2, §5.3, §5.6, §7, §10, §13 and §14 to match the spike findings and the roadmap). The operator approved revision 11. Cross-model review r17 approved revision 12 (rounds r12–r17) (`docs/reviews/`; responses in `0001-design-review-r1-response.md`). Waiting for operator approval of revision 12 (§5.9: an ADR change needs a new approval).
+- Status: Proposed, revision 13 (amends §2, §3, §3.4, §6.2, §7, §8, §11 and §13 for admind's operator decisions of 2026-10-01/02: several operators, summarized replies with `!details`, and an untruncated audit). The operator approved revision 12 (btq-freh). Cross-model review r17 approved revision 12 (rounds r12–r17) (`docs/reviews/`; responses in `0001-design-review-r1-response.md`). Revision 13 waits for its own cross-model review and operator approval (§5.9: an ADR change needs a new approval). The OpenShell sandbox runtime is deferred to revision 14 (§7).
 - Review process (set by the operator, 2026-09-29; applies to every agent and harness): **every change is reviewed by a different LLM than its author whenever possible, otherwise by an adversarial fresh-context agent** (§11.1). The two-model brainstorm requirement is retired.
 - Date: 2026-09-29
 - Author: Claude Opus 5.5 (brainstorm with the operator)
@@ -30,7 +30,7 @@ Build v2 in a new repo. The old harness is deadlocked, so there is no live cutov
 3. **Hermes as intermediary and gatekeeper**, behind a narrow request→response interface. It rewrites operator messages, judges grey-zone permissions, and answers or nudges stalled agents.
 4. **Beads for task intent, decisions and audit; a `wsd` journal for operational state.** Section 3.3 says which store owns which record.
 5. **Marmot as the human interface.** One group per workstream with a thread per bead, plus one control group. For internal repos, GitHub or Radicle PR/patch review is an equivalent place to approve.
-6. **`admind`, an independent admin override channel.** The operator's text goes unmodified to a superuser admin agent (itself an LLM), with no beads and no gatekeeper LLM between them.
+6. **`admind`, an independent admin override channel.** An operator's text goes unmodified to a superuser admin agent (itself an LLM), with no beads and no gatekeeper LLM between them.
 
 ### Rejected alternatives
 
@@ -62,7 +62,7 @@ Build v2 in a new repo. The old harness is deadlocked, so there is no live cutov
   • grey-zone permissions      in per-bead tmux session       + audit trail
   • answer/nudge agents        inside platform sandbox
 
- admind (independent service): own Marmot identity + 2-member group ─► superuser agent
+ admind (independent service): own Marmot identity + operators' group ─► superuser agent
 ```
 
 ### 3.1 Components
@@ -82,7 +82,7 @@ Build v2 in a new repo. The old harness is deadlocked, so there is no live cutov
 | hook shim | A tiny script that agent hooks call. It forwards the event to the `wsd` session socket (§7) and returns the decision. When `wsd` is unreachable it fails closed, except for a narrow local-only class (§10). | No |
 | hermes-channel | An MCP channel server that pushes steering into live Claude sessions (§4.2). | No |
 | gatekeeper | A Hermes endpoint. Typed request→response with a timeout. The only LLM in the loop. | Yes |
-| `admind` | The admin override channel (§8). | Passthrough only |
+| `admind` | The admin override channel (§8). | Passthrough in; summarized replies out (§8) |
 
 **Core rule:** `wsd` calls the gatekeeper; the gatekeeper never drives `wsd`. If Hermes is down, everything deterministic keeps working: commands, delivery, operator approvals, cron, and pickup of beads that are already ready.
 
@@ -124,7 +124,7 @@ The SQLite journal is backed up with the beads backups. The recovery order on st
   - `wsd` learns of other members' changes from `wn-agent`'s membership events. Those events are not delivered for a change made by the harness's own identity (S4), and `wn-agent` offers no member list to compare against.
   - So **every membership change by the harness identity goes through `wsd`**, which journals it and raises the same alert and suspension itself. No sandbox can reach the `wn-agent` control socket (§7).
   - As a backstop, reconcile compares each registered group's member count with its last trusted value, and a mismatch is treated as a membership change.
-  - **Residual risk, for operator acceptance with revision 12:** a change made directly on the control socket, bypassing `wsd`, by something running as the service user (for example `admind`'s agent, §8) and keeping the count unchanged, such as swapping one member for another, is not detected, so it raises no alert and suspends nothing.
+  - **Residual risk, for operator acceptance with revision 12:** a change made directly on the control socket, bypassing `wsd`, by something running as the service user (for example `admind`'s agent, §8) and keeping the count unchanged, such as swapping one member for another, is not detected, so it raises no alert and suspends nothing. The same risk applies to `admind`'s own group (§8), which now holds several operators.
 - **Forge:** reviews count only from allowlisted identities. A forge review is pinned by the head SHA, which is part of the ask's `context_digest`. A review is bound to a revision (§5.5). A review that is dismissed or revoked before execution starts cancels the pending decision.
 - **Non-allowlisted input** is logged and ignored, with no reply, so the system doesn't confirm it exists.
 
@@ -405,6 +405,8 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 
 ### 6.2 Rendering rules (golden-tested)
 
+These rules govern `wsd`'s messages. `admind`'s output follows §8.
+
 - **No internal IDs** other than a short bead ID. No UUIDs, hex strings, pane dumps or instructions meant for agents. There are two exceptions, both on approval cards: the 12-character `context_digest` (§5.9), and short commit SHAs inside pinned permalinks.
 - **An approval card** renders the five required parts of §5.9: *what*, *exact effect* (in a code block), *why*, *context*, and *pinned links* as permalinks. It then adds *how to answer* ("👍 approve · 👎 deny · ❤️ always · reply to steer") and the short `context_digest`. If the context is too long for a card, the card shows a summary plus pinned links, and the full text lives on the approval bead, which the digest covers.
 - **Length:** at most about 8 lines per message. Detail goes in `/status <bead>`.
@@ -412,7 +414,7 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 - **Reminders:** one reminder after 4h, as a reply to the original card, without repeating its content. After that, only the daily digest.
 - **Delivery that can't be confirmed:**
   - If no surface has a confirmed delivery receipt for an approval or question card within 10 minutes, `wsd` raises a delivery alert in the control group.
-  - If that also can't be confirmed, `wsd` writes a local alert file. `admind` watches the alert directory on its own and pushes it to the operator. This path doesn't depend on `wsd` or the gateway's Marmot connection.
+  - If that also can't be confirmed, `wsd` writes a local alert file. `admind` watches the alert directory on its own and pushes it to its operators, ahead of any `!details` output (§8). This path doesn't depend on `wsd` or the gateway's Marmot connection.
 
 ### 6.3 Commands (deterministic, target reply under 1s)
 
@@ -460,31 +462,64 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
     - S3's acceptance criteria are exactly these probes on both backends.
   - **Still to verify for v1 (implementation plan 4):** egress for package registries and read-only git fetch, the reviewer's read-only worktree bind, and the self-test and login against the managed Codex launch shape (app-server inside the sandbox). S3 tested Codex only as `codex exec`. Plan 4 also re-tests Codex `PreToolUse` deny and hook trust with the harness's actual `hooks.json` schema (§4.2).
 - **Why an outer sandbox:** a single boundary to review means swapping agents never changes the security posture. The agents' native sandboxes have different semantics.
+- **Runtime change deferred to revision 14:** the operator prefers NVIDIA OpenShell (Landlock, seccomp, network namespaces, per-binary egress policy, credential injection at the proxy) over bubblewrap, Seatbelt and CubeSandbox, because one policy model would cover Linux, macOS and later WSL. It has not yet run on the reference host: the first sandbox under OpenShell v0.1.2's VM driver failed inside the guest (2026-09-30). A spike, S5, must pass the §7 self-test probes on the reference host before revision 14 rewrites this section. Until then this section stands, and plan 4 (the sandbox runtime) waits for revision 14.
 - **v2 (future):** a `CubeRuntime` (TencentCloud CubeSandbox microVMs, Linux/KVM only) behind the same interface, with credentials injected at the egress proxy and a snapshot on park.
 
 ## 8. Admin override channel (`admind`)
 
 - **Independent:**
   - Its own service unit, sharing no dependency on `wsd`, the Hermes gateway, beads or the gatekeeper.
-  - Its own Marmot identity and connection, in a two-member MLS group of the operator plus the admin bot.
-  - It refuses to operate if the group has more than two members, and accepts messages only from the operator's exact npub. Anything else is dropped and logged.
+  - Its own Marmot identity and connection, in one MLS group of the operators plus the admin bot.
+- **Operators (revision 13):**
+  - Every entry in `policy.toml`'s `operators` with a Marmot npub is an admind operator. There may be several. admind reads `policy.toml` itself, with no dependency on `wsd`.
+  - **Ingress authentication** (as §3.4, but bound to admind's own group, which is not a `wsd`-registered group): admind processes a message only if its MLS-authenticated sender key, reported by `wn-agent` and never parsed from text, is an operator's; it arrived in admind's configured group; and its message ID has not been seen before. Anything else is dropped and logged, with no reply. The audit names the operator who sent each message.
+  - The join signal (plan 2, D5) is the first message from any operator.
+  - All operators share the group, see everything, and may each send messages and `!` commands.
+- **Group membership (revision 13):** `wn-agent` reports a member *count*, never a member list, and its membership events never name the member (S4). So membership is controlled, not inspected:
+  - `admind init` creates the group with admind and every operator. admind is the group's only admin.
+  - Members change only through the host command `admind operators add NAME` or `admind operators remove NAME`. For `add`, NAME must already be an operator in `policy.toml`. The command asks the running daemon, which makes the change through its own connection. admind's own changes produce no events for itself (S4), so they don't latch it.
+  - **A membership change is a journaled transition:**
+    1. The daemon serializes it with every guard check and holds dispatch and outbound posting until it ends.
+    2. It journals the pending change with its `from` and `to` counts. The trusted expected count stays `from`.
+    3. It makes the change and waits for `wn-agent`'s reply, then reads the group's member count. Membership events keep being processed throughout; since admind's own change produces none, any event during the transition latches.
+    4. It commits only if `wn-agent` reported success **and** the count equals `to`: `to` becomes the trusted expected count and the pending record is cleared. It aborts only if `wn-agent` reported failure **and** the count equals `from`: the pending record is cleared and nothing else changes. Every other outcome (a timeout, a lost reply, or a count that disagrees with the reported result) latches.
+    5. A pending record found on startup latches before anything else runs, because a count alone can't show which change happened. Count alone never confirms a change.
+  - **`admind rearm`** is the host recovery for every latch. The operator checks the group's members in their own client, then runs `admind rearm`, which takes the current member count as trusted and clears any pending record.
+  - Plan 2b first verifies that `wn-agent`'s control socket can add and remove group members. If it can't, the operator set changes only by creating a new group with `admind init`.
+  - **Latch:** any membership or admin event (necessarily a change made by someone else, such as an operator leaving), or a member count other than the expected count, latches admind until `admind rearm` on the host. A latched admind posts nothing and acts on nothing.
+  - **Residual risk:** something running as the service user could swap a member through admind's control socket while keeping the count, undetected (as in §3.4).
+  - **Temporary operators:** a test identity is added as a temporary `policy.toml` entry, added with `admind operators add`, and removed with `admind operators remove` when the test ends.
 - **Passthrough:**
   - Operator text goes byte-for-byte into a persistent interactive session of the `admin` profile (initially `claude-opus`; any adapter can be configured).
-  - Replies come back verbatim, split into chunks, as thread replies.
   - The agent runs as the harness's service user (the operator's login user on the reference install) with permission prompts bypassed, no sandbox, and no root. **This is a deliberate operator decision** (2026-09-29): its purpose is to repair anything the harness can break, so a least-privilege identity would defeat it. The review's objection is recorded and rebutted in the r1 response.
   - **Mitigations that keep the purpose intact:**
-    - the sender must be MLS-authenticated as the operator's npub (§3.4);
-    - the two-member group check;
+    - the sender must be MLS-authenticated as an operator's npub (§3.4);
+    - the controlled membership and the latch above;
     - admind's own Marmot identity keys are readable only by the admind unit;
     - every message and action goes to the append-only log.
+- **Redaction (revision 13):** one redaction applies to everything admind posts (verbatim replies, summaries, batches and both `!details` modes), to the summarizer's input, and to the audit: secrets, npubs and 64-hex values are replaced by markers, and control characters are escaped. "Unabridged" and "verbatim" below mean nothing is omitted or reworded apart from those markers. The unredacted text stays in the agent transcript on the host.
+- **Replies (revision 13):** each reply is the agent's text for the turn (the `Stop` hook's `last_assistant_message`, or the assistant text blocks of the transcript as a fallback). Thinking and tool calls are never part of a reply. A reply is threaded to the operator message that started its turn.
+  - **Short replies are sent verbatim:** up to `reply_verbatim_lines` lines (default 8) and `reply_verbatim_chars` characters (default 800).
+  - **Longer replies are summarized** by the configured `[admind] summarizer` profile, run headless, read-only and without tools, with a 60-second timeout. Its input is the reply after the audit redaction (secrets, npubs and 64-hex values). The summary is at most about 8 lines, quotes verbatim any question the agent asks and any error it reports, and ends with "summary · reply `!details` for everything". The summarizer is admind's own subprocess; it uses no `wsd`, gatekeeper or Hermes component, so admind stays independent.
+  - **Backstop:** if the summarizer is not configured, fails, times out or returns nothing, or any other step of the reply pipeline fails, the affected replies go to the backstop:
+    - A batch opens with the first affected reply and closes 60 seconds later. Replies affected meanwhile join it in order.
+    - Each reply in the batch is headed by its origin: the sending operator, the time, and the first words of the operator message that started its turn.
+    - Runs of identical consecutive lines are collapsed to one line marked "(×k)". Line counts are taken after this collapse.
+    - A batch of 50 lines or fewer is sent whole. A longer one is sent as the first 10 lines, a line "… N lines skipped …", and the last 40 lines.
+    - The batch is one message, posted unthreaded because it can answer several operator messages. This is deterministic and drops nothing that `!details` can't return.
+  - **`!details`**, as a reply to a summary or batch message (or, without a reply target, for the latest one), sends the full reply text, unabridged, chunked at `chunk_chars`. For a batch it sends every included reply, in order, each headed by its origin.
+  - **`!details full`** also sends the tool calls and their results of each included turn, read from the transcript. Thinking is never sent.
+  - admind keeps the record behind each summary and batch (which turns, which replies) so `!details` works after a restart.
+  - **Delivery lanes:** the outbox has two lanes. The first carries command replies, alerts, notices, summaries, batches and verbatim replies, in order. The second carries `!details` chunks, in order, and only when the first lane is empty. There is no cap on `!details` length, so urgent messages are never stuck behind a long one.
 - **Built-in commands (no LLM, `!` prefix):**
   - `!new` starts a fresh session
   - `!interrupt` sends Esc
   - `!tail [n]` shows the pane tail
   - `!restart <unit>` restarts a unit from a fixed allowlist in admind's config: `wsd`, the Hermes gateway, and runner units
   - `!ps` shows unit health
-- **Audit:** an append-only local JSONL log (timestamp, sender, text, action) plus the agent transcript. It is kept separate from beads on purpose.
-- **Alert relay:** admind watches `wsd`'s local alert directory and pushes new alerts to the operator (§6.2).
+  - `!details [full]` (above)
+- **Audit:** an append-only local JSONL log plus the agent transcript, kept separate from beads on purpose. Each operator message is logged **in full** (revision 13: no truncation), with the redaction above and control characters escaped, together with the timestamp, the sending operator and the action. Operator add and remove, latches, summarizer failures and backstop batches are logged too.
+- **Alert relay:** admind watches `wsd`'s local alert directory and pushes new alerts to the operators (§6.2).
 - **Build order:** `admind` is built early, right after the spikes, so every later step has a recovery path.
 
 ## 9. Scheduling and cron
@@ -524,7 +559,8 @@ User jobs live in `schedules.toml`. Each job either runs a fixed command or file
   - the nudge counter and progress detection
   - session ID derivation
   - sandbox profile compilation for both backends
-- **Golden:** every renderer event type has a fixture showing exactly what the operator sees.
+- **Golden:** every renderer event type has a fixture showing exactly what the operator sees. For `admind` this includes summaries, backstop batches (with skipped-line counts and collapsed runs) and `!details` chunking.
+- **admind (revision 13):** the guard with several operators and an expected member count; `admind operators add|remove` and the latch on every unexpected change; summarizer failure, timeout and empty output each falling back to the backstop; `!details` and `!details full` (redacted, no thinking); and delivery-lane ordering. The summarizer, Marmot and the agent are fakes.
 - **Integration:** a fake `claude` and `codex` that emit hook events, a fake gatekeeper, a mock Marmot, a fake forge, and a throwaway Dolt. They exercise flows 5.1–5.8 and every row in §10.
 - **Platform:** a CI matrix of Linux and macOS for the platform seam and the sandbox backends.
 - **Acceptance:** the migrated-bead corpus (§14) running through v1 end to end, starting with one workstream and adding others once it has run for 3 days without operator intervention beyond approvals.
@@ -584,6 +620,7 @@ This rule is the same for every agent and harness, and for v2's own development:
 - **S2, Claude channels** (phase 2 gate): a custom hermes-channel MCP server under subscription auth. Done: the live push was not demonstrated within the timebox, so the gate is not passed. v1 uses `tmux send-keys` for the Claude reviewer, unchanged.
 - **S3, sandbox:** run both CLIs inside bubblewrap (v1) and Seatbelt (phase 2 gate) with synthetic home, egress proxy and session socket. Acceptance is exactly the §7 launch self-test probes plus a working login and hooks. If a backend can't pass, that platform doesn't ship. Done for bubblewrap: the shape it tested passes (both CLIs headless, plus the Claude hook). The managed Codex shape is a plan-4 item (§7). Seatbelt remains open with the phase 2 macOS work.
 - **S4, Marmot:** threads (reply-to) and reactions end-to-end on the current mdk bindings, for both a harness identity and a separate `admind` identity. Done: the harness identity through its `wn-agent` control socket, and the scratch `admind` identity through its own `wn` daemon, in both directions. The operator's real-client check is still pending.
+- **S5, OpenShell (for revision 14):** run both CLIs under OpenShell on the reference host and pass exactly the §7 self-test probes, plus a working login and hooks. Not started; the first attempt failed inside the VM guest (§7).
 
 ## 14. Migration
 

@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from admind_waits import hold
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
 
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
-from heterodyne.admind.audit import Audit
+from heterodyne.admind.audit import Audit, ref_id
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import (
     LONG_TURN,
@@ -54,13 +55,16 @@ class Services:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, settings_overrides: dict[str, Any] | None = None,
+                 before_store: Callable[["Harness"], Any] | None = None) -> None:
         wrapper = tmp_path / "claude"
         wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_CLAUDE} \"$@\"\n")
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
         self.log = tmp_path / "claude.log"
         os.environ["FAKE_CLAUDE_LOG"] = str(self.log)
-        self.settings = make_settings(tmp_path, adapter_binary=str(wrapper))
+        self.settings = make_settings(tmp_path, adapter_binary=str(wrapper), **(settings_overrides or {}))
+        if before_store:
+            before_store(self)
         self.store = Store(self.settings.state_dir / "admind.db")
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
@@ -102,8 +106,10 @@ def drop_tmux(h: Harness) -> None:
 
 
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
-             before: Callable[[Harness], Any] | None = None) -> Harness:
-    h = Harness(tmp_path)
+             before: Callable[[Harness], Any] | None = None,
+             settings_overrides: dict[str, Any] | None = None,
+             before_store: Callable[[Harness], Any] | None = None) -> Harness:
+    h = Harness(tmp_path, settings_overrides, before_store)
     if before:
         before(h)
 
@@ -209,7 +215,7 @@ def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> 
         await h.until(lambda: any("control characters" in t for t in h.texts()))
         assert not any("let me in" in t for t in h.texts())
     h = run_with(tmp_path, scenario)
-    assert "sender is not the operator" in (h.settings.state_dir / "audit.jsonl").read_text()
+    assert "sender is not an operator" in (h.settings.state_dir / "audit.jsonl").read_text()
 
 
 @needs_tmux
@@ -316,7 +322,7 @@ def test_lost_prompt_hook_holds_the_queue_until_interrupt(tmp_path: Path) -> Non
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["echo: __noprompt__"] is None             # unconfirmed: posted top-level
         assert by_text[UNCONFIRMED] == lost
-        assert after not in dispatched(h)                        # a timeout never dispatches
+        assert ref_id(after) not in dispatched(h)                        # a timeout never dispatches
         await h.say("!interrupt")
         await h.until(lambda: "echo: after" in h.texts(), timeout=30)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
@@ -332,7 +338,7 @@ def test_long_turn_with_a_lost_prompt_hook_is_never_pasted_over(tmp_path: Path) 
         nxt = await h.say("next")
         await h.until(lambda: UNCONFIRMED in h.texts() and LONG_TURN in h.texts(), timeout=30)
         await asyncio.sleep(0.5)
-        assert nxt not in dispatched(h) and "echo: next" not in h.texts()
+        assert ref_id(nxt) not in dispatched(h) and "echo: next" not in h.texts()
         await h.say("!interrupt")
         await h.until(lambda: "echo: next" in h.texts(), timeout=30)
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
@@ -356,7 +362,7 @@ def test_failed_interrupt_keeps_the_queue_held(tmp_path: Path, monkeypatch: pyte
         await h.until(lambda: any(t.startswith("!interrupt failed: a tmux command failed")
                                   for t in h.texts()))
         await asyncio.sleep(0.5)
-        assert nxt not in dispatched(h)
+        assert ref_id(nxt) not in dispatched(h)
         assert h.store.get("anchor") == hung and h.store.get("busy") is not None
     run_with(tmp_path, scenario, before)
 
@@ -391,7 +397,7 @@ def test_stop_during_interrupt_never_dispatches_into_the_escape(
         await h.until(lambda: "echo: next" in h.texts())
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["finished anyway"] is None       # the interrupt had already released the turn
-        assert nxt in dispatched(h) and "echo: next" in by_text
+        assert ref_id(nxt) in dispatched(h) and "echo: next" in by_text
     run_with(tmp_path, scenario, before)
 
 
@@ -451,7 +457,7 @@ def test_new_ignores_the_replaced_sessions_late_session_start(
         await h.until(lambda: "echo: next" in h.texts(), timeout=30)
         assert h.agent.session_id != old
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
-        assert by_text["echo: next"] == nxt and dispatched(h).count(nxt) == 1
+        assert by_text["echo: next"] == nxt and dispatched(h).count(ref_id(nxt)) == 1
     run_with(tmp_path, scenario, lambda h: slow(monkeypatch, h, "new", started, release))
 
 
@@ -478,7 +484,7 @@ def test_lost_stop_then_terminal_turn_never_takes_the_thread(tmp_path: Path) -> 
         await h.until(lambda: h.store.get("anchor") == stuck)
         nxt = await h.say("next")
         await asyncio.sleep(1.0)
-        assert nxt not in dispatched(h)                          # busy until the agent is seen idle
+        assert ref_id(nxt) not in dispatched(h)                          # busy until the agent is seen idle
         sid = h.agent.session_id or ""
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, prompt="typed at the terminal"))
         await h.daemon.hooks.put(h.event("Stop", sid, last_assistant_message="terminal answer"))
@@ -531,13 +537,14 @@ def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("warm up")
         await h.until(lambda: "echo: warm up" in h.texts())
-        h.daemon.held += [("aa" * 32, "x1"), ("bb" * 32, "x2")]
+        hold(h.daemon, "aa" * 32, "x1")
+        hold(h.daemon, "bb" * 32, "x2")
         await asyncio.gather(h.daemon.flush(), h.daemon.flush(), h.daemon.flush())
         await h.until(lambda: "echo: x2" in h.texts())
         records = [json.loads(line) for line in
                    (h.settings.state_dir / "audit.jsonl").read_text().splitlines()]
         dispatched = [r["message_id"] for r in records if r["kind"] == "dispatch"]
-        assert dispatched.count("aa" * 32) == 1 and dispatched.count("bb" * 32) == 1
+        assert dispatched.count(ref_id("aa" * 32)) == 1 and dispatched.count(ref_id("bb" * 32)) == 1
         by_text = {r["text"]: r["reply_to_message_id_hex"] for r in h.fake.sent}
         assert by_text["echo: x1"] == "aa" * 32 and by_text["echo: x2"] == "bb" * 32
     run_with(tmp_path, scenario)
@@ -584,13 +591,13 @@ def test_audit_holds_no_peer_text_agent_text_or_account_identifiers(tmp_path: Pa
     async def scenario(h: Harness) -> None:
         await h.say(f"{stranger_npub} {token} let me in", sender=STRANGER)
         await h.say(f"hello {token}")
-        await h.until(lambda: f"echo: hello {token}" in h.texts())
+        await h.until(lambda: "echo: hello <redacted sk- API key>" in h.texts())   # redacted in chat too (B1)
         await h.say("!restart " + stranger_npub)
         await h.say("!ps")
         await h.until(lambda: any("fake.service: active" in t for t in h.texts()))
     h = run_with(tmp_path, scenario)
     audit = audit_text(h)
-    assert "sender is not the operator" in audit
+    assert "sender is not an operator" in audit
     for banned in (STRANGER, stranger_npub, token, OPERATOR_HEX, hex_to_npub(OPERATOR_HEX), ACCOUNT,
                    "b2" * 32, "let me in", "echo: "):
         assert banned not in audit, banned[:12]
@@ -603,7 +610,7 @@ def test_a_crashing_loop_restarts_with_a_value_free_audit(
     npub = hex_to_npub(STRANGER)
 
     def before(h: Harness) -> None:
-        real = h.store.pending
+        real = h.store.next_pending
         calls = [0]
 
         def flaky() -> Any:
@@ -611,7 +618,7 @@ def test_a_crashing_loop_restarts_with_a_value_free_audit(
             if calls[0] == 1:
                 raise ValueError(f"boom {npub}")
             return real()
-        monkeypatch.setattr(h.store, "pending", flaky)
+        monkeypatch.setattr(h.store, "next_pending", flaky)
 
     async def scenario(h: Harness) -> None:
         await h.say("hi")
@@ -825,26 +832,19 @@ def test_alert_render_withholds_secrets_and_identifiers_and_escapes_controls() -
 
 
 def test_transcript_fallback_never_follows_symlinks_or_blocks_on_fifos(tmp_path: Path) -> None:
-    from heterodyne.admind.hook import last_assistant_text, reply_text
+    from heterodyne.admind.hook import reply_text, transcript_size
     real = tmp_path / "real.txt"
     real.write_text(json.dumps({"type": "assistant", "message": {"content": [
         {"type": "text", "text": "secret reply"}]}}) + "\n")
     link = tmp_path / "S.jsonl"
     link.symlink_to(real)
-    assert last_assistant_text(link) == ""
-    assert reply_text(HookEvent("Stop", "S", str(link), None)) == ""
+    size = real.stat().st_size
+    assert reply_text(HookEvent("Stop", "S", str(link), None), 0, size) is None
+    assert transcript_size(HookEvent("Stop", "S", str(link), None)) is None
     fifo = tmp_path / "F.jsonl"
     os.mkfifo(fifo)
-    assert run_with_watchdog(fifo, lambda: reply_text(HookEvent("Stop", "F", str(fifo), None))) == ""
-
-
-def test_transcript_fallback_reads_only_a_bounded_tail(tmp_path: Path) -> None:
-    from heterodyne.admind.hook import last_assistant_text
-    path = tmp_path / "S.jsonl"
-    old = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old " * 500}]}})
-    new = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "newest"}]}})
-    path.write_text("\n".join([old] * 50 + [new]) + "\n")
-    assert last_assistant_text(path, limit=1000) == "newest"
+    assert run_with_watchdog(fifo, lambda: reply_text(HookEvent("Stop", "F", str(fifo), None), 0, 10)) is None
+    assert run_with_watchdog(fifo, lambda: transcript_size(HookEvent("Stop", "F", str(fifo), None))) is None
 
 
 # --- `admind run` wiring ------------------------------------------------------------------------------

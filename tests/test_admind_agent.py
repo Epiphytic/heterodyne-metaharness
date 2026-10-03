@@ -15,7 +15,6 @@ from heterodyne.admind.hook import (
     HookServer,
     hook_command,
     hook_main,
-    last_assistant_text,
     reply_text,
     settings_json,
 )
@@ -136,26 +135,12 @@ def test_reply_text_prefers_the_hook_field(tmp_path: Path) -> None:
         {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "final"},
                                                       {"type": "text", "text": "answer"}]}},
-    ]) + "\nnot json\n")
-    assert last_assistant_text(transcript) == "final\nanswer"
-    assert reply_text(HookEvent("Stop", "S", str(transcript), "from hook")) == "from hook"
-    assert reply_text(HookEvent("Stop", "S", str(transcript), None)) == "final\nanswer"
+    ]) + "\n")
+    end = transcript.stat().st_size
+    assert reply_text(HookEvent("Stop", "S", str(transcript), "from hook"), None, None) == "from hook"
+    assert reply_text(HookEvent("Stop", "S", str(transcript), None), 0, end) == "first\n\nfinal\n\nanswer"
     # a transcript path that isn't this session's file is not read
-    assert reply_text(HookEvent("Stop", "OTHER", str(transcript), None)) == ""
-    assert last_assistant_text(tmp_path / "missing.jsonl") == ""
-
-
-def test_transcript_fallback_is_bounded_to_the_current_turn(tmp_path: Path) -> None:
-    transcript = tmp_path / "S.jsonl"
-    records = [
-        {"type": "user", "message": {"role": "user", "content": "first question"}},
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "old answer"}]}},
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "second"}]}},
-        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
-        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
-    ]
-    transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-    assert last_assistant_text(transcript) == ""   # the second turn had no text; never "old answer"
+    assert reply_text(HookEvent("Stop", "OTHER", str(transcript), None), 0, end) is None
 
 
 def test_hook_round_trip_over_the_socket(tmp_path: Path) -> None:

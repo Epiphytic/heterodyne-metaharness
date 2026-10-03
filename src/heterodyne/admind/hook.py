@@ -12,8 +12,8 @@ and it does not run Stop on a user interrupt. admind processes events strictly o
 the kernel accepted their connections, and answers `ok` only after the event's effects are applied, so the
 hook exits only then. A hook is never configured as async (the generated settings entry has none).
 The agent's reply is the Stop hook's `last_assistant_message`. If a Claude Code build omits that
-optional field, the fallback is the last assistant text in the session's own transcript file
-(plan decision D2). The screen is never scraped.
+optional field, the fallback is the assistant text of the turn's span in the session's own transcript
+file (plan decision D2, plan 2b B13). The screen is never scraped.
 
 Trust boundary: the socket is 0600 in a 0700 directory, so only the service user can write to it, and
 events for any session but the current one are dropped. Each launch of the agent has its own nonce in its
@@ -25,6 +25,8 @@ residual risk ADR §3.4 accepts.
 import argparse
 import asyncio
 import contextlib
+import contextvars
+import hashlib
 import json
 import os
 import secrets
@@ -33,8 +35,9 @@ import shlex
 import socket
 import stat
 import sys
+import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -42,9 +45,9 @@ from typing import Annotated, Any, cast
 import msgspec
 
 from heterodyne.admind.audit import Audit
+from heterodyne.admind.redact import redact, unique_key
 
 MAX_HOOK_FRAME = 1024 * 1024
-MAX_TRANSCRIPT = 8 * 1024 * 1024    # the fallback reads at most this much from the end of the file
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
 ACK_SECONDS = 8.0       # the hook's total wait for admind's answer
 HOOK_TIMEOUT = 15       # Claude Code kills the hook only after the client above has given up
@@ -163,74 +166,282 @@ def _blocks(record: dict[str, Any]) -> list[dict[str, Any]] | str | None:
     return None
 
 
-def _read_tail(path: Path, limit: int) -> str | None:
-    """The last `limit` bytes of a regular file, or None. The path comes from a hook payload, so it is
-    opened without following symlinks and without blocking (a FIFO would hang a plain open)."""
+def transcript_size(ev: HookEvent) -> int | None:
+    """The size of this session's transcript now: at UserPromptSubmit, where the turn's bytes begin; at
+    Stop, where they end (plan 2b B19). Same path rules as the reply fallback; never follows a symlink or
+    blocks on a FIFO."""
+    if not ev.transcript_path:
+        return None
+    path = Path(ev.transcript_path)
+    if path.name != f"{ev.session_id}.jsonl" or not path.is_absolute():
+        return None
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None
-        start = max(0, st.st_size - limit)
-        os.lseek(fd, start, os.SEEK_SET)
-        chunks: list[bytes] = []
-        total = 0
-        while data := os.read(fd, min(1 << 20, 2 * limit - total)):  # the file may grow while we read
-            chunks.append(data)
-            total += len(data)
-            if total >= 2 * limit:
-                break
+        return st.st_size if stat.S_ISREG(st.st_mode) else None
     except OSError:
         return None
     finally:
         os.close(fd)
-    raw = b"".join(chunks)
-    if start:
-        raw = raw.partition(b"\n")[2]      # drop the line the cut landed in
-    return raw.decode("utf-8", errors="replace")
 
 
-def last_assistant_text(path: Path, limit: int = MAX_TRANSCRIPT) -> str:
-    """The last assistant text of the **current turn**: text before the latest real user prompt belongs
-    to an earlier turn and is never returned (a silent turn must not resend an old reply)."""
-    content = _read_tail(path, limit)
-    if content is None:
-        return ""
-    lines = content.splitlines()
-    text = ""
-    for line in lines:
-        try:
-            record: Any = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        kind = cast(dict[str, Any], record).get("type")
-        blocks = _blocks(cast(dict[str, Any], record))
-        if kind == "user":
-            # A tool result is also a "user" record; only a prompt (text) starts a new turn.
-            if isinstance(blocks, str) or (blocks and any(b.get("type") == "text" for b in blocks)):
-                text = ""
-        elif kind == "assistant" and isinstance(blocks, list):
-            parts = [b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str)]
-            if parts:
-                text = "\n".join(parts)
-    return text
+READ_WINDOW = 1024 * 1024               # a turn's bytes are read this much at a time
+MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record fails the read: memory (plan 2b B13)
+MAX_REPLY = MAX_RECORD                  # a turn's reply, in UTF-8 bytes of its final text (plan 2b B13)
+MAX_BLOCKS = 100_000                    # text blocks per turn, empty ones too
+SEPARATOR = "\n\n"                      # between a turn's text blocks
+# Memory, honestly. The accepted result is bounded by MAX_REPLY (UTF-8 bytes, redacted, checked in
+# prepare_reply), but the transient peak is not: prepare_reply redacts the whole text BEFORE it checks the
+# size, so the intermediates are not bounded by the accepted result. They are, at least:
+#   - the record buffer (up to MAX_RECORD) and the objects json parses from it;
+#   - the parts gathered so far, then the joined text;
+#   - in redaction: control escaping grows the text (a control character becomes `\xNN`), and each
+#     substitution pass allocates a copy;
+#   - the UTF-8 encode copy of the redacted text, for the size check.
+# Each of these can be larger than its byte count suggests: parsed Python objects take more than the bytes
+# they came from, and a Python string can take more than its UTF-8 size (or less, for CJK text). No
+# multiple is claimed, and this is not an RSS guarantee. The extraction threads run one at a time (B20),
+# so the peaks do not stack across turns.
+READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 
 
-def reply_text(ev: HookEvent, fallback: bool = True) -> str:
-    """The reply of a Stop. `fallback=False` (a stale Stop) never reads the transcript: it would hold the
-    text of whatever turn ran last, not necessarily this one."""
+class RecordTooLarge(OSError):
+    """A record in the turn's span is over MAX_RECORD. It can't be parsed, so nobody can tell whether it is
+    metadata, an answer or the next turn's prompt; reading on could mix in another turn's content (Codex
+    r7 finding 1), so the whole read fails."""
+
+
+def _lines(fd: int, start: int, end: int) -> Iterator[bytes]:
+    """The complete lines in bytes [start, end), read READ_WINDOW at a time. A line longer than MAX_RECORD
+    raises RecordTooLarge as soon as it passes the limit, so memory stays bounded. The span was measured at
+    the turn's edges, so it ends on a newline: a file shorter than `end`, or a last line without its
+    newline, means the transcript changed under us, and raises OSError (the caller reports a failed read,
+    never a partial one)."""
+    pos, buf = start, bytearray()
+    while pos < end:
+        data = os.pread(fd, min(READ_WINDOW, end - pos), pos)
+        if not data:
+            raise OSError("the transcript is shorter than the turn's span")
+        pos += len(data)
+        while data:
+            nl = data.find(b"\n")
+            piece, data = (data, b"") if nl < 0 else (data[:nl], data[nl + 1:])
+            buf += piece
+            if len(buf) > MAX_RECORD:
+                raise RecordTooLarge(f"a transcript record is over {MAX_RECORD} bytes")
+            if nl >= 0:
+                yield bytes(buf)
+                buf = bytearray()
+    if buf:
+        raise OSError("the turn's span ends inside a record")
+
+
+def _is_prompt(record: dict[str, Any]) -> bool:
+    """A real user prompt: text from the user, as opposed to a record that carries tool results or one
+    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output). A record that
+    carries a tool result is never a prompt, even if it also has text (Codex r4 finding 2)."""
+    blocks = _blocks(record)
+    return record.get("type") == "user" and not record.get("isMeta") and not _has_result(record) and (
+        isinstance(blocks, str) or bool(blocks and any(b.get("type") == "text" for b in blocks)))
+
+
+def _has_result(record: dict[str, Any]) -> bool:
+    blocks = _blocks(record)
+    return (record.get("type") == "user" and isinstance(blocks, list)
+            and any(b.get("type") == "tool_result" for b in blocks))
+
+
+def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
+    """The content records of one turn: transcript bytes [start, end), from its UserPromptSubmit to its
+    Stop (plan 2b B13, B19). The turn begins at its first content (an assistant record or a tool result);
+    a real prompt before that is the turn's own and is skipped, one after it is the next turn's and ends
+    this one. Anything else is metadata (such as `queue-operation`) and skipped. Raises RecordTooLarge for
+    a record over MAX_RECORD, and OSError if the file can't be read, or if a complete record in the span is
+    not a JSON object: a corrupt record could be the error or question the operator needs, so the read
+    fails rather than skip it (Codex r5 finding 2). Never follows a symlink or blocks on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        begun = False
+        for item in _lines(fd, start, end):
+            if _abandoned():
+                raise OSError("the read was abandoned")
+            try:
+                record: Any = json.loads(item)
+            except (ValueError, RecursionError):    # ValueError includes UnicodeDecodeError
+                raise OSError("a transcript record is not valid JSON") from None
+            if not isinstance(record, dict):
+                raise OSError("a transcript record is not a JSON object")
+            rec = cast(dict[str, Any], record)
+            if _is_prompt(rec):
+                if begun:
+                    return                  # the next turn's prompt
+                continue                    # this turn's own prompt
+            if rec.get("type") == "assistant" or _has_result(rec):
+                begun = True
+                yield rec
+    finally:
+        os.close(fd)
+
+
+def _block_text(block: Any) -> str:
+    """One block of a tool result, deterministically. Text is shown as it is; an image is named by its
+    type, size and digest (a text chat can't show it; flagged, B13); anything else is its JSON, keys
+    sorted, with every string redacted first (`_json`)."""
+    if isinstance(block, dict):
+        b = cast(dict[str, Any], block)
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            return b["text"]
+        source = b.get("source")
+        if b.get("type") == "image" and isinstance(source, dict):
+            src = cast(dict[str, Any], source)
+            data = str(src.get("data", ""))
+            digest = hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            media = _label(src.get("media_type", "?"))
+            return f"[image {media}, {len(data)} base64 characters, sha256 {digest}]"
+    return _json(block)
+
+
+def _redacted(value: Any) -> Any:
+    """`value` with every string in it (keys too) redacted, before it is serialized: JSON escapes can put
+    a digit right before a secret (`\\u0001ghp_…`), which the scanner's start rule then refuses (B1)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in cast(dict[Any, Any], value).items():
+            out[unique_key(redact(str(k)), out)] = _redacted(v)     # keys that redact alike: both kept
+        return out
+    if isinstance(value, list):
+        return [_redacted(v) for v in cast(list[Any], value)]
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(_redacted(value), ensure_ascii=False, sort_keys=True)
+
+
+def _label(value: Any) -> str:
+    """An untrusted field shown inline (a tool's name, an image's media type): a string is redacted, anything
+    else goes through `_json`, never through str/repr/format, where a "\\n" becomes a letter n and defeats
+    the scanner's lookbehind (B1)."""
+    return redact(value) if isinstance(value, str) else _json(value)
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_block_text(b) for b in cast(list[Any], content))
+    return _json(content)
+
+
+def _tool_lines(record: dict[str, Any]) -> list[str]:
+    """The tool calls and results in one record. Thinking blocks are never read out."""
+    blocks = _blocks(record)
+    if not isinstance(blocks, list):
+        return []
+    if record.get("type") == "user":
+        return [f"◂ {'(error) ' if b.get('is_error') else ''}{_result_text(b.get('content'))}"
+                for b in blocks if b.get("type") == "tool_result"]
+    if record.get("type") == "assistant":
+        return [f"▸ {_label(b.get('name'))} {_json(b.get('input'))}"
+                for b in blocks if b.get("type") == "tool_use"]
+    return []
+
+
+TOO_LARGE = (f"(this turn's transcript holds a record over {MAX_RECORD // (1024 * 1024)} MiB; "
+             "its tool calls can't be shown)")
+
+
+TRUNCATED = "(details truncated at 64 MiB)"
+
+
+def render_tool_calls(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
+    """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records`, and whether the
+    output was cut at `limit` UTF-8 bytes (None: no limit; the line that would pass it is dropped whole, so
+    nothing is shown in part). A record over MAX_RECORD makes the turn unreadable: without parsing it, the
+    turn's end can't be found (B13). A lone surrogate (JSON `\\ud800`) can't be stored or sent: it becomes
+    `?`, line by line, so no second copy of the whole text is made."""
+    out: list[str] = []
+    used = 0
+    try:
+        for rec in turn_records(path, start, end):
+            for line in _tool_lines(rec):
+                if _abandoned():
+                    raise OSError("the read was abandoned")
+                encoded = line.encode("utf-8", "replace")
+                used += len(encoded) + (1 if out else 0)
+                if limit is not None and used > limit:
+                    return "\n".join(out), True
+                out.append(encoded.decode("utf-8"))
+    except RecordTooLarge:
+        return TOO_LARGE, False
+    except (OSError, RecursionError):   # a structure nested deeper than the stack allows is unreadable too
+        return "(the transcript could not be read)", False
+    return ("\n".join(out) if out else "(no tool calls in this turn)"), False
+
+
+def turn_tool_calls(path: Path, start: int, end: int) -> str:
+    return render_tool_calls(path, start, end)[0]
+
+
+def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
+    """A current Stop's reply (B9, B19). The event's own text if it has one; otherwise every assistant text
+    of the turn's span, in order, so an early question or error is kept. None when it can't be read: no
+    span, a path that is not this session's transcript, a read error, a record too large to read
+    (RecordTooLarge is an OSError), text a database can't hold, or more than MAX_REPLY UTF-8 bytes of
+    joined text (separators included) or MAX_BLOCKS blocks, which stops the read at once. "" is a turn
+    that said nothing."""
     if ev.last_assistant_message:
-        return ev.last_assistant_message
-    if fallback and ev.transcript_path:
-        path = Path(ev.transcript_path)
-        if path.name == f"{ev.session_id}.jsonl":
-            return last_assistant_text(path)
-    return ""
+        size = _size(ev.last_assistant_message)
+        return ev.last_assistant_message if size is not None and size <= MAX_REPLY else None
+    if start is None or end is None or not ev.transcript_path:
+        return None
+    path = Path(ev.transcript_path)
+    if path.name != f"{ev.session_id}.jsonl" or not path.is_absolute():
+        return None
+    parts: list[str] = []
+    total = 0                               # UTF-8 bytes of the final joined text
+    try:
+        for rec in turn_records(path, start, end):
+            blocks = _blocks(rec)
+            if rec.get("type") == "assistant" and isinstance(blocks, list):
+                for b in blocks:
+                    if _abandoned():
+                        raise OSError("the read was abandoned")
+                    text = b.get("text")
+                    if b.get("type") != "text" or not isinstance(text, str):
+                        continue
+                    size = _size(text)
+                    if size is None:
+                        return None         # text no database can hold
+                    total += size + (len(SEPARATOR) if parts else 0)
+                    if total > MAX_REPLY or len(parts) >= MAX_BLOCKS:
+                        return None         # too much text in all, however it is split
+                    parts.append(text)
+    except OSError:
+        return None
+    return SEPARATOR.join(parts)
+
+
+def _abandoned() -> bool:
+    cancel = READ_CANCEL.get()
+    return cancel is not None and cancel.is_set()
+
+
+def _size(text: str) -> int | None:
+    """The UTF-8 length of `text`, or None for text with a lone surrogate (JSON `\\ud800`): it can't be
+    encoded, so it can't be stored."""
+    try:
+        return len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
 
 
 class HookServer:

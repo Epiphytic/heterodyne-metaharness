@@ -18,3 +18,15 @@ def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str
     if isinstance(args, list):
         argv += [str(a) for a in cast(list[Any], args)]
     return argv
+
+
+def headless_argv(binary: str, profile: Mapping[str, Any]) -> list[str]:
+    """A one-shot run that reads its prompt on stdin and prints text: no tools, no hooks, no MCP
+    servers, no user or local settings, no saved session. The profile's `args` are not appended: they
+    could re-enable tools (plan 2b B8)."""
+    argv = [binary, "-p"]
+    model = profile.get("model")
+    if isinstance(model, str) and model:
+        argv += ["--model", model]
+    return argv + ["--tools", "", "--setting-sources", "project", "--settings", '{"disableAllHooks": true}',
+                   "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"]

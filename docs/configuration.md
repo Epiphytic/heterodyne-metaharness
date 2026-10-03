@@ -101,6 +101,9 @@ Any other variable starting with `HETERODYNE_` is an error: "environment overrid
 | `start_timeout_seconds` | How long to wait for the agent to start. Default 60. |
 | `turn_notice_seconds` | How long a turn may run before the operator is told later messages are held. Default 1800. |
 | `group_name` | Name of the admin group. Default `heterodyne admin`. |
+| `summarizer` | Optional. The name of a profile from `[profiles]` used to summarize long replies. Default none: without it, a reply longer than the verbatim limits goes to the batched backstop. claude-code only for now, like `profile` (any other adapter is a configuration error). It runs headless, without tools, hooks, MCP servers or user settings, and the profile's `args` are ignored. See [admind.md](admind.md#4-using-it). |
+| `reply_verbatim_lines` | A reply of at most this many lines (and `reply_verbatim_chars`) is sent as it is; a longer one is summarized or batched. Integer, 1 to 200. Default 8. |
+| `reply_verbatim_chars` | The character limit for a verbatim reply. Integer, 50 to 60000. Default 800. |
 | `marmot.wn_agent` | The wn-agent executable. Default `wn-agent`. |
 | `marmot.home` | Marmot home directory. Default `<state>/admind/marmot`. |
 | `marmot.relays` | Required. A list of ws:// or wss:// relay URLs. |
@@ -115,7 +118,7 @@ Any other variable starting with `HETERODYNE_` is an error: "environment overrid
 - Four are interpreted today:
   - `approvers`: a list of names.
   - `identities`: a table of tables of strings, one table per approver, for example `marmot_npub`, `github` and `radicle_did`.
-  - `operators`: a list of approver names allowed to use the admin channel. Each must be in approvers. admind needs exactly one, with an identities.<name>.marmot_npub.
+  - `operators`: a list of approver names allowed to use the admin channel. Each must be in approvers. Every entry with an identities.<name>.marmot_npub is an admind operator; admind needs at least one. A name must be 1 to 128 characters with no control characters, and two operators can't share a key. Operators are added to and removed from the running group with `admind operators add|remove NAME` (see [admind.md](admind.md#operators)); an entry in the file alone authorises no one.
   - `[tiers]`: re-tiering, as `class = "tier"`. The class must be a default action class and the tier one of `auto_approve`, `escalate` or `hard_deny`. A host may raise or lower any class **except a locked one, which can never be lowered**.
 - The others are reserved for later plans: accepted, but not used.
 

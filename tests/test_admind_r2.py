@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from admind_waits import lock_waiters, wait_until
+from fakes.settings import OPERATOR_HEX
 from test_admind_r1 import FakeTmux, Unit, inbound, run
 
 from heterodyne.admind.daemon import READY_NOTICE, UNCERTAIN
@@ -53,7 +54,9 @@ def test_a_latch_while_waiting_for_the_dispatch_lock_stops_interrupt_and_new(
 
     async def scenario() -> None:
         await u.daemon.dispatch_lock.acquire()
-        task = asyncio.create_task(u.daemon.handle(u.mid(), command))
+        c = u.mid()
+        u.daemon.senders[c] = OPERATOR_HEX                  # as on_message records it
+        task = asyncio.create_task(u.daemon.handle(c, command))
         await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)    # parked on the lock
         u.daemon.latch("group membership changed (member_added)")
         u.daemon.dispatch_lock.release()
@@ -151,7 +154,7 @@ def test_a_transcript_read_that_straddles_a_new_dispatch_is_discarded(
     started = threading.Event()
     release = threading.Event()
 
-    def slow_read(ev: HookEvent, fallback: bool = True) -> str:
+    def slow_read(ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         started.set()
         assert release.wait(10), "test never released the read"
         return "the late reply"
@@ -174,7 +177,7 @@ def test_a_transcript_read_that_straddles_a_new_dispatch_is_discarded(
 def test_a_stop_from_a_retired_session_is_still_suppressed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "old session reply")
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "old session reply")
 
     async def scenario() -> None:
         u.daemon.retired.add("S1")
@@ -192,7 +195,7 @@ def test_a_crash_between_the_ready_marker_and_the_notice_still_sends_the_notice_
     u.store.delete("operator_seen_at")                  # the operator has not been seen yet
     real_enqueue = u.store.enqueue
 
-    def crashing_enqueue(key: str, text: str, reply_to: str | None) -> bool:
+    def crashing_enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         raise OSError("simulated crash while queueing the notice")
     monkeypatch.setattr(u.store, "enqueue", crashing_enqueue)
 

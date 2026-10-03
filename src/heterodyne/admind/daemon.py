@@ -3,9 +3,9 @@
 Output safety. Everything that leaves this module is one of:
 - fixed wording, or a number;
 - a message ID (an event hash, not an identity), audited for correlation;
-- an operator's own text, audited only after `show` (secrets and identifiers redacted, controls escaped);
-- the admin agent's reply or the `!tail` screen, relayed to the operator in chat because the brief says
-  so, and never written to the audit log.
+- an operator's own text, audited whole after `redact`; every audit field is redacted centrally;
+- the admin agent's reply, a summary, a batch, `!details` or the `!tail` screen, relayed to the operators in
+  chat after `redact`, never written to the audit log.
 Peer- and child-supplied text (a stranger's message, an agent reply, a terminal prompt, a peer's error
 `detail`, a hook's session ID or event name) is never logged. Exceptions are reported by type only.
 """
@@ -14,25 +14,44 @@ import asyncio
 import contextlib
 import contextvars
 import hmac
+import json
 import os
 import re
+import threading
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
+import uuid
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from heterodyne.admind import alerts, chunk, commands, guard
+from heterodyne.admind import alerts, backstop, chunk, commands, ctl, guard, membership, summarize
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
-from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
-from heterodyne.admind.settings import AdmindSettings
-from heterodyne.admind.store import Store, now
+from heterodyne.admind.hook import (
+    HOOK_EVENTS,
+    MAX_REPLY,
+    READ_CANCEL,
+    TRUNCATED,
+    Delivery,
+    HookEvent,
+    HookServer,
+    render_tool_calls,
+    reply_text,
+    same_prompt,
+    transcript_size,
+)
+from heterodyne.admind.redact import redact
+from heterodyne.admind.settings import AdmindSettings, Operator
+from heterodyne.admind.store import Store, TurnRow, now
+from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
     ControlClient,
     ControlError,
     GroupStateChanged,
     InboundMessage,
+    PeerError,
     ReactionAdded,
 )
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
@@ -58,9 +77,18 @@ AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is 
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
 AGENT_STUCK_NOTICE = "The admin agent is not running ({why}). Use !tail, then !new."
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
-AUDIT_TEXT_CHARS = 2000
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
 EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled filesystem must not hold a slot)
+OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20)
+SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
+DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
+DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
+NO_TOOL_CALLS = "(tool calls are not available for this turn)"
+DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
+MAX_DETAILS_PARTS = 20_000     # rows one !details publishes (and discards) in a single statement
+DETAILS_SLICE = 500     # parts staged per turn of the event loop
+EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
+                  "for the turn's tool calls, or ask the agent to repeat it.)")
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
 HOOK_LOCK_WAIT = 120.0      # an event's wait for the turn lock; expiry also holds dispatch (R6)
 HOOK_LOST_NOTICE = ("admind lost an agent hook event; new messages are held. "
@@ -97,9 +125,43 @@ def reason(exc: BaseException) -> str:
     return "internal error"
 
 
+def details_notice(cap: int) -> str:
+    """What `!details` says it stopped at: TRUNCATED for the full 64 MiB, otherwise the smaller limit."""
+    if cap >= MAX_REPLY:
+        return TRUNCATED
+    size = f"{cap >> 20} MiB" if cap % (1 << 20) == 0 else f"{cap} bytes"      # exact, never rounded
+    return f"(details truncated at {size})"
+
+
+def utf8_size(text: str) -> int:
+    """UTF-8 bytes of `text`, a lone surrogate counting as the one byte it is replaced by."""
+    return len(text.encode("utf-8", "replace"))
+
+
 def own_text(text: str) -> str:
-    """The operator's own text for the audit log: secrets and identifiers redacted, controls escaped."""
-    return show(text, False)[:AUDIT_TEXT_CHARS]
+    """The operator's own text for the audit log, whole (revision 13), redacted (B1; the audit redacts again,
+    idempotently)."""
+    return redact(text)
+
+
+def prepare_reply(raw: str, lines: int, chars: int) -> tuple[str, str] | None:
+    """A reply's redacted text and its mode, `verbatim` or `summary`. CPU-bound on a large reply, so it runs
+    in a thread. None if the text can't be stored (a lone surrogate) or is over MAX_REPLY UTF-8 bytes once
+    redacted: the caller treats the turn as unread."""
+    text = redact(raw if raw.strip() else NO_REPLY)
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+    if size > MAX_REPLY:
+        return None                 # redaction can expand control characters about fourfold
+    return text, "summary" if summarize.needs_summary(text, lines, chars) else "verbatim"
+
+
+def render_batch(rows: list[TurnRow]) -> str:
+    """One batch's message, redacted and fitted. CPU-bound, so it runs in a thread."""
+    return backstop.fit(redact(backstop.render([backstop.Entry(r.origin, r.text) for r in rows])),
+                        backstop.BATCH_MAX_CHARS)      # one message, not chunk_chars (B10)
 
 
 async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: Audit, *, base: float = 1.0,
@@ -128,10 +190,41 @@ async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: A
         delay = min(delay * 2, cap)
 
 
+def applied(confirmed: set[str], pending: membership.Pending) -> set[str]:
+    """The confirmed keys once `pending` took effect."""
+    return confirmed | {pending.member_hex} if pending.op == "add" else confirmed - {pending.member_hex}
+
+
+def reconcile(count: int, confirmed: set[str] | None, pending_raw: str | None,
+              policy: tuple[Operator, ...]) -> tuple[set[str] | None, str]:
+    """Which operators rearm confirms for a trusted `count` (B21). Returns (keys, how), or (None, what
+    admind had) when the count can't be reconciled. A pending change whose `to` count matches took effect;
+    one whose `from` count matches did not. Then the confirmed keys stand if the count fits them; else,
+    if the count fits every policy operator, the operator's rearm asserts they are all in the group."""
+    keys: set[str] = set() if confirmed is None else set(confirmed)
+    if pending_raw is not None:
+        pending = membership.Pending.load(pending_raw)
+        if count == pending.to_count:
+            keys = applied(keys, pending)
+    eligible = {o.hex for o in policy}
+    keys &= eligible
+    if confirmed is not None and count == 1 + len(keys):
+        return keys, "confirmed"
+    if count == 1 + len(eligible):
+        return eligible, "policy"
+    return None, f"{len(keys)}"
+
+
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
-                 agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str) -> None:
+                 agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
+                 load_operators: Callable[[], tuple[Operator, ...]] | None = None) -> None:
         self.s = settings
+        self.load_operators = load_operators or (lambda: settings.operators)
+        self.policy_operators = settings.operators
+        self.operators: dict[str, str] = {}     # set by run() from group_operators (B21)
+        self.senders: dict[str, str] = {}       # message ID -> sender key, so queued work can be revalidated
+        self.dispatching: str | None = None     # the prompt being pasted; it may return to `held`
         self.client = client
         self.store = store
         self.audit = audit
@@ -148,9 +241,10 @@ class Admind:
         # a restart resets the indices, and startup recovery already fails closed.
         self.turn_floor = 0
         self.extract_timeout = EXTRACT_SECONDS      # replaced in tests
+        self.details_timeout = DETAILS_READ_SECONDS         # replaced in tests
         self.hook_deadline = HOOK_DEADLINE          # replaced in tests
         self.hook_lock_wait = HOOK_LOCK_WAIT        # replaced in tests
-        self._extraction: asyncio.Future[str] | None = None     # the one transcript-read thread allowed
+        self._reader: asyncio.Future[Any] | None = None     # the one transcript-read thread allowed (B20)
         self._idle_tasks: set[asyncio.Task[None]] = set()
         self.held: list[tuple[str, str]] = []
         self.clock: Callable[[], float] = time.monotonic    # replaced in tests
@@ -159,11 +253,29 @@ class Admind:
         self.launched_at = self.clock()
         self.stuck: str | None = None
         self.not_ready_sent = False
+        self.summary_wake = asyncio.Event()
+        self.summarizer_argv: list[str] | None = (
+            None if settings.summarizer is None or settings.summarizer_binary is None
+            else headless_argv(settings.summarizer_binary, settings.summarizer))
+        self.summary_timeout = summarize.SUMMARY_TIMEOUT    # replaced in tests
+        self.summary_poll = SUMMARY_POLL                    # replaced in tests
+        self.offset_timeout = OFFSET_SECONDS                # replaced in tests
+        self.batch_seconds = backstop.BATCH_SECONDS         # replaced in tests
+        self.batch_poll = 1.0                               # replaced in tests
+        self.wallclock: Callable[[], float] = time.time     # replaced in tests; batches outlive a restart
         self.group_ok = False
         self.observing = False      # a membership subscription is confirmed active (acked, then verified)
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
+        self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
+        self.transition_lock = asyncio.Lock()   # one membership change or rearm at a time (B7)
+        self.work_lock = asyncio.Lock()         # held by worker_loop for each operator message
+        self.changing = False                   # a transition holds dispatch and posting (B7)
+        self.membership_epoch = 0               # bumped when a transition or rearm begins; see check_group
+        self.group_events = 0                   # membership events seen; rearm refuses if one comes meanwhile
+        self.reading = False                    # the subscription's events are being read (B22)
+        self._backoff: dict[int, asyncio.Future[None]] = {}     # each row waiting out a retry: its own timer
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
         self.generation = 0     # bumped by every dispatch and every turn-starting hook; see _flush
@@ -234,6 +346,20 @@ class Admind:
             self.ready.clear()
         return self.ready.is_set()
 
+    def confirmed_operators(self) -> set[str] | None:
+        """The keys admind has confirmed are in the group; None before the plan-2 migration."""
+        raw = self.store.get("group_operators")
+        return None if raw is None else {str(k) for k in json.loads(raw)}
+
+    def authorise(self, confirmed: Iterable[str]) -> None:
+        """Who may command admind: the policy operators whose key is confirmed in the group."""
+        keys = set(confirmed)
+        self.operators = {o.hex: o.name for o in self.policy_operators if o.hex in keys}
+
+    def expected_members(self) -> int:
+        """The trusted member count (B3). Absent only before the startup migration has run."""
+        return int(self.store.get("expected_members") or "2")
+
     def latched(self) -> bool:
         return self.store.get("latched") is not None
 
@@ -247,13 +373,32 @@ class Admind:
         """Outbound gate, checked immediately before every send: not latched, the operator has been
         seen in the group (D5), the last membership check succeeded and the membership subscription is
         confirmed active. A count check alone never counts: with nobody watching, a swap goes unseen."""
-        return (not self.latched() and self.group_ok and self.observing
+        return (not self.latched() and self.group_ok and self.observing and not self.changing
                 and self.store.get("operator_seen_at") is not None)
 
-    def authorised(self) -> bool:
-        """May admind act for the operator right now: not latched, group verified, subscription live.
-        Checked after every await that verifies and again immediately before a side effect."""
-        return not self.latched() and self.group_ok and self.observing
+    def sender_current(self, mid: str) -> bool:
+        """Is the sender of message `mid` still an authorised operator? A latch cleared by `rearm` may have
+        left it out. Fails closed: a message with no recorded sender is not current."""
+        sender = self.senders.get(mid)
+        return sender is not None and sender in self.operators
+
+    def remember_sender(self, mid: str, sender: str) -> None:
+        """Record who sent `mid`. A record is dropped only once its message is past every queue: never
+        while it is held, waiting for a lock, being pasted (it may return to `held` if the paste fails)."""
+        if len(self.senders) > 256:
+            live = {held_mid for held_mid, _ in self.held} | set(self.store.inbound_with_status("received"))
+            live |= set(self.store.inbound_with_status("executing"))
+            if self.dispatching is not None:
+                live.add(self.dispatching)
+            self.senders = {m: k for m, k in self.senders.items() if m in live}
+        self.senders[mid] = sender
+
+    def authorised(self, mid: str | None = None) -> bool:
+        """May admind act for the operator right now: not latched, group verified, subscription live, and
+        (given a message) its sender still an authorised operator. Checked after every await that verifies
+        and again immediately before a side effect."""
+        return (not self.latched() and self.group_ok and self.observing and not self.changing
+                and (mid is None or self.sender_current(mid)))
 
     def deny(self, mid: str, what: str) -> None:
         """Refuse a message that was accepted before admind stopped being authorised. Fixed wording; no
@@ -264,12 +409,14 @@ class Admind:
                 self.reply(mid, UNVERIFIED, "unverified")
         self.audit.write("drop", message_id=mid, reason="no longer authorised", what=what)
 
-    def post(self, key: str, text: str, reply_to: str | None) -> None:
-        if self.store.enqueue(key, text, reply_to):
+    def post(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> None:
+        """Queue one message. Everything admind posts is redacted here (B1); callers that chunk redact the
+        whole text first, so a value can't escape redaction by straddling a chunk boundary."""
+        if self.store.enqueue(key, redact(text), reply_to, lane):
             self.wake.set()
 
     def reply(self, mid: str, text: str, tag: str) -> None:
-        for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
             self.post(f"{tag}:{mid}:{i}", part, mid)
 
     # --- lifecycle -----------------------------------------------------------------------------
@@ -278,6 +425,7 @@ class Admind:
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
+        self.store.discard_details()    # a !details in preparation died with the process
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
         # Received (held, never pasted) or executing (a command that may not have run to the end): each
@@ -290,24 +438,67 @@ class Admind:
                 self.audit_quietly("recover", message_id=mid, action="answered-restarted")
 
     async def run(self) -> None:
+        if self.store.get("expected_members") is None:     # a plan-2 group: always two members (B3)
+            self.store.set("expected_members", "2")
+            self.audit.write("guard", action="migrated", expected_members=2)
+        if self.store.get("membership_pending") is not None:      # B15: a count can't tell which change
+            self.latch("a membership change was interrupted; check the group's members in your client, "
+                       "then run `admind rearm` on the host")
+        confirmed: set[str] | None = self.confirmed_operators()
+        if confirmed is None:          # a plan-2 database (B21)
+            if len(self.policy_operators) == 1:     # plan 2 allowed exactly one operator, so it is that one
+                confirmed = {self.policy_operators[0].hex}
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.audit.write("guard", action="migrated-operators", operators=1)
+            else:
+                confirmed = set()
+                self.latch("admind does not know which operators are in the group (upgraded with several "
+                           "operators in policy.toml); make policy.toml's operators match the group's, then "
+                           "run `admind rearm` on the host")
+        self.authorise(confirmed)
+        rewritten = self.store.redact_pending_outbox(self.s.chunk_chars)   # B17: a plan-2 outbox
+        if rewritten:
+            self.audit.write("outbox", action="redacted-after-upgrade", rows=rewritten)
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
+        control: ctl.CtlServer | None = None
         try:
             await server.start()
+            control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
+            await control.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
-                                   ("agent", self.agent_loop)):
+                                   ("agent", self.agent_loop), ("summaries", self.summary_loop),
+                                   ("batches", self.batch_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
         except BaseException:
             self.shutting_down = True
             raise
         finally:
             self.shutting_down = True
+            for timer in self._backoff.values():
+                timer.cancel()
+            self._backoff.clear()
+            if control is not None:
+                await control.close()
             await server.close()
+
+    async def on_ctl(self, req: ctl.CtlRequest) -> ctl.CtlReply:
+        """A host command. The reply's message names the operator, so it is redacted like any output."""
+        if req.op == "rearm":
+            result, message = await self.rearm()
+        else:
+            result, message = await self.change_membership(req.op, req.name or "")
+        if result in ("committed", "rearmed"):
+            try:
+                await self.flush()      # prompts held during the transition may go now
+            except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
+                self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
+        return ctl.CtlReply(result, redact(message))
 
     async def guarded(self, coro: Awaitable[None]) -> None:
         """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets
@@ -405,13 +596,25 @@ class Admind:
         establishes observation or group_ok, so a replacement is always verified by its own check."""
         generation = self.sub_gen
         acked_at_start = self.acked
+        epoch = self.membership_epoch
+        if self.changing:
+            self.audit_quietly("guard", action="group-check-deferred")
+            return False        # the transition reads the count itself and settles (B7)
         try:
             info = await self.client.group_info(self.account, self.group)
         except ControlError as exc:
+            if self.changing or epoch != self.membership_epoch:
+                self.audit_quietly("guard", action="group-check-deferred")
+                return False
             self.group_ok = False
             self.audit.write("guard", action="group-check-failed", code=exc.code)   # never the peer's detail
             return False
-        verdict = guard.judge_member_count(info.member_count)
+        if self.changing or epoch != self.membership_epoch:
+            # A transition or rearm began while this check waited: its count may be from either side of
+            # the change, so it decides nothing; group_ok stays as it is.
+            self.audit_quietly("guard", action="group-check-deferred")
+            return False
+        verdict = guard.judge_member_count(info.member_count, self.expected_members())
         if verdict.action == "latch":
             self.group_ok = False
             self.latch(verdict.reason)
@@ -425,6 +628,215 @@ class Admind:
         self.wake.set()
         return True
 
+    # --- membership (ADR 0001 §8, revision 13) -------------------------------------------------
+    def membership_refusal(self) -> str | None:
+        """Why a membership change can't start (or go on) now; None if it can."""
+        if self.latched():
+            return "admind is latched; check the group's members, then run `admind rearm` first."
+        if self.store.get("membership_pending") is not None:
+            return "a membership change is already pending; run `admind rearm`."
+        if not (self.observing and self.group_ok):
+            return ("admind is not watching the group yet (its membership subscription is not verified); "
+                    "nothing changed. Try again shortly.")
+        return None
+
+    async def change_membership(self, op: str, name: str) -> tuple[str, str]:
+        """`admind operators add|remove NAME` (ADR 0001 §8, revision 13; B7, B18). Returns (result, message);
+        the message is admind's own wording plus the operator's policy name (the caller redacts it)."""
+        async with self.transition_lock:
+            refusal = self.membership_refusal()
+            if refusal is not None:
+                return "refused", refusal
+            try:
+                loaded = {o.name: o for o in self.load_operators()}
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("membership", action="refused", why="policy-unreadable",
+                                 error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
+            if op == "add":
+                target = loaded.get(name)
+                if target is None:
+                    return "refused", (f"{name} is not an operator with a marmot_npub in policy.toml; add it "
+                                       "there first. Nothing changed.")
+                if target.hex in self.operators:
+                    return "refused", f"{name} is already an operator in the group; nothing changed."
+                member_hex = target.hex
+            else:
+                found = [key for key, known in self.operators.items() if known == name]
+                if not found:
+                    return "refused", f"{name} is not an operator in the group; nothing changed."
+                member_hex = found[0]
+                eligible = {o.hex for o in loaded.values()}
+                if not ({key for key in self.operators if key != member_hex} & eligible):
+                    return "refused", ("the last operator can't be removed: no one else in the group is "
+                                       "an operator in policy.toml. Nothing changed.")
+            policy = tuple(loaded.values())
+            # Step 1: hold. The message in hand finishes first; then nothing new is dispatched or sent, and
+            # a paste or a send already under way is waited for, before the count is read.
+            async with self.work_lock:
+                self.changing = True
+                self.membership_epoch += 1
+                journaled = settled = False
+                try:
+                    async with self.dispatch_lock:
+                        pass
+                    async with self.send_lock:
+                        pass
+                    generation = self.sub_gen
+                    refusal = self.membership_refusal()     # a latch or a lost subscription meanwhile
+                    if refusal is not None:
+                        settled = True
+                        return "refused", refusal
+                    try:
+                        count = (await self.client.group_info(self.account, self.group)).member_count
+                    except ControlError as exc:
+                        settled = True
+                        return "refused", (f"could not read the group's member count ({exc.code}); "
+                                           "nothing changed.")
+                    refusal = self.membership_refusal() or (
+                        None if generation == self.sub_gen else
+                        "the membership subscription was replaced; nothing changed. Try again.")
+                    if refusal is not None:
+                        settled = True
+                        return "refused", refusal
+                    expected = self.expected_members()
+                    if count != expected:
+                        self.latch(f"group has {count} members, expected {expected}")
+                        settled = True
+                        return "latched", (f"the group has {count} members, not the expected {expected}; "
+                                           "latched.")
+                    to = expected + 1 if op == "add" else expected - 1
+                    if to < 2:
+                        settled = True
+                        return "refused", "the last operator can't be removed."
+                    pending = membership.Pending("add" if op == "add" else "remove", name, member_hex,
+                                                 expected, to, now(), uuid.uuid4().hex)
+                    journaled = True        # from here an exception latches (B18)
+                    self.store.set("membership_pending", pending.dump())
+                    self.audit.write("membership", action="pending", op=pending.op, operator=name,
+                                     from_count=expected, to_count=to)
+                    reported = await self.member_call(pending)
+                    try:
+                        info = await self.client.group_info(self.account, self.group)
+                        after: int | None = info.member_count
+                    except ControlError:
+                        after = None
+                    outcome = membership.settle(reported, after, pending)
+                    if self.latched() or not self.observing or generation != self.sub_gen:
+                        outcome = "latch"   # an event, a latch or a lost subscription during it (step 3, B5)
+                    result = self.settle_membership(pending, outcome, reported, after, policy)
+                    settled = True
+                    return result
+                except BaseException:
+                    if journaled and not settled:
+                        with contextlib.suppress(Exception):
+                            self.latch("a membership change failed before it was settled; check the group's "
+                                       "members in your client, then run `admind rearm` on the host")
+                    raise
+                finally:
+                    if settled or not journaled or self.latched():
+                        self.changing = False
+                    else:   # pending, unsettled and not latched: hold until rearm or the restart latch (B15)
+                        self.audit_quietly("membership", action="held-unsettled")
+                    self.wake.set()
+
+    async def member_call(self, pending: membership.Pending) -> membership.Reported:
+        try:
+            if pending.op == "add":
+                await self.client.group_member_add(self.account, self.group, [pending.member_hex])
+            else:
+                await self.client.group_member_remove(self.account, self.group, [pending.member_hex])
+        except PeerError as exc:
+            self.audit.write("membership", action="refused-by-wn-agent", code=exc.code)
+            return "failed"
+        except ControlError as exc:
+            self.audit.write("membership", action="no-answer", code=exc.code)
+            return "unknown"
+        return "ok"
+
+    def settle_membership(self, pending: membership.Pending, outcome: membership.Outcome, reported: str,
+                          after: int | None, policy: tuple[Operator, ...]) -> tuple[str, str]:
+        """Apply the outcome. A commit writes the count, the confirmed operators (B21) and the notice and
+        clears the record in one transaction, then authorises from them (B2)."""
+        if outcome == "commit":
+            verb = "added to" if pending.op == "add" else "removed from"
+            confirmed = applied(self.confirmed_operators() or set(), pending)
+            with self.store.transaction():
+                self.store.set("expected_members", str(pending.to_count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.store.delete("membership_pending")
+                # The key holds the change's own ID, not its start time: two changes in one second differ.
+                self.post(f"membership:{pending.change_id}",
+                          f"Operator {pending.name} was {verb} the group.", None)
+            self.policy_operators = policy
+            self.authorise(confirmed)
+            self.audit_quietly("membership", action="committed", op=pending.op, operator=pending.name,
+                               member_count=pending.to_count)
+            return "committed", f"Operator {pending.name} was {verb} the group ({pending.to_count} members)."
+        if outcome == "abort":
+            self.store.delete("membership_pending")
+            self.audit_quietly("membership", action="aborted", op=pending.op, operator=pending.name)
+            return "aborted", ("wn-agent refused the change and the member count is unchanged; "
+                               "nothing changed.")
+        self.latch(f"membership change {pending.op} ended unconfirmed (reported {reported}, "
+                   f"count {'unknown' if after is None else after}, expected {pending.to_count})")
+        return "latched", ("the change could not be confirmed, so admind latched. Check the group's members "
+                           "in your client, then run `admind rearm` on the host.")
+
+    async def rearm(self) -> tuple[str, str]:
+        """`admind rearm`: trust the current member count and clear the latch, any pending change and a
+        held transition (§8: "takes the current member count as trusted"). It also reconciles which
+        operators are confirmed in the group (B21), and refuses, changing nothing, if the count can't be
+        reconciled with them or if the group changed while the count was read (B22)."""
+        async with self.transition_lock:
+            if not self.reading:
+                # Acknowledged is not enough: until confirm_observing returns, events wait unread in the
+                # stream, and a resubscription would drop them (Codex r3 finding 3).
+                return "refused", ("admind is not reading the group's events right now, so a change during "
+                                   "rearm could be missed; nothing changed. Try again shortly.")
+            try:
+                policy = self.load_operators()
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("guard", action="rearm-refused", why="policy-unreadable",
+                                 error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
+            generation, events, latched_before = self.sub_gen, self.group_events, self.store.get("latched")
+            try:
+                count = (await self.client.group_info(self.account, self.group)).member_count
+            except ControlError as exc:
+                return "refused", f"could not read the group's member count ({exc.code}); nothing changed."
+            if (not self.reading or generation != self.sub_gen or events != self.group_events
+                    or self.store.get("latched") != latched_before):
+                self.audit_quietly("guard", action="rearm-refused", why="changed-meanwhile")
+                return "refused", ("the group changed while rearm read it (a membership event, a new "
+                                   "latch or a resubscription); nothing changed. Check the group's "
+                                   "members, then run `admind rearm` again.")
+            if count < 2:
+                return "refused", f"the group has {count} member(s) and no operator; nothing changed."
+            confirmed, how = reconcile(count, self.confirmed_operators(),
+                                       self.store.get("membership_pending"), policy)
+            if confirmed is None:
+                self.audit_quietly("guard", action="rearm-refused", why="operators-unknown",
+                                   member_count=count, policy_operators=len(policy))
+                return "refused", (f"the group has {count} members but policy.toml lists {len(policy)} "
+                                   f"operator(s) and admind has confirmed {how}; make policy.toml's "
+                                   "operators match the group's members, then run `admind rearm` again. "
+                                   "Nothing changed.")
+            previous = self.store.get("latched")
+            with self.store.transaction():
+                self.store.set("expected_members", str(count))
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.store.delete("membership_pending")
+                self.store.delete("latched")
+            self.policy_operators = policy
+            self.authorise(confirmed)
+            self.changing = False           # a transition held unsettled (B18) ends here
+            self.membership_epoch += 1      # a check begun before this one judged against the old count
+            self.audit_quietly("guard", action="rearm", member_count=count, previous=previous, operators=how)
+        await self.check_group()
+        self.wake.set()
+        return "rearmed", f"Cleared the latch; the trusted member count is now {count}."
+
     # --- inbound -------------------------------------------------------------------------------
     async def inbound_loop(self) -> None:
         """Read the subscription and nothing else. Membership and admin events are acted on at once;
@@ -436,6 +848,7 @@ class Admind:
         while True:
             self.observing = False
             self.acked = False
+            self.reading = False
             self.sub_gen += 1
             try:
                 async for event in self.client.subscribe(self.account, self.group,
@@ -450,6 +863,7 @@ class Admind:
                 code = exc.code if isinstance(exc, ControlError) else type(exc).__name__
             self.observing = False
             self.acked = False
+            self.reading = False
             self.sub_gen += 1
             self.group_ok = False
             self.audit.write("subscribe", action="reconnect", code=code)
@@ -461,15 +875,15 @@ class Admind:
         re-verify the group, then (and only then) observe. `group_info` reports a count, not members, so
         a swap during an outage that leaves the count at two is not detected (ADR 0001 §3.4)."""
         self.acked = True       # check_group observes on success, here and on every later passing check
-        if not await self.check_group():
-            if self.latched():
-                return      # acknowledged but not observing; a passing check after a rearm restores it
+        if not await self.check_group() and not self.latched():
             raise ControlError("group could not be re-verified", "unverified", True)
+        self.reading = True     # acknowledged but not observing if latched; a rearm then restores it
 
     def on_event(self, event: object) -> None:
         if isinstance(event, InboundMessage):
             self.work.put_nowait(event)
         elif isinstance(event, GroupStateChanged):
+            self.group_events += 1
             verdict = guard.judge_group_change(event, group_id=self.group)
             if verdict.action == "latch":
                 self.latch(verdict.reason)
@@ -481,42 +895,54 @@ class Admind:
             self.audit.write("event", action="ignored", what="other")
 
     async def worker_loop(self) -> None:
-        """Process operator messages one at a time, in arrival order, apart from the subscription reader."""
+        """Process operator messages one at a time, in arrival order, apart from the subscription reader.
+        Each holds `work_lock`: a membership transition waits for the message in hand, and the next one
+        waits for the transition (B7), so a message is never denied just because a transition ran."""
         while True:
             event = await self.work.get()
             try:
-                await self.on_message(event)
+                async with self.work_lock:
+                    await self.on_message(event)
             except Exception as exc:  # noqa: BLE001 - one bad message must not end the worker
                 self.audit.write("handler", action="failed", error=type(exc).__name__)
 
     async def on_message(self, ev: InboundMessage) -> None:
-        verdict = guard.judge_message(ev, group_id=self.group, operator_hex=self.s.operator_hex,
+        verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators,
                                       latched=self.latched())
         mid = ev.message.message_id_hex.lower()
         if verdict.action == "ignore":
             return
         if verdict.action == "drop":
+            if verdict.operator is not None:    # an operator, while latched: logged in full, never acted on
+                self.audit.write("drop", operator=verdict.operator, message_id=mid, reason=verdict.reason,
+                                 text=own_text(ev.message.text))
+                return
             # The sender is peer-supplied: a short prefix correlates without recording an identifier,
             # and the text, which a stranger controls, is not recorded at all.
             self.audit.write("drop", sender_prefix=ev.message.sender.account_id_hex[:8],
                              reason=verdict.reason, text_chars=len(ev.message.text))
             return
         if not MESSAGE_ID.fullmatch(mid):
-            self.audit.write("drop", reason="malformed message id")
+            self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
+                             text=own_text(ev.message.text))
             return
         if not self.store.claim_inbound(mid):
-            self.audit.write("drop", message_id=mid, reason="replayed message id")
+            self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
+                             text=own_text(ev.message.text))
             return
+        self.remember_sender(mid, ev.message.sender.account_id_hex.lower())
         text = ev.message.text
-        self.audit.write("inbound", message_id=mid, text=own_text(text))
-        if not await self.check_group() or not self.authorised():   # the latch may have come meanwhile
+        self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
+        self.store.record_prompt(mid, verdict.operator or "?", backstop.first_words(redact(text)))
+        if not await self.check_group() or not self.authorised(mid):   # the latch may have come meanwhile
             self.deny(mid, "message")
             return
         if self.store.get("operator_seen_at") is None:
             with self.store.transaction():      # the marker and the notice: both or neither
                 self.store.set("operator_seen_at", now())
                 self.post("ready", READY_NOTICE, None)
-        await self.handle(mid, text)
+        target = ev.reply_to.message_id_hex.lower() if ev.reply_to is not None else None
+        await self.handle(mid, text, target)
 
     async def execute(self, cmd: commands.Command) -> tuple[str, bool]:
         """Run a command in a thread. A failure becomes fixed wording, never the exception's text."""
@@ -532,7 +958,7 @@ class Admind:
             self.store.set_inbound(mid, status)
             self.reply(mid, text, tag)
 
-    async def handle(self, mid: str, text: str) -> None:
+    async def handle(self, mid: str, text: str, target: str | None = None) -> None:
         # Control characters are refused before anything else: they can break out of bracketed paste,
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
@@ -547,11 +973,14 @@ class Admind:
             # Persisted before anything runs (or waits for the dispatch lock): a crash from here until
             # `done` is answered after the restart instead of being lost.
             self.store.set_inbound(mid, "executing")
+            if cmd.name == "details":
+                await self.details(mid, cmd, target)
+                return
             if cmd.name in ("interrupt", "new"):   # these recheck once they hold the dispatch lock
                 await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
                 return
-            if not self.authorised():
+            if not self.authorised(mid):
                 self.deny(mid, "command")
                 return
             result, _ = await self.execute(cmd)
@@ -563,13 +992,135 @@ class Admind:
         self.held.append((mid, text))
         await self.flush()
 
+    async def details(self, mid: str, cmd: commands.Command, target: str | None) -> None:
+        """`!details [full]`: the full redacted reply (or every reply of a batch), each under its origin,
+        in lane 2 and threaded to the command (ADR 0001 §8, revision 13). Rendering stops at a budget of
+        min(MAX_REPLY, MAX_DETAILS_PARTS * chunk_chars) UTF-8 bytes, with a notice (B13). It is a budget, not
+        a hard cap: it is checked before the final redaction (which can expand the text), a stored reply is
+        shown whole and may exceed it, and the number of parts is cut separately at MAX_DETAILS_PARTS. All of
+        one command's transcript reads share one time budget, `details_timeout` (DETAILS_READ_SECONDS); a turn
+        it ran out before says it was not read."""
+        if not self.authorised(mid):
+            self.deny(mid, "command")
+            return
+        post = self.store.details_target(target)
+        if post is not None and post.turn_id is not None:
+            ids = [post.turn_id]
+        else:
+            ids = [] if post is None else self.store.batch_turn_ids(post.batch_id or 0)
+        if not ids:
+            why = ("that message has no details. Reply to a summary or a batch." if target is not None
+                   else "there is no delivered summary or batch yet.")
+            self.finish(mid, "done", f"!details: {why}", "cmd")
+            return
+        full = cmd.arg == "full"
+        sections: list[str] = []
+        # Deviation from the plan, which gave each turn its own 30 s: one `!details full` has ONE budget,
+        # `details_timeout`, for all its reads. A batch can hold any number of turns, and 30 s each would
+        # hold the work lock (operator messages, !interrupt, membership transitions) for 30 s x N.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.details_timeout
+        # Deviation from the plan (extends B13): what `!details` renders is capped at MAX_REPLY, the same
+        # 64 MiB of UTF-8 as a reply, however many legal records or turns there are. A tool call or result
+        # is never shown in part: the first that would pass the cap, and everything after it, is replaced
+        # by TRUNCATED. A stored reply is shown whole (it is already bounded by MAX_REPLY), so the text can
+        # pass the cap by one reply. The cap counts the rendered text before redaction, which can expand it.
+        # Also part of that extension: the cap is min(MAX_REPLY, MAX_DETAILS_PARTS * chunk_chars), and the
+        # parts themselves are cut at MAX_DETAILS_PARTS below, so the publish and the cleanup are each one
+        # statement over at most 20k rows (about 40 ms) however the text was built. A batch's replies are
+        # loaded one at a time as they are rendered, and none past the cap is loaded at all.
+        cap = min(MAX_REPLY, MAX_DETAILS_PARTS * self.s.chunk_chars)
+        notice = details_notice(cap)
+        left_bytes = cap
+        shown = 0
+        for turn_id in ids:
+            if left_bytes <= 0:
+                sections.append(notice)
+                break
+            row = self.store.turn(turn_id)
+            if row is None:
+                continue
+            shown += 1
+            section = f"{row.origin}\n{row.text}"      # a stored reply: shown whole, even past the cap
+            left_bytes -= utf8_size(section) + 2
+            cut = False
+            if full:
+                left = deadline - loop.time()
+                calls, cut = (await self.tool_calls(row, left, left_bytes) if left > 0
+                              else (DETAILS_NOT_READ, False))
+                left_bytes -= utf8_size(calls) + 2
+                section += "\n\n" + calls
+            sections.append(section)
+            if cut:
+                sections.append(notice)
+                break
+        # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
+        def prepare() -> list[str]:
+            text = redact("\n\n".join(sections))
+            sections.clear()        # one full copy at a time
+            out = chunk.split(text, self.s.chunk_chars)
+            if len(out) > MAX_DETAILS_PARTS:    # a long stored reply, or redaction that grew the text
+                del out[MAX_DETAILS_PARTS:]
+                out.append(notice)
+            return out
+
+        parts = await asyncio.to_thread(prepare)
+        # Deviation from the plan (Codex T9 r1): the parts are staged, in slices with a yield between, in a
+        # table delivery ignores; one statement then makes them all visible. Inserting 335k rows (64 MiB
+        # at 200 chars) in one transaction would stop the loop, alerts and latching included. The guards
+        # are checked after every slice and again just before the publish, and a failed or cancelled
+        # command discards what it staged. `parts` are already redacted whole, so they aren't redacted again.
+        published = False
+        try:
+            for first in range(0, len(parts), DETAILS_SLICE):
+                if not self.authorised(mid):
+                    self.deny(mid, "command")
+                    return
+                self.store.stage_details(mid, first, parts[first:first + DETAILS_SLICE])
+                await asyncio.sleep(0)
+            if not self.authorised(mid):
+                self.deny(mid, "command")
+                return
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                self.store.publish_details(mid, f"details:{mid}", mid, 2)
+            published = True
+            self.wake.set()
+        finally:
+            if not published:
+                self.store.discard_details(mid)
+        self.audit.write("command", message_id=mid, command="details", full=full, replies=shown,
+                         chars=sum(len(p) for p in parts))
+
+    async def tool_calls(self, row: TurnRow, seconds: float, limit: int) -> tuple[str, bool]:
+        """One turn's tool calls for `!details full`, read in the shared slot (B20), within `seconds`."""
+        if row.transcript is None or row.transcript_start is None or row.transcript_end is None:
+            return NO_TOOL_CALLS, False
+        path = Path(row.transcript)
+        if path.name != f"{row.session}.jsonl" or not path.is_absolute():
+            return NO_TOOL_CALLS, False
+        cancel = threading.Event()
+        token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
+        try:
+            out = await self.bounded_read(seconds, render_tool_calls, path, row.transcript_start,
+                                          row.transcript_end, max(limit, 0))
+        except BaseException:
+            cancel.set()
+            raise
+        finally:
+            READ_CANCEL.reset(token)
+        if out is None:
+            cancel.set()
+            return DETAILS_BUSY, False
+        return out
+
     async def interrupt(self, mid: str, cmd: commands.Command) -> None:
         """!interrupt holds the dispatch lock from before the Escape until the turn's state is settled, so
         a Stop arriving meanwhile can't dispatch a prompt that the Escape, or this cleanup, would hit.
         Only the turn in flight when the command arrived is abandoned, and only once the Escape was sent:
         a failed send is no evidence that the agent is idle, so the queue stays held."""
         async with self.dispatch_lock:
-            if not self.authorised():       # the lock wait may have spanned a latch
+            if not self.authorised(mid):    # the lock wait may have spanned a latch, or a revoked operator
                 self.deny(mid, "command")
                 return
             target = self.store.get("in_flight")
@@ -597,7 +1148,7 @@ class Admind:
         The old session ID is retired first: its hooks (a late SessionStart included) are ignored from
         here on, whenever they arrive. The new session's SessionStart sets ready as usual."""
         async with self.dispatch_lock:
-            if not self.authorised():
+            if not self.authorised(mid):
                 self.deny(mid, "command")
                 return
             old = self.agent.session_id
@@ -626,13 +1177,15 @@ class Admind:
             return      # under dispatch_lock, with the other gates: nothing is pasted once shutdown began
         # Same gate as the outbound side (D4): while latched, or while the group is not verified as
         # the operator and admind, nothing reaches the agent. Held prompts stay held, state untouched.
-        if self.latched() or not self.group_ok or not self.observing:
+        if self.latched() or not self.group_ok or not self.observing or self.changing:
             if self.held and not self.block_audited:
                 self.block_audited = True
                 self.audit.write("agent", action="dispatch-blocked", held=len(self.held),
                                  latched=self.latched())
             return
         self.block_audited = False
+        while self.held and not self.sender_current(self.held[0][0]):   # revoked while it waited
+            self.deny(self.held.pop(0)[0], "held prompt")
         if self.stuck is not None:
             for mid, _ in self.held:
                 self.finish(mid, "dropped", f"Not delivered: the admin agent is not running ({self.stuck}). "
@@ -665,6 +1218,7 @@ class Admind:
         self.dispatched_at = time.monotonic()
         self.generation += 1
         generation = self.generation        # a UserPromptSubmit or SessionStart meanwhile makes it stale
+        self.dispatching = mid
         try:
             await asyncio.to_thread(self.agent.send, text)
         except TmuxPasteUncertain as exc:
@@ -692,6 +1246,8 @@ class Admind:
             self.paste_uncertain(mid, exc)
         else:
             self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+        finally:
+            self.dispatching = None
 
     def paste_uncertain(self, mid: str, exc: Exception) -> None:
         """The paste may have been submitted: never retry it (D6). The operator is told, in fixed words,
@@ -924,6 +1480,9 @@ class Admind:
         elif ev.hook_event_name == "Stop":
             await self.on_stop(ev, arrival, validate=validate)
         else:
+            # The turn's first byte, measured before the lock (B19): the transcript only grows, so a size
+            # taken later could skip the turn's own first records.
+            start = await self.transcript_offset(ev) if ev.hook_event_name == "UserPromptSubmit" else None
             async with self.turn_lock():
                 kind = self.classify(ev) if validate else "current"
                 if kind == "other":
@@ -936,9 +1495,9 @@ class Admind:
                     self.generation += 1
                     self.on_session_start(ev, arrival)
                 else:
-                    self.on_prompt(ev, arrival)
+                    self.on_prompt(ev, arrival, start)
 
-    def on_prompt(self, ev: HookEvent, arrival: int | None = None) -> None:
+    def on_prompt(self, ev: HookEvent, arrival: int | None = None, start: int | None = None) -> None:
         if self.below_floor(arrival):
             noop_event()
             # Accepted before the turn it would start or anchor was released (!interrupt, a relaunch, !new,
@@ -953,8 +1512,12 @@ class Admind:
             self.audit.write("agent", action="ignored-late-prompt", message_id=in_flight)
             return
         anchored = False
-        with self.store.transaction():      # the busy period and the anchor: one step
+        with self.store.transaction():      # the busy period, its transcript start and the anchor: one step
             self.set_busy()                 # a turn is running, whoever started it
+            if start is None:
+                self.store.delete("turn_start")
+            else:
+                self.store.set("turn_start", f"{self.store.get('busy')}:{start}")
             pasted = self.store.get("in_flight_text")
             if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
                     and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
@@ -1007,19 +1570,40 @@ class Admind:
     def session_current(self, session_id: str) -> bool:
         return session_id == self.agent.session_id and session_id not in self.retired
 
-    async def extract(self, ev: HookEvent) -> str | None:
-        """The transcript fallback, bounded: None if it took longer than `extract_timeout`, or if an
-        earlier read is still running (at most one extraction thread, so a stalled filesystem cannot pile
-        them up). The abandoned thread runs to completion in the background."""
-        if self._extraction is not None and not self._extraction.done():
+    async def bounded_read[T](self, timeout: float, fn: Callable[..., T], *args: object) -> T | None:
+        """Run one transcript read in a thread, bounded: None if it took longer than `timeout`, or if an
+        earlier read is still running. One slot for every transcript reader (extraction, offsets and
+        `!details full`), so a stalled filesystem cannot pile up threads (B20). An abandoned thread runs to
+        completion in the background."""
+        if self._reader is not None and not self._reader.done():
             return None
-        task = asyncio.ensure_future(asyncio.to_thread(reply_text, ev))
-        self._extraction = task
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        self._reader = task
         task.add_done_callback(lambda t: None if t.cancelled() else t.exception())  # never "not retrieved"
         try:
-            return await asyncio.wait_for(asyncio.shield(task), self.extract_timeout)
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
         except TimeoutError:
             return None
+
+    async def transcript_offset(self, ev: HookEvent) -> int | None:
+        return await self.bounded_read(self.offset_timeout, transcript_size, ev)
+
+    async def extract(self, ev: HookEvent, start: int | None, end: int | None) -> str | None:
+        """The reply of a Stop without its own text, read from the turn's span (B19) in the reader slot.
+        None if it can't be read in time or at all; the caller then sends `EXTRACT_FAILED` to the
+        backstop (B9)."""
+        cancel = threading.Event()
+        token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
+        try:
+            raw = await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)
+        except BaseException:
+            cancel.set()                        # cancelled or failed: nobody will use the result
+            raise
+        finally:
+            READ_CANCEL.reset(token)
+        if raw is None:
+            cancel.set()
+        return raw
 
     async def on_stop(self, ev: HookEvent, arrival: int | None = None, stale: bool = False,
                       validate: bool = False) -> None:
@@ -1028,6 +1612,7 @@ class Admind:
         that finds a reservation in flight but unanchored, that is stale (an earlier launch, or accepted
         before the turn was released) changes no turn state: its own text is posted top-level, otherwise
         nothing is and the record says so."""
+        end = await self.transcript_offset(ev)      # the turn's bytes end here, before a later turn can write
         async with self.turn_lock():
             if validate:
                 kind = self.classify(ev)        # under the lock: it protects the effects applied below
@@ -1042,6 +1627,7 @@ class Admind:
             # The identity is captured here, before the transcript read yields: !interrupt, !new, a
             # new dispatch or a relaunch can run meanwhile (they take the lock the read does not hold).
             identity = self.turn_identity(ev.session_id)
+            span = self.turn_span(identity[3], end)     # the turn's bytes, known before the read
             in_flight, anchor = identity[1], identity[2]
             unanchored = in_flight is not None and anchor is None
             own = ev.last_assistant_message or ""
@@ -1053,13 +1639,19 @@ class Admind:
                     self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
             need_fallback = not stale and not unanchored and not ev.last_assistant_message
-        raw = own
+        raw: str | None = own
         if need_fallback:
-            extracted = await self.extract(ev)      # may read the transcript file (lock not held)
-            if extracted is None:
-                self.audit.write("agent", action="reply-extraction-timeout")
-                return
-            raw = extracted
+            raw = await self.extract(ev, *span)     # may read the transcript file (lock not held)
+            if raw is None:
+                self.audit_quietly("agent", action="reply-extraction-failed")
+        text, mode = EXTRACT_FAILED, "backstop"
+        if raw is not None:
+            prepared = await asyncio.to_thread(prepare_reply, raw, self.s.reply_verbatim_lines,
+                                               self.s.reply_verbatim_chars)
+            if prepared is not None:
+                text, mode = prepared
+            else:
+                self.audit_quietly("agent", action="reply-extraction-failed")
         async with self.turn_lock():
             if not self.session_current(ev.session_id):
                 noop_event()
@@ -1071,30 +1663,136 @@ class Admind:
                 # The turn changed while the transcript was read: its last text may be the new turn's.
                 self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
-            text = raw if raw.strip() else NO_REPLY
-            parts = chunk.split(text, self.s.chunk_chars)
-            reply_seq = int(self.store.get("reply_seq") or "0") + 1
-            self.store.set("reply_seq", str(reply_seq))
-            # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
-            # captured for is still the current one. Otherwise the reply is real and goes out unthreaded,
-            # and the current turn's state is left exactly as it is.
             reply_to = anchor if current else None
-            with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
-                for i, part in enumerate(parts):
-                    self.post(f"reply:{ev.session_id}:{reply_seq}:{i}", part, reply_to)
-                if current:
-                    if anchor is not None:
-                        self.store.delete("anchor")
-                        self.store.delete("in_flight")
-                        self.store.delete("in_flight_text")
-                    self.set_idle()             # the turn ended; an unconfirmed in_flight still holds
-                    if arrival is not None:
-                        self.raise_floor(arrival)   # a prompt accepted before this Stop is that turn's
+            start, stop = span if current else (None, None)
+            origin = self.origin_for(reply_to)
+            parts = chunk.split(text, self.s.chunk_chars) if mode == "verbatim" else []
+
+            def record(how: str, body: str) -> int:
+                """The reply's record, its posts or its route, and the turn's end: one transaction."""
+                with self.store.transaction():
+                    reply_seq = int(self.store.get("reply_seq") or "0") + 1
+                    self.store.set("reply_seq", str(reply_seq))
+                    key = f"reply:{ev.session_id}:{reply_seq}"
+                    turn_id = self.store.add_turn(
+                        key, ev.session_id, reply_to, origin, body, ev.transcript_path, start, stop,
+                        "verbatim" if how == "verbatim" else "summarizing")
+                    if how == "verbatim":
+                        for i, part in enumerate(parts):
+                            self.post(f"{key}:{i}", part, reply_to)
+                            self.store.record_post(f"{key}:{i}", "verbatim", turn_id, None)
+                    elif how == "backstop":
+                        self.queue_backstop(turn_id)
+                    if current:
+                        self.end_turn(anchor, arrival)
+                return turn_id
+
+            try:
+                turn_id = record(mode, text)
+            except Exception as exc:  # noqa: BLE001 - the reply must still reach the operator (B9)
+                self.audit_quietly("reply", action="record-failed", error=type(exc).__name__)
+                mode, parts = "backstop", []
+                if isinstance(exc, UnicodeEncodeError):
+                    text = EXTRACT_FAILED           # text the database can't hold: never insert it again
+                turn_id = record(mode, text)        # any other failure keeps the reply; if this fails
+                                                    # too, hook_loop holds dispatch
+            if mode == "summary":
+                self.summary_wake.set()
+            elif mode == "backstop":
+                self.audit_quietly("backstop", action="queued", turn=turn_id)
             if not current:
-                self.audit.write("agent", action="late-stop")   # fixed wording; nothing from the event
+                self.audit_quietly("agent", action="late-stop")    # fixed wording; nothing from the event
             # The agent's text goes to the operator's chat only; the audit log records its size.
-            self.audit.write("reply", session=ev.session_id, reply_to=reply_to, chars=len(text),
-                             chunks=len(parts))
+            self.audit_quietly("reply", session=ev.session_id, reply_to=reply_to, chars=len(text),
+                               chunks=len(parts), mode=mode)
+
+    def turn_span(self, busy: str | None, end: int | None) -> tuple[int | None, int | None]:
+        """The transcript bytes of the turn a current Stop ends (B19): from its UserPromptSubmit to the Stop.
+        Unknown (both None) unless that prompt's mark belongs to the busy period the Stop was captured in."""
+        mark = self.store.get("turn_start")
+        if busy is None or end is None or mark is None:
+            return None, None
+        owner, _, offset = mark.partition(":")
+        if owner != busy or not offset.isdigit() or int(offset) > end:
+            return None, None
+        return int(offset), end
+
+    def end_turn(self, anchor: str | None, arrival: int | None) -> None:
+        """A current Stop's effects on turn state. Store calls and in-memory flags only (the caller's
+        transaction); repeating them after a rollback is harmless."""
+        if anchor is not None:
+            self.store.delete("anchor")
+            self.store.delete("in_flight")
+            self.store.delete("in_flight_text")
+        self.store.delete("turn_start")
+        self.set_idle()                 # the turn ended; an unconfirmed in_flight still holds
+        if arrival is not None:
+            self.raise_floor(arrival)   # a prompt accepted before this Stop is that turn's
+
+    def origin_for(self, mid: str | None) -> str:
+        row = None if mid is None else self.store.prompt(mid)
+        if row is None:
+            return backstop.origin(None, now(), None)
+        return backstop.origin(row.operator, row.received_at, row.words)
+
+    def queue_backstop(self, turn_id: int) -> None:
+        """Put a reply in the open backstop batch, opening one. Store calls only, in one transaction that
+        joins the caller's; the caller audits after it commits."""
+        with self.store.transaction():
+            batch = self.store.open_batch(self.wallclock(), self.batch_seconds)
+            self.store.add_to_batch(turn_id, batch)
+
+    async def summary_loop(self) -> None:
+        """Summarize every turn that waits for one (B9). Rows are read from the database on every pass, so
+        a failure at any step leaves the row for the next pass, without a restart."""
+        while True:
+            self.summary_wake.clear()
+            for row in self.store.turns_with_status("summarizing"):
+                try:
+                    await self.summarize_turn(row)
+                except Exception as exc:  # noqa: BLE001 - the row stays `summarizing`; the next pass retries
+                    self.audit_quietly("summary", action="pass-failed", turn=row.turn_id,
+                                       error=type(exc).__name__)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.summary_wake.wait(), self.summary_poll)
+
+    async def summarize_turn(self, row: TurnRow) -> None:
+        """Post a summary, or send the reply to the backstop. Either outcome is one transaction; if even the
+        backstop's fails, the exception reaches summary_loop and the row is tried again."""
+        try:
+            text = await summarize.summarize(self.summarizer_argv, self.s.state_dir / "summarizer", row.text,
+                                             self.summary_timeout)
+            with self.store.transaction():
+                for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
+                    self.post(f"{row.key}:s{i}", part, row.reply_to)
+                    self.store.record_post(f"{row.key}:s{i}", "summary", row.turn_id, None)
+                self.store.set_turn_status(row.turn_id, "summarized")
+        except Exception as exc:  # noqa: BLE001 - any failure sends the reply to the backstop (§8)
+            reason = exc.reason if isinstance(exc, summarize.SummaryFailed) else "internal"
+            self.audit_quietly("summary", action="failed", reason=reason, turn=row.turn_id,
+                               error=None if reason != "internal" else type(exc).__name__)
+            self.queue_backstop(row.turn_id)
+            self.audit_quietly("backstop", action="queued", turn=row.turn_id)
+            return
+        self.audit_quietly("summary", action="queued", turn=row.turn_id)
+
+    async def batch_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.batch_poll)    # not self._sleep: tests make that one return at once
+            await self.close_due_batches()
+
+    async def close_due_batches(self) -> None:
+        """Post each batch whose window has passed, as one unthreaded message (B10)."""
+        for batch, attempt in self.store.due_batches(self.wallclock(), self.batch_seconds):
+            rows = self.store.batch_turns(batch)
+            key = f"batch:{batch}.{attempt}"        # a new key per attempt: the outbox ignores a known key
+            text = await asyncio.to_thread(render_batch, rows)
+            with self.store.transaction():
+                self.post(key, text, None)
+                self.store.record_post(key, "batch", None, batch)
+                self.store.close_batch(batch)
+            self.audit_quietly("backstop", action="posted", batch=batch, replies=len(rows),
+                               lines=len(text.splitlines()), chars=len(text))
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
@@ -1105,29 +1803,66 @@ class Admind:
             await self.outbox_pass()
 
     async def outbox_pass(self) -> None:
-        """One sweep of the outbox (a loop iteration, callable on its own)."""
+        """One sweep of the outbox (a loop iteration, callable on its own). Each send holds `send_lock`,
+        and the gate and the next row are read under it: a membership transition that has drained the
+        lock sees no send in progress and none can start (B7). Rows are redacted again at delivery (B1).
+        A retry's backoff is a timer, not a sleep in this loop: the pass ends, and a row queued meanwhile
+        (`post` sets `wake`) is sent at once if it comes first, so a lane-1 message never waits behind a
+        lane-2 row's backoff (B14). The timer sets `wake` when it ends."""
         if self.held:
             await self.flush()              # emits NOT_READY once the start timeout passes
         self.notify_held()
-        for row in self.store.pending():
-            if not self.may_post():         # rechecked per row: a latch mid-batch stops the rest
-                break
-            try:
-                sent = await self.client.send_final(self.account, self.group, row.text, row.reply_to,
-                                                    row.key)
-            except ControlError as exc:
-                attempts = self.store.mark_attempt(row.seq)
-                if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
-                    self.audit.write("send", key=show(row.key, False), action="retry", attempts=attempts,
-                                     code=exc.code)
-                    await self._sleep(min(60, 2 ** attempts))
-                    self.wake.set()
-                    break
-                self.store.mark_failed(row.seq)
-                self.audit.write("send", key=show(row.key, False), action="failed", code=exc.code)
-                continue
-            self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
-            self.audit.write("send", key=show(row.key, False), action="sent")
+        while True:
+            async with self.send_lock:
+                if not self.may_post():     # rechecked per row: a latch mid-batch stops the rest
+                    return
+                row = self.store.next_pending()     # re-read each time: a new lane-1 row goes next (B14)
+                if row is None:
+                    return
+                timer = self._backoff.get(row.seq)
+                if timer is not None and not timer.done():
+                    return                  # its retry is not due; its timer or a new row wakes the loop
+                try:
+                    sent = await self.client.send_final(self.account, self.group, redact(row.text),
+                                                        row.reply_to, row.key)
+                except ControlError as exc:
+                    attempts = self.store.mark_attempt(row.seq)
+                    if not (exc.retryable and attempts < MAX_SEND_ATTEMPTS):
+                        self._backoff.pop(row.seq, None)
+                        self.send_failed(row.seq, row.key)
+                        self.audit.write("send", key=row.key, action="failed", code=exc.code)
+                        continue
+                    self.audit.write("send", key=row.key, action="retry", attempts=attempts, code=exc.code)
+                    timer = asyncio.ensure_future(self._sleep(min(60, 2 ** attempts)))
+                    timer.add_done_callback(lambda _: self.wake.set())
+                    self._backoff[row.seq] = timer      # per row: no other row's retry cuts it short
+                    return
+                else:
+                    self._backoff.pop(row.seq, None)
+                    self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
+                    self.audit.write("send", key=row.key, action="sent")
+                    continue
+
+    def send_failed(self, seq: int, key: str) -> None:
+        """A message admind gave up on. If it carried a reply or a summary, the reply goes to the backstop
+        in the same transaction (B9). If it was a batch, the batch opens again in the same transaction and
+        is posted after a new window under a new key, so its replies are never stranded (B10); this
+        repeats until it is delivered, and the audit records each attempt."""
+        queued = reopened = None
+        with self.store.transaction():
+            self.store.mark_failed(seq)
+            post = self.store.post_record(key)
+            turn = None if post is None or post.turn_id is None else self.store.turn(post.turn_id)
+            if turn is not None and turn.status in ("verbatim", "summarized"):
+                self.queue_backstop(turn.turn_id)
+                queued = turn.turn_id
+            if post is not None and post.kind == "batch" and post.batch_id is not None:
+                self.store.reopen_batch(post.batch_id, self.wallclock())
+                reopened = post.batch_id
+        if queued is not None:
+            self.audit_quietly("backstop", action="queued", turn=queued, why="send-failed")
+        if reopened is not None:
+            self.audit_quietly("backstop", action="reopened", batch=reopened, why="send-failed")
 
     async def alerts_loop(self) -> None:
         while True:
@@ -1153,11 +1888,11 @@ class Admind:
         if self.store.relayed(raw):
             return
         key = alerts.outbox_key(raw)
-        text = alerts.render(name, alert, self.s.chunk_chars)
+        text = redact(alerts.render(name, alert, self.s.chunk_chars))
         if self.store.relay_alert(raw, key, text):
             self.wake.set()
-            self.audit_quietly("alert", name=show(alerts.display_name(name), False)[:64],
-                               key=show(key, False), malformed=alert is None)
+            self.audit_quietly("alert", name=alerts.display_name(name),
+                               key=key, malformed=alert is None)    # name whole: redacted before any cut
 
     def alert_failed(self, raw: bytes, exc: Exception) -> None:
         """Report an alert admind could not relay: by exception type and opaque key only, and tell the
@@ -1171,9 +1906,9 @@ class Admind:
             self.bad_alerts.add(raw)
             skipped = type(inner).__name__
         # The fallback or the skip is recorded first; the audit (quiet) cannot undo or pre-empt either.
-        self.audit_quietly("alert", key=show(key, False), action="failed", error=type(exc).__name__)
+        self.audit_quietly("alert", key=key, action="failed", error=type(exc).__name__)
         if skipped is not None:
-            self.audit_quietly("alert", key=show(key, False), action="skipped", error=skipped)
+            self.audit_quietly("alert", key=key, action="skipped", error=skipped)
 
     async def group_loop(self) -> None:
         while True:

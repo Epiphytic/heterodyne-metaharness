@@ -33,6 +33,9 @@ class FakeWnAgent:
         self.sent: list[dict[str, Any]] = []
         self.fail_sends = 0          # the next N send_final calls fail with a retryable error
         self.fail_group_info = False
+        self.membership_mode = "ok"         # ok, fail, ok-no-count, fail-count, hang, lost, gated
+        self.membership_gate = asyncio.Event()      # "gated": the request waits until the test sets it
+        self.info_gate: asyncio.Event | None = None  # when set to an Event, group_info waits for it
         self.on_send: Callable[[dict[str, Any]], None] | None = None   # called after each new send
         self._keys: dict[str, str] = {}
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
@@ -94,6 +97,9 @@ class FakeWnAgent:
                     self.accounts.append({"account_id_hex": ACCOUNT, "local_signing": True})
                 await self._reply(writer, rid, {"type": "ack"})
             elif kind == "group_info":
+                count = self.member_count       # as of the request, even if a gate holds the answer back
+                if self.info_gate is not None:
+                    await self.info_gate.wait()
                 if self.fail_group_info:
                     await self._reply(writer, rid, {"type": "error", "code": "unavailable",
                                                     "message": "down", "retryable": True})
@@ -101,10 +107,12 @@ class FakeWnAgent:
                 await self._reply(writer, rid, {
                     "type": "group_info", "account_id_hex": req["account_id_hex"],
                     "group_id_hex": req["group_id_hex"], "agent_created": True,
-                    "member_count": self.member_count, "is_direct": True})
+                    "member_count": count, "is_direct": True})
             elif kind == "group_create":
                 await self._reply(writer, rid, {"type": "group_created", "group_id_hex": self.group_id,
                                                 "agent_created": True, "pending_welcome_count": 0})
+            elif kind in ("group_member_add", "group_member_remove"):
+                await self._membership(writer, rid, kind, req)
             elif kind == "send_final":
                 await self._send_final(writer, rid, req)
             elif kind == "subscribe_inbound":
@@ -116,6 +124,31 @@ class FakeWnAgent:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+    async def _membership(self, writer: asyncio.StreamWriter, rid: str, kind: str,
+                          req: dict[str, Any]) -> None:
+        mode = self.membership_mode
+        delta = len(req["members"]) * (1 if kind == "group_member_add" else -1)
+        if mode == "hang":
+            await asyncio.sleep(3600)
+        if mode == "lost":                  # the change happens; the reply never comes
+            self.member_count += delta
+            await asyncio.sleep(3600)
+        if mode == "gated":
+            await self.membership_gate.wait()
+        if mode in ("ok", "gated", "fail-count"):
+            self.member_count += delta
+        if mode in ("fail", "fail-count"):
+            await self._reply(writer, rid, {"type": "error", "code": "not_group_admin",
+                                            "message": "refused", "retryable": False})
+            return
+        await self._reply(writer, rid, {"type": "group_membership_updated", "group_id_hex": self.group_id,
+                                        "pending_welcome_count": 0})
+
+    async def drop_subscriptions(self) -> None:
+        """End every open subscription stream, as a wn-agent restart would: the daemon resubscribes."""
+        for queue in list(self._subscribers):
+            await queue.put({"type": "_close"})
 
     async def _send_final(self, writer: asyncio.StreamWriter, rid: str, req: dict[str, Any]) -> None:
         if self.fail_sends > 0:
@@ -143,6 +176,8 @@ class FakeWnAgent:
             await self._reply(writer, rid, {"type": "ack"})
             while True:
                 event = await queue.get()
+                if event.get("type") == "_close":
+                    return
                 await self._reply(writer, rid, event)
         finally:
             self._subscribers.remove(queue)

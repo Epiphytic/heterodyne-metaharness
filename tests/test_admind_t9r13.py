@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from admind_waits import lock_waiters, stays, wait_until
+from admind_waits import hold, lock_waiters, stays, wait_until
 from test_admind_r1 import Unit, run
 from test_admind_t9r3 import Gate
 from test_admind_t9r5 import answer, arm, frame, send
@@ -42,7 +42,7 @@ def test_sigterm_with_a_prompt_behind_interrupt_never_pastes_and_holds(tmp_path:
             assert await answer(r) == b"ok\n"
             w.close()
             await wait_until(lambda: u.daemon.pending_hooks() == 0)
-            u.daemon.held.append((u.mid(), "held operator message"))     # held, not yet dispatched
+            hold(u.daemon, u.mid(), "held operator message")     # held, not yet dispatched
             assert not u.daemon.dispatch_blocked
             interrupt = asyncio.create_task(u.say("!interrupt"))
             await asyncio.wait_for(gate.entered.wait(), 10)             # the lock is held
@@ -76,7 +76,7 @@ def test_no_flush_is_scheduled_or_run_while_shutting_down(tmp_path: Path) -> Non
     u = Unit(tmp_path)
 
     async def scenario() -> None:
-        u.daemon.held.append((u.mid(), "held"))
+        hold(u.daemon, u.mid(), "held")
         u.daemon.shutting_down = True
         u.daemon.hooks_idle()
         assert not u.daemon._idle_tasks          # pyright: ignore[reportPrivateUsage]
