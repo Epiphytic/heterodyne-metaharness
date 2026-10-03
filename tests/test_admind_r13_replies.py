@@ -82,8 +82,8 @@ def diagnostics(h: Harness) -> str:
             for line in (h.settings.state_dir / "audit.jsonl").read_text().splitlines()[-20:]:
                 try:
                     audit.append(json.dumps(clean(json.loads(line)), sort_keys=True, default=str))
-                except ValueError:  # not JSON: the raw line, redacted
-                    audit.append(redact(line))
+                except ValueError:  # torn write: its content may be escaped, so say nothing of it
+                    audit.append(f"(unparseable audit line, {len(line)} chars)")
         except Exception as exc:  # noqa: BLE001 - diagnostics must not hide the timeout
             audit = [f"(audit unreadable: {type(exc).__name__})"]
         state = clean(
@@ -1208,6 +1208,7 @@ def test_a_timed_out_wait_explains_itself_without_secrets(tmp_path: Path) -> Non
                 fh.write(json.dumps({"kind": "x", "value": secret, secret: "k"}) + "\n")
                 fh.write(json.dumps({"kind": "x", "nested": {"list": [secret], secret: (secret,)}}) + "\n")
                 fh.write("not json " + secret + "\n")
+                fh.write(json.dumps({"kind": "x", "value": secret})[:-1] + "\n")  # torn: escaped, unparseable
             with pytest.raises(pytest.fail.Exception) as info:
                 await waited(h, lambda: False, "nothing", 0.1)
             msg = str(info.value)
