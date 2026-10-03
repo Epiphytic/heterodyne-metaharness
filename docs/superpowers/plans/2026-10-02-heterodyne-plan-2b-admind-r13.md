@@ -78,7 +78,7 @@
 | B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. It renders `tool_use` and `tool_result` blocks whole (non-text results as JSON with sorted keys; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure or a missing span is `EXTRACT_FAILED` (B9), never `NO_REPLY`. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
 | B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
 | B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
@@ -2411,6 +2411,24 @@ def test_fallback_silent_turn_is_empty_not_a_failure(tmp_path: Path) -> None:
     assert reply_text(stop(t), 0, end) == ""
 
 
+def test_a_result_record_with_text_is_not_a_prompt(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    mixed = {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"},
+                                                     {"type": "text", "text": "note"}]}}
+    end = append(t, [prompt("go"), tool("Bash", command="ls"), mixed, said("Final."), prompt("next"),
+                     said("next answer")])
+    assert reply_text(stop(t), 0, end) == "Final."
+
+
+def test_a_changed_transcript_is_a_failure(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), said("hi")])
+    assert reply_text(stop(t), 0, end + 100) is None              # shorter than the span: truncated
+    with t.open("a") as fh:
+        fh.write('{"type": "assistant", "message": {"content": [{"type": "text", "text": "par')
+    assert reply_text(stop(t), 0, t.stat().st_size) is None       # the span ends inside a record
+
+
 def test_fallback_failures_are_none(tmp_path: Path) -> None:
     t = tmp_path / "s.jsonl"
     end = append(t, [prompt("go"), said("hi")])
@@ -2638,12 +2656,14 @@ MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record is named, not pa
 
 def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
     """The complete lines in bytes [start, end), read READ_WINDOW at a time. A line longer than MAX_RECORD
-    is not kept: its size in bytes is yielded instead. A last line without its newline is not yielded."""
+    is not kept: its size in bytes is yielded instead. The span was measured at the turn's edges, so it
+    ends on a newline: a file shorter than `end`, or a last line without its newline, means the transcript
+    changed under us, and raises OSError (the caller reports a failed read, never a partial one)."""
     pos, buf, skipped = start, bytearray(), 0
     while pos < end:
         data = os.pread(fd, min(READ_WINDOW, end - pos), pos)
         if not data:
-            return
+            raise OSError("the transcript is shorter than the turn's span")
         pos += len(data)
         while data:
             nl = data.find(b"\n")
@@ -2660,13 +2680,16 @@ def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
                 else:
                     yield bytes(buf)
                 skipped, buf = 0, bytearray()
+    if buf or skipped:
+        raise OSError("the turn's span ends inside a record")
 
 
 def _is_prompt(record: dict[str, Any]) -> bool:
     """A real user prompt: text from the user, as opposed to a record that carries tool results or one
-    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output)."""
+    Claude Code adds itself (`isMeta`, such as a caveat or a local command's output). A record that
+    carries a tool result is never a prompt, even if it also has text (Codex r4 finding 2)."""
     blocks = _blocks(record)
-    return record.get("type") == "user" and not record.get("isMeta") and (
+    return record.get("type") == "user" and not record.get("isMeta") and not _has_result(record) and (
         isinstance(blocks, str) or bool(blocks and any(b.get("type") == "text" for b in blocks)))
 
 
@@ -3142,6 +3165,17 @@ def test_non_text_results_are_kept_distinct(tmp_path: Path) -> None:
     assert "◂ (error) denied" in out
 
 
+def test_values_are_redacted_before_they_are_serialized(tmp_path: Path) -> None:
+    # Codex r4 finding 1: json.dumps turns "\x01ghp_…" into "\\u0001ghp_…", where the token follows "1".
+    token = "ghp_" + "A" * 30
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), tool("Bash", command="\x01" + token),
+                     {"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                "content": {"env": "\x01" + token}}]}}])
+    out = turn_tool_calls(t, 0, end)
+    assert "AAAAAAAAAA" not in out and out.count("<redacted GitHub token>") == 2
+
+
 def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hook, "MAX_RECORD", 1000)
     t = tmp_path / "s.jsonl"
@@ -3195,13 +3229,13 @@ Daemon scenarios with the shared harness:
 
   `CommandRunner.run` never receives `details`, because the daemon handles it. Raise `CommandError("internal")` there if it ever does.
 
-- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `import hashlib`, and:
+- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `import hashlib` and `from heterodyne.admind.redact import redact` (redact imports only the secret scanner, so there is no cycle), and:
 
 ```python
 def _block_text(block: Any) -> str:
     """One block of a tool result, deterministically. Text is shown as it is; an image is named by its
     type, size and digest (a text chat can't show it; flagged, B13); anything else is its JSON, keys
-    sorted."""
+    sorted, with every string redacted first (`_json`)."""
     if isinstance(block, dict):
         b = cast(dict[str, Any], block)
         if b.get("type") == "text" and isinstance(b.get("text"), str):
@@ -3212,7 +3246,23 @@ def _block_text(block: Any) -> str:
             digest = hashlib.sha256(data.encode()).hexdigest()[:12]
             return (f"[image {cast(dict[str, Any], source).get('media_type', '?')}, {len(data)} base64 "
                     f"characters, sha256 {digest}]")
-    return json.dumps(block, ensure_ascii=False, sort_keys=True)
+    return _json(block)
+
+
+def _redacted(value: Any) -> Any:
+    """`value` with every string in it (keys too) redacted, before it is serialized: JSON escapes can put
+    a digit right before a secret (`\\u0001ghp_…`), which the scanner's start rule then refuses (B1)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {redact(str(k)): _redacted(v) for k, v in cast(dict[Any, Any], value).items()}
+    if isinstance(value, list):
+        return [_redacted(v) for v in cast(list[Any], value)]
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(_redacted(value), ensure_ascii=False, sort_keys=True)
 
 
 def _result_text(content: Any) -> str:
@@ -3220,7 +3270,7 @@ def _result_text(content: Any) -> str:
         return content
     if isinstance(content, list):
         return "\n".join(_block_text(b) for b in cast(list[Any], content))
-    return json.dumps(content, ensure_ascii=False, sort_keys=True)
+    return _json(content)
 
 
 def _tool_lines(record: dict[str, Any]) -> list[str]:
@@ -3232,7 +3282,7 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
         return [f"◂ {'(error) ' if b.get('is_error') else ''}{_result_text(b.get('content'))}"
                 for b in blocks if b.get("type") == "tool_result"]
     if record.get("type") == "assistant":
-        return [f"▸ {b.get('name')} {json.dumps(b.get('input'), ensure_ascii=False)}"
+        return [f"▸ {b.get('name')} {_json(b.get('input'))}"
                 for b in blocks if b.get("type") == "tool_use"]
     return []
 
