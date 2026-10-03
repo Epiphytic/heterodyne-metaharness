@@ -199,9 +199,10 @@ SEPARATOR = "\n\n"                      # between a turn's text blocks
 #   - in redaction: control escaping grows the text (a control character becomes `\xNN`), and each
 #     substitution pass allocates a copy;
 #   - the UTF-8 encode copy of the redacted text, for the size check.
-# Every one of these is larger than its byte count suggests: parsed Python objects and Python's string
-# storage take more than the UTF-8 size. No multiple is claimed, and this is not an RSS guarantee. The
-# extraction threads run one at a time (B20), so the peaks do not stack across turns.
+# Each of these can be larger than its byte count suggests: parsed Python objects take more than the bytes
+# they came from, and a Python string can take more than its UTF-8 size (or less, for CJK text). No
+# multiple is claimed, and this is not an RSS guarantee. The extraction threads run one at a time (B20),
+# so the peaks do not stack across turns.
 READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 

@@ -55,40 +55,65 @@ def batches(h: Harness) -> list[str]:
     return [t for t in h.texts() if t.startswith(backstop.TITLE)]
 
 
+def clean(obj: Any) -> Any:
+    """`obj` with every string in it redacted, BEFORE anything formats it: a repr or json escape turns a
+    control character into a letter (`\\n` into `n`), which hides where a token starts."""
+    if isinstance(obj, str):
+        return redact(obj)
+    if isinstance(obj, bytes | bytearray):
+        return redact(bytes(obj).decode("utf-8", "replace"))
+    if isinstance(obj, dict):
+        return {clean(k): clean(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple | set | frozenset):
+        return [clean(v) for v in obj]
+    if obj is None or isinstance(obj, bool | int | float):
+        return obj
+    return redact(str(obj))
+
+
 def diagnostics(h: Harness) -> str:
     """What the daemon was doing, for a wait that timed out: rows without their text, the last audit
-    records, what was sent, and the readiness and latch state. Every raw value is redacted BEFORE it is
-    formatted (a repr's escapes can hide where a secret starts: `\\n` + token), and the whole message once
-    more after. It never raises: on any failure it says which kind."""
+    records, what was sent, and the readiness and latch state. Everything is cleaned before it is
+    formatted, and the assembled message is redacted once more. It never raises: on any failure it says
+    which kind."""
     try:
         db = h.store.db
-
-        def safe(value: object) -> str:
-            return redact(str(value))
-
-        def row(r: Any) -> str:
-            return "(" + ", ".join(safe(v) for v in r) + ")"
-
-        turns = [
-            row(r)
-            for r in db.execute(
-                "SELECT turn_id, status, batch_id, batch_seq, session, reply_to FROM turns"
-            ).fetchall()
-        ]
-        batch_rows = [
-            row(r) for r in db.execute("SELECT batch_id, status, attempt, opened_at FROM batches").fetchall()
-        ]
+        turns = clean(
+            [
+                tuple(r)
+                for r in db.execute(
+                    "SELECT turn_id, status, batch_id, batch_seq, session, reply_to FROM turns"
+                ).fetchall()
+            ]
+        )
+        batch_rows = clean(
+            [
+                tuple(r)
+                for r in db.execute("SELECT batch_id, status, attempt, opened_at FROM batches").fetchall()
+            ]
+        )
+        audit: list[str] = []
         try:
-            audit = [safe(json.dumps(r, sort_keys=True)) for r in audit_records(h)[-20:]]
+            for line in (h.settings.state_dir / "audit.jsonl").read_text().splitlines()[-20:]:
+                try:
+                    audit.append(json.dumps(clean(json.loads(line)), sort_keys=True, default=str))
+                except ValueError:  # not JSON: the raw line, redacted
+                    audit.append(redact(line))
         except Exception as exc:  # noqa: BLE001 - diagnostics must not hide the timeout
             audit = [f"(audit unreadable: {type(exc).__name__})"]
+        state = clean(
+            {
+                "latched": h.store.get("latched"),
+                "busy": h.store.get("busy"),
+                "in_flight": h.store.get("in_flight"),
+                "session": h.agent.session_id,
+            }
+        )
         lines = [
-            f"turns (id, status, batch, seq, session, reply_to): {' '.join(turns)}",
-            f"batches (id, status, attempt, opened_at): {' '.join(batch_rows)}",
-            f"ready={h.daemon.is_ready()} latched={safe(h.store.get('latched'))} "
-            f"busy={safe(h.store.get('busy'))} in_flight={safe(h.store.get('in_flight'))} "
-            f"session={safe(h.agent.session_id)}",
-            f"sent ({len(h.texts())}): " + " | ".join(safe(t[:60]) for t in h.texts()),
+            f"turns (id, status, batch, seq, session, reply_to): {turns}",
+            f"batches (id, status, attempt, opened_at): {batch_rows}",
+            f"ready={h.daemon.is_ready()} state={state}",
+            f"sent ({len(h.texts())}): {clean([t[:60] for t in h.texts()])}",
             "last audit records:",
             *audit,
         ]
@@ -1188,16 +1213,22 @@ def test_a_timed_out_wait_explains_itself_without_secrets(tmp_path: Path) -> Non
     async def scenario(h: Harness) -> None:
         await terminal_stop(h, "reply " + TOKEN + " " + "w" * 900)
         await h.until(lambda: len(h.store.turns_with_status("batched")) == 1)
-        for lead in ("\n", "\t"):  # a repr would escape these and hide where the token starts
-            h.store.set("busy", lead + TOKEN)
-            h.store.set("agent_session", lead + TOKEN)
-            h.fake.sent.append({"text": lead + TOKEN})
+        for n, lead in enumerate(("\n", "\t")):  # a repr or json escape would hide where a token starts
+            secret = lead + TOKEN
+            h.store.set("busy", secret)
+            h.store.set("agent_session", secret)
+            h.fake.sent.append({"text": secret})
+            h.store.db.execute("UPDATE turns SET reply_to = ?", (secret.encode(),))  # a bytes cell
+            with (h.settings.state_dir / "audit.jsonl").open("a") as fh:
+                fh.write(json.dumps({"kind": "x", "value": secret, secret: "k"}) + "\n")
+                fh.write(json.dumps({"kind": "x", "nested": {"list": [secret], secret: (secret,)}}) + "\n")
+                fh.write("not json " + secret + "\n")
             with pytest.raises(pytest.fail.Exception) as info:
                 await waited(h, lambda: False, "nothing", 0.1)
             msg = str(info.value)
             assert "timed out waiting for nothing" in msg and "turns (id, status" in msg
-            assert "batches (id, status" in msg and "last audit records:" in msg and "latched=" in msg
-            assert TOKEN not in msg and "w" * 100 not in msg and TOKEN[4:] not in msg
+            assert "batches (id, status" in msg and "last audit records:" in msg and "latched" in msg
+            assert TOKEN not in msg and "w" * 100 not in msg and TOKEN[4:] not in msg, n
 
     run_with(tmp_path, scenario, configure("exit 1", batch=3600))
 
@@ -1213,3 +1244,19 @@ def test_diagnostics_never_replace_the_timeout(tmp_path: Path) -> None:
         assert "diagnostics unavailable: ProgrammingError" in str(info.value)
 
     run_with(tmp_path, scenario, configure(None))
+
+
+def test_clean_redacts_before_any_formatting() -> None:
+    secret = "\n" + TOKEN
+    for value in (
+        (secret,),
+        [secret],
+        {secret: "v"},
+        {"k": {secret}},
+        secret.encode(),
+        bytearray(("\t" + TOKEN).encode()),
+        {("\t" + TOKEN): ("\t" + TOKEN,)},
+    ):
+        shown = repr(clean(value)) + json.dumps(clean(value), default=str)
+        assert TOKEN not in shown and TOKEN[4:] not in shown, value
+    assert clean(7) == 7 and clean(None) is None and clean(True) is True
