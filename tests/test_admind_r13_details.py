@@ -8,6 +8,7 @@ import asyncio
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -857,3 +858,157 @@ def test_details_on_a_big_batch_is_capped_in_total_and_says_so(
         assert len(whole) < 1000
 
     run_with(tmp_path, scenario, configure(None))
+
+
+def staged(h: Harness) -> int:
+    return int(h.store.db.execute("SELECT COUNT(*) FROM details_stage").fetchone()[0])
+
+
+def inbound_status(h: Harness, mid: str) -> str:
+    row = h.store.db.execute("SELECT status FROM inbound WHERE message_id = ?", (mid,)).fetchone()
+    return "" if row is None else str(row[0])
+
+
+def on_stage(h: Harness, after: Callable[[int, int], object]) -> None:
+    """Call `after(call number, parts so far)` once each slice of a !details is staged."""
+    real = h.store.stage_details
+    seen = {"calls": 0, "parts": 0}
+
+    def stage(token: str, first: int, parts: list[str]) -> None:
+        real(token, first, parts)
+        seen["calls"] += 1
+        seen["parts"] += len(parts)
+        after(seen["calls"], seen["parts"])
+
+    h.store.stage_details = stage  # type: ignore[method-assign]
+
+
+@needs_tmux
+def test_an_alert_is_delivered_while_a_large_details_is_still_being_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex T9 r1 finding 4: publishing used to be one synchronous transaction; nothing ran meanwhile.
+    monkeypatch.setattr("heterodyne.admind.daemon.DETAILS_SLICE", 2)
+
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 60000)
+        sid = await summary_delivered(h)
+        mid_holder: list[str] = []
+        snapshot: dict[str, Any] = {}
+
+        def on_send(req: dict[str, Any]) -> None:
+            if req["idempotency_key"] == "alert:x":
+                snapshot["status"] = inbound_status(h, mid_holder[0])
+                snapshot["visible"] = len(details_texts(h, mid_holder[0]))
+
+        h.fake.on_send = on_send
+        on_stage(h, lambda calls, parts: calls == 3 and h.daemon.post("alert:x", "urgent alert", None))
+        mid_holder.append(await ask(h, "!details", reply_to=sid))
+        mid = mid_holder[0]
+        await wait_until(lambda: delivered(h, mid), 30)
+        assert snapshot == {"status": "executing", "visible": 0}  # sent mid-preparation, nothing partial
+        assert len(details_texts(h, mid)) > 100 and staged(h) == 0
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+@needs_tmux
+@pytest.mark.parametrize("how", ["latch", "transition", "sender"])
+@pytest.mark.parametrize("slice_size", [1, 10_000])
+def test_a_guard_that_fails_while_staging_leaves_nothing_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str, slice_size: int
+) -> None:
+    # slice 1: caught between slices; 10_000: one slice, so only the check just before the publish can
+    monkeypatch.setattr("heterodyne.admind.daemon.DETAILS_SLICE", slice_size)
+
+    def trip(h: Harness) -> None:
+        if how == "latch":
+            h.daemon.latch("test latch")  # the real thing, not a hand-set flag
+        elif how == "transition":
+            h.daemon.changing = True
+        else:
+            h.daemon.operators.pop(OPERATOR_HEX)  # the sender is no longer an authorised operator
+
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 6000)
+        sid = await summary_delivered(h)
+        on_stage(h, lambda calls, parts: calls == 1 and trip(h))
+        mid = await ask(h, "!details", reply_to=sid)
+        await wait_until(lambda: inbound_status(h, mid) == "dropped")
+        assert details_texts(h, mid) == [] and staged(h) == 0
+        h.daemon.changing = False
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+@needs_tmux
+def test_a_failure_while_staging_discards_what_was_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("heterodyne.admind.daemon.DETAILS_SLICE", 1)
+
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 6000)
+        sid = await summary_delivered(h)
+
+        failed: list[bool] = []
+
+        def boom(calls: int, parts: int) -> None:
+            if calls == 3:
+                failed.append(True)
+                raise RuntimeError("staging failed")
+
+        on_stage(h, boom)
+        mid = await ask(h, "!details", reply_to=sid)
+        await wait_until(lambda: failed and staged(h) == 0)
+        assert details_texts(h, mid) == [] and staged(h) == 0
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+@needs_tmux
+def test_an_old_staging_is_purged_when_admind_restarts(tmp_path: Path) -> None:
+    async def first(h: Harness) -> None:
+        h.store.stage_details("dead", 0, ["a", "b"])
+
+    run_with(tmp_path, first, configure(None))
+
+    async def second(h: Harness) -> None:
+        assert staged(h) == 0
+
+    run_with(tmp_path, second, configure(None))
+
+
+@needs_tmux
+def test_the_sender_losing_authority_during_the_read_is_noticed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # every other check (latch, changing, group, subscription) still passes: only the sender is gone
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
+        started.set()
+        release.wait(10)
+        return "▸ Bash {}", False
+
+    monkeypatch.setattr("heterodyne.admind.daemon.render_tool_calls", slow)
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        path = tmp_path / f"{sid}.jsonl"
+        append(path, [prompt("old")])
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
+        await wait_until(lambda: h.store.get("turn_start") is not None)
+        append(path, [prompt("go"), tool("Bash")])
+        await h.daemon.hooks.put(h.event("Stop", sid, str(path), LONG))
+        await summary_delivered(h)
+        mid = await ask(h, "!details full")
+        await wait_until(started.is_set)
+        h.daemon.operators.pop(OPERATOR_HEX)
+        assert not h.daemon.sender_current(mid) and h.daemon.authorised()
+        release.set()
+        await wait_until(lambda: inbound_status(h, mid) == "dropped")
+        assert details_texts(h, mid) == []
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'))

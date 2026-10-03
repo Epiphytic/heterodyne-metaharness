@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS outbox (
     status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
     message_id TEXT);
+-- parts of a `!details` reply being prepared: invisible to the outbox until publish_details moves them
+CREATE TABLE IF NOT EXISTS details_stage (
+    token TEXT NOT NULL, idx INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (token, idx));
 CREATE TABLE IF NOT EXISTS alerts (name BLOB PRIMARY KEY, relayed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS prompts (
     message_id TEXT PRIMARY KEY, operator TEXT NOT NULL, received_at TEXT NOT NULL, words TEXT NOT NULL);
@@ -248,6 +251,33 @@ class Store:
         cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
                               "VALUES (?, ?, ?, 'pending', ?)", (key, reply_to, text, lane))
         return cur.rowcount == 1
+
+    @_locked
+    def stage_details(self, token: str, first: int, parts: list[str]) -> None:
+        """Hold parts first.. of a reply that is not yet visible to delivery (see publish_details)."""
+        with self.transaction():
+            self.db.executemany("INSERT OR REPLACE INTO details_stage(token, idx, text) VALUES (?, ?, ?)",
+                                [(token, first + i, p) for i, p in enumerate(parts)])
+
+    @_locked
+    def publish_details(self, token: str, prefix: str, reply_to: str, lane: int) -> int:
+        """Move every staged part to the outbox, keyed `{prefix}:{idx}`, in one statement: all or none.
+        Returns how many. The caller sets its inbound status in the same transaction."""
+        with self.transaction():
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
+                "SELECT ? || ':' || idx, ?, text, 'pending', ? FROM details_stage WHERE token = ? "
+                "ORDER BY idx", (prefix, reply_to, lane, token))
+            self.db.execute("DELETE FROM details_stage WHERE token = ?", (token,))
+            return cur.rowcount
+
+    @_locked
+    def discard_details(self, token: str | None = None) -> None:
+        """Drop one staged reply, or (no token) every one: a restart leaves no live preparation."""
+        if token is None:
+            self.db.execute("DELETE FROM details_stage")
+        else:
+            self.db.execute("DELETE FROM details_stage WHERE token = ?", (token,))
 
     @_locked
     def pending(self) -> list[OutboxRow]:

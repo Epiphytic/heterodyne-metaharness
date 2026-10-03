@@ -85,6 +85,7 @@ DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 NO_TOOL_CALLS = "(tool calls are not available for this turn)"
 DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
+DETAILS_SLICE = 500     # parts staged per turn of the event loop
 EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
                   "for the turn's tool calls, or ask the agent to repeat it.)")
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
@@ -415,6 +416,7 @@ class Admind:
         # A turn in flight when admind stopped can't be tied to its Stop any more (it may have been
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
+        self.store.discard_details()    # a !details in preparation died with the process
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
         # Received (held, never pasted) or executing (a command that may not have run to the end): each
@@ -1029,15 +1031,36 @@ class Admind:
                 sections.append(TRUNCATED)
                 break
         # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
-        parts = await asyncio.to_thread(
-            lambda: chunk.split(redact("\n\n".join(sections)), self.s.chunk_chars))
-        if not self.authorised(mid):    # the reads and the thread may have spanned a latch or a transition
-            self.deny(mid, "command")
-            return
-        with self.store.transaction():
-            self.store.set_inbound(mid, "done")
-            for i, part in enumerate(parts):
-                self.post(f"details:{mid}:{i}", part, mid, lane=2)
+        def prepare() -> list[str]:
+            text = redact("\n\n".join(sections))
+            sections.clear()        # one full copy at a time
+            return chunk.split(text, self.s.chunk_chars)
+
+        parts = await asyncio.to_thread(prepare)
+        # Deviation from the plan (Codex T9 r1): the parts are staged, in slices with a yield between, in a
+        # table delivery ignores; one statement then makes them all visible. Inserting 335k rows (64 MiB
+        # at 200 chars) in one transaction would stop the loop, alerts and latching included. The guards
+        # are checked after every slice and again just before the publish, and a failed or cancelled
+        # command discards what it staged. `parts` are already redacted whole, so they aren't redacted again.
+        published = False
+        try:
+            for first in range(0, len(parts), DETAILS_SLICE):
+                if not self.authorised(mid):
+                    self.deny(mid, "command")
+                    return
+                self.store.stage_details(mid, first, parts[first:first + DETAILS_SLICE])
+                await asyncio.sleep(0)
+            if not self.authorised(mid):
+                self.deny(mid, "command")
+                return
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                self.store.publish_details(mid, f"details:{mid}", mid, 2)
+            published = True
+            self.wake.set()
+        finally:
+            if not published:
+                self.store.discard_details(mid)
         self.audit.write("command", message_id=mid, command="details", full=full, replies=len(rows),
                          chars=sum(len(p) for p in parts))
 
