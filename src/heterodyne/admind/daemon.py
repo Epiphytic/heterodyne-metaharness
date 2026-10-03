@@ -994,10 +994,12 @@ class Admind:
 
     async def details(self, mid: str, cmd: commands.Command, target: str | None) -> None:
         """`!details [full]`: the full redacted reply (or every reply of a batch), each under its origin,
-        in lane 2 and threaded to the command (ADR 0001 §8, revision 13). The rendered text is capped at
-        min(MAX_REPLY, MAX_DETAILS_PARTS * chunk_chars) UTF-8 bytes, with an explicit notice where it stops
-        (B13), and all of one command's transcript reads share one budget, `details_timeout`
-        (DETAILS_READ_SECONDS); a turn the budget ran out before says it was not read."""
+        in lane 2 and threaded to the command (ADR 0001 §8, revision 13). Rendering stops at a budget of
+        min(MAX_REPLY, MAX_DETAILS_PARTS * chunk_chars) UTF-8 bytes, with a notice (B13). It is a budget, not
+        a hard cap: it is checked before the final redaction (which can expand the text), a stored reply is
+        shown whole and may exceed it, and the number of parts is cut separately at MAX_DETAILS_PARTS. All of
+        one command's transcript reads share one time budget, `details_timeout` (DETAILS_READ_SECONDS); a turn
+        it ran out before says it was not read."""
         if not self.authorised(mid):
             self.deny(mid, "command")
             return
