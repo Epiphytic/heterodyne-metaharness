@@ -55,7 +55,7 @@ class Audit:
         private_dir(path.parent)
 
     def write(self, kind: str, **fields: object) -> None:
-        record = {"ts": now(), "kind": kind, **{k: clean(v, k) for k, v in fields.items()}}
+        record = cast(dict[str, object], clean({"ts": now(), "kind": kind, **fields}))
         data = (json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n").encode()
         flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
         fd = os.open(self.path, flags, 0o600)

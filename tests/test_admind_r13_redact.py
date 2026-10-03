@@ -3,9 +3,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from heterodyne.admind import redact as redact_module
 from heterodyne.admind.audit import Audit, ref_id
 from heterodyne.admind.redact import redact, redact_continuation, unique_key
 from heterodyne.marmot.nip19 import hex_to_npub
@@ -78,9 +80,21 @@ def test_continuation_hides_the_rest_of_a_split_value() -> None:
     pem_head = "-----BEG"
     pem_rest = "IN " + "PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\nafter"   # split: gitleaks
     assert redact_continuation("see " + pem_head, pem_rest) == "<redacted fragment>\nafter"
+    # An escape next to a hex run changes where the run starts; the continuation sees the same text.
+    previous = "\x1b" + "f" * 62 + TOKEN[:8]
+    rest = TOKEN[8:] + " rest"
+    assert TOKEN not in redact(previous + rest)
+    assert redact_continuation(previous, rest) == "<redacted fragment> rest"
     assert redact_continuation("plain words. ", "more words") == "more words"
     # A value glued to a hex run that straddles the boundary is found the way redact finds it.
     assert redact_continuation("f" * 64 + "ghp_AAAA", "A" * 26 + " rest") == "<redacted fragment> rest"
+
+
+def test_text_that_never_settles_is_replaced_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    flips = iter(range(1000))
+    monkeypatch.setattr(redact_module, "_pass", lambda text: f"{text}x{next(flips)}")
+    assert redact("anything") == redact_module.UNSTABLE
+    assert next(flips) == redact_module.MAX_PASSES
 
 
 def records(path: Path) -> list[dict[str, object]]:
@@ -99,6 +113,14 @@ def test_audit_redacts_every_field(tmp_path: Path) -> None:
     assert r["nested"] == {"list": ["<redacted GitHub token>", 3, None], "deep": ["<redacted hex key>"]}
     assert r["other"] == "/x/<redacted hex key>"
     assert ref_id(HEX) == ref_id(HEX.upper()) and re.fullmatch(r"id:[0-9a-f]{12}", ref_id(HEX))
+
+
+def test_audit_redacts_kind_and_field_names(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "audit.jsonl")
+    audit.write(TOKEN, **{TOKEN: "safe"})
+    raw = (tmp_path / "audit.jsonl").read_text()
+    assert TOKEN not in raw
+    assert records(tmp_path / "audit.jsonl")[0]["kind"] == "<redacted GitHub token>"
 
 
 def test_audit_keeps_keys_that_redact_alike(tmp_path: Path) -> None:
@@ -132,5 +154,13 @@ def test_audit_is_whole_and_posts_are_redacted(tmp_path: Path) -> None:
     assert re.search(r"[0-9A-Fa-f]{64}", raw) is None
     inbound = [r for r in records(h.settings.state_dir / "audit.jsonl")
                if r.get("kind") == "inbound" and "line line" in str(r.get("text", ""))]
-    assert inbound and str(inbound[-1]["text"]).endswith("<redacted hex key>")
+    assert inbound and inbound[-1]["text"] == redact(long_text)
     assert all(HEX not in t for t in h.texts())
+
+
+def test_alert_name_is_redacted_before_any_cut(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.daemon.relay_alert("_" + HEX, b"raw", None)
+    raw = (h.settings.state_dir / "audit.jsonl").read_text()
+    assert re.search(r"[0-9A-Fa-f]{40}", raw) is None
+    assert "_<redacted hex key>" in raw

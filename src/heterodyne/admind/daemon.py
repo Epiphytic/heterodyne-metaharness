@@ -1159,8 +1159,8 @@ class Admind:
         text = redact(alerts.render(name, alert, self.s.chunk_chars))
         if self.store.relay_alert(raw, key, text):
             self.wake.set()
-            self.audit_quietly("alert", name=alerts.display_name(name)[:64],
-                               key=key, malformed=alert is None)
+            self.audit_quietly("alert", name=alerts.display_name(name),
+                               key=key, malformed=alert is None)    # name whole: redacted before any cut
 
     def alert_failed(self, raw: bytes, exc: Exception) -> None:
         """Report an alert admind could not relay: by exception type and opaque key only, and tell the

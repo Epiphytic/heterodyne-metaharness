@@ -59,12 +59,29 @@ def unique_key(key: str, taken: Container[str]) -> str:
     return out
 
 
+def _hex_spans(text: str) -> list[tuple[int, int]]:
+    """Hex runs as `_pass` sees them (after control escapes), as spans of the unescaped `text`: an escape's
+    own digits belong to the character it replaces."""
+    escaped: list[str] = []
+    owner: list[int] = []
+    for i, c in enumerate(text):
+        piece = f"\\x{ord(c):02x}" if _CONTROLS.fullmatch(c) else c
+        escaped.append(piece)
+        owner.extend([i] * len(piece))
+    return [(owner[m.start()], owner[m.end() - 1] + 1) for m in _HEX_RUN.finditer("".join(escaped))]
+
+
 def _spans(text: str) -> Iterator[tuple[int, int]]:
-    """Every span `redact` would hide, in offsets of `text`. Like `redact`, it repeats: found spans are
-    masked with `<` (a boundary, as a marker is) at the same length, and the text is scanned again."""
-    patterns = (_PEM, *(p for _, p in _SECRETS), _NPUB, _HEX_RUN)
+    """Every span `redact` would hide, in offsets of `text`. Like `redact`, it follows `_pass` (secrets and
+    npubs on the raw text, then hex runs on the escaped text) and repeats: found spans are masked with `<`
+    (a boundary, as a marker is) at the same length, and the text is scanned again."""
+    patterns = (_PEM, *(p for _, p in _SECRETS), _NPUB)
     for _ in range(MAX_PASSES):
         found = [(m.start(), m.end()) for p in patterns for m in p.finditer(text)]
+        masked = text
+        for start, end in found:
+            masked = masked[:start] + "<" * (end - start) + masked[end:]
+        found += _hex_spans(masked)
         if not found:
             return
         yield from found
