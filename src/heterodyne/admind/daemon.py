@@ -32,13 +32,14 @@ from heterodyne.admind.hook import (
     HOOK_EVENTS,
     MAX_REPLY,
     READ_CANCEL,
+    TRUNCATED,
     Delivery,
     HookEvent,
     HookServer,
+    render_tool_calls,
     reply_text,
     same_prompt,
     transcript_size,
-    turn_tool_calls,
 )
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
@@ -82,6 +83,7 @@ OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20
 SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
 DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
+NO_TOOL_CALLS = "(tool calls are not available for this turn)"
 DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
 EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
                   "for the turn's tool calls, or ask the agent to repeat it.)")
@@ -119,6 +121,11 @@ def reason(exc: BaseException) -> str:
     if isinstance(exc, TmuxError):
         return "a tmux command failed"
     return "internal error"
+
+
+def utf8_size(text: str) -> int:
+    """UTF-8 bytes of `text`, a lone surrogate counting as the one byte it is replaced by."""
+    return len(text.encode("utf-8", "replace"))
 
 
 def own_text(text: str) -> str:
@@ -996,13 +1003,31 @@ class Admind:
         # Deviation from the plan, which gave each turn its own 30 s: one `!details full` has ONE budget,
         # `details_timeout`, for all its reads. A batch can hold any number of turns, and 30 s each would
         # hold the work lock (operator messages, !interrupt, membership transitions) for 30 s x N.
-        deadline = asyncio.get_running_loop().time() + self.details_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.details_timeout
+        # Deviation from the plan (extends B13): what `!details` renders is capped at MAX_REPLY, the same
+        # 64 MiB of UTF-8 as a reply, however many legal records or turns there are. A tool call or result
+        # is never shown in part: the first that would pass the cap, and everything after it, is replaced
+        # by TRUNCATED. A stored reply is shown whole (it is already bounded by MAX_REPLY), so the text can
+        # pass the cap by one reply. The cap counts the rendered text before redaction, which can expand it.
+        left_bytes = MAX_REPLY
         for row in rows:
-            body = row.text
+            if left_bytes <= 0:
+                sections.append(TRUNCATED)
+                break
+            section = f"{row.origin}\n{row.text}"      # a stored reply: shown whole, even past the cap
+            left_bytes -= utf8_size(section) + 2
+            cut = False
             if full:
-                left = deadline - asyncio.get_running_loop().time()
-                body += "\n\n" + (await self.tool_calls(row, left) if left > 0 else DETAILS_NOT_READ)
-            sections.append(f"{row.origin}\n{body}")
+                left = deadline - loop.time()
+                calls, cut = (await self.tool_calls(row, left, left_bytes) if left > 0
+                              else (DETAILS_NOT_READ, False))
+                left_bytes -= utf8_size(calls) + 2
+                section += "\n\n" + calls
+            sections.append(section)
+            if cut:
+                sections.append(TRUNCATED)
+                break
         # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
         parts = await asyncio.to_thread(
             lambda: chunk.split(redact("\n\n".join(sections)), self.s.chunk_chars))
@@ -1016,18 +1041,18 @@ class Admind:
         self.audit.write("command", message_id=mid, command="details", full=full, replies=len(rows),
                          chars=sum(len(p) for p in parts))
 
-    async def tool_calls(self, row: TurnRow, seconds: float) -> str:
+    async def tool_calls(self, row: TurnRow, seconds: float, limit: int) -> tuple[str, bool]:
         """One turn's tool calls for `!details full`, read in the shared slot (B20), within `seconds`."""
         if row.transcript is None or row.transcript_start is None or row.transcript_end is None:
-            return "(tool calls are not available for this turn)"
+            return NO_TOOL_CALLS, False
         path = Path(row.transcript)
         if path.name != f"{row.session}.jsonl" or not path.is_absolute():
-            return "(tool calls are not available for this turn)"
+            return NO_TOOL_CALLS, False
         cancel = threading.Event()
         token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
         try:
-            out = await self.bounded_read(seconds, turn_tool_calls, path, row.transcript_start,
-                                          row.transcript_end)
+            out = await self.bounded_read(seconds, render_tool_calls, path, row.transcript_start,
+                                          row.transcript_end, max(limit, 0))
         except BaseException:
             cancel.set()
             raise
@@ -1035,7 +1060,7 @@ class Admind:
             READ_CANCEL.reset(token)
         if out is None:
             cancel.set()
-            return DETAILS_BUSY
+            return DETAILS_BUSY, False
         return out
 
     async def interrupt(self, mid: str, cmd: commands.Command) -> None:

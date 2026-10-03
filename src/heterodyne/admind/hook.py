@@ -359,22 +359,36 @@ TOO_LARGE = (f"(this turn's transcript holds a record over {MAX_RECORD // (1024 
              "its tool calls can't be shown)")
 
 
-def turn_tool_calls(path: Path, start: int, end: int) -> str:
-    """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records`. Nothing is
-    shortened: §8 puts no cap on `!details`. A record over MAX_RECORD makes the turn unreadable: without
-    parsing it, the turn's end can't be found (B13)."""
+TRUNCATED = "(details truncated at 64 MiB)"
+
+
+def render_tool_calls(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
+    """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records`, and whether the
+    output was cut at `limit` UTF-8 bytes (None: no limit; the line that would pass it is dropped whole, so
+    nothing is shown in part). A record over MAX_RECORD makes the turn unreadable: without parsing it, the
+    turn's end can't be found (B13). A lone surrogate (JSON `\\ud800`) can't be stored or sent: it becomes
+    `?`, line by line, so no second copy of the whole text is made."""
     out: list[str] = []
+    used = 0
     try:
         for rec in turn_records(path, start, end):
-            out.extend(_tool_lines(rec))
+            for line in _tool_lines(rec):
+                if _abandoned():
+                    raise OSError("the read was abandoned")
+                encoded = line.encode("utf-8", "replace")
+                used += len(encoded) + (1 if out else 0)
+                if limit is not None and used > limit:
+                    return "\n".join(out), True
+                out.append(encoded.decode("utf-8"))
     except RecordTooLarge:
-        return TOO_LARGE
+        return TOO_LARGE, False
     except (OSError, RecursionError):   # a structure nested deeper than the stack allows is unreadable too
-        return "(the transcript could not be read)"
-    # A lone surrogate (JSON `\\ud800`) can't be encoded, so it can't be stored or sent: it becomes `?`.
-    if not out:
-        return "(no tool calls in this turn)"
-    return "\n".join(out).encode("utf-8", "replace").decode("utf-8")
+        return "(the transcript could not be read)", False
+    return ("\n".join(out) if out else "(no tool calls in this turn)"), False
+
+
+def turn_tool_calls(path: Path, start: int, end: int) -> str:
+    return render_tool_calls(path, start, end)[0]
 
 
 def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:

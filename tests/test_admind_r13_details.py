@@ -502,11 +502,11 @@ def test_details_full_says_so_when_the_reader_is_busy(tmp_path: Path) -> None:
 def test_a_slow_transcript_read_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     release = threading.Event()
 
-    def slow(path: Path, start: int, end: int) -> str:
+    def slow(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
         release.wait(5)
-        return "late"
+        return "late", False
 
-    monkeypatch.setattr("heterodyne.admind.daemon.turn_tool_calls", slow)
+    monkeypatch.setattr("heterodyne.admind.daemon.render_tool_calls", slow)
 
     async def scenario(h: Harness) -> None:
         sid = await session(h)
@@ -630,12 +630,12 @@ def test_details_full_is_refused_if_admind_stops_being_authorised_during_the_rea
     started = threading.Event()
     release = threading.Event()
 
-    def slow(path: Path, start: int, end: int) -> str:
+    def slow(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
         started.set()
         release.wait(10)
-        return "▸ Bash {}"
+        return "▸ Bash {}", False
 
-    monkeypatch.setattr("heterodyne.admind.daemon.turn_tool_calls", slow)
+    monkeypatch.setattr("heterodyne.admind.daemon.render_tool_calls", slow)
 
     async def scenario(h: Harness) -> None:
         sid = await session(h)
@@ -754,7 +754,7 @@ def plant_batch(h: Harness, path: Path, sid: str, n: int) -> None:
 def cooperative_reader(seconds: float, seen: list[str]) -> Any:
     """A transcript reader that takes `seconds`, in steps, and stops as soon as READ_CANCEL is set."""
 
-    def read(path: Path, start: int, end: int) -> str:
+    def read(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
         cancel = hook.READ_CANCEL.get()
         assert cancel is not None
         deadline = time.monotonic() + seconds
@@ -764,7 +764,7 @@ def cooperative_reader(seconds: float, seen: list[str]) -> Any:
                 raise OSError("the read was abandoned")
             time.sleep(0.01)
         seen.append("read")
-        return "▸ Bash done"
+        return "▸ Bash done", False
 
     return read
 
@@ -775,7 +775,7 @@ def test_one_details_full_has_one_budget_for_all_its_turns(
 ) -> None:
     # Codex T9 r1 finding 2: 30 s per turn x N turns held the work lock for as long as that.
     seen: list[str] = []
-    monkeypatch.setattr("heterodyne.admind.daemon.turn_tool_calls", cooperative_reader(0.4, seen))
+    monkeypatch.setattr("heterodyne.admind.daemon.render_tool_calls", cooperative_reader(0.4, seen))
 
     async def scenario(h: Harness) -> None:
         sid = await session(h)
@@ -790,5 +790,70 @@ def test_one_details_full_has_one_budget_for_all_its_turns(
         assert whole.count("▸ Bash done") == 2 and whole.count(DETAILS_NOT_READ) == 3
         assert whole.count(DETAILS_BUSY) == 1  # the read the budget ran out in
         assert seen.count("read") == 2 and "cancelled" in seen
+
+    run_with(tmp_path, scenario, configure(None))
+
+
+def test_rendering_stops_at_the_limit_with_whole_lines(tmp_path: Path) -> None:
+    # Codex T9 r1 finding 3: many individually legal records must not add up without bound.
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), *[tool(f"T{i}", n="x" * 100) for i in range(1000)]])
+    out, cut = hook.render_tool_calls(t, 0, end, 5000)
+    assert cut and len(out.encode()) <= 5000
+    lines = out.split("\n")
+    assert lines[0].startswith("▸ T0 ") and all(ln.endswith('"}') for ln in lines)  # none cut in part
+    whole, cut_whole = hook.render_tool_calls(t, 0, end)
+    assert not cut_whole and whole.count("\n") == 999
+
+
+def test_a_lone_surrogate_is_replaced_line_by_line_and_counted_as_the_byte_it_becomes(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    with t.open("w") as fh:
+        fh.write(json.dumps(prompt("go")) + "\n")
+        fh.write(
+            '{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "B", '
+            '"input": {"c": "a\\ud800b"}}]}}\n'
+        )
+    out, cut = hook.render_tool_calls(t, 0, t.stat().st_size, 10_000)
+    assert not cut and "?" in out
+    out.encode("utf-8")
+
+
+@needs_tmux
+def test_details_full_is_capped_in_total_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("heterodyne.admind.daemon.MAX_REPLY", 4000)
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        path = tmp_path / f"{sid}.jsonl"
+        append(path, [prompt("old")])
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
+        await wait_until(lambda: h.store.get("turn_start") is not None)
+        append(path, [prompt("go"), *[tool(f"T{i}", n="x" * 100) for i in range(200)]])
+        await h.daemon.hooks.put(h.event("Stop", sid, str(path), LONG))
+        await summary_delivered(h)
+        mid = await ask(h, "!details full")
+        await wait_until(lambda: delivered(h, mid), 20)
+        whole = "".join(details_texts(h, mid))
+        assert whole.endswith(hook.TRUNCATED) and len(whole) < 4500
+        assert "▸ T0 " in whole and "▸ T199 " not in whole
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'))
+
+
+@needs_tmux
+def test_details_on_a_big_batch_is_capped_in_total_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("heterodyne.admind.daemon.MAX_REPLY", 600)
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        plant_batch(h, tmp_path / f"{sid}.jsonl", sid, 50)
+        mid = await ask(h, "!details", reply_to=BATCH_MESSAGE)
+        await wait_until(lambda: delivered(h, mid), 20)
+        whole = "".join(details_texts(h, mid))
+        assert whole.endswith(hook.TRUNCATED) and "reply 0" in whole and "reply 49" not in whole
+        assert len(whole) < 1000
 
     run_with(tmp_path, scenario, configure(None))
