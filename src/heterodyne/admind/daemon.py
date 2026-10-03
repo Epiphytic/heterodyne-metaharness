@@ -166,6 +166,7 @@ class Admind:
         self.policy_operators = settings.operators
         self.operators: dict[str, str] = {}     # set by run() from group_operators (B21)
         self.senders: dict[str, str] = {}       # message ID -> sender key, so queued work can be revalidated
+        self.dispatching: str | None = None     # the prompt being pasted; it may return to `held`
         self.client = client
         self.store = store
         self.audit = audit
@@ -308,9 +309,20 @@ class Admind:
 
     def sender_current(self, mid: str) -> bool:
         """Is the sender of message `mid` still an authorised operator? A latch cleared by `rearm` may have
-        left it out. A message with no recorded sender (never from on_message) is not judged."""
+        left it out. Fails closed: a message with no recorded sender is not current."""
         sender = self.senders.get(mid)
-        return sender is None or sender in self.operators
+        return sender is not None and sender in self.operators
+
+    def remember_sender(self, mid: str, sender: str) -> None:
+        """Record who sent `mid`. A record is dropped only once its message is past every queue: never
+        while it is held, waiting for a lock, being pasted (it may return to `held` if the paste fails)."""
+        if len(self.senders) > 256:
+            live = {held_mid for held_mid, _ in self.held} | set(self.store.inbound_with_status("received"))
+            live |= set(self.store.inbound_with_status("executing"))
+            if self.dispatching is not None:
+                live.add(self.dispatching)
+            self.senders = {m: k for m, k in self.senders.items() if m in live}
+        self.senders[mid] = sender
 
     def authorised(self, mid: str | None = None) -> bool:
         """May admind act for the operator right now: not latched, group verified, subscription live, and
@@ -829,10 +841,7 @@ class Admind:
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
                              text=own_text(ev.message.text))
             return
-        if len(self.senders) > 256:     # keep only what is still queued; the one in hand is added below
-            queued = {held_mid for held_mid, _ in self.held}
-            self.senders = {m: k for m, k in self.senders.items() if m in queued}
-        self.senders[mid] = ev.message.sender.account_id_hex.lower()
+        self.remember_sender(mid, ev.message.sender.account_id_hex.lower())
         text = ev.message.text
         self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
         if not await self.check_group() or not self.authorised(mid):   # the latch may have come meanwhile
@@ -993,6 +1002,7 @@ class Admind:
         self.dispatched_at = time.monotonic()
         self.generation += 1
         generation = self.generation        # a UserPromptSubmit or SessionStart meanwhile makes it stale
+        self.dispatching = mid
         try:
             await asyncio.to_thread(self.agent.send, text)
         except TmuxPasteUncertain as exc:
@@ -1020,6 +1030,8 @@ class Admind:
             self.paste_uncertain(mid, exc)
         else:
             self.audit.write("dispatch", message_id=mid, session=self.agent.session_id)
+        finally:
+            self.dispatching = None
 
     def paste_uncertain(self, mid: str, exc: Exception) -> None:
         """The paste may have been submitted: never retry it (D6). The operator is told, in fixed words,

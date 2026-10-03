@@ -469,7 +469,9 @@ def stop_during_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command
         b = await u.say("prompt B")                               # held behind A
         stop = asyncio.create_task(u.daemon.on_hook(HookEvent("Stop", "S1")))
         assert await asyncio.to_thread(slow.started.wait, 10)     # A's reply is being read
-        await u.daemon.handle(u.mid(), command)                   # runs, and may dispatch B, meanwhile
+        c = u.mid()
+        u.daemon.senders[c] = OPERATOR_HEX                        # as on_message records it
+        await u.daemon.handle(c, command)                         # runs, and may dispatch B, meanwhile
         slow.release.set()
         await stop
         held.append(b)

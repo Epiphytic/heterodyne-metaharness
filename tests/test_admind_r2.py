@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from admind_waits import lock_waiters, wait_until
+from fakes.settings import OPERATOR_HEX
 from test_admind_r1 import FakeTmux, Unit, inbound, run
 
 from heterodyne.admind.daemon import READY_NOTICE, UNCERTAIN
@@ -53,7 +54,9 @@ def test_a_latch_while_waiting_for_the_dispatch_lock_stops_interrupt_and_new(
 
     async def scenario() -> None:
         await u.daemon.dispatch_lock.acquire()
-        task = asyncio.create_task(u.daemon.handle(u.mid(), command))
+        c = u.mid()
+        u.daemon.senders[c] = OPERATOR_HEX                  # as on_message records it
+        task = asyncio.create_task(u.daemon.handle(c, command))
         await wait_until(lambda: lock_waiters(u.daemon.dispatch_lock) >= 1)    # parked on the lock
         u.daemon.latch("group membership changed (member_added)")
         u.daemon.dispatch_lock.release()

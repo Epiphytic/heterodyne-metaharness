@@ -1,11 +1,12 @@
 import asyncio
 import json
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from admind_waits import lock_waiters, stays, wait_until
+from admind_waits import hold, lock_waiters, stays, wait_until
 from fakes.fake_wn_agent import ACCOUNT
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_daemon import Harness, needs_tmux, run_with
@@ -13,6 +14,7 @@ from test_admind_daemon import Harness, needs_tmux, run_with
 from heterodyne.admind.daemon import applied, reconcile
 from heterodyne.admind.membership import Pending, settle
 from heterodyne.config import ConfigError
+from heterodyne.tmux import TmuxError
 
 P = Pending("add", "b", "d4" * 32, 2, 3, "2026-10-02T00:00:00+00:00", "c1" * 16)
 
@@ -604,3 +606,41 @@ def test_a_check_begun_before_a_change_does_not_latch_on_the_old_count(tmp_path:
         assert {"kind": "guard", "action": "group-check-deferred"} in [
             {"kind": r["kind"], "action": r.get("action")} for r in audit(h)]
     run(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_failed_paste_does_not_revive_a_revoked_prompt_after_pruning(tmp_path: Path) -> None:
+    # Round-2 finding: with many sender records another message pruned the one being pasted; the paste then
+    # failed, the prompt went back to `held`, and a missing sender counted as current.
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        entered, release = threading.Event(), threading.Event()
+        pasted: list[str] = []
+        original = h.daemon.agent.send
+
+        def send(text: str) -> None:
+            if text == "job from b":
+                entered.set()
+                release.wait(10)
+                raise TmuxError("paste failed")
+            pasted.append(text)
+            original(text)
+        h.daemon.agent.send = send                      # type: ignore[method-assign]
+        job = "ee" * 32             # pasted by a flush outside work_lock (a hook's idle edge)
+        assert h.store.claim_inbound(job)
+        hold(h.daemon, job, "job from b", SECOND_HEX)
+        flushing = asyncio.create_task(h.daemon.flush())
+        await wait_until(entered.is_set)
+        h.daemon.senders.update({f"{i:064x}": OPERATOR_HEX for i in range(1000, 1300)})
+        await h.say("another from op")                  # prunes the records of messages nobody holds
+        await wait_until(lambda: lock_waiters(h.daemon.dispatch_lock) >= 1)
+        await h.fake.push_event(member("member_removed"))
+        await wait_until(h.daemon.latched)
+        h.fake.member_count = 2
+        h.daemon.load_operators = lambda: POLICY[:1]
+        assert (await h.daemon.rearm())[0] == "rearmed"
+        release.set()
+        await flushing
+        await wait_until(lambda: job in h.store.inbound_with_status("dropped"))
+        assert "job from b" not in pasted and "job from b" not in h.log.read_text()
+    run(tmp_path, scenario, state(members=3, keys=(OPERATOR_HEX, SECOND_HEX)))

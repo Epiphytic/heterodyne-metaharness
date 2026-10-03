@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from admind_waits import hold
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
 
@@ -536,7 +537,8 @@ def test_concurrent_flushes_dispatch_each_message_once(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await h.say("warm up")
         await h.until(lambda: "echo: warm up" in h.texts())
-        h.daemon.held += [("aa" * 32, "x1"), ("bb" * 32, "x2")]
+        hold(h.daemon, "aa" * 32, "x1")
+        hold(h.daemon, "bb" * 32, "x2")
         await asyncio.gather(h.daemon.flush(), h.daemon.flush(), h.daemon.flush())
         await h.until(lambda: "echo: x2" in h.texts())
         records = [json.loads(line) for line in

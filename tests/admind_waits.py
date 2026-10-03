@@ -3,6 +3,9 @@ observation that a condition keeps holding. Neither depends on how many schedule
 
 import asyncio
 from collections.abc import Callable
+from typing import Any
+
+from fakes.settings import OPERATOR_HEX
 
 
 async def wait_until(pred: Callable[[], object], timeout: float = 10.0) -> None:
@@ -28,3 +31,9 @@ async def stays(pred: Callable[[], object], seconds: float = 0.05) -> None:
 def lock_waiters(lock: asyncio.Lock) -> int:
     """How many tasks are parked on `lock` (asyncio keeps them in a private deque)."""
     return len(getattr(lock, "_waiters", None) or ())
+
+
+def hold(daemon: Any, mid: str, text: str, sender: str = OPERATOR_HEX) -> None:
+    """Queue a prompt the way `on_message` does: with its sender recorded (a missing sender fails closed)."""
+    daemon.senders[mid] = sender
+    daemon.held.append((mid, text))
