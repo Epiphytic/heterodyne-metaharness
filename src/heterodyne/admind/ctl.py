@@ -8,6 +8,7 @@ The socket is 0600 inside the 0700 state directory; anything able to use it can 
 import asyncio
 import contextlib
 import os
+import socket
 import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -49,23 +50,49 @@ class CtlServer:
         self.handler = handler
         self.audit = audit
         self.server: asyncio.Server | None = None
+        self.created: tuple[int, int] | None = None     # (st_dev, st_ino) of the socket this instance bound
 
     async def start(self) -> None:
+        """Bind the socket ourselves: asyncio's path-based start would follow a symlink at the path and
+        remove a socket it points to. Only a stale real socket is replaced; anything else is refused."""
         private_dir(self.path.parent)
         with contextlib.suppress(FileNotFoundError):
-            if stat.S_ISSOCK(os.lstat(self.path).st_mode):    # a stale socket from an earlier run
+            if not stat.S_ISSOCK(os.lstat(self.path).st_mode):      # lstat: a symlink is not a socket
+                raise FileExistsError(f"{self.path} exists and is not a socket")
+            self.path.unlink()                                      # a stale socket from an earlier run
+        sock = socket.socket(socket.AF_UNIX)
+        try:
+            old = os.umask(0o177)          # never wider than 0600, even for an instant
+            try:
+                sock.bind(str(self.path))
+            finally:
+                os.umask(old)
+            made = os.lstat(self.path)
+            self.created = (made.st_dev, made.st_ino)
+            sock.listen()
+            sock.setblocking(False)
+            self.server = await asyncio.start_unix_server(self._handle, sock=sock, limit=MAX_REQUEST + 2)
+        except BaseException:
+            sock.close()
+            self.remove_own_socket()
+            raise
+
+    def remove_own_socket(self) -> None:
+        """Unlink the path only if it is still the socket this instance bound."""
+        if self.created is None:
+            return
+        with contextlib.suppress(OSError):
+            current = os.lstat(self.path)
+            if stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == self.created:
                 self.path.unlink()
-        self.server = await asyncio.start_unix_server(self._handle, path=str(self.path),
-                                                      limit=MAX_REQUEST + 1)
-        self.path.chmod(0o600)
+        self.created = None
 
     async def close(self) -> None:
         if self.server is not None:
             self.server.close()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.server.wait_closed(), 2)
-        with contextlib.suppress(FileNotFoundError):
-            self.path.unlink()
+        self.remove_own_socket()
 
     @staticmethod
     def check(req: CtlRequest) -> str | None:
@@ -81,6 +108,8 @@ class CtlServer:
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
+                if len(line.rstrip(b"\n")) > MAX_REQUEST:      # the delimiter does not count
+                    raise ValueError("request too long")
                 req = msgspec.json.decode(line, type=CtlRequest)
             except (TimeoutError, ValueError, msgspec.DecodeError):
                 reply = CtlReply("refused", "malformed request")
@@ -116,7 +145,7 @@ async def request(path: Path, req: CtlRequest, timeout: float = 300.0) -> CtlRep
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout)
         return msgspec.json.decode(line, type=CtlReply)
-    except (OSError, TimeoutError, msgspec.DecodeError) as exc:
+    except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:     # ValueError: framing
         raise CtlUnavailable(type(exc).__name__) from None
     finally:
         writer.close()

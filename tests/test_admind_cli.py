@@ -207,6 +207,29 @@ def test_rearm_without_a_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "admind is not running" in capsys.readouterr().err
 
 
+def test_rearm_with_a_garbled_reply_is_a_clean_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
+    s = make_settings(tmp_path)
+    _via_main(monkeypatch, s)
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()
+        writer.write(b"x" * 200_000 + b"\n")
+        await writer.drain()
+        writer.close()
+
+    async def go() -> int:
+        s.state_dir.mkdir(parents=True, exist_ok=True)
+        server = await asyncio.start_unix_server(serve, path=str(s.state_dir / ctl.CTL_SOCKET))
+        try:
+            return await asyncio.to_thread(lambda: cli.main(["rearm"]))
+        finally:
+            server.close()
+    assert asyncio.run(go()) == 1
+    err = capsys.readouterr().err
+    assert "admind is not running" in err and "Traceback" not in err
+
+
 def test_operators_add_needs_a_name(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as info:
         cli.main(["operators", "add"])

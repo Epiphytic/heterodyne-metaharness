@@ -99,33 +99,106 @@ def test_names_are_redacted_in_the_audit(tmp_path: Path) -> None:
     assert npub not in (tmp_path / "s" / "audit.jsonl").read_text()
 
 
-def test_a_stale_socket_is_replaced_and_a_non_socket_is_not(tmp_path: Path) -> None:
+def _handler_ok() -> ctl.Handler:
     async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
         return ctl.CtlReply("rearmed", "ok")
+    return handler
 
+
+def test_a_stale_socket_is_replaced(tmp_path: Path) -> None:
     async def serve_twice(path: Path) -> None:
-        first = ctl.CtlServer(path, handler, Audit(tmp_path / "audit.jsonl"))
+        first = ctl.CtlServer(path, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
         await first.start()
         assert first.server is not None
         first.server.close()                       # leaves the socket file behind, like a crash
-        second = ctl.CtlServer(path, handler, Audit(tmp_path / "audit.jsonl"))
+        second = ctl.CtlServer(path, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
         await second.start()
         try:
             assert (await ctl.request(path, ctl.CtlRequest("rearm"))).result == "rearmed"
         finally:
             await second.close()
+        await first.close()                        # the old instance no longer owns the path
+        assert not path.exists()
 
     asyncio.run(serve_twice(tmp_path / "s" / ctl.CTL_SOCKET))
+
+
+def test_a_regular_file_is_refused_and_survives_close(tmp_path: Path) -> None:
     regular = tmp_path / "t" / ctl.CTL_SOCKET
     regular.parent.mkdir()
     regular.write_text("keep")
 
-    async def refuse() -> None:
-        await ctl.CtlServer(regular, handler, Audit(tmp_path / "audit.jsonl")).start()
+    async def body() -> None:
+        server = ctl.CtlServer(regular, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
+        with pytest.raises(OSError):
+            await server.start()
+        await server.close()
 
-    with pytest.raises(OSError):
-        asyncio.run(refuse())
+    asyncio.run(body())
     assert regular.read_text() == "keep"
+
+
+def test_a_symlink_to_a_live_socket_is_refused_and_the_target_untouched(tmp_path: Path) -> None:
+    async def body() -> None:
+        target = ctl.CtlServer(tmp_path / "other" / "x.sock", _handler_ok(), Audit(tmp_path / "audit.jsonl"))
+        await target.start()
+        try:
+            link = tmp_path / "s" / ctl.CTL_SOCKET
+            link.parent.mkdir()
+            link.symlink_to(target.path)
+            server = ctl.CtlServer(link, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
+            with pytest.raises(OSError):
+                await server.start()
+            await server.close()
+            assert link.is_symlink() and target.path.exists()
+            assert (await ctl.request(target.path, ctl.CtlRequest("rearm"))).result == "rearmed"
+        finally:
+            await target.close()
+
+    asyncio.run(body())
+
+
+def test_request_size_limit_is_exact(tmp_path: Path) -> None:
+    async def send(path: Path, body_len: int) -> bytes:
+        base = b'{"op":"rearm"}'
+        raw = base + b" " * (body_len - len(base)) + b"\n"      # whitespace-padded, still valid JSON
+        reader, writer = await asyncio.open_unix_connection(str(path))
+        writer.write(raw)
+        await writer.drain()
+        line = await reader.readline()
+        writer.close()
+        return line
+
+    async def body() -> None:
+        path = tmp_path / "s" / ctl.CTL_SOCKET
+        server = ctl.CtlServer(path, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
+        await server.start()
+        try:
+            assert b'"rearmed"' in await send(path, ctl.MAX_REQUEST)        # the newline is not counted
+            assert b"malformed" in await send(path, ctl.MAX_REQUEST + 1)
+        finally:
+            await server.close()
+
+    asyncio.run(body())
+
+
+def test_an_oversized_reply_is_unavailable_not_a_traceback(tmp_path: Path) -> None:
+    async def body() -> None:
+        path = tmp_path / ctl.CTL_SOCKET
+
+        async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readline()
+            writer.write(b"x" * 200_000 + b"\n")
+            await writer.drain()
+            writer.close()
+        server = await asyncio.start_unix_server(serve, path=str(path))
+        try:
+            with pytest.raises(ctl.CtlUnavailable):
+                await ctl.request(path, ctl.CtlRequest("rearm"), timeout=5)
+        finally:
+            server.close()
+
+    asyncio.run(body())
 
 
 def test_no_daemon(tmp_path: Path) -> None:
