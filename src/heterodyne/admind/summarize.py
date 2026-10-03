@@ -21,6 +21,7 @@ MAX_LINES = 10  # "about 8 lines", with two of slack (B8)
 MAX_CHARS = 2000
 MAX_BYTES = MAX_CHARS * 4  # stdout is read until this many bytes, then the process is killed
 READ_CHUNK = 65536
+REAP_SECONDS = 5.0  # the most cleanup after a kill may take
 FOOTER = "summary · reply `!details` for everything"
 PROMPT = """You summarize an admin agent's reply for operators who read it on a phone.
 Write at most 8 short lines of plain text. Quote verbatim, in full, every question the reply asks the
@@ -45,6 +46,30 @@ def needs_summary(text: str, lines: int, chars: int) -> bool:
 def _kill(proc: asyncio.subprocess.Process) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGKILL)
+
+
+async def _drain(proc: asyncio.subprocess.Process) -> None:
+    """Close stdin and read stdout to its end, discarding it. asyncio stops reading a pipe that holds more
+    than its buffer limit unread, and then never sees the pipe close: `wait()` would not return."""
+    if proc.stdin is not None:
+        proc.stdin.close()
+    if proc.stdout is not None:
+        while await proc.stdout.read(READ_CHUNK):
+            pass
+    await proc.wait()
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill the whole process group (also anything it started and left running), then collect the process.
+    Runs on every exit path, including cancellation, and is bounded: a descendant that left the group and
+    still holds the pipe costs REAP_SECONDS, not a hang. The process itself is dead after the SIGKILL."""
+    _kill(proc)
+    try:
+        await asyncio.wait_for(_drain(proc), REAP_SECONDS)
+    except TimeoutError:
+        # Give up on the pipe so its descriptor is not held for as long as that descendant lives. asyncio
+        # has no public call for this.
+        proc._transport.close()  # pyright: ignore
 
 
 async def _collect(proc: asyncio.subprocess.Process, data: bytes) -> bytes:
@@ -93,8 +118,7 @@ async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: floa
     except TimeoutError:
         raise SummaryFailed("timeout") from None
     finally:
-        _kill(proc)  # the whole group: also anything it started and left running
-        await proc.wait()  # reaped after SIGKILL; returns at once if it had exited
+        await _reap(proc)
     if proc.returncode != 0:
         raise SummaryFailed("failed")
     text = redact(out.decode("utf-8", errors="replace")).strip()

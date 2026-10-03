@@ -285,3 +285,86 @@ def test_settings_invalid_summary_config(tmp_path: Path, extra: str, message: st
     env = settings_env(tmp_path, extra)
     with pytest.raises(ConfigError, match=message):
         resolve(load(None, env), env)
+
+
+# Grows the pipe, then writes more than asyncio buffers (128 KiB) in one go, then idles: the transport
+# pauses reading once that much sits unread, so cleanup that waits on the pipe never finishes.
+FILL = """FILL='import fcntl,sys,time
+fcntl.fcntl(1, 1031, 1 << 20)
+sys.stdout.buffer.write(b"x" * (1 << 20)); sys.stdout.flush(); time.sleep(30)'"""
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def gone(pid: int) -> bool:
+    for _ in range(50):  # init reaps an orphan a moment after SIGKILL
+        if not alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_oversize_output_is_cleaned_up_without_hanging(tmp_path: Path) -> None:
+    # Several MB, written flat out, and the child never exits: cleanup must not wait on unread output.
+    pidfile = tmp_path / "pid"
+    argv = script(tmp_path, f'{FILL}\necho $$ > "{pidfile}"\npython3 -c "$FILL"')
+
+    async def run() -> None:
+        await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 10)
+
+    with pytest.raises(summarize.SummaryFailed) as info:
+        asyncio.run(run())
+    assert info.value.reason == "too-long"
+    assert gone(int(pidfile.read_text()))
+
+
+def test_oversize_output_with_a_grandchild_holding_stdout(tmp_path: Path) -> None:
+    pids = tmp_path / "pids"
+    body = f'{FILL}\n(sleep 60) &\necho $$ $! > "{pids}"\npython3 -c "$FILL"'
+    argv = script(tmp_path, body)
+
+    async def run() -> None:
+        await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 10)
+
+    start = time.monotonic()
+    with pytest.raises(summarize.SummaryFailed) as info:
+        asyncio.run(run())
+    assert info.value.reason == "too-long" and time.monotonic() - start < 8
+    assert all(gone(int(p)) for p in pids.read_text().split())
+
+
+def test_cancellation_still_kills_the_group(tmp_path: Path) -> None:
+    pidfile = tmp_path / "pid"
+    argv = script(tmp_path, f'echo $$ > "{pidfile}"; sleep 30')
+
+    async def run() -> None:
+        task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
+        while not pidfile.exists():
+            await asyncio.sleep(0.05)
+        task.cancel()
+        await task
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run())
+    assert gone(int(pidfile.read_text()))
+
+
+def test_a_descendant_outside_the_group_cannot_hang_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
+    argv = script(tmp_path, f'{FILL}\nsetsid sleep 5 &\npython3 -c "$FILL"')
+
+    async def run() -> None:
+        await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 8)
+
+    start = time.monotonic()
+    with pytest.raises(summarize.SummaryFailed) as info:
+        asyncio.run(run())
+    assert info.value.reason == "too-long" and time.monotonic() - start < 4
