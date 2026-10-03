@@ -1,7 +1,9 @@
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
+import pytest
 from admind_waits import wait_until
 from test_admind_daemon import Harness, needs_tmux, run_with
 
@@ -9,6 +11,7 @@ from heterodyne.admind.store import Store
 
 TOKEN = "ghp_" + "A" * 30
 HEX = "ab" * 32
+MID = "c3" * 32
 
 OLD_OUTBOX = ("CREATE TABLE outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, "
               "reply_to TEXT, text TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'sent', "
@@ -94,12 +97,56 @@ def test_upgrade_hides_a_continuation_whose_start_is_gone(tmp_path: Path) -> Non
 
 def test_upgrade_rechunks(tmp_path: Path) -> None:
     # Not hex: a 600-character hex run would be one marker.
-    old_database(tmp_path / "old.db", [("cmd:x:0", "x" * 300, "pending"), ("cmd:x:1", "y" * 300, "pending")])
+    old_database(tmp_path / "old.db", [(f"cmd:{MID}:0", "x" * 300, "pending"),
+                                       (f"cmd:{MID}:1", "y" * 300, "pending")])
     s = Store(tmp_path / "old.db")
     s.redact_pending_outbox(250)
     rows = pending(s)
-    assert [k for k, _ in rows] == ["cmd:x:r0", "cmd:x:r1", "cmd:x:r2"]
+    assert [k for k, _ in rows] == [f"cmd:{MID}:r{i}" for i in range(3)]
     assert "".join(t for _, t in rows) == "x" * 300 + "y" * 300
+
+
+def test_upgrade_leaves_numeric_notice_keys_alone(tmp_path: Path) -> None:
+    old_database(tmp_path / "old.db", [("adopt-hold:1", f"held {HEX}", "pending"),
+                                       ("hook-lost:3", "lost", "pending"),
+                                       ("long-turn:7", "long", "pending"),
+                                       ("agent-stuck:2", "stuck", "pending")])
+    s = Store(tmp_path / "old.db")
+    s.redact_pending_outbox(4000)
+    assert pending(s) == [("adopt-hold:1", "held <redacted hex key>"), ("hook-lost:3", "lost"),
+                          ("long-turn:7", "long"), ("agent-stuck:2", "stuck")]
+
+
+def test_an_interrupted_rewrite_rolls_back_and_is_retried(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [(f"reply:s:5:{i}", f"part {i} {HEX if i == 1 else ''}", "pending") for i in range(2)]
+    old_database(tmp_path / "old.db", rows + [("hook-lost:1", "lost", "pending")])
+    s = Store(tmp_path / "old.db")
+    before = pending(s)
+    conn = s.db
+    calls = [0]
+
+    class Db:
+        def __getattr__(self, name: str) -> object:
+            return getattr(conn, name)
+
+        def executemany(self, sql: str, params: Any) -> object:
+            calls[0] += 1
+            if calls[0] == 3:                       # after some rows were rewritten
+                raise OSError("crash")
+            return conn.executemany(sql, params)
+    monkeypatch.setattr(s, "db", Db())
+    with pytest.raises(OSError):
+        s.redact_pending_outbox(4000)
+    monkeypatch.undo()
+    assert pending(s) == before and s.get("outbox_needs_redaction") == "1"
+    s.close()
+    s = Store(tmp_path / "old.db")                  # reopened: the marker persisted, the retry succeeds
+    assert s.get("outbox_needs_redaction") == "1"
+    assert s.redact_pending_outbox(4000) == 3
+    assert sorted(pending(s)) == [("hook-lost:1", "lost"),
+                                  ("reply:s:5:r0", "part 0 part 1 <redacted hex key>")]
+    assert s.get("outbox_needs_redaction") is None
 
 
 def test_a_new_database_needs_no_upgrade(tmp_path: Path) -> None:

@@ -58,7 +58,9 @@ class OutboxRow:
     lane: int
 
 
-_CHUNKED = re.compile(r"\A(.*):(\d+)\Z", re.DOTALL)
+# The keys of a chunked reply: `reply:<session>:<seq>:<i>` (an agent's reply) and `<tag>:<message id>:<i>`
+# (`Admind.reply`). Every other key (`adopt-hold:1`, `hook-lost:3`, `ready`, ...) is one whole message.
+_CHUNKED = re.compile(r"\A(reply:[^:]+:\d+|[a-z]+:[0-9a-f]{64}):(\d+)\Z")
 PARTLY_SENT = "<redacted continuation of a partly sent reply>"
 
 
