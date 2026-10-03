@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
@@ -29,6 +30,7 @@ from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import (
     HOOK_EVENTS,
+    READ_CANCEL,
     Delivery,
     HookEvent,
     HookServer,
@@ -118,6 +120,23 @@ def own_text(text: str) -> str:
     """The operator's own text for the audit log, whole (revision 13), redacted (B1; the audit redacts again,
     idempotently)."""
     return redact(text)
+
+
+def prepare_reply(raw: str, lines: int, chars: int) -> tuple[str, str] | None:
+    """A reply's redacted text and its mode, `verbatim` or `summary`. CPU-bound on a large reply, so it runs
+    in a thread. None if the text can't be stored (a lone surrogate): the caller treats the turn as unread."""
+    text = redact(raw if raw.strip() else NO_REPLY)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return text, "summary" if summarize.needs_summary(text, lines, chars) else "verbatim"
+
+
+def render_batch(rows: list[TurnRow]) -> str:
+    """One batch's message, redacted and fitted. CPU-bound, so it runs in a thread."""
+    return backstop.fit(redact(backstop.render([backstop.Entry(r.origin, r.text) for r in rows])),
+                        backstop.BATCH_MAX_CHARS)      # one message, not chunk_chars (B10)
 
 
 async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: Audit, *, base: float = 1.0,
@@ -1420,7 +1439,15 @@ class Admind:
         """The reply of a Stop without its own text, read from the turn's span (B19) in the reader slot.
         None if it can't be read in time or at all; the caller then sends `EXTRACT_FAILED` to the
         backstop (B9)."""
-        return await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)
+        cancel = threading.Event()
+        token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
+        try:
+            raw = await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)
+        finally:
+            READ_CANCEL.reset(token)
+        if raw is None:
+            cancel.set()
+        return raw
 
     async def on_stop(self, ev: HookEvent, arrival: int | None = None, stale: bool = False,
                       validate: bool = False) -> None:
@@ -1460,7 +1487,15 @@ class Admind:
         if need_fallback:
             raw = await self.extract(ev, *span)     # may read the transcript file (lock not held)
             if raw is None:
-                self.audit.write("agent", action="reply-extraction-failed")
+                self.audit_quietly("agent", action="reply-extraction-failed")
+        text, mode = EXTRACT_FAILED, "backstop"
+        if raw is not None:
+            prepared = await asyncio.to_thread(prepare_reply, raw, self.s.reply_verbatim_lines,
+                                               self.s.reply_verbatim_chars)
+            if prepared is not None:
+                text, mode = prepared
+            else:
+                self.audit_quietly("agent", action="reply-extraction-failed")
         async with self.turn_lock():
             if not self.session_current(ev.session_id):
                 noop_event()
@@ -1475,22 +1510,16 @@ class Admind:
             reply_to = anchor if current else None
             start, stop = span if current else (None, None)
             origin = self.origin_for(reply_to)
-            if raw is None:                         # current, but the reply could not be read (B9)
-                text, mode = EXTRACT_FAILED, "backstop"
-            else:
-                text = redact(raw if raw.strip() else NO_REPLY)
-                mode = ("summary" if summarize.needs_summary(text, self.s.reply_verbatim_lines,
-                                                             self.s.reply_verbatim_chars) else "verbatim")
             parts = chunk.split(text, self.s.chunk_chars) if mode == "verbatim" else []
 
-            def record(how: str) -> int:
+            def record(how: str, body: str) -> int:
                 """The reply's record, its posts or its route, and the turn's end: one transaction."""
                 with self.store.transaction():
                     reply_seq = int(self.store.get("reply_seq") or "0") + 1
                     self.store.set("reply_seq", str(reply_seq))
                     key = f"reply:{ev.session_id}:{reply_seq}"
                     turn_id = self.store.add_turn(
-                        key, ev.session_id, reply_to, origin, text, ev.transcript_path, start, stop,
+                        key, ev.session_id, reply_to, origin, body, ev.transcript_path, start, stop,
                         "verbatim" if how == "verbatim" else "summarizing")
                     if how == "verbatim":
                         for i, part in enumerate(parts):
@@ -1503,11 +1532,11 @@ class Admind:
                 return turn_id
 
             try:
-                turn_id = record(mode)
+                turn_id = record(mode, text)
             except Exception as exc:  # noqa: BLE001 - the reply must still reach the operator (B9)
                 self.audit_quietly("reply", action="record-failed", error=type(exc).__name__)
-                mode = "backstop"
-                turn_id = record(mode)              # if this fails too, hook_loop holds dispatch
+                mode, text, parts = "backstop", EXTRACT_FAILED, []   # never the text that just failed
+                turn_id = record(mode, text)        # if this fails too, hook_loop holds dispatch
             if mode == "summary":
                 self.summary_wake.set()
             elif mode == "backstop":
@@ -1591,15 +1620,14 @@ class Admind:
     async def batch_loop(self) -> None:
         while True:
             await asyncio.sleep(self.batch_poll)    # not self._sleep: tests make that one return at once
-            self.close_due_batches()
+            await self.close_due_batches()
 
-    def close_due_batches(self) -> None:
+    async def close_due_batches(self) -> None:
         """Post each batch whose window has passed, as one unthreaded message (B10)."""
         for batch, attempt in self.store.due_batches(self.wallclock(), self.batch_seconds):
             rows = self.store.batch_turns(batch)
             key = f"batch:{batch}.{attempt}"        # a new key per attempt: the outbox ignores a known key
-            text = backstop.fit(redact(backstop.render([backstop.Entry(r.origin, r.text) for r in rows])),
-                                backstop.BATCH_MAX_CHARS)      # one message, not chunk_chars (B10)
+            text = await asyncio.to_thread(render_batch, rows)
             with self.store.transaction():
                 self.post(key, text, None)
                 self.store.record_post(key, "batch", None, batch)

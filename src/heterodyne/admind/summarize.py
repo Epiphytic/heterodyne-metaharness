@@ -127,6 +127,7 @@ async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: floa
     if argv is None:
         raise SummaryFailed("not-configured")
     private_dir(cwd)
+    payload = await asyncio.to_thread(lambda: PROMPT.format(reply=redact(reply)).encode())   # off the loop
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -139,14 +140,14 @@ async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: floa
     except OSError:
         raise SummaryFailed("not-run") from None
     try:
-        out = await asyncio.wait_for(_collect(proc, PROMPT.format(reply=redact(reply)).encode()), timeout)
+        out = await asyncio.wait_for(_collect(proc, payload), timeout)
     except TimeoutError:
         raise SummaryFailed("timeout") from None
     finally:
         await _reap(proc)
     if proc.returncode != 0:
         raise SummaryFailed("failed")
-    text = redact(out.decode("utf-8", errors="replace")).strip()
+    text = await asyncio.to_thread(lambda: redact(out.decode("utf-8", errors="replace")).strip())
     if not text:
         raise SummaryFailed("empty")
     if len(text.splitlines()) > MAX_LINES or len(text) > MAX_CHARS:

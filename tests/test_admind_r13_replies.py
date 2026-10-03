@@ -301,8 +301,8 @@ def test_a_reply_that_cannot_be_recorded_goes_to_the_backstop(
         monkeypatch.setattr(h.store, "record_post", flaky)
         await h.say("hello")
         text = await batch_arrives(h)
-        assert "echo: hello" in text
-        assert "echo: hello" not in h.texts()  # the verbatim post never went out
+        assert EXTRACT_FAILED in text  # the fixed notice: never the text that just failed
+        assert "echo: hello" not in text and "echo: hello" not in h.texts()
         await h.until(lambda: h.store.get("busy") is None)
         assert audited(h, kind="reply", action="record-failed")
 
@@ -825,3 +825,177 @@ def test_transcript_size(tmp_path: Path) -> None:
     assert hook.transcript_size(HookEvent("Stop", "s", str(link))) is None
     assert hook.transcript_size(HookEvent("Stop", "other", str(t))) is None
     assert hook.transcript_size(HookEvent("Stop", "s", None)) is None
+
+
+# --- review round 1: bounded text, lone surrogates, a failing audit ---
+
+
+def test_many_small_records_over_the_budget_are_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hook, "MAX_REPLY", 1000)
+    path = tmp_path / "s1.jsonl"
+    append(path, [prompt("go")] + [said("m" * 100) for _ in range(11)])
+    ev = HookEvent("Stop", "s1", transcript_path=str(path))
+    assert reply_text(ev, 0, path.stat().st_size) is None
+    path2 = tmp_path / "s2.jsonl"
+    append(path2, [prompt("go")] + [said("m" * 100) for _ in range(10)])
+    ok = reply_text(HookEvent("Stop", "s2", transcript_path=str(path2)), 0, path2.stat().st_size)
+    assert ok is not None and len(ok) > 1000  # exactly at the budget is read (joiners don't count)
+
+
+def test_an_abandoned_read_stops_reading(tmp_path: Path) -> None:
+    path = tmp_path / "s1.jsonl"
+    append(path, [prompt("go"), said("hello")])
+    cancel = threading.Event()
+    cancel.set()
+    token = hook.READ_CANCEL.set(cancel)
+    try:
+        assert reply_text(HookEvent("Stop", "s1", transcript_path=str(path)), 0, path.stat().st_size) is None
+    finally:
+        hook.READ_CANCEL.reset(token)
+
+
+def test_a_lone_surrogate_makes_the_text_unreadable(tmp_path: Path) -> None:
+    path = tmp_path / "s1.jsonl"
+    append(path, [prompt("go"), said("bad \ud800 text")])
+    assert reply_text(HookEvent("Stop", "s1", transcript_path=str(path)), 0, path.stat().st_size) is None
+    assert reply_text(HookEvent("Stop", "s1", last_assistant_message="bad \ud800"), None, None) is None
+
+
+@needs_tmux
+def test_a_surrogate_in_a_transcript_reply_sends_the_notice_to_the_backstop(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        path = tmp_path / f"{sid}.jsonl"
+        path.write_bytes(b"")
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
+        await h.until(lambda: h.store.get("busy") is not None and h.store.get("turn_start") is not None)
+        append(path, [said("lone \ud800 surrogate")])
+        await h.daemon.hooks.put(h.event("Stop", sid, str(path)))
+        text = await batch_arrives(h)
+        assert EXTRACT_FAILED in text and "lone" not in text
+        await h.until(lambda: h.store.get("busy") is None)
+
+    run_with(tmp_path, scenario, configure("exit 1"))
+
+
+@needs_tmux
+def test_a_surrogate_in_the_events_own_text_sends_the_notice_to_the_backstop(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, "own \ud800 text")
+        text = await batch_arrives(h)
+        assert EXTRACT_FAILED in text and "own" not in text
+        await h.until(lambda: h.store.get("busy") is None)
+
+    run_with(tmp_path, scenario, configure("exit 1"))
+
+
+@needs_tmux
+def test_a_failing_record_falls_back_without_the_text_that_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # prepare_reply passes a lone surrogate, as if the check were missed: the insert raises
+    # UnicodeEncodeError, and the fallback must not insert that text again.
+    monkeypatch.setattr(
+        "heterodyne.admind.daemon.prepare_reply", lambda raw, lines, chars: ("x\ud800", "verbatim")
+    )
+
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, "anything")
+        text = await batch_arrives(h)
+        assert EXTRACT_FAILED in text
+        await h.until(lambda: h.store.get("busy") is None)
+        assert audited(h, kind="reply", action="record-failed", error="UnicodeEncodeError")
+
+    run_with(tmp_path, scenario, configure("exit 1"))
+
+
+@needs_tmux
+def test_a_failing_audit_does_not_hold_dispatch_on_an_unreadable_turn(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        real = h.daemon.audit.write
+
+        def write(kind: str, **fields: object) -> None:
+            if fields.get("action") == "reply-extraction-failed":
+                raise OSError("audit filesystem unavailable")
+            real(kind, **fields)
+
+        h.daemon.audit.write = write  # type: ignore[method-assign]
+        await terminal_stop(h, None, tmp_path / "x.jsonl")
+        text = await batch_arrives(h)
+        assert EXTRACT_FAILED in text
+        await h.until(lambda: h.store.get("busy") is None)
+
+    run_with(tmp_path, scenario, configure("exit 1"))
+
+
+HUGE = ("an ordinary line of reply text 12345\n" * 500_000)[: 16 * 1024 * 1024]
+
+
+@needs_tmux
+def test_the_heavy_work_on_a_reply_runs_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redacting, sizing and rendering a reply are CPU-bound on a big one, so none may run on the loop."""
+    main = threading.get_ident()
+    seen: dict[str, bool] = {}
+
+    def off_loop(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any) -> Any:
+            seen[name] = threading.get_ident() != main
+            return fn(*args)
+
+        return wrapper
+
+    from heterodyne.admind import daemon
+
+    monkeypatch.setattr(daemon, "prepare_reply", off_loop("prepare", daemon.prepare_reply))
+    monkeypatch.setattr(daemon, "render_batch", off_loop("render", daemon.render_batch))
+    monkeypatch.setattr(summarize, "redact", off_loop("summary", summarize.redact))
+
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, LONG)
+        await batch_arrives(h)
+        assert seen == {"prepare": True, "summary": True, "render": True}
+
+    run_with(tmp_path, scenario, configure("exit 1", batch=0.3))
+
+
+@needs_tmux
+def test_a_command_is_answered_while_a_huge_reply_is_processed(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, HUGE)
+        mid = await h.say("!ps")
+        await h.until(lambda: any(r.get("reply_to_message_id_hex") == mid for r in h.fake.sent), 5)
+        await batch_arrives(h)
+
+    run_with(tmp_path, scenario, configure("exit 1", batch=0.3))
+
+
+@needs_tmux
+@pytest.mark.parametrize(
+    ("reply", "mode"),
+    [
+        ("\n".join(f"line {i}" for i in range(8)), "verbatim"),
+        ("\n".join(f"line {i}" for i in range(9)), "summary"),
+        ("w" * 800, "verbatim"),
+        ("w" * 801, "summary"),
+    ],
+)
+def test_the_default_limits_route_at_the_boundary(tmp_path: Path, reply: str, mode: str) -> None:
+    async def scenario(h: Harness) -> None:
+        assert (h.settings.reply_verbatim_lines, h.settings.reply_verbatim_chars) == (8, 800)
+        await terminal_stop(h, reply)
+        await h.until(
+            lambda: (
+                len(h.store.turns_with_status("verbatim"))
+                + len(h.store.turns_with_status("summarizing"))
+                + len(h.store.turns_with_status("summarized"))
+                == 1
+            )
+        )
+        got = [t for s in ("verbatim", "summarizing", "summarized") for t in h.store.turns_with_status(s)][0]
+        assert (got.status == "verbatim") == (mode == "verbatim")
+
+    run_with(tmp_path, scenario, configure('echo "SUMMARIZED"'))

@@ -25,6 +25,7 @@ residual risk ADR §3.4 accepts.
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import secrets
@@ -33,6 +34,7 @@ import shlex
 import socket
 import stat
 import sys
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
@@ -186,6 +188,9 @@ def transcript_size(ev: HookEvent) -> int | None:
 
 READ_WINDOW = 1024 * 1024               # a turn's bytes are read this much at a time
 MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record fails the read: memory (plan 2b B13)
+MAX_REPLY = MAX_RECORD                  # a turn's assistant text in all: many small records add up too
+READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 
 
 class RecordTooLarge(OSError):
@@ -248,6 +253,9 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
             raise OSError("not a regular file")
         begun = False
         for item in _lines(fd, start, end):
+            cancel = READ_CANCEL.get()
+            if cancel is not None and cancel.is_set():
+                raise OSError("the read was abandoned")
             try:
                 record: Any = json.loads(item)
             except (ValueError, RecursionError):    # ValueError includes UnicodeDecodeError
@@ -272,22 +280,38 @@ def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
     span, a path that is not this session's transcript, a read error, or a record too large to read
     (RecordTooLarge is an OSError). "" is a turn that said nothing."""
     if ev.last_assistant_message:
-        return ev.last_assistant_message
+        return ev.last_assistant_message if _encodable(ev.last_assistant_message) else None
     if start is None or end is None or not ev.transcript_path:
         return None
     path = Path(ev.transcript_path)
     if path.name != f"{ev.session_id}.jsonl" or not path.is_absolute():
         return None
     parts: list[str] = []
+    total = 0
     try:
         for rec in turn_records(path, start, end):
             blocks = _blocks(rec)
             if rec.get("type") == "assistant" and isinstance(blocks, list):
-                parts.extend(b["text"] for b in blocks
-                             if b.get("type") == "text" and isinstance(b.get("text"), str))
+                for b in blocks:
+                    text = b.get("text")
+                    if b.get("type") != "text" or not isinstance(text, str):
+                        continue
+                    total += len(text)
+                    if total > MAX_REPLY or not _encodable(text):
+                        return None         # too much text in all, or text no database can hold
+                    parts.append(text)
     except OSError:
         return None
     return "\n\n".join(parts)
+
+
+def _encodable(text: str) -> bool:
+    """False for text with a lone surrogate (JSON `\\ud800`): it can't be encoded, so it can't be stored."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 class HookServer:
