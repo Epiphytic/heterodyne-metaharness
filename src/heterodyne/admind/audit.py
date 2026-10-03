@@ -42,11 +42,24 @@ def clean(value: object, field: str | None = None) -> object:
     if isinstance(value, dict):
         out: dict[str, object] = {}
         for k, v in cast(dict[Any, Any], value).items():
-            out[unique_key(redact(str(k)), out)] = clean(v, str(k))
+            out[unique_key(redact(_text(k)), out)] = clean(v, _text(k))
         return out
     if isinstance(value, list | tuple):
         return [clean(v, field) for v in cast(list[Any] | tuple[Any, ...], value)]
+    if isinstance(value, set | frozenset):
+        items = [clean(v, field) for v in cast(set[Any], value)]
+        return sorted(items, key=lambda x: json.dumps(x, sort_keys=True, default=str))   # deterministic
+    if isinstance(value, bytes | bytearray | memoryview):
+        return redact(_text(cast(bytes, value)))
     return redact(str(value))
+
+
+def _text(value: object) -> str:
+    """A value's text for redaction. Bytes are decoded, not `str()`ed: its repr would escape a control
+    character into a letter (`\\n` into `n`) before redaction, which hides where a token starts."""
+    if isinstance(value, bytes | bytearray | memoryview):
+        return bytes(cast(bytes, value)).decode("utf-8", "replace")
+    return str(value)
 
 
 class Audit:

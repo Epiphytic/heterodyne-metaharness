@@ -2,6 +2,7 @@
 import json
 import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 from hypothesis import given
@@ -164,3 +165,25 @@ def test_alert_name_is_redacted_before_any_cut(tmp_path: Path) -> None:
     raw = (h.settings.state_dir / "audit.jsonl").read_text()
     assert re.search(r"[0-9A-Fa-f]{40}", raw) is None
     assert "_<redacted hex key>" in raw
+
+
+@pytest.mark.parametrize("lead", ["\n", "\t"])
+def test_audit_hides_a_token_inside_bytes_and_sets(tmp_path: Path, lead: str) -> None:
+    """A repr would escape the control character into a letter before redaction and hide the token start."""
+    secret = lead + TOKEN
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write(
+        "probe",
+        raw=secret.encode(),
+        array=bytearray(secret.encode()),
+        view=memoryview(secret.encode()),
+        members={secret, "other"},
+        frozen=frozenset({secret}),
+        nested={"k": [{secret}]},
+        by_bytes={secret.encode(): "v"},
+    )
+    raw = path.read_text()
+    assert TOKEN not in raw and TOKEN[4:] not in raw
+    members = cast(list[str], records(path)[0]["members"])
+    assert members == sorted(members, key=lambda x: json.dumps(x))  # deterministic
+    assert "other" in members
