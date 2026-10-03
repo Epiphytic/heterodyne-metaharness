@@ -1,4 +1,4 @@
-"""`admind` command line: init, run, rearm, unit, hook (ADR 0001 §8)."""
+"""`admind` command line: init, run, operators, rearm, unit, hook (ADR 0001 §8)."""
 
 import argparse
 import asyncio
@@ -11,7 +11,7 @@ import sys
 from typing import NoReturn, cast
 
 from heterodyne import config as hconfig
-from heterodyne.admind import unit
+from heterodyne.admind import ctl, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -89,16 +89,18 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
     return 0
 
 
-def rearm(s: AdmindSettings, store: Store, audit: Audit) -> int:
-    reason = show(store.get("latched"), False) if store.get("latched") else None
-    store.delete("latched")
-    audit.write("guard", action="rearm", previous=reason)
-    print(f"Cleared the latch ({reason or 'was not latched'}). Check the group's member list in your "
-          "client first: admind re-checks the member count, but can't see a one-for-one swap.")
-    return 0
+def ask_daemon(s: AdmindSettings, req: ctl.CtlRequest) -> int:
+    try:
+        reply = asyncio.run(ctl.request(s.state_dir / ctl.CTL_SOCKET, req))
+    except ctl.CtlUnavailable:
+        print("admind is not running (or did not answer). Start it first; it starts latched if a "
+              "membership change was interrupted.", file=sys.stderr)
+        return 1
+    print(show(reply.message, False))   # already redacted by the daemon; this escapes terminal controls
+    return 0 if reply.result in ("committed", "rearmed") else 1
 
 
-def _with_settings(fn: str) -> int:
+def _with_settings(args: argparse.Namespace) -> int:
     try:
         s, store, audit = _load()
     except hconfig.ConfigError as exc:
@@ -107,10 +109,12 @@ def _with_settings(fn: str) -> int:
     except StateDirError as exc:
         print(show(str(exc), False), file=sys.stderr)
         return EX_CONFIG
-    if fn == "init":
+    if args.command == "init":
         return asyncio.run(init(s, store, audit))
-    if fn == "rearm":
-        return rearm(s, store, audit)
+    if args.command == "rearm":
+        return ask_daemon(s, ctl.CtlRequest("rearm"))
+    if args.command == "operators":
+        return ask_daemon(s, ctl.CtlRequest(args.action, args.name))
     return run(s, store, audit)
 
 
@@ -230,7 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_QuietParser)
     sub.add_parser("init", help="create admind's Marmot identity and its group with the operator")
     sub.add_parser("run", help="run the daemon (normally from its service unit)")
-    sub.add_parser("rearm", help="clear the membership latch after checking the group")
+    ops = sub.add_parser("operators", help="add or remove a group member (an operator in policy.toml)")
+    ops.add_argument("action", choices=["add", "remove"])
+    ops.add_argument("name")
+    sub.add_parser("rearm", help="trust the group's current member count and clear the latch "
+                                 "(check the members in your client first)")
     sub.add_parser("unit", help="print a systemd user unit for this install")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")
@@ -261,4 +269,4 @@ def _dispatch(argv: list[str]) -> int:
             print(f"cannot render the unit: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
         return 0
-    return _with_settings(args.command)
+    return _with_settings(args)

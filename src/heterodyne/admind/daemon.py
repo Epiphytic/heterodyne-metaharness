@@ -23,7 +23,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from heterodyne.admind import alerts, chunk, commands, guard, membership
+from heterodyne.admind import alerts, chunk, commands, ctl, guard, membership
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
@@ -392,8 +392,11 @@ class Admind:
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
+        control: ctl.CtlServer | None = None
         try:
             await server.start()
+            control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
+            await control.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
@@ -409,7 +412,22 @@ class Admind:
             for timer in self._backoff.values():
                 timer.cancel()
             self._backoff.clear()
+            if control is not None:
+                await control.close()
             await server.close()
+
+    async def on_ctl(self, req: ctl.CtlRequest) -> ctl.CtlReply:
+        """A host command. The reply's message names the operator, so it is redacted like any output."""
+        if req.op == "rearm":
+            result, message = await self.rearm()
+        else:
+            result, message = await self.change_membership(req.op, req.name or "")
+        if result in ("committed", "rearmed"):
+            try:
+                await self.flush()      # prompts held during the transition may go now
+            except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
+                self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
+        return ctl.CtlReply(result, redact(message))
 
     async def guarded(self, coro: Awaitable[None]) -> None:
         """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets

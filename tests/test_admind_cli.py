@@ -7,13 +7,14 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, make_settings, operator
 
-from heterodyne.admind import cli, unit
+from heterodyne.admind import cli, ctl, unit
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.store import Store
 from heterodyne.admind.wnagent import WnAgent, WnAgentError
@@ -155,13 +156,62 @@ def test_init_with_two_operators_invites_both_and_confirms_both(
     assert store.get("expected_members") == "3"
 
 
-def test_rearm_clears_the_latch(tmp_path: Path) -> None:
+class StubDaemon:
+    """A control socket on a short temp path (AF_UNIX paths are short) that answers every request."""
+
+    def __init__(self, reply: ctl.CtlReply) -> None:
+        self.reply = reply
+        self.seen: list[ctl.CtlRequest] = []
+
+    def serve(self, state_dir: Path, body: Callable[[], int]) -> int:
+        async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+            self.seen.append(req)
+            return self.reply
+
+        async def go() -> int:
+            server = ctl.CtlServer(state_dir / ctl.CTL_SOCKET, handler, Audit(state_dir / "audit.jsonl"))
+            await server.start()
+            try:
+                return await asyncio.to_thread(body)
+            finally:
+                await server.close()
+        return asyncio.run(go())
+
+
+@pytest.mark.parametrize(("result", "code"),
+                         [("committed", 0), ("rearmed", 0), ("refused", 1), ("failed", 1)])
+def test_operators_add_asks_the_daemon(result: str, code: int, tmp_path: Path,
+                                       monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
     s = make_settings(tmp_path)
-    store = Store(s.state_dir / "admind.db")
-    store.set("latched", "group has 3 members, not 2")
-    assert cli.rearm(s, store, Audit(s.state_dir / "audit.jsonl")) == 0
-    assert store.get("latched") is None
-    assert "rearm" in (s.state_dir / "audit.jsonl").read_text()
+    _via_main(monkeypatch, s)
+    stub = StubDaemon(ctl.CtlReply(result, "the daemon says so"))
+    assert stub.serve(s.state_dir, lambda: cli.main(["operators", "add", "b"])) == code
+    assert stub.seen == [ctl.CtlRequest("add", "b")]
+    assert capsys.readouterr().out.strip() == "the daemon says so"
+
+
+def test_operators_remove_and_rearm_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = make_settings(tmp_path)
+    _via_main(monkeypatch, s)
+    stub = StubDaemon(ctl.CtlReply("rearmed", "ok"))
+    assert stub.serve(s.state_dir, lambda: cli.main(["operators", "remove", "b"])) == 0
+    assert stub.serve(s.state_dir, lambda: cli.main(["rearm"])) == 0
+    assert stub.seen == [ctl.CtlRequest("remove", "b"), ctl.CtlRequest("rearm")]
+
+
+def test_rearm_without_a_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                capsys: pytest.CaptureFixture[str]) -> None:
+    _via_main(monkeypatch, make_settings(tmp_path))
+    assert cli.main(["rearm"]) == 1
+    assert "admind is not running" in capsys.readouterr().err
+
+
+def test_operators_add_needs_a_name(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as info:
+        cli.main(["operators", "add"])
+    assert info.value.code == 2
+    assert "admind: invalid arguments (see --help)" in capsys.readouterr().err
 
 
 def test_unit_rendering_escapes_and_refuses_bad_paths() -> None:
@@ -712,19 +762,24 @@ def test_cli_boundary_redacts_and_escapes_a_config_error(monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("bad", ["\x1b[2J", "a\x00b", "\x7f", "\x9b", "a\nb"])
-def test_human_output_escapes_controls(bad: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_human_output_escapes_controls(bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
     s = make_settings(tmp_path)
     store = Store(s.state_dir / "admind.db")
     store.set("group_id_hex", "b2" * 32)
     audit = Audit(s.state_dir / "audit.jsonl")
     shown = dataclasses.replace(s, state_dir=tmp_path / f"d{bad}" / "admind")  # only printed, never opened
     assert asyncio.run(cli.init(shown, store, audit)) == 1
-    store.set("latched", f"reason{bad}")
-    assert cli.rearm(s, store, audit) == 0
     out = capsys.readouterr().out
     assert not any(ord(c) < 32 and c != "\n" or 0x7f <= ord(c) <= 0x9f for c in out)
-    assert out.count("\n") == 2  # only the two prints' own newlines
+    assert out.count("\n") == 1  # only the print's own newline
     assert "\\x" in out
+    reply = StubDaemon(ctl.CtlReply("refused", f"reply{bad}"))
+    _via_main(monkeypatch, s)
+    assert reply.serve(s.state_dir, lambda: cli.main(["operators", "add", "b"])) == 1
+    out = capsys.readouterr().out
+    assert not any(ord(c) < 32 and c != "\n" or 0x7f <= ord(c) <= 0x9f for c in out)
+    assert out.count("\n") == 1 and "\\x" in out
 
 
 def test_log_open_rejects_a_fifo_promptly(tmp_path: Path) -> None:
