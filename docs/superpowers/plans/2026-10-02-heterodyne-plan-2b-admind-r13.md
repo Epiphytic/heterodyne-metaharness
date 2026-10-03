@@ -62,6 +62,41 @@
   - Nothing is pushed until Task 10. Merging is the operator's action, and every merge ask carries the full PR URL.
 - **Gate before each commit:** `uv run ruff check && uv run pyright && uv run pytest -q && uv run python scripts/check_install_agnostic.py`, all clean.
 
+## ADR r13 deviations for operator sign-off
+
+Each row is a place this plan does something other than ADR r13 §8 says. Your OK makes it part of the design; for a no, the last column is what changes. Details are in the decision named in the first column.
+
+| # | ADR says | Plan does | Why | If no |
+|---|---|---|---|---|
+| 1 (B1) | Control characters are escaped. | Newline and tab stay as they are; all other control characters become `\xNN`. | A reply with no line breaks can't be read. | Escape them too; replies become one long line. |
+| 2 (B1) | 64-hex values become markers. | Any run of 64 or more hex digits becomes one marker. | A key can hide inside a longer run. | Mask only exact 64-digit values; longer runs show. |
+| 3 (B1) | No such case. | Text that still changes after 10 redaction passes is replaced whole by `<redacted text>`. | Fail closed; can't happen with sane input. | Send the 10th pass as it is. |
+| 4 (B2) | Every `operators` entry with an npub is an operator. | A name over 128 characters or with control characters, two entries with one key, or no operator at all is a config error. | Names cross the control socket; one key with two names is ambiguous. | Accept them; show names escaped and use the first entry for a key. |
+| 5 (Task 5) | No limit on `operators remove`. | Removing the last operator is refused. | A group with only admind can't be commanded. | Allow it; recovery is then `admind init`. |
+| 6 (B6) | `rearm` is a host command. | `rearm` asks the running daemon; it fails if the daemon is down. | Only the daemon can read the member count (one process per wn-agent home). | `rearm` stops the daemon, reads the count itself, starts it again. |
+| 7 (B22) | `rearm` trusts the current count and clears any pending change. | `rearm` refuses if events aren't being read, if the group changed while it read the count, or if the count can't be matched to known operators. | Else a rearm can clear a latch set while it ran, or trust members it can't name. | Trust the count always; the operator set may then be wrong until the next change. |
+| 8 (B21) | Policy operators with an npub may command. | An operator must be in `policy.toml` **and** confirmed in the group (stored). A plan-2 upgrade with several policy operators latches until a `rearm`. | A restart must not authorise someone never added. | Authorise every policy operator; only the count is checked. |
+| 9 (B8) | Summary is at most about 8 lines. | The summarizer is asked for 8; up to 10 lines are accepted (12 shown with the footer). More than 10 lines, 2,000 characters or 8,000 bytes goes to the backstop. | Slack for a model that adds a line; the limits stop a runaway summary. | Accept only 8 lines; more summaries fall to the backstop. |
+| 10 (B8) | The summarizer profile runs headless, read-only, without tools. | The profile's `args` are ignored. | Extra args could turn tools back on. | Append `args`; the no-tools guarantee then depends on them. |
+| 11 (deferral) | Any adapter can be configured for the admin agent (and, by extension, the summarizer). | Both stay Claude Code only, as in plan 2. | Only Claude's headless, no-tools launch is verified (Task 1). | A later task adds Codex once its read-only headless launch is verified. |
+| 12 (B10) | A batch of 50 lines or fewer is sent whole. | A batch over 60,000 characters has each line shortened (`…(+N chars)`) to fit one message. | One message can't exceed the transport limit (Task 1 checks it). | Send it as several messages (no longer "one message"). |
+| 13 (B10) | Not covered. | A batch whose delivery fails reopens with a new 60-second window and is sent again under a new key, until delivered. | Its replies must not be stranded. | Give up after the retries and only audit it. |
+| 14 (B10) | A batch closes 60 seconds after its first reply. | No reply joins after 60 s; the batch is posted by a 1-second poll, so up to about 1 s late. | A poll survives restarts simply. | A timer per batch (more state across restarts). |
+| 15 (B9) | The backstop drops nothing `!details` can't return. | A reply that can't be read from the transcript (timeout, corrupt or changed file, unknown span) goes to the backstop as a fixed notice; its text stays only in the transcript on the host. | It is better than silence or a partial reply. | Hold dispatch until the reply can be read. |
+| 16 (B9, B13) | Fallback reply: the transcript's assistant text blocks. | All assistant texts of the turn, joined in order. | An early question or error is kept. | Use only the last text block. |
+| 17 (B13) | `!details full` has no cap. | One transcript record over 64 MiB is named with its size; images are shown as type, size and digest; structured results as sorted JSON, with keys that redact alike numbered `#2`, `#3`. | Memory bound; a chat can't show images. | Stream-parse huge records; send images as base64 text. |
+| 18 (B19, B20) | `!details full` sends each turn's tool calls. | It says "not available" when the turn's span is unknown, the transcript is busy or slow (30 s), or a record is corrupt; there is no automatic retry. | It must never show another turn's tool calls. | Queue a retry and post it when it succeeds. |
+| 19 (B16) | Audit values are redacted to markers. | Message IDs in ID fields become `id:` plus 12 hex digits of their SHA-256. | Records can still be matched up. | Plain markers; records can't be matched. |
+| 20 (B17) | Not covered. | After the upgrade, re-chunked pending replies may repeat text already received; a continuation that can't be checked is replaced whole. | Accuracy over deduplication; fail closed. | Drop plan-2 pending replies instead. |
+| 21 (deferral) | If wn-agent can't add or remove members, operators change only by `admind init` of a new group. | Task 1 stops and escalates if so; no task builds the init-only path. | Task 1 is expected to confirm add and remove work. | A plan revision adds the init-only path if Task 1 finds it needed. |
+| 22 (deferral) | The summary quotes every question and error verbatim. | The prompt asks for it; tests check the prompt wording, not the summaries. The Task 1 spike gives some real evidence. | A model's output can't be guaranteed by a unit test. | Add a check: a summary that lacks a reply line ending in `?` or starting `Error` goes to the backstop. |
+
+### Explicit deferrals (Codex r5 finding 6)
+
+- **Init-only fallback (row 21):** if Task 1 shows `wn-agent` can't add or remove members, the plan stops and escalates as it says; the ADR's alternative (operators change only by a new `admind init`) needs a plan revision, not an improvised task.
+- **Admin and summarizer adapters (row 11):** `settings.ADMIN_ADAPTERS` stays `("claude-code",)`, and Task 7's `_profile` keeps that restriction for the summarizer. Supporting another adapter is a later task.
+- **Summary content (row 22):** the question-and-error rule is enforced by the prompt only; no automated test proves a real summary keeps them.
+
 ## Decisions made in this plan (within the ADR; reviewers should check them)
 
 | # | Decision | Why | ADR |
@@ -75,11 +110,11 @@
 | B7 | A transition runs under `transition_lock` (one add, remove or rearm at a time). It refuses unless the subscription is observing and the group verified. It then takes `work_lock`, which `worker_loop` holds for each operator message, so the message in hand finishes and no new one starts; sets the in-memory flag `changing`, which blocks dispatch and posting through `authorised()`, `may_post()` and `_flush`; and drains a paste in progress (`dispatch_lock`) and a send in progress (`send_lock`, which `outbox_pass` holds across each send) before it reads the count and journals. Every await is followed by a recheck of the latch, observation and subscription generation. `check_group` takes no lock: a check begun during a transition, or overtaken by one (`membership_epoch`), returns "deferred" and changes nothing, so the subscription reader never waits on a transition. An exception after journaling latches; `changing` is cleared only once the change is settled or latched, otherwise it stays set until a restart latches on the pending record (B15) or `rearm`. | Step 1: "serializes it with every guard check and holds dispatch and outbound posting". A flag alone blocks new work but does not drain work already running. Holding `dispatch_lock` for the whole transition would stall the hooks, which also take it. | §8 transition step 1 |
 | B8 | Summarizer launch: `claude -p --model M --tools "" --setting-sources project --settings '{"disableAllHooks": true}' --strict-mcp-config --no-session-persistence --output-format text`, prompt on stdin. It runs in an empty private directory `state_dir/summarizer` and the profile's `args` are **not** appended. Admind appends the footer. Output that is empty, or longer than 10 lines or 2,000 characters, is a failure; stdout is read incrementally and the process is killed once it passes 8,000 bytes. | Headless, read-only, without tools, and unaffected by user-level hooks or MCP servers. `--bare` would need an API key. The ADR's "about 8 lines" gets two lines of slack; the limits stop a runaway "summary" from replacing the backstop, and the byte bound stops one from filling memory. | §8 Replies |
 | B9 | Every stage of a reply is durable. `on_stop` writes the turn record, its verbatim posts and the turn-state change in one transaction; if that fails, a second transaction records the turn straight into the backstop with the same state change, and if that fails too the error reaches `hook_loop`, which holds dispatch. An extraction that times out or cannot read the transcript (no span, a bad path, a read error) records a fixed-text turn (`EXTRACT_FAILED`) straight into the backstop; only a readable turn with no assistant text is `NO_REPLY`. Summary jobs are rows with `turns.status = 'summarizing'`; `summary_loop` polls them from the database (woken by an event, at least every 5 s), so a failure at any step leaves the row for the next pass, without a restart. A summary or verbatim post the outbox gives up on sends its turn to the backstop in the same transaction that marks it failed. | A reply must reach the operator whatever fails: summary, backstop, or at worst dispatch is held. | §8 Replies, Backstop |
-| B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
+| B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. Replies join in the order they reach the backstop (`turns.batch_seq`, written in the transaction that batches them), not the order their turns began. A reply joins only a batch whose 60-second window is still running at that moment; after that it opens the next batch, even if `batch_loop` hasn't posted the old one yet. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8); "closes 60 seconds later. Replies affected meanwhile join it in order" (Codex r5 findings 3, 4). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
-| B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A complete record in the span that is not a JSON object fails the read like a truncated one (Codex r5 finding 2). A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; keys that redact to the same marker are kept apart as `<marker> #2`, `#3`…, so no entry is lost; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
+| B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. A retry's backoff is a timer for that one row, not a sleep in the outbox loop: a lane-1 message queued during a lane-2 row's backoff is sent at once (Codex r5 finding 5). A lane-1 row in backoff still holds the lane-1 rows behind it, which keeps lane 1 in order. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
 | B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
 | B17 | Upgrading a plan-2 database: when `outbox.lane` is missing, the column is added and the kv marker `outbox_needs_redaction` set in one transaction. At startup, before `recover()`, `Store.redact_pending_outbox` joins each reply's pending chunks in order, redacts the whole, re-chunks it under new keys (`<prefix>:r<i>`), and clears the marker, all in one transaction. A value that straddles the boundary with the already-sent chunks is hidden to its end (`<redacted fragment>`); the check runs on **all** the reply's sent chunks joined in order, since a value can span several of them. If any earlier chunk of the reply is missing or not sent, the pending text is replaced whole by `<redacted continuation of a partly sent reply>` (fail closed). `outbox_pass` also redacts every row at delivery. | A plan-2 outbox can hold unredacted, chunked replies. The re-keyed chunks may repeat text the operator already received; accuracy over deduplication. | §8 Redaction |
@@ -945,6 +980,7 @@ Daemon tests with the shared harness:
 1. **Lane order:** while lane-2 rows are pending, a command reply queued after them is sent before the remaining lane-2 rows. Use `h.fake.on_send` to queue a lane-1 post the first time a lane-2 text is sent, then assert the order of `h.texts()`.
 2. **Redaction at delivery:** before `run()` (the `before` hook of `run_with`), insert a raw row with `h.store.enqueue("raw", f"see {HEX}", None)`, which bypasses `Admind.post`. After the join signal, the fake receives `"see <redacted hex key>"` and never `HEX`.
 3. **Upgrade at startup:** build the harness's database as a plan-2 database first (call `old_database(h.settings.state_dir / "admind.db", [...])` before `Harness` opens it; add an optional `before_store` callback to `Harness.__init__` that runs before `Store(...)`). A pending `reply:s:1:0`/`:1` pair holding a split token is delivered as one `<redacted GitHub token>` message, and the audit has `{"kind": "outbox", "action": "redacted-after-upgrade", "rows": 2}`.
+4. **A lane-1 message does not wait for a lane-2 backoff (Codex r5 finding 5):** replace `h.daemon._sleep` with a coroutine that, for a delay of 2 s or more (a backoff: the first is 2 s), waits on an `asyncio.Event` `release` the test sets, and otherwise returns at once (other loops' polls stay fast). Once the outbox is empty, set `h.fake.fail_sends = 1` and post a lane-2 row (`h.daemon.post("d", "details", None, lane=2)`): its first send fails as retryable and its backoff starts. Then `h.daemon.post("c", "urgent", None)`. `"urgent"` is delivered while `release` is still unset, and the fake saw exactly one attempt at `"details"`. After `release.set()`, `"details"` is delivered.
 
 - [ ] **Step 2: Run the tests and confirm they fail.** Expected: `TypeError: enqueue() got an unexpected keyword argument 'lane'`.
 
@@ -1034,7 +1070,7 @@ def _like(text: str) -> str:
   - `relay_alert`'s insert names `lane` explicitly as `1`.
 
 - [ ] **Step 4: Implement the daemon changes.**
-  - `__init__`: `self.send_lock = asyncio.Lock()   # held across each send; a membership transition drains it (B7)`.
+  - `__init__`: `self.send_lock = asyncio.Lock()   # held across each send; a membership transition drains it (B7)` and `self._backoff: tuple[int, asyncio.Future[None]] | None = None  # the row waiting out a retry, and its timer`. `run()`'s `finally` cancels a pending `_backoff` timer.
   - `post` passes `lane` to `enqueue`.
   - In `run()`, before `self.recover()` (and, from Task 5, after the B3 migration and the B15 latch):
 
@@ -1050,7 +1086,10 @@ def _like(text: str) -> str:
     async def outbox_pass(self) -> None:
         """One sweep of the outbox (a loop iteration, callable on its own). Each send holds `send_lock`,
         and the gate and the next row are read under it: a membership transition that has drained the
-        lock sees no send in progress and none can start (B7). Rows are redacted again at delivery (B1)."""
+        lock sees no send in progress and none can start (B7). Rows are redacted again at delivery (B1).
+        A retry's backoff is a timer, not a sleep in this loop: the pass ends, and a row queued meanwhile
+        (`post` sets `wake`) is sent at once if it comes first, so a lane-1 message never waits behind a
+        lane-2 row's backoff (B14). The timer sets `wake` when it ends."""
         if self.held:
             await self.flush()              # emits NOT_READY once the start timeout passes
         self.notify_held()
@@ -1061,6 +1100,8 @@ def _like(text: str) -> str:
                 row = self.store.next_pending()     # re-read each time: a new lane-1 row goes next (B14)
                 if row is None:
                     return
+                if self._backoff is not None and self._backoff[0] == row.seq and not self._backoff[1].done():
+                    return                  # its retry is not due; the timer or a new row wakes the loop
                 try:
                     sent = await self.client.send_final(self.account, self.group, redact(row.text),
                                                         row.reply_to, row.key)
@@ -1071,14 +1112,14 @@ def _like(text: str) -> str:
                         self.audit.write("send", key=row.key, action="failed", code=exc.code)
                         continue
                     self.audit.write("send", key=row.key, action="retry", attempts=attempts, code=exc.code)
-                    delay = min(60, 2 ** attempts)
+                    timer = asyncio.ensure_future(self._sleep(min(60, 2 ** attempts)))
+                    timer.add_done_callback(lambda _: self.wake.set())
+                    self._backoff = (row.seq, timer)    # only this row waits; nothing holds a lock meanwhile
+                    return
                 else:
                     self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
                     self.audit.write("send", key=row.key, action="sent")
                     continue
-            await self._sleep(delay)        # outside the lock: a transition need not wait for a backoff
-            self.wake.set()
-            return
 
     def send_failed(self, seq: int, key: str) -> None:
         """A message admind gave up on (Task 8 adds the backstop for replies)."""
@@ -2333,8 +2374,8 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
     - `record_prompt(mid, operator, words)` and `prompt(mid) -> PromptRow | None`;
     - `add_turn(key, session, reply_to, origin, text, transcript, start, end, status) -> int`;
     - `turn(turn_id) -> TurnRow | None` and `turns_with_status(status) -> list[TurnRow]`;
-    - `set_turn_status(turn_id, status, batch_id=None)`;
-    - `open_batch(at: float) -> int`, `due_batches(at: float, seconds: float) -> list[tuple[int, int]]` (batch and attempt), `batch_turns(batch_id) -> list[TurnRow]`, `close_batch(batch_id)` and `reopen_batch(batch_id, at: float)`;
+    - `set_turn_status(turn_id, status)` and `add_to_batch(turn_id, batch_id)`;
+    - `open_batch(at: float, seconds: float) -> int`, `due_batches(at: float, seconds: float) -> list[tuple[int, int]]` (batch and attempt), `batch_turns(batch_id) -> list[TurnRow]`, `close_batch(batch_id)` and `reopen_batch(batch_id, at: float)`;
     - `record_post(key, kind, turn_id, batch_id)` and `post_record(key) -> PostRow | None`;
     - `details_target(message_id: str | None) -> PostRow | None`.
   - Hook module: `transcript_size(ev: HookEvent) -> int | None`; `READ_WINDOW`, `MAX_RECORD`, `_lines`, `_is_prompt`, `_has_result`, `turn_records(path, start, end)` (Task 9 uses them too); and `reply_text(ev, start, end) -> str | None`, which replaces the tail-reading fallback (`last_assistant_text`, `_read_tail` and `MAX_TRANSCRIPT` are deleted).
@@ -2374,7 +2415,6 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
    - the audit has `{"kind": "reply", "action": "record-failed"}`.
 10. **Delivery gives up on a summary:** set `h.daemon._sleep` to a no-op coroutine. Once the ready notice is delivered and the outbox is empty, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS`, then send a long prompt (summarizer `echo "short summary"`). Every attempt to send the summary fails as retryable. Afterwards the summary row is `failed`, and in the same transaction its turn became `batched`. The batch arrives and holds the full reply.
 11. **Extraction fails:** set `extract_timeout = 0.1`, and monkeypatch `heterodyne.admind.daemon.reply_text` with a function `(ev, start, end)` that waits on a `threading.Event` (at most 5 s; the test sets it at the end). Then put a Stop for the current turn without `last_assistant_message`. A batch arrives holding `EXTRACT_FAILED`, and the turn is idle. Variants without the monkeypatch, each also giving a batch holding `EXTRACT_FAILED` (never `NO_REPLY`): the transcript path is a symlink; the turn has no span (no `UserPromptSubmit` was seen for it).
-16. **Fallback reads the whole turn (Codex r3 finding 2):** a `UserPromptSubmit` for `<tmp>/<sid>.jsonl`, then the test appends `said("Which unit, gateway or relay?")`, a tool call and result, and `said("Checked both.")`, then a current Stop without `last_assistant_message`. The reply (summarized or verbatim, per its size) and its `!details` record hold both texts in order.
 12. **Transcript span:**
     - **Current turn:** write `<tmp>/<sid>.jsonl` with 100 bytes, then put a `UserPromptSubmit` for that path. Append 50 bytes, then put a current `Stop` with a reply. The turn row has `transcript_start == 100` and `transcript_end == 150`.
     - **Stale launch:** a Stop from a stale launch (`launch=None`) that carries its own text gets `transcript_start` and `transcript_end` both NULL.
@@ -2382,6 +2422,8 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
 13. **Redaction:** a hex value in the reply never appears in any sent text.
 14. **Delivery gives up on a batch (Codex r2 finding 7):** `h.daemon._sleep` is a no-op coroutine. A failing summary is batched; just before the batch is due, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS`. The batch's outbox row (`batch:<id>.0`) becomes `failed`, and in the same transaction the batch is open again with `attempt == 1` and a fresh `opened_at`; the audit has `{"kind": "backstop", "action": "reopened"}`. Once `batch_seconds` passes again the batch arrives (key `batch:<id>.1`), holding the reply, and `!details` without a target returns it.
 15. **Restart after a failed batch:** as (14), but with `batch_seconds = 3600` once the batch is reopened, end the first `run_with`. A second `run_with` on the same `tmp_path` with `batch_seconds = 0.3` posts the reopened batch with the reply.
+16. **Fallback reads the whole turn (Codex r3 finding 2):** a `UserPromptSubmit` for `<tmp>/<sid>.jsonl`, then the test appends `said("Which unit, gateway or relay?")`, a tool call and result, and `said("Checked both.")`, then a current Stop without `last_assistant_message`. The reply (summarized or verbatim, per its size) and its `!details` record hold both texts in order.
+17. **Arrival order across overlapping failures (Codex r5 finding 3):** `h.daemon._sleep` is a no-op coroutine, `batch_seconds = 2`, `summary_timeout = 5`, and the summarizer is `sleep 1; exit 1`. Send a long prompt A; once `h.store.turns_with_status("summarizing")` holds its turn, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS` and send a short prompt B with `h.fake.message_event(...)` (not `h.say`, which waits for a delivered reply), whose verbatim reply fails delivery and joins the backstop first. A's summary then fails and joins second. The batch shows B's origin and reply before A's, and `!details` on the batch returns them in that order.
 
 Unit tests of the fallback, in the same file (`append`, `prompt`, `tool`, `result` and `said` are the same small JSONL helpers Task 9's tests define; define them in this file too):
 
@@ -2429,6 +2471,18 @@ def test_a_changed_transcript_is_a_failure(tmp_path: Path) -> None:
     assert reply_text(stop(t), 0, t.stat().st_size) is None       # the span ends inside a record
 
 
+def test_a_corrupt_record_is_a_failure(tmp_path: Path) -> None:
+    # Codex r5 finding 2: a complete record that can't be parsed fails the read, never a partial reply.
+    for i, bad in enumerate(('{"type": "assistant", "message": {"content": [{"type": "te', "[1, 2]", "\udcff")):
+        (tmp_path / str(i)).mkdir()
+        t = tmp_path / str(i) / "s.jsonl"                     # the session's own name: else None anyway
+        end = append(t, [prompt("go"), said("first answer")])
+        assert reply_text(stop(t), 0, end) == "first answer"
+        with t.open("a", errors="surrogateescape") as fh:
+            fh.write(bad + "\n")
+        assert reply_text(stop(t), 0, t.stat().st_size) is None
+
+
 def test_fallback_failures_are_none(tmp_path: Path) -> None:
     t = tmp_path / "s.jsonl"
     end = append(t, [prompt("go"), said("hi")])
@@ -2462,6 +2516,7 @@ CREATE TABLE IF NOT EXISTS turns (
     transcript_end INTEGER,
     status TEXT NOT NULL CHECK (status IN ('verbatim', 'summarizing', 'summarized', 'batched')),
     batch_id INTEGER,
+    batch_seq INTEGER,              -- the order replies joined the backstop in, across batches (B10)
     created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS batches (
     batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2560,13 +2615,25 @@ def _post(r: tuple[object, ...]) -> PostRow:
                                                   (status,)).fetchall()]
 
     @_locked
-    def set_turn_status(self, turn_id: int, status: str, batch_id: int | None = None) -> None:
-        self.db.execute("UPDATE turns SET status = ?, batch_id = ? WHERE turn_id = ?", (status, batch_id, turn_id))
+    def set_turn_status(self, turn_id: int, status: str) -> None:
+        self.db.execute("UPDATE turns SET status = ? WHERE turn_id = ?", (status, turn_id))
 
     @_locked
-    def open_batch(self, at: float) -> int:
-        """The open batch, or a new one opened at `at` (a batch opens with its first reply)."""
-        r = self.db.execute("SELECT batch_id FROM batches WHERE status = 'open' ORDER BY batch_id LIMIT 1").fetchone()
+    def add_to_batch(self, turn_id: int, batch_id: int) -> None:
+        """The reply joins the batch, after every reply that joined a batch before it: §8's "in order" is
+        the order replies reach the backstop, not the order their turns began (Codex r5 finding 3). An
+        older reply whose summary fails late comes after a newer one whose delivery failed first."""
+        self.db.execute("UPDATE turns SET status = 'batched', batch_id = ?, "
+                        "batch_seq = (SELECT COALESCE(MAX(batch_seq), 0) + 1 FROM turns) WHERE turn_id = ?",
+                        (batch_id, turn_id))
+
+    @_locked
+    def open_batch(self, at: float, seconds: float) -> int:
+        """The open batch whose window is still running at `at`, or a new one opened at `at` (a batch opens
+        with its first reply). A batch whose window has passed takes no more replies, even before
+        `batch_loop` posts it (Codex r5 finding 4)."""
+        r = self.db.execute("SELECT batch_id FROM batches WHERE status = 'open' AND opened_at + ? > ? "
+                            "ORDER BY batch_id LIMIT 1", (seconds, at)).fetchone()
         if r is not None:
             return int(r[0])
         return int(self.db.execute("INSERT INTO batches(opened_at, status) VALUES (?, 'open')", (at,)).lastrowid or 0)
@@ -2579,7 +2646,7 @@ def _post(r: tuple[object, ...]) -> PostRow:
 
     @_locked
     def batch_turns(self, batch_id: int) -> list[TurnRow]:
-        return [_turn(r) for r in self.db.execute(f"SELECT {_TURN} FROM turns WHERE batch_id = ? ORDER BY turn_id",
+        return [_turn(r) for r in self.db.execute(f"SELECT {_TURN} FROM turns WHERE batch_id = ? ORDER BY batch_seq",
                                                   (batch_id,)).fetchall()]
 
     @_locked
@@ -2622,6 +2689,8 @@ Store unit tests, in the same file:
 - `details_target(None)` with a sent summary followed by a pending summary and a failed batch returns the sent summary;
 - `details_target(mid)` for a row that is still pending returns None;
 - `add_turn` with the same key twice returns the same `turn_id`.
+- **Join order (Codex r5 finding 3):** add turns 1 and 2; `add_to_batch(2, b)` then `add_to_batch(1, b)`; `batch_turns(b)` returns turn 2, then turn 1. After a `reopen_batch(b, …)`, a turn 3 that joins comes after both.
+- **Batch window at join time (Codex r5 finding 4):** `b = open_batch(100.0, 60.0)`; `open_batch(159.999, 60.0) == b`; `open_batch(160.0, 60.0) != b` (the window has passed, though `b` is still open), and `due_batches(160.0, 60.0)` lists `b` first, then the new one only once its own window passes.
 
 - [ ] **Step 4: Implement `transcript_size` and the turn reader in `hook.py`.**
 
@@ -2705,7 +2774,9 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | 
     a real prompt before that is the turn's own and is skipped, one after it is the next turn's and ends
     this one. Anything else is metadata (such as `queue-operation`) and skipped. A record over MAX_RECORD
     is yielded as its size in bytes and never begins the turn: it may be metadata. Raises OSError if the
-    file can't be read; never follows a symlink or blocks on a FIFO."""
+    file can't be read, or if a complete record in the span is not a JSON object: a corrupt record could
+    be the error or question the operator needs, so the read fails rather than skip it (Codex r5
+    finding 2). Never follows a symlink or blocks on a FIFO."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -2717,10 +2788,10 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | 
                 continue
             try:
                 record: Any = json.loads(item)
-            except ValueError:
-                continue
+            except ValueError:          # also UnicodeDecodeError
+                raise OSError("a transcript record is not valid JSON") from None
             if not isinstance(record, dict):
-                continue
+                raise OSError("a transcript record is not a JSON object")
             rec = cast(dict[str, Any], record)
             if _is_prompt(rec):
                 if begun:
@@ -2922,8 +2993,8 @@ EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time
         """Put a reply in the open backstop batch, opening one. Store calls only, in one transaction that
         joins the caller's; the caller audits after it commits."""
         with self.store.transaction():
-            batch = self.store.open_batch(self.wallclock())
-            self.store.set_turn_status(turn_id, "batched", batch)
+            batch = self.store.open_batch(self.wallclock(), self.batch_seconds)
+            self.store.add_to_batch(turn_id, batch)
 
     async def summary_loop(self) -> None:
         """Summarize every turn that waits for one (B9). Rows are read from the database on every pass, so
@@ -3176,6 +3247,25 @@ def test_values_are_redacted_before_they_are_serialized(tmp_path: Path) -> None:
     assert "AAAAAAAAAA" not in out and out.count("<redacted GitHub token>") == 2
 
 
+def test_keys_that_redact_alike_keep_every_entry(tmp_path: Path) -> None:
+    # Codex r5 finding 1: two hex keys both become "<redacted hex key>"; neither entry may be lost.
+    both = {"a" * 64: "first result", "b" * 64: "second result"}
+    t = tmp_path / "s.jsonl"
+    end = append(t, [prompt("go"), tool("Bash", **both),
+                     {"type": "user", "message": {"content": [{"type": "tool_result", "content": both}]}}])
+    out = turn_tool_calls(t, 0, end)
+    assert out.count("first result") == 2 and out.count("second result") == 2
+    assert '"<redacted hex key> #2"' in out and "aaaa" not in out
+
+
+def test_a_corrupt_record_is_unreadable(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    append(t, [prompt("go"), tool("Bash", command="ls")])
+    with t.open("a") as fh:
+        fh.write("not json\n")
+    assert turn_tool_calls(t, 0, t.stat().st_size) == "(the transcript could not be read)"
+
+
 def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hook, "MAX_RECORD", 1000)
     t = tmp_path / "s.jsonl"
@@ -3255,7 +3345,15 @@ def _redacted(value: Any) -> Any:
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {redact(str(k)): _redacted(v) for k, v in cast(dict[Any, Any], value).items()}
+        out: dict[str, Any] = {}
+        for k, v in cast(dict[Any, Any], value).items():
+            key = base = redact(str(k))
+            n = 1
+            while key in out:           # two keys can redact to one marker: keep both entries (Codex r5 finding 1)
+                n += 1
+                key = f"{base} #{n}"
+            out[key] = _redacted(v)
+        return out
     if isinstance(value, list):
         return [_redacted(v) for v in cast(list[Any], value)]
     return value
@@ -3468,10 +3566,10 @@ The PR body ends with the attribution lines the session requires. Merging is the
 
 - **Type consistency:**
   - `Operator.hex` is used by guard, daemon and CLI.
-  - `PostRow` and `TurnRow` are defined in Task 8 and used in Task 9.
+  - `PostRow` and `TurnRow` are defined in Task 8 and used in Task 9. `queue_backstop` calls `open_batch(at, seconds)` and `add_to_batch(turn_id, batch_id)`; `batch_turns` orders by `batch_seq`; `set_turn_status(turn_id, status)` no longer takes a batch.
   - `post(..., lane=)` is defined in Task 2 and stored in Task 4.
   - `summarizer_argv` is defined in Task 8 and is `None` when not configured.
-  - `send_lock` and `send_failed(seq, key)` are defined in Task 4; Task 5 drains `send_lock`, and Task 8 extends `send_failed`.
+  - `send_lock`, `_backoff` and `send_failed(seq, key)` are defined in Task 4; Task 5 drains `send_lock`, and Task 8 extends `send_failed`.
   - `work_lock`, `transition_lock`, `changing` and `membership_epoch` are defined in Task 5; `worker_loop` holds `work_lock`.
   - `bounded_read` and `_reader` replace `_extraction` in Task 8; Task 9's `tool_calls` uses them.
   - `TurnRow` has `transcript_start` and `transcript_end` (Task 8); `turn_tool_calls(path, start, end)` takes both (Task 9).
@@ -3483,14 +3581,4 @@ The PR body ends with the attribution lines the session requires. Merging is the
   - `Admind.group_events` and `Admind.reading` are defined in Task 5 and read by `rearm`.
   - `hook.turn_records`, `_lines`, `_is_prompt`, `READ_WINDOW` and `MAX_RECORD` are defined in Task 8 (the reply fallback) and reused by Task 9's `turn_tool_calls`.
 - **Lock order** (Task 5): `transition_lock` → `work_lock` → `dispatch_lock` → `send_lock`, each held briefly after the second. Nothing holding a later lock waits for an earlier one.
-- **Deviations from the ADR's wording, for the operator:**
-  - `!details full` names (does not parse) a single transcript record over 64 MiB, to bound memory, and shows an image result as its type, size and digest; nothing else in `!details` is capped (B13);
-  - a Stop without its own text gets every assistant text of its turn as its reply (Claude Code's own field holds only the last one; B13);
-  - a backstop batch over 60,000 characters (50 lines averaging over 1,000 characters) has its lines shortened so it stays one deliverable message; below that it is sent exactly as the ADR's line rules render it (B10). This needs the operator's agreement or an ADR note;
-  - `rearm` can refuse: when not subscribed, when the group changes while it reads the count, or when it can't reconcile the count with the operators it knows (B22). The ADR says rearm takes the count as trusted unconditionally;
-  - who may command admind is durable state (`group_operators`), not just `policy.toml`; a plan-2 upgrade with several operators already in `policy.toml` latches until a rearm, which then trusts the count against `policy.toml` (B21);
-  - `policy.toml` operator names over 128 characters or with control characters are now a configuration error (B2);
-  - a summary may have 10 lines (the ADR says about 8; B8);
-  - the audit writes 64-hex message IDs as `id:` references, not raw (B16);
-  - after an upgrade, re-keyed chunks may repeat text the operator already received (B17);
-  - a reply that cannot be read from the transcript in time now reaches the operator as a fixed notice in the backstop, instead of only an audit record (B9).
+- **Deviations from the ADR's wording, for the operator:** see "ADR r13 deviations for operator sign-off" near the top of this plan; it is the one complete list.
