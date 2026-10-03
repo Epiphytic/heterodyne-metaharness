@@ -129,7 +129,7 @@ def details_notice(cap: int) -> str:
     """What `!details` says it stopped at: TRUNCATED for the full 64 MiB, otherwise the smaller limit."""
     if cap >= MAX_REPLY:
         return TRUNCATED
-    size = f"{cap} bytes" if cap < 1024 else f"{cap // 1024} KiB" if cap < 1 << 20 else f"{cap >> 20} MiB"
+    size = f"{cap >> 20} MiB" if cap % (1 << 20) == 0 else f"{cap} bytes"      # exact, never rounded
     return f"(details truncated at {size})"
 
 
