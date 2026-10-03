@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes.settings import OPERATOR_HEX
 from test_admind_daemon import Harness, needs_tmux, run_with
 
 from heterodyne.admind import backstop, hook, summarize
@@ -167,6 +168,26 @@ def sent_for(h: Harness, text: str) -> dict[str, Any]:
     return next(r for r in h.fake.sent if r["text"] == text)
 
 
+async def details_of(h: Harness, reply_to: str | None = None) -> str:
+    """What `!details` (as a reply to `reply_to`, else alone) answers: its lane-2 chunks, joined."""
+    h.seq += 1
+    mid = f"{h.seq:064x}"
+    await h.fake.push_event(h.fake.message_event("!details", OPERATOR_HEX, mid, reply_to=reply_to))
+    await h.until(
+        lambda: h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE key LIKE ? AND status = 'sent'", (f"details:{mid}:%",)
+        ).fetchone()[0]
+        > 0
+        and h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE key LIKE ? AND status != 'sent'", (f"details:{mid}:%",)
+        ).fetchone()[0]
+        == 0,
+        20,
+    )
+    rows = h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ? ORDER BY seq", (f"details:{mid}:%",))
+    return "".join(r[0] for r in rows.fetchall())
+
+
 LONG = "long " + "w" * 900
 ORIGIN = re.compile(r"— op · \d\d:\d\d UTC · “long w+…”")
 
@@ -278,6 +299,8 @@ def test_a_big_batch_is_one_message_with_whole_lines(tmp_path: Path) -> None:
         assert "…(+" not in text and len(text) > 4000
         await asyncio.sleep(0.6)
         assert len(batches(h)) == 1
+        every = await details_of(h)  # `!details` returns every line of all three replies
+        assert all(f"r{r}-{i:03d}-" + "z" * 190 in every for r in range(3) for i in range(100))
 
     run_with(tmp_path, scenario, configure("exit 1", batch=3600))
 
@@ -432,6 +455,7 @@ def test_a_batch_that_cannot_be_delivered_is_reopened_and_resent(tmp_path: Path)
         assert LONG in text
         assert sent_for(h, text)["idempotency_key"] == "batch:1.1"
         assert outbox_status(h, "batch:1.1") == "sent"
+        assert f"echo: {LONG}" in await details_of(h)  # no target: the latest batch delivered
 
     run_with(tmp_path, scenario, configure("exit 1", batch=1.0))
 
@@ -657,6 +681,8 @@ def test_the_batch_keeps_the_order_replies_reach_the_backstop(tmp_path: Path) ->
         assert text.index("“bee”") < text.index("“long ")
         assert text.index("echo: bee") < text.index(LONG)
         assert [t.text for t in h.store.batch_turns(1)] == ["echo: bee", f"echo: {LONG}"]
+        every = await details_of(h)
+        assert every.index("echo: bee") < every.index(f"echo: {LONG}")
 
     run_with(tmp_path, scenario, configure("sleep 1; exit 1", batch=2.0, timeout=5))
 

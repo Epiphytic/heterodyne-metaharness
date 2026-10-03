@@ -38,6 +38,7 @@ from heterodyne.admind.hook import (
     reply_text,
     same_prompt,
     transcript_size,
+    turn_tool_calls,
 )
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
@@ -79,6 +80,8 @@ KNOWN_HOOKS = frozenset(HOOK_EVENTS)
 EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled filesystem must not hold a slot)
 OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20)
 SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
+DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
+DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
                   "for the turn's tool calls, or ask the agent to repeat it.)")
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
@@ -220,6 +223,7 @@ class Admind:
         # a restart resets the indices, and startup recovery already fails closed.
         self.turn_floor = 0
         self.extract_timeout = EXTRACT_SECONDS      # replaced in tests
+        self.details_timeout = DETAILS_READ_SECONDS         # replaced in tests
         self.hook_deadline = HOOK_DEADLINE          # replaced in tests
         self.hook_lock_wait = HOOK_LOCK_WAIT        # replaced in tests
         self._reader: asyncio.Future[Any] | None = None     # the one transcript-read thread allowed (B20)
@@ -918,7 +922,8 @@ class Admind:
             with self.store.transaction():      # the marker and the notice: both or neither
                 self.store.set("operator_seen_at", now())
                 self.post("ready", READY_NOTICE, None)
-        await self.handle(mid, text)
+        target = ev.reply_to.message_id_hex.lower() if ev.reply_to is not None else None
+        await self.handle(mid, text, target)
 
     async def execute(self, cmd: commands.Command) -> tuple[str, bool]:
         """Run a command in a thread. A failure becomes fixed wording, never the exception's text."""
@@ -934,7 +939,7 @@ class Admind:
             self.store.set_inbound(mid, status)
             self.reply(mid, text, tag)
 
-    async def handle(self, mid: str, text: str) -> None:
+    async def handle(self, mid: str, text: str, target: str | None = None) -> None:
         # Control characters are refused before anything else: they can break out of bracketed paste,
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
@@ -949,6 +954,9 @@ class Admind:
             # Persisted before anything runs (or waits for the dispatch lock): a crash from here until
             # `done` is answered after the restart instead of being lost.
             self.store.set_inbound(mid, "executing")
+            if cmd.name == "details":
+                await self.details(mid, cmd, target)
+                return
             if cmd.name in ("interrupt", "new"):   # these recheck once they hold the dispatch lock
                 await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
@@ -964,6 +972,65 @@ class Admind:
             return
         self.held.append((mid, text))
         await self.flush()
+
+    async def details(self, mid: str, cmd: commands.Command, target: str | None) -> None:
+        """`!details [full]`: the full redacted reply (or every reply of a batch), each under its origin,
+        in lane 2 and threaded to the command (ADR 0001 §8, revision 13). Nothing is capped (B13)."""
+        if not self.authorised(mid):
+            self.deny(mid, "command")
+            return
+        post = self.store.details_target(target)
+        if post is not None and post.turn_id is not None:
+            one = self.store.turn(post.turn_id)
+            rows = [] if one is None else [one]
+        else:
+            rows = [] if post is None else self.store.batch_turns(post.batch_id or 0)
+        if not rows:
+            why = ("that message has no details. Reply to a summary or a batch." if target is not None
+                   else "there is no delivered summary or batch yet.")
+            self.finish(mid, "done", f"!details: {why}", "cmd")
+            return
+        full = cmd.arg == "full"
+        sections: list[str] = []
+        for row in rows:
+            body = row.text
+            if full:
+                body += "\n\n" + await self.tool_calls(row)
+            sections.append(f"{row.origin}\n{body}")
+        # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
+        parts = await asyncio.to_thread(
+            lambda: chunk.split(redact("\n\n".join(sections)), self.s.chunk_chars))
+        if not self.authorised(mid):    # the reads and the thread may have spanned a latch or a transition
+            self.deny(mid, "command")
+            return
+        with self.store.transaction():
+            self.store.set_inbound(mid, "done")
+            for i, part in enumerate(parts):
+                self.post(f"details:{mid}:{i}", part, mid, lane=2)
+        self.audit.write("command", message_id=mid, command="details", full=full, replies=len(rows),
+                         chars=sum(len(p) for p in parts))
+
+    async def tool_calls(self, row: TurnRow) -> str:
+        """One turn's tool calls for `!details full`, read in the shared reader slot (B20)."""
+        if row.transcript is None or row.transcript_start is None or row.transcript_end is None:
+            return "(tool calls are not available for this turn)"
+        path = Path(row.transcript)
+        if path.name != f"{row.session}.jsonl" or not path.is_absolute():
+            return "(tool calls are not available for this turn)"
+        cancel = threading.Event()
+        token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
+        try:
+            out = await self.bounded_read(self.details_timeout, turn_tool_calls, path, row.transcript_start,
+                                          row.transcript_end)
+        except BaseException:
+            cancel.set()
+            raise
+        finally:
+            READ_CANCEL.reset(token)
+        if out is None:
+            cancel.set()
+            return DETAILS_BUSY
+        return out
 
     async def interrupt(self, mid: str, cmd: commands.Command) -> None:
         """!interrupt holds the dispatch lock from before the Escape until the turn's state is settled, so

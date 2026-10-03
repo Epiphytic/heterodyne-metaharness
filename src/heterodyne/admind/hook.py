@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import json
 import os
 import secrets
@@ -44,6 +45,7 @@ from typing import Annotated, Any, cast
 import msgspec
 
 from heterodyne.admind.audit import Audit
+from heterodyne.admind.redact import redact, unique_key
 
 MAX_HOOK_FRAME = 1024 * 1024
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
@@ -285,6 +287,85 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
                 yield rec
     finally:
         os.close(fd)
+
+
+def _block_text(block: Any) -> str:
+    """One block of a tool result, deterministically. Text is shown as it is; an image is named by its
+    type, size and digest (a text chat can't show it; flagged, B13); anything else is its JSON, keys
+    sorted, with every string redacted first (`_json`)."""
+    if isinstance(block, dict):
+        b = cast(dict[str, Any], block)
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            return b["text"]
+        source = b.get("source")
+        if b.get("type") == "image" and isinstance(source, dict):
+            src = cast(dict[str, Any], source)
+            data = str(src.get("data", ""))
+            digest = hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            return f"[image {src.get('media_type', '?')}, {len(data)} base64 characters, sha256 {digest}]"
+    return _json(block)
+
+
+def _redacted(value: Any) -> Any:
+    """`value` with every string in it (keys too) redacted, before it is serialized: JSON escapes can put
+    a digit right before a secret (`\\u0001ghp_…`), which the scanner's start rule then refuses (B1)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in cast(dict[Any, Any], value).items():
+            out[unique_key(redact(str(k)), out)] = _redacted(v)     # keys that redact alike: both kept
+        return out
+    if isinstance(value, list):
+        return [_redacted(v) for v in cast(list[Any], value)]
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(_redacted(value), ensure_ascii=False, sort_keys=True)
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_block_text(b) for b in cast(list[Any], content))
+    return _json(content)
+
+
+def _tool_lines(record: dict[str, Any]) -> list[str]:
+    """The tool calls and results in one record. Thinking blocks are never read out."""
+    blocks = _blocks(record)
+    if not isinstance(blocks, list):
+        return []
+    if record.get("type") == "user":
+        return [f"◂ {'(error) ' if b.get('is_error') else ''}{_result_text(b.get('content'))}"
+                for b in blocks if b.get("type") == "tool_result"]
+    if record.get("type") == "assistant":
+        return [f"▸ {b.get('name')} {_json(b.get('input'))}" for b in blocks if b.get("type") == "tool_use"]
+    return []
+
+
+TOO_LARGE = (f"(this turn's transcript holds a record over {MAX_RECORD // (1024 * 1024)} MiB; "
+             "its tool calls can't be shown)")
+
+
+def turn_tool_calls(path: Path, start: int, end: int) -> str:
+    """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records`. Nothing is
+    shortened: §8 puts no cap on `!details`. A record over MAX_RECORD makes the turn unreadable: without
+    parsing it, the turn's end can't be found (B13)."""
+    out: list[str] = []
+    try:
+        for rec in turn_records(path, start, end):
+            out.extend(_tool_lines(rec))
+    except RecordTooLarge:
+        return TOO_LARGE
+    except (OSError, RecursionError):   # a structure nested deeper than the stack allows is unreadable too
+        return "(the transcript could not be read)"
+    # A lone surrogate (JSON `\\ud800`) can't be encoded, so it can't be stored or sent: it becomes `?`.
+    if not out:
+        return "(no tool calls in this turn)"
+    return "\n".join(out).encode("utf-8", "replace").decode("utf-8")
 
 
 def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
