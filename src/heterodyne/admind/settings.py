@@ -1,10 +1,12 @@
 """admind settings from the merged host config and the host policy (ADR 0001 §8, §15).
 
 `[admind]` lives in host `config.toml` only: the workstream layer rejects it (it is not one of
-`WORKSTREAM_KEYS`), and environment overrides cover locations only. The operator comes from
-`policy.toml` (`operators`, then `identities.<name>.marmot_npub`), which is host-only.
+`WORKSTREAM_KEYS`), and environment overrides cover locations only. The operators come from
+`policy.toml` (`operators`, then `identities.<name>.marmot_npub`), which is host-only; every entry with an
+npub is an operator.
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +24,16 @@ ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "
                          "marmot"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
+MAX_NAME = 128
+NAME_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 MAX_SOCKET_PATH = 100  # bytes; sun_path is 108 on Linux and 104 on macOS
+
+
+@dataclass(frozen=True)
+class Operator:
+    name: str
+    npub: str
+    hex: str
 
 
 @dataclass(frozen=True)
@@ -40,8 +51,7 @@ class AdmindSettings:
     wn_agent: str
     marmot_home: Path
     relays: tuple[str, ...]
-    operator_hex: str
-    operator_npub: str
+    operators: tuple[Operator, ...]
     state_dir: Path
     alerts_dir: Path
     service_manager: str
@@ -84,7 +94,6 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         raise ConfigError(f"[admind.marmot] home is too long for a Unix socket path "
                           f"(max {MAX_SOCKET_PATH} bytes including ctl/wn-agent.sock)")
 
-    operator_npub, operator_hex = _operator(cfg)
     service_manager = cfg.get("platform.service_manager")
     if not isinstance(service_manager, str) or not service_manager:
         raise ConfigError("[platform] service_manager is not set; run `heterodyne setup`")
@@ -101,7 +110,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         group_name=_text(admind, "group_name", "[admind]"),
         wn_agent=_text(marmot, "wn_agent", "[admind.marmot]"),
         marmot_home=home, relays=relays,
-        operator_hex=operator_hex, operator_npub=operator_npub,
+        operators=operators(cfg),
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
     )
@@ -118,19 +127,32 @@ def _relay_ok(r: str) -> bool:
         return False
 
 
-def _operator(cfg: Config) -> tuple[str, str]:
-    operators = cfg.policy.operators
-    if len(operators) != 1:
-        raise ConfigError(f"policy.toml: admind needs exactly one entry in operators, found {len(operators)}")
-    name = operators[0]
-    where = f"policy.toml: identities.{show(name, False)}.marmot_npub"
-    npub = cfg.policy.identities.get(name, {}).get("marmot_npub")
-    if not npub:
-        raise ConfigError(f"{where} is missing")
-    try:
-        return npub, npub_to_hex(npub)
-    except Nip19Error as exc:
-        raise ConfigError(f"{where} is not a valid npub ({exc})") from None
+def operators(cfg: Config) -> tuple[Operator, ...]:
+    """Every `policy.toml` operator with `identities.<name>.marmot_npub` (ADR 0001 §8, revision 13).
+    Its name must be one `admind operators add|remove NAME` can carry: 1 to `MAX_NAME` characters and no
+    control characters (the control server checks the same, Task 6)."""
+    found: list[Operator] = []
+    seen: set[str] = set()
+    for name in cfg.policy.operators:
+        npub = cfg.policy.identities.get(name, {}).get("marmot_npub")
+        if not npub:
+            continue
+        if not 1 <= len(name) <= MAX_NAME or NAME_CONTROLS.search(name):
+            raise ConfigError(f"policy.toml: operator name {show(name, False)!r} must be 1-{MAX_NAME} "
+                              "characters with no control characters")
+        where = f"policy.toml: identities.{show(name, False)}.marmot_npub"
+        try:
+            key = npub_to_hex(npub).lower()
+        except Nip19Error as exc:
+            raise ConfigError(f"{where} is not a valid npub ({exc})") from None
+        if key in seen:
+            raise ConfigError(f"{where} is the same marmot_npub as another operator's")
+        seen.add(key)
+        found.append(Operator(name, npub, key))
+    if not found:
+        raise ConfigError("policy.toml: admind needs at least one entry in operators with "
+                          "identities.<name>.marmot_npub")
+    return tuple(found)
 
 
 def _only(table: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import sqlite3
@@ -67,9 +68,12 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
                 print(f"wn-agent bootstrap failed (exit {proc.returncode})", file=sys.stderr)
                 return 1
         account = await wn.account(client)
-        created = await client.group_create(account, s.group_name, [s.operator_npub])
-        store.set("account_id_hex", account)
-        store.set("group_id_hex", created.group_id_hex.lower())
+        created = await client.group_create(account, s.group_name, [o.npub for o in s.operators])
+        with store.transaction():
+            store.set("account_id_hex", account)
+            store.set("group_id_hex", created.group_id_hex.lower())
+            store.set("expected_members", str(1 + len(s.operators)))
+            store.set("group_operators", json.dumps(sorted(o.hex for o in s.operators)))
         audit.write("init", action="group_created")
     except (WnAgentError, ControlError) as exc:
         # Never the peer's `detail`: it can echo the bearer token. Only the allowlisted code and flag.
@@ -79,8 +83,9 @@ async def init(s: AdmindSettings, store: Store, audit: Audit) -> int:
         return 1
     finally:
         await wn.stop()
-    print("Created admind's identity and its group with the operator. Accept the invite in your Marmot "
-          "client, start admind, then send any message in the group: admind answers once it sees you.")
+    print(f"Created admind's identity and its group with {len(s.operators)} operator(s). Each operator "
+          "accepts the invite in their Marmot client; then start admind and send any message in the group: "
+          "admind answers once it sees one of you.")
     return 0
 
 
@@ -195,7 +200,8 @@ async def _run_with_child(s: AdmindSettings, store: Store, audit: Audit, group: 
         return 1
     agent = AdminAgent(Tmux(TMUX_SOCKET, launcher=tmux_launcher(s)), store, s, s.state_dir / "hook.sock")
     runner = CommandRunner(agent, services, s.restart_units, wn.alive)
-    daemon = Admind(s, client, store, audit, agent, runner, account, group)
+    daemon = Admind(s, client, store, audit, agent, runner, account, group,
+                    load_operators=lambda: resolve(hconfig.load(), os.environ).operators)
     audit.write("admind", action="start")
     try:
         async with asyncio.TaskGroup() as tg:

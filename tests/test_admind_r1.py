@@ -166,6 +166,7 @@ class Unit:
         runner = CommandRunner(self.agent, self.services, ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, self.client, self.store, self.audit, self.agent, runner,  # type: ignore[arg-type]
                              ACCOUNT, GROUP)
+        self.daemon.authorise(o.hex for o in self.settings.operators)    # as run() does from the store
         self.daemon.group_ok = True         # as if the subscription were confirmed and the group verified
         self.daemon.observing = True
 

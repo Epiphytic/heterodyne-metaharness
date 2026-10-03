@@ -36,7 +36,7 @@ def write(d: Path, config: str = BASE_CONFIG, operators: str = '["op"]') -> dict
 def test_resolves_defaults_and_operator(tmp_path: Path) -> None:
     env = write(tmp_path)
     s = resolve(load(None, env), env)
-    assert s.operator_hex == OPERATOR_HEX
+    assert s.operators[0].hex == OPERATOR_HEX
     assert s.adapter_binary == "claude"
     assert s.profile["model"] == "m1"
     assert s.workdir == tmp_path
@@ -71,9 +71,9 @@ def test_invalid_admind_config_is_rejected(tmp_path: Path, patch: str, message: 
         resolve(load(None, env), env)
 
 
-def test_exactly_one_operator_with_a_valid_npub(tmp_path: Path) -> None:
+def test_an_operator_with_a_valid_npub_is_required(tmp_path: Path) -> None:
     env = write(tmp_path, operators="[]")
-    with pytest.raises(ConfigError, match="exactly one"):
+    with pytest.raises(ConfigError, match="at least one"):
         resolve(load(None, env), env)
     env = write(tmp_path)
     (tmp_path / "policy.toml").write_text(

@@ -1,11 +1,12 @@
 """Ingress decisions for admind (ADR 0001 §3.4, §8). Pure functions; the daemon acts on the verdicts.
 
-- Only MLS-authenticated messages from the operator's exact key, in admind's own group, are processed.
-- Any membership or admin change, or a member count other than two, latches admind (plan decision D4):
-  `group_info` reports a count, not a member list, so a swap that keeps the count is visible only as
-  an event.
+- Only MLS-authenticated messages from an operator's exact key, in admind's own group, are processed.
+- Any membership or admin change, or a member count other than the trusted expected count, latches
+  admind (plan decision D4): `group_info` reports a count, not a member list, so a swap that keeps the
+  count is visible only as an event.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -19,19 +20,22 @@ MEMBERSHIP_CHANGES = frozenset({"member_added", "member_removed", "member_left",
 class Verdict:
     action: Literal["process", "drop", "ignore", "latch"]
     reason: str
+    operator: str | None = None
 
 
-def judge_message(ev: InboundMessage, *, group_id: str, operator_hex: str, latched: bool) -> Verdict:
+def judge_message(ev: InboundMessage, *, group_id: str, operators: Mapping[str, str],
+                  latched: bool) -> Verdict:
     if ev.group_id_hex.lower() != group_id:
         return Verdict("drop", "message from another group")
     sender = ev.message.sender
     if sender.is_self:
         return Verdict("ignore", "admind's own message")
-    if sender.account_id_hex.lower() != operator_hex:
-        return Verdict("drop", "sender is not the operator")
-    if latched:
-        return Verdict("drop", "admind is latched; run `admind rearm` on the host")
-    return Verdict("process", "operator message")
+    name = operators.get(sender.account_id_hex.lower())
+    if name is None:
+        return Verdict("drop", "sender is not an operator")
+    if latched:     # an authenticated operator: the message is still audited in full, under their name
+        return Verdict("drop", "admind is latched; run `admind rearm` on the host", name)
+    return Verdict("process", "operator message", name)
 
 
 def judge_group_change(ev: GroupStateChanged, *, group_id: str) -> Verdict:
@@ -42,7 +46,7 @@ def judge_group_change(ev: GroupStateChanged, *, group_id: str) -> Verdict:
     return Verdict("ignore", f"group change {ev.change}")
 
 
-def judge_member_count(count: int) -> Verdict:
-    if count == 2:
-        return Verdict("process", "two members")
-    return Verdict("latch", f"group has {count} members, not 2")
+def judge_member_count(count: int, expected: int) -> Verdict:
+    if count == expected:
+        return Verdict("process", f"{count} members, as expected")
+    return Verdict("latch", f"group has {count} members, expected {expected}")

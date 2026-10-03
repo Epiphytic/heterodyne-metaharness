@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
-from fakes.settings import make_settings
+from fakes.settings import OPERATOR_HEX, make_settings
 
 from heterodyne.admind import cli, unit
 from heterodyne.admind.audit import Audit
@@ -128,7 +128,9 @@ def test_init_creates_identity_and_group_once(tmp_path: Path, capsys: pytest.Cap
     assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 0
     assert store.get("group_id_hex") == "b2" * 32 and store.get("account_id_hex") == ACCOUNT
     out = capsys.readouterr().out
-    assert "Accept the invite" in out and s.operator_npub not in out
+    assert "accepts the invite" in out and all(o.npub not in out for o in s.operators)
+    assert store.get("expected_members") == "2"
+    assert store.get("group_operators") == f'["{OPERATOR_HEX}"]'
     assert "bootstrap" in log.read_text()
     assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 1
 

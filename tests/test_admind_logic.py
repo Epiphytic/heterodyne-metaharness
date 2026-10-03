@@ -19,16 +19,16 @@ def msg(sender: str = OP, *, is_self: bool = False, group: str = GROUP, text: st
 
 
 def test_guard_accepts_only_the_operator_in_the_group() -> None:
-    assert guard.judge_message(msg(), group_id=GROUP, operator_hex=OP, latched=False).action == "process"
+    assert guard.judge_message(msg(), group_id=GROUP, operators={OP: "op"}, latched=False).action == "process"
     upper = msg(OP.upper(), group=GROUP.upper())
-    assert guard.judge_message(upper, group_id=GROUP, operator_hex=OP, latched=False).action == "process"
-    stranger = guard.judge_message(msg("e5" * 32), group_id=GROUP, operator_hex=OP, latched=False)
+    assert guard.judge_message(upper, group_id=GROUP, operators={OP: "op"}, latched=False).action == "process"
+    stranger = guard.judge_message(msg("e5" * 32), group_id=GROUP, operators={OP: "op"}, latched=False)
     assert stranger.action == "drop"
-    assert guard.judge_message(msg(group="f6" * 32), group_id=GROUP, operator_hex=OP,
+    assert guard.judge_message(msg(group="f6" * 32), group_id=GROUP, operators={OP: "op"},
                                latched=False).action == "drop"
-    assert guard.judge_message(msg(is_self=True), group_id=GROUP, operator_hex=OP,
+    assert guard.judge_message(msg(is_self=True), group_id=GROUP, operators={OP: "op"},
                                latched=False).action == "ignore"
-    latched = guard.judge_message(msg(), group_id=GROUP, operator_hex=OP, latched=True)
+    latched = guard.judge_message(msg(), group_id=GROUP, operators={OP: "op"}, latched=True)
     assert latched.action == "drop" and "latched" in latched.reason
 
 
@@ -47,7 +47,7 @@ def test_other_group_changes_are_ignored() -> None:
 
 @pytest.mark.parametrize(("count", "action"), [(1, "latch"), (2, "process"), (3, "latch")])
 def test_member_count(count: int, action: str) -> None:
-    assert guard.judge_member_count(count).action == action
+    assert guard.judge_member_count(count, 2).action == action
 
 
 @given(st.text(), st.integers(min_value=1, max_value=50))

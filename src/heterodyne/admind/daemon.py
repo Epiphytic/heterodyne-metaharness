@@ -14,10 +14,11 @@ import asyncio
 import contextlib
 import contextvars
 import hmac
+import json
 import os
 import re
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
 from heterodyne.admind.redact import redact
-from heterodyne.admind.settings import AdmindSettings
+from heterodyne.admind.settings import AdmindSettings, Operator
 from heterodyne.admind.store import Store, now
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -131,8 +132,12 @@ async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: A
 
 class Admind:
     def __init__(self, settings: AdmindSettings, client: ControlClient, store: Store, audit: Audit,
-                 agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str) -> None:
+                 agent: AdminAgent, runner: commands.CommandRunner, account: str, group: str,
+                 load_operators: Callable[[], tuple[Operator, ...]] | None = None) -> None:
         self.s = settings
+        self.load_operators = load_operators or (lambda: settings.operators)
+        self.policy_operators = settings.operators
+        self.operators: dict[str, str] = {}     # set by run() from group_operators (B21)
         self.client = client
         self.store = store
         self.audit = audit
@@ -235,6 +240,20 @@ class Admind:
             self.ready.clear()
         return self.ready.is_set()
 
+    def confirmed_operators(self) -> set[str] | None:
+        """The keys admind has confirmed are in the group; None before the plan-2 migration."""
+        raw = self.store.get("group_operators")
+        return None if raw is None else {str(k) for k in json.loads(raw)}
+
+    def authorise(self, confirmed: Iterable[str]) -> None:
+        """Who may command admind: the policy operators whose key is confirmed in the group."""
+        keys = set(confirmed)
+        self.operators = {o.hex: o.name for o in self.policy_operators if o.hex in keys}
+
+    def expected_members(self) -> int:
+        """The trusted member count (B3). Absent only before the startup migration has run."""
+        return int(self.store.get("expected_members") or "2")
+
     def latched(self) -> bool:
         return self.store.get("latched") is not None
 
@@ -293,6 +312,21 @@ class Admind:
                 self.audit_quietly("recover", message_id=mid, action="answered-restarted")
 
     async def run(self) -> None:
+        if self.store.get("expected_members") is None:     # a plan-2 group: always two members (B3)
+            self.store.set("expected_members", "2")
+            self.audit.write("guard", action="migrated", expected_members=2)
+        confirmed: set[str] | None = self.confirmed_operators()
+        if confirmed is None:          # a plan-2 database (B21)
+            if len(self.policy_operators) == 1:     # plan 2 allowed exactly one operator, so it is that one
+                confirmed = {self.policy_operators[0].hex}
+                self.store.set("group_operators", json.dumps(sorted(confirmed)))
+                self.audit.write("guard", action="migrated-operators", operators=1)
+            else:
+                confirmed = set()
+                self.latch("admind does not know which operators are in the group (upgraded with several "
+                           "operators in policy.toml); make policy.toml's operators match the group's, then "
+                           "run `admind rearm` on the host")
+        self.authorise(confirmed)
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
@@ -414,7 +448,7 @@ class Admind:
             self.group_ok = False
             self.audit.write("guard", action="group-check-failed", code=exc.code)   # never the peer's detail
             return False
-        verdict = guard.judge_member_count(info.member_count)
+        verdict = guard.judge_member_count(info.member_count, self.expected_members())
         if verdict.action == "latch":
             self.group_ok = False
             self.latch(verdict.reason)
@@ -493,25 +527,31 @@ class Admind:
                 self.audit.write("handler", action="failed", error=type(exc).__name__)
 
     async def on_message(self, ev: InboundMessage) -> None:
-        verdict = guard.judge_message(ev, group_id=self.group, operator_hex=self.s.operator_hex,
+        verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators,
                                       latched=self.latched())
         mid = ev.message.message_id_hex.lower()
         if verdict.action == "ignore":
             return
         if verdict.action == "drop":
+            if verdict.operator is not None:    # an operator, while latched: logged in full, never acted on
+                self.audit.write("drop", operator=verdict.operator, message_id=mid, reason=verdict.reason,
+                                 text=own_text(ev.message.text))
+                return
             # The sender is peer-supplied: a short prefix correlates without recording an identifier,
             # and the text, which a stranger controls, is not recorded at all.
             self.audit.write("drop", sender_prefix=ev.message.sender.account_id_hex[:8],
                              reason=verdict.reason, text_chars=len(ev.message.text))
             return
         if not MESSAGE_ID.fullmatch(mid):
-            self.audit.write("drop", reason="malformed message id")
+            self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
+                             text=own_text(ev.message.text))
             return
         if not self.store.claim_inbound(mid):
-            self.audit.write("drop", message_id=mid, reason="replayed message id")
+            self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
+                             text=own_text(ev.message.text))
             return
         text = ev.message.text
-        self.audit.write("inbound", message_id=mid, text=own_text(text))
+        self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
         if not await self.check_group() or not self.authorised():   # the latch may have come meanwhile
             self.deny(mid, "message")
             return

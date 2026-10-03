@@ -54,13 +54,13 @@ class Services:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, settings_overrides: dict[str, Any] | None = None) -> None:
         wrapper = tmp_path / "claude"
         wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_CLAUDE} \"$@\"\n")
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
         self.log = tmp_path / "claude.log"
         os.environ["FAKE_CLAUDE_LOG"] = str(self.log)
-        self.settings = make_settings(tmp_path, adapter_binary=str(wrapper))
+        self.settings = make_settings(tmp_path, adapter_binary=str(wrapper), **(settings_overrides or {}))
         self.store = Store(self.settings.state_dir / "admind.db")
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
@@ -102,8 +102,9 @@ def drop_tmux(h: Harness) -> None:
 
 
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
-             before: Callable[[Harness], Any] | None = None) -> Harness:
-    h = Harness(tmp_path)
+             before: Callable[[Harness], Any] | None = None,
+             settings_overrides: dict[str, Any] | None = None) -> Harness:
+    h = Harness(tmp_path, settings_overrides)
     if before:
         before(h)
 
@@ -209,7 +210,7 @@ def test_non_operator_dropped_silently_and_commands_answered(tmp_path: Path) -> 
         await h.until(lambda: any("control characters" in t for t in h.texts()))
         assert not any("let me in" in t for t in h.texts())
     h = run_with(tmp_path, scenario)
-    assert "sender is not the operator" in (h.settings.state_dir / "audit.jsonl").read_text()
+    assert "sender is not an operator" in (h.settings.state_dir / "audit.jsonl").read_text()
 
 
 @needs_tmux
@@ -590,7 +591,7 @@ def test_audit_holds_no_peer_text_agent_text_or_account_identifiers(tmp_path: Pa
         await h.until(lambda: any("fake.service: active" in t for t in h.texts()))
     h = run_with(tmp_path, scenario)
     audit = audit_text(h)
-    assert "sender is not the operator" in audit
+    assert "sender is not an operator" in audit
     for banned in (STRANGER, stranger_npub, token, OPERATOR_HEX, hex_to_npub(OPERATOR_HEX), ACCOUNT,
                    "b2" * 32, "let me in", "echo: "):
         assert banned not in audit, banned[:12]
