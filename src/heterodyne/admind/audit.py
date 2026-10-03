@@ -18,8 +18,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence, Set
 from datetime import date, datetime, time
 from decimal import Decimal
-from enum import Enum
-from pathlib import Path, PurePath
+from pathlib import Path, PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
 from typing import Any, cast
 from uuid import UUID
 
@@ -38,8 +37,12 @@ def ref_id(value: str) -> str:
 
 
 MAX_DEPTH = 64
-# Types whose str() is plain text, never an escaped rendering of a string they hold.
-_PLAIN = (PurePath, Enum, datetime, date, time, UUID, Decimal)
+# The exact stdlib classes whose str() is plain text, never an escaped rendering of a string they hold.
+# Matched by `type()`, not `isinstance`: a subclass may override __str__.
+_PLAIN = frozenset(
+    {PurePosixPath, PureWindowsPath, PosixPath, WindowsPath, datetime, date, time, UUID, Decimal}
+)
+_SCALARS = frozenset({bool, int, float})
 
 
 def clean(value: object, field: str | None = None) -> object:
@@ -49,7 +52,7 @@ def clean(value: object, field: str | None = None) -> object:
 
 
 def _clean(value: object, field: str | None, active: set[int], depth: int) -> object:
-    if value is None or isinstance(value, bool | int | float):
+    if value is None or type(value) in _SCALARS:
         return value
     if isinstance(value, str):
         if field in ID_FIELDS:
@@ -57,6 +60,10 @@ def _clean(value: object, field: str | None, active: set[int], depth: int) -> ob
         return redact(value)
     if isinstance(value, bytes | bytearray | memoryview):
         return redact(_text(cast(bytes, value)))
+    if isinstance(value, int):    # a subclass (IntEnum, say) may override __str__: keep only the number
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
     if isinstance(value, Mapping | Set | Sequence | deque):
         node = cast(object, value)
         ident = id(node)
@@ -69,17 +76,31 @@ def _clean(value: object, field: str | None, active: set[int], depth: int) -> ob
             return _container(node, field, active, depth + 1)
         finally:
             active.discard(ident)
+    name = _type_name(value)
     if isinstance(value, BaseException):
-        return {"type": type(value).__name__, "args": _clean(value.args, field, active, depth + 1)}
-    text = str(value)
-    if isinstance(value, _PLAIN):
+        return {"type": name, "args": _clean(value.args, field, active, depth + 1)}
+    try:
+        text = str(value)
+    except Exception:  # noqa: BLE001 - an object's own __str__ is unknown code; the audit must still write
+        return f"<{name}: unprintable>"
+    if type(value) in _PLAIN:
         return redact(text)
     # An object's own __str__ is unknown code. One that escapes a control character (as repr does) turns
     # "\n" into a letter and hides where a token starts, so a backslash means the text is withheld, not
-    # redacted. A backslash-free str() has no such escape.
+    # redacted. A backslash-free str() has no such escape. This covers subclasses of the plain types and
+    # Enum members too: their default str() has no backslash.
     if "\\" in text:
-        return f"<{type(value).__name__}: withheld>"
+        return f"<{name}: withheld>"
     return redact(text)
+
+
+def _type_name(value: object) -> str:
+    """A type's name as it may be written. `type()` can build a name holding a token or a control character,
+    so it is redacted, and one that still holds a backslash or a control character is replaced."""
+    name = redact(type(value).__name__)
+    if "\\" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return "object"
+    return name
 
 
 def _container(value: object, field: str | None, active: set[int], depth: int) -> object:
@@ -99,7 +120,7 @@ def _key(key: object, active: set[int], depth: int) -> str:
     """A dict key as it may be written. Scalar keys keep their `str()` spelling; others are cleaned first,
     and a compound key becomes JSON of its cleaned parts, which is safe because every string in it is
     already redacted."""
-    if key is None or isinstance(key, bool | int | float):
+    if key is None or type(key) in _SCALARS:
         return str(key)
     cleaned = _clean(key, None, active, depth)
     if isinstance(cleaned, str):

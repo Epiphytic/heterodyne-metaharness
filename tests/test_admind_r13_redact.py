@@ -3,7 +3,10 @@ import json
 import re
 from collections import UserDict, deque
 from collections.abc import Callable, Iterator, Mapping
-from pathlib import Path
+from datetime import date
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -304,3 +307,73 @@ def test_cycles_and_depth_are_bounded(tmp_path: Path) -> None:
 
 def test_scalar_keys_keep_their_spelling() -> None:
     assert clean({None: 1, True: 2, 3: 4, 1.5: 5}) == {"None": 1, "True": 2, "3": 4, "1.5": 5}
+
+
+class _Hex(Enum):
+    A = 1
+
+
+def _escaping(base: type, secret: str, *args: Any) -> object:
+    """A subclass of `base` whose __str__ escapes the secret, as repr does."""
+    return type("Sub", (base,), {"__str__": lambda self: repr(secret)})(*args)
+
+
+def _telling(base: type, *args: Any) -> object:
+    """A subclass of `base` whose __str__ returns a bare token."""
+    return type("Sub", (base,), {"__str__": lambda self: TOKEN})(*args)
+
+
+def _enum_sub(secret: str) -> object:
+    sub = Enum("Sub", {"A": 1})
+    sub.__str__ = lambda self: repr(secret)    # type: ignore[method-assign]
+    return sub.A    # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("lead", ["\n", "\t"])
+@pytest.mark.parametrize("make", [
+    lambda s: _escaping(Decimal, s, "1.5"),
+    lambda s: _escaping(PurePosixPath, s, "/a"),
+    lambda s: _escaping(date, s, 2026, 10, 3),
+    lambda s: _enum_sub(s),
+    lambda s: type(TOKEN, (Exception,), {})("safe"),
+    lambda s: type(TOKEN, (), {"__str__": lambda self: repr(s)})(),
+    lambda s: type(s, (), {"__str__": lambda self: repr(s)})(),
+    lambda s: type(s, (Exception,), {})("safe"),
+])
+@pytest.mark.parametrize("as_key", [False, True])
+def test_audit_subclasses_and_type_names_cannot_smuggle_a_token(
+    tmp_path: Path, lead: str, make: Callable[[str], object], as_key: bool
+) -> None:
+    obj = make(lead + TOKEN)
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write("probe", value={obj: "v"} if as_key else obj)
+    raw = path.read_text()
+    assert TOKEN not in raw and TOKEN[4:] not in raw
+
+
+@pytest.mark.parametrize("as_key", [False, True])
+def test_numeric_subclasses_with_a_telling_str_are_numbers(tmp_path: Path, as_key: bool) -> None:
+    for obj in (_telling(int, 7), _telling(float, 1.5)):
+        path = tmp_path / "audit.jsonl"
+        Audit(path).write("probe", value={obj: "v"} if as_key else obj)
+        assert TOKEN not in path.read_text()
+    assert clean(_telling(int, 7)) == 7 and type(clean(_telling(int, 7))) is int
+    assert clean(_telling(float, 1.5)) == 1.5 and type(clean(_telling(float, 1.5))) is float
+
+
+def test_an_unprintable_object_does_not_stop_the_audit(tmp_path: Path) -> None:
+    def boom(self: object) -> str:
+        raise RuntimeError("no")
+
+    obj = type("Odd", (), {"__str__": boom})()
+    assert clean(obj) == "<Odd: unprintable>"
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write("probe", value=obj, keyed={obj: 1})
+    assert "<Odd: unprintable>" in path.read_text()
+
+
+def test_type_names_are_redacted_or_replaced() -> None:
+    assert TOKEN not in str(clean(type(TOKEN, (), {"__str__": lambda self: "a\\b"})()))
+    assert clean(type("\n" + TOKEN, (), {"__str__": lambda self: "a\\b"})()) == "<object: withheld>"
+    assert clean(type("Fine", (Exception,), {})("x")) == {"type": "Fine", "args": ["x"]}
+    assert clean(_Hex.A) == "_Hex.A"    # compatibility pin: a plain Enum keeps Cls.NAME
