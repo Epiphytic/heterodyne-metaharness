@@ -83,13 +83,15 @@ Each row is a place this plan does something other than ADR r13 §8 says. Your O
 | 13 (B10) | Not covered. | A batch whose delivery fails reopens with a new 60-second window and is sent again under a new key, until delivered; replies affected meanwhile join it. | Its replies must not be stranded. | Give up after the retries and only audit it. |
 | 14 (B10) | A batch closes 60 seconds after its first reply. | No reply joins after 60 s; the batch is posted by a 1-second poll, so up to about 1 s late. | A poll survives restarts simply. | A timer per batch (more state across restarts). |
 | 15 (B9) | The backstop drops nothing `!details` can't return. | A reply that can't be read from the transcript (timeout, unknown span, or a file that is shorter than the span, ends inside a record or holds a corrupt record) goes to the backstop as a fixed notice; its text stays only in the transcript on the host. A file replaced by another valid transcript of that session is not detected. | It is better than silence or a partial reply. | Hold dispatch until the reply can be read. |
-| 16 (B13) | `!details full` has no cap. | One transcript record over 64 MiB is named with its size; images are shown as type, size and digest; structured results as sorted JSON, with keys that redact alike numbered `#2`, `#3`. | Memory bound; a chat can't show images. | Stream-parse huge records; send images as base64 text. |
+| 16 (B13) | `!details full` has no cap. | A transcript record over 64 MiB makes the turn unreadable: `!details full` says so, and a Stop without its own text gets the fixed unreadable notice (row 15). Images are shown as type, size and digest; structured results as sorted JSON, with keys that redact alike numbered `#2`, `#3`. | Memory bound; without parsing the record the turn's boundaries can't be trusted; a chat can't show images. | Stream-parse huge records; send images as base64 text. |
 | 17 (B19, B20) | `!details full` sends each turn's tool calls. | It says "not available" when the turn's span is unknown, the transcript is busy or slow (30 s), or a record is corrupt; there is no automatic retry. | It must never show another turn's tool calls. | Queue a retry and post it when it succeeds. |
 | 18 (B16) | Audit values are redacted to markers. | Message IDs in ID fields become `id:` plus 12 hex digits of their SHA-256. | Records can still be matched up. | Plain markers; records can't be matched. |
 | 19 (B17) | Not covered. | After the upgrade, re-chunked pending replies may repeat text already received; a continuation that can't be checked is replaced whole. | Accuracy over deduplication; fail closed. | Drop plan-2 pending replies instead. |
 | 20 (deferral) | If wn-agent can't add or remove members, operators change only by `admind init` of a new group. | Task 1 stops and escalates if so; no task builds the init-only path. | Task 1 is expected to confirm add and remove work. | A plan revision adds the init-only path if Task 1 finds it needed. |
 | 21 (deferral) | The summary quotes every question and error verbatim. | The prompt asks for it; tests check the prompt wording, not the summaries. The Task 1 spike gives some real evidence. | A model's output can't be guaranteed by a unit test. | Add a check: a summary that lacks a reply line ending in `?` or starting `Error` goes to the backstop. |
-| 22 (plan 2, D3) | Operator text goes byte-for-byte into the admin session. | A message holding control characters is refused with a fixed reply (kept from plan 2). | They can break out of bracketed paste and inject keystrokes. | Escape them visibly and send the escaped text. |
+| 22 (plan 2, D3) | Operator text goes byte-for-byte into the admin session. | A message holding control characters other than newline and tab is refused with a fixed reply (kept from plan 2). | They can break out of bracketed paste and inject keystrokes. | Pass them through raw and accept the bracketed-paste risk. |
+| 23 (Task 2, kept from plan 2) | Every emitted text gets the same marker redaction; the rest is kept. | An alert holding a secret or identifier is replaced whole by a fixed "withheld" notice; a long alert is cut to one message ("… see the alert file"). The common redactor then runs over the result. | The alert file on the host keeps it whole; alert text is machine-written and short. | Redact the alert with markers instead and send it in several messages. |
+| 24 (Task 2, kept from plan 2) | As row 23. | Command error replies and `services` replies that show a value holding a secret replace that whole value (`show`), then get the common redaction. | They echo config values, where the whole value is the secret. | Redact them with markers, keeping the rest of the value. |
 
 ### Explicit deferrals (Codex r5 finding 6)
 
@@ -113,7 +115,7 @@ Each row is a place this plan does something other than ADR r13 §8 says. Your O
 | B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. Replies join in the order they reach the backstop (`turns.batch_seq`, written in the transaction that batches them), not the order their turns began. A reply joins only a batch whose 60-second window is still running at that moment; after that it opens the next batch, even if `batch_loop` hasn't posted the old one yet. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8); "closes 60 seconds later. Replies affected meanwhile join it in order" (Codex r5 findings 3, 4). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A complete record in the span that is not a JSON object fails the read like a truncated one (Codex r5 finding 2). A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; keys that redact to the same marker are kept apart as `<marker> #2`, `#3`… (`redact.unique_key`, also used by the audit), so no entry is lost; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A complete record in the span that is not a JSON object fails the read like a truncated one (Codex r5 finding 2). A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; keys that redact to the same marker are kept apart as `<marker> #2`, `#3`… (`redact.unique_key`, also used by the audit), so no entry is lost; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which fails the read (`hook.RecordTooLarge`): the reply is `EXTRACT_FAILED` and `!details full` says the turn holds an oversized record (`hook.TOO_LARGE`), since a skipped record could be a prompt that ends the turn (Codex r7 finding 1). | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
 | B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. A retry's backoff is a timer for that one row (`Admind._backoff`, keyed by row), not a sleep in the outbox loop: a lane-1 message queued during a lane-2 row's backoff is sent at once (Codex r5 finding 5). A lane-1 row in backoff still holds the lane-1 rows behind it, which keeps lane 1 in order. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
 | B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. Dict keys that redact alike are numbered (`redact.unique_key`), so no value is lost. A message from an authenticated operator that is dropped (latched, replayed, or a malformed ID) is still audited whole under the operator's name; a stranger's text never is (Codex r6 finding 1). | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
@@ -569,7 +571,7 @@ In `Audit.write`, the record becomes `record = {"ts": now(), "kind": kind, **{k:
   (`lane` is stored from Task 4; until then `enqueue` ignores it, so here call `self.store.enqueue(key, redact(text), reply_to)` and keep the parameter.)
   - `reply` chunks `redact(text)` instead of `text`.
   - In `on_stop`, `parts = chunk.split(redact(text), self.s.chunk_chars)`.
-  - In `relay_alert`, `text = redact(alerts.render(name, alert, self.s.chunk_chars))`.
+  - In `relay_alert`, `text = redact(alerts.render(name, alert, self.s.chunk_chars))`. `alerts.render` keeps plan 2's whole-alert withholding and truncation, and `show` keeps its whole-value replacement; both are listed deviations (rows 23 and 24), so the common redactor is an extra layer here, not the only one.
   - Update the module docstring's "Output safety" list. The fourth and fifth bullets become:
     - "an operator's own text, audited whole after `redact`; every audit field is redacted centrally";
     - "the admin agent's reply, a summary, a batch, `!details` or the `!tail` screen, relayed to the operators in chat after `redact`, never written to the audit log".
@@ -1988,7 +1990,7 @@ async def request(path: Path, req: CtlRequest, timeout: float = 300.0) -> CtlRep
         return ctl.CtlReply(result, redact(message))
 ```
 
-In `run()`, after `await server.start()`. The control server may start before the subscription is observing: `membership_refusal()` (Task 5) refuses until it is, and `rearm` needs only the count:
+In `run()`, after `await server.start()`. The control server may start before the subscription is observing: `membership_refusal()` (Task 5) refuses until it is, and `rearm` needs the count and an observing subscription (Task 5 refuses a rearm while events aren't being read):
 
 ```python
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
@@ -2431,7 +2433,7 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
     - `open_batch(at: float, seconds: float) -> int`, `due_batches(at: float, seconds: float) -> list[tuple[int, int]]` (batch and attempt), `batch_turns(batch_id) -> list[TurnRow]`, `close_batch(batch_id)` and `reopen_batch(batch_id, at: float)`;
     - `record_post(key, kind, turn_id, batch_id)` and `post_record(key) -> PostRow | None`;
     - `details_target(message_id: str | None) -> PostRow | None`.
-  - Hook module: `transcript_size(ev: HookEvent) -> int | None`; `READ_WINDOW`, `MAX_RECORD`, `_lines`, `_is_prompt`, `_has_result`, `turn_records(path, start, end)` (Task 9 uses them too); and `reply_text(ev, start, end) -> str | None`, which replaces the tail-reading fallback (`last_assistant_text`, `_read_tail` and `MAX_TRANSCRIPT` are deleted).
+  - Hook module: `transcript_size(ev: HookEvent) -> int | None`; `READ_WINDOW`, `MAX_RECORD`, `RecordTooLarge(OSError)`, `_lines`, `_is_prompt`, `_has_result`, `turn_records(path, start, end)` (Task 9 uses them too); and `reply_text(ev, start, end) -> str | None`, which replaces the tail-reading fallback (`last_assistant_text`, `_read_tail` and `MAX_TRANSCRIPT` are deleted).
   - Daemon:
     - constants `OFFSET_SECONDS = 2.0`, `SUMMARY_POLL = 5.0` and `EXTRACT_FAILED`;
     - `bounded_read(timeout, fn, *args)`, which replaces the `_extraction` slot with `_reader` (B20);
@@ -2478,7 +2480,7 @@ git commit -m "feat(admind): summarizer runner and backstop renderer (ADR r13 §
 16. **Fallback reads the whole turn (Codex r3 finding 2):** a `UserPromptSubmit` for `<tmp>/<sid>.jsonl`, then the test appends `said("Which unit, gateway or relay?")`, a tool call and result, and `said("Checked both.")`, then a current Stop without `last_assistant_message`. The reply (summarized or verbatim, per its size) and its `!details` record hold both texts in order.
 17. **Arrival order across overlapping failures (Codex r5 finding 3):** `h.daemon._sleep` is a no-op coroutine, `batch_seconds = 2`, `summary_timeout = 5`, and the summarizer is `sleep 1; exit 1`. Send a long prompt A; once `h.store.turns_with_status("summarizing")` holds its turn, set `h.fake.fail_sends = MAX_SEND_ATTEMPTS` and send a short prompt B with `h.fake.message_event(...)` (not `h.say`, which waits for a delivered reply), whose verbatim reply fails delivery and joins the backstop first. A's summary then fails and joins second. The batch shows B's origin and reply before A's, and `!details` on the batch returns them in that order.
 
-Unit tests of the fallback, in the same file (`append`, `prompt`, `tool`, `result` and `said` are the same small JSONL helpers Task 9's tests define; define them in this file too):
+Unit tests of the fallback, in the same file (`append`, `prompt`, `tool`, `result` and `said` are the same small JSONL helpers Task 9's tests define; define them in this file too; the file imports `pytest`, `from heterodyne.admind import hook` and `from heterodyne.admind.hook import HookEvent, reply_text`):
 
 ```python
 def stop(path: Path, sid: str = "s") -> HookEvent:
@@ -2522,6 +2524,18 @@ def test_a_changed_transcript_is_a_failure(tmp_path: Path) -> None:
     with t.open("a") as fh:
         fh.write('{"type": "assistant", "message": {"content": [{"type": "text", "text": "par')
     assert reply_text(stop(t), 0, t.stat().st_size) is None       # the span ends inside a record
+
+
+def test_an_oversized_record_is_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Codex r7 finding 1: an unparsed record may be this turn's answer or the next turn's prompt.
+    monkeypatch.setattr(hook, "MAX_RECORD", 1000)
+    big = "x" * 5000
+    for i, records in enumerate(([prompt("go"), said(big), prompt("next"), said("next answer")],
+                                 [prompt("go"), said("mine"), prompt(big), said("next answer")])):
+        (tmp_path / str(i)).mkdir()
+        t = tmp_path / str(i) / "s.jsonl"
+        end = append(t, records)
+        assert reply_text(stop(t), 0, end) is None
 
 
 def test_a_corrupt_record_is_a_failure(tmp_path: Path) -> None:
@@ -2773,15 +2787,22 @@ The turn's records, shared by the reply fallback here and by `!details full` (Ta
 
 ```python
 READ_WINDOW = 1024 * 1024               # a turn's bytes are read this much at a time
-MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record is named, not parsed: memory (plan 2b B13)
+MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record fails the read: memory (plan 2b B13)
 
 
-def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
+class RecordTooLarge(OSError):
+    """A record in the turn's span is over MAX_RECORD. It can't be parsed, so nobody can tell whether it is
+    metadata, an answer or the next turn's prompt; reading on could mix in another turn's content (Codex
+    r7 finding 1), so the whole read fails."""
+
+
+def _lines(fd: int, start: int, end: int) -> Iterator[bytes]:
     """The complete lines in bytes [start, end), read READ_WINDOW at a time. A line longer than MAX_RECORD
-    is not kept: its size in bytes is yielded instead. The span was measured at the turn's edges, so it
-    ends on a newline: a file shorter than `end`, or a last line without its newline, means the transcript
-    changed under us, and raises OSError (the caller reports a failed read, never a partial one)."""
-    pos, buf, skipped = start, bytearray(), 0
+    raises RecordTooLarge as soon as it passes the limit, so memory stays bounded. The span was measured at
+    the turn's edges, so it ends on a newline: a file shorter than `end`, or a last line without its
+    newline, means the transcript changed under us, and raises OSError (the caller reports a failed read,
+    never a partial one)."""
+    pos, buf = start, bytearray()
     while pos < end:
         data = os.pread(fd, min(READ_WINDOW, end - pos), pos)
         if not data:
@@ -2790,19 +2811,13 @@ def _lines(fd: int, start: int, end: int) -> Iterator[bytes | int]:
         while data:
             nl = data.find(b"\n")
             piece, data = (data, b"") if nl < 0 else (data[:nl], data[nl + 1:])
-            if skipped:
-                skipped += len(piece)
-            else:
-                buf += piece
-                if len(buf) > MAX_RECORD:
-                    skipped, buf = len(buf), bytearray()
+            buf += piece
+            if len(buf) > MAX_RECORD:
+                raise RecordTooLarge(f"a transcript record is over {MAX_RECORD} bytes")
             if nl >= 0:
-                if skipped:
-                    yield skipped
-                else:
-                    yield bytes(buf)
-                skipped, buf = 0, bytearray()
-    if buf or skipped:
+                yield bytes(buf)
+                buf = bytearray()
+    if buf:
         raise OSError("the turn's span ends inside a record")
 
 
@@ -2821,13 +2836,12 @@ def _has_result(record: dict[str, Any]) -> bool:
             and any(b.get("type") == "tool_result" for b in blocks))
 
 
-def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | int]:
+def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
     """The content records of one turn: transcript bytes [start, end), from its UserPromptSubmit to its
     Stop (plan 2b B13, B19). The turn begins at its first content (an assistant record or a tool result);
     a real prompt before that is the turn's own and is skipped, one after it is the next turn's and ends
-    this one. Anything else is metadata (such as `queue-operation`) and skipped. A record over MAX_RECORD
-    is yielded as its size in bytes and never begins the turn: it may be metadata. Raises OSError if the
-    file can't be read, or if a complete record in the span is not a JSON object: a corrupt record could
+    this one. Anything else is metadata (such as `queue-operation`) and skipped. Raises RecordTooLarge for
+    a record over MAX_RECORD, and OSError if the file can't be read, or if a complete record in the span is not a JSON object: a corrupt record could
     be the error or question the operator needs, so the read fails rather than skip it (Codex r5
     finding 2). Never follows a symlink or blocks on a FIFO."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -2836,9 +2850,6 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | 
             raise OSError("not a regular file")
         begun = False
         for item in _lines(fd, start, end):
-            if isinstance(item, int):
-                yield item
-                continue
             try:
                 record: Any = json.loads(item)
             except ValueError:          # also UnicodeDecodeError
@@ -2860,7 +2871,8 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any] | 
 def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
     """A current Stop's reply (B9, B19). The event's own text if it has one; otherwise every assistant text
     of the turn's span, in order, so an early question or error is kept. None when it can't be read: no
-    span, a path that is not this session's transcript, or a read error. "" is a turn that said nothing."""
+    span, a path that is not this session's transcript, a read error, or a record too large to read
+    (RecordTooLarge is an OSError). "" is a turn that said nothing."""
     if ev.last_assistant_message:
         return ev.last_assistant_message
     if start is None or end is None or not ev.transcript_path:
@@ -2871,9 +2883,6 @@ def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
     parts: list[str] = []
     try:
         for rec in turn_records(path, start, end):
-            if isinstance(rec, int):
-                parts.append(f"(a transcript record of {rec} bytes was skipped: too large to read)")
-                continue
             blocks = _blocks(rec)
             if rec.get("type") == "assistant" and isinstance(blocks, list):
                 parts.extend(b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
@@ -3157,7 +3166,8 @@ Review against B9, B10, B12, B19 and B20.
 - Produces:
   - `commands.Command("details", arg="full" | None)`;
   - `hook.turn_tool_calls(path: Path, start: int, end: int) -> str`;
-  - it consumes Task 8's `hook.turn_records`, `READ_WINDOW` and `MAX_RECORD` (64 MiB; nothing shown is capped, B13);
+  - `hook.TOO_LARGE`;
+  - it consumes Task 8's `hook.turn_records`, `RecordTooLarge`, `READ_WINDOW` and `MAX_RECORD` (64 MiB; nothing shown is capped, B13);
   - in the daemon: `DETAILS_READ_SECONDS = 30.0`, `DETAILS_BUSY`, `Admind.details(mid, cmd, target)`, `Admind.tool_calls(row)` and the replaceable attribute `details_timeout`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -3260,15 +3270,19 @@ def test_record_larger_than_a_read_window_is_shown_whole(tmp_path: Path) -> None
     assert "◂ " + "r" * (2 * 1024 * 1024) + "\n" in out and "▸ After" in out
 
 
-def test_oversized_metadata_before_the_prompt_does_not_start_the_turn(
+def test_an_oversized_record_makes_the_turn_unreadable(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Codex r3 finding 3.
+    # Codex r3 finding 3, r7 finding 1: an unparsed record could be metadata, an answer or the next
+    # prompt, so no position of one may let another turn's tool calls through.
     monkeypatch.setattr(hook, "MAX_RECORD", 1000)
-    t = tmp_path / "s.jsonl"
-    end = append(t, [{"type": "queue-operation", "content": "q" * 5000}, prompt("mine"), tool("Mine"),
-                     prompt("next"), tool("Next")])
-    out = turn_tool_calls(t, 0, end)
-    assert "▸ Mine" in out and "Next" not in out
+    big = "q" * 5000
+    for i, records in enumerate((
+            [{"type": "queue-operation", "content": big}, prompt("mine"), tool("Mine"), prompt("next"), tool("Next")],
+            [prompt("mine"), tool("Mine", data=big), prompt("next"), tool("Next")],
+            [prompt("mine"), tool("Mine"), prompt(big), tool("Next")])):
+        t = tmp_path / f"{i}.jsonl"
+        end = append(t, records)
+        assert turn_tool_calls(t, 0, end) == hook.TOO_LARGE
 
 
 def test_non_text_results_are_kept_distinct(tmp_path: Path) -> None:
@@ -3317,15 +3331,6 @@ def test_a_corrupt_record_is_unreadable(tmp_path: Path) -> None:
     with t.open("a") as fh:
         fh.write("not json\n")
     assert turn_tool_calls(t, 0, t.stat().st_size) == "(the transcript could not be read)"
-
-
-def test_oversized_record_is_named_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hook, "MAX_RECORD", 1000)
-    t = tmp_path / "s.jsonl"
-    end = append(t, [prompt("go"), result("r" * 5000), tool("After")])
-    out = turn_tool_calls(t, 0, end)
-    assert "a transcript record of" in out and "was skipped" in out and "▸ After" in out
-    assert "rrrr" not in out
 
 
 def test_no_total_cap(tmp_path: Path) -> None:
@@ -3433,16 +3438,19 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
     return []
 
 
+TOO_LARGE = f"(this turn's transcript holds a record over {MAX_RECORD // (1024 * 1024)} MiB; its tool calls can't be shown)"
+
+
 def turn_tool_calls(path: Path, start: int, end: int) -> str:
     """The tool calls and results of one turn (plan 2b B13, B19), read with `turn_records` (Task 8).
-    Nothing is shortened: §8 puts no cap on `!details`. A record over MAX_RECORD is named with its size."""
+    Nothing is shortened: §8 puts no cap on `!details`. A record over MAX_RECORD makes the turn unreadable:
+    without parsing it, the turn's end can't be found (B13)."""
     out: list[str] = []
     try:
         for rec in turn_records(path, start, end):
-            if isinstance(rec, int):
-                out.append(f"(a transcript record of {rec} bytes was skipped: too large to read)")
-            else:
-                out.extend(_tool_lines(rec))
+            out.extend(_tool_lines(rec))
+    except RecordTooLarge:
+        return TOO_LARGE
     except OSError:
         return "(the transcript could not be read)"
     return "\n".join(out) if out else "(no tool calls in this turn)"
@@ -3516,7 +3524,7 @@ DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 
   Import `turn_tool_calls` from the hook module (`TurnRow` came with Task 8). The paths stored for a turn passed the same session-name rule when it was recorded.
 
-  Nothing in `!details` or `!details full` is capped (B13); a long answer is simply more lane-2 messages, which never hold up lane 1 (B14). The only exception is a single transcript record over `MAX_RECORD` (64 MiB), named with its size because parsing it would need that much memory at once (flagged to the operator).
+  Nothing in `!details` or `!details full` is capped (B13); a long answer is simply more lane-2 messages, which never hold up lane 1 (B14). The only exception is a turn whose transcript holds a single record over `MAX_RECORD` (64 MiB): parsing it would need that much memory at once, and without parsing it the turn's end can't be found, so the turn's tool calls are reported as unavailable (`TOO_LARGE`; flagged to the operator).
 
 - [ ] **Step 6: Run the gate. Then commit and review.**
 
