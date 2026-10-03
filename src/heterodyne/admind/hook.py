@@ -302,7 +302,8 @@ def _block_text(block: Any) -> str:
             src = cast(dict[str, Any], source)
             data = str(src.get("data", ""))
             digest = hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-            return f"[image {src.get('media_type', '?')}, {len(data)} base64 characters, sha256 {digest}]"
+            media = _label(src.get("media_type", "?"))
+            return f"[image {media}, {len(data)} base64 characters, sha256 {digest}]"
     return _json(block)
 
 
@@ -325,6 +326,13 @@ def _json(value: Any) -> str:
     return json.dumps(_redacted(value), ensure_ascii=False, sort_keys=True)
 
 
+def _label(value: Any) -> str:
+    """An untrusted field shown inline (a tool's name, an image's media type): a string is redacted, anything
+    else goes through `_json`, never through str/repr/format, where a "\\n" becomes a letter n and defeats
+    the scanner's lookbehind (B1)."""
+    return redact(value) if isinstance(value, str) else _json(value)
+
+
 def _result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -342,7 +350,8 @@ def _tool_lines(record: dict[str, Any]) -> list[str]:
         return [f"◂ {'(error) ' if b.get('is_error') else ''}{_result_text(b.get('content'))}"
                 for b in blocks if b.get("type") == "tool_result"]
     if record.get("type") == "assistant":
-        return [f"▸ {b.get('name')} {_json(b.get('input'))}" for b in blocks if b.get("type") == "tool_use"]
+        return [f"▸ {_label(b.get('name'))} {_json(b.get('input'))}"
+                for b in blocks if b.get("type") == "tool_use"]
     return []
 
 

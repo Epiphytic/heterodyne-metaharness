@@ -33,6 +33,7 @@ from test_admind_r13_replies import (
 from heterodyne.admind import commands, hook, summarize
 from heterodyne.admind.daemon import DETAILS_BUSY, READY_NOTICE
 from heterodyne.admind.hook import turn_tool_calls
+from heterodyne.admind.redact import redact
 from heterodyne.admind.store import Store
 
 SUMMARY = f"short summary\n\n{summarize.FOOTER}"
@@ -244,6 +245,56 @@ def test_a_lone_surrogate_in_a_tool_call_is_replaced_not_raised(tmp_path: Path) 
     out = turn_tool_calls(t, 0, t.stat().st_size)
     out.encode("utf-8")
     assert "▸ Bash" in out and "[image image/png, 1 base64 characters, sha256 " in out
+
+
+def structured(value: str) -> list[Any]:
+    """Untrusted structured values for a field that is shown inline: a dict and a list holding `value`."""
+    return [{"label": value}, [value], {"a": [{"b": value}]}]
+
+
+@pytest.mark.parametrize("sep", ["\n", "\t", "\x01"])
+def test_structured_names_and_media_types_are_redacted_before_they_are_formatted(
+    tmp_path: Path, sep: str
+) -> None:
+    # Codex T9 r1 finding 1: str() of {"label": "\nghp_…"} turns the newline into the letter n, which
+    # defeats the scanner's lookbehind.
+    token = "ghp_" + "A" * 30
+    t = tmp_path / "s.jsonl"
+    records: list[dict[str, Any]] = [prompt("go")]
+    for value in structured(sep + token):
+        records.append(
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": value, "input": {}}]}}
+        )
+        source = {"type": "base64", "media_type": value, "data": "iVBORw0KGgo="}
+        content = [{"type": "image", "source": source}]
+        records.append(
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": content}]}}
+        )
+    end = append(t, records)
+    out = redact(turn_tool_calls(t, 0, end))
+    assert "AAAAAAAAAA" not in out and out.count("<redacted GitHub token>") == 6
+    assert "▸ " in out and "[image " in out
+
+
+def test_non_string_names_are_serialized_not_formatted(tmp_path: Path) -> None:
+    t = tmp_path / "s.jsonl"
+    end = append(
+        t,
+        [
+            prompt("go"),
+            tool("x"),
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": None, "input": {}},
+                        {"type": "tool_use", "name": 7, "input": {}},
+                    ]
+                },
+            },
+        ],
+    )
+    assert "▸ null {}\n▸ 7 {}" in turn_tool_calls(t, 0, end)
 
 
 def test_no_total_cap(tmp_path: Path) -> None:
@@ -606,5 +657,45 @@ def test_details_full_is_refused_if_admind_stops_being_authorised_during_the_rea
         )
         assert details_texts(h, mid) == []
         h.daemon.changing = False
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'))
+
+
+@needs_tmux
+@pytest.mark.parametrize("sep", ["\n", "\t"])
+def test_details_full_never_shows_a_secret_hidden_in_a_structured_name(tmp_path: Path, sep: str) -> None:
+    token = "ghp_" + "B" * 30
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        path = tmp_path / f"{sid}.jsonl"
+        append(path, [prompt("old")])
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
+        await wait_until(lambda: h.store.get("turn_start") is not None)
+        value = {"label": sep + token}
+        source = {"type": "base64", "media_type": value, "data": "iVBORw0KGgo="}
+        append(
+            path,
+            [
+                prompt("go"),
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "tool_use", "name": value, "input": {}}]},
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "content": [{"type": "image", "source": source}]}]
+                    },
+                },
+            ],
+        )
+        await h.daemon.hooks.put(h.event("Stop", sid, str(path), LONG))
+        await summary_delivered(h)
+        mid = await ask(h, "!details full")
+        await wait_until(lambda: delivered(h, mid), 20)
+        whole = "".join(details_texts(h, mid))
+        assert "BBBBBBBBBB" not in whole and whole.count("<redacted GitHub token>") == 2
+        assert not any("BBBBBBBBBB" in t for t in h.texts())
 
     run_with(tmp_path, scenario, configure('echo "short summary"'))
