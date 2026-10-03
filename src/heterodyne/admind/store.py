@@ -429,6 +429,13 @@ class Store:
         return [_turn(r) for r in rows]
 
     @_locked
+    def batch_turn_ids(self, batch_id: int) -> list[int]:
+        """The batch's turns in order, without their replies: fetch each with turn() as it is used."""
+        rows = self.db.execute("SELECT turn_id FROM turns WHERE batch_id = ? ORDER BY batch_seq",
+                               (batch_id,)).fetchall()
+        return [int(r[0]) for r in rows]
+
+    @_locked
     def close_batch(self, batch_id: int) -> None:
         """Its message is queued; delivery is the outbox's job."""
         self.db.execute("UPDATE batches SET status = 'posted' WHERE batch_id = ?", (batch_id,))

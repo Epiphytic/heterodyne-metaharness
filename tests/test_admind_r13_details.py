@@ -1012,3 +1012,86 @@ def test_the_sender_losing_authority_during_the_read_is_noticed(
         assert details_texts(h, mid) == []
 
     run_with(tmp_path, scenario, configure('echo "short summary"'))
+
+
+@needs_tmux
+def test_a_batch_loads_replies_only_up_to_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Codex T9 r2 finding 1: batch_turns() read every reply of the batch before any cap applied.
+    monkeypatch.setattr("heterodyne.admind.daemon.MAX_REPLY", 600)
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        plant_batch(h, tmp_path / f"{sid}.jsonl", sid, 50)
+        loaded: list[int] = []
+        real_turn = h.store.turn
+
+        def turn(turn_id: int) -> Any:
+            loaded.append(turn_id)
+            return real_turn(turn_id)
+
+        def whole_batch(batch_id: int) -> Any:
+            raise AssertionError("every reply of the batch was loaded at once")
+
+        h.store.turn = turn  # type: ignore[method-assign]
+        h.store.batch_turns = whole_batch  # type: ignore[method-assign]
+        mid = await ask(h, "!details", reply_to=BATCH_MESSAGE)
+        await wait_until(lambda: delivered(h, mid), 20)
+        assert details_texts(h, mid)[-1].endswith(hook.TRUNCATED)
+        assert 0 < len(loaded) <= 20  # about 15 replies fill 600 bytes; the other 35 are never read
+
+    run_with(tmp_path, scenario, configure(None))
+
+
+@needs_tmux
+def test_the_parts_published_are_bounded_by_the_row_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex T9 r2 finding 2: a 64 MiB cap at 200 chars was ~335k rows in one statement.
+    monkeypatch.setattr("heterodyne.admind.daemon.MAX_DETAILS_PARTS", 20)
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        path = tmp_path / f"{sid}.jsonl"
+        append(path, [prompt("old")])
+        await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
+        await wait_until(lambda: h.store.get("turn_start") is not None)
+        append(path, [prompt("go"), *[tool(f"T{i}", n="x" * 100) for i in range(400)]])
+        await h.daemon.hooks.put(h.event("Stop", sid, str(path), LONG))
+        await summary_delivered(h)
+        mid = await ask(h, "!details full")
+        await wait_until(lambda: delivered(h, mid), 20)
+        texts = details_texts(h, mid)
+        assert len(texts) <= 20 + 1
+        assert texts[-1].endswith(
+            "(details truncated at 3 KiB)"
+        )  # 20 parts x 200 chars: the limit that applied
+        assert "▸ T399 " not in "".join(texts)
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+@needs_tmux
+def test_one_long_stored_reply_cannot_pass_the_row_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a stored reply is shown whole by the render cap, so the cut after splitting is what bounds the rows
+    monkeypatch.setattr("heterodyne.admind.daemon.MAX_DETAILS_PARTS", 5)
+
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 6000)
+        sid = await summary_delivered(h)
+        mid = await ask(h, "!details", reply_to=sid)
+        await wait_until(lambda: delivered(h, mid), 20)
+        texts = details_texts(h, mid)
+        assert len(texts) == 5 + 1 and texts[-1] == "(details truncated at 1000 bytes)"
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+def test_the_notice_names_the_limit_that_applied() -> None:
+    from heterodyne.admind.daemon import MAX_DETAILS_PARTS, MAX_REPLY, details_notice
+
+    assert details_notice(MAX_REPLY) == hook.TRUNCATED  # the default 4000 chars: 64 MiB governs
+    assert min(MAX_REPLY, MAX_DETAILS_PARTS * 4000) == MAX_REPLY
+    assert details_notice(4_000_000) == "(details truncated at 3 MiB)"
+    assert details_notice(4000) == "(details truncated at 3 KiB)"

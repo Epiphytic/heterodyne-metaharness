@@ -85,6 +85,7 @@ DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 NO_TOOL_CALLS = "(tool calls are not available for this turn)"
 DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
+MAX_DETAILS_PARTS = 20_000     # rows one !details publishes (and discards) in a single statement
 DETAILS_SLICE = 500     # parts staged per turn of the event loop
 EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
                   "for the turn's tool calls, or ask the agent to repeat it.)")
@@ -122,6 +123,14 @@ def reason(exc: BaseException) -> str:
     if isinstance(exc, TmuxError):
         return "a tmux command failed"
     return "internal error"
+
+
+def details_notice(cap: int) -> str:
+    """What `!details` says it stopped at: TRUNCATED for the full 64 MiB, otherwise the smaller limit."""
+    if cap >= MAX_REPLY:
+        return TRUNCATED
+    size = f"{cap} bytes" if cap < 1024 else f"{cap // 1024} KiB" if cap < 1 << 20 else f"{cap >> 20} MiB"
+    return f"(details truncated at {size})"
 
 
 def utf8_size(text: str) -> int:
@@ -991,11 +1000,10 @@ class Admind:
             return
         post = self.store.details_target(target)
         if post is not None and post.turn_id is not None:
-            one = self.store.turn(post.turn_id)
-            rows = [] if one is None else [one]
+            ids = [post.turn_id]
         else:
-            rows = [] if post is None else self.store.batch_turns(post.batch_id or 0)
-        if not rows:
+            ids = [] if post is None else self.store.batch_turn_ids(post.batch_id or 0)
+        if not ids:
             why = ("that message has no details. Reply to a summary or a batch." if target is not None
                    else "there is no delivered summary or batch yet.")
             self.finish(mid, "done", f"!details: {why}", "cmd")
@@ -1012,11 +1020,22 @@ class Admind:
         # is never shown in part: the first that would pass the cap, and everything after it, is replaced
         # by TRUNCATED. A stored reply is shown whole (it is already bounded by MAX_REPLY), so the text can
         # pass the cap by one reply. The cap counts the rendered text before redaction, which can expand it.
-        left_bytes = MAX_REPLY
-        for row in rows:
+        # Also part of that extension: the cap is min(MAX_REPLY, MAX_DETAILS_PARTS * chunk_chars), and the
+        # parts themselves are cut at MAX_DETAILS_PARTS below, so the publish and the cleanup are each one
+        # statement over at most 20k rows (about 40 ms) however the text was built. A batch's replies are
+        # loaded one at a time as they are rendered, and none past the cap is loaded at all.
+        cap = min(MAX_REPLY, MAX_DETAILS_PARTS * self.s.chunk_chars)
+        notice = details_notice(cap)
+        left_bytes = cap
+        shown = 0
+        for turn_id in ids:
             if left_bytes <= 0:
-                sections.append(TRUNCATED)
+                sections.append(notice)
                 break
+            row = self.store.turn(turn_id)
+            if row is None:
+                continue
+            shown += 1
             section = f"{row.origin}\n{row.text}"      # a stored reply: shown whole, even past the cap
             left_bytes -= utf8_size(section) + 2
             cut = False
@@ -1028,13 +1047,17 @@ class Admind:
                 section += "\n\n" + calls
             sections.append(section)
             if cut:
-                sections.append(TRUNCATED)
+                sections.append(notice)
                 break
         # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
         def prepare() -> list[str]:
             text = redact("\n\n".join(sections))
             sections.clear()        # one full copy at a time
-            return chunk.split(text, self.s.chunk_chars)
+            out = chunk.split(text, self.s.chunk_chars)
+            if len(out) > MAX_DETAILS_PARTS:    # a long stored reply, or redaction that grew the text
+                del out[MAX_DETAILS_PARTS:]
+                out.append(notice)
+            return out
 
         parts = await asyncio.to_thread(prepare)
         # Deviation from the plan (Codex T9 r1): the parts are staged, in slices with a yield between, in a
@@ -1061,7 +1084,7 @@ class Admind:
         finally:
             if not published:
                 self.store.discard_details(mid)
-        self.audit.write("command", message_id=mid, command="details", full=full, replies=len(rows),
+        self.audit.write("command", message_id=mid, command="details", full=full, replies=shown,
                          chars=sum(len(p) for p in parts))
 
     async def tool_calls(self, row: TurnRow, seconds: float, limit: int) -> tuple[str, bool]:
