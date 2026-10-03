@@ -21,7 +21,7 @@ from heterodyne.services import UNIT_NAME
 
 ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "alert_poll_seconds",
                          "group_check_seconds", "start_timeout_seconds", "turn_notice_seconds", "group_name",
-                         "marmot"})
+                         "summarizer", "reply_verbatim_lines", "reply_verbatim_chars", "marmot"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
 MAX_NAME = 128
@@ -40,6 +40,10 @@ class Operator:
 class AdmindSettings:
     profile: Mapping[str, Any]
     adapter_binary: str
+    summarizer: Mapping[str, Any] | None
+    summarizer_binary: str | None
+    reply_verbatim_lines: int
+    reply_verbatim_chars: int
     workdir: Path
     restart_units: tuple[str, ...]
     chunk_chars: int
@@ -66,16 +70,10 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
     profile_name = admind.get("profile")
     if not isinstance(profile_name, str) or not profile_name:
         raise ConfigError("[admind] profile must name a profile from [profiles]")
-    profile = as_table(table_at(cfg.values, "profiles", "config").get(profile_name))
-    if profile is None:
-        raise ConfigError(f"[admind] profile {show(profile_name)} is not defined in [profiles]")
-    adapter = profile.get("adapter")
-    if adapter not in ADMIN_ADAPTERS:
-        raise ConfigError(f"[admind] profile {show(profile_name)} uses adapter {show(adapter)}; "
-                          f"the admin agent supports {list(ADMIN_ADAPTERS)} so far")
-    binary = cfg.get(f"adapters.{adapter}.binary")
-    if not isinstance(binary, str) or not binary:
-        raise ConfigError(f"adapters.{adapter}.binary must be a non-empty string")
+    profile, binary = _profile(cfg, profile_name, "profile")
+    summarizer_name = admind.get("summarizer")
+    summarizer, summarizer_binary = (None, None) if summarizer_name is None else \
+        _profile(cfg, summarizer_name, "summarizer")
 
     units = tuple(string_list(admind.get("restart_units", []), "[admind] restart_units"))
     for unit in units:
@@ -100,6 +98,9 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
 
     return AdmindSettings(
         profile=profile, adapter_binary=binary,
+        summarizer=summarizer, summarizer_binary=summarizer_binary,
+        reply_verbatim_lines=_int(admind, "reply_verbatim_lines", 1, 200),
+        reply_verbatim_chars=_int(admind, "reply_verbatim_chars", 50, 60000),
         workdir=_abs(admind.get("workdir", "~"), env, "[admind] workdir"),
         restart_units=units,
         chunk_chars=_int(admind, "chunk_chars", 200, 60000),
@@ -114,6 +115,23 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
     )
+
+
+def _profile(cfg: Config, name: Any, key: str) -> tuple[Mapping[str, Any], str]:
+    """The profile `[admind] {key}` names, and its adapter's binary (Claude Code only, so far)."""
+    if not isinstance(name, str) or not name:
+        raise ConfigError(f"[admind] {key} must name a profile from [profiles]")
+    profile = as_table(table_at(cfg.values, "profiles", "config").get(name))
+    if profile is None:
+        raise ConfigError(f"[admind] {key} {show(name)} is not defined in [profiles]")
+    adapter = profile.get("adapter")
+    if adapter not in ADMIN_ADAPTERS:
+        raise ConfigError(f"[admind] {key} {show(name)} uses adapter {show(adapter)}; "
+                          f"the admin agent supports {list(ADMIN_ADAPTERS)} so far")
+    binary = cfg.get(f"adapters.{adapter}.binary")
+    if not isinstance(binary, str) or not binary:
+        raise ConfigError(f"adapters.{adapter}.binary must be a non-empty string")
+    return profile, binary
 
 
 def _relay_ok(r: str) -> bool:

@@ -37,6 +37,8 @@ group_check_seconds = 60
 start_timeout_seconds = 60
 turn_notice_seconds = 1800
 group_name = "heterodyne admin"
+reply_verbatim_lines = 8
+reply_verbatim_chars = 800
 
 [admind.marmot]
 wn_agent = "wn-agent"

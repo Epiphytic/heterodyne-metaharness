@@ -18,7 +18,8 @@ def operator(name: str, key: str) -> Operator:
 def make_settings(tmp_path: Path, **overrides: Any) -> AdmindSettings:
     base = AdmindSettings(
         profile={"adapter": "claude-code", "model": "m1", "args": []},
-        adapter_binary="claude", workdir=tmp_path, restart_units=("fake.service",),
+        adapter_binary="claude", summarizer=None, summarizer_binary=None,
+        reply_verbatim_lines=8, reply_verbatim_chars=800, workdir=tmp_path, restart_units=("fake.service",),
         chunk_chars=4000, alert_poll_seconds=0.1, group_check_seconds=0.5, start_timeout_seconds=5,
         turn_notice_seconds=3, group_name="heterodyne admin", wn_agent="wn-agent",
         marmot_home=tmp_path / "marmot",
