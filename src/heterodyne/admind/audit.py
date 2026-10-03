@@ -14,6 +14,8 @@ import json
 import os
 import re
 import stat
+from collections import deque
+from collections.abc import Mapping, Sequence, Set
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,19 +41,31 @@ def clean(value: object, field: str | None = None) -> object:
         if field in ID_FIELDS:
             value = _HEX_RUN.sub(lambda m: ref_id(m.group()), value)
         return redact(value)
-    if isinstance(value, dict):
-        out: dict[str, object] = {}
-        for k, v in cast(dict[Any, Any], value).items():
-            out[unique_key(redact(_text(k)), out)] = clean(v, _text(k))
-        return out
-    if isinstance(value, list | tuple):
-        return [clean(v, field) for v in cast(list[Any] | tuple[Any, ...], value)]
-    if isinstance(value, set | frozenset):
-        items = [clean(v, field) for v in cast(set[Any], value)]
-        return sorted(items, key=lambda x: json.dumps(x, sort_keys=True, default=str))   # deterministic
     if isinstance(value, bytes | bytearray | memoryview):
         return redact(_text(cast(bytes, value)))
+    if isinstance(value, Mapping):
+        out: dict[str, object] = {}
+        for k, v in cast(Mapping[Any, Any], value).items():
+            key = _key(k)
+            out[unique_key(key, out)] = clean(v, key)
+        return out
+    if isinstance(value, Set):
+        items = [clean(v, field) for v in cast(Set[Any], value)]
+        return sorted(items, key=lambda x: json.dumps(x, sort_keys=True, default=str))   # deterministic
+    if isinstance(value, Sequence | deque):
+        return [clean(v, field) for v in cast(Sequence[Any], value)]
+    # Residual risk: an object whose __str__ escapes a control character (as repr does) hides where a token
+    # starts from redaction. Scalars and the standard types above are handled before this point.
     return redact(str(value))
+
+
+def _key(key: object) -> str:
+    """A dict key as it may be written: cleaned first; a compound key becomes JSON of its cleaned parts,
+    which is safe because every string inside is already redacted."""
+    cleaned = clean(key)
+    if isinstance(cleaned, str):
+        return cleaned
+    return json.dumps(cleaned, sort_keys=True, default=str, ensure_ascii=False)
 
 
 def _text(value: object) -> str:

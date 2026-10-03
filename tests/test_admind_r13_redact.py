@@ -1,8 +1,10 @@
 # tests/test_admind_r13_redact.py
 import json
 import re
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from hypothesis import given
@@ -187,3 +189,38 @@ def test_audit_hides_a_token_inside_bytes_and_sets(tmp_path: Path, lead: str) ->
     members = cast(list[str], records(path)[0]["members"])
     assert members == sorted(members, key=lambda x: json.dumps(x))  # deterministic
     assert "other" in members
+
+
+class _Bag(Mapping[Any, Any]):
+    def __init__(self, data: dict[Any, Any]) -> None:
+        self._d = data
+
+    def __getitem__(self, k: Any) -> Any:
+        return self._d[k]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._d)
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+    def __repr__(self) -> str:
+        return repr(self._d)
+
+
+@pytest.mark.parametrize("lead", ["\n", "\t"])
+@pytest.mark.parametrize("make", [
+    lambda s: {(s,): "v"},
+    lambda s: {frozenset({s}): "v"},
+    lambda s: {frozenset({(s,)}): "v"},
+    lambda s: deque([s]),
+    lambda s: _Bag({"k": s}),
+    lambda s: _Bag({(s,): "v"}),
+])
+def test_audit_hides_a_token_in_compound_keys_and_generic_containers(
+    tmp_path: Path, lead: str, make: Callable[[str], object]
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write("probe", value=make(lead + TOKEN))
+    raw = path.read_text()
+    assert TOKEN not in raw and TOKEN[4:] not in raw
