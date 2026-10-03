@@ -1,9 +1,10 @@
 # tests/test_admind_r13_redact.py
 import json
 import re
-from collections import deque
+from collections import UserDict, deque
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -11,7 +12,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from heterodyne.admind import redact as redact_module
-from heterodyne.admind.audit import Audit, ref_id
+from heterodyne.admind.audit import MAX_DEPTH, Audit, clean, ref_id
 from heterodyne.admind.redact import redact, redact_continuation, unique_key
 from heterodyne.marmot.nip19 import hex_to_npub
 
@@ -224,3 +225,82 @@ def test_audit_hides_a_token_in_compound_keys_and_generic_containers(
     Audit(path).write("probe", value=make(lead + TOKEN))
     raw = path.read_text()
     assert TOKEN not in raw and TOKEN[4:] not in raw
+
+
+class _Escaper:
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+
+    def __str__(self) -> str:
+        return repr(self.secret)
+
+
+class _Plain:
+    def __str__(self) -> str:
+        return "a plain object"
+
+
+@pytest.mark.parametrize("lead", ["\n", "\t"])
+@pytest.mark.parametrize("make", [
+    lambda s: SimpleNamespace(value=s),
+    lambda s: ValueError(s, "x"),
+    lambda s: {ValueError(s, "x"): "v"},
+    lambda s: _Escaper(s),
+    lambda s: {_Escaper(s): "v"},
+])
+def test_audit_withholds_objects_whose_str_escapes(
+    tmp_path: Path, lead: str, make: Callable[[str], object]
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write("probe", value=make(lead + TOKEN))
+    raw = path.read_text()
+    assert TOKEN not in raw and TOKEN[4:] not in raw
+
+
+def test_an_exception_keeps_its_type_and_cleaned_args() -> None:
+    assert clean(ValueError("a", 3)) == {"type": "ValueError", "args": ["a", 3]}
+
+
+def test_a_benign_object_still_shows_its_redacted_str() -> None:
+    assert clean(_Plain()) == "a plain object"
+    assert TOKEN not in str(clean(SimpleNamespace(value=TOKEN)))
+
+
+def test_plain_types_keep_their_text(tmp_path: Path) -> None:
+    import datetime as dt
+    import decimal
+    import enum
+    import uuid
+    from pathlib import PurePosixPath
+
+    class Colour(enum.Enum):
+        RED = 1
+
+    u = uuid.UUID(int=5)
+    assert clean(PurePosixPath("/a/b")) == "/a/b"
+    assert clean(Colour.RED) == "Colour.RED"
+    assert clean(dt.date(2026, 10, 3)) == "2026-10-03"
+    assert clean(u) == str(u)
+    assert clean(decimal.Decimal("1.50")) == "1.50"
+
+
+def test_cycles_and_depth_are_bounded(tmp_path: Path) -> None:
+    loop: list[object] = []
+    loop.append(loop)
+    ring: deque[object] = deque()
+    ring.append(ring)
+    users: UserDict[str, object] = UserDict()
+    users["me"] = users
+    assert clean(loop) == ["<cycle>"]
+    assert clean(ring) == ["<cycle>"]
+    assert clean(users) == {"me": "<cycle>"}
+    deep: object = "leaf"
+    for _ in range(MAX_DEPTH + 10):
+        deep = [deep]
+    path = tmp_path / "audit.jsonl"
+    Audit(path).write("probe", loop=loop, ring=ring, users=users, deep=deep)    # must not raise
+    assert "<too deep>" in path.read_text() and "<cycle>" in path.read_text()
+
+
+def test_scalar_keys_keep_their_spelling() -> None:
+    assert clean({None: 1, True: 2, 3: 4, 1.5: 5}) == {"None": 1, "True": 2, "3": 4, "1.5": 5}

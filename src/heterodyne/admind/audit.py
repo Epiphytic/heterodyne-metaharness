@@ -16,8 +16,12 @@ import re
 import stat
 from collections import deque
 from collections.abc import Mapping, Sequence, Set
-from pathlib import Path
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path, PurePath
 from typing import Any, cast
+from uuid import UUID
 
 from heterodyne.admind.redact import redact, unique_key
 from heterodyne.admind.store import now, private_dir
@@ -33,8 +37,18 @@ def ref_id(value: str) -> str:
     return "id:" + hashlib.sha256(value.lower().encode()).hexdigest()[:12]
 
 
+MAX_DEPTH = 64
+# Types whose str() is plain text, never an escaped rendering of a string they hold.
+_PLAIN = (PurePath, Enum, datetime, date, time, UUID, Decimal)
+
+
 def clean(value: object, field: str | None = None) -> object:
-    """A field value as it may be written: every string redacted, recursively; identifiers referenced."""
+    """A field value as it may be written: every string redacted, recursively; identifiers referenced.
+    A cycle becomes "<cycle>" and nesting beyond MAX_DEPTH "<too deep>", so this always terminates."""
+    return _clean(value, field, set(), 0)
+
+
+def _clean(value: object, field: str | None, active: set[int], depth: int) -> object:
     if value is None or isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
@@ -43,26 +57,51 @@ def clean(value: object, field: str | None = None) -> object:
         return redact(value)
     if isinstance(value, bytes | bytearray | memoryview):
         return redact(_text(cast(bytes, value)))
+    if isinstance(value, Mapping | Set | Sequence | deque):
+        node = cast(object, value)
+        ident = id(node)
+        if ident in active:
+            return "<cycle>"
+        if depth >= MAX_DEPTH:
+            return "<too deep>"
+        active.add(ident)
+        try:
+            return _container(node, field, active, depth + 1)
+        finally:
+            active.discard(ident)
+    if isinstance(value, BaseException):
+        return {"type": type(value).__name__, "args": _clean(value.args, field, active, depth + 1)}
+    text = str(value)
+    if isinstance(value, _PLAIN):
+        return redact(text)
+    # An object's own __str__ is unknown code. One that escapes a control character (as repr does) turns
+    # "\n" into a letter and hides where a token starts, so a backslash means the text is withheld, not
+    # redacted. A backslash-free str() has no such escape.
+    if "\\" in text:
+        return f"<{type(value).__name__}: withheld>"
+    return redact(text)
+
+
+def _container(value: object, field: str | None, active: set[int], depth: int) -> object:
     if isinstance(value, Mapping):
         out: dict[str, object] = {}
         for k, v in cast(Mapping[Any, Any], value).items():
-            key = _key(k)
-            out[unique_key(key, out)] = clean(v, key)
+            key = _key(k, active, depth)
+            out[unique_key(key, out)] = _clean(v, key, active, depth)
         return out
     if isinstance(value, Set):
-        items = [clean(v, field) for v in cast(Set[Any], value)]
+        items = [_clean(v, field, active, depth) for v in cast(Set[Any], value)]
         return sorted(items, key=lambda x: json.dumps(x, sort_keys=True, default=str))   # deterministic
-    if isinstance(value, Sequence | deque):
-        return [clean(v, field) for v in cast(Sequence[Any], value)]
-    # Residual risk: an object whose __str__ escapes a control character (as repr does) hides where a token
-    # starts from redaction. Scalars and the standard types above are handled before this point.
-    return redact(str(value))
+    return [_clean(v, field, active, depth) for v in cast(Sequence[Any], value)]
 
 
-def _key(key: object) -> str:
-    """A dict key as it may be written: cleaned first; a compound key becomes JSON of its cleaned parts,
-    which is safe because every string inside is already redacted."""
-    cleaned = clean(key)
+def _key(key: object, active: set[int], depth: int) -> str:
+    """A dict key as it may be written. Scalar keys keep their `str()` spelling; others are cleaned first,
+    and a compound key becomes JSON of its cleaned parts, which is safe because every string in it is
+    already redacted."""
+    if key is None or isinstance(key, bool | int | float):
+        return str(key)
+    cleaned = _clean(key, None, active, depth)
     if isinstance(cleaned, str):
         return cleaned
     return json.dumps(cleaned, sort_keys=True, default=str, ensure_ascii=False)
