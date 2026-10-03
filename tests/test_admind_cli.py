@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import io
+import json
 import os
 import stat
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
-from fakes.settings import OPERATOR_HEX, make_settings
+from fakes.settings import OPERATOR_HEX, SECOND_HEX, make_settings, operator
 
 from heterodyne.admind import cli, unit
 from heterodyne.admind.audit import Audit
@@ -133,6 +134,25 @@ def test_init_creates_identity_and_group_once(tmp_path: Path, capsys: pytest.Cap
     assert store.get("group_operators") == f'["{OPERATOR_HEX}"]'
     assert "bootstrap" in log.read_text()
     assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 1
+
+
+def test_init_with_two_operators_invites_both_and_confirms_both(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binary, _ = fake_wn_agent(tmp_path)
+    ops = (operator("a", OPERATOR_HEX), operator("b", SECOND_HEX))
+    s = make_settings(tmp_path, wn_agent=binary, operators=ops)
+    store = Store(s.state_dir / "admind.db")
+    invited: list[list[str]] = []
+    real = ControlClient.group_create
+
+    async def spy(self: ControlClient, account: str, name: str, members: list[str]) -> object:
+        invited.append(list(members))
+        return await real(self, account, name, members)
+    monkeypatch.setattr(ControlClient, "group_create", spy)
+    assert asyncio.run(cli.init(s, store, Audit(s.state_dir / "audit.jsonl"))) == 0
+    assert invited == [[o.npub for o in ops]]
+    assert json.loads(store.get("group_operators") or "[]") == sorted([OPERATOR_HEX, SECOND_HEX])
+    assert store.get("expected_members") == "3"
 
 
 def test_rearm_clears_the_latch(tmp_path: Path) -> None:
