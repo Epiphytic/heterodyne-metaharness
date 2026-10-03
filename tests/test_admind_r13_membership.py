@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from admind_waits import stays, wait_until
+from admind_waits import lock_waiters, stays, wait_until
 from fakes.fake_wn_agent import ACCOUNT
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_daemon import Harness, needs_tmux, run_with
@@ -549,3 +549,58 @@ def test_restart_after_a_commit_authorises_from_the_group(tmp_path: Path) -> Non
         await wait_until(lambda: "echo: from a" in h.texts())
         assert not any("sneaky" in t for t in h.texts())
     run(tmp_path, third, lambda h: setattr(h.fake, "member_count", 3), operators=POLICY[:1])
+
+
+@needs_tmux
+@pytest.mark.parametrize("text", ["!interrupt", "plain text for the agent"])
+def test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm(tmp_path: Path, text: str) -> None:
+    # Review finding 1: the message waits for dispatch_lock, its sender is removed outside admind, a rearm
+    # clears the latch with only the other operator confirmed; the message must not run when the lock frees.
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        await h.daemon.dispatch_lock.acquire()
+        mid = await h.say(text, SECOND_HEX)
+        await wait_until(lambda: lock_waiters(h.daemon.dispatch_lock) >= 1)
+        await h.fake.push_event(member("member_removed"))
+        await wait_until(h.daemon.latched)
+        h.fake.member_count = 2
+        h.daemon.load_operators = lambda: POLICY[:1]
+        assert (await h.daemon.rearm())[0] == "rearmed"
+        assert h.daemon.operators == {OPERATOR_HEX: "op"}
+        h.daemon.dispatch_lock.release()
+        await wait_until(lambda: mid in h.store.inbound_with_status("dropped"))
+        assert not any(r["kind"] == "command" for r in audit(h))
+        assert f"echo: {text}" not in h.texts() and text not in h.log.read_text()
+    run(tmp_path, scenario, state(members=3, keys=(OPERATOR_HEX, SECOND_HEX)))
+
+
+@needs_tmux
+def test_the_last_eligible_operator_cannot_be_removed(tmp_path: Path) -> None:
+    # Review finding 2: two confirmed, policy lists only `op`: removing `op` leaves nobody to command.
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        h.daemon.load_operators = lambda: POLICY[:1]
+        result = await h.daemon.change_membership("remove", "op")
+        assert result[0] == "refused" and "last operator" in result[1]
+        assert not requested(h, "group_member_remove")
+        assert h.store.get("expected_members") == "3" and h.daemon.operators and not h.daemon.latched()
+    run(tmp_path, scenario, state(members=3, keys=(OPERATOR_HEX, SECOND_HEX)))
+
+
+@needs_tmux
+def test_a_check_begun_before_a_change_does_not_latch_on_the_old_count(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await join(h)
+        before = count_requests(h, "group_info")
+        gate = asyncio.Event()
+        h.fake.info_gate = gate
+        check = asyncio.create_task(h.daemon.check_group())
+        await wait_until(lambda: count_requests(h, "group_info") > before)   # it holds the old count (2)
+        h.fake.info_gate = None
+        assert (await h.daemon.change_membership("add", "b"))[0] == "committed"
+        gate.set()
+        assert await check is False
+        assert not h.daemon.latched() and h.daemon.group_ok
+        assert {"kind": "guard", "action": "group-check-deferred"} in [
+            {"kind": r["kind"], "action": r.get("action")} for r in audit(h)]
+    run(tmp_path, scenario)

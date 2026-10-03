@@ -165,6 +165,7 @@ class Admind:
         self.load_operators = load_operators or (lambda: settings.operators)
         self.policy_operators = settings.operators
         self.operators: dict[str, str] = {}     # set by run() from group_operators (B21)
+        self.senders: dict[str, str] = {}       # message ID -> sender key, so queued work can be revalidated
         self.client = client
         self.store = store
         self.audit = audit
@@ -305,10 +306,18 @@ class Admind:
         return (not self.latched() and self.group_ok and self.observing and not self.changing
                 and self.store.get("operator_seen_at") is not None)
 
-    def authorised(self) -> bool:
-        """May admind act for the operator right now: not latched, group verified, subscription live.
-        Checked after every await that verifies and again immediately before a side effect."""
-        return not self.latched() and self.group_ok and self.observing and not self.changing
+    def sender_current(self, mid: str) -> bool:
+        """Is the sender of message `mid` still an authorised operator? A latch cleared by `rearm` may have
+        left it out. A message with no recorded sender (never from on_message) is not judged."""
+        sender = self.senders.get(mid)
+        return sender is None or sender in self.operators
+
+    def authorised(self, mid: str | None = None) -> bool:
+        """May admind act for the operator right now: not latched, group verified, subscription live, and
+        (given a message) its sender still an authorised operator. Checked after every await that verifies
+        and again immediately before a side effect."""
+        return (not self.latched() and self.group_ok and self.observing and not self.changing
+                and (mid is None or self.sender_current(mid)))
 
     def deny(self, mid: str, what: str) -> None:
         """Refuse a message that was accepted before admind stopped being authorised. Fixed wording; no
@@ -556,6 +565,10 @@ class Admind:
                 if not found:
                     return "refused", f"{name} is not an operator in the group; nothing changed."
                 member_hex = found[0]
+                eligible = {o.hex for o in loaded.values()}
+                if not ({key for key in self.operators if key != member_hex} & eligible):
+                    return "refused", ("the last operator can't be removed: no one else in the group is "
+                                       "an operator in policy.toml. Nothing changed.")
             policy = tuple(loaded.values())
             # Step 1: hold. The message in hand finishes first; then nothing new is dispatched or sent, and
             # a paste or a send already under way is waited for, before the count is read.
@@ -816,9 +829,13 @@ class Admind:
             self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
                              text=own_text(ev.message.text))
             return
+        if len(self.senders) > 256:     # keep only what is still queued; the one in hand is added below
+            queued = {held_mid for held_mid, _ in self.held}
+            self.senders = {m: k for m, k in self.senders.items() if m in queued}
+        self.senders[mid] = ev.message.sender.account_id_hex.lower()
         text = ev.message.text
         self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
-        if not await self.check_group() or not self.authorised():   # the latch may have come meanwhile
+        if not await self.check_group() or not self.authorised(mid):   # the latch may have come meanwhile
             self.deny(mid, "message")
             return
         if self.store.get("operator_seen_at") is None:
@@ -860,7 +877,7 @@ class Admind:
                 await (self.interrupt(mid, cmd) if cmd.name == "interrupt" else self.new_session(mid, cmd))
                 await self.flush()
                 return
-            if not self.authorised():
+            if not self.authorised(mid):
                 self.deny(mid, "command")
                 return
             result, _ = await self.execute(cmd)
@@ -878,7 +895,7 @@ class Admind:
         Only the turn in flight when the command arrived is abandoned, and only once the Escape was sent:
         a failed send is no evidence that the agent is idle, so the queue stays held."""
         async with self.dispatch_lock:
-            if not self.authorised():       # the lock wait may have spanned a latch
+            if not self.authorised(mid):    # the lock wait may have spanned a latch, or a revoked operator
                 self.deny(mid, "command")
                 return
             target = self.store.get("in_flight")
@@ -906,7 +923,7 @@ class Admind:
         The old session ID is retired first: its hooks (a late SessionStart included) are ignored from
         here on, whenever they arrive. The new session's SessionStart sets ready as usual."""
         async with self.dispatch_lock:
-            if not self.authorised():
+            if not self.authorised(mid):
                 self.deny(mid, "command")
                 return
             old = self.agent.session_id
@@ -942,6 +959,8 @@ class Admind:
                                  latched=self.latched())
             return
         self.block_audited = False
+        while self.held and not self.sender_current(self.held[0][0]):   # revoked while it waited
+            self.deny(self.held.pop(0)[0], "held prompt")
         if self.stuck is not None:
             for mid, _ in self.held:
                 self.finish(mid, "dropped", f"Not delivered: the admin agent is not running ({self.stuck}). "

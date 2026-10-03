@@ -97,6 +97,7 @@ class FakeWnAgent:
                     self.accounts.append({"account_id_hex": ACCOUNT, "local_signing": True})
                 await self._reply(writer, rid, {"type": "ack"})
             elif kind == "group_info":
+                count = self.member_count       # as of the request, even if a gate holds the answer back
                 if self.info_gate is not None:
                     await self.info_gate.wait()
                 if self.fail_group_info:
@@ -106,7 +107,7 @@ class FakeWnAgent:
                 await self._reply(writer, rid, {
                     "type": "group_info", "account_id_hex": req["account_id_hex"],
                     "group_id_hex": req["group_id_hex"], "agent_created": True,
-                    "member_count": self.member_count, "is_direct": True})
+                    "member_count": count, "is_direct": True})
             elif kind == "group_create":
                 await self._reply(writer, rid, {"type": "group_created", "group_id_hex": self.group_id,
                                                 "agent_created": True, "pending_welcome_count": 0})
