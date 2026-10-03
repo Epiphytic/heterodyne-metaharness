@@ -21,6 +21,7 @@ from test_admind_daemon import Harness, needs_tmux, run_with
 from heterodyne.admind import backstop, hook, summarize
 from heterodyne.admind.daemon import EXTRACT_FAILED, MAX_SEND_ATTEMPTS
 from heterodyne.admind.hook import HookEvent, reply_text
+from heterodyne.admind.redact import redact
 from heterodyne.admind.store import Store, now
 
 TOKEN = "ghp_" + "A" * 30
@@ -54,22 +55,61 @@ def batches(h: Harness) -> list[str]:
     return [t for t in h.texts() if t.startswith(backstop.TITLE)]
 
 
+def diagnostics(h: Harness) -> str:
+    """What the daemon was doing, for a wait that timed out: rows without their text, the last audit
+    records, what was sent, and the readiness and latch state. Redacted before it is shown."""
+    db = h.store.db
+    turns = db.execute("SELECT turn_id, status, batch_id, batch_seq, session, reply_to FROM turns").fetchall()
+    batch_rows = db.execute("SELECT batch_id, status, attempt, opened_at FROM batches").fetchall()
+    try:
+        audit = [json.dumps(r, sort_keys=True) for r in audit_records(h)[-20:]]
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not hide the timeout
+        audit = [f"(audit unreadable: {type(exc).__name__})"]
+    lines = [
+        f"turns (id, status, batch, seq, session, reply_to): {[tuple(r) for r in turns]}",
+        f"batches (id, status, attempt, opened_at): {[tuple(r) for r in batch_rows]}",
+        f"ready={h.daemon.is_ready()} latched={h.store.get('latched')!r} busy={h.store.get('busy')!r} "
+        f"in_flight={h.store.get('in_flight')!r} session={h.agent.session_id!r}",
+        f"sent ({len(h.texts())}): {[t[:60] for t in h.texts()]}",
+        "last audit records:",
+        *audit,
+    ]
+    return redact("\n".join(lines))
+
+
+async def waited(h: Harness, pred: Callable[[], bool], what: str, timeout: float = 15) -> None:
+    """`h.until`, failing with `diagnostics` when it times out."""
+    try:
+        await h.until(pred, timeout)
+    except TimeoutError:
+        pytest.fail(f"timed out waiting for {what}\n{diagnostics(h)}", pytrace=False)
+
+
 async def batch_arrives(h: Harness, n: int = 1) -> str:
-    await h.until(lambda: len(batches(h)) >= n, 40)  # a loaded machine is slow, not wrong
+    # a loaded machine is slow, not wrong
+    await waited(h, lambda: len(batches(h)) >= n, f"batch {n}", 40)
     return batches(h)[n - 1]
 
 
 async def recorded_then_close(h: Harness, replies: int) -> None:
-    """Hold the batch window open until `replies` turns are recorded, then let it close. A fixed short
-    window races a slow machine: a reply that lands after it would open a second batch."""
+    """Hold the batch window open until `replies` turns have joined one batch, then let it close. A fixed
+    short window races a slow machine, and so does counting turns that are still summarizing: a reply that
+    lands after the window closes would open a second batch."""
     h.daemon.batch_seconds = 3600
-    await h.until(lambda: h.store.db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == replies, 40)
+
+    def together() -> bool:
+        row = h.store.db.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT batch_id) FROM turns WHERE status = 'batched'"
+        ).fetchone()
+        return bool(row[0] == replies and row[1] == 1)
+
+    await waited(h, together, f"{replies} replies in one open batch", 40)
     h.daemon.batch_seconds = 0.2
 
 
 async def session(h: Harness) -> str:
     """The admin agent's session ID, once its launch is ready (so hook events count as current)."""
-    await h.until(lambda: h.agent.session_id is not None and h.daemon.is_ready())
+    await waited(h, lambda: h.agent.session_id is not None and h.daemon.is_ready(), "the agent to be ready")
     assert h.agent.session_id is not None
     return h.agent.session_id
 
@@ -1121,3 +1161,18 @@ def test_the_default_limits_route_at_the_boundary(tmp_path: Path, reply: str, mo
         assert (got.status == "verbatim") == (mode == "verbatim")
 
     run_with(tmp_path, scenario, configure('echo "SUMMARIZED"'))
+
+
+@needs_tmux
+def test_a_timed_out_wait_explains_itself_without_secrets(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, "reply " + TOKEN + " " + "w" * 900)
+        await h.until(lambda: len(h.store.turns_with_status("batched")) == 1)
+        with pytest.raises(pytest.fail.Exception) as info:
+            await waited(h, lambda: False, "nothing", 0.1)
+        msg = str(info.value)
+        assert "timed out waiting for nothing" in msg and "turns (id, status" in msg
+        assert "batches (id, status" in msg and "last audit records:" in msg and "latched=" in msg
+        assert TOKEN not in msg and "w" * 100 not in msg
+
+    run_with(tmp_path, scenario, configure("exit 1", batch=3600))

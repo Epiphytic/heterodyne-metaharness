@@ -191,9 +191,17 @@ MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record fails the read: 
 MAX_REPLY = MAX_RECORD                  # a turn's reply, in UTF-8 bytes of its final text (plan 2b B13)
 MAX_BLOCKS = 100_000                    # text blocks per turn, empty ones too
 SEPARATOR = "\n\n"                      # between a turn's text blocks
-# The peak memory of one read is a small constant multiple of MAX_REPLY, not a guarantee on RSS: one record
-# buffer (up to MAX_RECORD) and its decoded objects, plus the parts gathered so far, plus the joined copy;
-# then, in the daemon, the redacted copy (also bounded by MAX_REPLY) while the joined one is still alive.
+# Memory, honestly. The accepted result is bounded by MAX_REPLY (UTF-8 bytes, redacted, checked in
+# prepare_reply), but the transient peak is not: prepare_reply redacts the whole text BEFORE it checks the
+# size, so the intermediates are worst-case multiples of the input, not of the accepted result:
+#   - the record buffer (up to MAX_RECORD) and its parsed objects (about the same again), while it is read;
+#   - the parts gathered so far (up to MAX_REPLY), then the joined text (another MAX_REPLY);
+#   - in redaction: control escaping can grow the text about 4x (a control character becomes `\xNN`), and
+#     each of the substitution passes allocates a copy (the previous one is freed as the next is built);
+#   - the UTF-8 encode copy of the redacted text, for the size check.
+# So roughly: MAX_RECORD x 2 for a read, then up to 2 x MAX_REPLY for parts and joined, then up to
+# ~4 x MAX_REPLY plus a pass copy and an encode copy in redaction. A small constant multiple, not an RSS
+# guarantee; the extraction threads are one at a time (B20), so it does not multiply.
 READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 
