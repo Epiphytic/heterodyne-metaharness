@@ -41,7 +41,7 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
 
 ### Operators
 
-Every name under `operators` in `policy.toml` that has an `identities.<name>.marmot_npub` is an admind operator. A name must be 1 to 128 characters with no control characters, two operators may not share a key, and at least one must exist; otherwise admind refuses to start (a configuration error). `admind init` puts all of them in the group. After that the group and `policy.toml` are two separate records, and admind only acts for an operator that is in **both**: listed in `policy.toml`, and confirmed as a member of the group (stored by admind). Editing `policy.toml` alone authorises no one, and it does not revoke anyone at once either: admind keeps the operators it loaded and re-reads `policy.toml` only at startup, after a successful `admind operators add|remove`, and on `admind rearm`. Until one of those happens, a deleted entry still commands admind.
+Every name under `operators` in `policy.toml` that has an `identities.<name>.marmot_npub` is an admind operator. A name must be 1 to 128 characters with no control characters, two operators may not share a key, and at least one must exist; otherwise admind refuses to start (a configuration error). `admind init` puts all of them in the group. After that the group and `policy.toml` are two separate records, and admind only acts for an operator that is in **both**: listed in `policy.toml`, and confirmed as a member of the group (stored by admind). Editing `policy.toml` alone authorises no one, and it does not revoke anyone at once either. admind acts on a cached operator set, and that set (the authority) is refreshed only at startup, after a committed (successful) `admind operators add|remove`, and after a successful `admind rearm`. A refused membership request or a refused rearm reads `policy.toml` but leaves the cache unchanged. Until a refresh, an operator whose entry you deleted still commands admind.
 
 Change the group with the running daemon, as the service user:
 
@@ -62,7 +62,7 @@ To let a test key command admind for a while:
 4. Run `admind operators remove NAME`.
 5. Delete the entry from `policy.toml`.
 
-Keep this order. `remove` finds the name among the operators admind has loaded (the cache above) and checks the freshly read `policy.toml` for another eligible operator. Deleting the entry first does not revoke access, because the cache still holds it, and the group and `policy.toml` disagree. After the next restart or `rearm` the key is in the group with no name, `remove` can no longer find it, and you must fix `policy.toml` and run `admind rearm` (section 5).
+Keep this order. `remove` finds the name among the operators admind has loaded (the cache above) and checks the freshly read `policy.toml` for another eligible operator. Deleting the entry first does not revoke access, because the cache still holds it, and the group and `policy.toml` disagree. A restart then rebuilds the set from the file, so the key stays in the group with no name and `remove` can no longer find it. A `rearm` does not necessarily fix that: the member count still includes the deleted operator, so it no longer matches the remaining `policy.toml` operators, the reconciliation fails, and the rearm is refused with the cache unchanged. Put the entry back, run `admind rearm` (it succeeds once `policy.toml` matches the group again and refreshes the cache), then `admind operators remove NAME`, then delete the entry.
 
 ## 3. Before first use of the admin agent
 
