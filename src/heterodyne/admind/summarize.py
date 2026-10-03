@@ -22,6 +22,7 @@ MAX_LINES = 10  # "about 8 lines", with two of slack (B8)
 MAX_CHARS = 2000
 MAX_BYTES = MAX_CHARS * 4  # stdout is read until this many bytes, then the process is killed
 READ_CHUNK = 65536
+FEED_CHUNK = 65536
 REAP_SECONDS = 5.0  # the most cleanup after a kill may take
 FOOTER = "summary · reply `!details` for everything"
 PROMPT = """You summarize an admin agent's reply for operators who read it on a phone.
@@ -105,8 +106,9 @@ async def _collect(proc: asyncio.subprocess.Process, data: bytes) -> bytes:
 
     async def feed() -> None:
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):  # it may stop reading early
-            stdin.write(data)
-            await stdin.drain()
+            for i in range(0, len(data), FEED_CHUNK):   # not one write: the transport would buffer it whole
+                stdin.write(data[i : i + FEED_CHUNK])
+                await stdin.drain()
             stdin.close()
 
     feeder = asyncio.create_task(feed())

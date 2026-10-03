@@ -188,7 +188,12 @@ def transcript_size(ev: HookEvent) -> int | None:
 
 READ_WINDOW = 1024 * 1024               # a turn's bytes are read this much at a time
 MAX_RECORD = 64 * 1024 * 1024           # a longer JSONL record fails the read: memory (plan 2b B13)
-MAX_REPLY = MAX_RECORD                  # a turn's assistant text in all: many small records add up too
+MAX_REPLY = MAX_RECORD                  # a turn's reply, in UTF-8 bytes of its final text (plan 2b B13)
+MAX_BLOCKS = 100_000                    # text blocks per turn, empty ones too
+SEPARATOR = "\n\n"                      # between a turn's text blocks
+# The peak memory of one read is a small constant multiple of MAX_REPLY, not a guarantee on RSS: one record
+# buffer (up to MAX_RECORD) and its decoded objects, plus the parts gathered so far, plus the joined copy;
+# then, in the daemon, the redacted copy (also bounded by MAX_REPLY) while the joined one is still alive.
 READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 
@@ -253,8 +258,7 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
             raise OSError("not a regular file")
         begun = False
         for item in _lines(fd, start, end):
-            cancel = READ_CANCEL.get()
-            if cancel is not None and cancel.is_set():
+            if _abandoned():
                 raise OSError("the read was abandoned")
             try:
                 record: Any = json.loads(item)
@@ -277,41 +281,54 @@ def turn_records(path: Path, start: int, end: int) -> Iterator[dict[str, Any]]:
 def reply_text(ev: HookEvent, start: int | None, end: int | None) -> str | None:
     """A current Stop's reply (B9, B19). The event's own text if it has one; otherwise every assistant text
     of the turn's span, in order, so an early question or error is kept. None when it can't be read: no
-    span, a path that is not this session's transcript, a read error, or a record too large to read
-    (RecordTooLarge is an OSError). "" is a turn that said nothing."""
+    span, a path that is not this session's transcript, a read error, a record too large to read
+    (RecordTooLarge is an OSError), text a database can't hold, or more than MAX_REPLY UTF-8 bytes of
+    joined text (separators included) or MAX_BLOCKS blocks, which stops the read at once. "" is a turn
+    that said nothing."""
     if ev.last_assistant_message:
-        return ev.last_assistant_message if _encodable(ev.last_assistant_message) else None
+        size = _size(ev.last_assistant_message)
+        return ev.last_assistant_message if size is not None and size <= MAX_REPLY else None
     if start is None or end is None or not ev.transcript_path:
         return None
     path = Path(ev.transcript_path)
     if path.name != f"{ev.session_id}.jsonl" or not path.is_absolute():
         return None
     parts: list[str] = []
-    total = 0
+    total = 0                               # UTF-8 bytes of the final joined text
     try:
         for rec in turn_records(path, start, end):
             blocks = _blocks(rec)
             if rec.get("type") == "assistant" and isinstance(blocks, list):
                 for b in blocks:
+                    if _abandoned():
+                        raise OSError("the read was abandoned")
                     text = b.get("text")
                     if b.get("type") != "text" or not isinstance(text, str):
                         continue
-                    total += len(text)
-                    if total > MAX_REPLY or not _encodable(text):
-                        return None         # too much text in all, or text no database can hold
+                    size = _size(text)
+                    if size is None:
+                        return None         # text no database can hold
+                    total += size + (len(SEPARATOR) if parts else 0)
+                    if total > MAX_REPLY or len(parts) >= MAX_BLOCKS:
+                        return None         # too much text in all, however it is split
                     parts.append(text)
     except OSError:
         return None
-    return "\n\n".join(parts)
+    return SEPARATOR.join(parts)
 
 
-def _encodable(text: str) -> bool:
-    """False for text with a lone surrogate (JSON `\\ud800`): it can't be encoded, so it can't be stored."""
+def _abandoned() -> bool:
+    cancel = READ_CANCEL.get()
+    return cancel is not None and cancel.is_set()
+
+
+def _size(text: str) -> int | None:
+    """The UTF-8 length of `text`, or None for text with a lone surrogate (JSON `\\ud800`): it can't be
+    encoded, so it can't be stored."""
     try:
-        text.encode("utf-8")
+        return len(text.encode("utf-8"))
     except UnicodeEncodeError:
-        return False
-    return True
+        return None
 
 
 class HookServer:

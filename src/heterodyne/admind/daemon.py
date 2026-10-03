@@ -30,6 +30,7 @@ from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import (
     HOOK_EVENTS,
+    MAX_REPLY,
     READ_CANCEL,
     Delivery,
     HookEvent,
@@ -124,12 +125,15 @@ def own_text(text: str) -> str:
 
 def prepare_reply(raw: str, lines: int, chars: int) -> tuple[str, str] | None:
     """A reply's redacted text and its mode, `verbatim` or `summary`. CPU-bound on a large reply, so it runs
-    in a thread. None if the text can't be stored (a lone surrogate): the caller treats the turn as unread."""
+    in a thread. None if the text can't be stored (a lone surrogate) or is over MAX_REPLY UTF-8 bytes once
+    redacted: the caller treats the turn as unread."""
     text = redact(raw if raw.strip() else NO_REPLY)
     try:
-        text.encode("utf-8")
+        size = len(text.encode("utf-8"))
     except UnicodeEncodeError:
         return None
+    if size > MAX_REPLY:
+        return None                 # redaction can expand control characters about fourfold
     return text, "summary" if summarize.needs_summary(text, lines, chars) else "verbatim"
 
 
@@ -1443,6 +1447,9 @@ class Admind:
         token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
         try:
             raw = await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)
+        except BaseException:
+            cancel.set()                        # cancelled or failed: nobody will use the result
+            raise
         finally:
             READ_CANCEL.reset(token)
         if raw is None:

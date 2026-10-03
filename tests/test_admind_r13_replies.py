@@ -840,18 +840,130 @@ def test_transcript_size(tmp_path: Path) -> None:
 # --- review round 1: bounded text, lone surrogates, a failing audit ---
 
 
+def read_blocks(tmp_path: Path, blocks: list[str], sid: str = "s1") -> str | None:
+    path = tmp_path / f"{sid}.jsonl"
+    path.unlink(missing_ok=True)
+    append(path, [prompt("go")] + [said(b) for b in blocks])
+    return reply_text(HookEvent("Stop", sid, transcript_path=str(path)), 0, path.stat().st_size)
+
+
 def test_many_small_records_over_the_budget_are_unreadable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The budget is UTF-8 bytes of the joined text, separators included: 10 x 100 + 9 x 2 = 1018.
+    blocks = ["m" * 100] * 10
+    monkeypatch.setattr(hook, "MAX_REPLY", 1018)
+    ok = read_blocks(tmp_path, blocks)
+    assert ok is not None and len(ok) == 1018
+    monkeypatch.setattr(hook, "MAX_REPLY", 1017)
+    assert read_blocks(tmp_path, blocks) is None
+
+
+def test_empty_blocks_cost_something(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hook, "MAX_BLOCKS", 5)
+    assert read_blocks(tmp_path, [""] * 5) is not None
+    assert read_blocks(tmp_path, [""] * 6) is None
+    monkeypatch.setattr(hook, "MAX_BLOCKS", 1000)
+    monkeypatch.setattr(hook, "MAX_REPLY", 20)  # their separators alone are over it
+    assert read_blocks(tmp_path, [""] * 12) is None
+
+
+def test_the_budget_counts_bytes_not_characters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hook, "MAX_REPLY", 1000)
-    path = tmp_path / "s1.jsonl"
-    append(path, [prompt("go")] + [said("m" * 100) for _ in range(11)])
-    ev = HookEvent("Stop", "s1", transcript_path=str(path))
-    assert reply_text(ev, 0, path.stat().st_size) is None
-    path2 = tmp_path / "s2.jsonl"
-    append(path2, [prompt("go")] + [said("m" * 100) for _ in range(10)])
-    ok = reply_text(HookEvent("Stop", "s2", transcript_path=str(path2)), 0, path2.stat().st_size)
-    assert ok is not None and len(ok) > 1000  # exactly at the budget is read (joiners don't count)
+    assert read_blocks(tmp_path, ["\u00e9" * 600]) is None  # 600 characters, 1200 bytes
+    assert read_blocks(tmp_path, ["\u00e9" * 500]) is not None
+
+
+def test_redaction_that_expands_the_text_past_the_budget_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heterodyne.admind import daemon
+
+    monkeypatch.setattr(daemon, "MAX_REPLY", 100)
+    assert daemon.prepare_reply("\x01" * 30, 8, 800) is None  # 30 bytes in, 120 out (`\\x01` each)
+    assert daemon.prepare_reply("fine", 8, 800) == ("fine", "verbatim")
+
+
+@needs_tmux
+def test_a_timed_out_extract_tells_its_reader_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed = threading.Event()
+
+    def reader(ev: HookEvent, start: int | None, end: int | None) -> str | None:
+        cancel = hook.READ_CANCEL.get()
+        assert cancel is not None
+        if cancel.wait(10):
+            observed.set()
+        return None
+
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", reader)
+
+    async def scenario(h: Harness) -> None:
+        h.daemon.extract_timeout = 0.1
+        assert await h.daemon.extract(HookEvent("Stop", "s1"), 0, 1) is None
+        assert await asyncio.to_thread(observed.wait, 5)
+
+    run_with(tmp_path, scenario, configure(None))
+
+
+@needs_tmux
+def test_a_cancelled_extract_tells_its_reader_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    observed = threading.Event()
+
+    def reader(ev: HookEvent, start: int | None, end: int | None) -> str | None:
+        cancel = hook.READ_CANCEL.get()
+        assert cancel is not None
+        started.set()
+        if cancel.wait(10):
+            observed.set()
+        return None
+
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", reader)
+
+    async def scenario(h: Harness) -> None:
+        h.daemon.extract_timeout = 30
+        task = asyncio.ensure_future(h.daemon.extract(HookEvent("Stop", "s1"), 0, 1))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(observed.wait, 5)
+
+    run_with(tmp_path, scenario, configure(None))
+
+
+def test_the_summarizer_is_fed_in_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(summarize, "FEED_CHUNK", 1000)
+    writes: list[int] = []
+
+    class Stdin:
+        def write(self, data: bytes) -> None:
+            writes.append(len(data))
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class Stdout:
+        async def read(self, n: int) -> bytes:
+            await asyncio.sleep(0.05)  # let the feeder run
+            return b""
+
+    class Proc:
+        stdin = Stdin()
+        stdout = Stdout()
+
+        async def wait(self) -> int:
+            return 0
+
+    asyncio.run(summarize._collect(Proc(), b"x" * 2500))  # type: ignore[arg-type]
+    assert writes == [1000, 1000, 500]
 
 
 def test_an_abandoned_read_stops_reading(tmp_path: Path) -> None:
