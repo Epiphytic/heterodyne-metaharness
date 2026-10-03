@@ -71,31 +71,31 @@ Each row is a place this plan does something other than ADR r13 §8 says. Your O
 | 1 (B1) | Control characters are escaped. | Newline and tab stay as they are; all other control characters become `\xNN`. | A reply with no line breaks can't be read. | Escape them too; replies become one long line. |
 | 2 (B1) | 64-hex values become markers. | Any run of 64 or more hex digits becomes one marker. | A key can hide inside a longer run. | Mask only exact 64-digit values; longer runs show. |
 | 3 (B1) | No such case. | Text that still changes after 10 redaction passes is replaced whole by `<redacted text>`. | Fail closed; can't happen with sane input. | Send the 10th pass as it is. |
-| 4 (B2) | Every `operators` entry with an npub is an operator. | A name over 128 characters or with control characters, two entries with one key, or no operator at all is a config error. | Names cross the control socket; one key with two names is ambiguous. | Accept them; show names escaped and use the first entry for a key. |
-| 5 (Task 5) | No limit on `operators remove`. | Removing the last operator is refused. | A group with only admind can't be commanded. | Allow it; recovery is then `admind init`. |
+| 4 (B2) | Every `operators` entry with an npub is an operator. | An empty name, a name over 128 characters or with control characters, two entries with one key, or no operator at all is a config error. | Names cross the control socket; one key with two names is ambiguous. | Accept them; show names escaped and use the first entry for a key. |
+| 5 (Task 5) | No limit on `operators remove`. | Removing the last operator is refused. | A group with only admind can't be commanded. | Allow it; an operator is then added back with `admind operators add` on the host. |
 | 6 (B6) | `rearm` is a host command. | `rearm` asks the running daemon; it fails if the daemon is down. | Only the daemon can read the member count (one process per wn-agent home). | `rearm` stops the daemon, reads the count itself, starts it again. |
 | 7 (B22) | `rearm` trusts the current count and clears any pending change. | `rearm` refuses if events aren't being read, if the group changed while it read the count, or if the count can't be matched to known operators. | Else a rearm can clear a latch set while it ran, or trust members it can't name. | Trust the count always; the operator set may then be wrong until the next change. |
 | 8 (B21) | Policy operators with an npub may command. | An operator must be in `policy.toml` **and** confirmed in the group (stored). A plan-2 upgrade with several policy operators latches until a `rearm`. | A restart must not authorise someone never added. | Authorise every policy operator; only the count is checked. |
 | 9 (B8) | Summary is at most about 8 lines. | The summarizer is asked for 8; up to 10 lines are accepted (12 shown with the footer). More than 10 lines, 2,000 characters or 8,000 bytes goes to the backstop. | Slack for a model that adds a line; the limits stop a runaway summary. | Accept only 8 lines; more summaries fall to the backstop. |
 | 10 (B8) | The summarizer profile runs headless, read-only, without tools. | The profile's `args` are ignored. | Extra args could turn tools back on. | Append `args`; the no-tools guarantee then depends on them. |
-| 11 (deferral) | Any adapter can be configured for the admin agent (and, by extension, the summarizer). | Both stay Claude Code only, as in plan 2. | Only Claude's headless, no-tools launch is verified (Task 1). | A later task adds Codex once its read-only headless launch is verified. |
-| 12 (B10) | A batch of 50 lines or fewer is sent whole. | A batch over 60,000 characters has each line shortened (`…(+N chars)`) to fit one message. | One message can't exceed the transport limit (Task 1 checks it). | Send it as several messages (no longer "one message"). |
-| 13 (B10) | Not covered. | A batch whose delivery fails reopens with a new 60-second window and is sent again under a new key, until delivered. | Its replies must not be stranded. | Give up after the retries and only audit it. |
+| 11 (deferral) | Any adapter can be configured for the admin agent. (For the summarizer the ADR names only "the configured profile".) | The admin agent stays Claude Code only, as in plan 2; the plan also limits the summarizer to Claude Code. | Only Claude's interactive and headless no-tools launches are verified (plan 2, Task 1). | A later task adds Codex once its launches are verified. |
+| 12 (B10) | A batch of 50 lines or fewer is sent whole. | A batch over 60,000 characters has each line shortened (`…(+N chars)`), and if needed its end cut, to fit one message. | One message can't exceed the transport limit (Task 1 checks it). | Send it as several messages (no longer "one message"). |
+| 13 (B10) | Not covered. | A batch whose delivery fails reopens with a new 60-second window and is sent again under a new key, until delivered; replies affected meanwhile join it. | Its replies must not be stranded. | Give up after the retries and only audit it. |
 | 14 (B10) | A batch closes 60 seconds after its first reply. | No reply joins after 60 s; the batch is posted by a 1-second poll, so up to about 1 s late. | A poll survives restarts simply. | A timer per batch (more state across restarts). |
-| 15 (B9) | The backstop drops nothing `!details` can't return. | A reply that can't be read from the transcript (timeout, corrupt or changed file, unknown span) goes to the backstop as a fixed notice; its text stays only in the transcript on the host. | It is better than silence or a partial reply. | Hold dispatch until the reply can be read. |
-| 16 (B9, B13) | Fallback reply: the transcript's assistant text blocks. | All assistant texts of the turn, joined in order. | An early question or error is kept. | Use only the last text block. |
-| 17 (B13) | `!details full` has no cap. | One transcript record over 64 MiB is named with its size; images are shown as type, size and digest; structured results as sorted JSON, with keys that redact alike numbered `#2`, `#3`. | Memory bound; a chat can't show images. | Stream-parse huge records; send images as base64 text. |
-| 18 (B19, B20) | `!details full` sends each turn's tool calls. | It says "not available" when the turn's span is unknown, the transcript is busy or slow (30 s), or a record is corrupt; there is no automatic retry. | It must never show another turn's tool calls. | Queue a retry and post it when it succeeds. |
-| 19 (B16) | Audit values are redacted to markers. | Message IDs in ID fields become `id:` plus 12 hex digits of their SHA-256. | Records can still be matched up. | Plain markers; records can't be matched. |
-| 20 (B17) | Not covered. | After the upgrade, re-chunked pending replies may repeat text already received; a continuation that can't be checked is replaced whole. | Accuracy over deduplication; fail closed. | Drop plan-2 pending replies instead. |
-| 21 (deferral) | If wn-agent can't add or remove members, operators change only by `admind init` of a new group. | Task 1 stops and escalates if so; no task builds the init-only path. | Task 1 is expected to confirm add and remove work. | A plan revision adds the init-only path if Task 1 finds it needed. |
-| 22 (deferral) | The summary quotes every question and error verbatim. | The prompt asks for it; tests check the prompt wording, not the summaries. The Task 1 spike gives some real evidence. | A model's output can't be guaranteed by a unit test. | Add a check: a summary that lacks a reply line ending in `?` or starting `Error` goes to the backstop. |
+| 15 (B9) | The backstop drops nothing `!details` can't return. | A reply that can't be read from the transcript (timeout, unknown span, or a file that is shorter than the span, ends inside a record or holds a corrupt record) goes to the backstop as a fixed notice; its text stays only in the transcript on the host. A file replaced by another valid transcript of that session is not detected. | It is better than silence or a partial reply. | Hold dispatch until the reply can be read. |
+| 16 (B13) | `!details full` has no cap. | One transcript record over 64 MiB is named with its size; images are shown as type, size and digest; structured results as sorted JSON, with keys that redact alike numbered `#2`, `#3`. | Memory bound; a chat can't show images. | Stream-parse huge records; send images as base64 text. |
+| 17 (B19, B20) | `!details full` sends each turn's tool calls. | It says "not available" when the turn's span is unknown, the transcript is busy or slow (30 s), or a record is corrupt; there is no automatic retry. | It must never show another turn's tool calls. | Queue a retry and post it when it succeeds. |
+| 18 (B16) | Audit values are redacted to markers. | Message IDs in ID fields become `id:` plus 12 hex digits of their SHA-256. | Records can still be matched up. | Plain markers; records can't be matched. |
+| 19 (B17) | Not covered. | After the upgrade, re-chunked pending replies may repeat text already received; a continuation that can't be checked is replaced whole. | Accuracy over deduplication; fail closed. | Drop plan-2 pending replies instead. |
+| 20 (deferral) | If wn-agent can't add or remove members, operators change only by `admind init` of a new group. | Task 1 stops and escalates if so; no task builds the init-only path. | Task 1 is expected to confirm add and remove work. | A plan revision adds the init-only path if Task 1 finds it needed. |
+| 21 (deferral) | The summary quotes every question and error verbatim. | The prompt asks for it; tests check the prompt wording, not the summaries. The Task 1 spike gives some real evidence. | A model's output can't be guaranteed by a unit test. | Add a check: a summary that lacks a reply line ending in `?` or starting `Error` goes to the backstop. |
+| 22 (plan 2, D3) | Operator text goes byte-for-byte into the admin session. | A message holding control characters is refused with a fixed reply (kept from plan 2). | They can break out of bracketed paste and inject keystrokes. | Escape them visibly and send the escaped text. |
 
 ### Explicit deferrals (Codex r5 finding 6)
 
-- **Init-only fallback (row 21):** if Task 1 shows `wn-agent` can't add or remove members, the plan stops and escalates as it says; the ADR's alternative (operators change only by a new `admind init`) needs a plan revision, not an improvised task.
+- **Init-only fallback (row 20):** if Task 1 shows `wn-agent` can't add or remove members, the plan stops and escalates as it says; the ADR's alternative (operators change only by a new `admind init`) needs a plan revision, not an improvised task.
 - **Admin and summarizer adapters (row 11):** `settings.ADMIN_ADAPTERS` stays `("claude-code",)`, and Task 7's `_profile` keeps that restriction for the summarizer. Supporting another adapter is a later task.
-- **Summary content (row 22):** the question-and-error rule is enforced by the prompt only; no automated test proves a real summary keeps them.
+- **Summary content (row 21):** the question-and-error rule is enforced by the prompt only; no automated test proves a real summary keeps them.
 
 ## Decisions made in this plan (within the ADR; reviewers should check them)
 
@@ -113,10 +113,10 @@ Each row is a place this plan does something other than ADR r13 §8 says. Your O
 | B10 | A backstop batch is **one** unthreaded message, rendered by the ADR's rules (a fixed title line, not counted in the 50; at most 50 collapsed lines whole, else the first 10 and last 40) and sent as rendered: `chunk_chars` does not apply to it. Only a batch over `backstop.BATCH_MAX_CHARS` (60,000, the largest message Task 1 confirms is delivered whole) is shortened, each line after the title to an equal share with `…(+N chars)`, then the end with `… (cut at the message size limit)`. Replies join in the order they reach the backstop (`turns.batch_seq`, written in the transaction that batches them), not the order their turns began. A reply joins only a batch whose 60-second window is still running at that moment; after that it opens the next batch, even if `batch_loop` hasn't posted the old one yet. A batch whose delivery is given up on opens again in the same transaction and is posted after a new window under a new key (`batch:<id>.<attempt>`), until it is delivered. `!details` on the batch returns every reply whole. **Deviation, flagged:** the over-60,000 cut (50 lines averaging over 1,000 characters) contradicts "sent whole"; one message can't be bigger than the transport allows. | ADR: "Each batch is one unthreaded message" (Codex r2 finding 8); "closes 60 seconds later. Replies affected meanwhile join it in order" (Codex r5 findings 3, 4). A batch whose delivery failed must not strand its replies (Codex r2 finding 7). | §8 Backstop |
 | B11 | New tables: `prompts` (who sent each operator message, when, first words), `turns` (one per reply: redacted text, origin, transcript path and start and end offsets), `batches`, and `posts` (outbox key to turn or batch). | `!details` must work after a restart. | §8 `!details` |
 | B12 | `!details` uses the command's `reply_to`: the **sent** outbox row with that `message_id`, then its `posts` row. Without a reply target it uses the latest summary or batch that was **delivered** (`status = 'sent'`); pending and failed rows never count. Verbatim replies get records too, so `!details full` works on them. | ADR text; lookups are exact, and "latest" is what the operator actually saw. | §8 `!details` |
-| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A complete record in the span that is not a JSON object fails the read like a truncated one (Codex r5 finding 2). A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; keys that redact to the same marker are kept apart as `<marker> #2`, `#3`…, so no entry is lost; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
-| B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. A retry's backoff is a timer for that one row, not a sleep in the outbox loop: a lane-1 message queued during a lane-2 row's backoff is sent at once (Codex r5 finding 5). A lane-1 row in backoff still holds the lane-1 rows behind it, which keeps lane 1 in order. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
+| B13 | `!details full` reads the transcript bytes between the turn's `UserPromptSubmit` and its `Stop` (B19), 1 MiB at a time. Metadata records (such as `queue-operation`, or Claude Code's own `isMeta` user records) are ignored; the turn begins at its first content (an assistant record or a tool result), so a real prompt before that is the turn's own and one after it ends the turn. A complete record in the span that is not a JSON object fails the read like a truncated one (Codex r5 finding 2). A user record that carries a tool result is never a prompt, even with text beside it. It renders `tool_use` and `tool_result` blocks whole (non-text results and tool inputs as JSON with sorted keys, every string in them redacted before serializing so an escape such as `\u0001` can't hide a token from the scanner; keys that redact to the same marker are kept apart as `<marker> #2`, `#3`… (`redact.unique_key`, also used by the audit), so no entry is lost; an image as its media type, size and a SHA-256 prefix, since a text chat can't show it); thinking blocks are never read out. A record over the size guard never begins the turn. The same turn reader (`hook.turn_records`) gives a Stop without its own text its reply: every assistant text of the span, in order; a read failure, a missing span, or a transcript that no longer matches the span (shorter than it, or ending inside a record) is `EXTRACT_FAILED` (B9), never `NO_REPLY` or a partial reply. Nothing is capped or shortened, so redaction always sees whole values. The one exception is a single JSONL record over 64 MiB (`MAX_RECORD`), which is named with its size rather than parsed. | It must show the tool calls of that turn, not of a later one (Codex r2 finding 6), and §8 says `!details` has no cap (finding 5). **Deviation, flagged:** the 64 MiB record guard bounds memory; showing such a record would need a streaming JSON parser. | §8 `!details full` |
+| B14 | `outbox.lane` (1 or 2). `Store.next_pending()` returns the lowest lane first, then by sequence, and is re-read after every send. A retry's backoff is a timer for that one row (`Admind._backoff`, keyed by row), not a sleep in the outbox loop: a lane-1 message queued during a lane-2 row's backoff is sent at once (Codex r5 finding 5). A lane-1 row in backoff still holds the lane-1 rows behind it, which keeps lane 1 in order. | "Only when the first lane is empty", and urgent messages are never stuck. | §8 Delivery lanes |
 | B15 | A pending membership record found at startup latches before `recover()` or anything else runs. | Step 5. | §8 transition step 5 |
-| B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
+| B16 | `Audit.write` redacts every string field, recursively through dicts, lists and tuples; any other value is redacted as its `str()`. In the identifier fields `message_id`, `reply_to`, `key`, `target` and `anchor`, a 64-hex run is first replaced by `id:` and 12 hex digits of its SHA-256 (`audit.ref_id`), so records still correlate without holding the identifier. Dict keys that redact alike are numbered (`redact.unique_key`), so no value is lost. A message from an authenticated operator that is dropped (latched, replayed, or a malformed ID) is still audited whole under the operator's name; a stranger's text never is (Codex r6 finding 1). | Redacting field by field at each call site misses fields (Codex r1 finding 4). One place cannot be bypassed. | §8 Audit, Redaction |
 | B17 | Upgrading a plan-2 database: when `outbox.lane` is missing, the column is added and the kv marker `outbox_needs_redaction` set in one transaction. At startup, before `recover()`, `Store.redact_pending_outbox` joins each reply's pending chunks in order, redacts the whole, re-chunks it under new keys (`<prefix>:r<i>`), and clears the marker, all in one transaction. A value that straddles the boundary with the already-sent chunks is hidden to its end (`<redacted fragment>`); the check runs on **all** the reply's sent chunks joined in order, since a value can span several of them. If any earlier chunk of the reply is missing or not sent, the pending text is replaced whole by `<redacted continuation of a partly sent reply>` (fail closed). `outbox_pass` also redacts every row at delivery. | A plan-2 outbox can hold unredacted, chunked replies. The re-keyed chunks may repeat text the operator already received; accuracy over deduplication. | §8 Redaction |
 | B18 | Failures fail closed. A membership transition that raises after journaling latches (with a fixed reason) before the exception propagates; if even the latch can't be written, `changing` stays set. The control server answers a raising handler with fixed wording. | Step 5 covers a crash; the same must hold for a daemon that keeps running. | §8 transition step 5 |
 | B19 | A turn's transcript span: `UserPromptSubmit` measures the transcript size before taking the turn lock and stores it as kv `turn_start = "<busy>:<offset>"` in the transaction that starts the busy period. `Stop` measures the size on entry, before the lock. The turn record keeps both only if the Stop is `current` and `turn_start` belongs to the busy period the Stop was captured with; otherwise both are NULL and `!details full` says the tool calls are not available. | A stale Stop, a lost prompt hook or a turn that changed during extraction can't be tied to its bytes; saying so is better than showing another turn's tool calls. | §8 `!details full` |
@@ -264,6 +264,7 @@ The close evidence lists every check's PASS/FAIL and states whether the ADR's as
 - Produces:
   - `heterodyne.admind.redact.redact(text: str) -> str`. Later tasks call it for every post, the summarizer input and `!details`;
   - `heterodyne.admind.redact.redact_continuation(previous: str, text: str) -> str` (used by Task 4's upgrade);
+  - `heterodyne.admind.redact.unique_key(key: str, taken: Container[str]) -> str` (used by `audit.clean` and Task 9's `_redacted`);
   - `heterodyne.admind.audit.ref_id(value: str) -> str` and `audit.ID_FIELDS`;
   - `Audit.write` redacts every field (B16).
 
@@ -280,7 +281,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from heterodyne.admind.audit import Audit, ref_id
-from heterodyne.admind.redact import redact, redact_continuation
+from heterodyne.admind.redact import redact, redact_continuation, unique_key
 from heterodyne.marmot.nip19 import hex_to_npub
 
 HEX = "ab" * 32
@@ -372,6 +373,14 @@ def test_audit_redacts_every_field(tmp_path: Path) -> None:
     assert r["nested"] == {"list": ["<redacted GitHub token>", 3, None], "deep": ["<redacted hex key>"]}
     assert r["other"] == "/x/<redacted hex key>"
     assert ref_id(HEX) == ref_id(HEX.upper()) and re.fullmatch(r"id:[0-9a-f]{12}", ref_id(HEX))
+
+
+def test_audit_keeps_keys_that_redact_alike(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "audit.jsonl")
+    audit.write("probe", nested={"a" * 64: "first", "b" * 64: "second"})
+    r = records(tmp_path / "audit.jsonl")[0]
+    assert r["nested"] == {"<redacted hex key>": "first", "<redacted hex key> #2": "second"}
+    assert unique_key("k", {"k", "k #2"}) == "k #3" and unique_key("k", set()) == "k"
 ```
 
 Also add a daemon test to the same file, using the `Harness` from `tests/test_admind_daemon.py`. Import it with `from test_admind_daemon import Harness, run_with`, which is the existing pattern in the `test_admind_t9r*.py` files. The test checks that the audit keeps a long operator message whole, that no audit record holds a raw 64-hex identifier, and that a reply's hex is redacted in the chat:
@@ -427,7 +436,7 @@ it becomes `UNSTABLE` whole (fail closed).
 """
 
 import re
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 
 from heterodyne.config.secret_scan import IDENTIFIER_VALUES, SECRET_VALUES
 
@@ -458,6 +467,17 @@ def redact(text: str) -> str:
             return text
         text = after
     return UNSTABLE
+
+
+def unique_key(key: str, taken: Container[str]) -> str:
+    """A redacted dict key, made distinct from the keys already `taken`: two keys can redact to one marker,
+    and neither entry may be lost, so later ones become `key #2`, `key #3`… (Codex r5 finding 1, r6
+    finding 3)."""
+    out, n = key, 1
+    while out in taken:
+        n += 1
+        out = f"{key} #{n}"
+    return out
 
 
 def _spans(text: str) -> Iterator[tuple[int, int]]:
@@ -496,7 +516,7 @@ import stat
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.admind.redact import redact
+from heterodyne.admind.redact import redact, unique_key
 from heterodyne.admind.store import now, private_dir
 
 # Fields that hold message IDs or outbox keys. A 64-hex run in them becomes a stable reference instead of
@@ -519,7 +539,10 @@ def clean(value: object, field: str | None = None) -> object:
             value = _HEX_RUN.sub(lambda m: ref_id(m.group()), value)
         return redact(value)
     if isinstance(value, dict):
-        return {redact(str(k)): clean(v, str(k)) for k, v in cast(dict[Any, Any], value).items()}
+        out: dict[str, object] = {}
+        for k, v in cast(dict[Any, Any], value).items():
+            out[unique_key(redact(str(k)), out)] = clean(v, str(k))
+        return out
     if isinstance(value, list | tuple):
         return [clean(v, field) for v in cast(list[Any] | tuple[Any, ...], value)]
     return redact(str(value))
@@ -660,6 +683,9 @@ def test_guard_names_the_operator() -> None:
     v = guard.judge_message(msg(SECOND_HEX.upper()), group_id=GROUP, operators=ops, latched=False)
     assert (v.action, v.operator) == ("process", "b")
     assert guard.judge_message(msg("e5" * 32), group_id=GROUP, operators=ops, latched=False).action == "drop"
+    v = guard.judge_message(msg(SECOND_HEX), group_id=GROUP, operators=ops, latched=True)
+    assert (v.action, v.operator) == ("drop", "b")          # latched, but still named for the audit
+    assert guard.judge_message(msg("e5" * 32), group_id=GROUP, operators=ops, latched=True).operator is None
 
 
 def test_member_count_against_expected() -> None:
@@ -680,6 +706,7 @@ They assert:
 4. **configured is not confirmed:** with kv `group_operators = json.dumps([OPERATOR_HEX])` and `member_count=2, expected_members="2"`, a message from `SECOND_HEX` (in policy, not in the group) is dropped as "sender is not an operator";
 5. **the plan-2 upgrade with one policy operator:** the default settings (one operator), `group_operators` absent: startup sets it to `[OPERATOR_HEX]`, audits `{"kind": "guard", "action": "migrated-operators", "operators": 1}`, and that operator's message is processed;
 6. **the plan-2 upgrade with several policy operators:** two operators, `group_operators` absent, `member_count=2`: startup latches (reason starts "admind does not know which operators are in the group") and leaves `group_operators` absent; `h.daemon.operators == {}`. (Task 5's scenario 18 rearms it.)
+7. **a latched operator's message is audited whole (Codex r6 finding 1):** latch the daemon (`h.daemon.latch("test")`), then `SECOND_HEX` sends `text = "line " * 1000 + "ghp_" + "A" * 36`. Nothing is dispatched or posted, and the audit has one `drop` record with `operator == "b"`, the reason "admind is latched…", and `text == redact(text)` (whole, over 5,000 characters, no token). Unlatched, an operator message delivered twice with one message ID (`h.fake.message_event` with the same ID): the second is audited the same way, with reason "replayed message id".
 
 (`Harness.__init__` takes the settings from `make_settings`; add an optional `settings_overrides` argument to `Harness` in `tests/test_admind_daemon.py` and pass it through.)
 
@@ -762,8 +789,8 @@ def judge_message(ev: InboundMessage, *, group_id: str, operators: Mapping[str, 
     name = operators.get(sender.account_id_hex.lower())
     if name is None:
         return Verdict("drop", "sender is not an operator")
-    if latched:
-        return Verdict("drop", "admind is latched; run `admind rearm` on the host")
+    if latched:     # an authenticated operator: the message is still audited in full, under their name
+        return Verdict("drop", "admind is latched; run `admind rearm` on the host", name)
     return Verdict("process", "operator message", name)
 
 
@@ -831,7 +858,30 @@ Update the module docstring:
   Imports: `json`, and `Iterable` from `collections.abc`.
 
   - `check_group`: `verdict = guard.judge_member_count(info.member_count, self.expected_members())`.
-  - `on_message`: `verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators, latched=self.latched())`. The `inbound` audit record gets `operator=verdict.operator`.
+  - `on_message`: `verdict = guard.judge_message(ev, group_id=self.group, operators=self.operators, latched=self.latched())`. The `inbound` audit record gets `operator=verdict.operator`. §8 logs **each operator message** in full with its operator (Codex r6 finding 1), so a dropped message from an authenticated operator is audited whole too; a stranger's text still is not. The `drop` branch and the two drops after it become:
+
+```python
+        if verdict.action == "drop":
+            if verdict.operator is not None:    # an operator, while latched: logged in full, never acted on
+                self.audit.write("drop", operator=verdict.operator, message_id=mid, reason=verdict.reason,
+                                 text=own_text(ev.message.text))
+                return
+            # The sender is peer-supplied: a short prefix correlates without recording an identifier,
+            # and the text, which a stranger controls, is not recorded at all.
+            self.audit.write("drop", sender_prefix=ev.message.sender.account_id_hex[:8],
+                             reason=verdict.reason, text_chars=len(ev.message.text))
+            return
+        if not MESSAGE_ID.fullmatch(mid):
+            self.audit.write("drop", operator=verdict.operator, reason="malformed message id",
+                             text=own_text(ev.message.text))
+            return
+        if not self.store.claim_inbound(mid):
+            self.audit.write("drop", operator=verdict.operator, message_id=mid, reason="replayed message id",
+                             text=own_text(ev.message.text))
+            return
+```
+
+  (The audit redacts every field, and `message_id` becomes an `id:` reference, B16.)
   - `cli.init`:
     - `created = await client.group_create(account, s.group_name, [o.npub for o in s.operators])`;
     - in the same block, in one `store.transaction()`, `store.set("expected_members", str(1 + len(s.operators)))` and `store.set("group_operators", json.dumps(sorted(o.hex for o in s.operators)))`;
@@ -980,7 +1030,7 @@ Daemon tests with the shared harness:
 1. **Lane order:** while lane-2 rows are pending, a command reply queued after them is sent before the remaining lane-2 rows. Use `h.fake.on_send` to queue a lane-1 post the first time a lane-2 text is sent, then assert the order of `h.texts()`.
 2. **Redaction at delivery:** before `run()` (the `before` hook of `run_with`), insert a raw row with `h.store.enqueue("raw", f"see {HEX}", None)`, which bypasses `Admind.post`. After the join signal, the fake receives `"see <redacted hex key>"` and never `HEX`.
 3. **Upgrade at startup:** build the harness's database as a plan-2 database first (call `old_database(h.settings.state_dir / "admind.db", [...])` before `Harness` opens it; add an optional `before_store` callback to `Harness.__init__` that runs before `Store(...)`). A pending `reply:s:1:0`/`:1` pair holding a split token is delivered as one `<redacted GitHub token>` message, and the audit has `{"kind": "outbox", "action": "redacted-after-upgrade", "rows": 2}`.
-4. **A lane-1 message does not wait for a lane-2 backoff (Codex r5 finding 5):** replace `h.daemon._sleep` with a coroutine that, for a delay of 2 s or more (a backoff: the first is 2 s), waits on an `asyncio.Event` `release` the test sets, and otherwise returns at once (other loops' polls stay fast). Once the outbox is empty, set `h.fake.fail_sends = 1` and post a lane-2 row (`h.daemon.post("d", "details", None, lane=2)`): its first send fails as retryable and its backoff starts. Then `h.daemon.post("c", "urgent", None)`. `"urgent"` is delivered while `release` is still unset, and the fake saw exactly one attempt at `"details"`. After `release.set()`, `"details"` is delivered.
+4. **Backoff is per row (Codex r5 finding 5, r6 finding 2):** replace `h.daemon._sleep` with a coroutine that, for a delay of 2 s or more (a backoff: the first is 2 s), appends a fresh `asyncio.Event` to a list `gates` and waits on it, and otherwise returns at once (other loops' polls stay fast). Once the outbox is empty, set `h.fake.fail_sends = 2`. Post a lane-2 row (`h.daemon.post("d", "details", None, lane=2)`); its first send fails and `gates[0]` is its backoff. Then `h.daemon.post("c", "urgent", None)`: it is sent at once (lane 1 does not wait for lane 2's backoff), fails, and `gates[1]` is its backoff. Set `gates[1]`: `"urgent"` is delivered, and the fake still saw exactly one attempt at `"details"` (its own timer is still running). Set `gates[0]`: `"details"` is delivered. A variant with `fail_sends = 1` checks that `"urgent"` is delivered while `gates[0]` is unset.
 
 - [ ] **Step 2: Run the tests and confirm they fail.** Expected: `TypeError: enqueue() got an unexpected keyword argument 'lane'`.
 
@@ -1070,7 +1120,7 @@ def _like(text: str) -> str:
   - `relay_alert`'s insert names `lane` explicitly as `1`.
 
 - [ ] **Step 4: Implement the daemon changes.**
-  - `__init__`: `self.send_lock = asyncio.Lock()   # held across each send; a membership transition drains it (B7)` and `self._backoff: tuple[int, asyncio.Future[None]] | None = None  # the row waiting out a retry, and its timer`. `run()`'s `finally` cancels a pending `_backoff` timer.
+  - `__init__`: `self.send_lock = asyncio.Lock()   # held across each send; a membership transition drains it (B7)` and `self._backoff: dict[int, asyncio.Future[None]] = {}  # each row waiting out a retry: its own timer`. `run()`'s `finally` cancels every timer left in `_backoff`.
   - `post` passes `lane` to `enqueue`.
   - In `run()`, before `self.recover()` (and, from Task 5, after the B3 migration and the B15 latch):
 
@@ -1100,23 +1150,26 @@ def _like(text: str) -> str:
                 row = self.store.next_pending()     # re-read each time: a new lane-1 row goes next (B14)
                 if row is None:
                     return
-                if self._backoff is not None and self._backoff[0] == row.seq and not self._backoff[1].done():
-                    return                  # its retry is not due; the timer or a new row wakes the loop
+                timer = self._backoff.get(row.seq)
+                if timer is not None and not timer.done():
+                    return                  # its retry is not due; its timer or a new row wakes the loop
                 try:
                     sent = await self.client.send_final(self.account, self.group, redact(row.text),
                                                         row.reply_to, row.key)
                 except ControlError as exc:
                     attempts = self.store.mark_attempt(row.seq)
                     if not (exc.retryable and attempts < MAX_SEND_ATTEMPTS):
+                        self._backoff.pop(row.seq, None)
                         self.send_failed(row.seq, row.key)
                         self.audit.write("send", key=row.key, action="failed", code=exc.code)
                         continue
                     self.audit.write("send", key=row.key, action="retry", attempts=attempts, code=exc.code)
                     timer = asyncio.ensure_future(self._sleep(min(60, 2 ** attempts)))
                     timer.add_done_callback(lambda _: self.wake.set())
-                    self._backoff = (row.seq, timer)    # only this row waits; nothing holds a lock meanwhile
+                    self._backoff[row.seq] = timer      # per row: another row's retry never cuts this one short
                     return
                 else:
+                    self._backoff.pop(row.seq, None)
                     self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
                     self.audit.write("send", key=row.key, action="sent")
                     continue
@@ -3319,7 +3372,7 @@ Daemon scenarios with the shared harness:
 
   `CommandRunner.run` never receives `details`, because the daemon handles it. Raise `CommandError("internal")` there if it ever does.
 
-- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `import hashlib` and `from heterodyne.admind.redact import redact` (redact imports only the secret scanner, so there is no cycle), and:
+- [ ] **Step 4: Implement `turn_tool_calls` in `hook.py`.** Add `import hashlib` and `from heterodyne.admind.redact import redact, unique_key` (redact imports only the secret scanner, so there is no cycle), and:
 
 ```python
 def _block_text(block: Any) -> str:
@@ -3347,12 +3400,7 @@ def _redacted(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in cast(dict[Any, Any], value).items():
-            key = base = redact(str(k))
-            n = 1
-            while key in out:           # two keys can redact to one marker: keep both entries (Codex r5 finding 1)
-                n += 1
-                key = f"{base} #{n}"
-            out[key] = _redacted(v)
+            out[unique_key(redact(str(k)), out)] = _redacted(v)    # keys that redact alike: both kept
         return out
     if isinstance(value, list):
         return [_redacted(v) for v in cast(list[Any], value)]
@@ -3574,6 +3622,8 @@ The PR body ends with the attribution lines the session requires. Merging is the
   - `bounded_read` and `_reader` replace `_extraction` in Task 8; Task 9's `tool_calls` uses them.
   - `TurnRow` has `transcript_start` and `transcript_end` (Task 8); `turn_tool_calls(path, start, end)` takes both (Task 9).
   - `audit.ref_id` and `redact_continuation` are defined in Task 2 and used in Tasks 2 and 4.
+  - `redact.unique_key` is defined in Task 2 and used by `audit.clean` (Task 2) and `hook._redacted` (Task 9).
+  - `guard.Verdict.operator` is set for a latched operator's message too (Task 3); `on_message` audits it whole.
   - The fake's `membership_gate`, `info_gate`, the `lost` mode and `drop_subscriptions()` are defined in Task 5.
   - kv `group_operators`, `confirmed_operators()`, `authorise()` and `policy_operators` are defined in Task 3; Task 5's commit and `rearm` write them (`applied`, `reconcile`).
   - `settings.MAX_NAME` and `NAME_CONTROLS` are defined in Task 3 and imported by Task 6's control server.
