@@ -193,15 +193,15 @@ MAX_BLOCKS = 100_000                    # text blocks per turn, empty ones too
 SEPARATOR = "\n\n"                      # between a turn's text blocks
 # Memory, honestly. The accepted result is bounded by MAX_REPLY (UTF-8 bytes, redacted, checked in
 # prepare_reply), but the transient peak is not: prepare_reply redacts the whole text BEFORE it checks the
-# size, so the intermediates are worst-case multiples of the input, not of the accepted result:
-#   - the record buffer (up to MAX_RECORD) and its parsed objects (about the same again), while it is read;
-#   - the parts gathered so far (up to MAX_REPLY), then the joined text (another MAX_REPLY);
-#   - in redaction: control escaping can grow the text about 4x (a control character becomes `\xNN`), and
-#     each of the substitution passes allocates a copy (the previous one is freed as the next is built);
+# size, so the intermediates are not bounded by the accepted result. They are, at least:
+#   - the record buffer (up to MAX_RECORD) and the objects json parses from it;
+#   - the parts gathered so far, then the joined text;
+#   - in redaction: control escaping grows the text (a control character becomes `\xNN`), and each
+#     substitution pass allocates a copy;
 #   - the UTF-8 encode copy of the redacted text, for the size check.
-# So roughly: MAX_RECORD x 2 for a read, then up to 2 x MAX_REPLY for parts and joined, then up to
-# ~4 x MAX_REPLY plus a pass copy and an encode copy in redaction. A small constant multiple, not an RSS
-# guarantee; the extraction threads are one at a time (B20), so it does not multiply.
+# Every one of these is larger than its byte count suggests: parsed Python objects and Python's string
+# storage take more than the UTF-8 size. No multiple is claimed, and this is not an RSS guarantee. The
+# extraction threads run one at a time (B20), so the peaks do not stack across turns.
 READ_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "READ_CANCEL", default=None)         # set by the caller of a threaded read: it gave up on it
 
