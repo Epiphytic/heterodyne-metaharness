@@ -1,4 +1,5 @@
 import asyncio
+import os
 import stat
 from pathlib import Path
 
@@ -105,19 +106,28 @@ def _handler_ok() -> ctl.Handler:
     return handler
 
 
-def test_a_stale_socket_is_replaced(tmp_path: Path) -> None:
+def test_a_stale_socket_is_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_umask(_mask: int) -> int:
+        raise AssertionError("os.umask is process-wide and must not be called")
+    monkeypatch.setattr(os, "umask", no_umask)
+
     async def serve_twice(path: Path) -> None:
         first = ctl.CtlServer(path, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
         await first.start()
         assert first.server is not None
         first.server.close()                       # leaves the socket file behind, like a crash
+        await asyncio.sleep(0.05)                  # file timestamps are coarse; a freed inode may be reused
         second = ctl.CtlServer(path, _handler_ok(), Audit(tmp_path / "audit.jsonl"))
         await second.start()
         try:
+            made = path.lstat()
+            assert stat.S_IMODE(made.st_mode) == 0o600
+            await first.close()                    # the old instance no longer owns the path
+            now = path.lstat()
+            assert (now.st_dev, now.st_ino) == (made.st_dev, made.st_ino)
             assert (await ctl.request(path, ctl.CtlRequest("rearm"))).result == "rearmed"
         finally:
             await second.close()
-        await first.close()                        # the old instance no longer owns the path
         assert not path.exists()
 
     asyncio.run(serve_twice(tmp_path / "s" / ctl.CTL_SOCKET))
@@ -265,7 +275,12 @@ def test_run_serves_and_removes_the_control_socket(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         path = h.settings.state_dir / ctl.CTL_SOCKET
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        reply = await ctl.request(path, ctl.CtlRequest("add", "nobody"), timeout=30)
+        reply = ctl.CtlReply("", "")
+        for _ in range(100):           # until the membership subscription is verified
+            reply = await ctl.request(path, ctl.CtlRequest("add", "nobody"), timeout=30)
+            if "nobody" in reply.message:
+                break
+            await asyncio.sleep(0.1)
         assert reply.result == "refused" and "nobody" in reply.message
         seen.append(path)
 

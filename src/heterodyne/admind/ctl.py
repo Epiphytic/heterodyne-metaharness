@@ -50,7 +50,7 @@ class CtlServer:
         self.handler = handler
         self.audit = audit
         self.server: asyncio.Server | None = None
-        self.created: tuple[int, int] | None = None     # (st_dev, st_ino) of the socket this instance bound
+        self.created: tuple[int, ...] | None = None     # identity of the socket this instance bound
 
     async def start(self) -> None:
         """Bind the socket ourselves: asyncio's path-based start would follow a symlink at the path and
@@ -62,13 +62,10 @@ class CtlServer:
             self.path.unlink()                                      # a stale socket from an earlier run
         sock = socket.socket(socket.AF_UNIX)
         try:
-            old = os.umask(0o177)          # never wider than 0600, even for an instant
-            try:
-                sock.bind(str(self.path))
-            finally:
-                os.umask(old)
+            sock.bind(str(self.path))
+            self.path.chmod(0o600)      # no umask change (it is process-wide); the 0700 parent covers the gap
             made = os.lstat(self.path)
-            self.created = (made.st_dev, made.st_ino)
+            self.created = self.identity(made)
             sock.listen()
             sock.setblocking(False)
             self.server = await asyncio.start_unix_server(self._handle, sock=sock, limit=MAX_REQUEST + 2)
@@ -77,13 +74,19 @@ class CtlServer:
             self.remove_own_socket()
             raise
 
+    @staticmethod
+    def identity(st: os.stat_result) -> tuple[int, ...]:
+        """Device and inode, plus the change and modify times: a freed inode number is soon reused by the
+        next socket bound at the same path, so the inode alone can't tell two instances' sockets apart."""
+        return (st.st_dev, st.st_ino, st.st_ctime_ns, st.st_mtime_ns)
+
     def remove_own_socket(self) -> None:
         """Unlink the path only if it is still the socket this instance bound."""
         if self.created is None:
             return
         with contextlib.suppress(OSError):
             current = os.lstat(self.path)
-            if stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == self.created:
+            if stat.S_ISSOCK(current.st_mode) and self.identity(current) == self.created:
                 self.path.unlink()
         self.created = None
 
