@@ -7,6 +7,7 @@ a private tmux server, the summarizer is a shell script in tmp_path, and wn-agen
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ from test_admind_r13_replies import (
     tool,
 )
 
-from heterodyne.admind import commands, hook, summarize
+from heterodyne.admind import chunk, commands, hook, summarize
 from heterodyne.admind.daemon import DETAILS_BUSY, READY_NOTICE
 from heterodyne.admind.hook import turn_tool_calls
 from heterodyne.admind.redact import redact
@@ -699,3 +700,32 @@ def test_details_full_never_shows_a_secret_hidden_in_a_structured_name(tmp_path:
         assert not any("BBBBBBBBBB" in t for t in h.texts())
 
     run_with(tmp_path, scenario, configure('echo "short summary"'))
+
+
+def old_split(text: str, limit: int) -> list[str]:
+    """The quadratic implementation chunk.split replaced, as the reference for what it returns."""
+    out: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        newline = rest.rfind("\n", 0, limit)
+        cut = newline + 1 if newline >= limit // 2 else limit
+        out.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        out.append(rest)
+    return out
+
+
+@pytest.mark.parametrize("limit", [1, 2, 7, 40, 200])
+def test_chunking_returns_what_it_always_did(limit: int) -> None:
+    text = "".join(f"line {i}\n" * (i % 3) + "x" * (i % 50) for i in range(300))
+    assert chunk.split(text, limit) == old_split(text, limit)
+
+
+def test_chunking_is_linear() -> None:
+    # Codex T9 r1 finding 3: copying the remainder per chunk took 2.3 s for 8 MiB at 200 characters.
+    text = ("y" * 99 + "\n") * (8 * 1024 * 1024 // 100)
+    start = time.perf_counter()
+    parts = chunk.split(text, 200)
+    assert time.perf_counter() - start < 1.0
+    assert "".join(parts) == text
