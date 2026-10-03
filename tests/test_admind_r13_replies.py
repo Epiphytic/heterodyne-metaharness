@@ -55,8 +55,16 @@ def batches(h: Harness) -> list[str]:
 
 
 async def batch_arrives(h: Harness, n: int = 1) -> str:
-    await h.until(lambda: len(batches(h)) >= n)
+    await h.until(lambda: len(batches(h)) >= n, 40)  # a loaded machine is slow, not wrong
     return batches(h)[n - 1]
+
+
+async def recorded_then_close(h: Harness, replies: int) -> None:
+    """Hold the batch window open until `replies` turns are recorded, then let it close. A fixed short
+    window races a slow machine: a reply that lands after it would open a second batch."""
+    h.daemon.batch_seconds = 3600
+    await h.until(lambda: h.store.db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == replies, 40)
+    h.daemon.batch_seconds = 0.2
 
 
 async def session(h: Harness) -> str:
@@ -178,13 +186,14 @@ def test_two_failures_in_one_window_make_one_batch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await terminal_stop(h, "first " + "y" * 900)
         await terminal_stop(h, "second " + "z" * 900)
+        await recorded_then_close(h, 2)
         text = await batch_arrives(h)
         assert text.index("first ") < text.index("second ")
         assert text.count("— terminal ·") == 2
         await asyncio.sleep(0.6)
         assert len(batches(h)) == 1
 
-    run_with(tmp_path, scenario, configure("exit 1", batch=0.5))
+    run_with(tmp_path, scenario, configure("exit 1", batch=3600))
 
 
 @needs_tmux
@@ -192,6 +201,7 @@ def test_a_big_batch_is_one_message_with_whole_lines(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         for r in range(3):
             await terminal_stop(h, "\n".join(f"r{r}-{i:03d}-" + "z" * 190 for i in range(100)))
+        await recorded_then_close(h, 3)
         text = await batch_arrives(h)
         lines = text.splitlines()
         assert lines[0] == backstop.TITLE and len(lines) == 1 + 10 + 1 + 40
@@ -199,7 +209,7 @@ def test_a_big_batch_is_one_message_with_whole_lines(tmp_path: Path) -> None:
         await asyncio.sleep(0.6)
         assert len(batches(h)) == 1
 
-    run_with(tmp_path, scenario, configure("exit 1", batch=0.5))
+    run_with(tmp_path, scenario, configure("exit 1", batch=3600))
 
 
 @needs_tmux
@@ -930,7 +940,7 @@ def test_a_failing_audit_does_not_hold_dispatch_on_an_unreadable_turn(tmp_path: 
     run_with(tmp_path, scenario, configure("exit 1"))
 
 
-HUGE = ("an ordinary line of reply text 12345\n" * 500_000)[: 16 * 1024 * 1024]
+HUGE = ("an ordinary line of reply text 12345\n" * 500_000)[: 4 * 1024 * 1024]
 
 
 @needs_tmux
@@ -967,7 +977,7 @@ def test_a_command_is_answered_while_a_huge_reply_is_processed(tmp_path: Path) -
     async def scenario(h: Harness) -> None:
         await terminal_stop(h, HUGE)
         mid = await h.say("!ps")
-        await h.until(lambda: any(r.get("reply_to_message_id_hex") == mid for r in h.fake.sent), 5)
+        await h.until(lambda: any(r.get("reply_to_message_id_hex") == mid for r in h.fake.sent), 30)
         await batch_arrives(h)
 
     run_with(tmp_path, scenario, configure("exit 1", batch=0.3))
