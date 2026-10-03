@@ -59,17 +59,30 @@ async def _drain(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
+def _close_transport(proc: asyncio.subprocess.Process) -> None:
+    """Release the pipe descriptors even if a descendant still holds the other end. asyncio has no public
+    call for this; `Process._transport` is CPython's (requires-python >= 3.12), so it is looked up
+    defensively and a failure here never hides the error being handled."""
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        with contextlib.suppress(Exception):
+            transport.close()
+
+
 async def _reap(proc: asyncio.subprocess.Process) -> None:
     """Kill the whole process group (also anything it started and left running), then collect the process.
-    Runs on every exit path, including cancellation, and is bounded: a descendant that left the group and
-    still holds the pipe costs REAP_SECONDS, not a hang. The process itself is dead after the SIGKILL."""
+    Runs on every exit path, including cancellation (also a second one), and is bounded: a descendant that
+    left the group and still holds the pipe costs REAP_SECONDS, not a hang. The pipes are closed whatever
+    happens here; a cancellation propagates after that, and any other failure of the cleanup is dropped
+    so it can't replace the error being handled. The process itself is dead after the SIGKILL and asyncio's
+    child watcher reaps it."""
     _kill(proc)
     try:
         await asyncio.wait_for(_drain(proc), REAP_SECONDS)
-    except TimeoutError:
-        # Give up on the pipe so its descriptor is not held for as long as that descendant lives. asyncio
-        # has no public call for this.
-        proc._transport.close()  # pyright: ignore
+    except Exception:  # noqa: BLE001, S110 - TimeoutError (a descendant holds the pipe) or a broken pipe
+        pass
+    finally:
+        _close_transport(proc)
 
 
 async def _collect(proc: asyncio.subprocess.Process, data: bytes) -> bytes:

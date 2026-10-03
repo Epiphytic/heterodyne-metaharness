@@ -1,5 +1,8 @@
 import asyncio
+import contextlib
+import fcntl
 import os
+import signal
 import stat
 import time
 from pathlib import Path
@@ -296,18 +299,31 @@ sys.stdout.buffer.write(b"x" * (1 << 20)); sys.stdout.flush(); time.sleep(30)'""
 
 def alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
         return False
-    return True
+    return stat_text.rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is dead, only not collected yet
 
 
 def gone(pid: int) -> bool:
-    for _ in range(50):  # init reaps an orphan a moment after SIGKILL
+    for _ in range(50):
         if not alive(pid):
             return True
         time.sleep(0.1)
     return False
+
+
+@pytest.fixture(autouse=True)
+def big_pipe() -> None:
+    """The FILL child grows its pipe to 1 MiB; skip, loudly, where the system doesn't allow it."""
+    r, w = os.pipe()
+    try:
+        fcntl.fcntl(w, 1031, 1 << 20)  # F_SETPIPE_SZ
+    except OSError as exc:
+        pytest.skip(f"cannot grow a pipe to 1 MiB here ({exc}); the oversize-output tests need it")
+    finally:
+        os.close(r)
+        os.close(w)
 
 
 def test_oversize_output_is_cleaned_up_without_hanging(tmp_path: Path) -> None:
@@ -355,16 +371,93 @@ def test_cancellation_still_kills_the_group(tmp_path: Path) -> None:
     assert gone(int(pidfile.read_text()))
 
 
+ESCAPED = """setsid sh -c 'echo $$ > "$0"; exec sleep 20' "{pidfile}" &
+while [ ! -s "{pidfile}" ]; do sleep 0.05; done"""     # ready once the descendant has its own session
+
+
+class Spy:
+    """Wraps `summarize._drain` to see when cleanup starts and which process it is cleaning up."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, pidfile: Path) -> None:
+        self.entered = asyncio.Event()
+        self.proc: asyncio.subprocess.Process | None = None
+        self.escaped = False
+        real = summarize._drain
+
+        async def drain(proc: asyncio.subprocess.Process) -> None:
+            self.proc = proc
+            self.escaped = os.getpgid(int(pidfile.read_text())) != proc.pid
+            self.entered.set()
+            await real(proc)
+
+        monkeypatch.setattr(summarize, "_drain", drain)
+
+
+def run_escaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, steps) -> Spy:  # type: ignore[no-untyped-def]
+    """Run `summarize` on a child that leaves a descendant in its own session holding stdout, so cleanup
+    has to give up on the pipe after REAP_SECONDS. `steps(task, spy)` drives the test; the descendant is
+    always killed afterwards."""
+    pidfile = tmp_path / "escaped.pid"
+    monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
+    spy = Spy(monkeypatch, pidfile)
+    argv = script(tmp_path, ESCAPED.format(pidfile=pidfile) + "\n" + body)
+
+    async def main() -> None:
+        task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
+        await asyncio.wait_for(steps(task, spy), 8)
+
+    try:
+        asyncio.run(main())
+    finally:
+        if pidfile.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+    return spy
+
+
+def transport_closed(spy: Spy) -> bool:
+    assert spy.proc is not None
+    return spy.proc._transport.is_closing()  # type: ignore[attr-defined]  # noqa: SLF001
+
+
 def test_a_descendant_outside_the_group_cannot_hang_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
-    argv = script(tmp_path, f'{FILL}\nsetsid sleep 5 &\npython3 -c "$FILL"')
-
-    async def run() -> None:
-        await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 8)
-
     start = time.monotonic()
-    with pytest.raises(summarize.SummaryFailed) as info:
-        asyncio.run(run())
-    assert info.value.reason == "too-long" and time.monotonic() - start < 4
+
+    async def steps(task: asyncio.Task[str], spy: Spy) -> None:
+        with pytest.raises(summarize.SummaryFailed) as info:
+            await task
+        assert info.value.reason == "too-long"
+        assert time.monotonic() - start >= 0.5  # the fallback ran: the drain timed out
+        assert alive(int((tmp_path / "escaped.pid").read_text()))  # and it was still holding the pipe
+
+    spy = run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
+    assert spy.escaped and transport_closed(spy)
+
+
+def test_cancelling_during_cleanup_still_closes_the_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def steps(task: asyncio.Task[str], spy: Spy) -> None:
+        await spy.entered.wait()  # oversize output sent it into cleanup, which waits on the descendant
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    spy = run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
+    assert spy.escaped and transport_closed(spy)
+
+
+def test_cancelling_twice_still_closes_the_pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def steps(task: asyncio.Task[str], spy: Spy) -> None:
+        while not (tmp_path / "escaped.pid").exists():
+            await asyncio.sleep(0.02)
+        task.cancel()  # first: while reading; cleanup starts and waits on the descendant
+        await spy.entered.wait()
+        task.cancel()  # second: during cleanup
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    spy = run_escaped(tmp_path, monkeypatch, "sleep 30", steps)
+    assert spy.escaped and transport_closed(spy)
