@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import sys
 from pathlib import Path
 
 from heterodyne.admind.redact import redact
@@ -59,14 +60,22 @@ async def _drain(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
+def _note(message: str, exc: Exception) -> None:
+    """Say what failed in cleanup: fixed words and the exception's type only, never its text (it could
+    hold the reply)."""
+    print(f"{message} ({type(exc).__name__})", file=sys.stderr)
+
+
 def _close_transport(proc: asyncio.subprocess.Process) -> None:
     """Release the pipe descriptors even if a descendant still holds the other end. asyncio has no public
     call for this; `Process._transport` is CPython's (requires-python >= 3.12), so it is looked up
     defensively and a failure here never hides the error being handled."""
     transport = getattr(proc, "_transport", None)
     if transport is not None:
-        with contextlib.suppress(Exception):
+        try:
             transport.close()
+        except Exception as exc:  # noqa: BLE001 - as in _reap
+            _note("summarizer pipe close failed", exc)
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> None:
@@ -79,8 +88,10 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
     _kill(proc)
     try:
         await asyncio.wait_for(_drain(proc), REAP_SECONDS)
-    except Exception:  # noqa: BLE001, S110 - TimeoutError (a descendant holds the pipe) or a broken pipe
-        pass
+    except TimeoutError:
+        pass  # expected when a descendant outside the group still holds the pipe; closed below
+    except Exception as exc:  # noqa: BLE001 - cleanup must not replace the error being handled
+        _note("summarizer cleanup failed", exc)
     finally:
         _close_transport(proc)
 
