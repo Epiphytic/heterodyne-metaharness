@@ -21,7 +21,7 @@
 
 ## Finding 10: admind
 
-**Rebutted in part: the privilege level.** The operator explicitly chose (2026-09-29) that admind runs as `<operator-user>` with permission prompts bypassed and no root. admind exists to repair anything the harness can break, including `wsd`, `wsd-act`, the sandbox profiles and the Hermes gateway. A least-privilege identity would have to be granted each of those repair paths in turn, and would fail on whichever one was missed during an incident, which is exactly when admind is needed. Requiring per-action confirmation would turn one passthrough message into a second round trip, also during an incident.
+**Rebutted in part: the privilege level.** The operator explicitly chose (2026-09-29) that admind runs as `openclaw` with permission prompts bypassed and no root. admind exists to repair anything the harness can break, including `wsd`, `wsd-act`, the sandbox profiles and the Hermes gateway. A least-privilege identity would have to be granted each of those repair paths in turn, and would fail on whichever one was missed during an incident, which is exactly when admind is needed. Requiring per-action confirmation would turn one passthrough message into a second round trip, also during an incident.
 
 **Accepted:**
 - "No LLM in between" is reworded to "no *gatekeeper* LLM between the operator and the admin agent".
@@ -31,7 +31,7 @@
 - Every message and action goes to the append-only log.
 - The build order no longer says admind is "first": it comes after the spikes, and it doesn't depend on the security boundary being demonstrated, because it deliberately sits outside that boundary.
 
-**Residual risk, accepted by the operator:** anyone who can send authenticated operator messages to the admin group has `<operator-user>`-level control of the host. The protection is the operator's Marmot key, and nothing else.
+**Residual risk, accepted by the operator:** anyone who can send authenticated operator messages to the admin group has `openclaw`-level control of the host. The protection is the operator's Marmot key, and nothing else.
 
 ## Round 2 fixes (after r2 review)
 
@@ -160,3 +160,13 @@ The operator approved revision 11. The plan-1 spikes then found facts that contr
 ## Round 17 (after r17 review)
 
 APPROVE, with no findings. Revision 12 is ready for operator approval.
+
+## Revision 13 (rounds r18–r20)
+
+- **r18, membership transition (BLOCKING):** fixed. §8 makes an operator change a journaled transition, serialized with the guard, holding dispatch and posting until it ends.
+- **r18, admind ingress (BLOCKING):** fixed. §8 restates sender-key, group-binding and replay checks for admind's own group, reading `policy.toml` directly.
+- **r18, redaction (BLOCKING):** fixed. One redaction applies to everything admind posts, to the summarizer's input and to the audit; "unabridged" means nothing omitted apart from redaction markers.
+- **r18, batch provenance (BLOCKING):** fixed. Batches head each reply with its origin, post unthreaded, and `!details` returns every included reply.
+- **r18, non-blocking:** batch cadence, the ≤50-line case, counting after collapse and pipeline failures are specified; the §3.1 table and §6.2 scope are updated.
+- **r19, recovery by count (BLOCKING):** fixed. Commit needs `wn-agent`'s success plus the expected count; a pending change found on startup latches; `admind rearm` is the recovery.
+- **r20:** APPROVE, no findings.
