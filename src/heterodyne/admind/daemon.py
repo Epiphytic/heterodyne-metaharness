@@ -3,9 +3,9 @@
 Output safety. Everything that leaves this module is one of:
 - fixed wording, or a number;
 - a message ID (an event hash, not an identity), audited for correlation;
-- an operator's own text, audited only after `show` (secrets and identifiers redacted, controls escaped);
-- the admin agent's reply or the `!tail` screen, relayed to the operator in chat because the brief says
-  so, and never written to the audit log.
+- an operator's own text, audited whole after `redact`; every audit field is redacted centrally;
+- the admin agent's reply, a summary, a batch, `!details` or the `!tail` screen, relayed to the operators in
+  chat after `redact`, never written to the audit log.
 Peer- and child-supplied text (a stranger's message, an agent reply, a terminal prompt, a peer's error
 `detail`, a hook's session ID or event name) is never logged. Exceptions are reported by type only.
 """
@@ -25,6 +25,7 @@ from heterodyne.admind import alerts, chunk, commands, guard
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
+from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings
 from heterodyne.admind.store import Store, now
 from heterodyne.config.secret_scan import show
@@ -58,7 +59,6 @@ AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is 
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
 AGENT_STUCK_NOTICE = "The admin agent is not running ({why}). Use !tail, then !new."
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
-AUDIT_TEXT_CHARS = 2000
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
 EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled filesystem must not hold a slot)
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
@@ -98,8 +98,9 @@ def reason(exc: BaseException) -> str:
 
 
 def own_text(text: str) -> str:
-    """The operator's own text for the audit log: secrets and identifiers redacted, controls escaped."""
-    return show(text, False)[:AUDIT_TEXT_CHARS]
+    """The operator's own text for the audit log, whole (revision 13), redacted (B1; the audit redacts again,
+    idempotently)."""
+    return redact(text)
 
 
 async def supervised(name: str, factory: Callable[[], Awaitable[None]], audit: Audit, *, base: float = 1.0,
@@ -265,11 +266,13 @@ class Admind:
         self.audit.write("drop", message_id=mid, reason="no longer authorised", what=what)
 
     def post(self, key: str, text: str, reply_to: str | None) -> None:
-        if self.store.enqueue(key, text, reply_to):
+        """Queue one message. Everything admind posts is redacted here (B1); callers that chunk redact the
+        whole text first, so a value can't escape redaction by straddling a chunk boundary."""
+        if self.store.enqueue(key, redact(text), reply_to):
             self.wake.set()
 
     def reply(self, mid: str, text: str, tag: str) -> None:
-        for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
             self.post(f"{tag}:{mid}:{i}", part, mid)
 
     # --- lifecycle -----------------------------------------------------------------------------
@@ -1072,7 +1075,7 @@ class Admind:
                 self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
             text = raw if raw.strip() else NO_REPLY
-            parts = chunk.split(text, self.s.chunk_chars)
+            parts = chunk.split(redact(text), self.s.chunk_chars)
             reply_seq = int(self.store.get("reply_seq") or "0") + 1
             self.store.set("reply_seq", str(reply_seq))
             # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
@@ -1118,16 +1121,16 @@ class Admind:
             except ControlError as exc:
                 attempts = self.store.mark_attempt(row.seq)
                 if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
-                    self.audit.write("send", key=show(row.key, False), action="retry", attempts=attempts,
+                    self.audit.write("send", key=row.key, action="retry", attempts=attempts,
                                      code=exc.code)
                     await self._sleep(min(60, 2 ** attempts))
                     self.wake.set()
                     break
                 self.store.mark_failed(row.seq)
-                self.audit.write("send", key=show(row.key, False), action="failed", code=exc.code)
+                self.audit.write("send", key=row.key, action="failed", code=exc.code)
                 continue
             self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
-            self.audit.write("send", key=show(row.key, False), action="sent")
+            self.audit.write("send", key=row.key, action="sent")
 
     async def alerts_loop(self) -> None:
         while True:
@@ -1153,11 +1156,11 @@ class Admind:
         if self.store.relayed(raw):
             return
         key = alerts.outbox_key(raw)
-        text = alerts.render(name, alert, self.s.chunk_chars)
+        text = redact(alerts.render(name, alert, self.s.chunk_chars))
         if self.store.relay_alert(raw, key, text):
             self.wake.set()
-            self.audit_quietly("alert", name=show(alerts.display_name(name), False)[:64],
-                               key=show(key, False), malformed=alert is None)
+            self.audit_quietly("alert", name=alerts.display_name(name)[:64],
+                               key=key, malformed=alert is None)
 
     def alert_failed(self, raw: bytes, exc: Exception) -> None:
         """Report an alert admind could not relay: by exception type and opaque key only, and tell the
@@ -1171,9 +1174,9 @@ class Admind:
             self.bad_alerts.add(raw)
             skipped = type(inner).__name__
         # The fallback or the skip is recorded first; the audit (quiet) cannot undo or pre-empt either.
-        self.audit_quietly("alert", key=show(key, False), action="failed", error=type(exc).__name__)
+        self.audit_quietly("alert", key=key, action="failed", error=type(exc).__name__)
         if skipped is not None:
-            self.audit_quietly("alert", key=show(key, False), action="skipped", error=skipped)
+            self.audit_quietly("alert", key=key, action="skipped", error=skipped)
 
     async def group_loop(self) -> None:
         while True:
