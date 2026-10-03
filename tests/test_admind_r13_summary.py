@@ -497,3 +497,22 @@ def test_the_expected_drain_timeout_is_not_noted(
 
     run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
     assert capsys.readouterr().err == ""
+
+
+class BrokenStderr:
+    def write(self, text: str) -> int:
+        raise OSError("stderr is gone")
+
+    def flush(self) -> None:
+        raise OSError("stderr is gone")
+
+
+def test_a_broken_stderr_does_not_replace_the_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def broken(proc: asyncio.subprocess.Process) -> None:
+        raise RuntimeError("drain failed")
+
+    monkeypatch.setattr(summarize, "_drain", broken)
+    monkeypatch.setattr("sys.stderr", BrokenStderr())
+    with pytest.raises(summarize.SummaryFailed) as info:
+        asyncio.run(summarize.summarize(script(tmp_path, "exit 3"), tmp_path / "w", "r"))
+    assert info.value.reason == "failed"

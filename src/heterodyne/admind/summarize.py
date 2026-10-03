@@ -63,7 +63,8 @@ async def _drain(proc: asyncio.subprocess.Process) -> None:
 def _note(message: str, exc: Exception) -> None:
     """Say what failed in cleanup: fixed words and the exception's type only, never its text (it could
     hold the reply)."""
-    print(f"{message} ({type(exc).__name__})", file=sys.stderr)
+    with contextlib.suppress(Exception):  # best-effort: a broken stderr must not replace the real error
+        print(f"{message} ({type(exc).__name__})", file=sys.stderr)
 
 
 def _close_transport(proc: asyncio.subprocess.Process) -> None:
