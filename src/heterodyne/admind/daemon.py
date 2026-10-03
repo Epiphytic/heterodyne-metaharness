@@ -170,6 +170,8 @@ class Admind:
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
         self.sub_gen = 0            # bumped at the start and end of every subscription attempt
         self.wake = asyncio.Event()
+        self.send_lock = asyncio.Lock()     # held across each send; a membership transition drains it (B7)
+        self._backoff: dict[int, asyncio.Future[None]] = {}     # each row waiting out a retry: its own timer
         self.dispatch_lock = asyncio.Lock()
         self.dispatched_at = 0.0
         self.generation = 0     # bumped by every dispatch and every turn-starting hook; see _flush
@@ -284,10 +286,10 @@ class Admind:
                 self.reply(mid, UNVERIFIED, "unverified")
         self.audit.write("drop", message_id=mid, reason="no longer authorised", what=what)
 
-    def post(self, key: str, text: str, reply_to: str | None) -> None:
+    def post(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> None:
         """Queue one message. Everything admind posts is redacted here (B1); callers that chunk redact the
         whole text first, so a value can't escape redaction by straddling a chunk boundary."""
-        if self.store.enqueue(key, redact(text), reply_to):
+        if self.store.enqueue(key, redact(text), reply_to, lane):
             self.wake.set()
 
     def reply(self, mid: str, text: str, tag: str) -> None:
@@ -327,6 +329,9 @@ class Admind:
                            "operators in policy.toml); make policy.toml's operators match the group's, then "
                            "run `admind rearm` on the host")
         self.authorise(confirmed)
+        rewritten = self.store.redact_pending_outbox(self.s.chunk_chars)   # B17: a plan-2 outbox
+        if rewritten:
+            self.audit.write("outbox", action="redacted-after-upgrade", rows=rewritten)
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
@@ -344,6 +349,9 @@ class Admind:
             raise
         finally:
             self.shutting_down = True
+            for timer in self._backoff.values():
+                timer.cancel()
+            self._backoff.clear()
             await server.close()
 
     async def guarded(self, coro: Awaitable[None]) -> None:
@@ -1148,29 +1156,49 @@ class Admind:
             await self.outbox_pass()
 
     async def outbox_pass(self) -> None:
-        """One sweep of the outbox (a loop iteration, callable on its own)."""
+        """One sweep of the outbox (a loop iteration, callable on its own). Each send holds `send_lock`,
+        and the gate and the next row are read under it: a membership transition that has drained the
+        lock sees no send in progress and none can start (B7). Rows are redacted again at delivery (B1).
+        A retry's backoff is a timer, not a sleep in this loop: the pass ends, and a row queued meanwhile
+        (`post` sets `wake`) is sent at once if it comes first, so a lane-1 message never waits behind a
+        lane-2 row's backoff (B14). The timer sets `wake` when it ends."""
         if self.held:
             await self.flush()              # emits NOT_READY once the start timeout passes
         self.notify_held()
-        for row in self.store.pending():
-            if not self.may_post():         # rechecked per row: a latch mid-batch stops the rest
-                break
-            try:
-                sent = await self.client.send_final(self.account, self.group, row.text, row.reply_to,
-                                                    row.key)
-            except ControlError as exc:
-                attempts = self.store.mark_attempt(row.seq)
-                if exc.retryable and attempts < MAX_SEND_ATTEMPTS:
-                    self.audit.write("send", key=row.key, action="retry", attempts=attempts,
-                                     code=exc.code)
-                    await self._sleep(min(60, 2 ** attempts))
-                    self.wake.set()
-                    break
-                self.store.mark_failed(row.seq)
-                self.audit.write("send", key=row.key, action="failed", code=exc.code)
-                continue
-            self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
-            self.audit.write("send", key=row.key, action="sent")
+        while True:
+            async with self.send_lock:
+                if not self.may_post():     # rechecked per row: a latch mid-batch stops the rest
+                    return
+                row = self.store.next_pending()     # re-read each time: a new lane-1 row goes next (B14)
+                if row is None:
+                    return
+                timer = self._backoff.get(row.seq)
+                if timer is not None and not timer.done():
+                    return                  # its retry is not due; its timer or a new row wakes the loop
+                try:
+                    sent = await self.client.send_final(self.account, self.group, redact(row.text),
+                                                        row.reply_to, row.key)
+                except ControlError as exc:
+                    attempts = self.store.mark_attempt(row.seq)
+                    if not (exc.retryable and attempts < MAX_SEND_ATTEMPTS):
+                        self._backoff.pop(row.seq, None)
+                        self.send_failed(row.seq, row.key)
+                        self.audit.write("send", key=row.key, action="failed", code=exc.code)
+                        continue
+                    self.audit.write("send", key=row.key, action="retry", attempts=attempts, code=exc.code)
+                    timer = asyncio.ensure_future(self._sleep(min(60, 2 ** attempts)))
+                    timer.add_done_callback(lambda _: self.wake.set())
+                    self._backoff[row.seq] = timer      # per row: no other row's retry cuts it short
+                    return
+                else:
+                    self._backoff.pop(row.seq, None)
+                    self.store.mark_sent(row.seq, sent.message_ids_hex[0] if sent.message_ids_hex else None)
+                    self.audit.write("send", key=row.key, action="sent")
+                    continue
+
+    def send_failed(self, seq: int, key: str) -> None:
+        """A message admind gave up on (Task 8 adds the backstop for replies)."""
+        self.store.mark_failed(seq)
 
     async def alerts_loop(self) -> None:
         while True:

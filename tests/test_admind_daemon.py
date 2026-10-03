@@ -54,13 +54,16 @@ class Services:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, settings_overrides: dict[str, Any] | None = None) -> None:
+    def __init__(self, tmp_path: Path, settings_overrides: dict[str, Any] | None = None,
+                 before_store: Callable[["Harness"], Any] | None = None) -> None:
         wrapper = tmp_path / "claude"
         wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_CLAUDE} \"$@\"\n")
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
         self.log = tmp_path / "claude.log"
         os.environ["FAKE_CLAUDE_LOG"] = str(self.log)
         self.settings = make_settings(tmp_path, adapter_binary=str(wrapper), **(settings_overrides or {}))
+        if before_store:
+            before_store(self)
         self.store = Store(self.settings.state_dir / "admind.db")
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
@@ -103,8 +106,9 @@ def drop_tmux(h: Harness) -> None:
 
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
              before: Callable[[Harness], Any] | None = None,
-             settings_overrides: dict[str, Any] | None = None) -> Harness:
-    h = Harness(tmp_path, settings_overrides)
+             settings_overrides: dict[str, Any] | None = None,
+             before_store: Callable[[Harness], Any] | None = None) -> Harness:
+    h = Harness(tmp_path, settings_overrides, before_store)
     if before:
         before(h)
 
@@ -604,7 +608,7 @@ def test_a_crashing_loop_restarts_with_a_value_free_audit(
     npub = hex_to_npub(STRANGER)
 
     def before(h: Harness) -> None:
-        real = h.store.pending
+        real = h.store.next_pending
         calls = [0]
 
         def flaky() -> Any:
@@ -612,7 +616,7 @@ def test_a_crashing_loop_restarts_with_a_value_free_audit(
             if calls[0] == 1:
                 raise ValueError(f"boom {npub}")
             return real()
-        monkeypatch.setattr(h.store, "pending", flaky)
+        monkeypatch.setattr(h.store, "next_pending", flaky)
 
     async def scenario(h: Harness) -> None:
         await h.say("hi")

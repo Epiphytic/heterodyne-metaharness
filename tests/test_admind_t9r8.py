@@ -21,11 +21,11 @@ def test_a_failed_supersession_notice_still_clears_the_old_anchor(
     real = Store.enqueue
     hits: list[str] = []
 
-    def enqueue(self: Store, key: str, text: str, reply_to: str | None) -> bool:
+    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         if key.startswith("abandoned:") and not hits:
             hits.append(key)
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to)
+        return real(self, key, text, reply_to, lane)
 
     async def scenario() -> None:
         a = await u.say("job A")
@@ -75,10 +75,10 @@ def test_a_persistent_abandonment_notice_failure_does_not_stop_a_dead_agent_rela
     u.daemon.ready.set()
     real = Store.enqueue
 
-    def enqueue(self: Store, key: str, text: str, reply_to: str | None) -> bool:
+    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         if key.startswith("abandoned:"):
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to)
+        return real(self, key, text, reply_to, lane)
 
     async def scenario() -> None:
         await u.say("job A")

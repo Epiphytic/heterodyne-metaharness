@@ -13,6 +13,7 @@
 import contextlib
 import functools
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -20,6 +21,9 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from heterodyne.admind import chunk
+from heterodyne.admind.redact import redact, redact_continuation
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE,
     reply_to TEXT,
+    lane INTEGER NOT NULL DEFAULT 1 CHECK (lane IN (1, 2)),
     text TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +55,16 @@ class OutboxRow:
     reply_to: str | None
     text: str
     attempts: int
+    lane: int
+
+
+_CHUNKED = re.compile(r"\A(.*):(\d+)\Z", re.DOTALL)
+PARTLY_SENT = "<redacted continuation of a partly sent reply>"
+
+
+def _like(text: str) -> str:
+    """`text` as a literal LIKE prefix (escape `\\`, `%` and `_`)."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _locked[**P, R](method: Callable[P, R]) -> Callable[P, R]:
@@ -107,6 +122,12 @@ class Store:
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        columns = {str(r[1]) for r in self.db.execute("PRAGMA table_info(outbox)")}
+        if "lane" not in columns:       # a database created before revision 13 (B17)
+            with self.transaction():    # the column and the redaction marker: both or neither
+                self.db.execute("ALTER TABLE outbox ADD COLUMN lane INTEGER NOT NULL DEFAULT 1")
+                self.db.execute("INSERT OR REPLACE INTO kv(key, value) "
+                                "VALUES ('outbox_needs_redaction', '1')")
 
     @_locked
     def close(self) -> None:
@@ -143,17 +164,72 @@ class Store:
         return [str(r[0]) for r in rows]
 
     @_locked
-    def enqueue(self, key: str, text: str, reply_to: str | None) -> bool:
-        cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status) "
-                              "VALUES (?, ?, ?, 'pending')", (key, reply_to, text))
+    def enqueue(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
+        cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
+                              "VALUES (?, ?, ?, 'pending', ?)", (key, reply_to, text, lane))
         return cur.rowcount == 1
 
     @_locked
     def pending(self) -> list[OutboxRow]:
-        rows = self.db.execute("SELECT seq, key, reply_to, text, attempts FROM outbox "
-                               "WHERE status = 'pending' ORDER BY seq").fetchall()
-        return [OutboxRow(int(r[0]), str(r[1]), None if r[2] is None else str(r[2]), str(r[3]), int(r[4]))
-                for r in rows]
+        rows = self.db.execute("SELECT seq, key, reply_to, text, attempts, lane FROM outbox "
+                               "WHERE status = 'pending' ORDER BY lane, seq").fetchall()
+        return [OutboxRow(int(r[0]), str(r[1]), None if r[2] is None else str(r[2]), str(r[3]), int(r[4]),
+                          int(r[5])) for r in rows]
+
+    @_locked
+    def next_pending(self) -> OutboxRow | None:
+        """The next message to send: lane 1 (commands, alerts, notices, summaries, batches, verbatim
+        replies) before lane 2 (`!details`), each in order (B14)."""
+        r = self.db.execute("SELECT seq, key, reply_to, text, attempts, lane FROM outbox "
+                            "WHERE status = 'pending' ORDER BY lane, seq LIMIT 1").fetchone()
+        return None if r is None else OutboxRow(int(r[0]), str(r[1]), None if r[2] is None else str(r[2]),
+                                                str(r[3]), int(r[4]), int(r[5]))
+
+    @_locked
+    def redact_pending_outbox(self, chunk_chars: int) -> int:
+        """Once, after the upgrade to revision 13 (B17): redact what a plan-2 admind queued and never sent.
+        The pending chunks of one reply (keys `<prefix>:<i>`) are joined in order first, so a value split
+        across their boundaries is still found, then re-chunked under new keys `<prefix>:r<i>`. If the
+        reply's earlier chunks were already sent, they are joined in order and a value they began is hidden
+        to its end (it can span several of them); if one of them is missing or not sent, the pending text is
+        replaced whole (fail closed). Returns the number of rows rewritten; one transaction."""
+        if self.get("outbox_needs_redaction") is None:
+            return 0
+        with self.transaction():
+            rows = self.db.execute("SELECT seq, key, reply_to, text FROM outbox WHERE status = 'pending' "
+                                   "ORDER BY seq").fetchall()
+            groups: dict[str, list[tuple[int, int, str | None, str]]] = {}
+            for seq, key, reply_to, text in rows:
+                m = _CHUNKED.match(str(key))
+                prefix, index = (m.group(1), int(m.group(2))) if m else (str(key), -1)
+                groups.setdefault(prefix, []).append(
+                    (index, int(seq), None if reply_to is None else str(reply_to), str(text)))
+            for prefix, parts in groups.items():
+                parts.sort()
+                first, reply_to = parts[0][0], parts[0][2]
+                joined = "".join(p[3] for p in parts)
+                if first <= 0:
+                    clean = redact(joined)
+                else:
+                    sent = self.db.execute(
+                        "SELECT key, text FROM outbox WHERE key LIKE ? ESCAPE '\\' AND status = 'sent'",
+                        (_like(prefix) + ":%",)).fetchall()
+                    earlier = {int(m.group(2)): str(t) for k, t in sent
+                               if (m := _CHUNKED.match(str(k))) and m.group(1) == prefix}
+                    if all(i in earlier for i in range(first)):
+                        clean = redact_continuation("".join(earlier[i] for i in range(first)), joined)
+                    else:
+                        clean = PARTLY_SENT
+                self.db.executemany("DELETE FROM outbox WHERE seq = ?", [(p[1],) for p in parts])
+                if first < 0:       # an unchunked key keeps its key
+                    pieces = [(prefix, clean)]
+                else:
+                    pieces = [(f"{prefix}:r{i}", part)
+                              for i, part in enumerate(chunk.split(clean, chunk_chars))]
+                self.db.executemany("INSERT INTO outbox(key, reply_to, text, status, lane) "
+                                    "VALUES (?, ?, ?, 'pending', 1)", [(k, reply_to, t) for k, t in pieces])
+            self.db.execute("DELETE FROM kv WHERE key = 'outbox_needs_redaction'")
+        return len(rows)
 
     @_locked
     def mark_sent(self, seq: int, message_id: str | None) -> None:
@@ -205,8 +281,8 @@ class Store:
                                   (name, now()))
             if cur.rowcount != 1:
                 return False
-            cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status) "
-                                  "VALUES (?, NULL, ?, 'pending')", (key, text))
+            cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
+                                  "VALUES (?, NULL, ?, 'pending', 1)", (key, text))
             if cur.rowcount != 1:
                 row = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
                 if row is None or row[0] != text:

@@ -192,7 +192,7 @@ def test_a_crash_between_the_ready_marker_and_the_notice_still_sends_the_notice_
     u.store.delete("operator_seen_at")                  # the operator has not been seen yet
     real_enqueue = u.store.enqueue
 
-    def crashing_enqueue(key: str, text: str, reply_to: str | None) -> bool:
+    def crashing_enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
         raise OSError("simulated crash while queueing the notice")
     monkeypatch.setattr(u.store, "enqueue", crashing_enqueue)
 
