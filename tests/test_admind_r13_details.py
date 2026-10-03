@@ -32,7 +32,7 @@ from test_admind_r13_replies import (
 )
 
 from heterodyne.admind import chunk, commands, hook, summarize
-from heterodyne.admind.daemon import DETAILS_BUSY, READY_NOTICE
+from heterodyne.admind.daemon import DETAILS_BUSY, DETAILS_NOT_READ, READY_NOTICE
 from heterodyne.admind.hook import turn_tool_calls
 from heterodyne.admind.redact import redact
 from heterodyne.admind.store import Store
@@ -729,3 +729,66 @@ def test_chunking_is_linear() -> None:
     parts = chunk.split(text, 200)
     assert time.perf_counter() - start < 1.0
     assert "".join(parts) == text
+
+
+BATCH_MESSAGE = "bb" * 32
+
+
+def plant_batch(h: Harness, path: Path, sid: str, n: int) -> None:
+    """A delivered backstop batch of `n` turns that each have a span in `path`."""
+    size = append(path, [prompt("go"), tool("Bash", command="ls"), result("out")])
+    batch = h.store.open_batch(time.time(), 3600)
+    for i in range(n):
+        turn = h.store.add_turn(
+            f"k{i}", sid, None, f"— op · 12:00 UTC · “t{i}”", f"reply {i}", str(path), 0, size, "summarizing"
+        )
+        h.store.add_to_batch(turn, batch)
+    h.store.close_batch(batch)
+    h.store.enqueue("batch:1.0", "batch", None)
+    h.store.record_post("batch:1.0", "batch", None, batch)
+    row = h.store.next_pending()
+    assert row is not None
+    h.store.mark_sent(row.seq, BATCH_MESSAGE)
+
+
+def cooperative_reader(seconds: float, seen: list[str]) -> Any:
+    """A transcript reader that takes `seconds`, in steps, and stops as soon as READ_CANCEL is set."""
+
+    def read(path: Path, start: int, end: int) -> str:
+        cancel = hook.READ_CANCEL.get()
+        assert cancel is not None
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if cancel.is_set():
+                seen.append("cancelled")
+                raise OSError("the read was abandoned")
+            time.sleep(0.01)
+        seen.append("read")
+        return "▸ Bash done"
+
+    return read
+
+
+@needs_tmux
+def test_one_details_full_has_one_budget_for_all_its_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex T9 r1 finding 2: 30 s per turn x N turns held the work lock for as long as that.
+    seen: list[str] = []
+    monkeypatch.setattr("heterodyne.admind.daemon.turn_tool_calls", cooperative_reader(0.4, seen))
+
+    async def scenario(h: Harness) -> None:
+        sid = await session(h)
+        plant_batch(h, tmp_path / f"{sid}.jsonl", sid, 6)
+        h.daemon.details_timeout = 1.0
+        started = time.monotonic()
+        mid = await ask(h, "!details full", reply_to=BATCH_MESSAGE)
+        await wait_until(lambda: delivered(h, mid), 20)
+        elapsed = time.monotonic() - started
+        whole = "".join(details_texts(h, mid))
+        assert elapsed < 2.5  # about the budget, not 6 x 0.4 s of reads plus
+        assert whole.count("▸ Bash done") == 2 and whole.count(DETAILS_NOT_READ) == 3
+        assert whole.count(DETAILS_BUSY) == 1  # the read the budget ran out in
+        assert seen.count("read") == 2 and "cancelled" in seen
+
+    run_with(tmp_path, scenario, configure(None))

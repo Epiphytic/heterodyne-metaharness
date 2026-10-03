@@ -82,6 +82,7 @@ OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20
 SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
 DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
+DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
 EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
                   "for the turn's tool calls, or ask the agent to repeat it.)")
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
@@ -992,10 +993,15 @@ class Admind:
             return
         full = cmd.arg == "full"
         sections: list[str] = []
+        # Deviation from the plan, which gave each turn its own 30 s: one `!details full` has ONE budget,
+        # `details_timeout`, for all its reads. A batch can hold any number of turns, and 30 s each would
+        # hold the work lock (operator messages, !interrupt, membership transitions) for 30 s x N.
+        deadline = asyncio.get_running_loop().time() + self.details_timeout
         for row in rows:
             body = row.text
             if full:
-                body += "\n\n" + await self.tool_calls(row)
+                left = deadline - asyncio.get_running_loop().time()
+                body += "\n\n" + (await self.tool_calls(row, left) if left > 0 else DETAILS_NOT_READ)
             sections.append(f"{row.origin}\n{body}")
         # whole text redacted and chunked in a thread: it may be huge and nothing is cut (B1, B13)
         parts = await asyncio.to_thread(
@@ -1010,8 +1016,8 @@ class Admind:
         self.audit.write("command", message_id=mid, command="details", full=full, replies=len(rows),
                          chars=sum(len(p) for p in parts))
 
-    async def tool_calls(self, row: TurnRow) -> str:
-        """One turn's tool calls for `!details full`, read in the shared reader slot (B20)."""
+    async def tool_calls(self, row: TurnRow, seconds: float) -> str:
+        """One turn's tool calls for `!details full`, read in the shared slot (B20), within `seconds`."""
         if row.transcript is None or row.transcript_start is None or row.transcript_end is None:
             return "(tool calls are not available for this turn)"
         path = Path(row.transcript)
@@ -1020,7 +1026,7 @@ class Admind:
         cancel = threading.Event()
         token = READ_CANCEL.set(cancel)         # the worker thread inherits it; it stops if we give up
         try:
-            out = await self.bounded_read(self.details_timeout, turn_tool_calls, path, row.transcript_start,
+            out = await self.bounded_read(seconds, turn_tool_calls, path, row.transcript_start,
                                           row.transcript_end)
         except BaseException:
             cancel.set()
