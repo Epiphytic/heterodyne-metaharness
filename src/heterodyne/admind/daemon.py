@@ -1535,8 +1535,11 @@ class Admind:
                 turn_id = record(mode, text)
             except Exception as exc:  # noqa: BLE001 - the reply must still reach the operator (B9)
                 self.audit_quietly("reply", action="record-failed", error=type(exc).__name__)
-                mode, text, parts = "backstop", EXTRACT_FAILED, []   # never the text that just failed
-                turn_id = record(mode, text)        # if this fails too, hook_loop holds dispatch
+                mode, parts = "backstop", []
+                if isinstance(exc, UnicodeEncodeError):
+                    text = EXTRACT_FAILED           # text the database can't hold: never insert it again
+                turn_id = record(mode, text)        # any other failure keeps the reply; if this fails
+                                                    # too, hook_loop holds dispatch
             if mode == "summary":
                 self.summary_wake.set()
             elif mode == "backstop":

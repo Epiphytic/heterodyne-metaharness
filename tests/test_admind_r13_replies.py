@@ -311,8 +311,8 @@ def test_a_reply_that_cannot_be_recorded_goes_to_the_backstop(
         monkeypatch.setattr(h.store, "record_post", flaky)
         await h.say("hello")
         text = await batch_arrives(h)
-        assert EXTRACT_FAILED in text  # the fixed notice: never the text that just failed
-        assert "echo: hello" not in text and "echo: hello" not in h.texts()
+        assert "echo: hello" in text and EXTRACT_FAILED not in text  # a transient failure keeps the reply
+        assert "echo: hello" not in h.texts()  # the verbatim post never went out
         await h.until(lambda: h.store.get("busy") is None)
         assert audited(h, kind="reply", action="record-failed")
 
