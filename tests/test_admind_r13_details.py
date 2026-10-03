@@ -752,20 +752,19 @@ def plant_batch(h: Harness, path: Path, sid: str, n: int) -> None:
     h.store.mark_sent(row.seq, BATCH_MESSAGE)
 
 
-def cooperative_reader(seconds: float, seen: list[str]) -> Any:
-    """A transcript reader that takes `seconds`, in steps, and stops as soon as READ_CANCEL is set."""
+def cooperative_reader(instant: int, acknowledged: threading.Event, calls: list[int]) -> Any:
+    """A transcript reader: the first `instant` calls return at once, the next blocks until READ_CANCEL
+    is set (as a stuck read would), then sets `acknowledged` and gives up. No wall-clock counting."""
 
     def read(path: Path, start: int, end: int, limit: int | None = None) -> tuple[str, bool]:
         cancel = hook.READ_CANCEL.get()
         assert cancel is not None
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if cancel.is_set():
-                seen.append("cancelled")
-                raise OSError("the read was abandoned")
-            time.sleep(0.01)
-        seen.append("read")
-        return "▸ Bash done", False
+        calls.append(1)
+        if len(calls) <= instant:
+            return "▸ Bash done", False
+        assert cancel.wait(30), "the read was never told to stop"
+        acknowledged.set()
+        raise OSError("the read was abandoned")
 
     return read
 
@@ -775,8 +774,11 @@ def test_one_details_full_has_one_budget_for_all_its_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Codex T9 r1 finding 2: 30 s per turn x N turns held the work lock for as long as that.
-    seen: list[str] = []
-    monkeypatch.setattr("heterodyne.admind.daemon.render_tool_calls", cooperative_reader(0.4, seen))
+    acknowledged = threading.Event()
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "heterodyne.admind.daemon.render_tool_calls", cooperative_reader(2, acknowledged, calls)
+    )
 
     async def scenario(h: Harness) -> None:
         sid = await session(h)
@@ -785,12 +787,13 @@ def test_one_details_full_has_one_budget_for_all_its_turns(
         started = time.monotonic()
         mid = await ask(h, "!details full", reply_to=BATCH_MESSAGE)
         await wait_until(lambda: delivered(h, mid), 20)
-        elapsed = time.monotonic() - started
         whole = "".join(details_texts(h, mid))
-        assert elapsed < 2.5  # about the budget, not 6 x 0.4 s of reads plus
-        assert whole.count("▸ Bash done") == 2 and whole.count(DETAILS_NOT_READ) == 3
+        assert time.monotonic() - started < 10  # a loose bound: it is the budget, not 6 reads of 30 s
+        assert whole.count("▸ Bash done") == 2  # read before the stuck one
         assert whole.count(DETAILS_BUSY) == 1  # the read the budget ran out in
-        assert seen.count("read") == 2 and "cancelled" in seen
+        assert whole.count(DETAILS_NOT_READ) == 3  # the turns after it were not tried
+        assert len(calls) == 3
+        await wait_until(acknowledged.is_set, 10)  # the reader was told to stop
 
     run_with(tmp_path, scenario, configure(None))
 
@@ -1095,3 +1098,52 @@ def test_the_notice_names_the_limit_that_applied() -> None:
     assert min(MAX_REPLY, MAX_DETAILS_PARTS * 4000) == MAX_REPLY
     assert details_notice(4_000_000) == "(details truncated at 3 MiB)"
     assert details_notice(4000) == "(details truncated at 3 KiB)"
+
+
+@needs_tmux
+def test_a_cancel_at_a_slice_yield_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("heterodyne.admind.daemon.DETAILS_SLICE", 1)
+
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 6000)
+        sid = await summary_delivered(h)
+        cancelled: list[bool] = []
+
+        def cancel_at_three(calls: int, parts: int) -> None:
+            if calls == 3:
+                cancelled.append(True)
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel()  # delivered at the slice's own yield
+
+        on_stage(h, cancel_at_three)
+        mid = await ask(h, "!details", reply_to=sid)
+        await wait_until(lambda: cancelled and staged(h) == 0)
+        assert details_texts(h, mid) == [] and inbound_status(h, mid) != "done"
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
+
+
+@needs_tmux
+def test_a_failure_after_the_publish_statement_rolls_the_whole_command_back(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.say("long " + "w" * 6000)
+        sid = await summary_delivered(h)
+        real = h.store.publish_details
+        failed: list[bool] = []
+
+        def publish_then_fail(token: str, prefix: str, reply_to: str, lane: int) -> int:
+            n = real(token, prefix, reply_to, lane)
+            assert n > 1 and details_texts(h, token) != []  # the rows were really moved...
+            failed.append(True)
+            raise RuntimeError("the commit never happened")  # ...in the transaction that now rolls back
+
+        h.store.publish_details = publish_then_fail  # type: ignore[method-assign]
+        mid = await ask(h, "!details", reply_to=sid)
+        await wait_until(lambda: failed and staged(h) == 0)
+        assert details_texts(h, mid) == []  # no outbox rows
+        assert inbound_status(h, mid) != "done"  # and the status was not committed on its own
+
+    run_with(tmp_path, scenario, configure('echo "short summary"'), {"chunk_chars": 200})
