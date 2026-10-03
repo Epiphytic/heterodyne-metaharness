@@ -28,7 +28,7 @@ def test_a_prompt_hook_during_a_failing_send_leaves_no_orphan_anchor_for_the_ret
             assert release.wait(10), "test never released the paste"
             raise TmuxError("load-buffer failed")      # definite: nothing reached the pane
     u.tmux.paste = paste                                # type: ignore[method-assign]
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, fallback=True: "the answer to A")
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "the answer to A")
 
     async def scenario() -> None:
         sending = asyncio.create_task(u.say("prompt A"))

@@ -832,26 +832,19 @@ def test_alert_render_withholds_secrets_and_identifiers_and_escapes_controls() -
 
 
 def test_transcript_fallback_never_follows_symlinks_or_blocks_on_fifos(tmp_path: Path) -> None:
-    from heterodyne.admind.hook import last_assistant_text, reply_text
+    from heterodyne.admind.hook import reply_text, transcript_size
     real = tmp_path / "real.txt"
     real.write_text(json.dumps({"type": "assistant", "message": {"content": [
         {"type": "text", "text": "secret reply"}]}}) + "\n")
     link = tmp_path / "S.jsonl"
     link.symlink_to(real)
-    assert last_assistant_text(link) == ""
-    assert reply_text(HookEvent("Stop", "S", str(link), None)) == ""
+    size = real.stat().st_size
+    assert reply_text(HookEvent("Stop", "S", str(link), None), 0, size) is None
+    assert transcript_size(HookEvent("Stop", "S", str(link), None)) is None
     fifo = tmp_path / "F.jsonl"
     os.mkfifo(fifo)
-    assert run_with_watchdog(fifo, lambda: reply_text(HookEvent("Stop", "F", str(fifo), None))) == ""
-
-
-def test_transcript_fallback_reads_only_a_bounded_tail(tmp_path: Path) -> None:
-    from heterodyne.admind.hook import last_assistant_text
-    path = tmp_path / "S.jsonl"
-    old = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old " * 500}]}})
-    new = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "newest"}]}})
-    path.write_text("\n".join([old] * 50 + [new]) + "\n")
-    assert last_assistant_text(path, limit=1000) == "newest"
+    assert run_with_watchdog(fifo, lambda: reply_text(HookEvent("Stop", "F", str(fifo), None), 0, 10)) is None
+    assert run_with_watchdog(fifo, lambda: transcript_size(HookEvent("Stop", "F", str(fifo), None))) is None
 
 
 # --- `admind run` wiring ------------------------------------------------------------------------------

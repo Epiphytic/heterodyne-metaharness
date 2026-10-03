@@ -145,7 +145,7 @@ class Unit:
 
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
-        self.settings = make_settings(tmp_path)
+        self.settings = make_settings(tmp_path, reply_verbatim_lines=200, reply_verbatim_chars=60000)
         self.store = Store(self.settings.state_dir / "admind.db")
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.tmux = FakeTmux()
@@ -451,7 +451,7 @@ class SlowRead:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, ev: HookEvent, fallback: bool = True) -> str:
+    def __call__(self, ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         self.started.set()
         assert self.release.wait(10), "test never released the read"
         return self.text
@@ -620,7 +620,7 @@ def test_recovery_notice_and_state_change_are_atomic(tmp_path: Path, monkeypatch
 def test_a_stop_is_all_or_nothing_and_recovery_then_answers_once(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)   # three chunks
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "x" * 9000)   # three chunks
 
     async def scenario() -> str:
         a = await u.say("prompt A")
@@ -643,7 +643,7 @@ def test_a_stop_is_all_or_nothing_and_recovery_then_answers_once(
 def test_a_stop_commits_its_chunks_and_state_together(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "x" * 9000)
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "x" * 9000)
 
     async def scenario() -> str:
         a = await u.say("prompt A")

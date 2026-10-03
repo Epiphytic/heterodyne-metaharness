@@ -74,7 +74,7 @@ class GatedRead:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, ev: HookEvent, fallback: bool = True) -> str:
+    def __call__(self, ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         self.calls += 1
         self.started.set()
         assert self.release.wait(10), "test never released the read"
@@ -342,13 +342,13 @@ def test_a_stalled_transcript_read_times_out_and_releases_the_slot(
                 r1, w1 = await send(sock, frame("Stop"))                # no text: fallback, which stalls
                 assert await asyncio.to_thread(read.started.wait, 10)
                 assert await answer(r1) == b"ok\n"                      # slot released at the deadline
-                assert replies(u) == [] and "reply-extraction-timeout" in u.audit_text()
+                assert replies(u) == [] and "reply-extraction-failed" in u.audit_text()
                 r2, w2 = await send(sock, frame("Stop"))                # the first thread is still running
                 assert await answer(r2) == b"ok\n"
                 assert read.calls == 1                                  # at most one extraction thread
-                assert u.audit_text().count("reply-extraction-timeout") == 2
+                assert u.audit_text().count("reply-extraction-failed") == 2
                 read.release.set()                                      # the abandoned thread finishes
-                await wait_until(lambda: u.daemon._extraction is not None and u.daemon._extraction.done())  # pyright: ignore[reportPrivateUsage]
+                await wait_until(lambda: u.daemon._reader is not None and u.daemon._reader.done())  # pyright: ignore[reportPrivateUsage]
                 u.daemon.extract_timeout = 10.0                         # the last read must not race it
                 r3, w3 = await send(sock, frame("Stop"))                # and the next fallback may run again
                 assert await answer(r3) == b"ok\n"

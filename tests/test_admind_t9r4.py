@@ -334,7 +334,7 @@ class GatedRead:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, ev: HookEvent, fallback: bool = True) -> str:
+    def __call__(self, ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         self.started.set()
         assert self.release.wait(10), "test never released the read"
         return self.text

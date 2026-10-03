@@ -22,14 +22,24 @@ import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from heterodyne.admind import alerts, chunk, commands, ctl, guard, membership
+from heterodyne.admind import alerts, backstop, chunk, commands, ctl, guard, membership, summarize
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
-from heterodyne.admind.hook import HOOK_EVENTS, Delivery, HookEvent, HookServer, reply_text, same_prompt
+from heterodyne.admind.hook import (
+    HOOK_EVENTS,
+    Delivery,
+    HookEvent,
+    HookServer,
+    reply_text,
+    same_prompt,
+    transcript_size,
+)
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
-from heterodyne.admind.store import Store, now
+from heterodyne.admind.store import Store, TurnRow, now
+from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
     ControlClient,
@@ -64,6 +74,10 @@ AGENT_STUCK_NOTICE = "The admin agent is not running ({why}). Use !tail, then !n
 MESSAGE_ID = re.compile(r"[0-9a-f]{64}")
 KNOWN_HOOKS = frozenset(HOOK_EVENTS)
 EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled filesystem must not hold a slot)
+OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20)
+SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
+EXTRACT_FAILED = ("(admind could not read this reply from the transcript in time. Reply `!details full` "
+                  "for the turn's tool calls, or ask the agent to repeat it.)")
 HOOK_DEADLINE = 30.0        # one hook event's whole processing; on expiry the slot is released
 HOOK_LOCK_WAIT = 120.0      # an event's wait for the turn lock; expiry also holds dispatch (R6)
 HOOK_LOST_NOTICE = ("admind lost an agent hook event; new messages are held. "
@@ -185,7 +199,7 @@ class Admind:
         self.extract_timeout = EXTRACT_SECONDS      # replaced in tests
         self.hook_deadline = HOOK_DEADLINE          # replaced in tests
         self.hook_lock_wait = HOOK_LOCK_WAIT        # replaced in tests
-        self._extraction: asyncio.Future[str] | None = None     # the one transcript-read thread allowed
+        self._reader: asyncio.Future[Any] | None = None     # the one transcript-read thread allowed (B20)
         self._idle_tasks: set[asyncio.Task[None]] = set()
         self.held: list[tuple[str, str]] = []
         self.clock: Callable[[], float] = time.monotonic    # replaced in tests
@@ -194,6 +208,16 @@ class Admind:
         self.launched_at = self.clock()
         self.stuck: str | None = None
         self.not_ready_sent = False
+        self.summary_wake = asyncio.Event()
+        self.summarizer_argv: list[str] | None = (
+            None if settings.summarizer is None or settings.summarizer_binary is None
+            else headless_argv(settings.summarizer_binary, settings.summarizer))
+        self.summary_timeout = summarize.SUMMARY_TIMEOUT    # replaced in tests
+        self.summary_poll = SUMMARY_POLL                    # replaced in tests
+        self.offset_timeout = OFFSET_SECONDS                # replaced in tests
+        self.batch_seconds = backstop.BATCH_SECONDS         # replaced in tests
+        self.batch_poll = 1.0                               # replaced in tests
+        self.wallclock: Callable[[], float] = time.time     # replaced in tests; batches outlive a restart
         self.group_ok = False
         self.observing = False      # a membership subscription is confirmed active (acked, then verified)
         self.acked = False          # the current subscription was acknowledged; check_group may then observe
@@ -402,7 +426,8 @@ class Admind:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
-                                   ("agent", self.agent_loop)):
+                                   ("agent", self.agent_loop), ("summaries", self.summary_loop),
+                                   ("batches", self.batch_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
         except BaseException:
             self.shutting_down = True
@@ -862,6 +887,7 @@ class Admind:
         self.remember_sender(mid, ev.message.sender.account_id_hex.lower())
         text = ev.message.text
         self.audit.write("inbound", operator=verdict.operator, message_id=mid, text=own_text(text))
+        self.store.record_prompt(mid, verdict.operator or "?", backstop.first_words(redact(text)))
         if not await self.check_group() or not self.authorised(mid):   # the latch may have come meanwhile
             self.deny(mid, "message")
             return
@@ -1282,6 +1308,9 @@ class Admind:
         elif ev.hook_event_name == "Stop":
             await self.on_stop(ev, arrival, validate=validate)
         else:
+            # The turn's first byte, measured before the lock (B19): the transcript only grows, so a size
+            # taken later could skip the turn's own first records.
+            start = await self.transcript_offset(ev) if ev.hook_event_name == "UserPromptSubmit" else None
             async with self.turn_lock():
                 kind = self.classify(ev) if validate else "current"
                 if kind == "other":
@@ -1294,9 +1323,9 @@ class Admind:
                     self.generation += 1
                     self.on_session_start(ev, arrival)
                 else:
-                    self.on_prompt(ev, arrival)
+                    self.on_prompt(ev, arrival, start)
 
-    def on_prompt(self, ev: HookEvent, arrival: int | None = None) -> None:
+    def on_prompt(self, ev: HookEvent, arrival: int | None = None, start: int | None = None) -> None:
         if self.below_floor(arrival):
             noop_event()
             # Accepted before the turn it would start or anchor was released (!interrupt, a relaunch, !new,
@@ -1311,8 +1340,12 @@ class Admind:
             self.audit.write("agent", action="ignored-late-prompt", message_id=in_flight)
             return
         anchored = False
-        with self.store.transaction():      # the busy period and the anchor: one step
+        with self.store.transaction():      # the busy period, its transcript start and the anchor: one step
             self.set_busy()                 # a turn is running, whoever started it
+            if start is None:
+                self.store.delete("turn_start")
+            else:
+                self.store.set("turn_start", f"{self.store.get('busy')}:{start}")
             pasted = self.store.get("in_flight_text")
             if (in_flight is not None and pasted is not None and self.store.get("anchor") is None
                     and ev.prompt is not None and same_prompt(ev.prompt, pasted)):
@@ -1365,19 +1398,29 @@ class Admind:
     def session_current(self, session_id: str) -> bool:
         return session_id == self.agent.session_id and session_id not in self.retired
 
-    async def extract(self, ev: HookEvent) -> str | None:
-        """The transcript fallback, bounded: None if it took longer than `extract_timeout`, or if an
-        earlier read is still running (at most one extraction thread, so a stalled filesystem cannot pile
-        them up). The abandoned thread runs to completion in the background."""
-        if self._extraction is not None and not self._extraction.done():
+    async def bounded_read[T](self, timeout: float, fn: Callable[..., T], *args: object) -> T | None:
+        """Run one transcript read in a thread, bounded: None if it took longer than `timeout`, or if an
+        earlier read is still running. One slot for every transcript reader (extraction, offsets and
+        `!details full`), so a stalled filesystem cannot pile up threads (B20). An abandoned thread runs to
+        completion in the background."""
+        if self._reader is not None and not self._reader.done():
             return None
-        task = asyncio.ensure_future(asyncio.to_thread(reply_text, ev))
-        self._extraction = task
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        self._reader = task
         task.add_done_callback(lambda t: None if t.cancelled() else t.exception())  # never "not retrieved"
         try:
-            return await asyncio.wait_for(asyncio.shield(task), self.extract_timeout)
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
         except TimeoutError:
             return None
+
+    async def transcript_offset(self, ev: HookEvent) -> int | None:
+        return await self.bounded_read(self.offset_timeout, transcript_size, ev)
+
+    async def extract(self, ev: HookEvent, start: int | None, end: int | None) -> str | None:
+        """The reply of a Stop without its own text, read from the turn's span (B19) in the reader slot.
+        None if it can't be read in time or at all; the caller then sends `EXTRACT_FAILED` to the
+        backstop (B9)."""
+        return await self.bounded_read(self.extract_timeout, reply_text, ev, start, end)
 
     async def on_stop(self, ev: HookEvent, arrival: int | None = None, stale: bool = False,
                       validate: bool = False) -> None:
@@ -1386,6 +1429,7 @@ class Admind:
         that finds a reservation in flight but unanchored, that is stale (an earlier launch, or accepted
         before the turn was released) changes no turn state: its own text is posted top-level, otherwise
         nothing is and the record says so."""
+        end = await self.transcript_offset(ev)      # the turn's bytes end here, before a later turn can write
         async with self.turn_lock():
             if validate:
                 kind = self.classify(ev)        # under the lock: it protects the effects applied below
@@ -1400,6 +1444,7 @@ class Admind:
             # The identity is captured here, before the transcript read yields: !interrupt, !new, a
             # new dispatch or a relaunch can run meanwhile (they take the lock the read does not hold).
             identity = self.turn_identity(ev.session_id)
+            span = self.turn_span(identity[3], end)     # the turn's bytes, known before the read
             in_flight, anchor = identity[1], identity[2]
             unanchored = in_flight is not None and anchor is None
             own = ev.last_assistant_message or ""
@@ -1411,13 +1456,11 @@ class Admind:
                     self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
             need_fallback = not stale and not unanchored and not ev.last_assistant_message
-        raw = own
+        raw: str | None = own
         if need_fallback:
-            extracted = await self.extract(ev)      # may read the transcript file (lock not held)
-            if extracted is None:
-                self.audit.write("agent", action="reply-extraction-timeout")
-                return
-            raw = extracted
+            raw = await self.extract(ev, *span)     # may read the transcript file (lock not held)
+            if raw is None:
+                self.audit.write("agent", action="reply-extraction-failed")
         async with self.turn_lock():
             if not self.session_current(ev.session_id):
                 noop_event()
@@ -1429,30 +1472,140 @@ class Admind:
                 # The turn changed while the transcript was read: its last text may be the new turn's.
                 self.audit.write("agent", action="stale-stop-unrecoverable")
                 return
-            text = raw if raw.strip() else NO_REPLY
-            parts = chunk.split(redact(text), self.s.chunk_chars)
-            reply_seq = int(self.store.get("reply_seq") or "0") + 1
-            self.store.set("reply_seq", str(reply_seq))
-            # Thread only to a prompt the agent confirmed receiving, and only if the turn this Stop was
-            # captured for is still the current one. Otherwise the reply is real and goes out unthreaded,
-            # and the current turn's state is left exactly as it is.
             reply_to = anchor if current else None
-            with self.store.transaction():      # reply, cleared turn and idle state: all or nothing
-                for i, part in enumerate(parts):
-                    self.post(f"reply:{ev.session_id}:{reply_seq}:{i}", part, reply_to)
-                if current:
-                    if anchor is not None:
-                        self.store.delete("anchor")
-                        self.store.delete("in_flight")
-                        self.store.delete("in_flight_text")
-                    self.set_idle()             # the turn ended; an unconfirmed in_flight still holds
-                    if arrival is not None:
-                        self.raise_floor(arrival)   # a prompt accepted before this Stop is that turn's
+            start, stop = span if current else (None, None)
+            origin = self.origin_for(reply_to)
+            if raw is None:                         # current, but the reply could not be read (B9)
+                text, mode = EXTRACT_FAILED, "backstop"
+            else:
+                text = redact(raw if raw.strip() else NO_REPLY)
+                mode = ("summary" if summarize.needs_summary(text, self.s.reply_verbatim_lines,
+                                                             self.s.reply_verbatim_chars) else "verbatim")
+            parts = chunk.split(text, self.s.chunk_chars) if mode == "verbatim" else []
+
+            def record(how: str) -> int:
+                """The reply's record, its posts or its route, and the turn's end: one transaction."""
+                with self.store.transaction():
+                    reply_seq = int(self.store.get("reply_seq") or "0") + 1
+                    self.store.set("reply_seq", str(reply_seq))
+                    key = f"reply:{ev.session_id}:{reply_seq}"
+                    turn_id = self.store.add_turn(
+                        key, ev.session_id, reply_to, origin, text, ev.transcript_path, start, stop,
+                        "verbatim" if how == "verbatim" else "summarizing")
+                    if how == "verbatim":
+                        for i, part in enumerate(parts):
+                            self.post(f"{key}:{i}", part, reply_to)
+                            self.store.record_post(f"{key}:{i}", "verbatim", turn_id, None)
+                    elif how == "backstop":
+                        self.queue_backstop(turn_id)
+                    if current:
+                        self.end_turn(anchor, arrival)
+                return turn_id
+
+            try:
+                turn_id = record(mode)
+            except Exception as exc:  # noqa: BLE001 - the reply must still reach the operator (B9)
+                self.audit_quietly("reply", action="record-failed", error=type(exc).__name__)
+                mode = "backstop"
+                turn_id = record(mode)              # if this fails too, hook_loop holds dispatch
+            if mode == "summary":
+                self.summary_wake.set()
+            elif mode == "backstop":
+                self.audit_quietly("backstop", action="queued", turn=turn_id)
             if not current:
-                self.audit.write("agent", action="late-stop")   # fixed wording; nothing from the event
+                self.audit_quietly("agent", action="late-stop")    # fixed wording; nothing from the event
             # The agent's text goes to the operator's chat only; the audit log records its size.
-            self.audit.write("reply", session=ev.session_id, reply_to=reply_to, chars=len(text),
-                             chunks=len(parts))
+            self.audit_quietly("reply", session=ev.session_id, reply_to=reply_to, chars=len(text),
+                               chunks=len(parts), mode=mode)
+
+    def turn_span(self, busy: str | None, end: int | None) -> tuple[int | None, int | None]:
+        """The transcript bytes of the turn a current Stop ends (B19): from its UserPromptSubmit to the Stop.
+        Unknown (both None) unless that prompt's mark belongs to the busy period the Stop was captured in."""
+        mark = self.store.get("turn_start")
+        if busy is None or end is None or mark is None:
+            return None, None
+        owner, _, offset = mark.partition(":")
+        if owner != busy or not offset.isdigit() or int(offset) > end:
+            return None, None
+        return int(offset), end
+
+    def end_turn(self, anchor: str | None, arrival: int | None) -> None:
+        """A current Stop's effects on turn state. Store calls and in-memory flags only (the caller's
+        transaction); repeating them after a rollback is harmless."""
+        if anchor is not None:
+            self.store.delete("anchor")
+            self.store.delete("in_flight")
+            self.store.delete("in_flight_text")
+        self.store.delete("turn_start")
+        self.set_idle()                 # the turn ended; an unconfirmed in_flight still holds
+        if arrival is not None:
+            self.raise_floor(arrival)   # a prompt accepted before this Stop is that turn's
+
+    def origin_for(self, mid: str | None) -> str:
+        row = None if mid is None else self.store.prompt(mid)
+        if row is None:
+            return backstop.origin(None, now(), None)
+        return backstop.origin(row.operator, row.received_at, row.words)
+
+    def queue_backstop(self, turn_id: int) -> None:
+        """Put a reply in the open backstop batch, opening one. Store calls only, in one transaction that
+        joins the caller's; the caller audits after it commits."""
+        with self.store.transaction():
+            batch = self.store.open_batch(self.wallclock(), self.batch_seconds)
+            self.store.add_to_batch(turn_id, batch)
+
+    async def summary_loop(self) -> None:
+        """Summarize every turn that waits for one (B9). Rows are read from the database on every pass, so
+        a failure at any step leaves the row for the next pass, without a restart."""
+        while True:
+            self.summary_wake.clear()
+            for row in self.store.turns_with_status("summarizing"):
+                try:
+                    await self.summarize_turn(row)
+                except Exception as exc:  # noqa: BLE001 - the row stays `summarizing`; the next pass retries
+                    self.audit_quietly("summary", action="pass-failed", turn=row.turn_id,
+                                       error=type(exc).__name__)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.summary_wake.wait(), self.summary_poll)
+
+    async def summarize_turn(self, row: TurnRow) -> None:
+        """Post a summary, or send the reply to the backstop. Either outcome is one transaction; if even the
+        backstop's fails, the exception reaches summary_loop and the row is tried again."""
+        try:
+            text = await summarize.summarize(self.summarizer_argv, self.s.state_dir / "summarizer", row.text,
+                                             self.summary_timeout)
+            with self.store.transaction():
+                for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
+                    self.post(f"{row.key}:s{i}", part, row.reply_to)
+                    self.store.record_post(f"{row.key}:s{i}", "summary", row.turn_id, None)
+                self.store.set_turn_status(row.turn_id, "summarized")
+        except Exception as exc:  # noqa: BLE001 - any failure sends the reply to the backstop (§8)
+            reason = exc.reason if isinstance(exc, summarize.SummaryFailed) else "internal"
+            self.audit_quietly("summary", action="failed", reason=reason, turn=row.turn_id,
+                               error=None if reason != "internal" else type(exc).__name__)
+            self.queue_backstop(row.turn_id)
+            self.audit_quietly("backstop", action="queued", turn=row.turn_id)
+            return
+        self.audit_quietly("summary", action="queued", turn=row.turn_id)
+
+    async def batch_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.batch_poll)    # not self._sleep: tests make that one return at once
+            self.close_due_batches()
+
+    def close_due_batches(self) -> None:
+        """Post each batch whose window has passed, as one unthreaded message (B10)."""
+        for batch, attempt in self.store.due_batches(self.wallclock(), self.batch_seconds):
+            rows = self.store.batch_turns(batch)
+            key = f"batch:{batch}.{attempt}"        # a new key per attempt: the outbox ignores a known key
+            text = backstop.fit(redact(backstop.render([backstop.Entry(r.origin, r.text) for r in rows])),
+                                backstop.BATCH_MAX_CHARS)      # one message, not chunk_chars (B10)
+            with self.store.transaction():
+                self.post(key, text, None)
+                self.store.record_post(key, "batch", None, batch)
+                self.store.close_batch(batch)
+            self.audit_quietly("backstop", action="posted", batch=batch, replies=len(rows),
+                               lines=len(text.splitlines()), chars=len(text))
 
     # --- outbound ------------------------------------------------------------------------------
     async def outbox_loop(self) -> None:
@@ -1504,8 +1657,25 @@ class Admind:
                     continue
 
     def send_failed(self, seq: int, key: str) -> None:
-        """A message admind gave up on (Task 8 adds the backstop for replies)."""
-        self.store.mark_failed(seq)
+        """A message admind gave up on. If it carried a reply or a summary, the reply goes to the backstop
+        in the same transaction (B9). If it was a batch, the batch opens again in the same transaction and
+        is posted after a new window under a new key, so its replies are never stranded (B10); this
+        repeats until it is delivered, and the audit records each attempt."""
+        queued = reopened = None
+        with self.store.transaction():
+            self.store.mark_failed(seq)
+            post = self.store.post_record(key)
+            turn = None if post is None or post.turn_id is None else self.store.turn(post.turn_id)
+            if turn is not None and turn.status in ("verbatim", "summarized"):
+                self.queue_backstop(turn.turn_id)
+                queued = turn.turn_id
+            if post is not None and post.kind == "batch" and post.batch_id is not None:
+                self.store.reopen_batch(post.batch_id, self.wallclock())
+                reopened = post.batch_id
+        if queued is not None:
+            self.audit_quietly("backstop", action="queued", turn=queued, why="send-failed")
+        if reopened is not None:
+            self.audit_quietly("backstop", action="reopened", batch=reopened, why="send-failed")
 
     async def alerts_loop(self) -> None:
         while True:

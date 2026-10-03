@@ -3,7 +3,7 @@
 On start it runs the SessionStart hooks. For each line typed into its terminal it runs the
 UserPromptSubmit hooks (with the line as `prompt`), then the Stop hooks with
 `last_assistant_message = "echo: <line>"`. It also keeps a transcript `<session>.jsonl` next to the log
-(user and assistant records, like Claude Code's). Special lines:
+(user and assistant records, like Claude Code's); UserPromptSubmit carries its path. Special lines:
 - `__silent__`: the turn ends with no text; its Stop carries only `transcript_path`, so admind's fallback
   reads a transcript whose earlier turns do have text;
 - `__hang__`: the turn doesn't end; the fake blocks until it reads an Escape byte (`!interrupt`), then
@@ -40,6 +40,7 @@ def fire(event: str, **extra: object) -> None:
 
 
 transcript = Path(os.environ["FAKE_CLAUDE_LOG"]).with_name(f"{session}.jsonl")
+transcript.touch()      # like Claude Code's: it exists before the first prompt, so admind can measure it
 
 
 def record(kind: str, content: object) -> None:
@@ -77,7 +78,7 @@ fire("SessionStart", source="startup")
 while (raw := read_line()) is not None:
     line = raw.lstrip("\x1b")
     if "__noprompt__" not in line:
-        fire("UserPromptSubmit", prompt=line)
+        fire("UserPromptSubmit", prompt=line, transcript_path=str(transcript))
     record("user", line)
     if "__hang__" in line:
         wait_for_escape()

@@ -154,7 +154,7 @@ def test_a_transcript_read_that_straddles_a_new_dispatch_is_discarded(
     started = threading.Event()
     release = threading.Event()
 
-    def slow_read(ev: HookEvent, fallback: bool = True) -> str:
+    def slow_read(ev: HookEvent, start: int | None = None, end: int | None = None) -> str:
         started.set()
         assert release.wait(10), "test never released the read"
         return "the late reply"
@@ -177,7 +177,7 @@ def test_a_transcript_read_that_straddles_a_new_dispatch_is_discarded(
 def test_a_stop_from_a_retired_session_is_still_suppressed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     u = Unit(tmp_path)
-    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev: "old session reply")
+    monkeypatch.setattr("heterodyne.admind.daemon.reply_text", lambda ev, *_: "old session reply")
 
     async def scenario() -> None:
         u.daemon.retired.add("S1")

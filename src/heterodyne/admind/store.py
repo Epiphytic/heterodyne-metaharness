@@ -21,6 +21,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from heterodyne.admind import chunk
 from heterodyne.admind.redact import redact, redact_continuation
@@ -41,6 +42,32 @@ CREATE TABLE IF NOT EXISTS outbox (
     attempts INTEGER NOT NULL DEFAULT 0,
     message_id TEXT);
 CREATE TABLE IF NOT EXISTS alerts (name BLOB PRIMARY KEY, relayed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS prompts (
+    message_id TEXT PRIMARY KEY, operator TEXT NOT NULL, received_at TEXT NOT NULL, words TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS turns (
+    turn_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    session TEXT NOT NULL,
+    reply_to TEXT,
+    origin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    transcript TEXT,
+    transcript_start INTEGER,
+    transcript_end INTEGER,
+    status TEXT NOT NULL CHECK (status IN ('verbatim', 'summarizing', 'summarized', 'batched')),
+    batch_id INTEGER,
+    batch_seq INTEGER,              -- the order replies joined the backstop in, across batches (B10)
+    created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS batches (
+    batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'posted')),
+    attempt INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS posts (
+    key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('verbatim', 'summary', 'batch')),
+    turn_id INTEGER,
+    batch_id INTEGER);
 """
 
 
@@ -56,6 +83,57 @@ class OutboxRow:
     text: str
     attempts: int
     lane: int
+
+
+@dataclass(frozen=True)
+class PromptRow:
+    operator: str
+    received_at: str
+    words: str
+
+
+@dataclass(frozen=True)
+class TurnRow:
+    turn_id: int
+    key: str
+    session: str
+    reply_to: str | None
+    origin: str
+    text: str
+    transcript: str | None
+    transcript_start: int | None
+    transcript_end: int | None
+    status: str
+    batch_id: int | None
+
+
+@dataclass(frozen=True)
+class PostRow:
+    key: str
+    kind: str
+    turn_id: int | None
+    batch_id: int | None
+
+
+_TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_start, transcript_end, "
+         "status, batch_id")       # fixed column list: the only thing interpolated into the queries below
+
+
+def _opt_int(v: object) -> int | None:
+    return None if v is None else int(cast(int, v))
+
+
+def _opt_str(v: object) -> str | None:
+    return None if v is None else str(v)
+
+
+def _turn(r: tuple[object, ...]) -> TurnRow:
+    return TurnRow(int(cast(int, r[0])), str(r[1]), str(r[2]), _opt_str(r[3]), str(r[4]), str(r[5]),
+                   _opt_str(r[6]), _opt_int(r[7]), _opt_int(r[8]), str(r[9]), _opt_int(r[10]))
+
+
+def _post(r: tuple[object, ...]) -> PostRow:
+    return PostRow(str(r[0]), str(r[1]), _opt_int(r[2]), _opt_int(r[3]))
 
 
 # The keys of a chunked reply: `reply:<session>:<seq>:<i>` (an agent's reply) and `<tag>:<message id>:<i>`
@@ -250,6 +328,110 @@ class Store:
     @_locked
     def relayed(self, name: bytes) -> bool:
         return self.db.execute("SELECT 1 FROM alerts WHERE name = ?", (name,)).fetchone() is not None
+
+    @_locked
+    def record_prompt(self, message_id: str, operator: str, words: str) -> None:
+        self.db.execute("INSERT OR IGNORE INTO prompts(message_id, operator, received_at, words) "
+                        "VALUES (?, ?, ?, ?)", (message_id, operator, now(), words))
+
+    @_locked
+    def prompt(self, message_id: str) -> PromptRow | None:
+        r = self.db.execute("SELECT operator, received_at, words FROM prompts WHERE message_id = ?",
+                            (message_id,)).fetchone()
+        return None if r is None else PromptRow(str(r[0]), str(r[1]), str(r[2]))
+
+    @_locked
+    def add_turn(self, key: str, session: str, reply_to: str | None, origin: str, text: str,
+                 transcript: str | None, start: int | None, end: int | None, status: str) -> int:
+        self.db.execute("INSERT OR IGNORE INTO turns(key, session, reply_to, origin, text, transcript, "
+                        "transcript_start, transcript_end, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (key, session, reply_to, origin, text, transcript, start, end, status, now()))
+        return int(self.db.execute("SELECT turn_id FROM turns WHERE key = ?", (key,)).fetchone()[0])
+
+    @_locked
+    def turn(self, turn_id: int) -> TurnRow | None:
+        r = self.db.execute(f"SELECT {_TURN} FROM turns WHERE turn_id = ?",  # noqa: S608
+                            (turn_id,)).fetchone()
+        return None if r is None else _turn(r)
+
+    @_locked
+    def turns_with_status(self, status: str) -> list[TurnRow]:
+        rows = self.db.execute(f"SELECT {_TURN} FROM turns WHERE status = ? ORDER BY turn_id",  # noqa: S608
+                               (status,)).fetchall()
+        return [_turn(r) for r in rows]
+
+    @_locked
+    def set_turn_status(self, turn_id: int, status: str) -> None:
+        self.db.execute("UPDATE turns SET status = ? WHERE turn_id = ?", (status, turn_id))
+
+    @_locked
+    def add_to_batch(self, turn_id: int, batch_id: int) -> None:
+        """The reply joins the batch, after every reply that joined a batch before it: §8's "in order" is
+        the order replies reach the backstop, not the order their turns began (Codex r5 finding 3). An
+        older reply whose summary fails late comes after a newer one whose delivery failed first."""
+        self.db.execute("UPDATE turns SET status = 'batched', batch_id = ?, "
+                        "batch_seq = (SELECT COALESCE(MAX(batch_seq), 0) + 1 FROM turns) WHERE turn_id = ?",
+                        (batch_id, turn_id))
+
+    @_locked
+    def open_batch(self, at: float, seconds: float) -> int:
+        """The open batch whose window is still running at `at`, or a new one opened at `at` (a batch opens
+        with its first reply). A batch whose window has passed takes no more replies, even before
+        `batch_loop` posts it (Codex r5 finding 4)."""
+        r = self.db.execute("SELECT batch_id FROM batches WHERE status = 'open' AND opened_at + ? > ? "
+                            "ORDER BY batch_id LIMIT 1", (seconds, at)).fetchone()
+        if r is not None:
+            return int(r[0])
+        cur = self.db.execute("INSERT INTO batches(opened_at, status) VALUES (?, 'open')", (at,))
+        return int(cur.lastrowid or 0)
+
+    @_locked
+    def due_batches(self, at: float, seconds: float) -> list[tuple[int, int]]:
+        rows = self.db.execute("SELECT batch_id, attempt FROM batches WHERE status = 'open' "
+                               "AND opened_at + ? <= ? ORDER BY batch_id", (seconds, at)).fetchall()
+        return [(int(r[0]), int(r[1])) for r in rows]
+
+    @_locked
+    def batch_turns(self, batch_id: int) -> list[TurnRow]:
+        rows = self.db.execute(f"SELECT {_TURN} FROM turns WHERE batch_id = ? ORDER BY batch_seq",  # noqa: S608
+                               (batch_id,)).fetchall()
+        return [_turn(r) for r in rows]
+
+    @_locked
+    def close_batch(self, batch_id: int) -> None:
+        """Its message is queued; delivery is the outbox's job."""
+        self.db.execute("UPDATE batches SET status = 'posted' WHERE batch_id = ?", (batch_id,))
+
+    @_locked
+    def reopen_batch(self, batch_id: int, at: float) -> None:
+        """Its message was given up on: post it again after a new window, under a new key (the attempt)."""
+        self.db.execute("UPDATE batches SET status = 'open', opened_at = ?, attempt = attempt + 1 "
+                        "WHERE batch_id = ?", (at, batch_id))
+
+    @_locked
+    def record_post(self, key: str, kind: str, turn_id: int | None, batch_id: int | None) -> None:
+        self.db.execute("INSERT OR IGNORE INTO posts(key, kind, turn_id, batch_id) VALUES (?, ?, ?, ?)",
+                        (key, kind, turn_id, batch_id))
+
+    @_locked
+    def post_record(self, key: str) -> PostRow | None:
+        r = self.db.execute("SELECT key, kind, turn_id, batch_id FROM posts WHERE key = ?", (key,)).fetchone()
+        return None if r is None else _post(r)
+
+    @_locked
+    def details_target(self, message_id: str | None) -> PostRow | None:
+        """The record behind a delivered message (B12): the sent outbox row with that message ID, or without
+        one the latest summary or batch that was delivered. Pending and failed rows never count."""
+        if message_id is not None:
+            r = self.db.execute("SELECT p.key, p.kind, p.turn_id, p.batch_id FROM outbox o JOIN posts p "
+                                "ON p.key = o.key WHERE o.message_id = ? AND o.status = 'sent'",
+                                (message_id,)).fetchone()
+        else:
+            r = self.db.execute("SELECT p.key, p.kind, p.turn_id, p.batch_id FROM posts p JOIN outbox o "
+                                "ON o.key = p.key WHERE p.kind IN ('summary', 'batch') AND o.status = 'sent' "
+                                "ORDER BY o.seq DESC LIMIT 1").fetchone()
+        return None if r is None else _post(r)
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:
