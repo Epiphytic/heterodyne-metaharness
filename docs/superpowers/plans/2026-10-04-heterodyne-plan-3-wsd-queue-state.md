@@ -18,7 +18,7 @@
 
 **Spec:** ADR 0001 revision 13 is design-repo commit `66b3aecb639e6ec56f108e2f55d483d4dedda485` in `$DESIGN_REPO`, approved in bead `btq-5ky39`. Section numbers (§) refer to it. Roadmap row 3 (`docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md`) scopes this plan. The progress-event requirement (waiting-on-input, held and stuck with concrete reasons, and per-message progress) follows the pending amendment `btq-xv48a`; this plan only records them, plan 6 renders them.
 
-**Status:** revision 3 of this plan. r2 answered the r1 cross-model review (19 blocking and 5 non-blocking findings; see "Simplifications vs r1"); r3 answers the r2 review (2 blocking findings and the non-blocking items; see "Changes in r3"). **Design approval is not set.** Four questions need the operator before approval (see "Operator decisions"); D3 and D20 stay provisional until then.
+**Status:** revision 4 of this plan (r3 was approved by the cross-model review; r4 changes documentation and docstrings only). r2 answered the r1 cross-model review (19 blocking and 5 non-blocking findings; see "Simplifications vs r1"); r3 answers the r2 review (2 blocking findings and the non-blocking items; see "Changes in r3"). **Design approval is not set.** Four questions need the operator before approval (see "Operator decisions"); D3 and D20 stay provisional until then.
 
 ## Global Constraints
 
@@ -64,7 +64,7 @@
 | D21 | How recovery finds "our" beads. | By assignee: every unclosed bead held by one of the workstream's per-bead workers, whatever its labels. A routing change under a claim is found by `validate` and escalated `routing_changed`. | Labels are routing, not ownership (§4.3); a relabelled bead and its session must stay visible. |
 | D22 | An existing worktree at a bead's path (§4.3). | It is used only if btq's provenance (worker, repository and base) on the bead matches **and** its git common directory is the repository's. Otherwise `worktree_failed`. Resume verifies the recorded worktree the same way. | A leftover or replaced directory never receives another repository's work. |
 | D23 | When sessions are reconciled. | The sweep (`sweep.py`: stop sessions of beads no longer ours, give a running bead whose session ended a resume operation, hold disagreements) runs at recovery step 5 **and** at the start of every pickup. | The runtime and beads change between restarts too; one code path covers both. |
-| D24 | Which sessions hold the coder role when the configured role name changes (`wsd.coder_role`). | wsd launches one role per workstream, so every session `AgentRuntime.sessions(ws)` lists for the workstream holds the coder role, whatever role name it was launched under; the pickup's BUSY check and the guard both count all of them. A pickup records the role in its intent; a rename seen before the worktree step escalates the pickup `config_invalid` (no launch was chosen yet), and after it the replay launches the recorded role. Resume and release launch the role in the bead's record. A later plan that adds other roles must name them so the check can exclude them. | A rename never frees the role while an old-role session is live or unknown, and an in-flight pickup never launches under a name it didn't choose. |
+| D24 | Which sessions hold the coder role when the configured role name changes (`wsd.coder_role`). | wsd launches one role per workstream, so every session `AgentRuntime.sessions(ws)` lists for the workstream holds the coder role, whatever role name it was launched under; the pickup's BUSY check and the guard both count all of them. A pickup records the role in its intent; a rename seen before the worktree step escalates the pickup `config_invalid` (no launch was chosen yet), and after it the replay launches the recorded role. Resume and release launch the role in the bead's record. This holds only while the coder is the only runtime role: before any second runtime role is enabled (plan 7's reviewer, any auxiliary session), occupancy must be classified by role, so that a reviewer on bead A runs beside the coder on bead B (ADR §4.3: "at most one active session per role"), with reservations kept across a coder rename (prerequisite P3 below). | A rename never frees the role while an old-role session is live or unknown, and an in-flight pickup never launches under a name it didn't choose. |
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
 
@@ -141,7 +141,10 @@ Non-blocking findings:
 | Pause barrier | `gate.pause.waiting` is reached before the pauser takes the claim lock; the test waits for it, then checks the pause is not acknowledged | `test_pause_waits_for_in_flight_claim` |
 | Structured reason details | State events carry `{"reason", "detail"}` (blocker IDs for a parked bead); a failed recovery publishes its hold; an acknowledged pause shows at once | `test_set_state_records_reason_and_event`, `test_failed_recovery_publishes_its_hold`, `test_acknowledged_pause_shows_at_once` |
 
-**Known limit, and a prerequisite for plan 4:** a relaunch after a dead session opens a new resume operation, so its launch-failure budget starts again, and a bead whose session dies on every launch keeps relaunching. Persistent crash-loop accounting (with the runtime's exit evidence, §10) must land in plan 4 **before a real runtime is enabled**; until then `NoRuntime` holds every workstream, so nothing relaunches.
+**Prerequisites for later plans.** Plan 3 ships with `NoRuntime`, which holds every workstream, so none of these can bite until they are met:
+- **P1, crash-loop accounting (plan 4, before a real runtime is enabled).** A relaunch after a dead session opens a new resume operation, so its launch-failure budget starts again, and a bead whose session dies on every launch keeps relaunching. Persistent crash-loop accounting, with the runtime's exit evidence (§10), must land first.
+- **P2, `resume=True` is prepared identity, not launch evidence (plan 4, before a real runtime is enabled).** A first pickup can write its record and then be shelved before launching; its later launch is a resume of a key no session ever ran under. The real `AgentRuntime.launch` must resume the session if it holds state for the key, create it if it can establish that none ever existed, and raise `RuntimeUnavailable` (a hold) if it can't tell. Plan 4 adds an adapter test for exactly this sequence (record, shelve, unblock, resume launch). The contract is in the `AgentRuntime.launch` docstring (Task 5); wsd's side is `test_first_pickup_shelved_before_its_launch_keeps_its_record`.
+- **P3, role-classified occupancy (plan 4 or 7, before any second runtime role is enabled).** D24 counts every listed session as the coder's. Before a reviewer (plan 7) or any auxiliary session runs through `AgentRuntime`, the busy check and the guard must classify sessions by role so that reviewer A runs beside coder B, and must keep the coder reservation across a `coder_role` rename (for example by recording which role names are coder roles). Tests: reviewer-A/coder-B, an auxiliary session that never blocks pickup, and the r3 rename tests still passing.
 
 ## Changes in r3
 
@@ -160,8 +163,8 @@ Non-blocking items:
 | `launch_uncertain` fault not scoped per bead in the property | `FakeRuntime.uncertain_beads`: the first launch of each named bead is uncertain; the property's fault uses it | `test_never_idle_while_an_unblocked_bead_exists` |
 | Conditional barriers missing from the crash tests | `release.stopped!` and `release.recorded!` (release replacing a missing record), `resume.shelved!` and `pickup.shelved!` (the guard shelving) each get a crash-and-replay test | `test_crash_while_release_replaces_a_record_completes_once[release.stopped!,release.recorded!]`, `test_crash_at_resume_shelved_stays_parked_once`, `test_first_pickup_shelved_before_its_launch_keeps_its_record[True]` |
 | A first pickup shelved before its record was written needed a human release | The guard writes the record before the eligibility check (D17), so a shelved first pickup is an ordinary parked bead that resumes into its recorded session | `test_first_pickup_shelved_before_its_launch_keeps_its_record[False,True]` |
-| Crash-loop accounting | Stated as a prerequisite for enabling a real runtime (above, and `docs/wsd.md` §5) | none (plan 4) |
-| Real-btq digest and metadata-write contract coverage | Left out as the review allowed: it needs a real Dolt-backed queue | none |
+| Crash-loop accounting | Stated as a prerequisite for enabling a real runtime (P1 above, and `docs/wsd.md` §5) | none (plan 4) |
+| Real-btq digest and metadata-write contract coverage | Follow-up, not in plan 3: a stateful fake `bd` behind the real `$BTQ_REPO/bin/btq` (no real Dolt needed) can cover matching and stale approval digests, protected metadata writes, claim replay and worktree recovery. Filed as a follow-up for plan 4's first task or a btq contract task | none yet |
 
 ## File map
 
@@ -3360,7 +3363,7 @@ class LaunchSpec:
     session_key: str        # ids.role_session(bead, role, profile), as recorded on the bead
     label: str              # "<bead> · <role> · <title>" (§4.1)
     worktree: Path
-    resume: bool            # resume the same session rather than start one
+    resume: bool            # a resume operation: the record names the key, not a session that ran (launch)
     ref: str | None = None  # the message or event that caused the launch, for progress reactions
 
 
@@ -3393,7 +3396,12 @@ class AgentRuntime(Protocol):
     def launch(self, spec: LaunchSpec) -> None:
         """Start (or, with `spec.resume`, resume) the session. Idempotent on `spec.session_key`: a live
         session is left alone. Returns once the session is live. Raises LaunchFailed when nothing
-        started, RuntimeUnavailable when nothing was attempted, and LaunchUncertain otherwise."""
+        started, RuntimeUnavailable when nothing was attempted, and LaunchUncertain otherwise.
+
+        `spec.resume` is prepared identity, not launch evidence: the bead's record names this key, but a
+        first pickup shelved after writing the record never launched. The runtime resumes the session
+        if it holds state for the key, creates it if it can establish that none ever existed, and
+        raises RuntimeUnavailable if it can't tell (plan 4's contract, tested there)."""
         ...
 
     def stop(self, session_key: str) -> None:
@@ -5166,7 +5174,8 @@ def test_replay_into_a_record_of_another_launch_escalates(tmp_path: Path) -> Non
 def test_first_pickup_shelved_before_its_launch_keeps_its_record(tmp_path: Path, crash: bool) -> None:
     """A blocker appeared between the worktree step and the launch. The guard writes the record first, so
     the shelved bead is an ordinary parked one: it resumes into the recorded session once unblocked,
-    with no human release. A crash at `pickup.shelved!` shelves it again, once."""
+    with no human release. A crash at `pickup.shelved!` shelves it again, once. The launch is a resume
+    of a key no session ever ran under: the runtime creates it (`AgentRuntime.launch`, plan 4)."""
     rig = make_rig(tmp_path, cp=CrashAt("pickup.worktree"))
     rig.world.add("btq-1")
     with pytest.raises(SimulatedCrash):
@@ -7545,7 +7554,7 @@ The journal is backed up with `Journal.backup(dest)`, a consistent online copy (
 
 ## 5. Seams for later plans
 
-- **Plan 4, `AgentRuntime`** (`heterodyne.wsd.runtime`): `available()`, `sessions(ws) -> [Session]` (every session that may be running, until its end is confirmed; never a partial list), `launch(LaunchSpec)` (raises `LaunchFailed` when nothing started, `RuntimeUnavailable` when nothing was attempted, anything else is treated as uncertain) and `stop(session_key)` (returns only once the session has ended). `unknown` liveness is never treated as dead. The launched-session record (`metadata.wsd_session`: role, profile, session key, repository, worktree) is written to the bead before every first launch; plan 4 may add fields. wsd never rewrites an existing record: the same five fields leave it exactly as it is, extra fields included, and different ones are escalated (`unexpected_state`). Plan 4 must add persistent crash-loop accounting before a real runtime is enabled: each relaunch after a dead session opens a new resume with a fresh launch-failure budget, so a bead whose session dies on every launch is relaunched without limit. Pass the runtime to `heterodyne.wsd.cli.run`.
+- **Plan 4, `AgentRuntime`** (`heterodyne.wsd.runtime`): `available()`, `sessions(ws) -> [Session]` (every session that may be running, until its end is confirmed; never a partial list), `launch(LaunchSpec)` (raises `LaunchFailed` when nothing started, `RuntimeUnavailable` when nothing was attempted, anything else is treated as uncertain) and `stop(session_key)` (returns only once the session has ended). `unknown` liveness is never treated as dead. The launched-session record (`metadata.wsd_session`: role, profile, session key, repository, worktree) is written to the bead before every first launch; plan 4 may add fields. wsd never rewrites an existing record: the same five fields leave it exactly as it is, extra fields included, and different ones are escalated (`unexpected_state`). Plan 4 must add persistent crash-loop accounting before a real runtime is enabled: each relaunch after a dead session opens a new resume with a fresh launch-failure budget, so a bead whose session dies on every launch is relaunched without limit. `LaunchSpec.resume` is prepared identity, not launch evidence: a first pickup shelved after writing its record never launched, so the runtime must create the session when it can establish none ever existed, and hold when it can't tell. wsd counts every listed session as the coder's; before a second runtime role (a reviewer, an auxiliary session) is enabled, occupancy must be classified by role, keeping the coder's reservation across a `wsd.coder_role` rename. Pass the runtime to `heterodyne.wsd.cli.run`.
 - **Plan 5, `ActionReconciler`**: `unresolved(ws) -> [approval bead IDs]`. The default `HoldingReconciler` reports every action not `pending`, `succeeded` or `failed`, closed beads included, so the workstream stays held until plan 5 settles them. Approval beads must carry the `ws:<ws>` label and `metadata.action_state`.
 - **Plans 5 and 6, parking**: `Parker.park(bead, blockers, why, hold, ref)` parks a running bead on blocking beads, or for the operator with `hold=True`. It takes the workstream's operation lock, raises `OpConflict` while another operation is open on the bead, and raises `BeadsUnavailable` when beads can't be reached; the caller keeps the request and retries after the next pickup.
 - **Plan 6, release**: `Parker.release(bead, ref)` is the only way out of `held` or `stuck`. It raises `NotReleasable` for any other bead.
@@ -7622,6 +7631,6 @@ git commit -m "feat(wsd): daemon, control socket, wsd/wsctl CLIs and operator do
 
 **Type consistency:** checked by building the tree task by task from these code blocks and running each task's tests, ruff and pyright at each step (Task 1: 24 passed; 2: 13; 3: 19; 4: 41 + 1 skipped, 38 with `BTQ_REPO`; 5: 9; 6: 58; 7: 58 new, 116 with Task 6's; 8: 22; 9: 22), then the full gate on the result with `BTQ_REPO` set. Every Python block compiles (`py_compile`), and test function names are unique across `tests/`.
 
-**Known limits, deliberately left to later plans:** no real `AgentRuntime` and no crash-loop accounting for a session that dies on every relaunch (plan 4, and required before a real runtime is enabled), no action reconciliation against targets (plan 5), no inbox consumer, `/stop` or release command, and no Marmot rendering of progress events (plan 6), and no systemd units, timers for `wsd tick` or journal backup schedule (plan 8).
+**Known limits, deliberately left to later plans:** no real `AgentRuntime`, and prerequisites P1–P3 (crash-loop accounting, the `resume=True` contract, role-classified occupancy) for plans 4 and 7, no action reconciliation against targets (plan 5), no inbox consumer, `/stop` or release command, and no Marmot rendering of progress events (plan 6), and no systemd units, timers for `wsd tick` or journal backup schedule (plan 8).
 
 **Open before approval:** operator decisions (a)–(d). Design approval is not set.
