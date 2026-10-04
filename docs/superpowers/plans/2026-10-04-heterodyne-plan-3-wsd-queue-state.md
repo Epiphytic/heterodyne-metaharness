@@ -8,15 +8,17 @@
 - a beads adapter that works through btq's `Queue` as agent `wsd`, with one workstream-session worker per workstream and one per-bead worker per claimed bead (§4.3);
 - the shared pause gate and the per-workstream claim lock (§4.3);
 - pickup, which never leaves a workstream idle while an unblocked bead exists (§5.2);
-- the park and resume journals (§3.3, §4.3);
-- the startup recovery order (§3.3);
-- the seams that plans 4, 5 and 6 plug into: `AgentRuntime`, `ActionReconciler`, `Parker.park`, the inbox and the progress events.
+- the park, resume, release and escalation journals, and the one launch guard every launch goes through (§3.3, §4.3);
+- the startup recovery order (§3.3), which never launches anything;
+- the seams that plans 4, 5, 6 and 8 plug into: `AgentRuntime`, `ActionReconciler`, `Parker.park`, `Parker.release`, the inbox, the progress events and `Journal.backup`.
 
-**Architecture:** every multi-step change to the queue, a worktree or an agent session is an *operation* in the journal (`ops`): intent first, then one recorded step at a time, each step idempotent (check, write, read back). A crash anywhere is replayed from the step reached, and each step has a named checkpoint so tests can crash or pause there deterministically. Beads stay the source of truth: recovery rebuilds the journal's bead states from beads and the runtime, and anything it can't read holds the workstream. Pickup, park, resume and recovery are blocking code run per workstream under one lock; a small asyncio daemon runs them on startup, on timers and on control-socket requests.
+**Architecture:** every multi-step change to the queue, a worktree or an agent session is an *operation* in the journal (`ops`): intent first, then one recorded step at a time, each step idempotent (check, write, read back). A crash anywhere is replayed from the step reached. Every external effect is followed by a `<op>.<step>!` checkpoint and every journal write by `<op>.<step>`, so tests can crash on either side of each write, or pause there to force an interleaving. Beads stay the source of truth: what was launched for a bead is recorded on the bead itself (`metadata.wsd_session`) before the launch, sessions come from the runtime's own list, and anything wsd can't read, or that beads and the journal disagree on, holds rather than proceeds. Every launch goes through one guard (`Parker.launch`) that re-checks the runtime, the holds, the coder role and btq's post-claim checks immediately before it; recovery never launches. Pickup, park, release and recovery are blocking code run per workstream under one lock (`Parker.entry`); a small asyncio daemon runs them on startup, on timers and on control-socket requests.
 
 **Tech Stack:** Python 3.12+, asyncio, sqlite3 (stdlib), msgspec (the only runtime dependency), btq's `Queue` loaded from `$BTQ_REPO/bin/btq`, git; pytest, hypothesis, ruff, pyright (strict on `src/`).
 
 **Spec:** ADR 0001 revision 13 is design-repo commit `66b3aecb639e6ec56f108e2f55d483d4dedda485` in `$DESIGN_REPO`, approved in bead `btq-5ky39`. Section numbers (§) refer to it. Roadmap row 3 (`docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md`) scopes this plan. The progress-event requirement (waiting-on-input, held and stuck with concrete reasons, and per-message progress) follows the pending amendment `btq-xv48a`; this plan only records them, plan 6 renders them.
+
+**Status:** revision 2 of this plan, answering the r1 cross-model review (19 blocking and 5 non-blocking findings; see "Simplifications vs r1"). **Design approval is not set.** Four questions need the operator before approval (see "Operator decisions"); D3 and D20 stay provisional until then.
 
 ## Global Constraints
 
@@ -24,10 +26,10 @@
 - "Python 3.12+, matching the repo's tooling (pytest, hypothesis, ruff, pyright)." Managed with `uv`. Runtime dependencies stay exactly `msgspec`. Async tests use `asyncio.run` inside sync test functions; no pytest-asyncio.
 - "Tests never touch the network, a real wn-agent, the real systemctl, the real claude or codex binaries, ~/.claude, or the real beads database. Use fake executables and temp dirs." The queue is `tests/fakes/fake_btq.py`; the one contract test that loads the real `$BTQ_REPO/bin/btq` replaces its `bd` with a fake executable and points `HOME` at `tmp_path`, and is skipped when `BTQ_REPO` is unset.
 - "Nothing may be specific to Claude or Codex." No adapter, model or CLI name appears in `src/heterodyne/wsd/`. Test profiles are made-up names (`p-one`, `p-two`).
-- "Every recovery path fails closed. Never infer absent, complete or safe from missing or unreadable evidence." Concretely: an unreadable pause flag reads as paused; an unreadable claim holds the workstream; `Liveness.UNKNOWN` is never treated as dead; a missing `dependencies` key with a non-zero count is a malformed answer, not "no blockers"; a corrupt journal stops wsd and is left in place.
-- "Use crash-window and interleaving tests (deterministic checkpoints) for every journaled transition." Every journaled step calls a named checkpoint (`POINTS`, `PARK_POINTS`, `RESUME_POINTS`, `RECOVERY_POINTS`, `gate.checked`); tests crash at each one (`CrashAt`) and replay, or pause at one (`PauseAt`) to force an interleaving.
+- "Every recovery path fails closed. Never infer absent, complete or safe from missing or unreadable evidence." Concretely: an unreadable pause flag reads as paused; an unreadable claim holds the workstream; a session the runtime lists is treated as running until the runtime confirms it ended, and `Liveness.UNKNOWN` never counts as dead; a runtime that can't list its sessions holds the workstream; a `dependencies` list that is missing or disagrees with `dependency_count` is a malformed answer, not "no blockers"; a missing or unreadable launched-session record escalates, never falls back to the current configuration; a bead the journal has no row for is held, never relaunched; closing a bead never settles its action; a corrupt journal stops wsd and is left in place.
+- "Use crash-window and interleaving tests (deterministic checkpoints) for every journaled transition." Every external effect is followed by a barrier checkpoint (`<op>.<step>!`) and every journal write by its step checkpoint (`<op>.<step>`): `POINTS` (pickup), `PARK_POINTS`, `RESUME_POINTS`, `RELEASE_POINTS`, `ESCALATE_POINTS`, `RECOVERY_POINTS`, `gate.checked`, `gate.pause.waiting` and `lock.waiting` (the operation lock's door). Tests crash at each one (`CrashAt`) and replay, or pause at one (`PauseAt`, `Seen`, `Many`) to force an interleaving.
 - **The beads adapter goes through btq's interfaces, not raw bd.** wsd loads btq's `Queue` in-process. Labels, dependencies, comments and metadata have no `Queue` method, so they go through `Queue.bd()` of the per-bead worker, after `Queue.owned()` confirms the claim, under that worker's `Queue.exclusive()` lock. wsd never execs `bd` itself.
-- **wsd never unclaims** (§4.3). A parked bead stays `in_progress` under its per-bead worker.
+- **wsd never unclaims** (§4.3). A parked, held or stuck bead stays `in_progress` under its per-bead worker. This departs from btq's `PICKUP.md` step 7 and its "only restructure tasks nobody holds" rule; see Operator decisions (c).
 - **`src/` style:** ruff line length 110; pyright strict; `sys.platform` only in `src/heterodyne/platform.py`; error messages name keys, never secret values.
 - **Review rule:** every task ends with a review by a **different LLM than the implementer** (cross-model), or by a fresh-context adversarial agent when only one LLM is available. The brief names the diff range and the ADR sections and asks for `[BLOCKING]`/`[NON-BLOCKING]` findings; fix or rebut every blocking one. Close evidence includes `Code-Review: reviewer=<model> author=<model> mode=<cross-model|adversarial> range=<BASE>..<HEAD>`.
 - **Beads** (workstream `heterodyne`): Tasks 1–9 are `kind:task`, each with `metadata.design_approval=btq-5ky39`, `metadata.adr_revision=66b3aecb639e6ec56f108e2f55d483d4dedda485` and a blocking dependency on `btq-5ky39`. They run in order 1 → 9, each blocked by the one before.
@@ -41,29 +43,104 @@
 |---|---|---|---|
 | D1 | §4.1/§4.3 use `uuid5(NS, …)` without fixing `NS`. | `NS = uuid5(NAMESPACE_URL, "urn:heterodyne:wsd")`, a constant in `ids.py` that must never change. | Deterministic and install-independent; a changed NS would orphan every claim and session. |
 | D2 | btq's `Queue` has no call for labels, dependencies, comments or metadata. | `Queue.bd()` of the per-bead worker, after `Queue.owned()`, under `Queue.exclusive()`; every write is check → write → read back. | Keeps to btq's interface (the scope says "not raw bd"), and S6 shows `bd label add` exits 0 even on a missing bead, so only a read-back is evidence. |
-| D3 | How `/stop` is represented on the bead. | A park with `hold=True`: `v2:held` plus `v2:parked`, no blocker needed. A `v2:held` bead is never resumable; plan 6's release removes `v2:held`. | Keeps "parked" one mechanism; the operator hold is visible on the bead, not only in the journal. |
+| D3 | How `/stop` is represented on the bead. **Provisional: operator decision (a).** | A park with `hold=True`: `v2:held` (written first) plus `v2:parked`, no blocker needed. A `v2:held` bead is never resumable; only `Parker.release` (plan 6) moves it on. | Keeps "parked" one mechanism; the operator hold is visible on the bead, not only in the journal. It departs from §4.3's "parking keeps a blocking edge" invariant, hence the decision. |
 | D4 | When a parked bead is "waiting on input" rather than "blocked on a bead". | When an open blocker carries `kind:approval`, `kind:question` or `kind:confirm` (`OPERATOR_INPUT_LABELS`). | Those are the operator-ask bead kinds of §5; plans 5–7 create them. |
 | D5 | Which repository a bead's worktree comes from; which profile runs it. | `metadata.repo` names one of the workstream's `[repos]` (default `default`); a single `role:<role>=<profile>` label overrides the configured coder profile (§15 layer 4). | Both are per-bead data in beads, so recovery can recompute them. |
-| D6 | Plan 5 owns action reconciliation (§5.4), but recovery step 3 runs now. | `HoldingReconciler`: any unclosed bead labelled `ws:<ws>` with `metadata.action_state` `executing` or `uncertain` holds the workstream (`actions_unreconciled`). Plan 5 replaces it. | Fails closed: plan 3 can't check targets, so it never assumes there is nothing to reconcile. |
+| D6 | Plan 5 owns action reconciliation (§5.4), but recovery step 3 runs now. | `HoldingReconciler`: any bead labelled `ws:<ws>`, **closed ones included**, whose `metadata.action_state` is set to anything but `pending`, `succeeded` or `failed` (`SETTLED_ACTIONS`) holds the workstream (`actions_unreconciled`). The hold stops every launch: the launch guard refuses while any hold applies, replays included. Plan 5 replaces the reconciler. | Fails closed: plan 3 can't check targets, so it never assumes there is nothing to reconcile, and closing a bead says nothing about its action. |
 | D7 | Recovery scope. | Recovery runs per workstream. A workstream whose recovery fails stays `held` and is recovered again before its next pickup; the others carry on. | One unreachable dependency must not stop unrelated workstreams. |
-| D8 | Lost journal during a park. | Recovery finishes a park cut short (blocking edge present, `v2:parked` absent) when the session is dead. Because the WIP mark is per operation, this may add a second, possibly empty, WIP commit. | Harmless and visible in git; the alternative (guessing that an earlier WIP commit was this park's) infers from incomplete evidence. |
-| D9 | Until plan 4 there is no agent runtime. | `NoRuntime` reports unavailable; every workstream is held `runtime_unavailable` and nothing is claimed. | Never claim work that can't run. |
-| D10 | One coder session per workstream (§4.3) when a stop can't be confirmed. | A bead that is `parking` or `stuck`, or closed or lost with an unconfirmed stop, keeps the coder role while its session's liveness is not `dead`. The session key is recomputed from the bead's ID and labels, so a bead whose repository vanished still counts. | "Never infer safe": a session that may be live is treated as live. |
-| D11 | What "never idle" means operationally (§5.2). | Pickup tries every candidate in turn (resumable first, then ready) until one starts; a refused, lost or failed candidate never ends pickup while another remains. A claim that did not land becomes a `beads_unreachable` hold, not idle. | Tested by a hypothesis property over random queues and faults. |
+| D8 | A lost journal (the file deleted or moved aside). | Any bead held by our per-bead workers that the journal has no row for is escalated `journal_lost` (STUCK, `needs-human`): never relaunched, never parked or unparked, whatever its labels and sessions say. Its sessions keep the coder role until the runtime confirms they ended. Only the operator's release moves it on. | Beads can't say whether a park, `/stop` or escalation was cut short, so recovery doesn't guess. Simpler than r1's "finish the park" rule, which inferred from partial evidence. |
+| D9 | Until plan 4 there is no agent runtime. | `NoRuntime` reports unavailable and can't list sessions; every workstream is held `runtime_unavailable` and nothing is claimed. `RuntimeUnavailable` anywhere is a workstream hold: the open operation stays at its step, no failure budget is spent and nothing escalates. | Never claim work that can't run; an absent runtime is not the bead's fault. |
+| D10 | One coder session per workstream (§4.3) when a stop can't be confirmed. | The role is taken by any coder session in `AgentRuntime.sessions(ws)`, which lists every session launched until the runtime confirms it ended, whatever its bead's state. A session of a bead that is no longer ours is stopped; while the stop is unconfirmed the bead is STUCK `stop_unconfirmed` and its session keeps the role. Nothing is recomputed from current labels or configuration. | "Never infer safe": a session that may be live is treated as live, and the runtime, not wsd's derivation, says which sessions exist. |
+| D11 | What "never idle" means operationally (§5.2). | Pickup tries every candidate in turn (resumable first, then ready) until one starts; a refused claim, a lost claim or a **confirmed** launch failure moves on to the next candidate. An **uncertain** launch keeps the coder role and holds `launch_uncertain` until the session list settles it. A claim that did not land becomes a `beads_unreachable` hold, not idle. | Tested by a hypothesis property over random queues and per-bead faults, with an independent oracle (below Task 7). |
 | D12 | Pause and resumable beads. | Pause blocks new claims only; a parked bead whose blockers closed still resumes while paused. | §4.3: "Pausing stops new claims only. Running and parked beads continue." |
 | D13 | `[integrations.beads]` keys. | `btq` (the checkout) plus btq's optional locations (`config_dir`, `repo`, `dolt_host`, `dolt_port`, `dolt_database`, `tls_cert`) and `credentials = { file = … }`. Unset ones fall back to btq's `BTQ_*` environment. | Uses the table plan 1 reserved; credentials are only ever a file reference. |
 | D14 | btq's state directory (`paused` flag, worker state) is under `Path.home()`. | wsd uses btq's location unchanged; tests that load the real btq set `HOME` to `tmp_path`. | btq owns that convention; the pause flag must be the one `btq pause` sets. |
-| D15 | Callers of `Parker.park` (plans 4 and 6). | `park` raises `BeadsUnavailable` when beads can't be reached; the open park journal is replayed by the next pickup. Callers keep their request and report it as pending. | An outage never escalates a bead. |
+| D15 | Callers of `Parker.park` (plans 4 and 6). | `park` takes the workstream's operation lock (`Parker.entry`, shared with pickup, release and recovery). It raises `OpConflict` while another operation is open on the bead and `BeadsUnavailable` when beads can't be reached; an open park journal is replayed by the next pickup. Callers keep their request and report it as pending. | No two operations on a workstream interleave, and an outage never escalates a bead. |
 | D16 | Approval beads for `HoldingReconciler` (plan 5). | Found by the `ws:<ws>` label. | Plan 5 must keep that label on approval beads (flagged in the seams doc). |
+| D17 | Where launch-time safety lives. | One launch guard, `Parker.launch(op, new)`, is the only caller of `AgentRuntime.launch`. In order: runtime available; no hold but the operation's own `launch_uncertain`; no other bead's coder session; no `needs-human`; `BeadsAdapter.validate` reruns btq's post-claim checks (ownership, routing, design approval); not held, parked or blocked (else shelved back to parked, or escalated if it has a session); the launched-session record written (first launch) and read back; the worktree verified; any own session not confirmed live, or under another key, is uncertain; then the launch. | Every replay and resume goes through the same checks immediately before the launch, so no path launches on stale evidence. |
+| D18 | §3.3's session registry before plan 4. | The launched-session record (`SessionRecord`: role, profile, session key, repository, worktree) is written to the bead as `metadata.wsd_session` before the first launch, with read-back. Resume, release and the sweep use it, never the current configuration. A pickup replay launches what its journal recorded at the worktree step. | The record survives a lost journal, and a configuration change never redirects a running bead. Plan 4 may add fields; unknown fields are ignored. |
+| D19 | How the operator's `/stop` and escalations end (§6.3, plan 6). | `Parker.release(bead)`: a journaled operation that removes `v2:held` and `needs-human`, then puts a parked bead back to waiting or hands an unparked one to a resume through the launch guard. HELD and STUCK rows leave only through it; removing the labels by hand changes nothing in wsd. | One audited way out, safe to replay. |
+| D20 | Journal backups (§3.3: "backed up with the beads backups"). **Provisional: operator decision (b).** | `Journal.backup(dest)`: a consistent online copy using SQLite's backup API (safe under WAL), written under a temporary name (mode 0600) and renamed into place. Scheduling it next to the beads backups is left to plan 8. | A WAL database can't be copied as a file; the interface is here so plan 8 only schedules it. |
+| D21 | How recovery finds "our" beads. | By assignee: every unclosed bead held by one of the workstream's per-bead workers, whatever its labels. A routing change under a claim is found by `validate` and escalated `routing_changed`. | Labels are routing, not ownership (§4.3); a relabelled bead and its session must stay visible. |
+| D22 | An existing worktree at a bead's path (§4.3). | It is used only if btq's provenance (worker, repository and base) on the bead matches, or its git common directory is the repository's. Otherwise `worktree_failed`. Resume verifies the recorded worktree the same way. | A leftover or replaced directory never receives another repository's work. |
+| D23 | When sessions are reconciled. | The sweep (`sweep.py`: stop sessions of beads no longer ours, give a running bead whose session ended a resume operation, hold disagreements) runs at recovery step 5 **and** at the start of every pickup. | The runtime and beads change between restarts too; one code path covers both. |
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
+
+Six numbered entries (r1's count was wrong: entry 3 covers two decisions). Two conflicts with btq's protocol follow them, and the questions the operator must answer are in "Operator decisions" below.
 
 1. **`/pause` in §6.3 vs §4.3.** §6.3's command table says `/pause` "stops or restarts pickup. The running task finishes its turn and is then parked." §4.3 says "Pausing stops new claims only. Running and parked beads continue, unless the operator uses `/stop`." This plan implements §4.3. Plan 6 owns `/pause` and should get the ADR text reconciled first.
 2. **The park sequence.** §4.3 lists "record intent, commit WIP (recording the SHA), apply the label, add a bead comment". This plan adds two steps: **stop the session** before the WIP commit (otherwise the agent keeps writing into the worktree being committed), and **add the blocking edges** before the label (so a bead is never `v2:parked` without what keeps it from resuming). It is an elaboration, not a change of outcome, but a reviewer may want it written into the ADR.
 3. **`/stop` representation** (D3) and **waiting-on-input detection** (D4) are not in the ADR. They are plan-level choices that plans 6 and 7 will depend on.
 4. **btq state under `HOME`** (D14). btq's per-worker state (and so the shared pause flag) lives under the service user's home. That is fine for one host user, but plan 4's synthetic home for agents must not be the home wsd runs with.
 5. **Runtime availability.** Until plan 4 lands, a running `wsd` claims nothing (D9). That is intended, but it means no end-to-end run is possible between plans 3 and 4.
-6. **Sandbox backend.** The roadmap's plan 4 names bubblewrap; the operator has since chosen OpenShell (ADR revision 14, pending). Nothing in this plan depends on the backend: `AgentRuntime` is backend-neutral.
+6. **Sandbox backend.** The roadmap's plan 4 names bubblewrap; the operator has since chosen OpenShell (ADR revision 14, pending, not treated as approved here). Nothing in this plan depends on the backend: `AgentRuntime` is backend-neutral.
+
+Conflicts with btq's `$BTQ_REPO/docs/PICKUP.md`:
+
+- **Step 7, line 81 ("Release what you can't progress")** vs §4.3's "wsd never unclaims". A parked bead stays claimed under its per-bead worker.
+- **Line 119 ("Only restructure tasks nobody holds")** vs the park sequence, which adds blocking edges to a bead wsd still holds.
+
+## Operator decisions (needed before design approval; recommendations, not decisions)
+
+**(a) Blocker-free operator holds (review finding 18, D3).** §4.3 says a parked bead keeps a blocking edge; `/stop` as designed parks with `v2:held` and no edge.
+- Option 1: amend §4.3 so `v2:held` is a second park reason that needs no edge (no code change).
+- Option 2: `/stop` creates a hold bead (`kind:hold`, `ws:<ws>`) and blocks on it; release closes it. The invariant holds literally, at the cost of an extra bead per stop and a release that writes two beads.
+- Option 3: `/stop` doesn't park: it stops the session, commits WIP and adds only `v2:held` (no `v2:parked`, no edge). The guard already refuses a held bead, so nothing launches, but "stopped" becomes a second shape that the sweep must accept (today `v2:held` without `v2:parked` is escalated `unexpected_state`), and §4.3's park sequence no longer covers it.
+- **Recommendation: option 1.** It is what the code does, `v2:held` is checked before every launch (D17), and release is already the only way out. Option 2 is the fallback if the invariant must hold literally.
+
+**(b) Journal backup ownership (review finding 19, D20).**
+- Option 1: a task here that adds `wsctl backup DEST` (a control request calling `Journal.backup`) and documents it next to the beads backups.
+- Option 2: plan 8 owns it as a named dependency: plan 8's backup unit calls `Journal.backup(dest)` through a control request it adds, timed with the beads backups.
+- **Recommendation: option 2.** The interface (`Journal.backup`, tested here for coherence, mode and leftovers) is in plan 3, but when to call it belongs to whatever schedules the beads backups, which is plan 8. Roadmap row 8 should list it.
+
+**(c) btq protocol conflicts (PICKUP.md lines 81 and 119).**
+- Option 1: amend PICKUP.md with a narrow wsd exception: an `agent:wsd` per-bead worker never releases (the claim is how a parked bead keeps its place and its session), and may add blocking edges, the `v2:parked`/`v2:held` labels and its own comment and metadata to a bead it holds. All other rules stay unchanged.
+- Option 2: change wsd to release on park and re-claim on resume. That contradicts §4.3 and loses the claim to another worker while the bead's session state still exists.
+- **Recommendation: option 1**, as a btq docs change reviewed in btq's own queue before plan 3 is implemented.
+
+**(d) `/pause` in §6.3 vs §4.3** (conflict 1).
+- Option 1: amend §6.3 to match §4.3 (pause stops new claims only); `/stop` is the way to park the running bead.
+- Option 2: amend §4.3 to match §6.3 (the running task finishes its turn and is parked). Pause then needs a park with an operator hold, and resuming it needs a release.
+- **Recommendation: option 1.** It is what this plan implements and tests (`test_pause_does_not_stop_the_running_bead`), and it keeps pause from doing two jobs. Plan 6 owns `/pause`; the ADR text should be settled before plan 6.
+
+## Simplifications vs r1
+
+Every r1 blocking finding, its fix, and the test that covers it. Where r1 had clever recovery, r2 holds instead (fail closed). Crash barriers (`<op>.<step>!`) sit after each external effect and before the journal write that records it.
+
+| # | Finding | Fix | Covering test(s) |
+|---|---|---|---|
+| 1 | Recovery can't adopt a closed bead | `Journal.adopt` writes any state from any row, CLOSED included, without the transition check | `test_adopt_closes_a_bead_from_any_row` |
+| 2 | Recovery launches before establishing role occupancy | Recovery never launches. Every launch goes through the guard, which reads the whole session list first (D17) | `test_recovery_never_launches`, `test_unknown_session_is_reserved_before_any_launch`, `test_two_dead_sessions_never_run_together` |
+| 3 | Recovery discards session obligations | Sessions come from `AgentRuntime.sessions`, listed until confirmed ended; the sweep stops sessions of beads no longer ours and holds STUCK `stop_unconfirmed` until the stop is confirmed; a parked bead with a session is escalated | `test_session_of_a_bead_not_ours_is_stopped`, `test_unconfirmed_stop_of_a_closed_bead_is_stuck_until_confirmed`, `test_closed_bead_with_unconfirmed_stop_keeps_the_role`, `test_parked_bead_with_a_listed_session_is_escalated`, `test_lost_claim_stops_the_session` |
+| 4 | Current configuration substituted for launch evidence | The launched-session record on the bead (D18); a missing or unreadable record escalates `launch_unrecorded`; pickup replays launch what the journal recorded | `test_resume_uses_the_recorded_identity_after_a_config_change`, `test_replayed_pickup_launches_what_it_chose`, `test_config_change_never_touches_a_running_bead`, `test_park_without_a_session_record_escalates`, `test_park_with_an_unreadable_record_escalates`, `test_running_bead_without_a_record_is_held` |
+| 5 | Uncertain-claim recovery bypasses btq's routing and digest gate | `BeadsAdapter.validate` reruns btq's own post-claim checks (`matches`, `design_allowed`) as the bead's worker, in the guard, before every launch | `test_validate_reruns_btqs_post_claim_checks`, `test_contract_with_real_btq`, `test_replayed_pickup_revalidates_before_launch`, `test_guard_revalidates_routing_and_design_approval` |
+| 6 | Launch replay doesn't revalidate ownership or eligibility | The guard (D17) on every path: ownership, routing, `needs-human`, held, parked, blockers; unknown own session is uncertain | `test_guard_refuses_a_lost_claim`, `test_hold_added_after_the_unlabel_shelves_the_bead`, `test_resume_abandoned_when_blocked_again`, `test_guard_never_launches_beside_an_unknown_session_of_its_bead`, `test_unknown_liveness_never_starts_a_second_session` |
+| 7 | Resume loses its intent across the unlabel gap | A resume replay at `intent` that finds `v2:parked` gone treats it as its own completed unlabel; barrier `resume.unlabelled!` | `test_crash_at_every_resume_point_launches_once` |
+| 8 | Action holds don't stop replay or recovery launches | Actions are read before any replay; the guard refuses while any hold applies; recovery never launches | `test_unsettled_action_blocks_a_replayed_launch`, `test_unsettled_actions_hold_after_recovery`, `test_unsettled_action_holds_pickup` |
+| 9 | Closed status treated as a settled action | `with_metadata` includes closed beads; only `pending`, `succeeded`, `failed` are settled, unknown values are not | `test_unsettled_actions_include_closed_beads_and_unknown_values`, `test_closed_bead_with_an_unsettled_action_holds` |
+| 10 | `NoRuntime` can escalate recoverable work | `RuntimeUnavailable` is a workstream hold everywhere: no budget, no escalation, operation left at its step | `test_no_runtime_waits_without_budget_or_escalation`, `test_no_runtime_never_spends_launch_budget`, `test_unconfirmed_stop_holds_and_never_spends_budget`, `test_runtime_that_cannot_list_holds_recovery` |
+| 11 | Lost-journal recovery infers permission from absent evidence | A bead with no journal row is escalated `journal_lost` and never relaunched, parked or unparked (D8); escalation is journaled with the STUCK row in one transaction, then labelled | `test_lost_journal_holds_a_running_bead`, `test_lost_journal_never_relaunches_a_dead_session`, `test_lost_journal_never_finishes_a_cut_short_park`, `test_lost_journal_parked_bead_resumes_only_after_release`, `test_crash_at_every_escalate_point_labels_once` |
+| 12 | Ownership discovery depends on routing labels | `ours()` by assignee (D21); routing changes escalate | `test_ours_is_found_by_assignee_whatever_the_labels`, `test_ownership_is_found_after_a_label_change` |
+| 13 | Public parking bypasses the serialization lock | `Parker.entry` is the one lock for park, release, pickup and recovery; `OpConflict` for a second operation | `test_pickup_waits_at_the_door_while_a_park_runs`, `test_crash_at_every_park_point_completes_once` (`lock.waiting`) |
+| 14 | The release seam strands held beads | `Parker.release` (D19), journaled; external label removal changes nothing | `test_release_of_a_held_parked_bead_makes_it_resumable`, `test_crash_at_every_release_point_completes_once`, `test_release_of_a_stuck_running_bead_resumes_through_the_guard`, `test_release_stops_unrecorded_sessions_before_writing_a_record`, `test_only_held_or_stuck_beads_are_releasable`, `test_external_label_removal_is_not_a_release` |
+| 15 | Existing worktree doesn't prove repository identity | btq provenance or a matching git common directory (D22); resume verifies the recorded worktree | `test_worktree_needs_btqs_provenance`, `test_park_into_a_foreign_worktree_escalates`, `test_crash_between_worktree_and_provenance_escalates` |
+| 16 | A failed launch reported as success and blocks other candidates | `Launch` outcomes: confirmed failure moves to the next candidate; uncertain keeps the role and holds; an operation's end settles its own uncertain hold | `test_confirmed_launch_failure_tries_the_next_candidate`, `test_uncertain_launch_keeps_the_role_and_holds`, `test_confirmed_launch_failure_retries_then_escalates`, `test_uncertain_launch_keeps_the_role_until_the_list_settles_it`, `test_uncertain_hold_ends_with_its_operation` |
+| 17 | Contradictory dependency evidence | `parse` rejects a `dependencies` list whose length disagrees with `dependency_count` (an empty or cut-short list is not "no blockers"), or a count that is not a non-negative integer | `test_parse_rejects_a_dependency_count_that_disagrees` |
+| 18 | Blocker-free hold is an ADR deviation | Not resolved here: operator decision (a); D3 provisional | `test_operator_hold_is_not_resumable` (current behaviour) |
+| 19 | No journal backup | `Journal.backup` (D20); scheduling is operator decision (b) | `test_backup_is_a_coherent_private_copy` |
+
+Non-blocking findings:
+
+| Finding | Fix | Covering test(s) |
+|---|---|---|
+| Barriers after external effects | `<op>.<step>!` after every external write (claim, worktree, record, stop, commit, edges, labels, comment, unlabel, launch, escalation label), before its journal write; the crash tests iterate over them | `test_crash_at_every_{pickup,park,resume,release,escalate}_point_*` |
+| Property oracle and uncertain launches | The property's oracle is independent of the scheduler: at most one coder session ever; STARTED, RESUMED and BUSY mean exactly one; HELD means a hold is recorded; NOTHING means nothing is ready and no coder runs. Faults are per bead; `launch_uncertain` is one of the generated faults | `test_never_idle_while_an_unblocked_bead_exists` |
+| Real-btq contract coverage | The contract test now also runs btq's real post-claim checks through `validate` (`matches` and the design gate): a research bead passes, a task without an approval or with a non-approval `design_approval` raises `RoutingChanged`; it checks reads run as the workstream worker and validation as the bead's own worker. btq's `claim`, `owned` and `worktree` against a real Dolt stay out of scope (no real database in tests) and are covered by the fake, which follows btq's rules | `test_contract_with_real_btq` |
+| Pause barrier | `gate.pause.waiting` is reached before the pauser takes the claim lock; the test waits for it, then checks the pause is not acknowledged | `test_pause_waits_for_in_flight_claim` |
+| Structured reason details | State events carry `{"reason", "detail"}` (blocker IDs for a parked bead); a failed recovery publishes its hold; an acknowledged pause shows at once | `test_set_state_records_reason_and_event`, `test_failed_recovery_publishes_its_hold`, `test_acknowledged_pause_shows_at_once` |
+
+**Known limit:** a relaunch after a dead session opens a new resume operation, so its launch-failure budget starts again. A bead that crashes its session on every launch keeps relaunching; crash-loop detection belongs to plan 4 with the runtime's exit evidence (§10).
 
 ## File map
 
@@ -83,7 +160,8 @@
 | `src/heterodyne/wsd/gate.py` | `ClaimGate` (claim lock, pause), `instance_lock` | 5 |
 | `src/heterodyne/wsd/runtime.py` | `AgentRuntime`, `NoRuntime`, `ActionReconciler`, `HoldingReconciler` | 5 |
 | `src/heterodyne/wsd/workstream.py` | per-workstream settings, `place()`, `Deps` | 6 |
-| `src/heterodyne/wsd/park.py` | `Parker`: park and resume journals | 6 |
+| `src/heterodyne/wsd/park.py` | `Parker`: the operation lock; park, resume, release and escalation journals; the launch guard | 6 |
+| `src/heterodyne/wsd/sweep.py` | the session sweep, shared by pickup and recovery | 7 |
 | `src/heterodyne/wsd/scheduler.py` | `Scheduler`: pickup and the pickup journal | 7 |
 | `src/heterodyne/wsd/recovery.py` | `recover()`: the startup recovery order | 8 |
 | `src/heterodyne/wsd/settings.py` | `[wsd]`, `[integrations.beads]` and workstream settings | 9 |
@@ -92,7 +170,7 @@
 | `src/heterodyne/wsd/cli.py` | `wsd` and `wsctl` | 9 |
 | `src/heterodyne/defaults/defaults.toml`, `pyproject.toml` | `[wsd]` defaults; console scripts | 9 |
 | `docs/wsd.md`, `docs/configuration.md`, `docs/install.md`, `examples/config.toml` | operator docs | 9 |
-| `tests/fakes/checkpoints.py` | `Recorder`, `CrashAt`, `PauseAt`, `SimulatedCrash` | 1 |
+| `tests/fakes/checkpoints.py` | `Recorder`, `CrashAt`, `PauseAt`, `Seen`, `Many`, `SimulatedCrash` | 1 |
 | `tests/fakes/fake_btq.py` | in-memory queue with btq's `Queue` interface and bd 1.1 shapes | 4 |
 | `tests/fakes/fake_runtime.py` | recording `AgentRuntime` | 5 |
 | `tests/wsd_env.py` | shared helpers (Task 4), the test rig (Task 6), rig pickup (Task 7) | 4, 6, 7 |
@@ -112,7 +190,7 @@
   - `heterodyne.fsutil.private_dir(path: Path) -> None`.
   - `heterodyne.wsd.ids`: `NS: uuid.UUID`, `SLUG: re.Pattern`, `PROFILE: re.Pattern`, `ROLE_LABEL = "role:"`, `class BadName(ValueError)`, `slug(value: str, what: str) -> str`, `ws_session(ws: str) -> str`, `bead_session(ws: str, bead: str) -> str`, `role_session(bead: str, role: str, profile: str) -> str`, `profile_for(labels: tuple[str, ...], role: str, default: str) -> str`.
   - `heterodyne.wsd.checkpoints`: `Checkpoint = Callable[[str], None]`, `nothing(_name: str) -> None`.
-  - `tests/fakes/checkpoints.py`: `SimulatedCrash(BaseException)`, `Recorder` (`.seen: list[str]`), `CrashAt(point)`, `PauseAt(point)` (`.reached`, `.go`: `threading.Event`).
+  - `tests/fakes/checkpoints.py`: `SimulatedCrash(BaseException)`, `Recorder` (`.seen: list[str]`), `CrashAt(point)`, `PauseAt(point)` (`.reached`, `.go`: `threading.Event`), `Seen(point)` (`.reached` set when the point is passed, without stopping), `Many(*recorders)` (forwards every point to each). A recorder records the calling thread's name with each point, so an interleaving test can tell which caller reached which door.
 
 - [ ] **Step 1: Create `$HZ/tests/fakes/checkpoints.py`**
 
@@ -121,7 +199,8 @@ Checkpoints are how every crash-window and interleaving test reaches an exact po
 ```python
 """Deterministic checkpoints for crash-window and interleaving tests.
 
-wsd calls `cp(name)` right after each journaled step. `CrashAt` raises `SimulatedCrash` (a BaseException,
+wsd calls `cp(name)` right after each external effect (`<op>.<step>!`) and each journal write
+(`<op>.<step>`). `CrashAt` raises `SimulatedCrash` (a BaseException,
 so no `except Exception` in wsd can swallow it) the first time a named point is reached, which models the
 process dying at exactly that point. `PauseAt` parks the calling thread at a point until the test lets it go.
 """
@@ -167,6 +246,34 @@ class PauseAt(Recorder):
             self.reached.set()
             if not self.go.wait(10):
                 raise TimeoutError(name)
+
+
+class Seen(Recorder):
+    """Signals, without blocking, the first time a thread reaches the point: an interleaving test waits on
+    `reached` to know the other thread is at that point (for example at a lock's door)."""
+
+    def __init__(self, point: str) -> None:
+        super().__init__()
+        self.point = point
+        self.reached = threading.Event()
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        if name == self.point:
+            self.reached.set()
+
+
+class Many(Recorder):
+    """Several checkpoints at once, called in order."""
+
+    def __init__(self, *parts: Recorder) -> None:
+        super().__init__()
+        self.parts = parts
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        for part in self.parts:
+            part(name)
 ```
 
 - [ ] **Step 2: Create `$HZ/tests/test_wsd_ids.py`**
@@ -367,7 +474,7 @@ git commit -m "feat(wsd): deterministic worker and session IDs, test checkpoints
 - Consumes: nothing.
 - Produces (`heterodyne.wsd.states`):
   - `class BeadState(StrEnum)`: `CLAIMING, STARTING, RUNNING, PARKING, PARKED, WAITING_INPUT, HELD, STUCK, RESUMING, CLOSED, DROPPED`.
-  - `class Reason(StrEnum)`: `CLAIM_UNCERTAIN, CLAIM_LOST, CLAIM_ABANDONED, ROUTING_CHANGED, WORKTREE_FAILED, LAUNCH_FAILED, SESSION_DEAD, RUNTIME_UNAVAILABLE, PARK_FAILED, BLOCKED_ON_BEAD, WAITING_ON_OPERATOR, HELD_BY_OPERATOR, NEEDS_HUMAN, BEADS_UNREACHABLE, ACTIONS_UNRECONCILED, CONFIG_INVALID, UNEXPECTED_STATE`.
+  - `class Reason(StrEnum)`: `CLAIM_UNCERTAIN, CLAIM_LOST, CLAIM_ABANDONED, ROUTING_CHANGED, WORKTREE_FAILED, LAUNCH_FAILED` (the runtime confirmed nothing started), `LAUNCH_UNCERTAIN` (it can't say), `LAUNCH_UNRECORDED` (no readable launched-session record), `STOP_UNCONFIRMED`, `JOURNAL_LOST` (beads show work the journal has no row for), `SESSION_DEAD, RUNTIME_UNAVAILABLE, PARK_FAILED, BLOCKED_ON_BEAD, WAITING_ON_OPERATOR, HELD_BY_OPERATOR, NEEDS_HUMAN, BEADS_UNREACHABLE, ACTIONS_UNRECONCILED, CONFIG_INVALID, UNEXPECTED_STATE`.
   - `class WsState(StrEnum)`: `RUNNING, IDLE, ALL_BLOCKED, PAUSED, HELD, STUCK`.
   - `TERMINAL`, `ACTIVE`, `WAITING`: `frozenset[BeadState]`; `ALLOWED: dict[BeadState | None, frozenset[BeadState]]`.
   - `class IllegalTransition(Exception)`, `allowed(src: BeadState | None, dst: BeadState) -> bool`, `check(src, dst) -> None` (raises `IllegalTransition`).
@@ -414,9 +521,11 @@ def test_claiming_never_jumps_to_running() -> None:
         check(BeadState.CLAIMING, BeadState.RUNNING)
 
 
-def test_held_bead_never_resumes_directly() -> None:
-    # /stop holds a bead until the operator releases it: HELD -> RESUMING is not a transition.
-    assert not allowed(BeadState.HELD, BeadState.RESUMING)
+def test_only_a_claim_starts_a_row() -> None:
+    # wsd's own operations start every bead with a claim; recovery rebuilds rows with `adopt` instead.
+    assert ALLOWED[None] == {BeadState.CLAIMING}
+    with pytest.raises(IllegalTransition):
+        check(None, BeadState.CLOSED)
 
 
 @pytest.mark.parametrize(("paused", "holds", "beads", "expected"), [
@@ -482,7 +591,11 @@ class Reason(StrEnum):
     CLAIM_ABANDONED = "claim_abandoned"
     ROUTING_CHANGED = "routing_changed"
     WORKTREE_FAILED = "worktree_failed"
-    LAUNCH_FAILED = "launch_failed"
+    LAUNCH_FAILED = "launch_failed"            # the runtime confirmed nothing is running
+    LAUNCH_UNCERTAIN = "launch_uncertain"      # the runtime can't say whether the launch started
+    LAUNCH_UNRECORDED = "launch_unrecorded"    # no readable launched-session record on the bead
+    STOP_UNCONFIRMED = "stop_unconfirmed"      # a session that must end could not be confirmed ended
+    JOURNAL_LOST = "journal_lost"              # beads show work wsd's journal has no record of
     SESSION_DEAD = "session_dead"
     RUNTIME_UNAVAILABLE = "runtime_unavailable"
     PARK_FAILED = "park_failed"
@@ -512,19 +625,22 @@ WAITING = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT, BeadState.HELD})
 _PARKED_LIKE = WAITING | {BeadState.STUCK}
 
 # Every non-terminal state may also go to CLOSED: anyone with the right can close a bead at any time.
+# Recovery and the per-pickup observation rebuild rows from beads with `Journal.adopt`, which skips this
+# table: these are the transitions wsd's own operations make.
 ALLOWED: dict[BeadState | None, frozenset[BeadState]] = {
-    # A fresh journal learns beads from beads (§3.3), in whatever state they are.
-    None: frozenset(BeadState) - TERMINAL,
+    None: frozenset({BeadState.CLAIMING}),      # wsd's own operations start every bead with a claim
     BeadState.CLAIMING: frozenset({BeadState.STARTING, BeadState.DROPPED, BeadState.STUCK, BeadState.CLOSED}),
-    BeadState.STARTING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.STUCK, BeadState.CLOSED}),
+    BeadState.STARTING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.STUCK, BeadState.CLOSED}
+                                  | WAITING),    # WAITING: shelved, not runnable when its launch came
     BeadState.RUNNING: frozenset({BeadState.PARKING, BeadState.RESUMING, BeadState.STUCK, BeadState.CLOSED}),
     BeadState.PARKING: frozenset({BeadState.PARKED, BeadState.WAITING_INPUT, BeadState.HELD,
                                   BeadState.STUCK, BeadState.CLOSED}),
     BeadState.PARKED: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},
     BeadState.WAITING_INPUT: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},
-    BeadState.HELD: _PARKED_LIKE | {BeadState.CLOSED},
-    BeadState.RESUMING: frozenset({BeadState.RUNNING, BeadState.PARKED, BeadState.WAITING_INPUT,
-                                   BeadState.HELD, BeadState.STUCK, BeadState.CLOSED}),
+    BeadState.HELD: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},   # RESUMING: only by release
+    BeadState.RESUMING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.PARKED,
+                                   BeadState.WAITING_INPUT, BeadState.HELD, BeadState.STUCK,
+                                   BeadState.CLOSED}),
     BeadState.STUCK: _PARKED_LIKE | {BeadState.RESUMING, BeadState.RUNNING, BeadState.CLOSED},
     BeadState.CLOSED: frozenset({BeadState.CLAIMING}),   # a reopened bead can be claimed again
     BeadState.DROPPED: frozenset({BeadState.CLAIMING}),
@@ -590,9 +706,10 @@ git commit -m "feat(wsd): bead and workstream states with concrete reasons and l
 - Consumes: `heterodyne.fsutil.private_dir` (Task 1); `BeadState`, `Reason`, `WsState`, `check` (Task 2).
 - Produces (`heterodyne.wsd.journal`):
   - `class JournalCorrupt(Exception)`, `class OpConflict(Exception)`.
-  - `class InboxStatus(StrEnum)`: `PENDING, COMMITTED, SUPERSEDED, REJECTED, NEEDS_HUMAN`. `class OpKind(StrEnum)`: `PICKUP, PARK, RESUME`. `class OpStatus(StrEnum)`: `OPEN, DONE, ABANDONED, STUCK`.
+  - `class InboxStatus(StrEnum)`: `PENDING, COMMITTED, SUPERSEDED, REJECTED, NEEDS_HUMAN`. `class OpKind(StrEnum)`: `PICKUP, PARK, RESUME, RELEASE, ESCALATE`. `class OpStatus(StrEnum)`: `OPEN, DONE, ABANDONED, STUCK`.
   - Frozen dataclasses: `InboxRow(seq, surface, event_id, kind, ws, bead, payload, status, attempts)`, `Op(op_id, kind, ws, bead, step, data: dict[str, str], attempts, status)`, `BeadRow(ws, bead, state, reason, detail, since)`, `Event(seq, at, ws, bead, kind, detail, ref)`, `Snapshot(ws, state: WsState | None, holds: dict[Reason, str], beads: list[BeadRow], ops: list[Op], last_event: int)`.
-  - `class Journal(path: Path)`, with `.fresh: bool` and: `close()`, `transaction()` (re-entrant context manager), `inbox_add(surface, event_id, kind, payload, ws=None, bead=None) -> int | None` (None for a duplicate), `inbox_pending()`, `inbox_get(seq)`, `inbox_failed(seq, limit) -> InboxStatus`, `inbox_finish(seq, status)`, `inbox_pending_count()`, `op_open(kind, ws, bead, data=None) -> Op` (one open op per bead, else `OpConflict`), `op_step(op_id, step, data=None) -> Op`, `op_failed(op_id) -> int`, `op_finish(op_id, status)`, `ops_open(ws=None) -> list[Op]`, `op_for(ws, bead) -> Op | None`, `set_state(ws, bead, state, reason=None, detail="", ref=None)` (legal transitions only; emits `state:<value>`), `adopt(ws, bead, state, reason=None, detail="")` (recovery only, no transition check), `state(ws, bead) -> BeadRow | None`, `states(ws)`, `hold(ws, reason, detail="")`, `unhold(ws, reason)`, `holds(ws) -> dict[Reason, str]`, `set_ws_state(ws, state)`, `emit(ws, bead, kind, detail="", ref=None) -> int`, `events_since(seq, limit=500) -> list[Event]`, `snapshot(ws) -> Snapshot`.
+  - `state_detail(reason, detail) -> str`: the JSON detail of a `state:<value>` event, `{"reason": …, "detail": …}`.
+  - `class Journal(path: Path)`, with `.fresh: bool` and: `close()`, `backup(dest: Path)` (a consistent online copy with SQLite's backup API, written under a temporary name with mode 0600 and renamed into place; **the plan 8 seam**), `transaction()` (re-entrant context manager), `inbox_add(surface, event_id, kind, payload, ws=None, bead=None) -> int | None` (None for a duplicate), `inbox_pending()`, `inbox_get(seq)`, `inbox_failed(seq, limit) -> InboxStatus`, `inbox_finish(seq, status)`, `inbox_pending_count()`, `op_open(kind, ws, bead, data=None) -> Op` (one open op per bead, else `OpConflict`), `op_step(op_id, step, data=None) -> Op`, `op_failed(op_id) -> int`, `op_finish(op_id, status)`, `ops_open(ws=None) -> list[Op]` (in the order they were opened), `op_for(ws, bead) -> Op | None`, `set_state(ws, bead, state, reason=None, detail="", ref=None)` (legal transitions only; emits `state:<value>`), `adopt(ws, bead, state, reason=None, detail="")` (recovery only: writes any state, CLOSED included, from any row or none, without the transition check), `state(ws, bead) -> BeadRow | None`, `states(ws)`, `hold(ws, reason, detail="")`, `unhold(ws, reason)`, `holds(ws) -> dict[Reason, str]`, `set_ws_state(ws, state)`, `emit(ws, bead, kind, detail="", ref=None) -> int`, `events_since(seq, limit=500) -> list[Event]`, `snapshot(ws) -> Snapshot`.
 
 The journal is integrity-checked when opened (`PRAGMA integrity_check`, schema version, expected tables); any failure raises `JournalCorrupt` and the file is not modified. The hypothesis test drives random transition sequences and checks that the journal accepts exactly the legal ones.
 
@@ -723,10 +840,14 @@ def test_transaction_rolls_back_on_crash(journal: Journal) -> None:
 
 
 def test_set_state_records_reason_and_event(journal: Journal) -> None:
+    for step in (BeadState.CLAIMING, BeadState.STARTING, BeadState.RUNNING, BeadState.PARKING):
+        journal.set_state("alpha", "btq-1", step)
+    since = journal.events_since(0, 100)[-1].seq
     journal.set_state("alpha", "btq-1", BeadState.PARKED, Reason.BLOCKED_ON_BEAD, "btq-2", ref="msg1")
     journal.set_state("alpha", "btq-1", BeadState.PARKED, Reason.BLOCKED_ON_BEAD, "btq-2", ref="msg1")
-    events = journal.events_since(0, 10)
-    assert [(e.kind, e.detail, e.ref) for e in events] == [("state:parked", "blocked_on_bead", "msg1")]
+    events = journal.events_since(since, 10)
+    assert [(e.kind, e.detail, e.ref) for e in events] == [
+        ("state:parked", '{"reason":"blocked_on_bead","detail":"btq-2"}', "msg1")]
 
 
 def test_adopt_skips_the_transition_check(journal: Journal) -> None:
@@ -734,6 +855,29 @@ def test_adopt_skips_the_transition_check(journal: Journal) -> None:
     journal.adopt("alpha", "btq-1", BeadState.PARKED, Reason.BLOCKED_ON_BEAD)
     row = journal.state("alpha", "btq-1")
     assert row is not None and row.state is BeadState.PARKED
+
+
+def test_adopt_closes_a_bead_from_any_row(journal: Journal) -> None:
+    # Finding 1 (r1): recovery adopting an externally closed bead must not trip the transition table.
+    journal.set_state("alpha", "btq-1", BeadState.CLAIMING)
+    journal.set_state("alpha", "btq-1", BeadState.STARTING)
+    journal.set_state("alpha", "btq-1", BeadState.RUNNING)
+    journal.adopt("alpha", "btq-1", BeadState.CLOSED)
+    journal.adopt("alpha", "btq-2", BeadState.CLOSED)        # no row at all
+    assert [r.state for r in journal.states("alpha")] == [BeadState.CLOSED, BeadState.CLOSED]
+
+
+def test_backup_is_a_coherent_private_copy(journal: Journal, tmp_path: Path) -> None:
+    journal.set_state("alpha", "btq-1", BeadState.CLAIMING)
+    journal.op_open(OpKind.PICKUP, "alpha", "btq-1")
+    dest = tmp_path / "backups" / "wsd.db"
+    dest.parent.mkdir()
+    journal.backup(dest)
+    assert dest.stat().st_mode & 0o777 == 0o600
+    assert not list(dest.parent.glob(".*.part"))
+    copy = Journal(dest)            # opens: the integrity and schema checks pass on the copy
+    assert copy.state("alpha", "btq-1") is not None and len(copy.ops_open("alpha")) == 1
+    copy.close()
 
 
 def test_holds_and_snapshot(journal: Journal) -> None:
@@ -798,15 +942,16 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'heterodyne.wsd.journal'`.
 What it holds, and what it never does:
 - `inbox`: decision events keyed by (surface, event ID), `pending` until committed, superseded,
   rejected or escalated. The decision itself lives on the bead (§5.4); the inbox only orders and dedups.
-- `ops`: the pickup, park and resume journals, one row per operation with its last completed step, so
-  a crash at any point is replayed from the step it reached (§4.3).
+- `ops`: the pickup, park, resume, release and escalation journals, one row per operation with its last
+  completed step, so a crash at any point is replayed from the step it reached (§4.3).
 - `beads`, `holds`, `workstreams`: the state every surface shows (plan 6), each with a concrete reason.
-- `events`: an append-only progress log with a cursor, for per-message progress reactions (plan 6).
+- `events`: an append-only progress log with a cursor, for per-message progress reactions (plan 6). A
+  state event's `detail` is JSON with the reason and its concrete detail (blocker IDs, the failing step).
 
 Beads stay the source of truth. Opening the journal checks it first: an unreadable, corrupt or
 foreign file is refused (JournalCorrupt) and never deleted or recreated, because a lost journal must be
-noticed, not papered over. A missing file is created atomically and reported as `fresh`, so recovery
-knows every journal it relies on is gone and rebuilds from beads.
+noticed, not papered over. A missing file is created atomically and reported as `fresh`. `backup()`
+writes a consistent online copy (SQLite's backup API, safe under WAL) for the beads backups (§3.3).
 """
 
 import contextlib
@@ -846,7 +991,7 @@ CREATE TABLE inbox (
     UNIQUE (surface, event_id));
 CREATE TABLE ops (
     op_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('pickup', 'park', 'resume')),
+    kind TEXT NOT NULL CHECK (kind IN ('pickup', 'park', 'resume', 'release', 'escalate')),
     ws TEXT NOT NULL,
     bead TEXT NOT NULL,
     step TEXT NOT NULL,
@@ -894,6 +1039,8 @@ class OpKind(StrEnum):
     PICKUP = "pickup"
     PARK = "park"
     RESUME = "resume"
+    RELEASE = "release"
+    ESCALATE = "escalate"
 
 
 class OpStatus(StrEnum):
@@ -961,6 +1108,11 @@ class Snapshot:
 
 
 _DATA = msgspec.json.Decoder(dict[str, str])
+
+
+def state_detail(reason: Reason | None, detail: str) -> str:
+    """A state event's detail: the reason and its concrete detail, as JSON (plan 6 renders it)."""
+    return msgspec.json.encode({"reason": reason.value if reason else "", "detail": detail}).decode()
 _INBOX = "seq, surface, event_id, kind, ws, bead, payload, status, attempts"
 _OP = "op_id, kind, ws, bead, step, data, attempts, status"
 
@@ -1051,6 +1203,24 @@ class Journal:
     @_locked
     def close(self) -> None:
         self.db.close()
+
+    @_locked
+    def backup(self, dest: Path) -> None:
+        """A consistent copy of the journal at `dest` (0600), taken online with SQLite's backup API, so
+        it is safe while wsd runs in WAL mode. Written under a temporary name and renamed into place."""
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.part")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        os.close(fd)
+        try:
+            copy = sqlite3.connect(tmp)
+            try:
+                self.db.backup(copy)
+            finally:
+                copy.close()
+            tmp.replace(dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:
@@ -1172,10 +1342,10 @@ class Journal:
     def ops_open(self, ws: str | None = None) -> list[Op]:
         if ws is None:
             rows = self.db.execute(f"SELECT {_OP} FROM ops WHERE status = 'open' "  # noqa: S608
-                                   "ORDER BY created_at, op_id")
+                                   "ORDER BY rowid")
         else:
             rows = self.db.execute(f"SELECT {_OP} FROM ops WHERE status = 'open' AND ws = ? "  # noqa: S608
-                                   "ORDER BY created_at, op_id", (ws,))
+                                   "ORDER BY rowid", (ws,))
         return [_op(r) for r in rows.fetchall()]
 
     @_locked
@@ -1193,28 +1363,26 @@ class Journal:
         with self.transaction():
             current = self.state(ws, bead)
             check(None if current is None else current.state, state)
-            if current is not None and (current.state, current.reason, current.detail) == (
-                    state, reason, detail):
-                return
-            self.db.execute(
-                "INSERT INTO beads (ws, bead, state, reason, detail, since) VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (ws, bead) DO UPDATE SET state = excluded.state, reason = excluded.reason, "
-                "detail = excluded.detail, since = excluded.since",
-                (ws, bead, state.value, None if reason is None else reason.value, detail, now()))
-            self.emit(ws, bead, f"state:{state.value}", reason.value if reason else "", ref)
+            self._put(ws, bead, current, state, reason, detail, ref)
 
     @_locked
     def adopt(self, ws: str, bead: str, state: BeadState, reason: Reason | None = None,
-              detail: str = "") -> None:
-        """Recovery's rebuild from beads (§3.3): beads are the truth, so the cached row is replaced
-        without a transition check."""
+              detail: str = "", ref: str | None = None) -> None:
+        """The rebuild from beads and the runtime (§3.3, and each pickup's observation): beads are the
+        truth, so the cached row is replaced without a transition check. It still emits the event."""
         with self.transaction():
-            current = self.state(ws, bead)
-            if current is not None and (current.state, current.reason, current.detail) == (
-                    state, reason, detail):
-                return
-            self.db.execute("DELETE FROM beads WHERE ws = ? AND bead = ?", (ws, bead))
-            self.set_state(ws, bead, state, reason, detail)
+            self._put(ws, bead, self.state(ws, bead), state, reason, detail, ref)
+
+    def _put(self, ws: str, bead: str, current: BeadRow | None, state: BeadState, reason: Reason | None,
+             detail: str, ref: str | None) -> None:
+        if current is not None and (current.state, current.reason, current.detail) == (state, reason, detail):
+            return
+        self.db.execute(
+            "INSERT INTO beads (ws, bead, state, reason, detail, since) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (ws, bead) DO UPDATE SET state = excluded.state, reason = excluded.reason, "
+            "detail = excluded.detail, since = excluded.since",
+            (ws, bead, state.value, None if reason is None else reason.value, detail, now()))
+        self.emit(ws, bead, f"state:{state.value}", state_detail(reason, detail), ref)
 
     @_locked
     def state(self, ws: str, bead: str) -> BeadRow | None:
@@ -1236,7 +1404,7 @@ class Journal:
             self.db.execute("INSERT INTO holds (ws, reason, detail, since) VALUES (?, ?, ?, ?) "
                             "ON CONFLICT (ws, reason) DO UPDATE SET detail = excluded.detail",
                             (ws, reason.value, detail, now()))
-            self.emit(ws, None, "hold", reason.value)
+            self.emit(ws, None, "hold", state_detail(reason, detail))
 
     @_locked
     def unhold(self, ws: str, reason: Reason) -> None:
@@ -1294,7 +1462,7 @@ class Journal:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_journal.py -q`
-Expected: `17 passed`.
+Expected: `19 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -1320,8 +1488,8 @@ git commit -m "feat(wsd): SQLite journal with inbox, operations, holds and progr
 - Produces:
   - `heterodyne.wsd.btq`: `AGENT = "wsd"`, `class BtqUnavailable(Exception)`, `class QueueLike(Protocol)` (`worker: str`, `state: Path`, `bd(*args)`, `show(id)`, `ready()`, `claim(id)`, `owned(id, statuses=("in_progress",))`, `worktree(id, repository)`, `exclusive()`), `QueueFactory = Callable[[str, str], QueueLike]` (workstream, btq session), `load(checkout: Path) -> ModuleType`, `factory(module, locations: Mapping[str, str]) -> QueueFactory`.
   - `heterodyne.wsd.gitwip`: `class GitFailed(Exception)`, `git(path, *args) -> str`, `branch(path) -> str`, `toplevel(path) -> Path`, `find_wip(worktree, mark) -> str | None`, `wip_commit(worktree, mark, summary) -> str` (idempotent per mark; returns the SHA).
-  - `heterodyne.wsd.beads`: labels `PARKED = "v2:parked"`, `HELD = "v2:held"`, `NEEDS_HUMAN = "needs-human"`, `OPERATOR_INPUT_LABELS`, `NON_BLOCKING_DEPS`; exceptions `BeadsUnavailable`, `UnexpectedShape(BeadsUnavailable)`, `ClaimRefused`, `ClaimUncertain`, `RoutingChanged`, `NotOurs`, `WorktreeConflict`; `class ClaimView(StrEnum)`: `OURS, FREE, OTHER`; frozen `Dep(id, status, kind, labels)` with `.blocking`; frozen `Bead(id, title, status, assignee, labels, metadata, deps)` with `open_blockers()` and `waits_on_operator()`; `parse(raw, detail) -> Bead`; `class BeadsAdapter(factory: QueueFactory)` with `ws_queue(ws)`, `bead_queue(ws, bead)`, `ready(ws) -> list[Bead]`, `show(ws, bead) -> Bead`, `exists(ws, bead) -> bool`, `read_claim(ws, bead) -> ClaimView`, `ours(ws) -> list[Bead]`, `with_metadata(ws, key, values) -> list[str]`, `comments(ws, bead) -> list[str]`, `paused(ws) -> bool`, `set_paused(ws, paused)`, `claim(ws, bead) -> Bead`, `ensure_label(ws, bead, label, present=True)`, `ensure_blocker(ws, bead, blocker)`, `ensure_comment(ws, bead, mark, text)`, `ensure_metadata(ws, bead, key, value)`, `worktree(ws, bead, repository: Path) -> Path`.
-  - `tests/fakes/fake_btq.py`: `FakeBead`, `Fault(call, exc, after=False, times=1)`, `World(state_root)` (`beads`, `down`, `faults`, `calls`, `claims`, `stolen`, `worktrees`; `add(id, ws="alpha", **kw)`, `fault(call, exc, after=False, times=1)`, `close(id)`), `FakeQueue(world, ws, session)`, `factory(world) -> QueueFactory`.
+  - `heterodyne.wsd.beads`: labels `PARKED = "v2:parked"`, `HELD = "v2:held"`, `NEEDS_HUMAN = "needs-human"`, `OPERATOR_INPUT_LABELS`, `NON_BLOCKING_DEPS`; `RECORD_KEY = "wsd_session"`; `PROVENANCE` (btq's worktree provenance comment); exceptions `BeadsUnavailable`, `UnexpectedShape(BeadsUnavailable)`, `ClaimRefused`, `ClaimUncertain`, `RoutingChanged`, `NotOurs`, `WorktreeConflict`, `RecordUnreadable`; `class SessionRecord(msgspec.Struct)`: `role, profile, session_key, repo, worktree` (**the §3.3 launched-session record**; unknown fields ignored), `encode_record(record) -> str`; `class ClaimView(StrEnum)`: `OURS, FREE, OTHER`; frozen `Dep(id, status, kind, labels)` with `.blocking`; frozen `Bead(id, title, status, assignee, labels, metadata, deps)` with `open_blockers()`, `waits_on_operator()`, `record() -> SessionRecord | None` (raises `RecordUnreadable`) and `provenance(worker) -> list[tuple[str, str]]`; `parse(raw, detail) -> Bead`; `class BeadsAdapter(factory: QueueFactory)` with `ws_queue(ws)`, `bead_queue(ws, bead)`, `ready(ws) -> list[Bead]`, `show(ws, bead) -> Bead`, `exists(ws, bead) -> bool`, `read_claim(ws, bead) -> ClaimView`, `ours(ws) -> list[Bead]` (by assignee, whatever the labels), `with_metadata(ws, key, settled: frozenset[str]) -> list[str]` (closed beads included), `validate(ws, bead) -> Bead` (btq's post-claim checks, as the bead's worker: `NotOurs` or `RoutingChanged`), `comments(ws, bead) -> list[str]`, `paused(ws) -> bool`, `set_paused(ws, paused)`, `claim(ws, bead) -> Bead`, `ensure_label(ws, bead, label, present=True)`, `ensure_blocker(ws, bead, blocker)`, `ensure_comment(ws, bead, mark, text)`, `ensure_record(ws, bead, record)`, `ensure_metadata(ws, bead, key, value)`, `worktree(ws, bead, repository: Path) -> Path`, `verify_worktree(ws, bead, repository, worktree) -> Path` (provenance or git common directory, else `WorktreeConflict`).
+  - `tests/fakes/fake_btq.py`: `FakeBead`, `Fault(call, exc, after=False, times=1, bead=None)`, `World(state_root)` (`beads`, `down`, `faults`, `calls`, `claims`, `stolen`, `worktrees`, `approvals`; `add(id, ws="alpha", **kw)`, `fault(call, exc, after=False, times=1, bead=None)`, `close(id)`), `FakeQueue(world, ws, session)`, `factory(world) -> QueueFactory`.
   - `tests/wsd_env.py`: `WS = "alpha"`, `git_repo(path) -> Path`.
 
 - [ ] **Step 1: Record the bd 1.1 JSON shapes (spike S6)**
@@ -1387,9 +1555,11 @@ The fake follows btq's claim rules and error messages, and answers in the S6 sha
 
 It answers in the bd 1.1 JSON shapes recorded in spike S6 (`docs/spikes/S6-beads-json.md`): empty
 `labels` and `metadata` are omitted, `dependencies` is omitted when `dependency_count` is 0, and `list`
-gives dependency edges where `show` gives the beads depended on. Claims,
-ownership and the pause flag follow btq's rules and error messages. Faults are injected per call name;
-`after=True` performs the write and then fails, which is how an uncertain write looks to wsd.
+gives dependency edges where `show` gives the beads depended on. Claims, ownership, routing (`matches`),
+the design gate (`design_allowed`, simplified: a `kind:task` needs a `design_approval` the world
+accepts), worktree provenance notes and the pause flag follow btq's rules and error messages. Faults are
+injected per call name, optionally for one bead only; `after=True` performs the write and then fails,
+which is how an uncertain write looks to wsd.
 """
 
 import contextlib
@@ -1414,6 +1584,7 @@ class FakeBead:
     metadata: dict[str, Any] = field(default_factory=dict)
     deps: list[tuple[str, str]] = field(default_factory=list)      # (other bead, dependency type)
     comments: list[str] = field(default_factory=list)
+    notes: str = ""
 
 
 @dataclass
@@ -1422,6 +1593,7 @@ class Fault:
     exc: Exception
     after: bool = False
     times: int = 1
+    bead: str | None = None      # only calls about this bead
 
 
 class World:
@@ -1434,34 +1606,40 @@ class World:
         self.claims: list[str] = []
         self.stolen: set[str] = set()      # beads another worker claims first (a lost race)
         self.worktrees: list[str] = []
+        self.approvals = {"approval-1"}     # design approvals btq's gate accepts
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
         labels = kw.pop("labels", [])
-        bead = FakeBead(bead_id, labels=["agent:wsd", f"ws:{ws}", "kind:task", *labels], **kw)
+        kind = kw.pop("kind", "task")
+        metadata = {"design_approval": "approval-1", **kw.pop("metadata", {})}
+        bead = FakeBead(bead_id, labels=["agent:wsd", f"ws:{ws}", f"kind:{kind}", *labels],
+                        metadata=metadata, **kw)
         self.beads[bead_id] = bead
         return bead
 
-    def fault(self, call: str, exc: Exception, after: bool = False, times: int = 1) -> None:
-        self.faults.append(Fault(call, exc, after, times))
+    def fault(self, call: str, exc: Exception, after: bool = False, times: int = 1,
+              bead: str | None = None) -> None:
+        self.faults.append(Fault(call, exc, after, times, bead))
 
-    def _take(self, call: str, after: bool) -> Exception | None:
+    def _take(self, call: str, after: bool, bead: str | None) -> Exception | None:
         for f in self.faults:
-            if f.call == call and f.after == after and f.times > 0:
+            if (f.call == call and f.after == after and f.times > 0
+                    and (f.bead is None or f.bead == bead)):
                 f.times -= 1
                 return f.exc
         return None
 
-    def check(self, call: str, worker: str) -> None:
+    def check(self, call: str, worker: str, bead: str | None = None) -> None:
         self.calls.append((worker, call))
         if self.down:
             raise RuntimeError("dolt: connection refused")
-        exc = self._take(call, after=False)
+        exc = self._take(call, after=False, bead=bead)
         if exc is not None:
             raise exc
 
-    def check_after(self, call: str) -> None:
-        exc = self._take(call, after=True)
+    def check_after(self, call: str, bead: str | None = None) -> None:
+        exc = self._take(call, after=True, bead=bead)
         if exc is not None:
             raise exc
 
@@ -1487,6 +1665,8 @@ class World:
             out["labels"] = list(bead.labels)
         if bead.metadata:
             out["metadata"] = dict(bead.metadata)
+        if bead.notes:
+            out["notes"] = bead.notes
         out["dependency_count"] = len(bead.deps)
         if not detail and bead.deps:        # `bd list` gives the edges, not the beads they point at
             out["dependencies"] = [{"issue_id": bead.id, "depends_on_id": other, "type": kind,
@@ -1522,7 +1702,7 @@ class FakeQueue:
 
     def show(self, issue_id: str) -> Any:
         with self.world.lock:
-            self.world.check("show", self.worker)
+            self.world.check("show", self.worker, issue_id)
             return self.world.json(self._get(issue_id), detail=True)
 
     def ready(self) -> Any:
@@ -1534,7 +1714,7 @@ class FakeQueue:
 
     def claim(self, issue_id: str) -> Any:
         with self.world.lock:
-            self.world.check("claim", self.worker)
+            self.world.check("claim", self.worker, issue_id)
             bead = self._get(issue_id)
             if issue_id in self.world.stolen:
                 bead.status, bead.assignee = "in_progress", "codex:otherhost:x"
@@ -1545,12 +1725,12 @@ class FakeQueue:
                 raise ValueError("Task is not eligible for this worker")
             bead.status, bead.assignee = "in_progress", self.worker
             self.world.claims.append(issue_id)
-            self.world.check_after("claim")
+            self.world.check_after("claim", issue_id)
             return self.world.json(bead, detail=True)
 
     def owned(self, issue_id: str, statuses: tuple[str, ...] = ("in_progress",)) -> Any:
         with self.world.lock:
-            self.world.check("owned", self.worker)
+            self.world.check("owned", self.worker, issue_id)
             bead = self._get(issue_id)
             if bead.status not in statuses or bead.assignee != self.worker:
                 raise ValueError("Task is not in progress under this worker")
@@ -1558,15 +1738,37 @@ class FakeQueue:
 
     def worktree(self, issue_id: str, repository: str) -> Any:
         with self.world.lock:
-            self.world.check("worktree", self.worker)
+            self.world.check("worktree", self.worker, issue_id)
             self.owned(issue_id)
-            repo = Path(repository)
+            repo = Path(repository).resolve(strict=True)
             dest = repo.parent / f"{repo.name}-btq-{issue_id}"
+            base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout.strip()
             subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", f"btq/{issue_id}",
-                            str(dest)], check=True, capture_output=True)
+                            str(dest), base], check=True, capture_output=True)
             self.world.worktrees.append(issue_id)
-            self.world.check_after("worktree")
-            return {"worktree": str(dest), "base": "main"}
+            self.world.check_after("worktree", issue_id)     # git made it, the provenance note failed
+            bead = self._get(issue_id)
+            line = f"worker={self.worker}; repository={repo}; base={base}; worktree={dest}"
+            bead.notes = f"{bead.notes}\n{line}" if bead.notes else line
+            return {"worktree": str(dest), "base": base}
+
+    def matches(self, issue: Any) -> bool:
+        """btq's routing rule, for this worker's agent (`wsd`), workstream and session."""
+        labels: list[str] = issue.get("labels", [])
+        routes = {p: [v[len(p):] for v in labels if v.startswith(p)]
+                  for p in ("agent:", "ws:", "session:", "kind:")}
+        session = self.worker.split(":", 2)[2]
+        return (routes["agent:"] == ["wsd"] and routes["ws:"] == [self.ws]
+                and routes["session:"] in ([], [session]) and len(routes["kind:"]) == 1
+                and routes["kind:"][0] in ("brainstorm", "task", "review", "research")
+                and "needs-human" not in labels)
+
+    def design_allowed(self, issue: Any) -> bool:
+        """btq's gate, simplified: a `kind:task` needs a design approval the world accepts."""
+        if "kind:task" not in issue.get("labels", []):
+            return True
+        return issue.get("metadata", {}).get("design_approval") in self.world.approvals
 
     @contextlib.contextmanager
     def exclusive(self) -> Generator[None]:
@@ -1577,19 +1779,21 @@ class FakeQueue:
         with self.world.lock:
             verb = args[0]
             name = "comments add" if verb == "comments" and len(args) > 2 else verb
-            self.world.check(name, self.worker)
+            about = next((a for a in args[1:] if a in self.world.beads), None)
+            self.world.check(name, self.worker, about)
             result = self._bd(list(args))
-            self.world.check_after(name)
+            self.world.check_after(name, about)
             return result
 
     def _bd(self, args: list[str]) -> Any:
         verb = args.pop(0)
         if verb == "list":
             labels = [args[i + 1] for i, a in enumerate(args) if a == "--label"]
-            statuses = args[args.index("--status") + 1].split(",")
+            every = "--all" in args
+            statuses = args[args.index("--status") + 1].split(",") if "--status" in args else []
             beads = sorted(self.world.beads.values(), key=lambda b: b.id)
             return [self.world.json(b, detail=False) for b in beads
-                    if b.status in statuses and all(lbl in b.labels for lbl in labels)]
+                    if (every or b.status in statuses) and all(lbl in b.labels for lbl in labels)]
         if verb == "label":
             action, bead_id, label = args
             bead = self._get(bead_id)
@@ -1618,7 +1822,10 @@ class FakeQueue:
             bead_id, flag, pair = args
             assert flag == "--set-metadata"
             key, value = pair.split("=", 1)
-            self._get(bead_id).metadata[key] = value
+            try:      # bd 1.1 stores a number as a number, anything else (JSON objects too) as a string
+                self._get(bead_id).metadata[key] = int(value)
+            except ValueError:
+                self._get(bead_id).metadata[key] = value
             return [self.world.json(self._get(bead_id), detail=False)]
         raise AssertionError(f"fake bd does not support {verb}")
 
@@ -1675,12 +1882,16 @@ from wsd_env import WS, git_repo
 from heterodyne.wsd import btq, ids
 from heterodyne.wsd.beads import (
     PARKED,
+    RECORD_KEY,
     BeadsAdapter,
     BeadsUnavailable,
     ClaimRefused,
     ClaimUncertain,
     ClaimView,
     NotOurs,
+    RecordUnreadable,
+    RoutingChanged,
+    SessionRecord,
     UnexpectedShape,
     WorktreeConflict,
     parse,
@@ -1707,6 +1918,14 @@ def test_parse_missing_count_and_list_fails_closed() -> None:
     del bead["dependency_count"]
     with pytest.raises(UnexpectedShape):
         parse(bead, detail=True)
+
+
+@pytest.mark.parametrize("count", [0, 2, "1", True, -1])
+def test_parse_rejects_a_dependency_count_that_disagrees(count: Any) -> None:
+    """Finding 17: a count that doesn't match the list, or isn't a count, is contradictory evidence."""
+    with pytest.raises(UnexpectedShape):
+        parse(raw(dependency_count=count, dependencies=[{"id": "x", "status": "open",
+                                                         "dependency_type": "blocks"}]), detail=True)
 
 
 @pytest.mark.parametrize("bad", [
@@ -1770,6 +1989,84 @@ def test_ours_lists_only_per_bead_workers(world: World) -> None:
     adapter = BeadsAdapter(factory(world))
     adapter.claim(WS, "btq-1")
     assert [b.id for b in adapter.ours(WS)] == ["btq-1"]
+
+
+def test_ours_is_found_by_assignee_whatever_the_labels(world: World) -> None:
+    """Finding 12: a claimed bead that lost its routing labels, or went back to open or blocked under our
+    worker, is still ours. A closed one is not."""
+    for bead in ("btq-1", "btq-2", "btq-3", "btq-4"):
+        world.add(bead)
+    adapter = BeadsAdapter(factory(world))
+    for bead in ("btq-1", "btq-2", "btq-3", "btq-4"):
+        adapter.claim(WS, bead)
+    world.beads["btq-1"].labels = ["kind:task"]
+    world.beads["btq-2"].status = "blocked"
+    world.beads["btq-3"].status = "open"
+    world.close("btq-4")
+    assert [b.id for b in adapter.ours(WS)] == ["btq-1", "btq-2", "btq-3"]
+
+
+def test_unsettled_actions_include_closed_beads_and_unknown_values(world: World) -> None:
+    """Finding 9: closing a bead settles nothing; a value wsd doesn't know is never read as settled."""
+    world.add("btq-a", metadata={"action_state": "executing"})
+    world.add("btq-b", status="closed", metadata={"action_state": "uncertain"})
+    world.add("btq-c", status="closed", metadata={"action_state": "succeeded"})
+    world.add("btq-d", metadata={"action_state": "half-done"})
+    world.add("btq-e")
+    adapter = BeadsAdapter(factory(world))
+    found = adapter.with_metadata(WS, "action_state", frozenset({"pending", "succeeded", "failed"}))
+    assert sorted(found) == ["btq-a", "btq-b", "btq-d"]
+
+
+def test_validate_reruns_btqs_post_claim_checks(world: World) -> None:
+    world.add("btq-1")
+    world.add("btq-2", kind="research", metadata={"design_approval": ""})
+    world.add("btq-3")
+    adapter = BeadsAdapter(factory(world))
+    with pytest.raises(NotOurs):
+        adapter.validate(WS, "btq-1")
+    for bead in ("btq-1", "btq-2", "btq-3"):
+        adapter.claim(WS, bead)
+    assert adapter.validate(WS, "btq-1").id == "btq-1"
+    assert adapter.validate(WS, "btq-2").id == "btq-2"         # no design gate on research
+    del world.beads["btq-1"].metadata["design_approval"]
+    with pytest.raises(RoutingChanged):
+        adapter.validate(WS, "btq-1")
+    world.beads["btq-3"].labels.append("session:someone-else")
+    with pytest.raises(RoutingChanged):
+        adapter.validate(WS, "btq-3")
+
+
+def test_session_record_round_trips_and_never_guesses(world: World) -> None:
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    assert adapter.show(WS, "btq-1").record() is None
+    rec = SessionRecord("coder", "p-one", "key-1", "/r", "/r-btq-btq-1")
+    adapter.ensure_record(WS, "btq-1", rec)
+    assert adapter.show(WS, "btq-1").record() == rec
+    world.beads["btq-1"].metadata[RECORD_KEY] = '{"role": "coder"}'
+    with pytest.raises(RecordUnreadable):
+        adapter.show(WS, "btq-1").record()
+
+
+def test_worktree_needs_btqs_provenance(world: World, tmp_path: Path) -> None:
+    """Finding 15: a worktree btq made for this bead and repository is verified; the same path without
+    the provenance note (btq died between the two), or a worktree of another repository, is a conflict."""
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    assert adapter.verify_worktree(WS, "btq-1", repo, path) == path
+    other = git_repo(tmp_path / "other" / "proj")
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", other, path)        # not a worktree of that repository
+    world.beads["btq-1"].notes = ""
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+    with pytest.raises(WorktreeConflict):
+        adapter.worktree(WS, "btq-1", repo)                       # and never reused
 
 
 def test_writes_are_idempotent_and_owned(world: World) -> None:
@@ -1855,11 +2152,15 @@ def test_worktree_is_idempotent_and_conflicts_fail_closed(world: World, tmp_path
 FAKE_BD = """#!{python}
 import json, sys
 log = {log!r}
+beads = json.loads({beads!r})
 with open(log, "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
 args = sys.argv[1:]
 if "show" in args:
-    print(json.dumps([{bead}]))
+    bead = beads.get(args[args.index("show") + 1])
+    if bead is None:
+        sys.exit("no issue found")
+    print(json.dumps([bead]))
 else:
     print("[]")
 """
@@ -1867,18 +2168,26 @@ else:
 
 @pytest.mark.skipif(not os.environ.get("BTQ_REPO"), reason="needs $BTQ_REPO (a beads-task-queue checkout)")
 def test_contract_with_real_btq(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real btq Queue, loaded as wsd does, against a fake `bd` executable: no Dolt, no network."""
+    """The real btq Queue, loaded as wsd does, against a fake `bd` executable: no Dolt, no network. Also
+    the guard's re-run of btq's post-claim checks: `matches` and the design gate, as btq implements them."""
     home, bindir = tmp_path / "home", tmp_path / "bin"
     home.mkdir()
     bindir.mkdir()
     config = tmp_path / "btq-config"
     config.mkdir()
     (config / "credentials.json").write_text(json.dumps({"wsd": "test-only"}))
-    session = ids.bead_session(WS, "btq-1")
-    bead = {"id": "btq-1", "title": "t", "status": "in_progress", "assignee": f"wsd:fakehost:{session}",
-            "labels": ["agent:wsd", f"ws:{WS}", "kind:task"], "dependency_count": 0}
+
+    def bead(bead_id: str, kind: str, **extra: Any) -> dict[str, Any]:
+        worker = f"wsd:fakehost:{ids.bead_session(WS, bead_id)}"
+        return {"id": bead_id, "title": "t", "status": "in_progress", "assignee": worker,
+                "labels": ["agent:wsd", f"ws:{WS}", f"kind:{kind}"], "dependency_count": 0, **extra}
+
+    beads = {"btq-1": bead("btq-1", "task"),                                  # no design approval
+             "btq-2": bead("btq-2", "research"),                              # no design gate
+             "btq-3": bead("btq-3", "task", metadata={"design_approval": "btq-2"})}   # not an approval
     bd = bindir / "bd"
-    bd.write_text(FAKE_BD.format(python=sys.executable, log=str(tmp_path / "bd.log"), bead=json.dumps(bead)))
+    bd.write_text(FAKE_BD.format(python=sys.executable, log=str(tmp_path / "bd.log"),
+                                 beads=json.dumps(beads)))
     bd.chmod(bd.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
@@ -1889,10 +2198,19 @@ def test_contract_with_real_btq(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert adapter.read_claim(WS, "btq-1") is ClaimView.OURS
     assert adapter.paused(WS) is False
     assert str(adapter.ws_queue(WS).state).startswith(str(home))
-    logged = [json.loads(line) for line in (tmp_path / "bd.log").read_text().splitlines()]
-    actors = {argv[argv.index("--actor") + 1] for argv in logged}
-    assert all(argv[-1] == "--json" for argv in logged)
-    assert actors == {f"wsd:fakehost:{ids.ws_session(WS)}"}       # reads use the workstream worker
+
+    def actors() -> set[str]:
+        logged = [json.loads(line) for line in (tmp_path / "bd.log").read_text().splitlines()]
+        (tmp_path / "bd.log").unlink()
+        assert all(argv[-1] == "--json" for argv in logged)
+        return {argv[argv.index("--actor") + 1] for argv in logged}
+
+    assert actors() == {f"wsd:fakehost:{ids.ws_session(WS)}"}       # reads use the workstream worker
+    assert adapter.validate(WS, "btq-2").id == "btq-2"
+    assert actors() == {beads["btq-2"]["assignee"]}                   # validation, the bead's own worker
+    for gated in ("btq-1", "btq-3"):
+        with pytest.raises(RoutingChanged):
+            adapter.validate(WS, gated)
 
 
 def test_btq_without_wsd_agent_is_refused(tmp_path: Path) -> None:
@@ -1987,6 +2305,8 @@ class QueueLike(Protocol):
     def ready(self) -> Any: ...
     def claim(self, issue_id: str) -> Any: ...
     def owned(self, issue_id: str, statuses: tuple[str, ...] = ("in_progress",)) -> Any: ...
+    def matches(self, issue: Any) -> bool: ...
+    def design_allowed(self, issue: Any) -> bool: ...
     def worktree(self, issue_id: str, repository: str) -> Any: ...
     def exclusive(self) -> AbstractContextManager[None]: ...
 
@@ -2079,6 +2399,12 @@ def wip_commit(worktree: Path, mark: str, summary: str) -> str:
     git(worktree, "-c", "user.name=wsd", "-c", "user.email=wsd@localhost", "commit", "--allow-empty",
         "--no-verify", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
     return git(worktree, "rev-parse", "HEAD")
+
+
+def common_dir(path: Path) -> Path:
+    """The git common directory: shared by a repository and every worktree made from it."""
+    out = git(path, "rev-parse", "--git-common-dir")
+    return (path / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
 ```
 
 - [ ] **Step 9: Create `$HZ/src/heterodyne/wsd/beads.py`**
@@ -2093,6 +2419,12 @@ def wip_commit(worktree: Path, mark: str, summary: str) -> str:
   that worker's `exclusive()` lock.
 - Every write is check, write, read back (`ensure_*`): a step whose effect is already on the bead is not
   repeated, and an uncertain write is only trusted once it reads back (§4.3).
+- Ownership is found by assignee, not by routing labels: a bead held by one of this workstream's per-bead
+  workers is ours even if its labels changed. Before every launch `validate` re-runs btq's own post-claim
+  checks (`owned`, then `matches` and `design_allowed`, btq's shared routing and design-approval gate).
+- The launched-session record (§3.3, §4.1) lives on the bead as metadata `wsd_session`: role, profile,
+  session key, repository and worktree. It is written before every launch, so it survives a lost journal;
+  plan 4 adds the adapter, model and session ID it learns at launch.
 - Fail closed: anything that does not parse as the bd 1.1 JSON shapes recorded in spike S6 raises
   UnexpectedShape, and every infrastructure failure raises BeadsUnavailable. Neither is ever read as
   "absent", "not paused" or "unblocked".
@@ -2100,13 +2432,16 @@ def wip_commit(worktree: Path, mark: str, summary: str) -> str:
 
 import contextlib
 import os
+import re
 import subprocess
 import threading
 from collections.abc import Callable, Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
+
+import msgspec
 
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.btq import QueueFactory, QueueLike
@@ -2125,6 +2460,10 @@ BTQ_REFUSALS = ("Finish or release this worker's existing claim first",
 BTQ_ROUTING_CHANGED = "Routing/design changed during claim"
 BTQ_NOT_OWNED = "Task is not in progress under this worker"
 NOT_FOUND = "no issue found matching"
+RECORD_KEY = "wsd_session"
+# The provenance line btq's `worktree` appends to the bead's notes.
+PROVENANCE = re.compile(r"^worker=(?P<worker>[^;]+); repository=(?P<repo>.+); base=[0-9a-f]+; "
+                        r"worktree=(?P<worktree>.+)$")
 _FAILURES = (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError,
              IndexError, AttributeError)
 
@@ -2157,6 +2496,25 @@ class WorktreeConflict(Exception):
     """The btq worktree path exists but is not this bead's worktree; it is inspected, never deleted."""
 
 
+class RecordUnreadable(Exception):
+    """The bead's launched-session record is present but does not parse: never guessed at."""
+
+
+class SessionRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=False):
+    """What was launched for a bead (§3.3 session registry). Session identity and worktree come from here,
+    never from the current configuration. Plan 4 adds its own fields; unknown fields are kept by bd and
+    ignored here."""
+    role: str
+    profile: str
+    session_key: str
+    repo: str
+    worktree: str
+
+
+def encode_record(record: SessionRecord) -> str:
+    return msgspec.json.encode(record, order="sorted").decode()
+
+
 class ClaimView(StrEnum):
     OURS = "ours"      # in_progress, assigned to our per-bead worker
     FREE = "free"      # open and unassigned: the claim did not happen
@@ -2184,6 +2542,8 @@ class Bead:
     labels: tuple[str, ...]
     metadata: dict[str, Any]
     deps: tuple[Dep, ...] | None     # None for list output, which carries no dependency status
+    notes: str = ""
+    raw: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}), compare=False, repr=False)
 
     def open_blockers(self) -> tuple[Dep, ...]:
         if self.deps is None:
@@ -2192,6 +2552,27 @@ class Bead:
 
     def waits_on_operator(self) -> bool:
         return any(OPERATOR_INPUT_LABELS & set(d.labels) for d in self.open_blockers())
+
+    def record(self) -> SessionRecord | None:
+        """The launched-session record; None if there is none. RecordUnreadable if it does not parse."""
+        value = self.metadata.get(RECORD_KEY)
+        if value is None:
+            return None
+        try:
+            if isinstance(value, str):
+                return msgspec.json.decode(value, type=SessionRecord)
+            return msgspec.convert(value, SessionRecord)
+        except (msgspec.DecodeError, msgspec.ValidationError):
+            raise RecordUnreadable(self.id) from None
+
+    def provenance(self, worker: str) -> list[tuple[str, str]]:
+        """(repository, worktree) pairs btq recorded in the notes when `worker` made a worktree."""
+        found: list[tuple[str, str]] = []
+        for line in self.notes.splitlines():
+            m = PROVENANCE.match(line.strip())
+            if m and m["worker"] == worker:
+                found.append((m["repo"], m["worktree"]))
+        return found
 
 
 def _str(raw: dict[str, Any], key: str, required: bool = True) -> str | None:
@@ -2220,13 +2601,14 @@ def parse(raw: object, detail: bool) -> Bead:
         raise UnexpectedShape("bead metadata is not an object")
     deps: tuple[Dep, ...] | None = None
     if detail:
-        raw_deps = item.get("dependencies")
-        if raw_deps is None:
-            if item.get("dependency_count") != 0:    # bd omits the list only when there are none
-                raise UnexpectedShape("bead dependencies are missing")
-            raw_deps = []
+        count = item.get("dependency_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise UnexpectedShape("bead dependency_count is missing")
+        raw_deps = item.get("dependencies", [])     # bd omits the list only when there are none
         if not isinstance(raw_deps, list):
             raise UnexpectedShape("bead dependencies are not a list")
+        if len(cast(list[Any], raw_deps)) != count:   # an empty or cut-short list is not "no blockers"
+            raise UnexpectedShape("bead dependencies do not match dependency_count")
         parsed: list[Dep] = []
         for dep in cast(list[Any], raw_deps):
             if not isinstance(dep, dict):
@@ -2237,7 +2619,7 @@ def parse(raw: object, detail: bool) -> Bead:
         deps = tuple(parsed)
     return Bead(cast(str, _str(item, "id")), cast(str, _str(item, "title")), cast(str, _str(item, "status")),
                 _str(item, "assignee", required=False) or None, _labels(item),
-                cast(dict[str, Any], metadata), deps)
+                cast(dict[str, Any], metadata), deps, _str(item, "notes", required=False) or "", item)
 
 
 def _one(result: object) -> Bead:
@@ -2312,11 +2694,12 @@ class BeadsAdapter:
         return ClaimView.OTHER
 
     def ours(self, ws: str) -> list[Bead]:
-        """Every in_progress bead routed to this workstream and held by one of its per-bead workers, with
-        dependency detail. A bead whose ID is not a slug can't have been claimed by wsd and is skipped."""
+        """Every bead held by one of this workstream's per-bead workers, with dependency detail. Found by
+        assignee across every unclosed claimed status, never by routing labels: a bead whose labels changed
+        under its claim is still ours, and recovery must see it. A bead whose ID is not a slug can't have
+        been claimed by wsd and is skipped."""
         queue = self.ws_queue(ws)
-        raw = self._call(lambda: queue.bd("list", "--label", "agent:wsd", "--label", f"ws:{ws}",
-                                          "--status", "in_progress", "--limit", "0"))
+        raw = self._call(lambda: queue.bd("list", "--status", "in_progress,blocked,open", "--limit", "0"))
         if not isinstance(raw, list):
             raise UnexpectedShape("list did not return a list")
         found: list[Bead] = []
@@ -2328,15 +2711,32 @@ class BeadsAdapter:
                 found.append(self.show(ws, listed.id))
         return found
 
-    def with_metadata(self, ws: str, key: str, values: frozenset[str]) -> list[str]:
-        """IDs of unclosed beads labelled `ws:<ws>` whose metadata `key` is one of `values`."""
+    def with_metadata(self, ws: str, key: str, settled: frozenset[str]) -> list[str]:
+        """IDs of beads labelled `ws:<ws>`, closed ones included, whose metadata `key` is set to anything
+        but one of the `settled` values. Closing a bead says nothing about its action, so status is never
+        a reason to skip one, and a value wsd doesn't know is never read as settled."""
         queue = self.ws_queue(ws)
-        raw = self._call(lambda: queue.bd("list", "--label", f"ws:{ws}",
-                                          "--status", "open,in_progress,blocked", "--limit", "0"))
+        raw = self._call(lambda: queue.bd("list", "--all", "--label", f"ws:{ws}", "--limit", "0"))
         if not isinstance(raw, list):
             raise UnexpectedShape("list did not return a list")
         beads = [parse(item, detail=False) for item in cast(list[Any], raw)]
-        return [b.id for b in beads if b.metadata.get(key) in values]
+        return [b.id for b in beads if key in b.metadata and b.metadata[key] not in settled]
+
+    def validate(self, ws: str, bead: str) -> Bead:
+        """btq's post-claim checks, run again right before a launch: the bead is in progress under our
+        per-bead worker (NotOurs otherwise), and btq's own `matches` and `design_allowed` still pass
+        (RoutingChanged otherwise). Returns the bead as read under the worker's exclusive lock."""
+        with self._owned(ws, bead) as owned:
+            try:
+                issue = owned.owned(bead)
+                ok = owned.matches(issue) and owned.design_allowed(issue)
+            except ValueError as exc:
+                if str(exc).startswith(BTQ_NOT_OWNED):
+                    raise NotOurs(bead) from None
+                raise
+        if not ok:
+            raise RoutingChanged(bead)
+        return _one(issue)
 
     def comments(self, ws: str, bead: str) -> list[str]:
         queue = self.ws_queue(ws)
@@ -2448,6 +2848,12 @@ class BeadsAdapter:
         if not any(mark in c for c in self.comments(ws, bead)):
             raise BeadsUnavailable("comment did not read back")
 
+    def ensure_record(self, ws: str, bead: str, record: SessionRecord) -> None:
+        """Write the launched-session record before the launch it describes, and read it back."""
+        self.ensure_metadata(ws, bead, RECORD_KEY, encode_record(record))
+        if self.show(ws, bead).record() != record:
+            raise BeadsUnavailable("session record did not read back")
+
     def ensure_metadata(self, ws: str, bead: str, key: str, value: str) -> None:
         if self.show(ws, bead).metadata.get(key) == value:
             return
@@ -2467,7 +2873,7 @@ class BeadsAdapter:
             raise WorktreeConflict("repository missing") from None
         destination = repo.parent / f"{repo.name}-btq-{bead}"
         if os.path.lexists(destination):
-            return self._existing_worktree(destination, bead)
+            return self.verify_worktree(ws, bead, repo, destination)
         queue = self.bead_queue(ws, bead)
         try:
             result = queue.worktree(bead, str(repo))
@@ -2476,29 +2882,37 @@ class BeadsAdapter:
                 raise NotOurs(bead) from None
             raise BeadsUnavailable(type(exc).__name__) from None
         except _FAILURES as exc:
-            if os.path.lexists(destination):    # git made it, then the bead note failed: reuse it
-                return self._existing_worktree(destination, bead)
             raise BeadsUnavailable(f"worktree failed ({type(exc).__name__})") from None
         if not isinstance(result, dict) or cast(dict[str, Any], result).get("worktree") != str(destination):
             raise UnexpectedShape("worktree result")
-        return destination
+        return self.verify_worktree(ws, bead, repo, destination)
 
-    @staticmethod
-    def _existing_worktree(destination: Path, bead: str) -> Path:
+    def verify_worktree(self, ws: str, bead: str, repository: Path, worktree: Path) -> Path:
+        """`worktree` is this bead's worktree of `repository`: a real directory at its own top level, on
+        branch `btq/<id>`, sharing the repository's git common directory, and recorded on the bead by btq
+        for our per-bead worker. A path that fails any check (including a worktree whose provenance note
+        was never written) is a WorktreeConflict: inspected by a human, never deleted or reused."""
+        worker = self.bead_queue(ws, bead).worker
         try:
-            if (destination.is_dir() and not destination.is_symlink()
-                    and gitwip.toplevel(destination) == destination.resolve()
-                    and gitwip.branch(destination) == f"btq/{bead}"):
-                return destination
-        except gitwip.GitFailed:
-            pass
-        raise WorktreeConflict("worktree path is not this bead's worktree")
+            repo = repository.resolve(strict=True)
+        except OSError:
+            raise WorktreeConflict("repository missing") from None
+        try:
+            ok = (worktree.is_dir() and not worktree.is_symlink()
+                  and gitwip.toplevel(worktree) == worktree.resolve()
+                  and gitwip.branch(worktree) == f"btq/{bead}"
+                  and gitwip.common_dir(worktree) == gitwip.common_dir(repo))
+        except (OSError, gitwip.GitFailed):
+            ok = False
+        if not ok or (str(repo), str(worktree)) not in self.show(ws, bead).provenance(worker):
+            raise WorktreeConflict("the path is not this bead's recorded worktree")
+        return worktree
 ```
 
 - [ ] **Step 10: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_beads.py tests/test_wsd_gitwip.py -q`
-Expected: `30 passed, 1 skipped`. Then `BTQ_REPO=$BTQ_REPO uv run pytest tests/test_wsd_beads.py -q` runs the contract test too: `27 passed`.
+Expected: `40 passed, 1 skipped`. Then `BTQ_REPO=$BTQ_REPO uv run pytest tests/test_wsd_beads.py -q` runs the contract test too: `37 passed`.
 
 - [ ] **Step 11: Lint and type-check**
 
@@ -2522,9 +2936,9 @@ git commit -m "feat(wsd): beads adapter through btq's Queue as agent wsd, with r
 **Interfaces:**
 - Consumes: `private_dir` (Task 1); `ids.slug` (Task 1); `Checkpoint`, `nothing` (Task 1); `BeadsAdapter`, `Bead`, `BeadsUnavailable` (Task 4).
 - Produces:
-  - `heterodyne.wsd.gate`: `class Paused(Exception)`, `class AlreadyRunning(Exception)`, `class ClaimGate(lock_dir: Path, beads: BeadsAdapter, cp: Checkpoint = nothing)` with `locked(ws)` (context manager; a per-workstream `flock`), `pause(ws)`, `resume(ws)`, `claim(ws, bead) -> Bead` (re-checks the flag inside the lock, then checkpoint `gate.checked`, then claims); `instance_lock(path: Path) -> int`.
-  - `heterodyne.wsd.runtime` (**the plan 4 and plan 5 seams**): `ACTION_STATE = "action_state"`, `UNSETTLED_ACTIONS = {"executing", "uncertain"}`; `class Liveness(StrEnum)`: `LIVE, DEAD, UNKNOWN`; frozen `LaunchSpec(ws, bead, role, profile, session_key, label, worktree, resume, ref=None)`; `RuntimeUnavailable`, `LaunchFailed`; `class AgentRuntime(Protocol)`: `available() -> bool`, `launch(spec) -> None`, `liveness(session_key) -> Liveness`, `stop(session_key) -> None`; `NoRuntime`; `class ActionReconciler(Protocol)`: `unresolved(ws) -> list[str]`; `HoldingReconciler(beads)`.
-  - `tests/fakes/fake_runtime.py`: `FakeRuntime` (`up`, `sessions`, `launches`, `stops`, `launch_failures`, `stop_failures`, `live()`).
+  - `heterodyne.wsd.gate`: `POINTS = ("gate.checked",)`, `PAUSE_POINTS = ("gate.pause.waiting",)`, `class Paused(Exception)`, `class AlreadyRunning(Exception)`, `class ClaimGate(lock_dir: Path, beads: BeadsAdapter, cp: Checkpoint = nothing)` with `locked(ws)` (context manager; a per-workstream `flock`), `pause(ws)` (checkpoint `gate.pause.waiting`, then the lock, then the flag), `resume(ws)`, `claim(ws, bead) -> Bead` (re-checks the flag inside the lock, then checkpoint `gate.checked`, then claims); `instance_lock(path: Path) -> int`.
+  - `heterodyne.wsd.runtime` (**the plan 4 and plan 5 seams**): `ACTION_STATE = "action_state"`, `SETTLED_ACTIONS = {"pending", "succeeded", "failed"}`; `class Liveness(StrEnum)`: `LIVE, UNKNOWN`; frozen `Session(key, ws, bead, role, liveness)`; frozen `LaunchSpec(ws, bead, role, profile, session_key, label, worktree, resume, ref=None)`; `RuntimeUnavailable` (nothing attempted), `LaunchFailed` (confirmed: nothing started), `LaunchUncertain`; `class AgentRuntime(Protocol)`: `available() -> bool`, `sessions(ws) -> list[Session]` (every session launched until the runtime confirms it ended; never a partial list), `launch(spec) -> None` (idempotent on the session key), `stop(session_key) -> None` (returns once ended); `NoRuntime`; `class ActionReconciler(Protocol)`: `unresolved(ws) -> list[str]`; `HoldingReconciler(beads)`.
+  - `tests/fakes/fake_runtime.py`: `FakeRuntime` (`up`, `listed`, `launches`, `stops`, `launch_failures`, `launch_uncertain`, `failing_beads`, `stop_failures`, `list_failures`; `end(key)`, `set(key, liveness)`, `adopt(spec, liveness=LIVE)`, `live()`, `coders(ws)`).
 
 - [ ] **Step 1: Create `$HZ/tests/test_wsd_gate.py`**
 
@@ -2613,13 +3027,16 @@ import pytest
 from fakes.fake_btq import World, factory
 
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
-from heterodyne.wsd.runtime import HoldingReconciler, Liveness, NoRuntime, RuntimeUnavailable
+from heterodyne.wsd.runtime import HoldingReconciler, LaunchSpec, NoRuntime, RuntimeUnavailable
 
 
-def test_no_runtime_is_unavailable_and_never_dead() -> None:
+def test_no_runtime_is_unavailable_and_lists_nothing_as_ended() -> None:
     runtime = NoRuntime()
     assert not runtime.available()
-    assert runtime.liveness("any") is Liveness.UNKNOWN
+    with pytest.raises(RuntimeUnavailable):
+        runtime.sessions("alpha")       # never "no sessions": that would read as "none running"
+    with pytest.raises(RuntimeUnavailable):
+        runtime.launch(LaunchSpec("alpha", "btq-a", "coder", "p", "k", "l", Path("/nonexistent"), False))
     with pytest.raises(RuntimeUnavailable):
         runtime.stop("any")
 
@@ -2628,10 +3045,15 @@ def test_holding_reconciler_reports_every_unsettled_action(tmp_path: Path) -> No
     world = World(tmp_path / "btq-state")
     world.add("btq-a", metadata={"action_state": "executing"})
     world.add("btq-b", metadata={"action_state": "uncertain"})
-    world.add("btq-c", metadata={"action_state": "committed"})
+    world.add("btq-c", metadata={"action_state": "succeeded"})
     world.add("btq-d", ws="beta", metadata={"action_state": "uncertain"})
-    world.add("btq-e", status="closed", metadata={"action_state": "uncertain"})
-    assert HoldingReconciler(BeadsAdapter(factory(world))).unresolved("alpha") == ["btq-a", "btq-b"]
+    world.add("btq-e", status="closed", metadata={"action_state": "uncertain"})   # closed still counts
+    world.add("btq-f", metadata={"action_state": "reticulating"})      # unknown: never settled
+    world.add("btq-g", metadata={"action_state": "pending"})
+    world.add("btq-h", status="closed", metadata={"action_state": "failed"})
+    world.add("btq-i")
+    assert HoldingReconciler(BeadsAdapter(factory(world))).unresolved("alpha") == ["btq-a", "btq-b", "btq-e",
+                                                                                   "btq-f"]
 
 
 def test_holding_reconciler_fails_closed(tmp_path: Path) -> None:
@@ -2647,47 +3069,82 @@ def test_holding_reconciler_fails_closed(tmp_path: Path) -> None:
 
 ```python
 """A recording AgentRuntime (plan 4 provides the real one). Sessions survive a simulated wsd restart,
-like real agent processes do."""
+like real agent processes do. A session stays listed until it is stopped or `end`s on its own."""
 
-from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, RuntimeUnavailable
+from heterodyne.wsd.runtime import (
+    LaunchFailed,
+    LaunchSpec,
+    LaunchUncertain,
+    Liveness,
+    RuntimeUnavailable,
+    Session,
+)
 
 
 class FakeRuntime:
     def __init__(self) -> None:
         self.up = True
-        self.sessions: dict[str, Liveness] = {}
+        self.listed: dict[str, Session] = {}
         self.launches: list[LaunchSpec] = []
         self.stops: list[str] = []
-        self.launch_failures = 0      # the next N launches fail
+        self.launch_failures = 0      # the next N launches fail, confirmed: nothing starts
+        self.launch_uncertain = 0     # the next N launches are uncertain: listed as UNKNOWN
+        self.failing_beads: set[str] = set()     # every launch for these beads fails, confirmed
         self.stop_failures = 0
+        self.list_failures = 0
 
     def available(self) -> bool:
         return self.up
 
+    def sessions(self, ws: str) -> list[Session]:
+        if not self.up or self.list_failures:
+            self.list_failures = max(0, self.list_failures - 1)
+            raise RuntimeUnavailable("can't list sessions")
+        return [s for s in self.listed.values() if s.ws == ws]
+
     def launch(self, spec: LaunchSpec) -> None:
         if not self.up:
             raise RuntimeUnavailable("down")
-        if self.launch_failures:
-            self.launch_failures -= 1
-            raise LaunchFailed("launch failed")
-        if self.sessions.get(spec.session_key) is Liveness.LIVE:
+        current = self.listed.get(spec.session_key)
+        if current is not None and current.liveness is Liveness.LIVE:
             return
+        if self.launch_failures or spec.bead in self.failing_beads:
+            self.launch_failures = max(0, self.launch_failures - 1)
+            raise LaunchFailed("launch failed")
         self.launches.append(spec)
-        self.sessions[spec.session_key] = Liveness.LIVE
-
-    def liveness(self, session_key: str) -> Liveness:
-        return self.sessions.get(session_key, Liveness.DEAD)
+        liveness = Liveness.UNKNOWN if self.launch_uncertain else Liveness.LIVE
+        self.listed[spec.session_key] = Session(spec.session_key, spec.ws, spec.bead, spec.role, liveness)
+        if self.launch_uncertain:
+            self.launch_uncertain -= 1
+            raise LaunchUncertain("no answer from the backend")
 
     def stop(self, session_key: str) -> None:
         if self.stop_failures:
             self.stop_failures -= 1
             raise RuntimeUnavailable("stop not confirmed")
         self.stops.append(session_key)
-        if session_key in self.sessions:
-            self.sessions[session_key] = Liveness.DEAD
+        self.listed.pop(session_key, None)
+
+    # --- test controls ---
+
+    def end(self, session_key: str) -> None:
+        """The session ended on its own (the agent exited or crashed)."""
+        del self.listed[session_key]
+
+    def set(self, session_key: str, liveness: Liveness) -> None:
+        old = self.listed[session_key]
+        self.listed[session_key] = Session(old.key, old.ws, old.bead, old.role, liveness)
+
+    def adopt(self, spec: LaunchSpec, liveness: Liveness = Liveness.LIVE) -> None:
+        """A session the runtime already runs (for example one launched before a lost journal)."""
+        self.listed[spec.session_key] = Session(spec.session_key, spec.ws, spec.bead, spec.role, liveness)
 
     def live(self) -> list[str]:
-        return [k for k, v in self.sessions.items() if v is Liveness.LIVE]
+        return [k for k, s in self.listed.items() if s.liveness is Liveness.LIVE]
+
+    def coders(self, ws: str = "alpha") -> list[str]:
+        """Beads with a listed coder session."""
+        return sorted(s.bead for s in self.listed.values() if s.ws == ws and s.role == "coder")
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
@@ -2719,6 +3176,7 @@ from heterodyne.wsd.beads import Bead, BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 
 POINTS = ("gate.checked",)
+PAUSE_POINTS = ("gate.pause.waiting",)
 
 
 class Paused(Exception):
@@ -2749,10 +3207,12 @@ class ClaimGate:
 
     def pause(self, ws: str) -> None:
         """Returns (acknowledges) only once the flag reads back, with no claim in flight."""
+        self.cp("gate.pause.waiting")
         with self.locked(ws):
             self.beads.set_paused(ws, True)
 
     def resume(self, ws: str) -> None:
+        self.cp("gate.pause.waiting")
         with self.locked(ws):
             self.beads.set_paused(ws, False)
 
@@ -2796,13 +3256,25 @@ from typing import Protocol
 from heterodyne.wsd.beads import BeadsAdapter
 
 ACTION_STATE = "action_state"
-UNSETTLED_ACTIONS = frozenset({"executing", "uncertain"})
+# The action states that say nothing is in flight (ADR §3.3: pending, executing, then succeeded, failed
+# or uncertain). A pending action has not started. Every other value, including one wsd doesn't know,
+# is unsettled.
+SETTLED_ACTIONS = frozenset({"pending", "succeeded", "failed"})
 
 
 class Liveness(StrEnum):
     LIVE = "live"
-    DEAD = "dead"
-    UNKNOWN = "unknown"     # can't tell: never treated as dead
+    UNKNOWN = "unknown"     # listed, but the runtime can't tell whether it runs: treated as live
+
+
+@dataclass(frozen=True)
+class Session:
+    """A session the runtime may still be running. Ended sessions are not listed."""
+    key: str
+    ws: str
+    bead: str
+    role: str
+    liveness: Liveness
 
 
 @dataclass(frozen=True)
@@ -2811,7 +3283,7 @@ class LaunchSpec:
     bead: str
     role: str
     profile: str
-    session_key: str        # ids.role_session(bead, role, profile)
+    session_key: str        # ids.role_session(bead, role, profile), as recorded on the bead
     label: str              # "<bead> · <role> · <title>" (§4.1)
     worktree: Path
     resume: bool            # resume the same session rather than start one
@@ -2819,11 +3291,17 @@ class LaunchSpec:
 
 
 class RuntimeUnavailable(Exception):
-    """No runtime can launch anything right now (none configured, or its backend is down)."""
+    """No runtime can act right now (none configured, or its backend is down). Nothing was attempted."""
 
 
 class LaunchFailed(Exception):
-    """This launch failed; the reason is the exception text (fixed wording, no secrets)."""
+    """The runtime confirms this launch started nothing. The reason is the exception text (fixed
+    wording, no secrets)."""
+
+
+class LaunchUncertain(Exception):
+    """The launch was attempted and the runtime can't say whether a session is running. Any exception
+    from `launch` other than LaunchFailed and RuntimeUnavailable is treated the same way."""
 
 
 class AgentRuntime(Protocol):
@@ -2831,15 +3309,17 @@ class AgentRuntime(Protocol):
         """Whether launches can be attempted at all. Checked before every claim."""
         ...
 
-    def launch(self, spec: LaunchSpec) -> None:
-        """Start (or, with `spec.resume`, resume) the session. Idempotent on `spec.session_key`: a live
-        session is left alone. Returns once the session is live; raises LaunchFailed or
-        RuntimeUnavailable otherwise."""
+    def sessions(self, ws: str) -> list[Session]:
+        """Every session of the workstream that may be running: each key `launch` was called with, until
+        the runtime has confirmed that session ended. This includes sessions started before a wsd
+        restart and sessions whose bead wsd no longer knows. Raises RuntimeUnavailable if it can't list
+        them; a partial list is never returned."""
         ...
 
-    def liveness(self, session_key: str) -> Liveness:
-        """DEAD only when the runtime knows no session with this key is running (including one it never
-        launched); UNKNOWN whenever it can't tell. wsd treats UNKNOWN as possibly live."""
+    def launch(self, spec: LaunchSpec) -> None:
+        """Start (or, with `spec.resume`, resume) the session. Idempotent on `spec.session_key`: a live
+        session is left alone. Returns once the session is live. Raises LaunchFailed when nothing
+        started, RuntimeUnavailable when nothing was attempted, and LaunchUncertain otherwise."""
         ...
 
     def stop(self, session_key: str) -> None:
@@ -2849,16 +3329,17 @@ class AgentRuntime(Protocol):
 
 
 class NoRuntime:
-    """The runtime until plan 4: launches nothing, and never claims a session is dead."""
+    """The runtime until plan 4: it launches nothing, and since it can't list sessions it never lets wsd
+    conclude that none are running."""
 
     def available(self) -> bool:
         return False
 
-    def launch(self, spec: LaunchSpec) -> None:
+    def sessions(self, ws: str) -> list[Session]:
         raise RuntimeUnavailable("no agent runtime is configured")
 
-    def liveness(self, session_key: str) -> Liveness:
-        return Liveness.UNKNOWN
+    def launch(self, spec: LaunchSpec) -> None:
+        raise RuntimeUnavailable("no agent runtime is configured")
 
     def stop(self, session_key: str) -> None:
         raise RuntimeUnavailable("no agent runtime is configured")
@@ -2866,8 +3347,9 @@ class NoRuntime:
 
 class ActionReconciler(Protocol):
     def unresolved(self, ws: str) -> list[str]:
-        """IDs of approval beads whose action is `executing` or `uncertain` and not yet reconciled
-        against its target (§5.4). Raises BeadsUnavailable if that can't be established."""
+        """IDs of beads, closed ones included, whose action is in any state but pending, succeeded or
+        failed and not yet reconciled against its target (§5.4). Raises BeadsUnavailable if that can't
+        be established."""
         ...
 
 
@@ -2880,7 +3362,7 @@ class HoldingReconciler:
         self.beads = beads
 
     def unresolved(self, ws: str) -> list[str]:
-        return self.beads.with_metadata(ws, ACTION_STATE, UNSETTLED_ACTIONS)
+        return self.beads.with_metadata(ws, ACTION_STATE, SETTLED_ACTIONS)
 ```
 
 - [ ] **Step 7: Run the tests to verify they pass**
@@ -2901,7 +3383,7 @@ git add src/heterodyne/wsd/gate.py src/heterodyne/wsd/runtime.py tests/fakes/fak
 git commit -m "feat(wsd): claim gate with the shared pause flag; runtime and reconciler seams"
 ```
 
-### Task 6: Park and resume journals
+### Task 6: The operation lock, park, resume, release and escalation, and the launch guard
 
 **Files:**
 - Create: `$HZ/src/heterodyne/wsd/workstream.py`, `$HZ/src/heterodyne/wsd/park.py`
@@ -2909,13 +3391,21 @@ git commit -m "feat(wsd): claim gate with the shared pause flag; runtime and rec
 - Test: `$HZ/tests/test_wsd_park.py`
 
 **Interfaces:**
-- Consumes: `ids` (Task 1); `Journal`, `Op`, `OpKind`, `OpStatus` (Task 3); `BeadsAdapter`, `Bead`, labels and exceptions (Task 4); `gitwip.wip_commit`, `GitFailed` (Task 4); `ClaimGate` (Task 5); `AgentRuntime`, `ActionReconciler`, `LaunchSpec`, `LaunchFailed`, `RuntimeUnavailable` (Task 5).
+- Consumes: `ids` (Task 1); `Journal`, `Op`, `OpKind`, `OpStatus` (Task 3); `BeadsAdapter`, `Bead`, `SessionRecord`, labels and exceptions (Task 4); `gitwip.wip_commit`, `GitFailed` (Task 4); `ClaimGate` (Task 5); `AgentRuntime`, `ActionReconciler`, `Session`, `Liveness`, `LaunchSpec`, `LaunchFailed`, `RuntimeUnavailable` (Task 5).
 - Produces:
-  - `heterodyne.wsd.workstream`: `REPO_KEY = "repo"`, `DEFAULT_REPO = "default"`, `class ConfigInvalid(Exception)`, frozen `Limits(launch_failures_before_human=2, park_attempts_before_human=3)`, frozen `WorkstreamSettings(name, repos: dict[str, Path], coder_role, coder_profile, profiles: frozenset[str], limits=Limits())`, frozen `Placement(repo, worktree, profile, session_key, label)`, `place(ws, bead) -> Placement`, frozen `Deps(journal, beads, gate, runtime, reconciler, cp=nothing)`.
-  - `heterodyne.wsd.park`: `PARK_POINTS = ("park.intent", "park.stopped", "park.committed", "park.blocked", "park.labelled", "park.commented")`, `RESUME_POINTS = ("resume.intent", "resume.unlabelled", "resume.launched")`, `PARK_MARK = "wsd-park: "`, `parked_state(bead) -> BeadState`, `resumable(bead) -> bool`, `class Parker(ws, deps)` with `park(bead, blockers: tuple[str, ...], why="", hold=False, ref=None) -> BeadState` (**the plan 5/6 seam**), `resume(bead: Bead, ref=None) -> BeadState`, `replay(op) -> BeadState`, `escalate(bead)`.
-  - `tests/wsd_env.py`: `PROFILES`, `Rig` (`world`, `runtime`, `repo`, `ws`, `cp`, `journal`, `beads`, `gate`, `deps`, `parker`; `restart(cp=None)`, `start(bead)`, `replay_open()`, `worktree(bead)`, `state(bead)`), `make_rig(tmp_path, cp=None, limits=None) -> Rig`.
+  - `heterodyne.wsd.workstream`: `REPO_KEY = "repo"`, `DEFAULT_REPO = "default"`, `class ConfigInvalid(Exception)`, frozen `Limits(launch_failures_before_human=2, park_attempts_before_human=3)`, frozen `WorkstreamSettings(name, repos: dict[str, Path], coder_role, coder_profile, profiles: frozenset[str], limits=Limits())`, frozen `Placement(repo, worktree, profile, session_key, label)`, `place(ws, bead) -> Placement` (first launch only), `label(bead, role) -> str`, `record(ws, spot) -> SessionRecord`, frozen `Deps(journal, beads, gate, runtime, reconciler, cp=nothing)`.
+  - `heterodyne.wsd.park`: `PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!", "park.committed", "park.blocked!", "park.blocked", "park.labelled!", "park.labelled", "park.commented!", "park.done")`, `RESUME_POINTS = ("resume.intent", "resume.unlabelled!", "resume.unlabelled", "resume.launched!", "resume.done")`, `RELEASE_POINTS = ("lock.waiting", "release.intent", "release.unlabelled!", "release.unlabelled", "release.done")`, `ESCALATE_POINTS = ("escalate.intent", "escalate.labelled!", "escalate.done")`; conditional barriers outside the tuples: `release.stopped!`, `release.recorded!`, `<kind>.recorded!`, `<kind>.shelved!`. `PARK_MARK = "wsd-park: "`, `REASONS`, `RELEASABLE = {HELD, STUCK}`, `GUARD_SETTLES = {LAUNCH_UNCERTAIN}`.
+  - `class Launch(StrEnum)`: `STARTED, LIVE, WAIT, UNCERTAIN, FAILED, ENDED`; `class NotReleasable(Exception)`; `parked_state(bead) -> BeadState`, `blocker_detail(bead) -> str`, `resumable(bead) -> bool`, `park_comment(op) -> str`.
+  - `class Parker(ws, deps)` with `entry()` (**the workstream's operation lock**: checkpoint `lock.waiting`, then an `RLock`; park, release, pickup and recovery all take it), `park(bead, blockers: tuple[str, ...], why="", hold=False, ref=None) -> BeadState` (**the plan 5/6 seam**; `OpConflict` if another operation is open on the bead), `release(bead, ref=None) -> BeadState` (**the plan 6 seam**; `NotReleasable`), `resume(bead: Bead, ref=None) -> Launch`, `launch(op, new: SessionRecord | None = None) -> Launch` (**the launch guard**, D17), `escalate(bead, reason, detail="")`, `escalate_from(op, reason, detail="")`, `replay(op)`, `replay_park(op) -> BeadState`, `replay_resume(op) -> Launch`, `replay_release(op) -> BeadState`, `replay_escalate(op)`.
+  - `tests/wsd_env.py`: `PROFILES`, `Rig` (`world`, `runtime`, `repo`, `ws`, `cp`, `journal`, `beads`, `gate`, `deps`, `parker`; `restart(cp=None)`, `start(bead)` (claim, worktree, launched-session record, launch, state RUNNING), `key(bead)` (the recorded session key), `replay_open()`, `worktree(bead)`, `state(bead)`), `make_rig(tmp_path, cp=None, limits=None) -> Rig`.
 
-Park: intent → stop the session → WIP commit (SHA recorded) → blocking edges → labels (`v2:held` first when held, then `v2:parked`) → bead comment. Resume: intent → re-check resumable → remove `v2:parked` → launch the same session key in the same worktree. Each step is journaled when it completes; the crash tests restart at every point and replay.
+- **Park:** intent → stop every session of the bead (unconfirmed: the workstream holds `runtime_unavailable`, the bead stays PARKING, no budget spent) → WIP commit (SHA recorded) → blocking edges → labels (`v2:held` first when held, then `v2:parked`) → bead comment. A missing or unreadable session record, or a worktree that fails verification, escalates.
+- **Resume:** intent → remove `v2:parked` (a replay that finds it gone treats that as its own unlabel) → the launch guard, which reads the record already on the bead.
+- **Release:** intent → remove `v2:held` and `needs-human` → a parked bead goes back to PARKED or WAITING_INPUT; an unparked one gets a resume operation at `unlabelled`, so it launches only through the guard. Sessions under another key are stopped before a replacement record is written.
+- **Escalate:** the STUCK row and the escalation open in one transaction, then `needs-human`, replayed until it reads back.
+- **The guard** (D17): the only call to `AgentRuntime.launch`. `RuntimeUnavailable` is a hold (`WAIT`), `LaunchFailed` spends the operation's budget (`FAILED`, then escalation), anything else is `UNCERTAIN`: the workstream holds `launch_uncertain` and the role stays taken until the session list settles it. However an operation ends, it clears its own `launch_uncertain` hold.
+
+Each external effect is followed by its `!` barrier and each journal write by its step checkpoint; the crash tests restart at every point and replay.
 
 - [ ] **Step 1: Create `$HZ/tests/wsd_env.py`**
 
@@ -2943,7 +3433,7 @@ from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSpec
 from heterodyne.wsd.states import BeadState
-from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place
+from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
@@ -2987,13 +3477,21 @@ class Rig:
         self.parker = Parker(self.ws, self.deps)
 
     def start(self, bead: str) -> None:
-        """What a pickup does for one bead, without the pickup journal: claim, worktree, launch."""
+        """What a pickup does for one bead, without the pickup op: claim, worktree, record, launch."""
         self.gate.claim(WS, bead)
         spot = place(self.ws, self.beads.show(WS, bead))
         self.beads.worktree(WS, bead, spot.repo)
+        self.beads.ensure_record(WS, bead, record(self.ws, spot))
         self.runtime.launch(LaunchSpec(WS, bead, self.ws.coder_role, spot.profile, spot.session_key,
                                        spot.label, spot.worktree, resume=False))
-        self.journal.set_state(WS, bead, BeadState.RUNNING)
+        for step in (BeadState.CLAIMING, BeadState.STARTING, BeadState.RUNNING):
+            self.journal.set_state(WS, bead, step)
+
+    def key(self, bead: str) -> str:
+        """The coder session key of a started bead, from its launched-session record."""
+        found = self.beads.show(WS, bead).record()
+        assert found is not None
+        return found.session_key
 
     def replay_open(self) -> None:
         for op in self.journal.ops_open(WS):
@@ -3021,13 +3519,24 @@ from pathlib import Path
 
 import pytest
 from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
-from wsd_env import WS, Rig, make_rig
+from wsd_env import WS, Rig, git_repo, make_rig
 
 from heterodyne.wsd import gitwip
-from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, BeadsUnavailable
-from heterodyne.wsd.park import PARK_MARK, PARK_POINTS, RESUME_POINTS, resumable
+from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
+from heterodyne.wsd.journal import OpKind
+from heterodyne.wsd.park import (
+    ESCALATE_POINTS,
+    PARK_MARK,
+    PARK_POINTS,
+    RELEASE_POINTS,
+    RESUME_POINTS,
+    Launch,
+    NotReleasable,
+    resumable,
+)
+from heterodyne.wsd.runtime import Liveness
 from heterodyne.wsd.states import Reason
-from heterodyne.wsd.workstream import Limits
+from heterodyne.wsd.workstream import Limits, WorkstreamSettings
 
 
 def running(tmp_path: Path, cp: Recorder | None = None, limits: Limits | None = None) -> Rig:
@@ -3040,17 +3549,39 @@ def running(tmp_path: Path, cp: Recorder | None = None, limits: Limits | None = 
     return rig
 
 
+def parked(tmp_path: Path, limits: Limits | None = None) -> Rig:
+    """btq-1 parked on btq-2, and btq-2 since closed: resumable."""
+    rig = running(tmp_path, limits=limits)
+    rig.parker.park("btq-1", ("btq-2",))
+    rig.world.close("btq-2")
+    return rig
+
+
 def wip_commits(rig: Rig) -> list[str]:
     out = gitwip.git(rig.worktree("btq-1"), "log", "--format=%H", f"--grep={PARK_MARK}")
     return out.split()
 
 
+def resume(rig: Rig, ref: str | None = None) -> Launch:
+    with rig.parker.entry():
+        return rig.parker.resume(rig.beads.show(WS, "btq-1"), ref=ref)
+
+
+def reason(rig: Rig, bead: str = "btq-1") -> Reason | None:
+    row = rig.journal.state(WS, bead)
+    assert row is not None
+    return row.reason
+
+
+# --- park ---
+
 def test_park_sequence(tmp_path: Path) -> None:
     rig = running(tmp_path)
-    key = rig.runtime.launches[0].session_key
+    key = rig.key("btq-1")
+    rig.restart(Recorder())
     assert rig.parker.park("btq-1", ("btq-2",), why="needs the schema", ref="msg-7").value == "parked"
     assert isinstance(rig.cp, Recorder)
-    assert [p for p in rig.cp.seen if p.startswith("park.")] == list(PARK_POINTS)
+    assert [p for p in rig.cp.seen if p in PARK_POINTS] == list(PARK_POINTS)
     bead = rig.world.beads["btq-1"]
     assert bead.status == "in_progress"                            # never unclaimed
     assert PARKED in bead.labels and ("btq-2", "blocks") in bead.deps
@@ -3061,6 +3592,7 @@ def test_park_sequence(tmp_path: Path) -> None:
     assert rig.runtime.stops == [key]
     row = rig.journal.state(WS, "btq-1")
     assert row is not None and row.state.value == "parked" and row.reason is Reason.BLOCKED_ON_BEAD
+    assert row.detail == "btq-2"
     progress = [(e.kind, e.ref) for e in rig.journal.events_since(0) if e.bead == "btq-1"]
     assert ("state:parking", "msg-7") in progress and ("state:parked", "msg-7") in progress
     assert rig.journal.ops_open() == []
@@ -3068,65 +3600,118 @@ def test_park_sequence(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("point", PARK_POINTS)
 def test_crash_at_every_park_point_completes_once(tmp_path: Path, point: str) -> None:
-    rig = running(tmp_path, cp=CrashAt(point))
+    rig = running(tmp_path)
+    rig.restart(CrashAt(point))
     with pytest.raises(SimulatedCrash):
         rig.parker.park("btq-1", ("btq-2",), why="w")
     rig.restart()
     rig.replay_open()
+    if point == "lock.waiting":                                     # died at the door: nothing happened
+        assert rig.state("btq-1") == "running" and rig.journal.ops_open() == []
+        return
     bead = rig.world.beads["btq-1"]
     assert PARKED in bead.labels and bead.deps == [("btq-2", "blocks")]
     assert len(bead.comments) == 1
     assert len(wip_commits(rig)) == 1
     assert rig.state("btq-1") == "parked"
     assert rig.journal.ops_open() == []
-    assert len(rig.runtime.launches) == 1                           # never relaunched while parked
+    assert rig.runtime.live() == [] and len(rig.runtime.launches) == 1     # never relaunched while parked
 
 
-def test_resume_sequence(tmp_path: Path) -> None:
+def test_park_stops_every_session_of_the_bead(tmp_path: Path) -> None:
+    """A second, unrecorded session of the bead (one listed as UNKNOWN, say) is stopped too: a park never
+    commits under a session that may still write."""
     rig = running(tmp_path)
+    first = rig.runtime.launches[0]
+    rig.runtime.adopt(type(first)(WS, "btq-1", "coder", "p-two", "other-key", first.label, first.worktree,
+                                  resume=False), Liveness.UNKNOWN)
     rig.parker.park("btq-1", ("btq-2",))
-    rig.world.close("btq-2")
-    bead = rig.beads.show(WS, "btq-1")
-    assert resumable(bead)
-    assert rig.parker.resume(bead, ref="msg-9").value == "running"
-    assert isinstance(rig.cp, Recorder)
-    assert [p for p in rig.cp.seen if p.startswith("resume.")] == list(RESUME_POINTS)
-    spec = rig.runtime.launches[-1]
-    assert (spec.bead, spec.resume, spec.ref) == ("btq-1", True, "msg-9")
-    assert spec.worktree == rig.worktree("btq-1")
-    assert spec.session_key == rig.runtime.launches[0].session_key
-    assert PARKED not in rig.world.beads["btq-1"].labels
+    assert sorted(rig.runtime.stops) == sorted([first.session_key, "other-key"])
+    assert rig.state("btq-1") == "parked"
 
 
-@pytest.mark.parametrize("point", RESUME_POINTS)
-def test_crash_at_every_resume_point_launches_once(tmp_path: Path, point: str) -> None:
-    rig = running(tmp_path)
-    rig.parker.park("btq-1", ("btq-2",))
-    rig.world.close("btq-2")
-    rig.restart(CrashAt(point))
-    with pytest.raises(SimulatedCrash):
-        rig.parker.resume(rig.beads.show(WS, "btq-1"))
-    rig.restart()
+def test_unconfirmed_stop_holds_and_never_spends_budget(tmp_path: Path) -> None:
+    """Finding 10/11: a stop the runtime can't confirm is a hold, not a failure. No WIP commit, no label,
+    no budget, no `needs-human`, however often it repeats; it completes once the stop is confirmed."""
+    rig = running(tmp_path, limits=Limits(park_attempts_before_human=1))
+    rig.runtime.stop_failures = 5
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "parking"
+    for _ in range(4):
+        rig.replay_open()
+    assert reason(rig) is Reason.STOP_UNCONFIRMED
+    assert Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+    bead = rig.world.beads["btq-1"]
+    assert PARKED not in bead.labels and NEEDS_HUMAN not in bead.labels and wip_commits(rig) == []
+    [op] = rig.journal.ops_open()
+    assert op.attempts == 0 and op.step == "intent"
     rig.replay_open()
-    resumes = [s for s in rig.runtime.launches if s.resume]
-    assert len(resumes) == 1
-    assert PARKED not in rig.world.beads["btq-1"].labels
-    assert rig.state("btq-1") == "running"
+    assert rig.state("btq-1") == "parked"
+
+
+def test_git_failure_retries_then_escalates(tmp_path: Path) -> None:
+    rig = running(tmp_path, limits=Limits(park_attempts_before_human=2))
+    gitdir = Path(gitwip.git(rig.worktree("btq-1"), "rev-parse", "--absolute-git-dir").strip())
+    (gitdir / "index.lock").write_text("")                          # every `git add` fails
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "parking"
+    assert reason(rig) is Reason.PARK_FAILED
+    assert PARKED not in rig.world.beads["btq-1"].labels           # no label before the WIP commit
+    rig.replay_open()                                               # second failure
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.PARK_FAILED
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
     assert rig.journal.ops_open() == []
 
 
-def test_resume_abandoned_when_blocked_again(tmp_path: Path) -> None:
-    """Between the decision to resume and the replay, the bead gained an open blocker: the resume is
-    abandoned with the bead still parked, and nothing is launched."""
+def test_park_without_a_session_record_escalates(tmp_path: Path) -> None:
+    """Finding 11: the worktree comes from the record, never from the current placement. No record: no
+    commit anywhere, a human looks."""
     rig = running(tmp_path)
-    rig.parker.park("btq-1", ("btq-2",))
-    rig.world.close("btq-2")
-    bead = rig.beads.show(WS, "btq-1")
-    rig.world.add("btq-3")
-    rig.world.beads["btq-1"].deps.append(("btq-3", "blocks"))
-    assert rig.parker.resume(bead).value == "parked"
-    assert [s.resume for s in rig.runtime.launches] == [False]
-    assert PARKED in rig.world.beads["btq-1"].labels
+    del rig.world.beads["btq-1"].metadata[RECORD_KEY]
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
+    assert reason(rig) is Reason.LAUNCH_UNRECORDED
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels and wip_commits(rig) == []
+
+
+def test_park_with_an_unreadable_record_escalates(tmp_path: Path) -> None:
+    rig = running(tmp_path)
+    rig.world.beads["btq-1"].metadata[RECORD_KEY] = "{not json"
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
+    assert reason(rig) is Reason.LAUNCH_UNRECORDED and wip_commits(rig) == []
+
+
+def test_park_into_a_foreign_worktree_escalates(tmp_path: Path) -> None:
+    """Finding 15: a record naming a worktree of another repository (same path layout, same branch name)
+    fails the common-dir check, and nothing is committed there."""
+    rig = running(tmp_path)
+    other = git_repo(tmp_path / "elsewhere" / "proj")
+    foreign = other.parent / "proj-btq-btq-1"
+    gitwip.git(other, "worktree", "add", "-q", "-b", "btq/btq-1", str(foreign))
+    bead = rig.world.beads["btq-1"]
+    bead.metadata[RECORD_KEY] = bead.metadata[RECORD_KEY].replace(str(rig.worktree("btq-1")), str(foreign))
+    base = gitwip.git(other, "rev-parse", "HEAD").strip()
+    bead.notes += f"\nworker={bead.assignee}; repository={rig.repo}; base={base}; worktree={foreign}"
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
+    assert reason(rig) is Reason.WORKTREE_FAILED
+    assert gitwip.git(foreign, "log", "--format=%H", f"--grep={PARK_MARK}").split() == []
+
+
+def test_beads_outage_during_park_never_escalates(tmp_path: Path) -> None:
+    rig = running(tmp_path, limits=Limits(park_attempts_before_human=1))
+    rig.world.fault("dep", RuntimeError("dolt down"), times=2)
+    for _ in range(2):
+        with pytest.raises(BeadsUnavailable):
+            rig.replay_open() if rig.journal.ops_open() else rig.parker.park("btq-1", ("btq-2",))
+        assert rig.state("btq-1") == "parking"
+        assert NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    rig.replay_open()
+    assert rig.state("btq-1") == "parked"
+
+
+def test_park_of_a_bead_not_ours_is_abandoned(tmp_path: Path) -> None:
+    rig = running(tmp_path)
+    rig.world.beads["btq-1"].assignee = "someone-else"
+    assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
+    assert reason(rig) is Reason.CLAIM_LOST
+    assert PARKED not in rig.world.beads["btq-1"].labels
 
 
 def test_operator_hold_is_not_resumable(tmp_path: Path) -> None:
@@ -3154,37 +3739,252 @@ def test_park_needs_a_blocker_or_a_hold(tmp_path: Path) -> None:
     assert rig.journal.ops_open() == []
 
 
-def test_unconfirmed_stop_retries_then_escalates(tmp_path: Path) -> None:
-    rig = running(tmp_path, limits=Limits(park_attempts_before_human=2))
-    rig.runtime.stop_failures = 5
-    assert rig.parker.park("btq-1", ("btq-2",)).value == "parking"
-    assert PARKED not in rig.world.beads["btq-1"].labels           # no label before the session stopped
-    row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.reason is Reason.PARK_FAILED
-    rig.replay_open()                                               # second failure
-    assert rig.state("btq-1") == "stuck"
-    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+# --- resume and the launch guard ---
 
-
-def test_beads_outage_during_park_never_escalates(tmp_path: Path) -> None:
-    rig = running(tmp_path, limits=Limits(park_attempts_before_human=1))
-    rig.world.fault("dep", RuntimeError("dolt down"), times=2)
-    for _ in range(2):
-        with pytest.raises(BeadsUnavailable):
-            rig.replay_open() if rig.journal.ops_open() else rig.parker.park("btq-1", ("btq-2",))
-        assert rig.state("btq-1") == "parking"
-        assert NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
-    rig.replay_open()
-    assert rig.state("btq-1") == "parked"
-
-
-def test_park_of_a_bead_not_ours_is_abandoned(tmp_path: Path) -> None:
-    rig = running(tmp_path)
-    rig.world.beads["btq-1"].assignee = "someone-else"
-    assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
-    row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.reason is Reason.CLAIM_LOST
+def test_resume_sequence(tmp_path: Path) -> None:
+    rig = parked(tmp_path)
+    assert resumable(rig.beads.show(WS, "btq-1"))
+    rig.restart(Recorder())
+    assert resume(rig, ref="msg-9") is Launch.STARTED
+    assert isinstance(rig.cp, Recorder)
+    assert [p for p in rig.cp.seen if p in RESUME_POINTS] == list(RESUME_POINTS)
+    spec = rig.runtime.launches[-1]
+    assert (spec.bead, spec.resume, spec.ref) == ("btq-1", True, "msg-9")
+    assert spec.worktree == rig.worktree("btq-1")
+    assert spec.session_key == rig.runtime.launches[0].session_key
     assert PARKED not in rig.world.beads["btq-1"].labels
+    assert rig.state("btq-1") == "running"
+
+
+@pytest.mark.parametrize("point", RESUME_POINTS)
+def test_crash_at_every_resume_point_launches_once(tmp_path: Path, point: str) -> None:
+    """Finding 7 among them: at `resume.unlabelled!` the label is gone but the step is not journaled. The
+    replay reads that as its own unlabel and goes on to launch; it is never a cancellation."""
+    rig = parked(tmp_path)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        resume(rig)
+    rig.restart()
+    rig.replay_open()
+    assert len([s for s in rig.runtime.launches if s.resume]) == 1
+    assert rig.runtime.coders() == ["btq-1"]
+    assert PARKED not in rig.world.beads["btq-1"].labels
+    assert rig.state("btq-1") == "running"
+    assert rig.journal.ops_open() == []
+
+
+def test_resume_uses_the_recorded_identity_after_a_config_change(tmp_path: Path) -> None:
+    """Finding 4: the operator changed the default profile and repository since the launch. The resume is
+    the recorded session in the recorded worktree, never a new placement."""
+    rig = parked(tmp_path)
+    first = rig.runtime.launches[0]
+    other = git_repo(tmp_path / "repos" / "other")
+    rig.ws = WorkstreamSettings(WS, {"default": other}, "coder", "p-two", rig.ws.profiles, rig.ws.limits)
+    rig.restart()
+    assert resume(rig) is Launch.STARTED
+    spec = rig.runtime.launches[-1]
+    assert (spec.profile, spec.session_key, spec.worktree) == (first.profile, first.session_key,
+                                                               first.worktree)
+
+
+def test_resume_abandoned_when_blocked_again(tmp_path: Path) -> None:
+    """Between the decision to resume and the replay, the bead gained an open blocker: the resume ends
+    with the bead still parked, and nothing is launched."""
+    rig = parked(tmp_path)
+    rig.world.add("btq-3")
+    rig.world.beads["btq-1"].deps.append(("btq-3", "blocks"))
+    assert resume(rig) is Launch.ENDED
+    assert [s.resume for s in rig.runtime.launches] == [False]
+    assert PARKED in rig.world.beads["btq-1"].labels and rig.state("btq-1") == "parked"
+
+
+def test_hold_added_after_the_unlabel_shelves_the_bead(tmp_path: Path) -> None:
+    """The operator held the bead between the unlabel and the replay: the guard puts `v2:parked` back and
+    records it as HELD. Nothing is launched."""
+    rig = parked(tmp_path)
+    rig.restart(CrashAt("resume.unlabelled"))
+    with pytest.raises(SimulatedCrash):
+        resume(rig)
+    rig.world.beads["btq-1"].labels.append(HELD)
+    rig.restart()
+    rig.replay_open()
+    assert PARKED in rig.world.beads["btq-1"].labels and rig.state("btq-1") == "held"
+    assert [s.resume for s in rig.runtime.launches] == [False] and rig.journal.ops_open() == []
+
+
+@pytest.mark.parametrize("change", ["routing", "design"])
+def test_guard_revalidates_routing_and_design_approval(tmp_path: Path, change: str) -> None:
+    """Findings 5 and 6: btq's post-claim checks run again right before the launch. A bead that moved to
+    another workstream, or lost its design approval, is escalated and not launched."""
+    rig = parked(tmp_path)
+    bead = rig.world.beads["btq-1"]
+    if change == "routing":
+        bead.labels[bead.labels.index("ws:alpha")] = "ws:beta"
+    else:
+        del bead.metadata["design_approval"]
+    assert resume(rig) is Launch.ENDED
+    assert reason(rig) is Reason.ROUTING_CHANGED and NEEDS_HUMAN in bead.labels
+    assert [s.resume for s in rig.runtime.launches] == [False]
+
+
+def test_guard_refuses_a_lost_claim(tmp_path: Path) -> None:
+    rig = parked(tmp_path)
+    rig.restart(CrashAt("resume.unlabelled"))
+    with pytest.raises(SimulatedCrash):
+        resume(rig)
+    rig.world.beads["btq-1"].assignee = "someone-else"
+    rig.restart()
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.CLAIM_LOST
+    assert [s.resume for s in rig.runtime.launches] == [False]
+
+
+def test_guard_waits_while_another_bead_holds_the_coder_role(tmp_path: Path) -> None:
+    rig = parked(tmp_path)
+    rig.world.add("btq-3")
+    rig.start("btq-3")
+    assert resume(rig) is Launch.WAIT
+    assert rig.runtime.coders() == ["btq-3"]
+    [op] = rig.journal.ops_open()
+    assert op.kind is OpKind.RESUME and op.attempts == 0
+
+
+def test_no_runtime_waits_without_budget_or_escalation(tmp_path: Path) -> None:
+    """Finding 10: RuntimeUnavailable is a hold. It never counts as a launch failure."""
+    rig = parked(tmp_path, limits=Limits(launch_failures_before_human=1))
+    rig.runtime.up = False
+    for _ in range(3):
+        assert (resume(rig) if not rig.journal.ops_open() else rig.parker.launch(rig.journal.ops_open()[0])
+                ) is Launch.WAIT
+    assert Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+    assert NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    [op] = rig.journal.ops_open()
+    assert op.attempts == 0
+
+
+def test_confirmed_launch_failure_retries_then_escalates(tmp_path: Path) -> None:
+    rig = parked(tmp_path, limits=Limits(launch_failures_before_human=2))
+    rig.runtime.launch_failures = 2
+    assert resume(rig) is Launch.FAILED
+    assert reason(rig) is Reason.LAUNCH_FAILED and rig.runtime.coders() == []
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+
+
+def test_uncertain_launch_keeps_the_role_until_the_list_settles_it(tmp_path: Path) -> None:
+    """Finding 16: an uncertain launch is never retried blind. The workstream holds LAUNCH_UNCERTAIN; the
+    replay waits while the session is listed UNKNOWN and finishes once it is listed live."""
+    rig = parked(tmp_path)
+    rig.runtime.launch_uncertain = 1
+    assert resume(rig) is Launch.UNCERTAIN
+    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"}
+    rig.replay_open()
+    assert len(rig.runtime.launches) == 2 and rig.journal.ops_open() != []
+    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
+    rig.replay_open()
+    assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
+    assert len(rig.runtime.launches) == 2 and rig.journal.ops_open() == []
+
+
+def test_uncertain_launch_that_never_started_is_launched_again(tmp_path: Path) -> None:
+    rig = parked(tmp_path)
+    rig.runtime.launch_uncertain = 1
+    assert resume(rig) is Launch.UNCERTAIN
+    rig.runtime.end(rig.key("btq-1"))                              # the runtime confirms it is not running
+    rig.replay_open()
+    assert rig.runtime.coders() == ["btq-1"] and rig.state("btq-1") == "running"
+    assert rig.journal.holds(WS) == {}
+
+
+# --- release and escalate ---
+
+def held(tmp_path: Path) -> Rig:
+    rig = running(tmp_path)
+    rig.parker.park("btq-1", (), why="operator /stop", hold=True)
+    return rig
+
+
+def test_release_of_a_held_parked_bead_makes_it_resumable(tmp_path: Path) -> None:
+    rig = held(tmp_path)
+    rig.restart(Recorder())
+    assert rig.parker.release("btq-1", ref="msg-r").value == "parked"
+    assert isinstance(rig.cp, Recorder)
+    assert [p for p in rig.cp.seen if p in RELEASE_POINTS] == list(RELEASE_POINTS)
+    bead = rig.beads.show(WS, "btq-1")
+    assert HELD not in bead.labels and resumable(bead)
+    assert rig.journal.ops_open() == []
+
+
+@pytest.mark.parametrize("point", RELEASE_POINTS[1:])
+def test_crash_at_every_release_point_completes_once(tmp_path: Path, point: str) -> None:
+    rig = held(tmp_path)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.release("btq-1")
+    rig.restart()
+    rig.replay_open()
+    assert rig.state("btq-1") == "parked" and rig.journal.ops_open() == []
+    assert HELD not in rig.world.beads["btq-1"].labels
+
+
+def test_release_of_a_stuck_running_bead_resumes_through_the_guard(tmp_path: Path) -> None:
+    rig = running(tmp_path, limits=Limits(launch_failures_before_human=1))
+    rig.runtime.end(rig.key("btq-1"))
+    rig.parker.escalate("btq-1", Reason.LAUNCH_FAILED)
+    assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    assert rig.parker.release("btq-1").value == "resuming"
+    assert NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.step) == (OpKind.RESUME, "unlabelled")
+    rig.replay_open()
+    assert rig.state("btq-1") == "running" and rig.runtime.coders() == ["btq-1"]
+    assert rig.runtime.launches[-1].session_key == rig.runtime.launches[0].session_key
+
+
+def test_release_stops_unrecorded_sessions_before_writing_a_record(tmp_path: Path) -> None:
+    rig = running(tmp_path)
+    del rig.world.beads["btq-1"].metadata[RECORD_KEY]
+    first = rig.runtime.launches[0]
+    rig.runtime.adopt(type(first)(WS, "btq-1", "coder", "p-two", "stray", first.label, first.worktree,
+                                  resume=False), Liveness.UNKNOWN)
+    rig.parker.escalate("btq-1", Reason.LAUNCH_UNRECORDED)
+    assert rig.parker.release("btq-1").value == "resuming"
+    assert "stray" in rig.runtime.stops and "stray" not in rig.runtime.listed
+    assert rig.beads.show(WS, "btq-1").record() is not None
+
+
+def test_only_held_or_stuck_beads_are_releasable(tmp_path: Path) -> None:
+    rig = running(tmp_path)
+    with pytest.raises(NotReleasable):
+        rig.parker.release("btq-1")
+    with pytest.raises(NotReleasable):
+        rig.parker.release("btq-404")
+
+
+@pytest.mark.parametrize("point", ESCALATE_POINTS)
+def test_crash_at_every_escalate_point_labels_once(tmp_path: Path, point: str) -> None:
+    rig = running(tmp_path)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.escalate("btq-1", Reason.UNEXPECTED_STATE)
+    rig.restart()
+    rig.replay_open()
+    assert rig.world.beads["btq-1"].labels.count(NEEDS_HUMAN) == 1
+    assert rig.state("btq-1") == "stuck" and rig.journal.ops_open() == []
+
+
+def test_guard_never_launches_beside_an_unknown_session_of_its_bead(tmp_path: Path) -> None:
+    """Finding 6: the replay finds the bead's own session listed but not confirmed live. It holds; it
+    neither launches a second one nor assumes the first is running."""
+    rig = parked(tmp_path)
+    rig.restart(CrashAt("resume.unlabelled"))
+    with pytest.raises(SimulatedCrash):
+        resume(rig)
+    rig.runtime.adopt(rig.runtime.launches[0], Liveness.UNKNOWN)
+    rig.restart()
+    rig.replay_open()
+    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"}
+    assert len(rig.runtime.launches) == 1 and rig.journal.ops_open() != []
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -3195,13 +3995,19 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'heterodyne.wsd.park'` (or
 - [ ] **Step 4: Create `$HZ/src/heterodyne/wsd/workstream.py`**
 
 ```python
-"""One workstream's settings, and where a bead runs: repository, worktree, profile and session key."""
+"""One workstream's settings, and where a bead runs: repository, worktree, profile and session key.
+
+`place` is used only where wsd starts something new: a pickup's worktree and record, and a release that
+must record a bead whose launch was never recorded. Everything that continues existing work (resume,
+park, recovery) reads the launched-session record on the bead instead, so a configuration change never
+redirects a running or parked bead to another session or worktree.
+"""
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from heterodyne.wsd import ids
-from heterodyne.wsd.beads import Bead, BeadsAdapter
+from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.journal import Journal
@@ -3253,9 +4059,18 @@ def place(ws: WorkstreamSettings, bead: Bead) -> Placement:
     if profile not in ws.profiles:
         raise ConfigInvalid("the bead names an unknown profile")
     repo = ws.repos[name].resolve()
-    title = " ".join(bead.title.split())[:LABEL_TITLE_CHARS]
     return Placement(repo, repo.parent / f"{repo.name}-btq-{bead.id}", profile, session_key,
-                     f"{bead.id} · {ws.coder_role} · {title}")
+                     label(bead, ws.coder_role))
+
+
+def label(bead: Bead, role: str) -> str:
+    """The session label (§4.1): "<bead> · <role> · <title>"."""
+    title = " ".join(bead.title.split())[:LABEL_TITLE_CHARS]
+    return f"{bead.id} · {role} · {title}"
+
+
+def record(ws: WorkstreamSettings, spot: Placement) -> SessionRecord:
+    return SessionRecord(ws.coder_role, spot.profile, spot.session_key, str(spot.repo), str(spot.worktree))
 
 
 @dataclass(frozen=True)
@@ -3271,32 +4086,79 @@ class Deps:
 - [ ] **Step 5: Create `$HZ/src/heterodyne/wsd/park.py`**
 
 ```python
-"""The park and resume journals (ADR 0001 §3.3, §4.3).
+"""Every journaled bead operation but the claim (ADR 0001 §3.3, §4.3), and the one launch path.
 
-Park: intent, stop the session, WIP commit (SHA recorded), blocking edges, labels, bead comment. Resume:
-intent, remove `v2:parked`, launch the same session in the same worktree. Each step is journaled when
-it completes and is idempotent, so a crash anywhere is replayed from the step reached. Blocking edges go
-on before `v2:parked`, and `v2:held` before `v2:parked`, so the bead is never `v2:parked` without what
-keeps it from being resumed.
+- Park: intent, stop every session of the bead, WIP commit (SHA recorded), blocking edges, labels, bead
+  comment. Blocking edges go on before `v2:parked`, and `v2:held` before `v2:parked`, so the bead is
+  never `v2:parked` without what keeps it from being resumed.
+- Resume: intent, remove `v2:parked`, then the launch guard. A replay that finds `v2:parked` already
+  gone is its own completed unlabel, not a cancellation.
+- Release (the operator's, plan 6): remove `v2:held` and `needs-human`, then either back to parked or
+  on to a resume. It is the only way out of HELD or STUCK.
+- Escalate: STUCK in the journal, then `needs-human` on the bead, replayed until it reads back.
+- `launch`, the guard: the only call to `AgentRuntime.launch`, used by pickup, resume and their replays.
 
-wsd never unclaims: a parked bead stays `in_progress` under its per-bead worker. BeadsUnavailable is
-never caught here: it propagates, and the caller holds the workstream until beads answer again (§10),
-so an outage never escalates a bead.
+Every external effect is followed by a `<op>.<step>!` checkpoint, and every journal write by
+`<op>.<step>`, so a test can crash on either side of each write. `entry()` is the workstream's one
+lock: park, release, pickup and recovery all take it, so no two operations interleave.
+
+wsd never unclaims: a parked or stuck bead stays `in_progress` under its per-bead worker.
+BeadsUnavailable is never caught here: it propagates, the operation stays open, and the caller holds
+the workstream until beads answer again (§10). RuntimeUnavailable is a hold too: it uses no failure
+budget and never escalates.
 """
 
-from heterodyne.wsd import gitwip
-from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, Bead, BeadsUnavailable, NotOurs
-from heterodyne.wsd.journal import Op, OpKind, OpStatus
-from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, RuntimeUnavailable
-from heterodyne.wsd.states import BeadState, Reason
-from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place
+import contextlib
+import threading
+from collections.abc import Generator
+from enum import StrEnum
+from pathlib import Path
 
-PARK_POINTS = ("park.intent", "park.stopped", "park.committed", "park.blocked", "park.labelled",
-               "park.commented")
-RESUME_POINTS = ("resume.intent", "resume.unlabelled", "resume.launched")
+from heterodyne.wsd import gitwip
+from heterodyne.wsd.beads import (
+    HELD,
+    NEEDS_HUMAN,
+    PARKED,
+    Bead,
+    NotOurs,
+    RecordUnreadable,
+    RoutingChanged,
+    SessionRecord,
+    WorktreeConflict,
+)
+from heterodyne.wsd.journal import Op, OpKind, OpStatus
+from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, RuntimeUnavailable, Session
+from heterodyne.wsd.states import BeadState, Reason
+from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
+
+PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
+               "park.committed", "park.blocked!", "park.blocked", "park.labelled!", "park.labelled",
+               "park.commented!", "park.done")
+RESUME_POINTS = ("resume.intent", "resume.unlabelled!", "resume.unlabelled", "resume.launched!",
+                 "resume.done")
+RELEASE_POINTS = ("lock.waiting", "release.intent", "release.unlabelled!", "release.unlabelled",
+                  "release.done")
+ESCALATE_POINTS = ("escalate.intent", "escalate.labelled!", "escalate.done")
 PARK_MARK = "wsd-park: "
 REASONS = {BeadState.HELD: Reason.HELD_BY_OPERATOR, BeadState.WAITING_INPUT: Reason.WAITING_ON_OPERATOR,
            BeadState.PARKED: Reason.BLOCKED_ON_BEAD}
+RELEASABLE = frozenset({BeadState.HELD, BeadState.STUCK})
+# Holds the guard settles itself from the session list instead of waiting on.
+GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
+
+
+class Launch(StrEnum):
+    """What the launch guard did."""
+    STARTED = "started"        # launched now
+    LIVE = "live"              # the recorded session was already running
+    WAIT = "wait"              # not attempted: a hold applies or the role is taken; the operation stays open
+    UNCERTAIN = "uncertain"    # attempted, outcome unknown: the role stays taken and the workstream holds
+    FAILED = "failed"          # the runtime confirmed nothing started; the operation is retried later
+    ENDED = "ended"            # the operation finished without a launch (shelved, stuck or claim lost)
+
+
+class NotReleasable(Exception):
+    """Release applies only to a HELD or STUCK bead with no operation open on it."""
 
 
 def park_comment(op: Op) -> str:
@@ -3315,6 +4177,11 @@ def parked_state(bead: Bead) -> BeadState:
     return BeadState.PARKED
 
 
+def blocker_detail(bead: Bead) -> str:
+    """The open blockers, for the state's detail: plan 6 counts "N beads on M approvals" from it."""
+    return ",".join(sorted(d.id for d in bead.open_blockers()))
+
+
 def resumable(bead: Bead) -> bool:
     """§4.3: claimed by wsd (the caller checked), `v2:parked`, every blocking edge closed. A bead held by
     the operator or escalated to a human is not resumable."""
@@ -3326,134 +4193,381 @@ class Parker:
     def __init__(self, ws: WorkstreamSettings, deps: Deps) -> None:
         self.ws = ws
         self.d = deps
+        self.lock = threading.RLock()
 
-    def _finish(self, op: Op, status: OpStatus, state: BeadState, reason: Reason | None = None,
-                detail: str = "") -> BeadState:
+    @contextlib.contextmanager
+    def entry(self) -> Generator[None]:
+        """The workstream's operation lock. Every public entry point (park, release, pickup, recovery)
+        takes it; the checkpoint before it lets a test hold one caller at the door."""
+        self.d.cp("lock.waiting")
+        with self.lock:
+            yield
+
+    # --- shared ---
+
+    def _finish(self, op: Op, status: OpStatus, state: BeadState | None, reason: Reason | None = None,
+                detail: str = "") -> None:
         with self.d.journal.transaction():
             self.d.journal.op_finish(op.op_id, status)
-            self.d.journal.set_state(self.ws.name, op.bead, state, reason, detail, op.data.get("ref") or None)
-        return state
+            self._settle_uncertain(op)
+            if state is not None:
+                self.d.journal.set_state(self.ws.name, op.bead, state, reason, detail,
+                                         op.data.get("ref") or None)
 
-    def escalate(self, bead: str) -> None:
-        """Best effort `needs-human` on the bead; the journal already says STUCK, which plan 6 shows."""
+    def _settle_uncertain(self, op: Op) -> None:
+        """An operation that ends, however it ends, settles its own LAUNCH_UNCERTAIN hold: any session it
+        may have started is listed by the runtime, and the sweep and the role check take it from there."""
+        if self.d.journal.holds(self.ws.name).get(Reason.LAUNCH_UNCERTAIN) == op.bead:
+            self.d.journal.unhold(self.ws.name, Reason.LAUNCH_UNCERTAIN)
+
+    def _sessions(self, bead: str | None = None) -> list[Session]:
+        found = self.d.runtime.sessions(self.ws.name)
+        return [s for s in found if bead is None or s.bead == bead]
+
+    def _runtime_hold(self, op: Op, reason: Reason = Reason.RUNTIME_UNAVAILABLE) -> BeadState:
+        """Hold the workstream; the operation stays open at its step and uses no failure budget."""
+        j = self.d.journal
+        j.hold(self.ws.name, Reason.RUNTIME_UNAVAILABLE)
+        row = j.state(self.ws.name, op.bead)
+        if row is None:
+            return BeadState.STUCK
+        j.set_state(self.ws.name, op.bead, row.state, reason)
+        return row.state
+
+    # --- escalate ---
+
+    def escalate_from(self, op: Op, reason: Reason, detail: str = "") -> None:
+        """End `op` as STUCK and open the escalation in the same transaction, so a crash can't leave a
+        stuck bead without its pending `needs-human`."""
+        j = self.d.journal
+        with j.transaction():
+            j.op_finish(op.op_id, OpStatus.STUCK)
+            self._settle_uncertain(op)
+            esc = j.op_open(OpKind.ESCALATE, self.ws.name, op.bead, {"reason": reason.value})
+            j.set_state(self.ws.name, op.bead, BeadState.STUCK, reason, detail, op.data.get("ref") or None)
+        self.d.cp("escalate.intent")
+        self.replay_escalate(esc)
+
+    def escalate(self, bead: str, reason: Reason, detail: str = "") -> None:
+        """Recovery's escalation: the journal row is rebuilt as STUCK whatever it said (beads are the
+        truth, and they contradict it), then `needs-human` goes on the bead."""
+        j = self.d.journal
+        with j.transaction():
+            esc = j.op_open(OpKind.ESCALATE, self.ws.name, bead, {"reason": reason.value})
+            j.adopt(self.ws.name, bead, BeadState.STUCK, reason, detail)
+        self.d.cp("escalate.intent")
+        self.replay_escalate(esc)
+
+    def replay_escalate(self, op: Op) -> None:
         try:
-            self.d.beads.ensure_label(self.ws.name, bead, NEEDS_HUMAN)
-        except (BeadsUnavailable, NotOurs):
-            self.d.journal.emit(self.ws.name, bead, "escalation_unrecorded")
-
-    def _stuck(self, op: Op, reason: Reason, detail: str) -> BeadState:
-        self._finish(op, OpStatus.STUCK, BeadState.STUCK, reason, detail)
-        self.escalate(op.bead)
-        return BeadState.STUCK
+            self.d.beads.ensure_label(self.ws.name, op.bead, NEEDS_HUMAN)
+        except NotOurs:
+            self._finish(op, OpStatus.ABANDONED, None)      # the row already says STUCK
+            return
+        self.d.cp("escalate.labelled!")
+        self._finish(op, OpStatus.DONE, None)
+        self.d.cp("escalate.done")
 
     # --- park ---
 
     def park(self, bead: str, blockers: tuple[str, ...], why: str = "", hold: bool = False,
              ref: str | None = None) -> BeadState:
-        """Park a bead wsd holds. `blockers` are the beads it waits on; `hold` parks it for the operator
+        """Park a bead wsd runs. `blockers` are the beads it waits on; `hold` parks it for the operator
         (/stop) until they release it. Returns the bead's state afterwards (PARKING if a step must be
-        retried)."""
+        retried). Raises OpConflict if another operation is open on the bead: the caller retries after
+        the next pickup, it never runs beside it."""
         if not blockers and not hold:
             raise ValueError("a park needs a blocker or an operator hold")
-        with self.d.journal.transaction():
-            op = self.d.journal.op_open(OpKind.PARK, self.ws.name, bead,
-                                        {"blockers": ",".join(blockers), "why": why,
-                                         "hold": "1" if hold else "", "ref": ref or ""})
-            self.d.journal.set_state(self.ws.name, bead, BeadState.PARKING, ref=ref)
-        self.d.cp("park.intent")
-        return self.replay_park(op)
+        with self.entry():
+            j = self.d.journal
+            with j.transaction():
+                op = j.op_open(OpKind.PARK, self.ws.name, bead,
+                               {"blockers": ",".join(blockers), "why": why, "hold": "1" if hold else "",
+                                "ref": ref or ""})
+                j.set_state(self.ws.name, bead, BeadState.PARKING, ref=ref)
+            self.d.cp("park.intent")
+            return self.replay_park(op)
 
     def replay_park(self, op: Op) -> BeadState:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
         try:
-            spot = place(self.ws, self.d.beads.show(ws, bead))
             if op.step == "intent":
-                self.d.runtime.stop(spot.session_key)
+                for session in self._sessions(bead):
+                    self.d.runtime.stop(session.key)
+                self.d.cp("park.stopped!")
                 op = j.op_step(op.op_id, "stopped")
                 self.d.cp("park.stopped")
             if op.step == "stopped":
-                sha = gitwip.wip_commit(spot.worktree, op.op_id, f"parked {bead}")
+                rec = self.d.beads.show(ws, bead).record()
+                if rec is None:
+                    self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record names the worktree")
+                    return BeadState.STUCK
+                worktree = self.d.beads.verify_worktree(ws, bead, Path(rec.repo), Path(rec.worktree))
+                sha = gitwip.wip_commit(worktree, op.op_id, f"parked {bead}")
+                self.d.cp("park.committed!")
                 op = j.op_step(op.op_id, "committed", {"sha": sha})
                 self.d.cp("park.committed")
             if op.step == "committed":
                 for blocker in filter(None, op.data.get("blockers", "").split(",")):
                     self.d.beads.ensure_blocker(ws, bead, blocker)
+                self.d.cp("park.blocked!")
                 op = j.op_step(op.op_id, "blocked")
                 self.d.cp("park.blocked")
             if op.step == "blocked":
                 if op.data.get("hold"):
                     self.d.beads.ensure_label(ws, bead, HELD)
                 self.d.beads.ensure_label(ws, bead, PARKED)
+                self.d.cp("park.labelled!")
                 op = j.op_step(op.op_id, "labelled")
                 self.d.cp("park.labelled")
-            if op.step == "labelled":
-                self.d.beads.ensure_comment(ws, bead, f"{PARK_MARK}{op.op_id}", park_comment(op))
-                op = j.op_step(op.op_id, "commented")
-                self.d.cp("park.commented")
-            final = parked_state(self.d.beads.show(ws, bead))
+            self.d.beads.ensure_comment(ws, bead, f"{PARK_MARK}{op.op_id}", park_comment(op))
+            self.d.cp("park.commented!")
+            shown = self.d.beads.show(ws, bead)
+            final = parked_state(shown)
+            self._finish(op, OpStatus.DONE, final, REASONS[final], blocker_detail(shown))
+            self.d.cp("park.done")
+            return final
         except NotOurs:
-            return self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
-        except ConfigInvalid as exc:
-            return self._stuck(op, Reason.CONFIG_INVALID, str(exc))
-        except (gitwip.GitFailed, RuntimeUnavailable) as exc:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return BeadState.STUCK
+        except RecordUnreadable:
+            self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "the session record does not parse")
+            return BeadState.STUCK
+        except WorktreeConflict as exc:
+            self.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
+            return BeadState.STUCK
+        except RuntimeUnavailable:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        except gitwip.GitFailed as exc:
             if j.op_failed(op.op_id) >= self.ws.limits.park_attempts_before_human:
-                return self._stuck(op, Reason.PARK_FAILED, type(exc).__name__)
-            j.set_state(ws, bead, BeadState.PARKING, Reason.PARK_FAILED, type(exc).__name__)
+                self.escalate_from(op, Reason.PARK_FAILED, str(exc))
+                return BeadState.STUCK
+            j.set_state(ws, bead, BeadState.PARKING, Reason.PARK_FAILED, str(exc))
             return BeadState.PARKING
-        return self._finish(op, OpStatus.DONE, final, REASONS.get(final))
 
     # --- resume ---
 
-    def resume(self, bead: Bead, ref: str | None = None) -> BeadState:
-        """Resume a resumable parked bead as the same session in the same worktree."""
-        with self.d.journal.transaction():
-            op = self.d.journal.op_open(OpKind.RESUME, self.ws.name, bead.id, {"ref": ref or ""})
-            self.d.journal.set_state(self.ws.name, bead.id, BeadState.RESUMING, ref=ref)
+    def resume(self, bead: Bead, ref: str | None = None) -> Launch:
+        """Resume a resumable parked bead as its recorded session in its recorded worktree. The caller
+        (pickup) holds `entry()`."""
+        j = self.d.journal
+        with j.transaction():
+            op = j.op_open(OpKind.RESUME, self.ws.name, bead.id, {"ref": ref or ""})
+            j.set_state(self.ws.name, bead.id, BeadState.RESUMING, ref=ref)
         self.d.cp("resume.intent")
         return self.replay_resume(op)
 
-    def replay_resume(self, op: Op) -> BeadState:
+    def replay_resume(self, op: Op) -> Launch:
+        ws, bead, j = self.ws.name, op.bead, self.d.journal
+        if op.step == "intent":
+            shown = self.d.beads.show(ws, bead)
+            # `v2:parked` already gone is this operation's own unlabel, done before a crash: go on. The
+            # guard below re-checks everything that would make launching wrong.
+            if PARKED in shown.labels:
+                if NEEDS_HUMAN in shown.labels:
+                    self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.NEEDS_HUMAN)
+                    return Launch.ENDED
+                if not resumable(shown):         # it stopped being resumable meanwhile
+                    final = parked_state(shown)
+                    self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
+                    return Launch.ENDED
+                try:
+                    self.d.beads.ensure_label(ws, bead, PARKED, present=False)
+                except NotOurs:
+                    self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+                    return Launch.ENDED
+            self.d.cp("resume.unlabelled!")
+            op = j.op_step(op.op_id, "unlabelled")
+            self.d.cp("resume.unlabelled")
+        return self.launch(op)
+
+    # --- release ---
+
+    def release(self, bead: str, ref: str | None = None) -> BeadState:
+        """The operator's release of a HELD or STUCK bead (plan 6). Removes `v2:held` and `needs-human`;
+        a parked bead goes back to waiting on its blockers, any other goes on to a resume through the
+        launch guard at the next pickup. An external removal of either label never does this: the
+        journal keeps the bead HELD or STUCK until release runs."""
+        with self.entry():
+            j, ws = self.d.journal, self.ws.name
+            with j.transaction():
+                row = j.state(ws, bead)
+                if row is None or row.state not in RELEASABLE or j.op_for(ws, bead) is not None:
+                    raise NotReleasable(bead)
+                op = j.op_open(OpKind.RELEASE, ws, bead, {"ref": ref or ""})
+            self.d.cp("release.intent")
+            return self.replay_release(op)
+
+    def replay_release(self, op: Op) -> BeadState:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
         try:
-            shown = self.d.beads.show(ws, bead)
-            spot = place(self.ws, shown)
             if op.step == "intent":
-                if not resumable(shown):        # it stopped being resumable meanwhile
-                    final = parked_state(shown) if PARKED in shown.labels else BeadState.STUCK
-                    return self._finish(op, OpStatus.ABANDONED, final,
-                                        REASONS.get(final, Reason.UNEXPECTED_STATE))
-                self.d.beads.ensure_label(ws, bead, PARKED, present=False)
+                self.d.beads.ensure_label(ws, bead, HELD, present=False)
+                self.d.beads.ensure_label(ws, bead, NEEDS_HUMAN, present=False)
+                self.d.cp("release.unlabelled!")
                 op = j.op_step(op.op_id, "unlabelled")
-                self.d.cp("resume.unlabelled")
-            if op.step == "unlabelled":
-                self.d.runtime.launch(LaunchSpec(ws, bead, self.ws.coder_role, spot.profile, spot.session_key,
-                                                 spot.label, spot.worktree, resume=True,
-                                                 ref=op.data.get("ref") or None))
-                op = j.op_step(op.op_id, "launched")
-                self.d.cp("resume.launched")
+                self.d.cp("release.unlabelled")
+            shown = self.d.beads.show(ws, bead)
+            if PARKED in shown.labels:
+                final = parked_state(shown)
+                self._finish(op, OpStatus.DONE, final, REASONS[final], blocker_detail(shown))
+                self.d.cp("release.done")
+                return final
+            self._record_for_release(shown)
         except NotOurs:
-            return self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return BeadState.STUCK
         except ConfigInvalid as exc:
-            return self._stuck(op, Reason.CONFIG_INVALID, str(exc))
-        except (LaunchFailed, RuntimeUnavailable) as exc:
-            if j.op_failed(op.op_id) >= self.ws.limits.launch_failures_before_human:
-                return self._stuck(op, Reason.LAUNCH_FAILED, type(exc).__name__)
-            j.set_state(ws, bead, BeadState.RESUMING, Reason.LAUNCH_FAILED, type(exc).__name__)
-            return BeadState.RESUMING
-        return self._finish(op, OpStatus.DONE, BeadState.RUNNING)
+            self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+            return BeadState.STUCK
+        except RuntimeUnavailable:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        with j.transaction():
+            j.op_finish(op.op_id, OpStatus.DONE)
+            nxt = j.op_open(OpKind.RESUME, ws, bead, {"ref": op.data.get("ref", "")})
+            j.op_step(nxt.op_id, "unlabelled")
+            j.set_state(ws, bead, BeadState.RESUMING, ref=op.data.get("ref") or None)
+        self.d.cp("release.done")
+        return BeadState.RESUMING
 
-    def replay(self, op: Op) -> BeadState:
+    def _record_for_release(self, shown: Bead) -> None:
+        """An unparked bead resumes through the guard, which needs a launched-session record. One that
+        is missing or unreadable is replaced from the current placement, but only after every session
+        of the bead under another key is confirmed stopped: nothing unrecorded keeps running."""
+        try:
+            rec = shown.record()
+        except RecordUnreadable:
+            rec = None
+        own = self._sessions(shown.id)
+        if rec is not None and all(s.key == rec.session_key for s in own):
+            return
+        new = rec if rec is not None else record(self.ws, place(self.ws, shown))
+        for session in own:
+            if session.key != new.session_key:
+                self.d.runtime.stop(session.key)
+        self.d.cp("release.stopped!")
+        if rec is None:
+            self.d.beads.ensure_record(self.ws.name, shown.id, new)
+            self.d.cp("release.recorded!")
+
+    # --- the launch guard ---
+
+    def launch(self, op: Op, new: SessionRecord | None = None) -> Launch:
+        """The one way wsd starts or resumes a session. In order: the runtime is up and no workstream
+        hold applies; no other bead holds the coder role; the bead has no `needs-human`; btq's own
+        post-claim checks pass (ownership, routing, design approval); the bead is runnable; the launched-
+        session record is on the bead and its worktree verified; then the launch. `new` is the record a
+        pickup writes; a resume reads the record already on the bead and never recomputes it."""
+        ws, bead, j = self.ws.name, op.bead, self.d.journal
+        kind = op.kind.value
+        if not self.d.runtime.available():
+            j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
+            return Launch.WAIT
+        if set(j.holds(ws)) - GUARD_SETTLES:
+            return Launch.WAIT
+        try:
+            coder = [s for s in self._sessions() if s.role == self.ws.coder_role]
+        except RuntimeUnavailable:
+            j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
+            return Launch.WAIT
+        if any(s.bead != bead for s in coder):
+            return Launch.WAIT               # one coder session at a time (§4.3)
+        own = [s for s in coder if s.bead == bead]
+        if NEEDS_HUMAN in self.d.beads.show(ws, bead).labels:
+            self._finish(op, OpStatus.STUCK, BeadState.STUCK, Reason.NEEDS_HUMAN)
+            return Launch.ENDED
+        try:
+            shown = self.d.beads.validate(ws, bead)
+        except NotOurs:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return Launch.ENDED
+        except RoutingChanged:
+            self.escalate_from(op, Reason.ROUTING_CHANGED)
+            return Launch.ENDED
+        if HELD in shown.labels or PARKED in shown.labels or shown.open_blockers():
+            if own:
+                self.escalate_from(op, Reason.UNEXPECTED_STATE, "not runnable, but its session is listed")
+                return Launch.ENDED
+            return self._shelve(op)
+        try:
+            if new is not None:
+                self.d.beads.ensure_record(ws, bead, new)
+                self.d.cp(f"{kind}.recorded!")
+            rec = shown.record() if new is None else new
+            if rec is None:
+                self.escalate_from(op, Reason.LAUNCH_UNRECORDED)
+                return Launch.ENDED
+            worktree = self.d.beads.verify_worktree(ws, bead, Path(rec.repo), Path(rec.worktree))
+        except RecordUnreadable:
+            self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "the session record does not parse")
+            return Launch.ENDED
+        except WorktreeConflict as exc:
+            self.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
+            return Launch.ENDED
+        if any(s.liveness is not Liveness.LIVE or s.key != rec.session_key for s in own):
+            return self._uncertain(op, "a session of this bead is listed but not confirmed live")
+        if not own:
+            spec = LaunchSpec(ws, bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
+                              worktree, resume=op.kind is OpKind.RESUME, ref=op.data.get("ref") or None)
+            try:
+                self.d.runtime.launch(spec)
+            except RuntimeUnavailable:
+                j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
+                return Launch.WAIT
+            except LaunchFailed as exc:
+                if j.op_failed(op.op_id) >= self.ws.limits.launch_failures_before_human:
+                    self.escalate_from(op, Reason.LAUNCH_FAILED, str(exc))
+                    return Launch.ENDED
+                row = j.state(ws, bead)
+                j.set_state(ws, bead, row.state if row else BeadState.STUCK, Reason.LAUNCH_FAILED, str(exc))
+                return Launch.FAILED
+            except Exception as exc:  # noqa: BLE001 - any other outcome is uncertain, never a failure
+                return self._uncertain(op, type(exc).__name__)
+            self.d.cp(f"{kind}.launched!")
+        self._finish(op, OpStatus.DONE, BeadState.RUNNING)
+        self.d.cp(f"{kind}.done")
+        return Launch.LIVE if own else Launch.STARTED
+
+    def _uncertain(self, op: Op, detail: str) -> Launch:
+        """The role stays taken and the workstream holds; the next pickup's replay settles it from the
+        session list (live: done; no longer listed: launch again; still unknown: keep holding)."""
+        j = self.d.journal
+        j.hold(self.ws.name, Reason.LAUNCH_UNCERTAIN, op.bead)
+        row = j.state(self.ws.name, op.bead)
+        if row is not None:
+            j.set_state(self.ws.name, op.bead, row.state, Reason.LAUNCH_UNCERTAIN, detail)
+        return Launch.UNCERTAIN
+
+    def _shelve(self, op: Op) -> Launch:
+        """The bead stopped being runnable before its launch (a blocker, a hold or `v2:parked` appeared)
+        and has no session: it goes back to waiting, parked, with nothing to stop or commit."""
+        self.d.beads.ensure_label(self.ws.name, op.bead, PARKED)
+        self.d.cp(f"{op.kind.value}.shelved!")
+        shown = self.d.beads.show(self.ws.name, op.bead)
+        final = parked_state(shown)
+        self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
+        return Launch.ENDED
+
+    # --- dispatch ---
+
+    def replay(self, op: Op) -> None:
+        """Continue any open operation but a pickup (the scheduler owns those)."""
         if op.kind is OpKind.PARK:
-            return self.replay_park(op)
-        if op.kind is OpKind.RESUME:
-            return self.replay_resume(op)
-        raise ValueError("not a park or resume operation")
+            self.replay_park(op)
+        elif op.kind is OpKind.RESUME:
+            self.replay_resume(op)
+        elif op.kind is OpKind.RELEASE:
+            self.replay_release(op)
+        elif op.kind is OpKind.ESCALATE:
+            self.replay_escalate(op)
+        else:
+            raise ValueError("pickup operations are replayed by the scheduler")
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_park.py -q`
-Expected: `18 passed`.
+Expected: `53 passed`.
 
 - [ ] **Step 7: Lint and type-check**
 
@@ -3465,26 +4579,36 @@ Expected: `All checks passed!` and `0 errors, 0 warnings, 0 informations`.
 ```bash
 cd $HZ
 git add src/heterodyne/wsd/workstream.py src/heterodyne/wsd/park.py tests/wsd_env.py tests/test_wsd_park.py
-git commit -m "feat(wsd): journaled park and resume; wsd never unclaims"
+git commit -m "feat(wsd): journaled park, resume, release and escalation behind one lock and one launch guard"
 ```
 
 ### Task 7: Pickup ("never idle while an unblocked bead exists")
 
 **Files:**
-- Create: `$HZ/src/heterodyne/wsd/scheduler.py`
+- Create: `$HZ/src/heterodyne/wsd/sweep.py`, `$HZ/src/heterodyne/wsd/scheduler.py`
 - Modify: `$HZ/tests/wsd_env.py` (add the scheduler to the rig)
 - Test: `$HZ/tests/test_wsd_pickup.py`, `$HZ/tests/test_wsd_pause.py`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–6; in particular `Parker`, `resumable`, `place`, `Deps`, `ClaimGate`/`Paused`, `BeadsAdapter.ready/ours/read_claim`, `Journal.op_*`, `ws_state`.
+- Consumes: everything from Tasks 1–6; in particular `Parker` (`entry`, `launch`, `resume`, `replay`, `escalate`, `escalate_from`), `Launch`, `resumable`, `parked_state`, `place`, `record`, `Deps`, `ClaimGate`/`Paused`, `BeadsAdapter.ready/ours/read_claim/validate`, `Journal.op_*`, `ws_state`.
+- Produces:
+  - `heterodyne.wsd.sweep`: `KEEP = {STUCK, HELD}`, frozen `Swept(resumes=0, held=0, stopped=0)`, `sweep(parker) -> Swept` (run under `parker.entry()`; `BeadsUnavailable` and `RuntimeUnavailable` propagate).
 - Produces (`heterodyne.wsd.scheduler`):
-  - `POINTS = ("pickup.intent", "pickup.claimed", "pickup.worktree", "pickup.launched")`, `CODER_BUSY`, `SESSION_MAY_LIVE`, `RETRIED_HOLDS`.
+  - `POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed", "pickup.worktree!", "pickup.worktree", "pickup.recorded!", "pickup.launched!", "pickup.done")`, `RESUMABLE_ROWS = {PARKED, WAITING_INPUT}`, `record_from(role, op) -> SessionRecord`.
   - `class TriggerKind(StrEnum)`: `TURN_ENDED, BEAD_CLOSED, BEAD_PARKED, APPROVAL_RESOLVED, BACKSTOP, OPERATOR, STARTUP`; frozen `Trigger(kind, ref=None)` (**the plan 6 seam**: `ref` is the message behind the trigger, carried into progress events and `LaunchSpec.ref`).
   - `class Outcome(StrEnum)`: `STARTED, RESUMED, BUSY, NOTHING, HELD`.
-  - `class Scheduler(ws, deps, parker=None)` with `.lock` (one pickup, park or recovery at a time per workstream), `.parker`, `pickup(trigger) -> Outcome`, `refresh_active() -> bool`, `relaunch_if_dead(bead) -> BeadState`, `start_new(bead, ref) -> BeadState`, `replay(op) -> BeadState`.
+  - `class Scheduler(ws, deps, parker=None)` with `.parker`, `pickup(trigger) -> Outcome` (under `parker.entry()`), `publish()`, `start_new(bead, ref) -> Launch`, `resolve_claim(op) -> Op | None`, `replay(op)`, `replay_pickup(op) -> Launch`.
   - `tests/wsd_env.py`: `Rig.sched`, `Rig.pickup(kind=TriggerKind.BACKSTOP, ref=None) -> Outcome`.
 
-Pickup, under the workstream lock: hold if no runtime; replay open journals; hold while a claim is unread or actions are unreconciled; refresh the beads that hold the coder role (a session that may be live keeps it); resume resumable parked beads first; then, unless paused, try ready beads in order until one starts. The hypothesis property `test_never_idle_while_unblocked_work_exists` checks the "never idle" rule over random queues, races and faults.
+Pickup, under the operation lock: hold if no runtime; read unsettled actions (a hold the guard respects); the sweep; replay every open operation (each launch goes through the guard); report HELD while any hold is left; BUSY while the runtime lists any coder session of the workstream; then resumable parked beads first and, unless paused, ready beads in order, until one starts. A confirmed launch failure moves on to the next candidate; an uncertain one holds.
+
+The sweep (`sweep.py`, recovery step 5 too), for every bead with no open operation:
+- a session whose bead is not ours (closed, another worker's, gone) is stopped; an unconfirmed stop is STUCK `stop_unconfirmed` and retried on the next sweep;
+- a bead of ours with `needs-human` is STUCK; one with no journal row is escalated `journal_lost`; STUCK and HELD rows stay as they are;
+- a routing change escalates `routing_changed`; `v2:held` without `v2:parked`, a parked bead with a listed session, or a state beads and the journal disagree on escalates `unexpected_state`;
+- a RUNNING bead with no readable record escalates `launch_unrecorded`; one whose sessions are all gone gets a resume operation at `unlabelled` (RESUMING `session_dead`), which the guard carries out.
+
+The hypothesis property `test_never_idle_while_an_unblocked_bead_exists` checks the "never idle" rule over random queues, races and per-bead faults (including uncertain launches), with an oracle that reads only the fake queue and the fake runtime: never more than one coder session; STARTED, RESUMED and BUSY mean exactly one; HELD means a recorded hold; NOTHING means no ready bead and no coder session.
 
 - [ ] **Step 1: Add the scheduler to the rig in `$HZ/tests/wsd_env.py`**
 
@@ -3513,7 +4637,7 @@ from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSpec
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
-from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place
+from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
@@ -3559,13 +4683,21 @@ class Rig:
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 
     def start(self, bead: str) -> None:
-        """What a pickup does for one bead, without the pickup journal: claim, worktree, launch."""
+        """What a pickup does for one bead, without the pickup op: claim, worktree, record, launch."""
         self.gate.claim(WS, bead)
         spot = place(self.ws, self.beads.show(WS, bead))
         self.beads.worktree(WS, bead, spot.repo)
+        self.beads.ensure_record(WS, bead, record(self.ws, spot))
         self.runtime.launch(LaunchSpec(WS, bead, self.ws.coder_role, spot.profile, spot.session_key,
                                        spot.label, spot.worktree, resume=False))
-        self.journal.set_state(WS, bead, BeadState.RUNNING)
+        for step in (BeadState.CLAIMING, BeadState.STARTING, BeadState.RUNNING):
+            self.journal.set_state(WS, bead, step)
+
+    def key(self, bead: str) -> str:
+        """The coder session key of a started bead, from its launched-session record."""
+        found = self.beads.show(WS, bead).record()
+        assert found is not None
+        return found.session_key
 
     def replay_open(self) -> None:
         for op in self.journal.ops_open(WS):
@@ -3592,20 +4724,21 @@ def make_rig(tmp_path: Path, cp: Checkpoint | None = None, limits: Limits | None
 - [ ] **Step 2: Create `$HZ/tests/test_wsd_pickup.py`**
 
 ```python
+import threading
 from pathlib import Path
 
 import pytest
-from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
+from fakes.checkpoints import CrashAt, Many, PauseAt, Recorder, SimulatedCrash
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from wsd_env import WS, Rig, make_rig
 
 from heterodyne.wsd import ids
-from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED, BeadsUnavailable
+from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, BeadsUnavailable
 from heterodyne.wsd.runtime import Liveness
 from heterodyne.wsd.scheduler import POINTS, Outcome
 from heterodyne.wsd.states import Reason, WsState
-from heterodyne.wsd.workstream import Limits
+from heterodyne.wsd.workstream import Limits, WorkstreamSettings
 
 
 def test_clean_pickup_passes_every_point_once(tmp_path: Path) -> None:
@@ -3613,7 +4746,7 @@ def test_clean_pickup_passes_every_point_once(tmp_path: Path) -> None:
     rig.world.add("btq-1", title="Do   the\nthing")
     assert rig.pickup(ref="msg-1") is Outcome.STARTED
     assert isinstance(rig.cp, Recorder)
-    assert [p for p in rig.cp.seen if p.startswith("pickup.")] == list(POINTS)
+    assert [p for p in rig.cp.seen if p in POINTS] == list(POINTS)
     [spec] = rig.runtime.launches
     assert spec.session_key == ids.role_session("btq-1", "coder", "p-one")
     assert spec.label == "btq-1 · coder · Do the thing"
@@ -3701,16 +4834,128 @@ def test_unknown_repository_is_stuck_not_guessed(tmp_path: Path) -> None:
     assert rig.runtime.launches == []
 
 
-def test_launch_failures_escalate_after_limit(tmp_path: Path) -> None:
+def test_confirmed_launch_failure_tries_the_next_candidate(tmp_path: Path) -> None:
+    """Finding 16: a launch the runtime confirms never started frees the role, so the next ready bead is
+    tried in the same pickup. The failed one keeps its operation and is retried by later pickups until its
+    budget runs out."""
     rig = make_rig(tmp_path, limits=Limits(launch_failures_before_human=2))
     rig.world.add("btq-1")
     rig.world.add("btq-2")
-    rig.runtime.launch_failures = 2
-    assert rig.pickup() is Outcome.STARTED          # STARTING, retried on the next trigger
-    assert rig.state("btq-1") == "starting"
-    assert rig.pickup() is Outcome.STARTED          # second failure: stuck; then btq-2 starts
-    assert rig.state("btq-1") == "stuck" and rig.state("btq-2") == "running"
-    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    rig.runtime.failing_beads.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.runtime.coders() == ["btq-2"]
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (row.state.value, row.reason) == ("starting", Reason.LAUNCH_FAILED)
+    assert rig.pickup() is Outcome.BUSY             # btq-1's replay waits: btq-2 holds the role
+    rig.world.close("btq-2")
+    rig.pickup()                                    # second failure: btq-1 escalates
+    assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+
+
+def test_uncertain_launch_keeps_the_role_and_holds(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.runtime.launch_uncertain = 1
+    assert rig.pickup() is Outcome.HELD
+    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"}
+    assert rig.world.claims == ["btq-1"] and rig.runtime.coders() == ["btq-1"]
+    assert rig.pickup() is Outcome.HELD             # still listed as unknown: nothing else is tried
+    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
+    assert rig.pickup() is Outcome.BUSY
+    assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
+    assert rig.world.claims == ["btq-1"] and len(rig.runtime.launches) == 1
+
+
+def test_no_runtime_never_spends_launch_budget(tmp_path: Path) -> None:
+    """Finding 10: a runtime that went away after the claim is a hold. The pickup waits at its worktree
+    step, with no failure counted and no `needs-human`, and launches once the runtime is back."""
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.worktree"), limits=Limits(launch_failures_before_human=1))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.restart()
+    rig.runtime.up = False
+    for _ in range(3):
+        assert rig.pickup() is Outcome.HELD
+    [op] = rig.journal.ops_open()
+    assert op.attempts == 0 and NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    rig.runtime.up = True
+    assert rig.pickup() is Outcome.BUSY
+    assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
+
+
+@pytest.mark.parametrize("change", ["routing", "design"])
+def test_replayed_pickup_revalidates_before_launch(tmp_path: Path, change: str) -> None:
+    """Findings 5 and 6: between the claim and a replayed launch the bead moved to another workstream or
+    lost its design approval. The guard's re-run of btq's checks refuses, and a human decides."""
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.worktree"))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    bead = rig.world.beads["btq-1"]
+    if change == "routing":
+        bead.labels.remove("ws:alpha")
+    else:
+        bead.metadata["design_approval"] = "approval-revoked"
+    rig.restart()
+    rig.pickup()
+    assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in bead.labels
+    assert rig.runtime.launches == []
+
+
+def test_replayed_pickup_launches_what_it_chose(tmp_path: Path) -> None:
+    """Finding 4: the default profile changed between the worktree step and the replay. The launch is the
+    one the pickup journaled, recorded on the bead before it starts."""
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.worktree"))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.ws = WorkstreamSettings(WS, rig.ws.repos, "coder", "p-two", rig.ws.profiles, rig.ws.limits)
+    rig.restart()
+    rig.pickup()
+    [spec] = rig.runtime.launches
+    assert spec.profile == "p-one" and spec.session_key == ids.role_session("btq-1", "coder", "p-one")
+    rec = rig.beads.show(WS, "btq-1").record()
+    assert rec is not None and rec.session_key == spec.session_key
+
+
+def test_crash_between_worktree_and_provenance_escalates(tmp_path: Path) -> None:
+    """btq made the worktree but died before writing its provenance note. The path is never trusted or
+    reused: the bead is escalated and nothing is launched in it."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.fault("worktree", RuntimeError("killed"), after=True)
+    assert rig.pickup() is Outcome.HELD             # the worktree call's outcome is unknown
+    assert rig.pickup() is Outcome.NOTHING          # replayed: the path exists without provenance
+    assert rig.state("btq-1") == "stuck"
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.WORKTREE_FAILED
+    assert rig.runtime.launches == []
+
+
+def test_unsettled_action_blocks_a_replayed_launch(tmp_path: Path) -> None:
+    """Finding 8: a hold stops every launch, replays included. A running bead whose session died is not
+    relaunched while an action is unsettled."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.pickup()
+    rig.runtime.end(rig.key("btq-1"))
+    rig.world.add("btq-ap", labels=["kind:approval"], metadata={"action_state": "executing"})
+    assert rig.pickup() is Outcome.HELD
+    assert len(rig.runtime.launches) == 1 and rig.runtime.coders() == []
+    rig.world.beads["btq-ap"].metadata["action_state"] = "succeeded"
+    assert rig.pickup() is Outcome.BUSY
+    assert [s.resume for s in rig.runtime.launches] == [False, True]
+
+
+def test_closed_bead_with_an_unsettled_action_holds(tmp_path: Path) -> None:
+    """Finding 9: closing a bead says nothing about its action."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-ap", labels=["kind:approval"], status="closed", metadata={"action_state": "uncertain"})
+    assert rig.pickup() is Outcome.HELD
+    assert rig.journal.holds(WS) == {Reason.ACTIONS_UNRECONCILED: "btq-ap"}
 
 
 def test_no_runtime_holds_without_claiming(tmp_path: Path) -> None:
@@ -3748,30 +4993,32 @@ def test_one_coder_session_at_a_time(tmp_path: Path) -> None:
         rig.world.add(f"btq-{n}")
     assert rig.pickup() is Outcome.STARTED
     assert rig.pickup() is Outcome.BUSY
-    assert len(rig.runtime.live()) == 1
-    rig.world.close("btq-0")
-    assert rig.pickup() is Outcome.STARTED
-    assert rig.state("btq-0") == "closed" and len(rig.runtime.live()) == 1
+    assert rig.runtime.coders() == ["btq-0"]
+    rig.world.close("btq-0")                        # the agent closed it; its session is still listed
+    assert rig.pickup() is Outcome.STARTED          # the sweep stopped it first
+    assert rig.state("btq-0") == "closed" and rig.runtime.coders() == ["btq-1"]
 
 
 def test_lost_claim_stops_the_session(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.pickup()
-    rig.world.beads["btq-1"].assignee = "bel:host:recovery"
+    rig.world.beads["btq-1"].assignee = "someone:host:recovery"
     rig.pickup()
     assert rig.state("btq-1") == "stuck"
-    assert rig.runtime.live() == []
+    assert rig.runtime.coders() == []
 
 
 def test_dead_session_is_relaunched_as_the_same_session(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
+    rig.world.add("btq-2")
     rig.pickup()
-    key = rig.runtime.launches[0].session_key
-    rig.runtime.sessions[key] = Liveness.DEAD
-    assert rig.pickup() is Outcome.BUSY
+    key = rig.key("btq-1")
+    rig.runtime.end(key)
+    assert rig.pickup() is Outcome.BUSY             # resumed before any new work
     assert [(s.session_key, s.resume) for s in rig.runtime.launches] == [(key, False), (key, True)]
+    assert rig.world.claims == ["btq-1"]
 
 
 def test_unknown_liveness_never_starts_a_second_session(tmp_path: Path) -> None:
@@ -3779,21 +5026,34 @@ def test_unknown_liveness_never_starts_a_second_session(tmp_path: Path) -> None:
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     rig.pickup()
-    rig.runtime.sessions[rig.runtime.launches[0].session_key] = Liveness.UNKNOWN
+    rig.runtime.set(rig.key("btq-1"), Liveness.UNKNOWN)
     assert rig.pickup() is Outcome.BUSY
-    assert rig.world.claims == ["btq-1"]
+    assert rig.world.claims == ["btq-1"] and len(rig.runtime.launches) == 1
 
 
 # --- never idle while an unblocked bead exists ---
 
-KINDS = ("ok", "lost_race", "bad_repo", "launch_fails", "uncertain_landed", "uncertain_missed",
-         "blocked", "closed_blocker")
+KINDS = ("ok", "lost_race", "bad_repo", "launch_fails", "launch_uncertain", "uncertain_landed",
+         "uncertain_missed", "blocked", "closed_blocker")
+
+
+def settle(rig: Rig) -> None:
+    """What the world does between triggers: an uncertain launch turns out live, and every bead with a
+    live session is finished and closed by its agent."""
+    for key, session in list(rig.runtime.listed.items()):
+        if session.liveness is Liveness.UNKNOWN:
+            rig.runtime.set(key, Liveness.LIVE)
+    for key in rig.runtime.live():
+        rig.world.close(rig.runtime.listed[key].bead)
 
 
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(st.lists(st.sampled_from(KINDS), min_size=0, max_size=6))
 def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.TempPathFactory,
                                                     kinds: list[str]) -> None:
+    """The oracle, per pickup: STARTED, RESUMED and BUSY each mean exactly one coder session is listed;
+    HELD means a hold names why; NOTHING means no ready bead is left and no coder runs. Faults are scoped
+    to their bead, so one bead's trouble never hides another's."""
     rig = make_rig(tmp_path_factory.mktemp("never-idle"))
     rig.world.add("btq-zz-blocker")
     rig.world.beads["btq-zz-blocker"].labels.remove("agent:wsd")      # someone else's bead
@@ -3810,26 +5070,35 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
         elif kind == "lost_race":
             rig.world.stolen.add(bead)
         elif kind == "launch_fails":
-            rig.runtime.launch_failures += 1
+            rig.runtime.failing_beads.add(bead)
+        elif kind == "launch_uncertain":
+            rig.runtime.launch_uncertain += 1
         elif kind == "uncertain_landed":
-            rig.world.fault("claim", RuntimeError("timeout"), after=True)
+            rig.world.fault("claim", RuntimeError("timeout"), after=True, bead=bead)
         elif kind == "uncertain_missed":
-            rig.world.fault("claim", RuntimeError("timeout"))
-    # Every bead that finishes is closed by its agent; pickup runs on each trigger.
-    for _ in range(4 * len(kinds) + 4):
+            rig.world.fault("claim", RuntimeError("timeout"), bead=bead)
+    for _ in range(6 * len(kinds) + 6):
         outcome = rig.pickup()
-        assert len(rig.runtime.live()) <= 1
-        if outcome is Outcome.NOTHING:
-            assert rig.world.ready_for(WS) == []           # idle only when nothing is ready
-            assert rig.runtime.live() == []
-            break
-        assert outcome in (Outcome.STARTED, Outcome.BUSY, Outcome.RESUMED, Outcome.HELD)
-        for key in rig.runtime.live():
-            bead = next(s.bead for s in rig.runtime.launches if s.session_key == key)
-            rig.world.close(bead)
+        coders = rig.runtime.coders()
+        assert len(coders) <= 1
+        if outcome in (Outcome.STARTED, Outcome.RESUMED, Outcome.BUSY):
+            assert len(coders) == 1
+        elif outcome is Outcome.HELD:
+            assert rig.journal.holds(WS)
+        else:
+            assert outcome is Outcome.NOTHING
+            assert rig.world.ready_for(WS) == [] and coders == []
+            if not rig.journal.ops_open():
+                break
+        settle(rig)
     else:
         pytest.fail("pickup never settled")
     assert "btq-zz-blocker" not in rig.world.claims
+    for n, kind in enumerate(kinds):
+        expected = {"ok": "closed", "closed_blocker": "closed", "launch_uncertain": "closed",
+                    "uncertain_landed": "closed", "uncertain_missed": "closed", "lost_race": "dropped",
+                    "bad_repo": "stuck", "launch_fails": "stuck", "blocked": None}[kind]
+        assert rig.state(f"btq-{n}") == expected, (n, kind)
 
 
 # --- parked beads in pickup (§5.2: resumable before ready; a parked bead never pre-empts) ---
@@ -3875,11 +5144,13 @@ def test_held_bead_is_skipped_by_pickup(tmp_path: Path) -> None:
     assert [s.resume for s in rig.runtime.launches] == [False]
 
 
-def test_dead_session_of_parked_bead_is_left_alone(tmp_path: Path) -> None:
+def test_parked_bead_with_a_listed_session_is_escalated(tmp_path: Path) -> None:
+    """Beads say parked, the runtime lists a session of it: never resumed or guessed at."""
     rig = parked_rig(tmp_path)
-    rig.runtime.sessions[rig.runtime.launches[0].session_key] = Liveness.DEAD
-    rig.pickup()
-    assert len(rig.runtime.launches) == 1
+    rig.runtime.adopt(rig.runtime.launches[0])
+    rig.world.add("btq-3")
+    assert rig.pickup() is Outcome.BUSY             # the listed session keeps the role
+    assert rig.state("btq-1") == "stuck" and rig.world.claims == ["btq-1"]
 
 
 def test_pickup_replays_an_interrupted_park(tmp_path: Path) -> None:
@@ -3896,35 +5167,34 @@ def test_pickup_replays_an_interrupted_park(tmp_path: Path) -> None:
 
 
 def test_unconfirmed_park_stop_keeps_the_coder_role(tmp_path: Path) -> None:
-    """A park that could not confirm its session stopped, and the stuck bead it escalates to, keep the
-    coder role until the runtime reports that session dead: never two coder sessions at once."""
-    rig = make_rig(tmp_path, limits=Limits(park_attempts_before_human=2))
+    """A park that can't confirm its session stopped holds the workstream (no budget, no `needs-human`):
+    the session keeps the coder role and no new work is claimed until the stop is confirmed."""
+    rig = make_rig(tmp_path, limits=Limits(park_attempts_before_human=1))
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     rig.world.beads["btq-2"].labels.remove("agent:wsd")
     rig.pickup()
-    key = rig.runtime.launches[0].session_key
-    rig.runtime.stop_failures = 5
+    rig.runtime.stop_failures = 3
     rig.parker.park("btq-1", ("btq-2",))
     rig.world.add("btq-3")
-    assert rig.pickup() is Outcome.BUSY             # PARKING, stop unconfirmed
-    assert rig.state("btq-1") == "stuck"            # the replay inside that pickup escalated it
-    assert rig.pickup() is Outcome.BUSY             # still stuck, session still live
-    assert rig.world.claims == ["btq-1"]
-    rig.runtime.sessions[key] = Liveness.DEAD
-    assert rig.pickup() is Outcome.STARTED
-    assert rig.world.claims == ["btq-1", "btq-3"]
+    for _ in range(2):
+        assert rig.pickup() is Outcome.HELD
+        assert rig.state("btq-1") == "parking" and rig.runtime.coders() == ["btq-1"]
+    assert rig.world.claims == ["btq-1"] and NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    assert rig.pickup() is Outcome.STARTED          # the third stop is confirmed; the park completes
+    assert rig.state("btq-1") == "parked" and rig.world.claims == ["btq-1", "btq-3"]
 
 
-def test_stuck_bead_whose_repo_vanished_keeps_its_live_session_counted(tmp_path: Path) -> None:
+def test_config_change_never_touches_a_running_bead(tmp_path: Path) -> None:
+    """The bead's repo metadata now names a repository wsd doesn't know. The running session was placed
+    from its record, so nothing about it changes."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.pickup()
     rig.world.beads["btq-1"].metadata["repo"] = "gone"
     rig.world.add("btq-2")
     assert rig.pickup() is Outcome.BUSY
-    assert rig.state("btq-1") == "stuck"
-    assert rig.world.claims == ["btq-1"]
+    assert rig.state("btq-1") == "running" and rig.world.claims == ["btq-1"]
 
 
 def test_closed_bead_with_unconfirmed_stop_keeps_the_role(tmp_path: Path) -> None:
@@ -3935,15 +5205,85 @@ def test_closed_bead_with_unconfirmed_stop_keeps_the_role(tmp_path: Path) -> Non
     rig.world.add("btq-2")
     rig.runtime.stop_failures = 1
     assert rig.pickup() is Outcome.BUSY
-    assert rig.state("btq-1") == "running"
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (row.state.value, row.reason) == ("stuck", Reason.STOP_UNCONFIRMED)
     assert rig.pickup() is Outcome.STARTED          # the retried stop is confirmed
     assert rig.state("btq-1") == "closed"
     assert rig.world.claims == ["btq-1", "btq-2"]
+
+
+class DoorWatch(Recorder):
+    """Signals when the thread named `who` reaches the operation lock's door."""
+
+    def __init__(self, who: str) -> None:
+        super().__init__()
+        self.who = who
+        self.reached = threading.Event()
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        if name == "lock.waiting" and threading.current_thread().name == self.who:
+            self.reached.set()
+
+
+def test_pickup_waits_at_the_door_while_a_park_runs(tmp_path: Path) -> None:
+    """Finding 13: a park has stopped the session (the coder role looks free) but not yet labelled the
+    bead. A pickup arriving now waits on the operation lock; it never claims in that window."""
+    pause, door = PauseAt("park.stopped!"), DoorWatch("pickup")
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    rig.pickup()
+    rig.world.add("btq-3")
+    rig.restart(Many(pause, door))
+    parker = threading.Thread(target=lambda: rig.parker.park("btq-1", ("btq-2",)), name="park")
+    parker.start()
+    assert pause.reached.wait(5)
+    outcome: list[Outcome] = []
+    picker = threading.Thread(target=lambda: outcome.append(rig.pickup()), name="pickup")
+    picker.start()
+    assert door.reached.wait(5)
+    assert outcome == [] and rig.world.claims == ["btq-1"] and rig.runtime.coders() == []
+    pause.go.set()
+    parker.join(5)
+    picker.join(5)
+    assert outcome == [Outcome.STARTED]
+    assert rig.state("btq-1") == "parked" and rig.world.claims == ["btq-1", "btq-3"]
+
+
+def test_external_label_removal_is_not_a_release(tmp_path: Path) -> None:
+    """Someone removed `v2:held` by hand. The journal still says HELD; nothing resumes until release."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.pickup()
+    rig.parker.park("btq-1", (), why="operator /stop", hold=True)
+    rig.world.beads["btq-1"].labels.remove(HELD)
+    assert rig.pickup() is Outcome.NOTHING
+    assert rig.state("btq-1") == "held"
+    assert [s.resume for s in rig.runtime.launches] == [False]
+
+
+def test_uncertain_hold_ends_with_its_operation(tmp_path: Path) -> None:
+    """The uncertain launch's bead was closed meanwhile: the replay finds the claim gone and ends the
+    operation, and the hold goes with it. The listed session is the sweep's to stop."""
+    rig = parked_rig(tmp_path)
+    rig.world.close("btq-2")
+    rig.runtime.launch_uncertain = 1
+    assert rig.pickup() is Outcome.HELD           # the resume's launch is uncertain
+    rig.world.close("btq-1")
+    for op in rig.journal.ops_open():
+        rig.parker.replay(op)
+    assert rig.journal.ops_open() == [] and rig.journal.holds(WS) == {}
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.CLAIM_LOST
+    assert rig.pickup() is Outcome.NOTHING
+    assert rig.runtime.coders() == [] and rig.state("btq-1") == "closed"
 ```
 
 - [ ] **Step 3: Create `$HZ/tests/test_wsd_pause.py`**
 
-These force the §4.3 interleavings with `PauseAt`: a direct `btq pause` after listing, and a `wsctl`-style pause racing an in-flight claim.
+These force the §4.3 interleavings with `PauseAt`: a direct `btq pause` after listing, and a `wsctl`-style pause racing an in-flight claim. The racing pause is shown to have reached its lock attempt (`Seen('gate.pause.waiting')`) before the test checks it is not yet acknowledged.
 
 ```python
 """Pause at the pickup level (ADR 0001 §4.3): it stops new claims only, and an acknowledged pause is
@@ -3952,7 +5292,7 @@ never followed by a claim. Interleavings are forced with checkpoints."""
 import threading
 from pathlib import Path
 
-from fakes.checkpoints import PauseAt
+from fakes.checkpoints import Many, PauseAt, Seen
 from wsd_env import WS, make_rig
 
 from heterodyne.wsd.scheduler import Outcome
@@ -3989,7 +5329,8 @@ def test_pause_waits_for_in_flight_claim(tmp_path: Path) -> None:
     """The claim has passed the flag check when the operator pauses. The pause is not acknowledged until
     that claim is done, and after the acknowledgement no claim starts."""
     cp = PauseAt("gate.checked")
-    rig = make_rig(tmp_path, cp=cp)
+    door = Seen("gate.pause.waiting")
+    rig = make_rig(tmp_path, cp=Many(cp, door))
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     outcome: list[Outcome] = []
@@ -3999,7 +5340,8 @@ def test_pause_waits_for_in_flight_claim(tmp_path: Path) -> None:
     acked = threading.Event()
     pauser = threading.Thread(target=lambda: (rig.gate.pause(WS), acked.set()))
     pauser.start()
-    assert not acked.wait(0.3)              # blocked on the claim lock
+    assert door.reached.wait(5)             # the pauser is at the claim lock's door, which the claim holds
+    assert not acked.is_set()
     cp.go.set()
     picker.join(5)
     pauser.join(5)
@@ -4037,31 +5379,186 @@ def test_pause_does_not_stop_a_resume(tmp_path: Path) -> None:
 Run: `cd $HZ && uv run pytest tests/test_wsd_pickup.py tests/test_wsd_pause.py -q`
 Expected: FAIL: `ModuleNotFoundError: No module named 'heterodyne.wsd.scheduler'`.
 
-- [ ] **Step 5: Create `$HZ/src/heterodyne/wsd/scheduler.py`**
+- [ ] **Step 5: Create `$HZ/src/heterodyne/wsd/sweep.py`**
+
+The sweep reconciles beads, sessions and the journal. Pickup runs it on every call and recovery runs it as its step 5.
+
+```python
+"""Reconcile beads, sessions and the journal (ADR 0001 §4.3, §10): recovery's step 5, and the first
+thing every pickup does. The sweep never launches; it stops what must not run, records what beads say,
+and hands a dead recorded session to the launch guard as a resume operation.
+
+Only beads with no open operation are swept: an open operation's replay owns its bead.
+
+- A listed session whose bead is not ours (closed, claimed by another worker, gone) is stopped. If the
+  stop can't be confirmed the bead is STUCK with STOP_UNCONFIRMED and the next sweep tries again; the
+  session keeps the coder role until it is gone.
+- A bead of ours is checked against its row: `needs-human` is STUCK; no row (a lost journal) is held as
+  JOURNAL_LOST; STUCK and HELD rows stay so until the operator's release; a status, label or row that
+  doesn't fit is escalated as UNEXPECTED_STATE; btq's post-claim checks must still pass.
+- A RUNNING bead with no session and a readable record gets a resume operation at `unlabelled` (it was
+  never parked). With no readable record, or with a session under another key, it is escalated.
+"""
+
+from collections import defaultdict
+from dataclasses import dataclass
+
+from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, Bead, NotOurs, RecordUnreadable, RoutingChanged
+from heterodyne.wsd.journal import OpKind
+from heterodyne.wsd.park import REASONS, Parker, blocker_detail, parked_state
+from heterodyne.wsd.runtime import RuntimeUnavailable, Session
+from heterodyne.wsd.states import TERMINAL, WAITING, BeadState, Reason
+
+KEEP = frozenset({BeadState.STUCK, BeadState.HELD})     # only the operator's release moves these on
+
+
+@dataclass(frozen=True)
+class Swept:
+    resumes: int = 0         # dead sessions handed to the guard as resume operations
+    held: int = 0            # beads escalated because beads and the journal disagree
+    stopped: int = 0         # sessions stopped because their bead is not ours
+
+
+def sweep(parker: Parker) -> Swept:
+    """Run under `parker.entry()`. BeadsUnavailable and RuntimeUnavailable propagate: the caller holds."""
+    return _Sweep(parker).run()
+
+
+class _Sweep:
+    def __init__(self, parker: Parker) -> None:
+        self.p = parker
+        self.d = parker.d
+        self.j = parker.d.journal
+        self.name = parker.ws.name
+        self.held = 0
+        self.stopped = 0
+        self.resumes = 0
+
+    def run(self) -> Swept:
+        d, j, name = self.d, self.j, self.name
+        ours = {b.id: b for b in d.beads.ours(name)}
+        by_bead: dict[str, list[Session]] = defaultdict(list)
+        for session in d.runtime.sessions(name):
+            by_bead[session.bead].append(session)
+        for bead, sessions in sorted(by_bead.items()):
+            if bead not in ours and j.op_for(name, bead) is None:
+                self._not_ours(bead, sessions)
+        for row in j.states(name):
+            if (row.state not in TERMINAL and row.state not in KEEP and row.bead not in ours
+                    and row.bead not in by_bead and j.op_for(name, row.bead) is None):
+                self._not_ours(row.bead, [])
+        for bead in sorted(ours.values(), key=lambda b: b.id):
+            if j.op_for(name, bead.id) is None:
+                self._ours(bead, by_bead.get(bead.id, []))
+        return Swept(self.resumes, self.held, self.stopped)
+
+    def _not_ours(self, bead: str, sessions: list[Session]) -> None:
+        """Nothing runs without our claim: stop the bead's sessions, then record what beads say."""
+        confirmed = True
+        for session in sessions:
+            try:
+                self.d.runtime.stop(session.key)
+                self.stopped += 1
+            except RuntimeUnavailable:
+                confirmed = False
+        if not confirmed:
+            self.j.adopt(self.name, bead, BeadState.STUCK, Reason.STOP_UNCONFIRMED)
+        elif not self.d.beads.exists(self.name, bead):
+            self.j.adopt(self.name, bead, BeadState.DROPPED, Reason.CLAIM_LOST, "the bead no longer exists")
+        elif self.d.beads.show(self.name, bead).status == "closed":
+            self.j.adopt(self.name, bead, BeadState.CLOSED)
+        elif self.j.state(self.name, bead) is not None:
+            self.j.adopt(self.name, bead, BeadState.STUCK, Reason.CLAIM_LOST)
+
+    def _hold(self, bead: Bead, reason: Reason, detail: str = "") -> None:
+        self.held += 1
+        self.p.escalate(bead.id, reason, detail)
+
+    def _ours(self, bead: Bead, sessions: list[Session]) -> None:
+        j, name = self.j, self.name
+        row = j.state(name, bead.id)
+        if NEEDS_HUMAN in bead.labels:
+            if row is None or row.state is not BeadState.STUCK:
+                j.adopt(name, bead.id, BeadState.STUCK, Reason.NEEDS_HUMAN)
+            return
+        if row is None:
+            self._hold(bead, Reason.JOURNAL_LOST, "claimed by this workstream, with no journal record")
+            return
+        if row.state in KEEP:
+            return
+        if bead.status != "in_progress":
+            self._hold(bead, Reason.UNEXPECTED_STATE, f"claimed with status {bead.status}")
+            return
+        try:
+            self.d.beads.validate(name, bead.id)
+        except RoutingChanged:
+            self._hold(bead, Reason.ROUTING_CHANGED)
+            return
+        except NotOurs:
+            j.adopt(name, bead.id, BeadState.STUCK, Reason.CLAIM_LOST)
+            return
+        if HELD in bead.labels and PARKED not in bead.labels:
+            self._hold(bead, Reason.UNEXPECTED_STATE, "v2:held without v2:parked")
+        elif PARKED in bead.labels:
+            if sessions:
+                self._hold(bead, Reason.UNEXPECTED_STATE, "parked, but a session is listed")
+            elif row.state in WAITING:
+                state = parked_state(bead)
+                if (row.state, row.detail) != (state, blocker_detail(bead)):
+                    j.adopt(name, bead.id, state, REASONS[state], blocker_detail(bead))
+            else:
+                self._hold(bead, Reason.UNEXPECTED_STATE, f"parked, but the journal says {row.state.value}")
+        elif row.state is not BeadState.RUNNING:
+            self._hold(bead, Reason.UNEXPECTED_STATE, f"running, but the journal says {row.state.value}")
+        else:
+            self._running(bead, sessions)
+
+    def _running(self, bead: Bead, sessions: list[Session]) -> None:
+        """A recorded running bead: its session runs on, or it gets a resume operation for the guard."""
+        try:
+            rec = bead.record()
+        except RecordUnreadable:
+            rec = None
+        if rec is None:
+            self._hold(bead, Reason.LAUNCH_UNRECORDED)
+        elif any(s.key != rec.session_key for s in sessions):
+            self._hold(bead, Reason.UNEXPECTED_STATE, "a session not in its record is listed")
+        elif not sessions:
+            with self.j.transaction():
+                op = self.j.op_open(OpKind.RESUME, self.name, bead.id, {"ref": ""})
+                self.j.op_step(op.op_id, "unlabelled")      # never parked: nothing to unlabel
+                self.j.set_state(self.name, bead.id, BeadState.RESUMING, Reason.SESSION_DEAD)
+            self.resumes += 1
+```
+
+- [ ] **Step 6: Create `$HZ/src/heterodyne/wsd/scheduler.py`**
 
 ```python
 """Deterministic pickup (ADR 0001 §5.2) for one workstream, and the pickup journal (§4.3).
 
-On every trigger (a turn ends, a bead closes or parks, an approval resolves, the 60s backstop), with the
-workstream lock held:
-1. replay any open pickup, park or resume journal;
-2. refresh the beads wsd thinks are active, against beads and the runtime;
-3. if the coder role is free: resumable parked beads first, then new ready work, trying each candidate
-   in turn until one starts or none is left. That loop is the "never idle while an unblocked bead
-   exists" rule: a refused, lost or failed candidate never ends pickup while another one remains.
+On every trigger (a turn ends, a bead closes or parks, an approval resolves, the 60s backstop), under
+the workstream's operation lock (`Parker.entry`):
+1. the runtime must be available, or the workstream holds (no failure budget, no `needs-human`);
+2. unsettled actions are found (closed beads included); any hold the launch guard respects;
+3. the sweep (`sweep.py`) reconciles beads, sessions and the journal: sessions of beads no longer ours
+   are stopped, and a running bead whose session is gone gets a resume operation;
+4. every open operation is replayed: park, release and escalation finish; pickup and resume reach the
+   launch guard, which refuses while any hold applies;
+5. any hold left: pickup reports HELD;
+6. the coder role is taken if the runtime lists any coder session of the workstream, live or unknown;
+7. otherwise resumable parked beads first, then new ready work, trying each candidate in turn until one
+   starts. A refused claim, a lost claim or a confirmed launch failure moves on to the next candidate
+   (the "never idle while an unblocked bead exists" rule); an uncertain launch keeps the role and holds.
 
-New work is journaled: intent, claim (inside the claim gate), worktree, launch. A claim with an uncertain
-outcome is read back before anything else; while it can't be read back, the workstream is held.
+New work is journaled: intent, claim (inside the claim gate), worktree, then the launch guard, which
+writes the launched-session record before launching. A claim with an uncertain outcome is read back
+before anything else; while it can't be read back, the workstream is held.
 """
 
-import threading
 from dataclasses import dataclass
 from enum import StrEnum
 
-from heterodyne.wsd import ids
 from heterodyne.wsd.beads import (
-    NEEDS_HUMAN,
-    PARKED,
     Bead,
     BeadsUnavailable,
     ClaimRefused,
@@ -4069,22 +5566,20 @@ from heterodyne.wsd.beads import (
     ClaimView,
     NotOurs,
     RoutingChanged,
+    SessionRecord,
     WorktreeConflict,
 )
 from heterodyne.wsd.gate import Paused
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
-from heterodyne.wsd.park import Parker, resumable
-from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, RuntimeUnavailable
+from heterodyne.wsd.park import Launch, Parker, resumable
+from heterodyne.wsd.runtime import RuntimeUnavailable
 from heterodyne.wsd.states import BeadState, Reason, ws_state
-from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place
+from heterodyne.wsd.sweep import sweep
+from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place, record
 
-POINTS = ("pickup.intent", "pickup.claimed", "pickup.worktree", "pickup.launched")
-CODER_BUSY = frozenset({BeadState.CLAIMING, BeadState.STARTING, BeadState.RUNNING, BeadState.RESUMING})
-# A park that has not confirmed its stop, or a stuck bead, may still have a live coder session.
-SESSION_MAY_LIVE = frozenset({BeadState.PARKING, BeadState.STUCK})
-# Holds that pickup re-checks itself each time; any other hold needs recovery or the operator.
-RETRIED_HOLDS = frozenset({Reason.BEADS_UNREACHABLE, Reason.RUNTIME_UNAVAILABLE, Reason.CLAIM_UNCERTAIN,
-                           Reason.ACTIONS_UNRECONCILED})
+POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed",
+          "pickup.worktree!", "pickup.worktree", "pickup.recorded!", "pickup.launched!", "pickup.done")
+RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 
 
 class TriggerKind(StrEnum):
@@ -4106,7 +5601,7 @@ class Trigger:
 class Outcome(StrEnum):
     STARTED = "started"          # new work claimed and launched
     RESUMED = "resumed"          # a parked bead resumed
-    BUSY = "busy"                # the coder role already has a bead
+    BUSY = "busy"                # the coder role already has a session
     NOTHING = "nothing"          # nothing is ready and nothing is resumable
     HELD = "held"                # pickup is held (see the workstream's holds)
 
@@ -4116,22 +5611,20 @@ class Scheduler:
         self.ws = ws
         self.d = deps
         self.parker = parker or Parker(ws, deps)
-        self.lock = threading.Lock()     # one pickup, park or reconcile at a time per workstream
 
     # --- entry point ---
 
     def pickup(self, trigger: Trigger) -> Outcome:
-        with self.lock:
+        with self.parker.entry():
             try:
                 outcome = self._pickup(trigger)
-                self.d.journal.unhold(self.ws.name, Reason.BEADS_UNREACHABLE)
             except BeadsUnavailable as exc:
                 self.d.journal.hold(self.ws.name, Reason.BEADS_UNREACHABLE, type(exc).__name__)
                 outcome = Outcome.HELD
-            self._publish()
+            self.publish()
             return outcome
 
-    def _publish(self) -> None:
+    def publish(self) -> None:
         j, name = self.d.journal, self.ws.name
         try:
             paused = self.d.beads.paused(name)
@@ -4145,128 +5638,61 @@ class Scheduler:
             j.hold(name, Reason.RUNTIME_UNAVAILABLE)
             return Outcome.HELD
         j.unhold(name, Reason.RUNTIME_UNAVAILABLE)
-        for op in j.ops_open(name):
-            self.replay(op)
-        if Reason.CLAIM_UNCERTAIN in j.holds(name):
-            return Outcome.HELD
         unresolved = self.d.reconciler.unresolved(name)
+        j.unhold(name, Reason.BEADS_UNREACHABLE)      # beads answered
         if unresolved:
             j.hold(name, Reason.ACTIONS_UNRECONCILED, ",".join(sorted(unresolved)))
+        else:
+            j.unhold(name, Reason.ACTIONS_UNRECONCILED)
+        try:
+            sweep(self.parker)
+            for op in j.ops_open(name):
+                self.replay(op)
+            if j.holds(name):
+                return Outcome.HELD
+            coder = [s for s in self.d.runtime.sessions(name) if s.role == self.ws.coder_role]
+        except RuntimeUnavailable:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE)
             return Outcome.HELD
-        j.unhold(name, Reason.ACTIONS_UNRECONCILED)
-        if set(j.holds(name)) - RETRIED_HOLDS:
-            return Outcome.HELD
-        if self.refresh_active():
+        if coder:
             return Outcome.BUSY
-        idle = [b for b in self.d.beads.ours(name) if resumable(b) and j.op_for(name, b.id) is None]
-        for bead in sorted(idle, key=lambda b: b.id):
-            if self.parker.resume(bead, trigger.ref) in CODER_BUSY:
+        for bead in self._resumable():
+            result = self.parker.resume(bead, trigger.ref)
+            if result in (Launch.STARTED, Launch.LIVE):
                 return Outcome.RESUMED
+            if result in (Launch.WAIT, Launch.UNCERTAIN):
+                return self._stalled()
         if self.d.beads.paused(name):
             return Outcome.NOTHING       # pausing stops new claims only (§4.3)
         for bead in self.d.beads.ready(name):
             if j.op_for(name, bead.id) is not None:
                 continue
             try:
-                state = self.start_new(bead, trigger.ref)
+                result = self.start_new(bead, trigger.ref)
             except Paused:
                 return Outcome.NOTHING
-            if Reason.CLAIM_UNCERTAIN in j.holds(name):
-                return Outcome.HELD          # an unread claim: nothing else is claimed until it is known
-            if state in CODER_BUSY:
+            if result in (Launch.STARTED, Launch.LIVE):
                 return Outcome.STARTED
+            if result in (Launch.WAIT, Launch.UNCERTAIN):
+                return self._stalled()
         return Outcome.NOTHING
 
-    # --- the coder role ---
+    def _stalled(self) -> Outcome:
+        return Outcome.HELD if self.d.journal.holds(self.ws.name) else Outcome.BUSY
 
-    def refresh_active(self) -> bool:
-        """Re-read every bead the journal has in a coder-busy state; True if the coder role is taken.
-        A closed bead is CLOSED; a bead no longer ours is STUCK (claim lost) and its session stopped; a
-        dead session is relaunched as the same session, up to the launch-failure limit. A session whose
-        liveness is unknown keeps the role busy: wsd never starts a second session beside it. That includes
-        the session of a bead being parked or stuck, until the runtime confirms it dead."""
+    def _resumable(self) -> list[Bead]:
+        """Parked beads of ours that are resumable now and that the journal has as waiting on blockers
+        or input. A bead the journal has as HELD or STUCK is never resumed here, whatever its labels say:
+        only the operator's release moves it on."""
         j, name = self.d.journal, self.ws.name
-        busy = False
-        for row in j.states(name):
-            if row.state in SESSION_MAY_LIVE:
-                busy = self._may_be_live(row.bead) or busy
-                continue
-            if row.state not in CODER_BUSY or j.op_for(name, row.bead) is not None:
-                busy = busy or row.state in CODER_BUSY
-                continue
-            bead = self.d.beads.show(name, row.bead)
-            if bead.status == "closed":
-                if self._stop(bead):
-                    j.set_state(name, row.bead, BeadState.CLOSED)
-                else:
-                    busy = True         # stays as it is and is retried: the session may still be working
-                continue
-            if self.d.beads.read_claim(name, row.bead) is not ClaimView.OURS:
-                stopped = self._stop(bead)
-                j.set_state(name, row.bead, BeadState.STUCK, Reason.CLAIM_LOST)
-                busy = busy or not stopped
-                continue
-            state = self.relaunch_if_dead(bead)
-            if state in CODER_BUSY or (state in SESSION_MAY_LIVE and self._may_be_live(bead.id)):
-                busy = True
-        return busy
-
-    def _session_key(self, bead: Bead) -> str | None:
-        """The bead's coder session key. It needs only the bead's ID and labels, not a valid repository: a
-        bead stuck on a configuration change may still have the session launched before the change. None
-        if no session can have a key for this bead, so none was ever launched for it."""
-        try:
-            profile = ids.profile_for(bead.labels, self.ws.coder_role, self.ws.coder_profile)
-            return ids.role_session(bead.id, self.ws.coder_role, profile)
-        except ids.BadName:
-            return None
-
-    def _may_be_live(self, bead: str) -> bool:
-        key = self._session_key(self.d.beads.show(self.ws.name, bead))
-        return key is not None and self.d.runtime.liveness(key) is not Liveness.DEAD
-
-    def _stop(self, bead: Bead) -> bool:
-        """Stop the session of a bead that is closed or no longer ours: work on it has no claim behind it.
-        False if the stop could not be confirmed."""
-        key = self._session_key(bead)
-        if key is None:
-            return True
-        try:
-            self.d.runtime.stop(key)
-        except RuntimeUnavailable:
-            self.d.journal.emit(self.ws.name, bead.id, "stop_unconfirmed")
-            return False
-        return True
-
-    def relaunch_if_dead(self, bead: Bead) -> BeadState:
-        """An in-progress bead of ours: leave a live (or unknown) session alone, relaunch a dead one through
-        the resume journal. A `v2:parked` or `needs-human` bead is never relaunched here."""
-        j, name = self.d.journal, self.ws.name
-        try:
-            spot = place(self.ws, bead)
-        except ConfigInvalid as exc:
-            j.set_state(name, bead.id, BeadState.STUCK, Reason.CONFIG_INVALID, str(exc))
-            return BeadState.STUCK
-        if PARKED in bead.labels or NEEDS_HUMAN in bead.labels:
-            j.set_state(name, bead.id, BeadState.STUCK, Reason.UNEXPECTED_STATE)
-            return BeadState.STUCK
-        if self.d.runtime.liveness(spot.session_key) is not Liveness.DEAD:
-            current = j.state(name, bead.id)
-            if current is None or current.state is not BeadState.RUNNING:
-                j.set_state(name, bead.id, BeadState.RUNNING)
-            return BeadState.RUNNING
-        with j.transaction():
-            op = j.op_open(OpKind.RESUME, name, bead.id)
-            j.op_step(op.op_id, "unlabelled")       # nothing to unlabel: go straight to the launch
-            j.set_state(name, bead.id, BeadState.RESUMING, Reason.SESSION_DEAD)
-        reopened = j.op_for(name, bead.id)
-        if reopened is None:
-            raise RuntimeError("resume journal vanished")
-        return self.parker.replay_resume(reopened)
+        rows = {r.bead: r.state for r in j.states(name)}
+        return sorted((b for b in self.d.beads.ours(name)
+                       if rows.get(b.id) in RESUMABLE_ROWS and resumable(b) and j.op_for(name, b.id) is None),
+                      key=lambda b: b.id)
 
     # --- new work ---
 
-    def start_new(self, bead: Bead, ref: str | None) -> BeadState:
+    def start_new(self, bead: Bead, ref: str | None) -> Launch:
         j, name = self.d.journal, self.ws.name
         with j.transaction():
             op = j.op_open(OpKind.PICKUP, name, bead.id, {"ref": ref or ""})
@@ -4278,106 +5704,116 @@ class Scheduler:
             self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
             raise
         except ClaimRefused:
-            return self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
+            self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
+            return Launch.ENDED
         except RoutingChanged:
-            return self._routing_changed(op)
+            # btq claimed it but routing or the design gate changed: the claim stays (wsd never
+            # unclaims), the bead is never executed, and a human decides.
+            self.parker.escalate_from(op, Reason.ROUTING_CHANGED)
+            return Launch.ENDED
         except ClaimUncertain:
-            state = self.replay(op)
+            result = self.replay_pickup(op)
             row = j.state(name, bead.id)
             if row is not None and (row.state, row.reason) == (BeadState.DROPPED, Reason.CLAIM_ABANDONED):
                 # The claim failed without landing: the queue is failing, not the bead. Hold pickup and let
                 # the next trigger try again, rather than calling the workstream idle with work ready.
                 raise BeadsUnavailable("claim did not land") from None
-            return state
+            return result
+        self.d.cp("pickup.claimed!")
         op = j.op_step(op.op_id, "claimed")
         self.d.cp("pickup.claimed")
         return self._start(op)
 
-    def _routing_changed(self, op: Op) -> BeadState:
-        """btq claimed it but routing or the design gate changed: the claim stays (wsd never unclaims),
-        the bead is never executed, and a human decides."""
-        self._finish(op, OpStatus.STUCK, BeadState.STUCK, Reason.ROUTING_CHANGED)
-        self.parker.escalate(op.bead)
-        return BeadState.STUCK
-
     def _finish(self, op: Op, status: OpStatus, state: BeadState, reason: Reason | None = None,
-                detail: str = "") -> BeadState:
+                detail: str = "") -> None:
         with self.d.journal.transaction():
             self.d.journal.op_finish(op.op_id, status)
             self.d.journal.set_state(self.ws.name, op.bead, state, reason, detail, op.data.get("ref") or None)
-        return state
 
-    def replay(self, op: Op) -> BeadState:
-        """Continue an open journal from the step it reached."""
-        if op.kind is not OpKind.PICKUP:
-            return self.parker.replay(op)
-        j, name = self.d.journal, self.ws.name
-        if op.step == "intent":
-            try:
-                view = self.d.beads.read_claim(name, op.bead)
-            except BeadsUnavailable as exc:
-                j.hold(name, Reason.CLAIM_UNCERTAIN, op.bead)
-                j.set_state(name, op.bead, BeadState.CLAIMING, Reason.CLAIM_UNCERTAIN, type(exc).__name__)
-                return BeadState.CLAIMING
-            j.unhold(name, Reason.CLAIM_UNCERTAIN)
-            if view is ClaimView.FREE:
-                return self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
-            if view is ClaimView.OTHER:
-                return self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_LOST)
-            op = j.op_step(op.op_id, "claimed")
-            self.d.cp("pickup.claimed")
-        return self._start(op)
-
-    def _start(self, op: Op) -> BeadState:
+    def resolve_claim(self, op: Op) -> Op | None:
+        """A pickup journal at `intent`: read the claim back. Returns the operation at `claimed` if the
+        claim is ours, or None if it was finished (not ours) or can't be read (held)."""
         j, name = self.d.journal, self.ws.name
         try:
-            bead = self.d.beads.show(name, op.bead)
-            spot = place(self.ws, bead)
-            if op.step == "claimed":
+            view = self.d.beads.read_claim(name, op.bead)
+        except BeadsUnavailable as exc:
+            j.hold(name, Reason.CLAIM_UNCERTAIN, op.bead)
+            j.set_state(name, op.bead, BeadState.CLAIMING, Reason.CLAIM_UNCERTAIN, type(exc).__name__)
+            return None
+        j.unhold(name, Reason.CLAIM_UNCERTAIN)
+        if view is ClaimView.FREE:
+            self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
+            return None
+        if view is ClaimView.OTHER:
+            self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_LOST)
+            return None
+        op = j.op_step(op.op_id, "claimed")
+        self.d.cp("pickup.claimed")
+        return op
+
+    def replay(self, op: Op) -> None:
+        """Continue an open journal from the step it reached."""
+        if op.kind is OpKind.PICKUP:
+            self.replay_pickup(op)
+        else:
+            self.parker.replay(op)
+
+    def replay_pickup(self, op: Op) -> Launch:
+        if op.step == "intent":
+            resolved = self.resolve_claim(op)
+            if resolved is None:
+                held = Reason.CLAIM_UNCERTAIN in self.d.journal.holds(self.ws.name)
+                return Launch.WAIT if held else Launch.ENDED
+            op = resolved
+        return self._start(op)
+
+    def _start(self, op: Op) -> Launch:
+        j, name = self.d.journal, self.ws.name
+        if op.step == "claimed":
+            try:
+                spot = place(self.ws, self.d.beads.show(name, op.bead))
                 j.set_state(name, op.bead, BeadState.STARTING)
                 path = self.d.beads.worktree(name, op.bead, spot.repo)
-                op = j.op_step(op.op_id, "worktree", {"worktree": str(path)})
-                self.d.cp("pickup.worktree")
-            if op.step == "worktree":
-                self.d.runtime.launch(LaunchSpec(name, op.bead, self.ws.coder_role, spot.profile,
-                                                 spot.session_key, spot.label, spot.worktree, resume=False,
-                                                 ref=op.data.get("ref") or None))
-                op = j.op_step(op.op_id, "launched")
-                self.d.cp("pickup.launched")
-        except NotOurs:
-            return self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
-        except ConfigInvalid as exc:
-            return self._stuck(op, Reason.CONFIG_INVALID, str(exc))
-        except WorktreeConflict as exc:
-            return self._stuck(op, Reason.WORKTREE_FAILED, str(exc))
-        except (LaunchFailed, RuntimeUnavailable) as exc:
-            if j.op_failed(op.op_id) >= self.ws.limits.launch_failures_before_human:
-                return self._stuck(op, Reason.LAUNCH_FAILED, type(exc).__name__)
-            j.set_state(name, op.bead, BeadState.STARTING, Reason.LAUNCH_FAILED, type(exc).__name__)
-            return BeadState.STARTING
-        return self._finish(op, OpStatus.DONE, BeadState.RUNNING)
+            except NotOurs:
+                self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+                return Launch.ENDED
+            except ConfigInvalid as exc:
+                self.parker.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+                return Launch.ENDED
+            except WorktreeConflict as exc:
+                self.parker.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
+                return Launch.ENDED
+            self.d.cp("pickup.worktree!")
+            rec = record(self.ws, spot)
+            op = j.op_step(op.op_id, "worktree", {"worktree": str(path), "repo": rec.repo,
+                                                  "profile": rec.profile, "session_key": rec.session_key})
+            self.d.cp("pickup.worktree")
+        rec = record_from(self.ws.coder_role, op)
+        return self.parker.launch(op, rec)
 
-    def _stuck(self, op: Op, reason: Reason, detail: str) -> BeadState:
-        self._finish(op, OpStatus.STUCK, BeadState.STUCK, reason, detail)
-        self.parker.escalate(op.bead)
-        return BeadState.STUCK
+
+def record_from(role: str, op: Op) -> SessionRecord:
+    """The record a pickup decided on at its worktree step, from its journal: a replay launches what the
+    pickup chose, even if the configuration changed since."""
+    data = op.data
+    return SessionRecord(role, data["profile"], data["session_key"], data["repo"], data["worktree"])
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_pickup.py tests/test_wsd_pause.py tests/test_wsd_park.py -q`
-Expected: `51 passed` (33 new, plus Task 6's 18 still passing with the extended rig).
+Expected: `103 passed` (50 new, plus Task 6's 53 still passing with the extended rig).
 
-- [ ] **Step 7: Lint and type-check**
+- [ ] **Step 8: Lint and type-check**
 
 Run: `cd $HZ && uv run ruff check && uv run pyright`
 Expected: `All checks passed!` and `0 errors, 0 warnings, 0 informations`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 cd $HZ
-git add src/heterodyne/wsd/scheduler.py tests/wsd_env.py tests/test_wsd_pickup.py tests/test_wsd_pause.py
+git add src/heterodyne/wsd/sweep.py src/heterodyne/wsd/scheduler.py tests/wsd_env.py tests/test_wsd_pickup.py tests/test_wsd_pause.py
 git commit -m "feat(wsd): journaled pickup that never idles while unblocked work exists"
 ```
 
@@ -4388,10 +5824,10 @@ git commit -m "feat(wsd): journaled pickup that never idles while unblocked work
 - Test: `$HZ/tests/test_wsd_recovery.py`
 
 **Interfaces:**
-- Consumes: `Scheduler` (`.lock`, `.d`, `.ws`, `.parker`, `.replay`, `.relaunch_if_dead`), `CODER_BUSY` (Task 7); `parked_state` (Task 6); `BeadsAdapter.ours/read_claim`, labels (Task 4); `Journal.adopt/ops_open/hold/unhold` (Task 3).
-- Produces (`heterodyne.wsd.recovery`): `RECOVERY_POINTS = ("recovery.read", "recovery.actions", "recovery.journals", "recovery.sessions")`; frozen `Recovered(ws, ok, replayed=0, completed_parks=0, relaunched=0)`; `recover(sched: Scheduler) -> Recovered`.
+- Consumes: `Scheduler` (`.d`, `.ws`, `.parker`, `.resolve_claim`, `.publish`) (Task 7); `sweep`, `Swept` (Task 7); `Parker.entry`, `Parker.replay` (Task 6); `BeadsAdapter.ours` (Task 4); `AgentRuntime.sessions`, `RuntimeUnavailable` (Task 5); `Journal.ops_open/hold/unhold` (Task 3).
+- Produces (`heterodyne.wsd.recovery`): `RECOVERY_POINTS = ("lock.waiting", "recovery.read", "recovery.actions", "recovery.journals", "recovery.sessions")`; frozen `Recovered(ws, ok, replayed=0, resumes=0, held=0, stopped=0)`; `recover(sched: Scheduler) -> Recovered`.
 
-The order is the ADR's (§3.3): journal integrity (done by `Journal()`), read beads, reconcile actions, resume park journals, reconcile sessions; the caller accepts events only afterwards (Task 9). The tests crash at every recovery point and recover again, and cover a lost journal (deleted between runs).
+The order is the ADR's (§3.3): journal integrity (done by `Journal()`); read beads (by assignee) and the runtime's sessions; reconcile actions (a hold); replay every open park, release and escalation, and read back any claim left at `intent`; the sweep (reconcile sessions). The caller accepts events only afterwards (Task 9). **Recovery never launches**: a pickup past its claim, a resume, and the resume operations the sweep opens for dead sessions are all left to the next pickup's launch guard, which sees the whole session list first. `BeadsUnavailable` or `RuntimeUnavailable` anywhere makes the recovery fail (`ok=False`) with the matching hold; it is retried before the next pickup. The tests crash at every recovery point and recover again, and cover a lost journal (deleted between runs): nothing is relaunched, parked or unparked until the operator's release.
 
 - [ ] **Step 1: Create `$HZ/tests/test_wsd_recovery.py`**
 
@@ -4402,7 +5838,8 @@ import pytest
 from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from wsd_env import WS, Rig, make_rig
 
-from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED
+from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY
+from heterodyne.wsd.journal import OpKind
 from heterodyne.wsd.recovery import RECOVERY_POINTS, recover
 from heterodyne.wsd.runtime import Liveness
 from heterodyne.wsd.scheduler import Outcome
@@ -4415,6 +5852,20 @@ def lose_journal(rig: Rig) -> None:
         Path(f"{rig.root / 'state' / 'wsd.db'}{suffix}").unlink(missing_ok=True)
     rig.restart()
     assert rig.journal.fresh
+
+
+def started(tmp_path: Path, *extra: str) -> Rig:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    for bead in extra:
+        rig.world.add(bead)
+    assert rig.pickup() is Outcome.STARTED
+    return rig
+
+
+def row_of(rig: Rig, bead: str = "btq-1") -> tuple[str | None, Reason | None]:
+    row = rig.journal.state(WS, bead)
+    return (None, None) if row is None else (row.state.value, row.reason)
 
 
 def test_recovery_runs_in_adr_order(tmp_path: Path) -> None:
@@ -4431,82 +5882,176 @@ def test_crash_during_recovery_is_safe_to_repeat(tmp_path: Path, point: str) -> 
     rig.world.add("btq-2")
     rig.world.beads["btq-2"].labels.remove("agent:wsd")
     rig.pickup()
-    rig.sched.parker.park("btq-1", ("btq-2",))
+    rig.restart(CrashAt("park.blocked"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
     rig.restart(CrashAt(point))
     with pytest.raises(SimulatedCrash):
         recover(rig.sched)
     rig.restart()
     assert recover(rig.sched).ok
-    assert rig.state("btq-1") == "parked"
+    assert rig.state("btq-1") == "parked" and rig.journal.ops_open() == []
     assert len(rig.runtime.launches) == 1
 
 
-def test_lost_journal_rebuilds_running_from_beads(tmp_path: Path) -> None:
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.world.add("btq-2")
-    rig.pickup()
-    lose_journal(rig)
+def test_recovery_never_launches(tmp_path: Path) -> None:
+    """Findings 2 and 3: a running bead whose session ended gets a resume operation; the launch is the
+    guard's, at the next pickup, after every listed session has been seen."""
+    rig = started(tmp_path)
+    rig.runtime.end(rig.key("btq-1"))
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.resumes == 1
+    assert len(rig.runtime.launches) == 1
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.step) == (OpKind.RESUME, "unlabelled")
+    assert row_of(rig) == ("resuming", Reason.SESSION_DEAD)
+    assert rig.pickup() is Outcome.BUSY
+    assert [s.resume for s in rig.runtime.launches] == [False, True]
+
+
+def test_unknown_session_is_reserved_before_any_launch(tmp_path: Path) -> None:
+    """Finding 2: the runtime lists the session, but can't say it is live. It keeps the coder role: no
+    relaunch of its bead and no new claim."""
+    rig = started(tmp_path, "btq-2")
+    rig.runtime.set(rig.key("btq-1"), Liveness.UNKNOWN)
+    rig.restart()
     assert recover(rig.sched).ok
-    assert rig.state("btq-1") == "running"
-    assert rig.pickup() is Outcome.BUSY                   # the live session keeps the role
+    assert rig.pickup() is Outcome.BUSY
+    assert len(rig.runtime.launches) == 1 and rig.world.claims == ["btq-1"]
+
+
+def test_two_dead_sessions_never_run_together(tmp_path: Path) -> None:
+    """Two running beads of ours with no session (possible only after manual intervention): both get
+    resume operations, and the guard lets exactly one through."""
+    rig = started(tmp_path, "btq-2")
+    rig.start("btq-2")                              # the intervention: a second coder, by hand
+    for bead in ("btq-1", "btq-2"):
+        rig.runtime.end(rig.key(bead))
+    rig.restart()
+    assert recover(rig.sched).resumes == 2
+    assert rig.pickup() is Outcome.BUSY
+    assert rig.runtime.coders() == ["btq-1"]
+    assert [op.bead for op in rig.journal.ops_open()] == ["btq-2"]       # waiting on the role
+
+
+def test_lost_journal_holds_a_running_bead(tmp_path: Path) -> None:
+    """Finding 11: no journal row for a bead we hold. Its session keeps the role; nothing is relaunched,
+    nothing new is claimed, and a human looks."""
+    rig = started(tmp_path, "btq-2")
+    lose_journal(rig)
+    result = recover(rig.sched)
+    assert result.ok and result.held == 1
+    assert row_of(rig) == ("stuck", Reason.JOURNAL_LOST)
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    assert rig.pickup() is Outcome.BUSY
     assert rig.world.claims == ["btq-1"]
 
 
-def test_lost_journal_relaunches_a_dead_session_once(tmp_path: Path) -> None:
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.pickup()
-    key = rig.runtime.launches[0].session_key
-    rig.runtime.sessions[key] = Liveness.DEAD
+def test_lost_journal_never_relaunches_a_dead_session(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.runtime.end(rig.key("btq-1"))
     lose_journal(rig)
-    result = recover(rig.sched)
-    assert result.relaunched == 1
-    assert [s.resume for s in rig.runtime.launches] == [False, True]
-    assert rig.state("btq-1") == "running"
-
-
-def test_lost_journal_finishes_a_cut_short_park(tmp_path: Path) -> None:
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.world.add("btq-2")
-    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.JOURNAL_LOST)
     rig.pickup()
-    rig.restart(CrashAt("park.blocked"))                   # edge on, v2:parked not yet
-    with pytest.raises(SimulatedCrash):
-        rig.sched.parker.park("btq-1", ("btq-2",))
-    lose_journal(rig)
-    result = recover(rig.sched)
-    assert result.completed_parks == 1
-    assert PARKED in rig.world.beads["btq-1"].labels
-    assert rig.state("btq-1") == "parked"
     assert len(rig.runtime.launches) == 1
 
 
-def test_lost_journal_parked_bead_resumes_when_unblocked(tmp_path: Path) -> None:
+def test_lost_journal_never_finishes_a_cut_short_park(tmp_path: Path) -> None:
+    """r1 completed the park from beads alone; r2 holds instead. The edge is on, `v2:parked` is not, and
+    nothing says whether the WIP commit happened."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     rig.world.beads["btq-2"].labels.remove("agent:wsd")
     rig.pickup()
-    rig.sched.parker.park("btq-1", ("btq-2",))
+    rig.restart(CrashAt("park.blocked"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    lose_journal(rig)
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.JOURNAL_LOST)
+    assert PARKED not in rig.world.beads["btq-1"].labels
+    assert len(rig.runtime.launches) == 1
+
+
+def test_lost_journal_parked_bead_resumes_only_after_release(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    rig.pickup()
+    rig.parker.park("btq-1", ("btq-2",))
     rig.world.close("btq-2")
     lose_journal(rig)
     assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.JOURNAL_LOST)
+    assert rig.pickup() is Outcome.NOTHING
+    assert rig.parker.release("btq-1").value == "parked"
     assert rig.pickup() is Outcome.RESUMED
 
 
-def test_needs_human_bead_is_stuck_not_relaunched(tmp_path: Path) -> None:
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.pickup()
-    rig.world.beads["btq-1"].labels.append(NEEDS_HUMAN)
-    rig.runtime.sessions[rig.runtime.launches[0].session_key] = Liveness.DEAD
-    lose_journal(rig)
+def test_ownership_is_found_after_a_label_change(tmp_path: Path) -> None:
+    """Finding 12: someone moved the claimed bead off this workstream. Recovery finds it by assignee
+    and escalates it; its session keeps the role."""
+    rig = started(tmp_path, "btq-2")
+    rig.world.beads["btq-1"].labels.remove("ws:alpha")
+    rig.restart()
     assert recover(rig.sched).ok
-    row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.state.value == "stuck" and row.reason is Reason.NEEDS_HUMAN
+    assert row_of(rig) == ("stuck", Reason.ROUTING_CHANGED)
+    assert rig.pickup() is Outcome.BUSY and rig.world.claims == ["btq-1"]
+
+
+def test_needs_human_bead_is_stuck_not_relaunched(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.world.beads["btq-1"].labels.append(NEEDS_HUMAN)
+    rig.runtime.end(rig.key("btq-1"))
+    rig.restart()
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.NEEDS_HUMAN)
+    rig.pickup()
     assert len(rig.runtime.launches) == 1
+
+
+def test_running_bead_without_a_record_is_held(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.runtime.end(rig.key("btq-1"))
+    del rig.world.beads["btq-1"].metadata[RECORD_KEY]
+    rig.restart()
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.LAUNCH_UNRECORDED)
+    rig.pickup()
+    assert len(rig.runtime.launches) == 1
+
+
+def test_held_without_parked_is_unexpected(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.world.beads["btq-1"].labels.append(HELD)
+    rig.restart()
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.UNEXPECTED_STATE)
+
+
+def test_session_of_a_bead_not_ours_is_stopped(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.world.beads["btq-1"].assignee = "someone:host:recovery"
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.stopped == 1
+    assert row_of(rig) == ("stuck", Reason.CLAIM_LOST) and rig.runtime.coders() == []
+
+
+def test_unconfirmed_stop_of_a_closed_bead_is_stuck_until_confirmed(tmp_path: Path) -> None:
+    rig = started(tmp_path, "btq-2")
+    rig.world.close("btq-1")
+    rig.runtime.stop_failures = 1
+    rig.restart()
+    assert recover(rig.sched).ok
+    assert row_of(rig) == ("stuck", Reason.STOP_UNCONFIRMED)
+    assert rig.runtime.coders() == ["btq-1"]
+    assert rig.pickup() is Outcome.STARTED            # the sweep's retried stop is confirmed
+    assert rig.state("btq-1") == "closed" and rig.runtime.coders() == ["btq-2"]
 
 
 def test_beads_down_at_startup_holds_and_claims_nothing(tmp_path: Path) -> None:
@@ -4519,37 +6064,22 @@ def test_beads_down_at_startup_holds_and_claims_nothing(tmp_path: Path) -> None:
     assert rig.world.claims == []
 
 
+def test_runtime_that_cannot_list_holds_recovery(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.runtime.list_failures = 1
+    rig.restart()
+    result = recover(rig.sched)
+    assert not result.ok
+    assert Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+    assert NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+
+
 def test_unsettled_actions_hold_after_recovery(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-ap", labels=["kind:approval"], metadata={"action_state": "executing"})
+    rig.world.add("btq-aq", labels=["kind:approval"], status="closed", metadata={"action_state": "bogus"})
     assert recover(rig.sched).ok
-    assert rig.journal.holds(WS) == {Reason.ACTIONS_UNRECONCILED: "btq-ap"}
-
-
-def test_journal_bead_lost_to_another_worker(tmp_path: Path) -> None:
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.pickup()
-    rig.world.beads["btq-1"].assignee = "bel:host:recovery"
-    rig.restart()
-    assert recover(rig.sched).ok
-    row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.reason is Reason.CLAIM_LOST
-
-
-def test_two_dead_sessions_never_run_together(tmp_path: Path) -> None:
-    """Only possible after a manual intervention; recovery relaunches one and leaves the other stuck."""
-    rig = make_rig(tmp_path)
-    rig.world.add("btq-1")
-    rig.world.add("btq-2")
-    rig.pickup()
-    adapter_worker = rig.beads.bead_queue(WS, "btq-2").worker
-    rig.world.beads["btq-2"].status, rig.world.beads["btq-2"].assignee = "in_progress", adapter_worker
-    rig.runtime.sessions[rig.runtime.launches[0].session_key] = Liveness.DEAD
-    lose_journal(rig)
-    assert recover(rig.sched).ok
-    assert len(rig.runtime.live()) == 1
-    assert sorted(str(rig.state(b)) for b in ("btq-1", "btq-2")) == ["running", "stuck"]
+    assert rig.journal.holds(WS) == {Reason.ACTIONS_UNRECONCILED: "btq-ap,btq-aq"}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -4560,31 +6090,39 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'heterodyne.wsd.recovery'`
 - [ ] **Step 3: Create `$HZ/src/heterodyne/wsd/recovery.py`**
 
 ```python
-"""Startup recovery for one workstream, in the ADR's order (ADR 0001 §3.3, §4.3, §10):
+"""Startup recovery for one workstream, in the ADR's order (ADR 0001 §3.3, §4.3, §10). Recovery never
+launches anything: it stops what must not run, rebuilds the journal from beads and the runtime, and
+leaves every launch to pickup's launch guard.
 
 1. journal integrity check: done when the Journal is opened (a corrupt journal never gets this far);
-2. read beads: every bead this workstream's per-bead workers hold;
-3. reconcile actions in `executing`/`uncertain` (plan 5 checks targets; until then they hold pickup);
-4. resume park journals: replay every open pickup, park and resume journal; with a lost journal, finish
-   a park that was cut short (blocking edge on, `v2:parked` not yet) when its session is dead;
-5. reconcile sessions: rebuild every bead's state from beads, relaunch a dead in-progress session;
+2. read beads and sessions: every bead held by one of this workstream's per-bead workers, found by
+   assignee whatever its labels say, and every session the runtime may still be running;
+3. reconcile actions: any action not settled (closed beads included) holds pickup until plan 5 checks
+   its target;
+4. resume park journals: replay every open park, release and escalation, and read back any claim a
+   pickup left uncertain. Pickup and resume operations that would launch are left to pickup;
+5. reconcile sessions (`sweep`, which every pickup also runs): a session whose bead is not ours
+   (closed, claimed by another worker, gone) is stopped; a recorded running bead whose session is gone
+   gets a resume operation that pickup will carry through the guard; anything beads and the journal
+   disagree on is held as STUCK, never relaunched;
 6. only then does the caller accept events.
 
-Recovery is the one place the journal's bead states are replaced from beads without a transition check
-(`Journal.adopt`), because beads are the source of truth. Anything it can't read holds the workstream:
-nothing is ever inferred from missing evidence.
+Doubt always holds: a bead the journal has no row for (a lost journal), a missing or unreadable session
+record, `v2:held` without `v2:parked`, a parked bead with a session, a routing change, or a stop the
+runtime can't confirm. Rows that are STUCK or HELD stay so until the operator's release.
 """
 
 from dataclasses import dataclass
 
-from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED, Bead, BeadsUnavailable, ClaimView
-from heterodyne.wsd.park import parked_state
-from heterodyne.wsd.runtime import Liveness
-from heterodyne.wsd.scheduler import CODER_BUSY, Scheduler
-from heterodyne.wsd.states import TERMINAL, BeadState, Reason
-from heterodyne.wsd.workstream import ConfigInvalid, place
+from heterodyne.wsd.beads import BeadsUnavailable
+from heterodyne.wsd.journal import OpKind
+from heterodyne.wsd.runtime import RuntimeUnavailable
+from heterodyne.wsd.scheduler import Scheduler
+from heterodyne.wsd.states import Reason
+from heterodyne.wsd.sweep import sweep
 
-RECOVERY_POINTS = ("recovery.read", "recovery.actions", "recovery.journals", "recovery.sessions")
+RECOVERY_POINTS = ("lock.waiting", "recovery.read", "recovery.actions", "recovery.journals",
+                   "recovery.sessions")
 
 
 @dataclass(frozen=True)
@@ -4592,100 +6130,70 @@ class Recovered:
     ws: str
     ok: bool                 # False: the workstream stays held until a later recovery succeeds
     replayed: int = 0        # open journals replayed
-    completed_parks: int = 0  # parks finished from bead state alone (lost journal)
-    relaunched: int = 0
+    resumes: int = 0         # dead sessions handed to pickup as resume operations
+    held: int = 0            # beads recovery escalated because beads and the journal disagree
+    stopped: int = 0         # sessions stopped because their bead is not ours
 
 
 def recover(sched: Scheduler) -> Recovered:
     j, name = sched.d.journal, sched.ws.name
-    with sched.lock:
+    with sched.parker.entry():
         try:
-            result = _recover(sched)
+            result = _Recovery(sched).run()
         except BeadsUnavailable as exc:
             j.hold(name, Reason.BEADS_UNREACHABLE, type(exc).__name__)
-            return Recovered(name, ok=False)
-        j.unhold(name, Reason.BEADS_UNREACHABLE)
+            result = Recovered(name, ok=False)
+        except RuntimeUnavailable as exc:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE, type(exc).__name__)
+            result = Recovered(name, ok=False)
+        else:
+            j.unhold(name, Reason.BEADS_UNREACHABLE)
+        sched.publish()
         return result
 
 
-def _recover(sched: Scheduler) -> Recovered:
-    j, name, d = sched.d.journal, sched.ws.name, sched.d
-    # 2. read beads
-    ours = {b.id: b for b in d.beads.ours(name)}
-    for row in j.states(name):
-        if row.state in TERMINAL or row.bead in ours or j.op_for(name, row.bead) is not None:
-            continue
-        bead = d.beads.show(name, row.bead)
-        if bead.status == "closed":
-            j.adopt(name, row.bead, BeadState.CLOSED)
-        elif d.beads.read_claim(name, row.bead) is not ClaimView.OURS:
-            j.adopt(name, row.bead, BeadState.STUCK, Reason.CLAIM_LOST)
-    d.cp("recovery.read")
-    # 3. actions
-    unresolved = d.reconciler.unresolved(name)
-    if unresolved:
-        j.hold(name, Reason.ACTIONS_UNRECONCILED, ",".join(sorted(unresolved)))
-    else:
-        j.unhold(name, Reason.ACTIONS_UNRECONCILED)
-    d.cp("recovery.actions")
-    # 4. park journals (and pickup and resume journals)
-    replayed = 0
-    for op in j.ops_open(name):
-        sched.replay(op)
-        replayed += 1
-    completed = 0
-    for bead in d.beads.ours(name):
-        if (j.op_for(name, bead.id) is None and PARKED not in bead.labels and NEEDS_HUMAN not in bead.labels
-                and bead.open_blockers() and _liveness(sched, bead) is Liveness.DEAD):
-            blockers = tuple(dep.id for dep in bead.open_blockers())
-            sched.parker.park(bead.id, blockers, why="park completed by recovery")
-            completed += 1
-    d.cp("recovery.journals")
-    # 5. sessions
-    relaunched = 0
-    for bead in sorted(d.beads.ours(name), key=lambda b: b.id):
-        if j.op_for(name, bead.id) is not None:
-            continue
-        if NEEDS_HUMAN in bead.labels:
-            j.adopt(name, bead.id, BeadState.STUCK, Reason.NEEDS_HUMAN)
-        elif PARKED in bead.labels:
-            state = parked_state(bead)
-            j.adopt(name, bead.id, state, {BeadState.HELD: Reason.HELD_BY_OPERATOR,
-                                           BeadState.WAITING_INPUT: Reason.WAITING_ON_OPERATOR}.get(
-                                               state, Reason.BLOCKED_ON_BEAD))
+class _Recovery:
+    def __init__(self, sched: Scheduler) -> None:
+        self.s = sched
+        self.d = sched.d
+        self.j = sched.d.journal
+        self.name = sched.ws.name
+
+    def run(self) -> Recovered:
+        d, j, name = self.d, self.j, self.name
+        # 2. read beads and sessions
+        d.beads.ours(name)
+        d.runtime.sessions(name)
+        d.cp("recovery.read")
+        # 3. actions
+        unresolved = d.reconciler.unresolved(name)
+        if unresolved:
+            j.hold(name, Reason.ACTIONS_UNRECONCILED, ",".join(sorted(unresolved)))
         else:
-            relaunched += _session(sched, bead)
-    d.cp("recovery.sessions")
-    return Recovered(name, ok=True, replayed=replayed, completed_parks=completed, relaunched=relaunched)
-
-
-def _liveness(sched: Scheduler, bead: Bead) -> Liveness:
-    try:
-        return sched.d.runtime.liveness(place(sched.ws, bead).session_key)
-    except ConfigInvalid:
-        return Liveness.UNKNOWN
-
-
-def _session(sched: Scheduler, bead: Bead) -> int:
-    """An in-progress, unparked bead of ours: a live (or unknown) session keeps running; a dead one is
-    relaunched, unless another bead already holds the coder role (one session per role, §4.3)."""
-    j, name = sched.d.journal, sched.ws.name
-    if _liveness(sched, bead) is not Liveness.DEAD:
-        j.adopt(name, bead.id, BeadState.RUNNING)
-        return 0
-    others = [r for r in j.states(name) if r.bead != bead.id and r.state in CODER_BUSY]
-    if others or not sched.d.runtime.available():
-        reason = Reason.UNEXPECTED_STATE if others else Reason.RUNTIME_UNAVAILABLE
-        j.adopt(name, bead.id, BeadState.STUCK, reason, "in progress without a session")
-        return 0
-    j.adopt(name, bead.id, BeadState.RUNNING, Reason.SESSION_DEAD)
-    return 1 if sched.relaunch_if_dead(bead) in CODER_BUSY else 0
+            j.unhold(name, Reason.ACTIONS_UNRECONCILED)
+        d.cp("recovery.actions")
+        # 4. journals that never launch
+        replayed = 0
+        for op in j.ops_open(name):
+            if op.kind is OpKind.PICKUP and op.step == "intent":
+                self.s.resolve_claim(op)
+            elif op.kind in (OpKind.PARK, OpKind.RELEASE, OpKind.ESCALATE):
+                self.s.parker.replay(op)
+            else:
+                continue            # a pickup past its claim, or a resume: pickup's guard carries it on
+            replayed += 1
+        d.cp("recovery.journals")
+        # 5. sessions, read again: the replays changed both
+        swept = sweep(self.s.parker)
+        d.cp("recovery.sessions")
+        return Recovered(name, ok=True, replayed=replayed, resumes=swept.resumes, held=swept.held,
+                         stopped=swept.stopped)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_recovery.py -q`
-Expected: `14 passed`.
+Expected: `22 passed`.
 
 - [ ] **Step 5: Lint and type-check**
 
@@ -4697,7 +6205,7 @@ Expected: `All checks passed!` and `0 errors, 0 warnings, 0 informations`.
 ```bash
 cd $HZ
 git add src/heterodyne/wsd/recovery.py tests/test_wsd_recovery.py
-git commit -m "feat(wsd): startup recovery in the ADR's order, failing closed"
+git commit -m "feat(wsd): startup recovery in the ADR's order; never launches, fails closed"
 ```
 
 ### Task 9: Settings, control socket, daemon, CLIs and docs
@@ -4715,7 +6223,7 @@ git commit -m "feat(wsd): startup recovery in the ADR's order, failing closed"
   - `heterodyne.wsd.daemon`: frozen `Parts(journal, beads, gate, schedulers: dict[str, Scheduler])`; `assemble(s, journal, factory, runtime, reconciler=HoldingReconciler, cp=nothing) -> Parts` (**plans 4 and 5 pass their runtime and reconciler here**); `class Wsd(s, parts)` with `recovered: set[str]`, `recover_one`, `pickup_one`, `reconcile_one`, `startup`, `set_pause(name, paused) -> CtlReply`, `status(only)`, `handle(req)` (async), `serve(stop)` (async).
   - `heterodyne.wsd.cli`: `EX_CONFIG = 78`, `run(s, factory, runtime) -> int`, `wsd_main(argv=None) -> int`, `wsctl_main(argv=None) -> int`; console scripts `wsd` and `wsctl`.
 
-`wsd run` order: instance lock → open (and so integrity-check) the journal → recover every workstream → a startup pickup each → only then the control socket and the timers. `wsctl pause` goes through wsd, which sets the flag under the claim lock (§4.3).
+`wsd run` order: instance lock → open (and so integrity-check) the journal → recover every workstream → a startup pickup each → only then the control socket and the timers. `wsctl pause` goes through wsd, which sets the flag under the claim lock (§4.3), and publishes the workstream's new state before it acknowledges. A failed recovery publishes its hold at once, so `wsctl status` never shows a stale state.
 
 - [ ] **Step 1: Create `$HZ/tests/test_wsd_settings.py`**
 
@@ -4856,6 +6364,7 @@ from heterodyne.wsd.daemon import Wsd, assemble
 from heterodyne.wsd.gate import instance_lock
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.states import Reason, WsState
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 
@@ -5023,6 +6532,28 @@ def test_pause_without_a_workstream_is_refused(tmp_path: Path) -> None:
         return reply
 
     assert asyncio.run(scenario()).result == "refused"
+
+
+def test_acknowledged_pause_shows_at_once(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    journal = Journal(s.journal)
+    daemon = Wsd(s, assemble(s, journal, factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    daemon.startup()
+    assert journal.snapshot(WS).state is WsState.IDLE
+    reply = asyncio.run(daemon.handle(ctl.CtlRequest("pause", ws=WS)))
+    assert reply.result == "ok"
+    assert journal.snapshot(WS).state is WsState.PAUSED       # no pickup ran in between
+
+
+def test_failed_recovery_publishes_its_hold(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+    world.down = True
+    journal = Journal(s.journal)
+    daemon = Wsd(s, assemble(s, journal, factory(world), FakeRuntime()))
+    daemon.recover_one(WS)
+    snap = journal.snapshot(WS)
+    assert snap.state is WsState.HELD and Reason.BEADS_UNREACHABLE in snap.holds
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -5359,7 +6890,7 @@ stays held, and every later tick retries its recovery before any pickup: pickup 
 recovery could not confirm.
 
 Pickup and recovery are blocking (btq runs bd as a subprocess), so they run in worker threads; each
-workstream's `Scheduler.lock` keeps them one at a time per workstream.
+workstream's operation lock (`Parker.entry`, also taken by park and release) keeps them one at a time.
 """
 
 import asyncio
@@ -5444,6 +6975,9 @@ class Wsd:
                                       "nothing is acknowledged")
         self.parts.journal.emit(name, None, "paused" if paused else "resumed")
         if paused:
+            sched = self.parts.schedulers[name]
+            with sched.parker.entry():
+                sched.publish()        # the acknowledged pause shows at once, not at the next pickup
             return CtlReply("ok", f"{name}: paused. No new claims start; a running bead finishes and parked "
                                   "beads may resume.")
         outcome = self.pickup_one(name, Trigger(TriggerKind.OPERATOR))
@@ -5656,11 +7190,11 @@ Then `cd $HZ && uv sync`.
 - [ ] **Step 10: Run the tests to verify they pass**
 
 Run: `cd $HZ && uv run pytest tests/test_wsd_settings.py tests/test_wsd_daemon.py -q`
-Expected: `20 passed`.
+Expected: `22 passed`.
 
 - [ ] **Step 11: Create `$HZ/docs/wsd.md`**
 
-The operator page, including the seams for plans 4–6 (section 5).
+The operator page, including the seams for plans 4, 5, 6 and 8 (section 5).
 
 ```markdown
 # wsd: the workstream daemon (queue and state)
@@ -5711,32 +7245,37 @@ Each bead wsd holds has one state and, when it is waiting or stuck, a reason:
 
 - `claiming`, `starting`, `running`, `resuming`: being started, working, or coming back from a park.
 - `parking`, then `parked` (`blocked_on_bead`), `waiting_input` (`waiting_on_operator`: it waits on an approval, question or confirm bead) or `held` (`held_by_operator`: `/stop`).
-- `stuck`: needs a human. The reason says why (`launch_failed`, `park_failed`, `config_invalid`, `claim_lost`, `routing_changed`, `worktree_failed`, `unexpected_state`) and the bead gets the `needs-human` label.
+- `stuck`: needs a human. The reason says why (`launch_failed`, `launch_unrecorded`, `park_failed`, `config_invalid`, `claim_lost`, `routing_changed`, `worktree_failed`, `journal_lost`, `stop_unconfirmed`, `needs_human`, `unexpected_state`) and the bead gets the `needs-human` label.
+- `held` and `stuck` beads move on only through the operator's release (plan 6). Removing `v2:held` or `needs-human` by hand changes nothing in wsd.
 - `closed`, `dropped` (no longer ours).
 
-A workstream is `running`, `idle`, `all_blocked`, `paused`, `held` or `stuck`. `held` lists its holds: `beads_unreachable`, `runtime_unavailable`, `claim_uncertain`, `actions_unreconciled` (a plan 5 action in `executing` or `uncertain`). A hold is retried on every pickup and cleared once its cause is gone. Holds never escalate a bead: an outage is not the bead's fault.
+A workstream is `running`, `idle`, `all_blocked`, `paused`, `held` or `stuck`. `held` lists its holds: `beads_unreachable`, `runtime_unavailable`, `claim_uncertain`, `launch_uncertain` (a launch whose outcome the runtime could not report), `actions_unreconciled` (a plan 5 action in any state but `pending`, `succeeded` or `failed`, closed beads included). A hold is retried on every pickup and cleared once its cause is gone. Holds never escalate a bead: an outage is not the bead's fault.
 
-Every state change is also a progress event in the journal, carrying the message or event that caused it when there is one.
+Every state change is also a progress event in the journal, carrying the reason, its detail (for a parked bead, the blocker IDs) and the message or event that caused it when there is one.
 
 ## 4. Recovery
 
 On start, before the control socket opens, wsd runs for each workstream:
 
 1. the journal integrity check (a failed check stops wsd with exit 78 and leaves the file in place; move it aside to start from beads alone);
-2. read every bead the workstream's per-bead workers hold;
-3. hold the workstream while any action is `executing` or `uncertain`;
-4. replay every open pickup, park and resume journal from its last step;
-5. rebuild every bead's state from beads, and relaunch a dead running session;
+2. read every bead the workstream's per-bead workers hold, found by assignee whatever its labels say, and every session the runtime may still be running;
+3. hold the workstream while any action is unsettled, closed beads included;
+4. replay every open park, release and escalation, and read back any claim a pickup left uncertain;
+5. the sweep: stop the sessions of beads no longer ours, give a running bead whose session is gone a resume operation, and hold as `stuck` anything beads and the journal disagree on;
 6. then a startup pickup, and only then events.
 
-A workstream whose recovery failed stays `held` and is recovered again before its next pickup. Nothing is inferred from missing evidence: an unreadable claim, liveness or pause flag holds rather than proceeds.
+Recovery never launches: every launch goes through pickup's launch guard, which checks the runtime, the holds, the coder role, `needs-human`, btq's own post-claim checks, the launched-session record on the bead and its worktree, in that order. A workstream whose recovery failed stays `held` and is recovered again before its next pickup. Nothing is inferred from missing evidence. An unreadable claim, session list, session record or pause flag holds rather than proceeds. A bead the journal has no row for (a lost journal) is held as `journal_lost` until the operator releases it.
+
+The journal is backed up with `Journal.backup(dest)`, a consistent online copy (SQLite's backup API). Scheduling it next to the beads backups is plan 8's job.
 
 ## 5. Seams for later plans
 
-- **Plan 4, `AgentRuntime`** (`heterodyne.wsd.runtime`): `available()`, `launch(LaunchSpec)`, `liveness(session_key) -> live|dead|unknown` and `stop(session_key)`. `stop` returns only once the session is confirmed stopped; `unknown` is never treated as dead. Pass it to `heterodyne.wsd.cli.run`.
-- **Plan 5, `ActionReconciler`**: `unresolved(ws) -> [approval bead IDs]`. The default `HoldingReconciler` reports every `executing` or `uncertain` action, so the workstream stays held until plan 5 settles them. Approval beads must carry the `ws:<ws>` label and `metadata.action_state`.
-- **Plans 5 and 6, parking**: `Parker.park(bead, blockers, why, hold, ref)` parks a running bead on blocking beads, or for the operator with `hold=True`. It raises `BeadsUnavailable` when beads can't be reached; the caller keeps the request and retries.
+- **Plan 4, `AgentRuntime`** (`heterodyne.wsd.runtime`): `available()`, `sessions(ws) -> [Session]` (every session that may be running, until its end is confirmed; never a partial list), `launch(LaunchSpec)` (raises `LaunchFailed` when nothing started, `RuntimeUnavailable` when nothing was attempted, anything else is treated as uncertain) and `stop(session_key)` (returns only once the session has ended). `unknown` liveness is never treated as dead. The launched-session record (`metadata.wsd_session`: role, profile, session key, repository, worktree) is written to the bead before every first launch; plan 4 may add fields. Pass the runtime to `heterodyne.wsd.cli.run`.
+- **Plan 5, `ActionReconciler`**: `unresolved(ws) -> [approval bead IDs]`. The default `HoldingReconciler` reports every action not `pending`, `succeeded` or `failed`, closed beads included, so the workstream stays held until plan 5 settles them. Approval beads must carry the `ws:<ws>` label and `metadata.action_state`.
+- **Plans 5 and 6, parking**: `Parker.park(bead, blockers, why, hold, ref)` parks a running bead on blocking beads, or for the operator with `hold=True`. It takes the workstream's operation lock, raises `OpConflict` while another operation is open on the bead, and raises `BeadsUnavailable` when beads can't be reached; the caller keeps the request and retries after the next pickup.
+- **Plan 6, release**: `Parker.release(bead, ref)` is the only way out of `held` or `stuck`. It raises `NotReleasable` for any other bead.
 - **Plan 6, events**: `Journal.inbox_add` (deduplicated by surface and event ID), `inbox_pending`, `inbox_failed`, `inbox_finish`; `Journal.events_since(seq)` for progress; `Journal.snapshot(ws)` for status. Triggers enter as `Scheduler.pickup(Trigger(kind, ref))`.
+- **Plan 8, backups**: `Journal.backup(dest)`.
 ```
 
 - [ ] **Step 12: Update the configuration and install docs and the example config**
@@ -5776,7 +7315,7 @@ Expected: ruff and pyright clean; every test passes (the BTQ contract test is sk
 - [ ] **Step 14: Run the btq contract test against the real btq**
 
 Run: `cd $HZ && BTQ_REPO=$BTQ_REPO uv run pytest tests/test_wsd_beads.py -q`
-Expected: `27 passed`. This loads `$BTQ_REPO/bin/btq` but runs a fake `bd`: no queue is touched.
+Expected: `37 passed`. This loads `$BTQ_REPO/bin/btq` but runs a fake `bd`: no queue is touched.
 
 - [ ] **Step 15: Commit**
 
@@ -5796,15 +7335,18 @@ git commit -m "feat(wsd): daemon, control socket, wsd/wsctl CLIs and operator do
 | Beads adapter with the `wsd` identity and per-bead workers | Task 1 (`ws_session`, `bead_session`), Task 4 (`BeadsAdapter`, through btq's `Queue` as agent `wsd`) |
 | Shared pause gate and claim lock | Task 5 (`ClaimGate`), Task 7 (`test_wsd_pause.py` interleavings), Task 9 (`wsctl pause` through wsd) |
 | Pickup, never idle while an unblocked bead exists | Task 7 (`Scheduler.pickup`, hypothesis property) |
-| Park/resume journal | Task 6 (`Parker`), Task 7 (resume ordering) |
-| Startup recovery order | Task 8 (`recover`), Task 9 (`Wsd.serve`: socket only after recovery) |
+| Park/resume journal | Task 6 (`Parker`: park, resume, release, escalate, the launch guard), Task 7 (resume ordering, the sweep) |
+| Startup recovery order | Task 8 (`recover`, which never launches), Task 9 (`Wsd.serve`: socket only after recovery) |
+| Journal backed up with the beads backups (§3.3) | Task 3 (`Journal.backup`); scheduling is operator decision (b) |
 | Waiting-on-input, held, stuck with concrete reasons; per-message progress events | Task 2 (`Reason`), Task 3 (`set_state` emits `state:<value>` with `ref`), Task 6 (`waiting_input`, `held`), Task 7 (`Trigger.ref`) |
 | Seams for plans 4, 5, 6 (interfaces and fakes only) | Task 5 (`AgentRuntime`, `ActionReconciler`, fakes), Task 6 (`Parker.park`), Task 3 (inbox, events), Task 9 (`assemble`, docs §5) |
-| Crash-window and interleaving tests for every journaled transition | `PARK_POINTS`, `RESUME_POINTS` (Task 6), `POINTS` (Task 7), `RECOVERY_POINTS` (Task 8), `gate.checked` (Tasks 5, 7) |
-| Fail closed | Global Constraints list; tests: unreadable flag, uncertain claim, unknown liveness, malformed JSON, corrupt journal, unconfirmed stop |
+| Crash-window and interleaving tests for every journaled transition | `PARK_POINTS`, `RESUME_POINTS`, `RELEASE_POINTS`, `ESCALATE_POINTS` and the conditional `!` barriers (Task 6), `POINTS` (Task 7), `RECOVERY_POINTS` (Task 8), `gate.checked`, `gate.pause.waiting`, `lock.waiting` (Tasks 5–7) |
+| Fail closed | Global Constraints list; "Simplifications vs r1" maps each fail-closed rule to its test |
 
 **Placeholder scan:** no step says "TBD", "similar to" or "add error handling"; every code step carries the full file. Edits to existing files show the exact text.
 
-**Type consistency:** checked by building the tree task by task from these code blocks and running each task's tests, ruff and pyright at each step (Task 1: 24 passed; 2: 13; 3: 17; 4: 30 + 1 skipped; 5: 9; 6: 18; 7: 33; 8: 14; 9: 20), then the full gate on the result. Every Python block compiles (`py_compile`), and test function names are unique across `tests/`.
+**Type consistency:** checked by building the tree task by task from these code blocks and running each task's tests, ruff and pyright at each step (Task 1: 24 passed; 2: 13; 3: 19; 4: 40 + 1 skipped, 37 with `BTQ_REPO`; 5: 9; 6: 53; 7: 50 new, 103 with Task 6's; 8: 22; 9: 22), then the full gate on the result with `BTQ_REPO` set. Every Python block compiles (`py_compile`), and test function names are unique across `tests/`.
 
-**Known limits, deliberately left to later plans:** no real `AgentRuntime` (plan 4), no action reconciliation against targets (plan 5), no inbox consumer and no Marmot rendering of progress events (plan 6), and no systemd units or timers for `wsd tick` (plan 8).
+**Known limits, deliberately left to later plans:** no real `AgentRuntime` and no crash-loop detection for a session that dies on every relaunch (plan 4), no action reconciliation against targets (plan 5), no inbox consumer, `/stop` or release command, and no Marmot rendering of progress events (plan 6), and no systemd units, timers for `wsd tick` or journal backup schedule (plan 8).
+
+**Open before approval:** operator decisions (a)–(d). Design approval is not set.
