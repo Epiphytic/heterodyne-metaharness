@@ -43,7 +43,7 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
 
 Every name under `operators` in `policy.toml` that has an `identities.<name>.marmot_npub` is an admind operator. A name must be 1 to 128 characters with no control characters, two operators may not share a key, and at least one must exist; otherwise admind refuses to start (a configuration error). `admind init` puts all of them in the group. After that the group and `policy.toml` are two separate records, and admind only acts for an operator that is in **both**: listed in `policy.toml`, and confirmed as a member of the group (stored by admind). Editing `policy.toml` alone authorises no one, and it does not revoke anyone at once either. admind acts on a cached operator set, and that set (the authority) is refreshed only at startup, after a committed (successful) `admind operators add|remove`, and after a successful `admind rearm`. A refused membership request or a refused rearm may read `policy.toml` (some are refused before they do), but never refreshes the cache. Until a refresh, an operator whose entry you deleted still commands admind.
 
-Change the group with the running daemon, as the service user:
+Change the group with the running daemon, as the service user. `admind` is a console script of the heterodyne package, so it is on `PATH` only where the package's environment is (an activated virtualenv, or its `bin/`); `python -m heterodyne.admind` with that environment's interpreter is equivalent:
 
 ```sh
 admind operators add NAME      # NAME is a policy.toml operator; admind adds its npub to the group
@@ -56,11 +56,11 @@ Both ask the daemon over its control socket (section 7), so admind must be runni
 
 To let a test key command admind for a while:
 
-1. Add the name to `operators` in `policy.toml`, with an `identities.<name>.marmot_npub`.
+1. Add the name to `operators` **and to `approvers`** in `policy.toml`, with an `identities.<name>.marmot_npub`. Every operator must also be an approver, or the configuration is invalid: `admind operators add` refuses with "not in approvers", and a restart while the file is in that state fails to start.
 2. Run `admind operators add NAME`.
 3. Run the test.
 4. Run `admind operators remove NAME`.
-5. Delete the entry from `policy.toml`.
+5. Delete the entry from `policy.toml` (from `operators`, `approvers` and `[identities.<name>]`).
 
 Keep this order. `remove` finds the name among the operators admind has loaded (the cache above) and checks the freshly read `policy.toml` for another eligible operator. Deleting the entry first does not revoke access, because the cache still holds it, and the group and `policy.toml` disagree. A restart then rebuilds the set from the file, so the key stays in the group with no name and `remove` can no longer find it. A `rearm` does not necessarily fix that: the member count still includes the deleted operator, so it no longer matches the remaining `policy.toml` operators, the reconciliation fails, and the rearm is refused with the cache unchanged. Put the entry back, run `admind rearm` (it succeeds once `policy.toml` matches the group again and refreshes the cache), then `admind operators remove NAME`, then delete the entry.
 
