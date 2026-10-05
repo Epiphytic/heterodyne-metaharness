@@ -1,0 +1,5 @@
+Verdict: APPROVE
+
+1. [MINOR] `docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:561` — The `!asks` backstop reuses startup reconciliation, but startup relies on `recover()` to settle the original inbound message. After a failed settlement transaction, `!asks` can recover the ask while leaving that message `executing`. A later restart then emits a misleading `RESTARTED_NOTICE` for an already recovered command (`src/heterodyne/admind/daemon.py:433`). During successful reconciliation, mark the attempt’s inbound message `done` in the same transaction if it remains `executing`; extend `test_asks_backstop_reconciles_stranded` to verify this and absence of a later restart notice.
+
+Summary: The r5 settlement fix is substantively complete; no blocking or major defects remain, with minor recovery bookkeeping to tighten.
