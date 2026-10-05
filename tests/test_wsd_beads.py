@@ -9,7 +9,7 @@ import pytest
 from fakes.fake_btq import World, factory
 from wsd_env import WS, git_repo
 
-from heterodyne.wsd import btq, ids
+from heterodyne.wsd import btq, gitwip, ids
 from heterodyne.wsd.beads import (
     PARKED,
     RECORD_KEY,
@@ -222,6 +222,46 @@ def test_worktree_needs_btqs_provenance(world: World, tmp_path: Path) -> None:
         adapter.verify_worktree(WS, "btq-1", repo, path)
     with pytest.raises(WorktreeConflict):
         adapter.worktree(WS, "btq-1", repo)                       # and never reused
+
+
+def test_replaced_worktree_directory_is_a_conflict(world: World, tmp_path: Path) -> None:
+    """D22: provenance alone is not enough. A separate repository put at the recorded path, on the
+    bead's branch, does not share the repository's git common directory and is never used."""
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    gitwip.git(repo, "worktree", "remove", "--force", str(path))
+    git_repo(path)
+    gitwip.git(path, "checkout", "-q", "-b", "btq/btq-1")
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+    with pytest.raises(WorktreeConflict):
+        adapter.worktree(WS, "btq-1", repo)
+
+
+@pytest.mark.parametrize("write", ["label", "unlabel", "blocker", "comment", "record", "metadata"])
+def test_a_write_that_does_not_read_back_is_unavailable(
+        world: World, monkeypatch: pytest.MonkeyPatch, write: str) -> None:
+    """S6: `bd label add` on a missing bead exits 0 and writes nothing. A write is only trusted once it
+    reads back, so a bd that reports success without changing the bead is BeadsUnavailable."""
+    world.add("btq-1", labels=["old"])
+    world.add("btq-2")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    monkeypatch.setattr(adapter.bead_queue(WS, "btq-1"), "bd", lambda *args: [])
+    rec = SessionRecord("coder", "p-one", "k", "/r", "/w")
+    writes = {
+        "label": lambda: adapter.ensure_label(WS, "btq-1", PARKED),
+        "unlabel": lambda: adapter.ensure_label(WS, "btq-1", "old", present=False),
+        "blocker": lambda: adapter.ensure_blocker(WS, "btq-1", "btq-2"),
+        "comment": lambda: adapter.ensure_comment(WS, "btq-1", "m-1", "parked (m-1)"),
+        "record": lambda: adapter.ensure_record(WS, "btq-1", rec),
+        "metadata": lambda: adapter.ensure_metadata(WS, "btq-1", "action_state", "pending"),
+    }
+    with pytest.raises(BeadsUnavailable):
+        writes[write]()
 
 
 def test_writes_are_idempotent_and_owned(world: World) -> None:
