@@ -69,13 +69,16 @@ class RacingEvent(threading.Event):
 class SplitSeen(list[str]):
     """`seen` for the pairing test. Unless the caller holds the recorder's lock, thread t0 stops right
     after its append here until t1 has made a whole call, so an unsynchronized Recorder records t1's
-    thread before t0's, deterministically. A serialized Recorder never waits."""
+    thread before t0's, deterministically. A serialized Recorder never waits. `waits` records each wait's
+    outcome, so a test can fail when t0 gave up instead of being released by t1."""
 
     def __init__(self, cp: Recorder, t0_in: threading.Event, t1_done: threading.Event) -> None:
         super().__init__()
         self.cp = cp
         self.t0_in = t0_in
         self.t1_done = t1_done
+        self.timeout = 5.0
+        self.waits: list[bool] = []
 
     def append(self, name: str) -> None:
         super().append(name)
@@ -84,14 +87,14 @@ class SplitSeen(list[str]):
         self.t0_in.set()
         lock: threading.Lock | None = getattr(self.cp, "lock", None)
         if lock is None or not lock.locked():
-            self.t1_done.wait(5)
+            self.waits.append(self.t1_done.wait(self.timeout))
 
 
 def test_recorder_keeps_points_and_threads_paired() -> None:
     cp = Recorder()
     t0_in = threading.Event()
     t1_done = threading.Event()
-    cp.seen = SplitSeen(cp, t0_in, t1_done)
+    cp.seen = split = SplitSeen(cp, t0_in, t1_done)
 
     def t1() -> None:
         cp("t1")
@@ -107,6 +110,8 @@ def test_recorder_keeps_points_and_threads_paired() -> None:
     finally:
         t1_done.set()  # failure cleanup only: never leave t0 waiting if the test fails early
         finish([thread for thread in threads if thread.ident is not None])
+    assert t0_in.is_set(), "t0 never reached the split"
+    assert False not in split.waits, "t0 timed out before t1 released it"
     assert list(cp.seen) == ["t0", "t1"]
     assert cp.threads == ["t0", "t1"]  # each point is paired with the thread that recorded it
 
