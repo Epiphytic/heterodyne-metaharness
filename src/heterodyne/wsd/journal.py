@@ -9,11 +9,13 @@ What it holds, and what it never does:
 - `events`: an append-only progress log with a cursor, for per-message progress reactions (plan 6). A
   state event's `detail` is JSON with the reason and its concrete detail (blocker IDs, the failing step).
 
-Beads stay the source of truth. Opening the journal checks it first, through a connection that cannot
-change the file: an unreadable, corrupt or foreign file, or one whose schema differs in any table, column,
-constraint or index, is refused (JournalCorrupt) and never modified, deleted or recreated, because a lost
-journal must be noticed, not papered over. A journal locked by another connection is JournalBusy, which is
-transient and says nothing about the file. A missing file is created atomically and reported as `fresh`.
+Beads stay the source of truth. Opening the journal checks it first, through a read-only connection: an
+unreadable, corrupt or foreign file, or one whose schema differs in any table, column, constraint or
+index, is refused (JournalCorrupt) and never deleted or recreated, because a lost journal must be
+noticed, not papered over. A refused file and its write-ahead log keep their bytes (`_validate` names
+the sidecars SQLite may add). A journal locked by another connection, at open or later, is JournalBusy,
+which is transient and says nothing about the file. A missing file is created atomically and reported
+as `fresh`.
 `backup()` writes a consistent online copy (SQLite's backup API, safe under WAL) for the beads backups (§3.3).
 """
 
@@ -87,8 +89,10 @@ class JournalCorrupt(Exception):
 
 
 class JournalBusy(Exception):
-    """The journal is locked by another connection (SQLITE_BUSY or SQLITE_LOCKED). Transient: the file
-    is not suspect, so it is never reported as corrupt; retry once the other holder lets go."""
+    """The journal is locked by another connection (SQLITE_BUSY or SQLITE_LOCKED, extended codes
+    included), when it is opened or by any Journal method after. Transient: the file is not suspect, so
+    it is never reported as corrupt, and the method's writes did not happen; retry once the other holder
+    lets go."""
 
 
 class OpConflict(Exception):
@@ -205,11 +209,26 @@ def _bead(r: tuple[object, ...]) -> BeadRow:
                    str(r[4]), str(r[5]))
 
 
+def _transient(exc: sqlite3.Error) -> bool:
+    return exc.sqlite_errorcode & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+@contextlib.contextmanager
+def _busy() -> Generator[None]:
+    """Contention on the journal raises JournalBusy; every other SQLite error passes through as it is."""
+    try:
+        yield
+    except sqlite3.OperationalError as exc:
+        if _transient(exc):
+            raise JournalBusy(exc.sqlite_errorname) from None
+        raise
+
+
 def _locked[**P, R](method: Callable[P, R]) -> Callable[P, R]:
     """Serialize a Journal method: wsd calls it from the event loop and from worker threads."""
     @functools.wraps(method)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        with args[0].lock:  # type: ignore[attr-defined]  # args[0] is the Journal
+        with args[0].lock, _busy():  # type: ignore[attr-defined]  # args[0] is the Journal
             return method(*args, **kwargs)
     return wrapper
 
@@ -220,11 +239,14 @@ def _uri(path: Path, query: str) -> str:
 
 def _connect(path: Path) -> sqlite3.Connection:
     """The working connection, opened only after `_validate` accepted the file. `mode=rw` never creates
-    a file; switching to WAL is the first write."""
+    a file; switching to WAL is the first write. The file is checked again on this connection, because
+    another connection may have changed it since `_validate` read it; a file refused here has already
+    been switched to WAL."""
     db = sqlite3.connect(_uri(path, "mode=rw"), uri=True, isolation_level=None, timeout=BUSY_TIMEOUT,
                          check_same_thread=False)
     try:
         db.execute("PRAGMA journal_mode=WAL")
+        _check_snapshot(db)
     except BaseException:
         db.close()
         raise
@@ -277,26 +299,32 @@ def _check(db: sqlite3.Connection) -> None:
         raise JournalCorrupt("unknown schema version")
 
 
-def _validate(path: Path) -> None:
-    """Check the journal through a connection that cannot change it: never created, never switched to
-    WAL, and no new sidecar files. `immutable` reads the main file without locks or sidecars, which is
-    exact while no write-ahead log holds data; a non-empty `-wal` (wsd stopped without a checkpoint) is
-    read through a plain read-only open instead, whose sidecars already exist."""
-    try:
-        wal = path.with_name(f"{path.name}-wal").stat().st_size
-    except FileNotFoundError:
-        wal = 0
-    db = sqlite3.connect(_uri(path, "mode=ro" if wal else "mode=ro&immutable=1"), uri=True,
-                         isolation_level=None, timeout=BUSY_TIMEOUT)
+def _check_snapshot(db: sqlite3.Connection) -> None:
+    """`_check` inside one read transaction: every read sees the same committed snapshot, under SQLite's
+    locks, write-ahead log included."""
+    db.execute("BEGIN")
     try:
         _check(db)
+    finally:
+        db.execute("ROLLBACK")
+
+
+def _validate(path: Path) -> None:
+    """Check the journal before anything writes to it, through a read-only connection that is never
+    created, never switched to WAL and never checkpoints: the main file and an existing `-wal` keep
+    their bytes. Reading a WAL-mode file needs its shared-memory index, so SQLite may create or update
+    `-shm` and create an empty `-wal`, and a read-only connection leaves them in place; a refused
+    WAL-mode file can keep those two sidecars. A rollback-journal (non-WAL) file gains no files."""
+    db = sqlite3.connect(_uri(path, "mode=ro"), uri=True, isolation_level=None, timeout=BUSY_TIMEOUT)
+    try:
+        _check_snapshot(db)
     finally:
         db.close()
 
 
 def _refusal(exc: sqlite3.DatabaseError) -> Exception:
-    if exc.sqlite_errorcode & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-        return JournalBusy(type(exc).__name__)
+    if _transient(exc):
+        return JournalBusy(exc.sqlite_errorname)
     return JournalCorrupt(type(exc).__name__)
 
 
@@ -357,16 +385,17 @@ class Journal:
                 finally:
                     self._depth -= 1
                 return
-            self.db.execute("BEGIN IMMEDIATE")
-            self._depth = 1
-            try:
-                yield
-                self.db.execute("COMMIT")
-            except BaseException:
-                self.db.execute("ROLLBACK")
-                raise
-            finally:
-                self._depth = 0
+            with _busy():
+                self.db.execute("BEGIN IMMEDIATE")
+                self._depth = 1
+                try:
+                    yield
+                    self.db.execute("COMMIT")
+                except BaseException:
+                    self.db.execute("ROLLBACK")
+                    raise
+                finally:
+                    self._depth = 0
 
     # --- inbox (§5.4) ---
 

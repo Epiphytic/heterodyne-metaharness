@@ -29,12 +29,22 @@ def _files(d: Path) -> dict[str, bytes]:
     return {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()}
 
 
-def assert_refused_unchanged(path: Path) -> None:
-    """Refused, and the directory is byte for byte what it was: the file untouched, no -wal or -shm."""
+def assert_refused_preserved(path: Path) -> None:
+    """Refused, and every file keeps its bytes, the main file and an existing -wal included. For a
+    WAL-mode file only what `_validate` documents may differ: `-shm` created or updated, and an empty
+    `-wal` created. A rollback-journal file gains nothing."""
     before = _files(path.parent)
+    wal_mode = before[path.name][18:20] == b"\x02\x02"   # the header's WAL read and write versions
     with pytest.raises(JournalCorrupt):
         Journal(path)
-    assert _files(path.parent) == before
+    after = _files(path.parent)
+    if wal_mode:
+        shm, wal = f"{path.name}-shm", f"{path.name}-wal"
+        before.pop(shm, None)
+        after.pop(shm, None)
+        if wal not in before:
+            assert after.pop(wal, b"") == b""
+    assert after == before
 
 
 def _tamper(path: Path, sql: str) -> None:
@@ -58,7 +68,7 @@ def test_new_journal_is_fresh_and_private(tmp_path: Path) -> None:
 def test_corrupt_journal_is_refused_and_kept(tmp_path: Path, content: bytes) -> None:
     path = tmp_path / "wsd.db"
     path.write_bytes(content)
-    assert_refused_unchanged(path)
+    assert_refused_preserved(path)
 
 
 @pytest.mark.parametrize("mode", ["delete", "wal"])
@@ -69,12 +79,12 @@ def test_foreign_database_is_refused_unchanged(tmp_path: Path, mode: str) -> Non
     db.execute("CREATE TABLE other (x)")
     db.commit()
     db.close()
-    assert_refused_unchanged(path)
+    assert_refused_preserved(path)
 
 
 def test_wrong_schema_version_is_refused(tmp_path: Path) -> None:
     _tamper(tmp_path / "wsd.db", "UPDATE meta SET value = '99' WHERE key = 'schema_version'")
-    assert_refused_unchanged(tmp_path / "wsd.db")
+    assert_refused_preserved(tmp_path / "wsd.db")
 
 
 @pytest.mark.parametrize("sql", [
@@ -86,11 +96,13 @@ def test_wrong_schema_version_is_refused(tmp_path: Path) -> None:
     "ALTER TABLE holds RENAME COLUMN detail TO note",
     "ALTER TABLE events DROP COLUMN ref",
     "ALTER TABLE beads ADD COLUMN extra TEXT",
+    "CREATE TABLE extra (x)",
+    "CREATE INDEX extra ON ops (kind)",
 ])
 def test_altered_schema_is_refused_unchanged(tmp_path: Path, sql: str) -> None:
     # Review finding 2: the one-open-op index (with its predicate) and every column are part of the check.
     _tamper(tmp_path / "wsd.db", sql)
-    assert_refused_unchanged(tmp_path / "wsd.db")
+    assert_refused_preserved(tmp_path / "wsd.db")
 
 
 def test_journal_with_an_unflushed_log_opens(tmp_path: Path) -> None:
@@ -113,12 +125,173 @@ def test_schema_altered_in_an_unflushed_log_is_refused(tmp_path: Path) -> None:
         other.execute("PRAGMA wal_autocheckpoint=0")
         other.execute("DROP INDEX ops_one_open")
         assert (tmp_path / "wsd.db-wal").stat().st_size > 0
-        before = path.read_bytes()
-        with pytest.raises(JournalCorrupt):
-            Journal(path)
-        assert path.read_bytes() == before
+        assert_refused_preserved(path)
     finally:
         other.close()
+
+
+def _crashed_copy(tmp_path: Path, sql: str) -> Path:
+    """A journal whose last writer died before a checkpoint: the main file and a -wal holding `sql`'s
+    change, and no -shm."""
+    path = tmp_path / "wsd.db"
+    Journal(path).close()
+    other = sqlite3.connect(path, isolation_level=None)
+    try:
+        other.execute("PRAGMA wal_autocheckpoint=0")
+        other.executescript(sql)
+        crash = tmp_path / "crash"
+        crash.mkdir()
+        for name in ("wsd.db", "wsd.db-wal"):
+            (crash / name).write_bytes((tmp_path / name).read_bytes())
+    finally:
+        other.close()
+    assert not (crash / "wsd.db-shm").exists() and (crash / "wsd.db-wal").stat().st_size > 0
+    return crash / "wsd.db"
+
+
+def test_retained_log_without_shm_is_read(tmp_path: Path) -> None:
+    path = _crashed_copy(tmp_path, "INSERT INTO events (at, ws, kind, detail) VALUES ('t', 'alpha', 'x', '')")
+    j = Journal(path)
+    assert [e.kind for e in j.events_since(0, 10)] == ["x"]
+    j.close()
+
+
+def test_retained_log_without_shm_altering_the_schema_is_refused_preserved(tmp_path: Path) -> None:
+    # r2 finding 2: the main file and the retained -wal keep their bytes; only -shm may appear.
+    assert_refused_preserved(_crashed_copy(tmp_path, "DROP INDEX ops_one_open"))
+
+
+@pytest.mark.parametrize("checkpointed", [False, True])
+def test_schema_changed_after_validation_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                    checkpointed: bool) -> None:
+    # r2 finding 1: a change committed between the read-only check and the working open, left in the
+    # -wal or checkpointed into the main file, is caught by the working connection's own check.
+    path = tmp_path / "wsd.db"
+    Journal(path).close()
+    validate = journal_mod._validate  # pyright: ignore[reportPrivateUsage]
+    changed: list[sqlite3.Connection] = []
+
+    def validate_then_change(p: Path) -> None:
+        validate(p)
+        db = sqlite3.connect(p, isolation_level=None)
+        changed.append(db)
+        db.execute("PRAGMA wal_autocheckpoint=0")
+        db.execute("DROP INDEX ops_one_open")
+        if checkpointed:
+            db.close()      # the last connection: the change moves into the main file
+        else:
+            assert (tmp_path / "wsd.db-wal").stat().st_size > 0
+
+    monkeypatch.setattr(journal_mod, "_validate", validate_then_change)
+    try:
+        with pytest.raises(JournalCorrupt):
+            Journal(path)
+    finally:
+        for db in changed:
+            db.close()
+    assert changed
+
+
+@pytest.mark.parametrize("step", ["_validate", "_connect"])
+def test_each_check_reads_one_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    # A commit that lands between the check's schema read and its version read is not seen by the
+    # version read: the check judges one committed state, never a mix of two.
+    path = tmp_path / "wsd.db"
+    Journal(path).close()
+    schema = journal_mod._schema  # pyright: ignore[reportPrivateUsage]
+    other = sqlite3.connect(path, isolation_level=None)
+
+    def schema_then_commit(db: sqlite3.Connection) -> set[tuple[str, str, str, str]]:
+        found = schema(db)
+        other.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+        return found
+
+    monkeypatch.setattr(journal_mod, "_schema", schema_then_commit)
+    try:
+        result = getattr(journal_mod, step)(path)
+        if isinstance(result, sqlite3.Connection):
+            result.close()
+        assert other.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("99",)
+    finally:
+        other.close()
+
+
+TRANSIENT = ["SQLITE_BUSY", "SQLITE_BUSY_RECOVERY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED",
+             "SQLITE_LOCKED_SHAREDCACHE"]
+NOT_TRANSIENT = ["SQLITE_IOERR_READ", "SQLITE_READONLY", "SQLITE_CANTOPEN"]
+
+
+def _error(name: str) -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError(name)
+    exc.sqlite_errorcode = getattr(sqlite3, name)
+    exc.sqlite_errorname = name
+    return exc
+
+
+class _Failing:
+    """A connection whose every statement fails with `exc`."""
+
+    def __init__(self, exc: sqlite3.Error) -> None:
+        self.exc = exc
+
+    def execute(self, *args: object) -> None:
+        raise self.exc
+
+
+@pytest.mark.parametrize("name", TRANSIENT)
+def test_contention_at_open_is_busy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # r2 finding 3: extended codes are contention too.
+    def fail(p: Path) -> None:
+        raise _error(name)
+    monkeypatch.setattr(journal_mod, "_validate", fail)
+    with pytest.raises(JournalBusy, match=name):
+        Journal(tmp_path / "wsd.db")
+
+
+@pytest.mark.parametrize("name", NOT_TRANSIENT)
+def test_other_errors_at_open_are_corrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    def fail(p: Path) -> None:
+        raise _error(name)
+    monkeypatch.setattr(journal_mod, "_validate", fail)
+    with pytest.raises(JournalCorrupt):
+        Journal(tmp_path / "wsd.db")
+
+
+@pytest.mark.parametrize("name", TRANSIENT)
+def test_contention_after_open_is_busy(journal: Journal, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # r2 finding 4: every Journal method, and opening a transaction, report contention the same way.
+    monkeypatch.setattr(journal, "db", _Failing(_error(name)))
+    with pytest.raises(JournalBusy, match=name):
+        journal.emit("alpha", None, "a")
+    with pytest.raises(JournalBusy, match=name), journal.transaction():
+        pass
+
+
+@pytest.mark.parametrize("name", NOT_TRANSIENT)
+def test_other_errors_after_open_pass_through(journal: Journal, monkeypatch: pytest.MonkeyPatch,
+                                              name: str) -> None:
+    monkeypatch.setattr(journal, "db", _Failing(_error(name)))
+    with pytest.raises(sqlite3.OperationalError, match=name):
+        journal.emit("alpha", None, "a")
+
+
+def test_a_write_lock_held_elsewhere_is_busy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(journal_mod, "BUSY_TIMEOUT", 0.0)
+    journal = Journal(tmp_path / "wsd.db")
+    other = sqlite3.connect(tmp_path / "wsd.db", isolation_level=None)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        with pytest.raises(JournalBusy):
+            journal.emit("alpha", None, "a")
+        with pytest.raises(JournalBusy), journal.transaction():
+            pass
+        other.execute("ROLLBACK")
+        with journal.transaction():
+            journal.emit("alpha", None, "b")
+    finally:
+        other.close()
+    assert [e.kind for e in journal.events_since(0, 10)] == ["b"]
+    journal.close()
 
 
 def test_locked_journal_is_busy_not_corrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
