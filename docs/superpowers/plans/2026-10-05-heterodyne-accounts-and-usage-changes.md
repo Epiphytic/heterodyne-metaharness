@@ -31,8 +31,9 @@ Plan 3's items (AU-3 to AU-5) don't need G1 if they are scoped as **structure on
 | 7 Gatekeeper and steering | An exhausted reviewer counts as "unavailable" for `fallback_reviewer` | AU-13 |
 | 8 Operations | `heterodyne setup` login per account; runbook; docs | AU-10 |
 | 9 Migration | None | n/a |
-| P2 | macOS keychain behaviour for Claude accounts (with Seatbelt); ACP adapter, listed with the Paseo adapter | n/a |
+| P2 | macOS keychain behaviour for Claude accounts (with Seatbelt); an ACP adapter design note, listed with the Paseo adapter | AU-16 |
 | New | Spike S6 | AU-1 |
+| Later (after plan 4) | Adapter registry review; Codex app-server reference material and replay fakes | AU-14, AU-15 |
 
 ## Work items
 
@@ -174,6 +175,44 @@ Each item lists its roadmap plan, dependencies, scope and acceptance. Bead title
   - Review mode is still derived from the recorded models (§4.1). The account doesn't affect it.
 - **Acceptance:** tests cover each step of this chain. The `Code-Review:` line is unchanged.
 
+## Later tasks (never on the critical path)
+
+AU-14 to AU-16 come from the same t3code review, but aren't part of the amendment. **No other item depends on them, and none of them blocks a plan from starting or closing.** They run when there's spare capacity: AU-14 and AU-15 after plan 4's `AgentRuntime` has merged, and AU-16 with the P2 design rounds. Their beads must never be added as blockers of plan 3–9 beads. If one turns up a defect in merged code, that defect becomes its own bead with the usual priority; the later task itself stays non-blocking.
+
+They need no amendment approval (G1), because they change no ADR decision. If AU-14 or AU-16 concludes that the ADR should change, that change is a separate amendment.
+
+### AU-14. Later: review `AgentRuntime` against t3code's driver-registry shape
+
+- **Plan:** later, after plan 4 merges. **Depends on:** plan 4's `AgentRuntime` (and AU-6 and AU-8 if they have merged). **Blocks:** nothing.
+- **Reference:** t3code (MIT) `apps/server/src/provider/ProviderDriver.ts`, `builtInDrivers.ts`, `Layers/ProviderInstanceRegistryLive.ts`. Ideas only; no code is ported (§16).
+- **Scope:** compare the merged `AgentRuntime` with these properties, and refactor where it falls short and the change is small:
+  - adapters are plain registered records keyed by adapter type, not ad hoc branches;
+  - one runtime instance per (profile, account), with no shared mutable state between instances of the same adapter;
+  - each instance's config is decoded and validated once, and an invalid one is rejected whole (§4.1), without affecting the others;
+  - an adapter that fails to load (binary missing, wrong version, config invalid) reports an `unavailable` status that `/status` can show, instead of crashing `wsd` or failing silently at the next launch.
+- **Acceptance:** a short written comparison (in the bead or `docs/`) listing each property as met, refactored, or deliberately not adopted, with reasons. Any refactor has tests, and keeps behaviour unchanged except for the `unavailable` status.
+
+### AU-15. Later: Codex app-server reference material and replay fakes
+
+- **Plan:** later, after plan 4 merges. **Depends on:** plan 4's managed Codex launch and the ADR §11 fake `codex`. **Blocks:** nothing.
+- **Reference:** t3code (MIT) `packages/effect-codex-app-server/src/_generated` (schemas generated from the app-server protocol), `packages/effect-codex-app-server/src/replay.ts`, and the recorded transcripts in `apps/server/src/orchestration-v2/testkit/fixtures/*/codex_transcript.ndjson`.
+- **Scope:**
+  - Check the message shapes `wsd` uses against the app-server (thread start and resume, `queue`, rate limits, turn and item notifications) against the generated schemas. Record any differences for the pinned Codex version.
+  - Upgrade the fake `codex` to replay recorded transcripts in the same expect-outbound/emit-inbound style.
+  - **Record our own transcripts** against the pinned Codex version through the per-session app-server. Don't copy t3code's: they were recorded on a different Codex version and on different hosts.
+  - Generated or derived schema files, if any are vendored, keep t3code's MIT notice.
+- **Acceptance:** at least the launch, steer, rate-limit and limit-reached flows have recorded transcripts, and integration tests replay them. Recorded transcripts are scrubbed so they pass `scripts/check_install_agnostic.py` (no paths, account IDs or emails).
+
+### AU-16. Later (P2): ACP adapter design note
+
+- **Plan:** P2, with the Paseo adapter. **Depends on:** nothing. **Blocks:** nothing.
+- **Scope:** a design note, not code: how an Agent Client Protocol adapter would fit ADR 0001.
+  - ACP's `session/request_permission` would feed the §5.3 policy engine directly: auto-approve, deny with a reason and park, or hard deny. That is a stronger enforcement point than a `PreToolUse` hook.
+  - It is headless, which conflicts with §2 (interactive CLIs, `tmux attach`). It would be an exception like `codex exec` (§5.3), and the note must say what replaces attach and hook-derived state.
+  - Which harnesses it would add, how auth and subscription login work for each, and how accounts (D1) apply.
+  - The outer sandbox (§7) is unchanged: the ACP agent process runs inside it.
+- **Acceptance:** the note is written, under `docs/`, and ready to bring to a P2 design round. Any implementation needs its own amendment, cross-model review and approval.
+
 ## Proposed roadmap edits (apply once G1 passes)
 
 - **Plan 3 row, "Delivers":** add "launched-session `account` field; deferred park kind; usage cache and headroom-gate interface (AU-3–AU-5)".
@@ -181,6 +220,7 @@ Each item lists its roadmap plan, dependencies, scope and acceptance. Bead title
 - **Plan 5, 6, 7 and 8 rows:** add AU-12, AU-9, AU-13 and AU-10 respectively.
 - **New rows:** "1b Config: accounts (AU-2)" and "2c admind accounts (AU-11)", each gated on G1.
 - **Spikes:** add S6 beside S5.
+- **Later (not gating):** add AU-14 and AU-15 after plan 4, and AU-16 under P2, each marked as blocking nothing.
 
 ## Bead refactor checklist
 
@@ -192,7 +232,8 @@ For the orchestrator, against the current plan 3+ beads:
 4. **Plan 4 beads:** add AU-6, AU-7 and AU-8, each blocked by G1 and the S6 bead.
 5. Create AU-2 and AU-11 as their own beads, blocked by G1. AU-11 is also blocked by AU-2.
 6. Add AU-9, AU-10, AU-12 and AU-13 to their plans' beads, or note them for when those plans are written.
-7. Leave every other plan 3+ bead's scope unchanged.
+7. Create AU-14, AU-15 and AU-16 as low-priority beads. Give them only their own dependencies (listed above), and never add them as blockers of any other bead.
+8. Leave every other plan 3+ bead's scope unchanged.
 
 ## Not changed
 

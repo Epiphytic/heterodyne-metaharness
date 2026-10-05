@@ -31,6 +31,8 @@ Not taken:
 
 These conflict with §2 (vanilla interactive CLIs, hooks for state), §5.3 (park and continue, typed actions) and §7 (one outer sandbox).
 
+Two more t3code ideas are in the change plan as later, non-blocking tasks rather than ADR decisions: its driver-registry shape (AU-14) and its Codex app-server protocol schemas and replay transcripts (AU-15).
+
 ## 2. Decisions
 
 - **D1. Accounts are host configuration.**
@@ -205,7 +207,7 @@ Add rows:
 
 ### §12 Scope
 
-v1 minimum slice: add "accounts with the headroom gate and deferred parking; the Codex usage source; the Claude usage source if S6 finds one, otherwise reactive only". Out of scope: add "an ACP adapter (revisit with the Paseo adapter)".
+v1 minimum slice: add "accounts with the headroom gate and deferred parking; the Codex usage source; the Claude usage source if S6 finds one, otherwise reactive only". Out of scope: add "an ACP adapter (revisit with the Paseo adapter; a design note is change-plan item AU-16)".
 
 ### §13 Spikes
 
