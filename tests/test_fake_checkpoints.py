@@ -1,22 +1,12 @@
 """The checkpoint fakes themselves: interleaving tests rely on them under concurrent callers."""
 
-import sys
 import threading
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 
 import pytest
 from fakes.checkpoints import CrashAt, Many, PauseAt, Recorder, Seen, SimulatedCrash
 
 THREADS = 8
-
-
-@pytest.fixture
-def fast_switching() -> Generator[None]:
-    # Switch threads as often as possible, so an unsynchronized check-then-set would interleave.
-    before = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    yield
-    sys.setswitchinterval(before)
 
 
 def together(count: int, body: Callable[[int], None]) -> list[threading.Thread]:
@@ -31,6 +21,12 @@ def together(count: int, body: Callable[[int], None]) -> list[threading.Thread]:
     for thread in threads:
         thread.start()
     return threads
+
+
+def finish(threads: list[threading.Thread]) -> None:
+    for thread in threads:
+        thread.join(10)
+    assert not [thread.name for thread in threads if thread.is_alive()]
 
 
 def line_up(cp: Recorder, callers: threading.Barrier) -> None:
@@ -70,18 +66,47 @@ class RacingEvent(threading.Event):
         return value
 
 
-@pytest.mark.usefixtures("fast_switching")
+class SplitSeen(list[str]):
+    """`seen` for the pairing test. Unless the caller holds the recorder's lock, thread t0 stops right
+    after its append here until t1 has made a whole call, so an unsynchronized Recorder records t1's
+    thread before t0's, deterministically. A serialized Recorder never waits."""
+
+    def __init__(self, cp: Recorder, t0_in: threading.Event, t1_done: threading.Event) -> None:
+        super().__init__()
+        self.cp = cp
+        self.t0_in = t0_in
+        self.t1_done = t1_done
+
+    def append(self, name: str) -> None:
+        super().append(name)
+        if threading.current_thread().name != "t0":
+            return
+        self.t0_in.set()
+        lock: threading.Lock | None = getattr(self.cp, "lock", None)
+        if lock is None or not lock.locked():
+            self.t1_done.wait(5)
+
+
 def test_recorder_keeps_points_and_threads_paired() -> None:
     cp = Recorder()
+    t0_in = threading.Event()
+    t1_done = threading.Event()
+    cp.seen = SplitSeen(cp, t0_in, t1_done)
 
-    def body(i: int) -> None:
-        for _ in range(2000):
-            cp(f"t{i}")
+    def t1() -> None:
+        cp("t1")
+        t1_done.set()
 
-    for thread in together(THREADS, body):
-        thread.join(10)
-    assert len(cp.seen) == len(cp.threads) == THREADS * 2000
-    assert cp.seen == cp.threads  # each thread records its own name as the point
+    threads = [threading.Thread(target=cp, args=("t0",), name="t0"), threading.Thread(target=t1, name="t1")]
+    try:
+        threads[0].start()
+        assert t0_in.wait(5)
+        threads[1].start()
+    finally:
+        t1_done.set()  # never leave t0 waiting if the test fails early
+        finish([thread for thread in threads if thread.ident is not None])
+    assert list(cp.seen) == ["t0", "t1"]
+    assert cp.threads == ["t0", "t1"]  # each point is paired with the thread that recorded it
 
 
 def test_a_concurrent_first_hit_crashes_exactly_once() -> None:
@@ -94,8 +119,7 @@ def test_a_concurrent_first_hit_crashes_exactly_once() -> None:
         except SimulatedCrash:
             crashed.append(i)
 
-    for thread in together(THREADS, body):
-        thread.join(10)
+    finish(together(THREADS, body))
     assert len(crashed) == 1
     assert sorted(cp.seen) == ["door"] * THREADS
 
@@ -115,11 +139,12 @@ def test_a_concurrent_first_hit_pauses_exactly_one_caller() -> None:
                 others_passed.set()
 
     threads = together(THREADS, body)
-    assert others_passed.wait(5), "more than one caller is paused"
-    assert len(passed) == THREADS - 1
-    cp.go.set()
-    for thread in threads:
-        thread.join(10)
+    try:
+        assert others_passed.wait(5), "more than one caller is paused"
+        assert len(passed) == THREADS - 1
+    finally:
+        cp.go.set()  # never leave a paused caller behind if the test fails
+        finish(threads)
     assert sorted(passed) == list(range(THREADS))
 
 
