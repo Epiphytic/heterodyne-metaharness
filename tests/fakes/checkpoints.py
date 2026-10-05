@@ -17,10 +17,12 @@ class Recorder:
     def __init__(self) -> None:
         self.seen: list[str] = []
         self.threads: list[str] = []  # the calling thread's name for each entry of `seen`
+        self.lock = threading.Lock()  # keeps `seen` and `threads` paired, and picks a single first caller
 
     def __call__(self, name: str) -> None:
-        self.seen.append(name)
-        self.threads.append(threading.current_thread().name)
+        with self.lock:
+            self.seen.append(name)
+            self.threads.append(threading.current_thread().name)
 
 
 class CrashAt(Recorder):
@@ -31,8 +33,11 @@ class CrashAt(Recorder):
 
     def __call__(self, name: str) -> None:
         super().__call__(name)
-        if name == self.point and not self.fired:
-            self.fired = True
+        with self.lock:
+            first = name == self.point and not self.fired
+            if first:
+                self.fired = True
+        if first:
             raise SimulatedCrash(name)
 
 
@@ -45,10 +50,12 @@ class PauseAt(Recorder):
 
     def __call__(self, name: str) -> None:
         super().__call__(name)
-        if name == self.point and not self.reached.is_set():
-            self.reached.set()
-            if not self.go.wait(10):
-                raise TimeoutError(name)
+        with self.lock:
+            first = name == self.point and not self.reached.is_set()
+            if first:
+                self.reached.set()
+        if first and not self.go.wait(10):  # waits outside the lock, so other callers carry on
+            raise TimeoutError(name)
 
 
 class Seen(Recorder):
