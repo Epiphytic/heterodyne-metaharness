@@ -67,7 +67,7 @@ What it does **not** change, stated plainly so the change is not overstated:
 | R23 | **A decision attempt is persisted before the child starts.** One transaction holds the inbound row `executing`, the ask `deciding` with `asks.attempt` set to the operator's message ID, and a new `ask_attempts` row: the ask, the message ID, the action, the operator's name, `ref`, the full digest and the redacted note. `asks.attempt` names the **current attempt**; reconcile and settle use only that row. An attempt's `settled` is NULL while it is unresolved, and `uncertain` while it is unresolved after a failed read-back. Every terminal value (`refused` before launch, `recorded`, `untouched`, `blocked`) is written in the same transaction as the ask's new status, the clearing of `asks.attempt` and the reply or notice. Each such transaction is conditional: it updates only if the ask still has that status and that `attempt` (compare-and-set), and otherwise it changes nothing and audits `ask/conflict`. Before any settlement, the child is reaped: on every exit path, its own exit included, admind kills its process group (a group already gone is fine), drains both pipes and waits for it, bounded at 5 s, then closes the pipes (r4-1). A descendant that outlives the parent is killed too, and `approve-bead` passes its lock to every `bd` child, so the R6 lock is held until the last possible writer exits (r3-1). | A restart must be able to tell the attempt's outcome from someone else's (r1-2). Reaping first means admind never reopens an ask while its writer is alive, and the lock in R6 covers a child that outlived admind itself. |
 | R24 | **Replies on `ask.sock` are bounded.** A reply is at most 1 MiB, and the client reads with a matching limit. `get` returns one ask and all its answers (at most 64,000 characters, R15). `list` returns summaries without answers: every active ask (R15), and the 20 most recent others. | A request limit alone does not bound replies; the default stream limit is 64 KiB (r1-9). |
 | R25 | **Refs are readable from the phone, or the card says they are not.** `approve-bead --json` adds `links`: for each numbered file, commit or range ref whose repo has a `github.com` remote (`git remote get-url origin`, HTTPS or SSH form), a permalink pinned to the ref's commit (`/blob/<sha>/<path>` with the path percent-encoded, `/commit/<sha>`, `/compare/<a>...<b>`). The card shows the link under the ref. A ref without one shows "(no forge link; read it on the host with approve-bead --doc N)". A link does not prove the commit is pushed; a 404 means the operator should not approve from the phone. | §5.9 asks for clickable pinned links wherever a forge exists (r1-13). |
-| R26 | **Recovery is serialised with decisions.** At startup, before any loop starts, `run()` takes a snapshot of the asks in `deciding` or `uncertain`, with each one's status and current attempt; the compare-and-set expects that status (r3-2). The reconcile task works only on that snapshot. It holds `work_lock` for each ask, so it cannot run while the worker is deciding. A retry of `uncertain` asks from `!asks` runs in the worker, under `work_lock` too. With the compare-and-set of R23, a reconcile can never reopen an attempt that a live decision owns. | A decision started after startup is not in the snapshot, and it holds `work_lock` for its whole run (r2-3). |
+| R26 | **Recovery is serialised with decisions.** At startup, before any loop starts, `run()` takes a snapshot of the asks in `deciding` or `uncertain`, with each one's status and current attempt; the compare-and-set expects that status (r3-2). The reconcile task works only on that snapshot. It holds `work_lock` for each ask, so it cannot run while the worker is deciding. The `!asks` backstop, which reconciles any `deciding` or `uncertain` ask, runs in the worker under `work_lock` too (r5-1). With the compare-and-set of R23, a reconcile can never reopen an attempt that a live decision owns. | A decision started after startup is not in the snapshot, and it holds `work_lock` for its whole run (r2-3). |
 
 ## 5. Data model
 
@@ -203,11 +203,12 @@ The card shows the title, then the ask fields in `ASK_FIELDS` order with their r
 | partial or foreign write (`blocked`) | `btq-ab12c holds a decision admind cannot confirm as yours ("<stderr line>"). Nothing more will be done from Marmot. Resolve it on the host with approve-bead btq-ab12c.` |
 | uncertain | `admind could not read btq-ab12c back. No further decision is taken from Marmot until it can; check it on the host with approve-bead btq-ab12c.` |
 | busy | `btq-ab12c is being decided elsewhere right now. Nothing recorded; try again in a minute.` |
+| preflight failed (§8, r5-1) | `admind could not check btq-ab12c (<word>); nothing was recorded. Try again.` The word is one of `timed out`, `unavailable`, `bad output`, `error`. |
 | not configured | `Approval asks are not configured on this host ([admind] approve_bead).` |
 
 **New `!` commands** (`commands.HELP` gains `!asks · !answer <id> <text> · !approve <bead> <digest> · !deny <bead> <reason>`):
 
-- `!asks`: the active asks (R15), one line each: `k7m2 question · 3h · <first 60 characters of the title>`. If any ask is `uncertain`, it first retries those read-backs.
+- `!asks`: the active asks (R15), one line each: `k7m2 question · 3h · <first 60 characters of the title>`. If any ask is `deciding` or `uncertain`, it first reconciles those (§8, "Backstop").
 - `!answer <id> <text>`: `<text>` is everything after the ID, newlines included. Refused for an approval ask, with the hint.
 - `!approve <bead> <digest12>`: exactly two arguments. The digest is 12 hex digits, case-insensitive.
 - `!deny <bead> <reason>`: the reason is everything after the bead and must not be empty.
@@ -290,6 +291,26 @@ The card shows the title, then the ask fields in `ASK_FIELDS` order with their r
    - queue the thread reply.
 
    Audit `ask/decided`, with the outcome word, the exit status, `gate_valid` and `latched_during`.
+
+**Every exit between step 4 and the launch settles the attempt** (r5-1). Steps 4 to 7 run inside one `try`. Until the decision child exists, nothing can have been written by this attempt, so every failure below closes it as `refused` in one compare-and-set transaction. That transaction returns the ask to `open`, clears `asks.attempt`, sets the inbound row to `done` and queues the fixed reply "admind could not check btq-ab12c (<word>); nothing was recorded. Try again." Then it audits `ask/refused` with the word.
+
+| Exit | Raised by | Settlement |
+|---|---|---|
+| the step 4 transaction fails | sqlite | rolled back; nothing is persisted, the ask stays `open`, and the existing handler-failure path applies to the message |
+| the `ask/deciding` audit write fails | `audit.write` (`OSError`) | `refused`, word `error` |
+| the `--json` read times out | `BtqError("timed out")`, after the bounded reap (R23) | `refused`, word `timed out` |
+| the `--json` read exits non-zero, or its output is over the cap, not JSON, or not the schema | `BtqError("unavailable")` / `BtqError("bad output")`, after the bounded reap | `refused`, word `unavailable` or `bad output` |
+| the binary cannot be started | `create_subprocess_exec` (`OSError`) | `refused`, word `unavailable` |
+| the read says `busy`, the digest changed, or a step 5 check fails | returned values | as in step 5 (`refused`, `stale` or `blocked`) |
+| `authorised(mid)` is false | step 6 | as in step 6 (`refused`, with the existing deny) |
+| the decision child cannot be started | `create_subprocess_exec` (`OSError`) in step 7 | `refused`, word `unavailable`: no process exists, so nothing was written |
+| any other exception before the child exists (a bug) | anything | `refused`, word `error` |
+| cancellation (admind is stopping) | `CancelledError` | not settled; the ask stays `deciding`, the inbound row `executing`, and the startup reconcile settles it (R26) |
+| the settling transaction itself fails | sqlite | the ask stays `deciding`; the next `!asks` or restart reconciles it (below) |
+
+Once the child exists, every exit goes through the reap and the read-back of step 8, and a read-back failure gives `uncertain`. An exception in step 8 itself (a bug) closes the attempt as `uncertain`, so the read-back is retried.
+
+**Backstop.** `!asks` runs in the worker under `work_lock`, as decisions and the reconcile do, so while it runs no decision is in flight. Any ask it finds `deciding` or `uncertain` is therefore stranded, and `!asks` reconciles each of them exactly as the startup reconcile does (read back, then a compare-and-set on the status it saw). No ask needs a restart to recover.
 
 ## 9. Security analysis
 

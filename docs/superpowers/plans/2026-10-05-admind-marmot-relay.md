@@ -382,7 +382,7 @@ Steps:
     - it appends the message ID it returns to each `sent` record, as `req["_message_id"]`; existing tests ignore the field;
     - it gains `send_gate: asyncio.Event | None`, like `info_gate`: while it is set to an unset Event, `send_final` waits.
   - `tests/fakes/fake_approve_bead.py` is a script run by a `#!/bin/sh` wrapper written into `tmp_path`, like the fake claude. It implements Task 1's interface from a JSON DB (`FAKE_BTQ_DB`) and appends its argv to `FAKE_BTQ_LOG`.
-  - `--json` prints the bead's stored readout object, exits 1 if `fail_read`, and gives the busy reply if `busy`.
+  - `--json` prints the bead's stored readout object, exits 1 if `fail_read`, and gives the busy reply if `busy`. The bead's `read` mode, which a test sets after the post, can make it sleep 600 s (`"hang"`) or print non-JSON and exit 0 (`"garbage"`) (Task 3, r5-1).
   - A decision: honours `--expect-digest` (exit 3), `busy` (exit 4), and the bead's `decide` mode:
     - `"ok"`: closes the bead and sets `decision`, `*_by`, `*_digest`, `via`, `via_ref`, `decided`, and `gate_valid` (from the bead's `gate` field, default true);
     - `"fail"`: a stderr line, exit 1, no change;
@@ -547,6 +547,7 @@ Daemon:
 - **Deciding** follows spec §8 "Decide", steps 1–8, as `async def decide(self, mid, cmd, target)`.
   - Every refusal is `finish(mid, "done", <spec §6 wording>, "ask")` plus an `ask/refused` audit with a reason word.
   - Step 4 is `begin_attempt`. Every later exit (stale, each refusal, the authorisation failure, the settlement) goes through `close_attempt` with `expect_status="deciding"`, so no attempt is ever left unresolved by a refusal (r2-2).
+  - **Preflight failures** (r5-1, spec §8 "Every exit between step 4 and the launch"): the `ask/deciding` audit, step 5, step 6 and the spawn in step 7 run in one `try` with a `launched` flag. `ApproveBead.decide` sets it through a callback right after `create_subprocess_exec` returns, so a spawn `OSError` leaves it false. `except asyncio.CancelledError: raise` comes first, unsettled. Then `except Exception as exc` with `launched` false calls `close_attempt(..., expect_status="deciding", settled="refused", new_status="open")` and queues the §6 "preflight failed" reply. The word is `BtqError`'s fixed word, `unavailable` for an `OSError`, or `error`. With `launched` true, an exception goes to the step 8 path, and an exception there closes the attempt as `uncertain`. If `close_attempt` itself raises, the exception reaches the worker's existing handler, and the ask is left for the backstop.
   - Step 6 is `if not self.authorised(mid)` immediately followed by `await approve_bead.decide(…)`, with no other await in between.
   - `ref = "marmot:" + audit.ref_id(mid)`.
   - `latched_during = self.latched()` is computed after the run.
@@ -557,7 +558,7 @@ Daemon:
     - read back;
     - `close_attempt(…, expect_status=<the status in the snapshot>)`, mapping `recorded` to `approved`/`denied`, `untouched` to `open` (with the restart notice), `blocked` to `blocked`, and a read error or busy to `uncertain` (the attempt is kept);
     - queue its notice threaded to `first_card_message`, as `asknote:<id>:reconciled:<n>:<i>`, in the same transaction; it is sent once admind may post.
-  - `!asks` runs the same routine, already in the worker under `work_lock`, for the current `uncertain` asks before listing.
+  - `!asks` runs the same routine, already in the worker under `work_lock`, for every ask currently `deciding` or `uncertain`, with `expect_status` set to the status it read, before listing. No decision can be in flight then, because decisions also hold `work_lock` (spec §8 "Backstop", r5-1).
 - **Supersede** on posting: an `open`/`answered` ask for the bead becomes `superseded`, with `asknote:<old>:superseded:<new>:<i>` threaded to the old card. A `deciding`/`uncertain` ask for the bead makes the post refused (R22); a `blocked` bead is refused by `postable`, because it has decision fields.
 
 Steps:
@@ -599,6 +600,12 @@ Steps:
   - `test_unthreaded_approve_refused` and `test_approve_as_reply_to_agent_message_refused`: `decisions(h) == []`.
   - `test_wrong_digest_refused`, `test_wrong_bead_refused`.
   - `test_card_not_fully_delivered`: the last chunk is held by `send_gate` (or failed with `fail_sends`), so `!approve` is refused.
+  - `test_preflight_timeout_settles` (r5-1): the post succeeds; then `read="hang"` with `READ_SECONDS` patched to 1. The decision ends with the "preflight failed (timed out)" reply. The ask is `open`, `asks.attempt` is NULL, the attempt is `refused`, the inbound row is `done`, and `decisions(h)` is empty. After the fake is reset, a second `!approve` records, with no restart.
+  - `test_preflight_bad_output_settles` (r5-1): the same with `read="garbage"` (non-JSON on stdout), and again with output over the cap; the word is `bad output`.
+  - `test_preflight_spawn_failure_settles` (r5-1): `approve_bead` points at a file whose executable bit is removed after the post; the word is `unavailable`, and a retry succeeds once the bit is restored.
+  - `test_preflight_audit_failure_settles` (r5-1): `audit.write` patched to raise `OSError` on `ask/deciding`; the attempt is `refused` and nothing launches.
+  - `test_asks_backstop_reconciles_stranded` (r5-1): `close_attempt` is patched to raise once, so the ask is left `deciding`. A following `!asks` reconciles it to `open` (read-back `untouched`), and a retry records.
+  - `test_cancel_during_preflight_left_for_reconcile`: cancelling the worker during the step 5 read leaves the ask `deciding`; a restart reconciles it to `open`.
   - `test_digest_changed_before_read`: the digest is changed between post and decide, so the ask is `stale` and no decision runs.
   - `test_digest_changed_inside_approve_bead`: `decide="edit-before"` makes the fake exit 3; the read-back is `untouched`, so the ask is `open` and the reply quotes the stderr line.
   - `test_non_approver_operator_refused`: `llctest` replies with the right digest; "not a btq approver"; no decision.
@@ -697,4 +704,5 @@ Steps:
   - 1: reaping kills the process group on every exit path, a normal exit included; Task 1's lock is inherited by `bd`; `test_descendant_killed_after_parent_exit` and `test_lock_outlives_parent`.
   - 2: `recovery_snapshot` returns the status; `test_reconcile_snapshot_statuses`.
   - 3: percent-encoded blob paths; `test_links_forms`.
+- Review r5 finding 1: spec §8 table of every exit between step 4 and the launch, each with its settlement; the `launched` flag and `refused` close in Task 3; the `!asks` backstop for stranded `deciding` asks; tests `test_preflight_*`, `test_asks_backstop_reconciles_stranded`, `test_cancel_during_preflight_left_for_reconcile`.
 - Review r4 finding 1: bounded concurrent draining of both pipes and closing the transport, in a reap helper shared with `summarize`; the overflow test fills paused pipes, and `test_reap_bounded_when_pipe_held`.
