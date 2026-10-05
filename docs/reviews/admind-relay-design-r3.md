@@ -1,0 +1,9 @@
+Verdict: REVISE
+
+1. **[MAJOR] docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:505 — Cleanup can leave a writer descendant alive.** `proc.returncode is None` checks the immediate child, not its process group. If `approve-bead` dies while its `bd` subprocess continues, the parent’s flock is released and cleanup skips the surviving writer. Read-back can then report `untouched` and reopen the ask before that writer finishes. A read-only subprocess reproduction confirmed an exited parent with a surviving group. **Fix:** terminate the remaining process group before settlement even when the parent has exited, tolerate `ProcessLookupError`, and reap the parent. Add a regression where the parent exits while a descendant remains poised to write; verify it cannot write after settlement.
+
+2. **[MINOR] docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:532 — The recovery snapshot omits a required CAS input.** Its contract returns only `(ask_id, attempt_message_id)`, but line 555 requires “the status in the snapshot.” **Fix:** return `(ask_id, attempt_message_id, status)` and use that captured status for `expect_status`. Exercise both `deciding` and `uncertain` startup records.
+
+3. **[MINOR] docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:121 — File permalinks need path escaping.** Directly appending `<path>` makes a valid Git filename such as `docs/design.md#relay` link to `docs/design.md`, with `relay` interpreted as a fragment. The operator can therefore open different evidence from the pinned ref. **Fix:** percent-encode the path while preserving `/` separators; test filenames containing `#`, `?` and `%`.
+
+Summary: R2 fixes 1, 2, 4 and 5 are verified; fix 3 needs the snapshot signature corrected, and descendant cleanup requires revision before approval.
