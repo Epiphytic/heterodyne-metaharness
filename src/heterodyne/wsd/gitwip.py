@@ -5,11 +5,15 @@ it already made instead of making a second one. The commit is local to the `btq/
 is ever pushed (§5.3).
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 GIT_TIMEOUT = 60
 PARK_MARK = "wsd-park: "
+# No hook runs for a WIP commit: `--no-verify` skips only pre-commit and commit-msg, and a
+# prepare-commit-msg hook could strip the park mark. A hooks path that holds no hooks turns them all off.
+NO_HOOKS = ("-c", f"core.hooksPath={os.devnull}")
 
 
 class GitFailed(Exception):
@@ -49,13 +53,26 @@ def wip_commit(worktree: Path, mark: str, summary: str) -> str:
     found = find_wip(worktree, mark)
     if found is not None:
         return found
-    git(worktree, "add", "--all")
-    git(worktree, "-c", "user.name=wsd", "-c", "user.email=wsd@localhost", "commit", "--allow-empty",
-        "--no-verify", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
-    return git(worktree, "rev-parse", "HEAD")
+    git(worktree, *NO_HOOKS, "add", "--all")
+    git(worktree, *NO_HOOKS, "-c", "user.name=wsd", "-c", "user.email=wsd@localhost", "commit",
+        "--allow-empty", "--no-verify", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
+    head = git(worktree, "rev-parse", "HEAD")
+    if find_wip(worktree, mark) != head:      # the mark is what a replayed park looks for
+        raise GitFailed("the WIP commit does not carry its park mark")
+    return head
 
 
 def common_dir(path: Path) -> Path:
     """The git common directory: shared by a repository and every worktree made from it."""
     out = git(path, "rev-parse", "--git-common-dir")
     return (path / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+
+
+def descends_from(path: Path, base: str) -> bool:
+    """HEAD is the commit `base` or a descendant of it. git refuses (and this is False) when `base` names
+    no object, or an object that is not a commit (a tree, a blob)."""
+    try:
+        git(path, "merge-base", "--is-ancestor", base, "HEAD")
+    except GitFailed:
+        return False
+    return True
