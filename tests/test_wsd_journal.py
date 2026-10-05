@@ -7,13 +7,41 @@ from fakes.checkpoints import SimulatedCrash
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from heterodyne.wsd.journal import InboxStatus, Journal, JournalCorrupt, OpConflict, OpKind, OpStatus
+from heterodyne.wsd import journal as journal_mod
+from heterodyne.wsd.journal import (
+    InboxStatus,
+    Journal,
+    JournalBusy,
+    JournalCorrupt,
+    OpConflict,
+    OpKind,
+    OpStatus,
+)
 from heterodyne.wsd.states import BeadState, IllegalTransition, Reason, WsState, allowed
 
 
 @pytest.fixture
 def journal(tmp_path: Path) -> Journal:
     return Journal(tmp_path / "state" / "wsd.db")
+
+
+def _files(d: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()}
+
+
+def assert_refused_unchanged(path: Path) -> None:
+    """Refused, and the directory is byte for byte what it was: the file untouched, no -wal or -shm."""
+    before = _files(path.parent)
+    with pytest.raises(JournalCorrupt):
+        Journal(path)
+    assert _files(path.parent) == before
+
+
+def _tamper(path: Path, sql: str) -> None:
+    Journal(path).close()
+    db = sqlite3.connect(path)
+    db.executescript(sql)
+    db.close()
 
 
 def test_new_journal_is_fresh_and_private(tmp_path: Path) -> None:
@@ -26,42 +54,88 @@ def test_new_journal_is_fresh_and_private(tmp_path: Path) -> None:
     assert not again.fresh
 
 
-def test_corrupt_journal_is_refused_and_kept(tmp_path: Path) -> None:
+@pytest.mark.parametrize("content", [b"not a database at all" * 100, b""])
+def test_corrupt_journal_is_refused_and_kept(tmp_path: Path, content: bytes) -> None:
     path = tmp_path / "wsd.db"
-    path.write_bytes(b"not a database at all" * 100)
-    before = path.read_bytes()
-    with pytest.raises(JournalCorrupt):
-        Journal(path)
-    assert path.read_bytes() == before
+    path.write_bytes(content)
+    assert_refused_unchanged(path)
 
 
-def test_foreign_database_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["delete", "wal"])
+def test_foreign_database_is_refused_unchanged(tmp_path: Path, mode: str) -> None:
     path = tmp_path / "wsd.db"
     db = sqlite3.connect(path)
+    db.execute(f"PRAGMA journal_mode={mode}")
     db.execute("CREATE TABLE other (x)")
+    db.commit()
     db.close()
-    with pytest.raises(JournalCorrupt):
-        Journal(path)
-    assert path.exists()
+    assert_refused_unchanged(path)
 
 
 def test_wrong_schema_version_is_refused(tmp_path: Path) -> None:
-    Journal(tmp_path / "wsd.db").close()
-    db = sqlite3.connect(tmp_path / "wsd.db")
-    db.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
-    db.commit()
-    db.close()
-    with pytest.raises(JournalCorrupt):
-        Journal(tmp_path / "wsd.db")
+    _tamper(tmp_path / "wsd.db", "UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+    assert_refused_unchanged(tmp_path / "wsd.db")
 
 
-def test_journal_missing_a_table_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sql", [
+    "DROP TABLE holds",
+    "DROP INDEX ops_one_open",
+    "DROP INDEX ops_one_open; CREATE UNIQUE INDEX ops_one_open ON ops (ws, bead)",
+    "DROP INDEX ops_one_open; CREATE INDEX ops_one_open ON ops (ws, bead) WHERE status = 'open'",
+    "DROP INDEX ops_one_open; CREATE UNIQUE INDEX ops_one_open ON ops (ws, bead) WHERE status = 'done'",
+    "ALTER TABLE holds RENAME COLUMN detail TO note",
+    "ALTER TABLE events DROP COLUMN ref",
+    "ALTER TABLE beads ADD COLUMN extra TEXT",
+])
+def test_altered_schema_is_refused_unchanged(tmp_path: Path, sql: str) -> None:
+    # Review finding 2: the one-open-op index (with its predicate) and every column are part of the check.
+    _tamper(tmp_path / "wsd.db", sql)
+    assert_refused_unchanged(tmp_path / "wsd.db")
+
+
+def test_journal_with_an_unflushed_log_opens(tmp_path: Path) -> None:
+    # A non-empty -wal (wsd stopped before a checkpoint) is read, not ignored.
+    first = Journal(tmp_path / "wsd.db")
+    seq = first.emit("alpha", None, "a")
+    assert (tmp_path / "wsd.db-wal").stat().st_size > 0
+    second = Journal(tmp_path / "wsd.db")
+    assert [e.seq for e in second.events_since(0, 10)] == [seq]
+    second.close()
+    first.close()
+
+
+def test_schema_altered_in_an_unflushed_log_is_refused(tmp_path: Path) -> None:
+    # The check reads what the log holds, not only the main file.
+    path = tmp_path / "wsd.db"
+    Journal(path).close()
+    other = sqlite3.connect(path, isolation_level=None)
+    try:
+        other.execute("PRAGMA wal_autocheckpoint=0")
+        other.execute("DROP INDEX ops_one_open")
+        assert (tmp_path / "wsd.db-wal").stat().st_size > 0
+        before = path.read_bytes()
+        with pytest.raises(JournalCorrupt):
+            Journal(path)
+        assert path.read_bytes() == before
+    finally:
+        other.close()
+
+
+def test_locked_journal_is_busy_not_corrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding 5: contention is transient and must never read as corruption.
     Journal(tmp_path / "wsd.db").close()
-    db = sqlite3.connect(tmp_path / "wsd.db")
-    db.execute("DROP TABLE holds")
-    db.close()
-    with pytest.raises(JournalCorrupt):
-        Journal(tmp_path / "wsd.db")
+    monkeypatch.setattr(journal_mod, "BUSY_TIMEOUT", 0.0)
+    other = sqlite3.connect(tmp_path / "wsd.db", isolation_level=None)
+    try:
+        other.execute("PRAGMA locking_mode=EXCLUSIVE")
+        other.execute("INSERT INTO events (at, ws, kind, detail) VALUES ('t', 'alpha', 'x', '')")
+        with pytest.raises(JournalBusy):
+            Journal(tmp_path / "wsd.db")
+    finally:
+        other.close()
+    again = Journal(tmp_path / "wsd.db")
+    assert [e.kind for e in again.events_since(0, 10)] == ["x"]
+    again.close()
 
 
 def test_symlinked_journal_is_refused(tmp_path: Path) -> None:
@@ -182,6 +256,28 @@ def test_holds_and_snapshot(journal: Journal) -> None:
     assert [e.kind for e in journal.events_since(0, 10)] == ["hold", "ws:held", "unhold"]
 
 
+def test_backup_is_refused_inside_a_transaction(journal: Journal, tmp_path: Path) -> None:
+    # Review finding 4: the copy would wait forever on the caller's own write lock.
+    dest = tmp_path / "wsd-backup.db"
+    with journal.transaction():
+        journal.emit("alpha", None, "a")
+        with pytest.raises(RuntimeError):
+            journal.backup(dest)
+    assert not dest.exists() and not list(tmp_path.glob(".*.part"))
+    journal.backup(dest)
+    assert dest.exists()
+
+
+def test_events_since_pages_in_order(journal: Journal) -> None:
+    seqs = [journal.emit("alpha", None, f"e{i}") for i in range(7)]
+    pages: list[list[int]] = []
+    cursor = 0
+    while page := journal.events_since(cursor, 3):
+        pages.append([e.seq for e in page])
+        cursor = page[-1].seq
+    assert pages == [seqs[0:3], seqs[3:6], seqs[6:7]]
+
+
 def test_events_cursor(journal: Journal) -> None:
     first = journal.emit("alpha", None, "a")
     journal.emit("alpha", "btq-1", "b")
@@ -201,6 +297,61 @@ def test_concurrent_writers_serialize(journal: Journal) -> None:
             if t.ident is not None:
                 t.join()
     assert len(journal.events_since(0, 1000)) == 200
+
+
+class _SignalBeforeAcquire:
+    """Journal.lock, instrumented: `reached` is set just before the watched thread tries to take it."""
+
+    def __init__(self, real: threading.RLock) -> None:
+        self.real = real
+        self.reached = threading.Event()
+        self.watched: threading.Thread | None = None
+
+    def __enter__(self) -> None:
+        if threading.current_thread() is self.watched:
+            self.reached.set()
+        self.real.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.real.release()
+
+
+def test_a_transaction_excludes_other_threads(journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding 3: a worker's write must neither run inside another thread's open transaction nor
+    # vanish in its rollback; it waits at the lock and lands after.
+    lock = _SignalBeforeAcquire(journal.lock)
+    monkeypatch.setattr(journal, "lock", lock)
+    trace: list[tuple[str, str]] = []
+    journal.db.set_trace_callback(lambda sql: trace.append((threading.current_thread().name, sql)))
+    seqs: list[int] = []
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            seqs.append(journal.emit("alpha", "btq-w", "worker"))
+        except BaseException as exc:  # noqa: BLE001  # re-raised in the test thread
+            errors.append(exc)
+
+    worker = threading.Thread(target=work, name="worker")
+    lock.watched = worker
+    owner = threading.current_thread().name
+    try:
+        with pytest.raises(SimulatedCrash), journal.transaction():
+            journal.emit("alpha", "btq-o", "owner")
+            worker.start()
+            assert lock.reached.wait(5), "the worker never went through the journal lock"
+            raise SimulatedCrash("owner")
+    finally:
+        if worker.ident is not None:
+            worker.join(5)
+        journal.db.set_trace_callback(None)
+    assert not worker.is_alive()
+    if errors:
+        raise errors[0]
+    rollback = trace.index((owner, "ROLLBACK"))
+    worker_sql = [i for i, (name, _) in enumerate(trace) if name == "worker"]
+    assert worker_sql and min(worker_sql) > rollback
+    assert [(e.seq, e.kind) for e in journal.events_since(0, 10)] == [(seqs[0], "worker")]
 
 
 @settings(max_examples=60, deadline=None)

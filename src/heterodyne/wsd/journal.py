@@ -9,10 +9,12 @@ What it holds, and what it never does:
 - `events`: an append-only progress log with a cursor, for per-message progress reactions (plan 6). A
   state event's `detail` is JSON with the reason and its concrete detail (blocker IDs, the failing step).
 
-Beads stay the source of truth. Opening the journal checks it first: an unreadable, corrupt or
-foreign file is refused (JournalCorrupt) and never deleted or recreated, because a lost journal must be
-noticed, not papered over. A missing file is created atomically and reported as `fresh`. `backup()`
-writes a consistent online copy (SQLite's backup API, safe under WAL) for the beads backups (§3.3).
+Beads stay the source of truth. Opening the journal checks it first, through a connection that cannot
+change the file: an unreadable, corrupt or foreign file, or one whose schema differs in any table, column,
+constraint or index, is refused (JournalCorrupt) and never modified, deleted or recreated, because a lost
+journal must be noticed, not papered over. A journal locked by another connection is JournalBusy, which is
+transient and says nothing about the file. A missing file is created atomically and reported as `fresh`.
+`backup()` writes a consistent online copy (SQLite's backup API, safe under WAL) for the beads backups (§3.3).
 """
 
 import contextlib
@@ -73,7 +75,7 @@ CREATE TABLE events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, ws TEXT NOT NULL, bead TEXT,
     kind TEXT NOT NULL, detail TEXT NOT NULL, ref TEXT);
 """
-TABLES = frozenset({"meta", "inbox", "ops", "beads", "holds", "workstreams", "events"})
+BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
 
 
 def now() -> str:
@@ -82,6 +84,11 @@ def now() -> str:
 
 class JournalCorrupt(Exception):
     """The journal failed its integrity check. wsd refuses to start; the file is left for the operator."""
+
+
+class JournalBusy(Exception):
+    """The journal is locked by another connection (SQLITE_BUSY or SQLITE_LOCKED). Transient: the file
+    is not suspect, so it is never reported as corrupt; retry once the other holder lets go."""
 
 
 class OpConflict(Exception):
@@ -207,9 +214,20 @@ def _locked[**P, R](method: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def _uri(path: Path, query: str) -> str:
+    return f"{path.absolute().as_uri()}?{query}"
+
+
 def _connect(path: Path) -> sqlite3.Connection:
-    db = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
-    db.execute("PRAGMA journal_mode=WAL")
+    """The working connection, opened only after `_validate` accepted the file. `mode=rw` never creates
+    a file; switching to WAL is the first write."""
+    db = sqlite3.connect(_uri(path, "mode=rw"), uri=True, isolation_level=None, timeout=BUSY_TIMEOUT,
+                         check_same_thread=False)
+    try:
+        db.execute("PRAGMA journal_mode=WAL")
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -229,16 +247,57 @@ def _create(path: Path) -> None:
     tmp.unlink()
 
 
+def _schema(db: sqlite3.Connection) -> set[tuple[str, str, str, str]]:
+    """Every table and index the schema declares, with its SQL: columns, constraints and an index's
+    predicate included. SQLite's own objects (`sqlite_sequence`, automatic indexes) are left out."""
+    rows = db.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+    return {(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in rows if not str(r[1]).startswith("sqlite_")}
+
+
+def _expected() -> set[tuple[str, str, str, str]]:
+    db = sqlite3.connect(":memory:")
+    try:
+        db.executescript(SCHEMA)
+        return _schema(db)
+    finally:
+        db.close()
+
+
+EXPECTED_SCHEMA = _expected()
+
+
 def _check(db: sqlite3.Connection) -> None:
     rows = db.execute("PRAGMA integrity_check").fetchall()
     if [tuple(r) for r in rows] != [("ok",)]:
         raise JournalCorrupt("integrity_check failed")
-    tables = {str(r[0]) for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if not TABLES <= tables:
-        raise JournalCorrupt("tables missing")
+    if _schema(db) != EXPECTED_SCHEMA:
+        raise JournalCorrupt("schema differs")
     row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if row is None or str(row[0]) != SCHEMA_VERSION:
         raise JournalCorrupt("unknown schema version")
+
+
+def _validate(path: Path) -> None:
+    """Check the journal through a connection that cannot change it: never created, never switched to
+    WAL, and no new sidecar files. `immutable` reads the main file without locks or sidecars, which is
+    exact while no write-ahead log holds data; a non-empty `-wal` (wsd stopped without a checkpoint) is
+    read through a plain read-only open instead, whose sidecars already exist."""
+    try:
+        wal = path.with_name(f"{path.name}-wal").stat().st_size
+    except FileNotFoundError:
+        wal = 0
+    db = sqlite3.connect(_uri(path, "mode=ro" if wal else "mode=ro&immutable=1"), uri=True,
+                         isolation_level=None, timeout=BUSY_TIMEOUT)
+    try:
+        _check(db)
+    finally:
+        db.close()
+
+
+def _refusal(exc: sqlite3.DatabaseError) -> Exception:
+    if exc.sqlite_errorcode & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return JournalBusy(type(exc).__name__)
+    return JournalCorrupt(type(exc).__name__)
 
 
 class Journal:
@@ -256,10 +315,10 @@ class Journal:
         self.lock = threading.RLock()
         self._depth = 0
         try:
+            _validate(path)
             self.db = _connect(path)
-            _check(self.db)
         except sqlite3.DatabaseError as exc:
-            raise JournalCorrupt(type(exc).__name__) from None
+            raise _refusal(exc) from None
 
     @_locked
     def close(self) -> None:
@@ -268,7 +327,10 @@ class Journal:
     @_locked
     def backup(self, dest: Path) -> None:
         """A consistent copy of the journal at `dest` (0600), taken online with SQLite's backup API, so
-        it is safe while wsd runs in WAL mode. Written under a temporary name and renamed into place."""
+        it is safe while wsd runs in WAL mode. Written under a temporary name and renamed into place.
+        Refused inside a transaction: the copy would wait on the caller's own write lock forever."""
+        if self._depth or self.db.in_transaction:
+            raise RuntimeError("backup() inside a journal transaction")
         tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.part")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         os.close(fd)
