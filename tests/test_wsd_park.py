@@ -889,8 +889,9 @@ def test_another_beads_uncertain_launch_holds_the_guard(tmp_path: Path) -> None:
 
 
 def busy_escalation(rig: Rig) -> None:
-    """The journal is busy exactly when the escalation is opened (once), as if another connection took
-    the write lock there."""
+    """A one-shot JournalBusy when the escalation is opened: a late failure inside the transaction that
+    already counted the attempt, which must roll the count back. Another connection can't take the write
+    lock there (BEGIN IMMEDIATE already holds it), so the failure is injected."""
     real = rig.journal.op_open
 
     def op_open(kind: OpKind, ws: str, bead: str, data: dict[str, str] | None = None) -> Op:
