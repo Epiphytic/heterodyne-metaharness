@@ -1,12 +1,12 @@
 import os
 import sqlite3
 import threading
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
-from wsd_env import WS, Rig, git_repo, make_rig
+from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
 
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
@@ -762,32 +762,6 @@ def test_release_refuses_a_bead_with_an_open_operation(tmp_path: Path) -> None:
         rig.parker.release("btq-1")
     [op] = rig.journal.ops_open()
     assert op.kind is OpKind.ESCALATE
-
-
-class Worker(threading.Thread):
-    """A test thread that keeps what its body raised, so `finish` can report it."""
-
-    def __init__(self, body: Callable[[], object], name: str) -> None:
-        super().__init__(name=name, daemon=True)
-        self.body = body
-        self.error: BaseException | None = None
-
-    def run(self) -> None:
-        try:
-            self.body()
-        except BaseException as exc:  # noqa: BLE001 - re-raised by finish() in the test's thread
-            self.error = exc
-
-
-def finish(*threads: Worker) -> None:
-    """Join every thread that started, then require each to have ended without raising."""
-    started = [t for t in threads if t.ident is not None]
-    for t in started:
-        t.join(10)
-    assert [t.name for t in started if t.is_alive()] == []
-    errors = [t.error for t in started if t.error is not None]
-    if errors:
-        raise errors[0]
 
 
 def test_entry_admits_one_operation_at_a_time(tmp_path: Path) -> None:

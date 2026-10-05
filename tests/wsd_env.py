@@ -5,6 +5,8 @@ while the queue, the repository and the agent sessions (other processes) carry o
 """
 
 import subprocess
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSpec
+from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
 from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
 
@@ -47,6 +50,7 @@ class Rig:
     gate: ClaimGate = field(init=False)
     deps: Deps = field(init=False)
     parker: Parker = field(init=False)
+    sched: Scheduler = field(init=False)
 
     def __post_init__(self) -> None:
         self.restart(self.cp)
@@ -61,6 +65,7 @@ class Rig:
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
                          self.reconciler or HoldingReconciler(self.beads), self.cp)
         self.parker = Parker(self.ws, self.deps)
+        self.sched = Scheduler(self.ws, self.deps, self.parker)
 
     def start(self, bead: str) -> None:
         """What a pickup does for one bead, without the pickup op: claim, worktree, record, launch."""
@@ -83,6 +88,9 @@ class Rig:
         for op in self.journal.ops_open(WS):
             self.parker.replay(op)
 
+    def pickup(self, kind: TriggerKind = TriggerKind.BACKSTOP, ref: str | None = None) -> Outcome:
+        return self.sched.pickup(Trigger(kind, ref))
+
     def worktree(self, bead: str) -> Path:
         return self.repo.parent / f"{self.repo.name}-btq-{bead}"
 
@@ -96,3 +104,29 @@ def make_rig(tmp_path: Path, cp: Checkpoint | None = None, limits: Limits | None
     repo = git_repo(tmp_path / "repos" / "proj")
     ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, limits or Limits())
     return Rig(tmp_path, world, FakeRuntime(), repo, ws, cp if cp is not None else Recorder())
+
+
+class Worker(threading.Thread):
+    """A test thread that keeps what its body raised, so `finish` can report it."""
+
+    def __init__(self, body: Callable[[], object], name: str) -> None:
+        super().__init__(name=name, daemon=True)
+        self.body = body
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            self.body()
+        except BaseException as exc:  # noqa: BLE001 - re-raised by finish() in the test's thread
+            self.error = exc
+
+
+def finish(*threads: Worker) -> None:
+    """Join every thread that started, then require each to have ended without raising."""
+    started = [t for t in threads if t.ident is not None]
+    for t in started:
+        t.join(10)
+    assert [t.name for t in started if t.is_alive()] == []
+    errors = [t.error for t in started if t.error is not None]
+    if errors:
+        raise errors[0]
