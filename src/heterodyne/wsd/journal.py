@@ -92,7 +92,9 @@ class JournalBusy(Exception):
     """The journal is locked by another connection (SQLITE_BUSY or SQLITE_LOCKED, extended codes
     included), when it is opened or by any Journal method after. Transient: the file is not suspect, so
     it is never reported as corrupt, and the method's writes did not happen; retry once the other holder
-    lets go."""
+    lets go. Inside a `transaction()` block that promise is the block's: the whole block rolls back when
+    the exception leaves it. A block that catches it and carries on commits whatever else it wrote, a
+    method's half included (a bead row without its event), so never catch it inside a block."""
 
 
 class OpConflict(Exception):
@@ -241,12 +243,16 @@ def _connect(path: Path) -> sqlite3.Connection:
     """The working connection, opened only after `_validate` accepted the file. `mode=rw` never creates
     a file; switching to WAL is the first write. The file is checked again on this connection, because
     another connection may have changed it since `_validate` read it; a file refused here has already
-    been switched to WAL."""
+    been switched to WAL. Until this check passes the connection never checkpoints on close: as the last
+    connection to a WAL file it would otherwise copy a log another writer left into the main file and
+    delete the log, changing a file it refuses."""
     db = sqlite3.connect(_uri(path, "mode=rw"), uri=True, isolation_level=None, timeout=BUSY_TIMEOUT,
                          check_same_thread=False)
     try:
+        db.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
         db.execute("PRAGMA journal_mode=WAL")
         _check_snapshot(db)
+        db.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, False)
     except BaseException:
         db.close()
         raise
@@ -375,8 +381,10 @@ class Journal:
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:
-        """All the block's journal writes commit, or (on any exception, a simulated crash included)
-        none do. Re-entrant: a nested block joins the outer one."""
+        """All the block's journal writes commit, or (on any exception that leaves the block, a simulated
+        crash included) none do. Re-entrant: a nested block joins the outer one. An exception caught inside
+        the block does not roll anything back (see JournalBusy). When SQLite has already rolled the
+        transaction back itself (SQLITE_FULL, for one), the original error is raised as it is."""
         with self.lock:
             if self._depth:
                 self._depth += 1
@@ -392,7 +400,8 @@ class Journal:
                     yield
                     self.db.execute("COMMIT")
                 except BaseException:
-                    self.db.execute("ROLLBACK")
+                    if self.db.in_transaction:
+                        self.db.execute("ROLLBACK")
                     raise
                 finally:
                     self._depth = 0

@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -192,6 +193,33 @@ def test_schema_changed_after_validation_is_refused(tmp_path: Path, monkeypatch:
     assert changed
 
 
+def test_refusal_after_validation_keeps_a_log_another_writer_left(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    # r3 finding 1: the refusing connection is the last one; closing it must not checkpoint the log a
+    # departed writer left into the main file, nor delete it.
+    path = tmp_path / "wsd.db"
+    Journal(path).close()
+    validate = journal_mod._validate  # pyright: ignore[reportPrivateUsage]
+    kept: dict[str, bytes] = {}
+
+    def validate_then_writer_leaves(p: Path) -> None:
+        validate(p)
+        writer = sqlite3.connect(p, isolation_level=None)
+        try:
+            writer.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("DROP INDEX ops_one_open")
+        finally:
+            writer.close()
+        kept.update({name: (tmp_path / name).read_bytes() for name in ("wsd.db", "wsd.db-wal")})
+
+    monkeypatch.setattr(journal_mod, "_validate", validate_then_writer_leaves)
+    with pytest.raises(JournalCorrupt):
+        Journal(path)
+    assert kept and kept["wsd.db-wal"]
+    assert {name: (tmp_path / name).read_bytes() for name in kept} == kept
+
+
 @pytest.mark.parametrize("step", ["_validate", "_connect"])
 def test_each_check_reads_one_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
     # A commit that lands between the check's schema read and its version read is not seen by the
@@ -273,6 +301,84 @@ def test_other_errors_after_open_pass_through(journal: Journal, monkeypatch: pyt
     monkeypatch.setattr(journal, "db", _Failing(_error(name)))
     with pytest.raises(sqlite3.OperationalError, match=name):
         journal.emit("alpha", None, "a")
+
+
+class _FailOn:
+    """The journal's connection, passing every statement through except the `nth` one starting with
+    `prefix`, which fails with `exc` before it runs. `ran` lists what ran."""
+
+    def __init__(self, db: sqlite3.Connection, prefix: str, nth: int, exc: sqlite3.Error) -> None:
+        self.db, self.prefix, self.nth, self.exc = db, prefix, nth, exc
+        self.seen = 0
+        self.ran: list[str] = []
+
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+        if sql.startswith(self.prefix):
+            self.seen += 1
+            if self.seen == self.nth:
+                raise self.exc
+        self.ran.append(sql)
+        return self.db.execute(sql, params)
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.db.in_transaction
+
+
+def _write_then_write(j: Journal) -> None:
+    with j.transaction():
+        j.emit("alpha", None, "a")
+        j.emit("alpha", None, "b")
+
+
+def _write_then_nested_method(j: Journal) -> None:
+    with j.transaction():
+        j.emit("alpha", None, "a")
+        j.set_state("alpha", "btq-1", BeadState.CLAIMING)
+
+
+def _method_alone(j: Journal) -> None:
+    j.set_state("alpha", "btq-1", BeadState.CLAIMING)    # its own transaction, its emit re-entering
+
+
+@pytest.mark.parametrize(("body", "prefix", "nth"), [
+    (_write_then_write, "INSERT INTO events", 2),
+    (_write_then_nested_method, "INSERT INTO events", 2),
+    (_method_alone, "INSERT INTO events", 1),
+    (_write_then_nested_method, "COMMIT", 1),
+])
+def test_contention_inside_a_transaction_rolls_it_all_back(journal: Journal, monkeypatch: pytest.MonkeyPatch,
+                                                         body: Callable[[Journal], None], prefix: str,
+                                                         nth: int) -> None:
+    # r3 finding 3: contention after the transaction began (after a write, inside a nested method, at
+    # COMMIT) rolls back everything once, and the journal works afterwards.
+    real = journal.db
+    failing = _FailOn(real, prefix, nth, _error("SQLITE_BUSY"))
+    monkeypatch.setattr(journal, "db", failing)
+    with pytest.raises(JournalBusy):
+        body(journal)
+    assert failing.seen == nth
+    assert failing.ran.count("ROLLBACK") == 1 and not real.in_transaction
+    assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
+    assert journal.events_since(0, 10) == [] and journal.state("alpha", "btq-1") is None
+    with journal.transaction():
+        journal.emit("alpha", None, "after")
+    assert [e.kind for e in journal.events_since(0, 10)] == ["after"]
+
+
+def test_error_that_already_rolled_back_is_raised_as_it_is(journal: Journal) -> None:
+    # r3 finding 2: SQLITE_FULL rolls the transaction back itself; the cleanup must not mask it.
+    pages = journal.db.execute("PRAGMA page_count").fetchone()[0]
+    journal.db.execute(f"PRAGMA max_page_count={pages}")
+    with pytest.raises(sqlite3.OperationalError) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+        journal.set_state("alpha", "btq-1", BeadState.CLAIMING, detail="x" * 200_000)
+    assert caught.value.sqlite_errorname == "SQLITE_FULL"
+    assert not journal.db.in_transaction and journal._depth == 0  # pyright: ignore[reportPrivateUsage]
+    journal.db.execute("PRAGMA max_page_count=1073741823")
+    assert journal.events_since(0, 10) == [] and journal.state("alpha", "btq-1") is None
+    journal.emit("alpha", None, "after")
+    assert [e.kind for e in journal.events_since(0, 10)] == ["after"]
 
 
 def test_a_write_lock_held_elsewhere_is_busy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
