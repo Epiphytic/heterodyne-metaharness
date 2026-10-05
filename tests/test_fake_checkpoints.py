@@ -102,8 +102,10 @@ def test_recorder_keeps_points_and_threads_paired() -> None:
         threads[0].start()
         assert t0_in.wait(5)
         threads[1].start()
+        threads[1].join(10)  # t1 itself releases t0, once its whole call has returned
+        assert not threads[1].is_alive()
     finally:
-        t1_done.set()  # never leave t0 waiting if the test fails early
+        t1_done.set()  # failure cleanup only: never leave t0 waiting if the test fails early
         finish([thread for thread in threads if thread.ident is not None])
     assert list(cp.seen) == ["t0", "t1"]
     assert cp.threads == ["t0", "t1"]  # each point is paired with the thread that recorded it
