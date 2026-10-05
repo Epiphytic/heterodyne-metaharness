@@ -54,6 +54,8 @@ class FakeRuntime:
             raise LaunchUncertain("no answer from the backend")
 
     def stop(self, session_key: str) -> None:
+        if not self.up:
+            raise RuntimeUnavailable("down")      # nothing confirmed: the session stays listed
         if self.stop_failures:
             self.stop_failures -= 1
             raise RuntimeUnavailable("stop not confirmed")

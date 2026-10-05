@@ -1,13 +1,18 @@
+import errno
+import fcntl
 import os
 import threading
+import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes.checkpoints import Many, PauseAt, Recorder, Seen
 from fakes.fake_btq import World, factory
 
+from heterodyne.wsd import gate as gate_mod
 from heterodyne.wsd.beads import BeadsAdapter
-from heterodyne.wsd.gate import AlreadyRunning, ClaimGate, Paused, instance_lock
+from heterodyne.wsd.gate import AlreadyRunning, ClaimGate, Paused, instance_lock, open_lock_file
 
 WS = "alpha"
 
@@ -132,3 +137,108 @@ def test_instance_lock_is_exclusive(tmp_path: Path) -> None:
         instance_lock(tmp_path / "state" / "wsd.lock")
     os.close(fd)
     os.close(instance_lock(tmp_path / "state" / "wsd.lock"))
+
+
+def flock_spy(monkeypatch: pytest.MonkeyPatch, on_flock: Any) -> None:
+    """Replace the gate module's `fcntl` with one whose `flock` calls `on_flock(fd, op)` first."""
+    def flock(fd: int, op: int) -> None:
+        on_flock(fd, op)
+        fcntl.flock(fd, op)
+
+    monkeypatch.setattr(gate_mod, "fcntl", types.SimpleNamespace(
+        flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB))
+
+
+def test_pause_set_while_a_claim_waits_for_the_lock_refuses_it(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    world, beads, g = gate(tmp_path)
+    world.add("btq-1")
+    claimer: threading.Thread | None = None
+    at_door = threading.Event()
+
+    def on_flock(_fd: int, _op: int) -> None:
+        if threading.current_thread() is claimer:
+            at_door.set()
+
+    errors: list[BaseException] = []
+
+    def claim() -> None:
+        try:
+            g.claim(WS, "btq-1")
+        except BaseException as exc:  # noqa: BLE001 - reported by the test thread
+            errors.append(exc)
+
+    claimer = threading.Thread(target=claim)
+    try:
+        with g.locked(WS):                  # a pause holds the lock ...
+            flock_spy(monkeypatch, on_flock)
+            claimer.start()
+            assert at_door.wait(5)          # ... while the claim waits for it
+            beads.set_paused(WS, True)      # ... and sets the flag before the claim gets the lock
+    finally:
+        if claimer.ident is not None:
+            claimer.join(5)
+    assert not claimer.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], Paused)
+    assert world.claims == [] and all(call != "claim" for _, call in world.calls)
+
+
+def test_instance_lock_closes_its_descriptor_on_any_failure(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[int] = []
+
+    def on_flock(fd: int, _op: int) -> None:
+        opened.append(fd)
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    flock_spy(monkeypatch, on_flock)
+    with pytest.raises(OSError) as raised:
+        instance_lock(tmp_path / "state" / "wsd.lock")
+    assert raised.value.errno == errno.ENOLCK and not isinstance(raised.value, AlreadyRunning)
+    assert len(opened) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[0])
+    assert closed.value.errno == errno.EBADF
+
+
+def test_lock_files_are_narrowed_to_0600(tmp_path: Path) -> None:
+    _, _, g = gate(tmp_path)
+    (tmp_path / "claims").mkdir(mode=0o700)
+    claim_file = tmp_path / "claims" / f"{WS}.claim"
+    claim_file.touch()
+    claim_file.chmod(0o666)
+    with g.locked(WS):
+        pass
+    assert claim_file.stat().st_mode & 0o777 == 0o600
+    (tmp_path / "state").mkdir(mode=0o700)
+    lock = tmp_path / "state" / "wsd.lock"
+    lock.touch()
+    lock.chmod(0o644)
+    os.close(instance_lock(lock))
+    assert lock.stat().st_mode & 0o777 == 0o600
+
+
+def test_lock_files_refuse_anything_but_our_regular_file(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    _, _, g = gate(tmp_path)
+    (tmp_path / "claims").mkdir(mode=0o700)
+    os.mkfifo(tmp_path / "claims" / f"{WS}.claim", 0o600)
+    with pytest.raises(PermissionError, match="not a regular file"):
+        with g.locked(WS):
+            pass
+    target = tmp_path / "elsewhere"
+    target.touch()
+    (tmp_path / "claims" / "beta.claim").symlink_to(target)
+    with pytest.raises(OSError):
+        with g.locked("beta"):
+            pass
+    mine = tmp_path / "mine.lock"
+    mine.touch(mode=0o600)
+    fds = Path("/proc/self/fd")         # Linux: the refusal must leave no descriptor open
+    before = len(list(fds.iterdir())) if fds.is_dir() else None
+    monkeypatch.setattr(gate_mod.os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(PermissionError, match="not owned"):
+        open_lock_file(mine)
+    monkeypatch.undo()
+    if before is not None:
+        assert len(list(fds.iterdir())) == before

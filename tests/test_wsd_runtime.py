@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from fakes.fake_btq import World, factory
+from fakes.fake_runtime import FakeRuntime
 
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.runtime import HoldingReconciler, LaunchSpec, NoRuntime, RuntimeUnavailable
@@ -51,3 +52,13 @@ def test_holding_reconciler_never_reads_a_non_string_as_settled(tmp_path: Path) 
     world.add("btq-e", metadata={"action_state": "Succeeded"})
     assert HoldingReconciler(BeadsAdapter(factory(world))).unresolved("alpha") == ["btq-a", "btq-b", "btq-c",
                                                                                    "btq-d", "btq-e"]
+
+
+def test_fake_runtime_that_is_down_never_confirms_a_stop() -> None:
+    runtime = FakeRuntime()
+    spec = LaunchSpec("alpha", "btq-a", "coder", "p", "k", "l", Path("/nonexistent"), False)
+    runtime.launch(spec)
+    runtime.up = False
+    with pytest.raises(RuntimeUnavailable):
+        runtime.stop("k")
+    assert runtime.stops == [] and "k" in runtime.listed
