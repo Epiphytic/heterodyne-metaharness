@@ -80,6 +80,7 @@
 | `src/heterodyne/admind/daemon.py` | 2, 3 | ask socket, card replies, the commands, reconcile |
 | `src/heterodyne/admind/cli.py` | 2 | `admind ask post\|get\|wait\|list\|cancel` |
 | `src/heterodyne/admind/approvals.py` | 3 | new: `ApproveBead`, `Readout`, `settle` |
+| `src/heterodyne/admind/reap.py`, `src/heterodyne/admind/summarize.py` | 3 | new shared bounded reap (kill group, drain both pipes, close transport); `summarize` uses it, its tests unchanged |
 | `src/heterodyne/admind/settings.py` | 3 | optional `approve_bead` |
 | `tests/fakes/fake_approve_bead.py`, `tests/admind_asks_fixture.py` | 2 | new fake and shared fixture |
 | `tests/fakes/fake_wn_agent.py` | 2 | record sent message IDs; `send_gate` |
@@ -504,7 +505,7 @@ def settle(r: Readout, a: Attempt) -> Literal["recorded", "untouched", "blocked"
 ```
 
 - **Running a child** (both methods): `asyncio.create_subprocess_exec` with `start_new_session=True`, stdin `DEVNULL`, and the environment inherited (the unit's `PATH` finds `bd`). Output is read with a cap; over the cap it is `BtqError("bad output")`.
-- **Reaping** (R23): the child runs inside `try/finally`. On every exit path, a normal exit included (a timeout, `CancelledError`, an overflow, any exception, or the child's own exit), admind calls `os.killpg(proc.pid, SIGKILL)` unconditionally, ignoring `ProcessLookupError`, and then `await proc.wait()`, both shielded from cancellation, before settling or re-raising. It must not skip the kill when `proc.returncode` is already set: the parent may have exited while a descendant (`bd`) in its group is still running (r3-1). Reusing the group ID is not a risk: while any member of the group lives, Linux does not hand its ID out as a new PID, and once the group is empty the kill only raises `ProcessLookupError`.
+- **Reaping** (R23): the child runs inside `try/finally`. On every exit path, a normal exit included (a timeout, `CancelledError`, an overflow, any exception, or the child's own exit), admind calls `os.killpg(proc.pid, SIGKILL)` unconditionally, ignoring `ProcessLookupError`, and then drains and waits as below, shielded from cancellation, before settling or re-raising. It must not skip the kill when `proc.returncode` is already set: the parent may have exited while a descendant (`bd`) in its group is still running (r3-1). **Draining** (r4-1): after a capped read stops, asyncio pauses the pipe transport, and `proc.wait()` would then never return, holding `work_lock`. So the cleanup follows `summarize._reap` (`src/heterodyne/admind/summarize.py:53`), extended to both pipes: after the kill it runs `asyncio.wait_for(drain(), REAP_SECONDS)`, where `drain()` reads stdout and stderr to EOF concurrently (`asyncio.gather` of two `read(READ_CHUNK)` loops that discard the data) and then awaits `proc.wait()`. On `TimeoutError` (a descendant that left the group still holds a pipe) or any other cleanup error, it notes fixed words and the exception type on stderr, and in `finally` closes the transport (`getattr(proc, "_transport", None)`, as in `summarize._close_transport`). Cleanup is therefore bounded by `REAP_SECONDS` (5 s), a second cancellation included, and never replaces the error being handled. Factor `_kill`, `_close_transport` and the bounded reap into one shared helper (`admind/reap.py`) used by both `summarize` and `approvals`, with `summarize`'s tests unchanged. A writer that escaped the group and outlives the reap is still covered by the R6 lock it inherited. Reusing the group ID is not a risk: while any member of the group lives, Linux does not hand its ID out as a new PID, and once the group is empty the kill only raises `ProcessLookupError`.
 - **Decision argv:** `[binary, bead, f"--as={a.operator}", "--yes", f"--expect-digest={a.digest}", "--via=marmot", f"--via-ref={a.ref}"]`, plus `["--deny", f"--note={a.note}"]` for a deny.
 - **`settle`:**
   - `recorded`: the bead is closed, `decision` equals the action, `{approved|denied}_by == a.operator`, `{approved|denied}_digest == a.digest`, and `via_ref == a.ref`;
@@ -567,7 +568,9 @@ Steps:
   - Reaping:
     - a timeout kills the process group (the fake `hang`; the test asserts the PID is gone);
     - cancelling the awaiting task also kills and reaps it;
-    - an output overflow kills and reaps it;
+    - an output overflow kills and reaps it: the fake writes past the cap on stdout and keeps writing, and also fills stderr past the pipe buffer, so both transports are paused when the read stops; the test asserts `decide`/`read` returns within `REAP_SECONDS + 1` and that the PID is gone (r4-1);
+    - `test_reap_bounded_when_pipe_held`: the fake starts a grandchild with `setsid` that keeps stdout open and sleeps 30 s; cleanup returns within `REAP_SECONDS + 1`, and the transport is closed (r4-1);
+    - a second cancellation during cleanup still returns within the bound;
     - `test_descendant_killed_after_parent_exit`: the fake (`decide="orphan"`) forks a grandchild in its process group that sleeps 1 s and then writes the decision into the fake bead state, and the fake exits 1 at once. After `decide` returns, the grandchild's PID is gone, and 2 s later the fake bead state is still undecided (r3-1).
   - `settle`: every branch, including a closed bead with a different `via_ref`, a foreign `approved_by`, and open with `decided: true`.
   - `postable`: closed, not `kind:approval`, gaps, `digest: null`, an invalid `design_review`, a `posted_digest` mismatch, `decided: true`.
@@ -694,3 +697,4 @@ Steps:
   - 1: reaping kills the process group on every exit path, a normal exit included; Task 1's lock is inherited by `bd`; `test_descendant_killed_after_parent_exit` and `test_lock_outlives_parent`.
   - 2: `recovery_snapshot` returns the status; `test_reconcile_snapshot_statuses`.
   - 3: percent-encoded blob paths; `test_links_forms`.
+- Review r4 finding 1: bounded concurrent draining of both pipes and closing the transport, in a reap helper shared with `summarize`; the overflow test fills paused pipes, and `test_reap_bounded_when_pipe_held`.
