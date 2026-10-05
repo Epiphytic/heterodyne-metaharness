@@ -118,13 +118,13 @@ approve-bead ID --as=NAME --yes [--deny --note=TEXT] --expect-digest=HEX64 --via
 - `gate_valid` is null unless the bead is closed with `decision=approve`; then it is `queue.approval_valid(issue, adr_revision)`, with its stderr reasons captured into `gate_reasons`.
 - `design_review_valid` is null when the bead has no `design_review`.
 - `links`: for each `--doc N` ref, if `git -C <ref repo> remote get-url origin` is `https://github.com/O/R(.git)`, or the SSH form (user `git`, host `github.com`, path `O/R(.git)`), then:
-  - a file ref gets `https://github.com/O/R/blob/<id>/<path>`;
+  - a file ref gets `https://github.com/O/R/blob/<id>/<path>`, with the path percent-encoded by `urllib.parse.quote(path, safe="/")`, so `#`, `?`, `%` and spaces stay part of the path (r3-3);
   - a commit ref gets `/commit/<id>`;
   - a range ref gets `/compare/<a>...<b>`.
 
   Read `btq.Resolution` and `doc_pages` for the exact ref fields before implementing.
 - `--expect-digest` must be 64 lowercase hex characters. It is compared at the first computation and again at the pre-write re-check (exit 3, "The ask is not the one you were shown (expected …12, now …12); nothing written.").
-- **Lock:** every invocation that reads or decides, `--json` included, holds `fcntl.flock(LOCK_EX)` on `~/.local/state/beads-task-queue/approve-bead/<sha256(id)[:16]>.lock` from before the first `show` until after the last write. The directory is mode 0700. The wait is 60 s (polling `LOCK_NB` every 0.2 s), then exit 4 "busy". `--dry-run` and the read-only `--tree`/`--doc` paths also take it.
+- **Lock:** every invocation that reads or decides, `--json` included, holds `fcntl.flock(LOCK_EX)` on `~/.local/state/beads-task-queue/approve-bead/<sha256(id)[:16]>.lock` from before the first `show` until after the last write. The directory is mode 0700. The wait is 60 s (polling `LOCK_NB` every 0.2 s), then exit 4 "busy". `--dry-run` and the read-only `--tree`/`--doc` paths also take it. Every `bd` child is started with the lock file descriptor inherited (`pass_fds=(lock_fd,)`), so the lock is held until the last process that could write has exited, even if `approve-bead` itself dies first (r3-1). A read-back therefore waits for any surviving writer.
 - **Pre-write re-check, under the lock:**
   - re-`show` the bead;
   - refuse (exit 1, nothing written) unless it is open, still `kind:approval`, has no decision field, and `--as` is still in the policy approvers;
@@ -205,7 +205,8 @@ FAKE_BD = textwrap.dedent('''\
   - `test_default_via_is_cli`: no `--via` gives `via=cli` and no `via_ref`.
   - `test_via_ref_requires_marmot_and_pattern`: `--via-ref=x` without `--via=marmot`, and `--via=marmot --via-ref='a b'`, exit 2 with an empty `bd` log.
   - `test_via_ref_is_not_a_digest_key`: `'via_ref'.endswith('_digest')` is False (a rename can't slip past `approval_valid`).
-  - `test_links_forms`: an SSH remote gives the same URL; a non-GitHub remote gives no link.
+  - `test_lock_outlives_parent`: the fake bd, when asked to `update`, forks a grandchild that keeps its inherited fds and sleeps 2 s, and `approve-bead` is killed with SIGKILL right after the `update` starts. A `--json` read started at once with `APPROVE_BEAD_LOCK_SECONDS=1` gives the busy reply; one started after the grandchild exits succeeds.
+  - `test_links_forms`: an SSH remote gives the same URL; a file named `docs/a#b?c%d e.md` gives `…/blob/<id>/docs/a%23b%3Fc%25d%20e.md`; a non-GitHub remote gives no link.
 - [ ] **1.2 Run them to see them fail:** `python3 -m unittest tests.test_approve_bead_relay -v` gives errors on unknown arguments.
 - [ ] **1.3 Implement** in `bin/approve-bead`:
   - add the arguments and validate them right after `parse_args` with `parser.error`;
@@ -385,6 +386,7 @@ Steps:
     - `"ok"`: closes the bead and sets `decision`, `*_by`, `*_digest`, `via`, `via_ref`, `decided`, and `gate_valid` (from the bead's `gate` field, default true);
     - `"fail"`: a stderr line, exit 1, no change;
     - `"hang"`: sleeps 600 s;
+    - `"orphan"`: forks a grandchild (same process group) that sleeps 1 s and then writes the decision, and exits 1 at once (used in Task 3, r3-1);
     - `"partial"`: writes the decision fields, leaves the bead open, exits 1;
     - `"foreign"`: closes it with `approved_by` set to another name;
     - `"edit-before"`: changes `digest` first, then behaves as with `--expect-digest`.
@@ -502,7 +504,7 @@ def settle(r: Readout, a: Attempt) -> Literal["recorded", "untouched", "blocked"
 ```
 
 - **Running a child** (both methods): `asyncio.create_subprocess_exec` with `start_new_session=True`, stdin `DEVNULL`, and the environment inherited (the unit's `PATH` finds `bd`). Output is read with a cap; over the cap it is `BtqError("bad output")`.
-- **Reaping** (R23): the child runs inside `try/finally`. On every exit path (a timeout, `CancelledError`, an overflow, or any exception), if `proc.returncode is None` admind calls `os.killpg(proc.pid, SIGKILL)` and then `await proc.wait()`, shielded from cancellation, before re-raising.
+- **Reaping** (R23): the child runs inside `try/finally`. On every exit path, a normal exit included (a timeout, `CancelledError`, an overflow, any exception, or the child's own exit), admind calls `os.killpg(proc.pid, SIGKILL)` unconditionally, ignoring `ProcessLookupError`, and then `await proc.wait()`, both shielded from cancellation, before settling or re-raising. It must not skip the kill when `proc.returncode` is already set: the parent may have exited while a descendant (`bd`) in its group is still running (r3-1). Reusing the group ID is not a risk: while any member of the group lives, Linux does not hand its ID out as a new PID, and once the group is empty the kill only raises `ProcessLookupError`.
 - **Decision argv:** `[binary, bead, f"--as={a.operator}", "--yes", f"--expect-digest={a.digest}", "--via=marmot", f"--via-ref={a.ref}"]`, plus `["--deny", f"--note={a.note}"]` for a deny.
 - **`settle`:**
   - `recorded`: the bead is closed, `decision` equals the action, `{approved|denied}_by == a.operator`, `{approved|denied}_digest == a.digest`, and `via_ref == a.ref`;
@@ -529,7 +531,7 @@ Store: the `ask_attempts` table (spec §5), with these methods:
 - `begin_attempt(a) -> bool`: one transaction. It sets the ask `open → deciding` and `asks.attempt = a.message_id`, and inserts the row; it returns False, changing nothing, if the ask is not `open`.
 - `current_attempt(ask_id) -> Attempt | None`: the row named by `asks.attempt`.
 - `close_attempt(ask_id, message_id, *, expect_status, settled, exit_status, new_status, outcome, decided_by) -> bool`: one compare-and-set transaction. It does nothing and returns False unless the ask's status is `expect_status` and its `attempt` is `message_id`. Otherwise it sets `settled` and `exit_status`, and the ask's status, outcome and `decided_by`. It clears `asks.attempt` unless `settled == "uncertain"`. The caller queues its reply or notice inside the same transaction.
-- `recovery_snapshot() -> list[tuple[str, str]]`: (ask ID, attempt message ID) for every `deciding`/`uncertain` ask.
+- `recovery_snapshot() -> list[tuple[str, str, str]]`: (ask ID, attempt message ID, status) for every `deciding`/`uncertain` ask. The reconcile passes that status as `expect_status` (r3-2).
 
 Commands:
 
@@ -550,7 +552,7 @@ Daemon:
 - **Startup reconcile** (R26):
   - `recover()` leaves `deciding` asks alone.
   - In `run()`, after `recover()` and before the `TaskGroup` starts any loop, `snapshot = store.recovery_snapshot()`.
-  - A `reconcile` task in the group handles each (ask, attempt) in the snapshot under `async with self.work_lock`:
+  - A `reconcile` task in the group handles each (ask, attempt, status) in the snapshot under `async with self.work_lock`:
     - read back;
     - `close_attempt(…, expect_status=<the status in the snapshot>)`, mapping `recorded` to `approved`/`denied`, `untouched` to `open` (with the restart notice), `blocked` to `blocked`, and a read error or busy to `uncertain` (the attempt is kept);
     - queue its notice threaded to `first_card_message`, as `asknote:<id>:reconciled:<n>:<i>`, in the same transaction; it is sent once admind may post.
@@ -565,7 +567,8 @@ Steps:
   - Reaping:
     - a timeout kills the process group (the fake `hang`; the test asserts the PID is gone);
     - cancelling the awaiting task also kills and reaps it;
-    - an output overflow kills and reaps it.
+    - an output overflow kills and reaps it;
+    - `test_descendant_killed_after_parent_exit`: the fake (`decide="orphan"`) forks a grandchild in its process group that sleeps 1 s and then writes the decision into the fake bead state, and the fake exits 1 at once. After `decide` returns, the grandchild's PID is gone, and 2 s later the fake bead state is still undecided (r3-1).
   - `settle`: every branch, including a closed bead with a different `via_ref`, a foreign `approved_by`, and open with `decided: true`.
   - `postable`: closed, not `kind:approval`, gaps, `digest: null`, an invalid `design_review`, a `posted_digest` mismatch, `decided: true`.
   - `approval_card`:
@@ -617,6 +620,7 @@ Steps:
   - `test_busy_read_back`: a fake `busy` makes the read-back retry, then `uncertain`.
   - `test_refused_then_retried_then_restart`: an `!approve` refused at step 5 (not an approver), then a successful one, then a restart. Only the second attempt is current; the first is `refused`; the reconcile has nothing to do.
   - `test_uncertain_then_reconciled_at_restart`.
+  - `test_reconcile_snapshot_statuses`: a restart with ask A `deciding` and ask B `uncertain` (attempt kept). The snapshot holds both with their statuses; A settles from `deciding` and B from `uncertain`. Changing B's status in the store before the reconcile makes its compare-and-set fail, with an `ask/conflict` audit (r3-2).
   - `test_reconcile_does_not_touch_live_attempt`: a restart snapshot with ask A `deciding`, while a live decision on ask B pauses (gated fake read) after `begin_attempt`. The reconcile settles A only; B is untouched and completes.
   - `test_blocked_asks_do_not_exhaust_quota`: 20 `blocked` asks, then a question post is admitted.
   - `test_restart_while_deciding`: in `before_store`, set the ask to `deciding`, the inbound row to `executing`, and the `ask_attempts` row, with the fake bead closed by that attempt. At start, the inbound row gets `RESTARTED_NOTICE` and the ask becomes `approved` with the reconcile notice. A variant where the bead is closed by a different `via_ref` becomes `blocked`.
@@ -686,3 +690,7 @@ Steps:
   - 3: R26 startup snapshot, reconcile under `work_lock`.
   - 4: `blocked` is terminal and outside `ACTIVE`.
   - 5: the fallback wording for empty `gate_reasons`.
+- Review r3 findings and where they land:
+  - 1: reaping kills the process group on every exit path, a normal exit included; Task 1's lock is inherited by `bd`; `test_descendant_killed_after_parent_exit` and `test_lock_outlives_parent`.
+  - 2: `recovery_snapshot` returns the status; `test_reconcile_snapshot_statuses`.
+  - 3: percent-encoded blob paths; `test_links_forms`.
