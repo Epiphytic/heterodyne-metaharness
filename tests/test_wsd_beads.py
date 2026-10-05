@@ -410,6 +410,44 @@ def test_provenance_must_name_this_repository_path_and_base(
         adapter.verify_worktree(WS, "btq-1", repo, path)
 
 
+def test_separators_inside_the_paths_never_shift_the_fields(world: World, tmp_path: Path) -> None:
+    """Paths may contain `; base=` and `; worktree=`: the note is matched against the exact repository and
+    worktree, never split on the separators, so btq's genuine note still verifies."""
+    repo = git_repo(tmp_path / "proj; base=short; worktree=x")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    assert "; base=" in str(path) and "; worktree=" in str(path)
+    assert adapter.verify_worktree(WS, "btq-1", repo, path) == path
+
+
+def test_notes_for_other_repositories_and_paths_do_not_count(world: World, tmp_path: Path) -> None:
+    """Notes whose repository or worktree has ours as a prefix or a suffix, each with a base that is not a
+    commit, are another worktree's: they neither verify nor block ours."""
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    worker = adapter.bead_queue(WS, "btq-1").worker
+    r = repo.resolve()
+    bead = world.beads["btq-1"]
+    genuine = bead.notes
+    others = [(f"{r}2", path), (f"/x{r}", path), (r, f"{path}-old"), (r, f"/x{path}")]
+    bead.notes = "\n".join(f"worker={worker}; repository={o}; base=short; worktree={w}" for o, w in others)
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)      # none of them is ours
+    bead.notes = genuine + "\n" + bead.notes
+    assert adapter.verify_worktree(WS, "btq-1", repo, path) == path
+    # A note that opens and closes exactly as ours does is ours, whatever lies between: its base is the whole
+    # middle, here not a commit, so it fails closed rather than being re-split on the separators.
+    bead.notes = genuine + f"\nworker={worker}; repository={r}; base=short; worktree={path}; repository={r}" \
+        f"; base=short; worktree={path}"
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+
+
 def test_a_worktree_ahead_of_its_base_is_verified(world: World, tmp_path: Path) -> None:
     repo = git_repo(tmp_path / "proj")
     world.add("btq-1")

@@ -49,10 +49,10 @@ BTQ_ROUTING_CHANGED = "Routing/design changed during claim"
 BTQ_NOT_OWNED = "Task is not in progress under this worker"
 NOT_FOUND = "no issue found matching"
 RECORD_KEY = "wsd_session"
-# The provenance line btq's `worktree` appends to the bead's notes. The base is matched loosely so that a
-# malformed one is still seen (and refused by verify_worktree), never skipped.
-PROVENANCE = re.compile(r"^worker=(?P<worker>[^;]+); repository=(?P<repo>.+); "
-                        r"base=(?P<base>[^;]*); worktree=(?P<worktree>.+)$")
+# The provenance line btq's `worktree` appends to the bead's notes. Paths may contain the separators, so a
+# line is never split on them: it is matched against the exact worker, repository and worktree expected
+# (`Bead.bases`), and what lies between is the base.
+PROVENANCE = "worker={worker}; repository={repo}; base={base}; worktree={worktree}"
 FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _FAILURES = (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError,
              IndexError, AttributeError)
@@ -162,15 +162,15 @@ class Bead:
         except (msgspec.DecodeError, msgspec.ValidationError):
             raise RecordUnreadable(self.id) from None
 
-    def provenance(self, worker: str) -> list[tuple[str, str, str]]:
-        """(repository, base, worktree) triples btq recorded in the notes when `worker` made a worktree,
-        oldest first."""
-        found: list[tuple[str, str, str]] = []
-        for line in self.notes.splitlines():
-            m = PROVENANCE.match(line.strip())
-            if m and m["worker"] == worker:
-                found.append((m["repo"], m["base"], m["worktree"]))
-        return found
+    def bases(self, worker: str, repo: str, worktree: str) -> list[str]:
+        """The base of every provenance note btq wrote when `worker` made `worktree` from `repo`, oldest
+        first, exactly as written: a malformed base is returned for the caller to refuse, never skipped. A
+        line counts only if it is exactly the expected prefix, a base, and the expected suffix, so separators
+        inside a path never shift the fields; a crafted line that still fits yields a base that is not a
+        commit hash, which fails closed."""
+        head, tail = f"worker={worker}; repository={repo}; base=", f"; worktree={worktree}"     # PROVENANCE
+        return [line[len(head):len(line) - len(tail)] for line in self.notes.split("\n")
+                if len(line) >= len(head) + len(tail) and line.startswith(head) and line.endswith(tail)]
 
 
 def _str(raw: dict[str, Any], key: str, required: bool = True) -> str | None:
@@ -511,8 +511,7 @@ class BeadsAdapter:
             repo = repository.resolve(strict=True)
         except OSError:
             raise WorktreeConflict("repository missing") from None
-        bases = [base for r, base, w in self.show(ws, bead).provenance(worker)
-                 if (r, w) == (str(repo), str(worktree))]
+        bases = self.show(ws, bead).bases(worker, str(repo), str(worktree))
         try:
             ok = (bool(bases) and worktree.is_dir() and not worktree.is_symlink()
                   and gitwip.toplevel(worktree) == worktree.resolve()
