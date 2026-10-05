@@ -264,9 +264,9 @@ def test_owned_writes_wait_for_the_workers_exclusive_lock(world: World) -> None:
     writer = threading.Thread(target=write)
     held = True
     try:
+        calls = len(world.calls)        # before the writer starts: no ownership check may precede the lock
         writer.start()
         assert door.reached.wait(timeout=5), "the write never asked for the exclusive lock"
-        calls = len(world.calls)
         assert PARKED not in world.beads["btq-1"].labels
         assert (queue.worker, "owned") not in world.calls[calls:]
         door.lock.release()
@@ -386,7 +386,8 @@ def test_a_recorded_base_that_is_not_a_commit_is_a_conflict(world: World, tmp_pa
         adapter.verify_worktree(WS, "btq-1", repo, path)
 
 
-@pytest.mark.parametrize("note", ["other-path", "other-repo", "second-bad-base"])
+@pytest.mark.parametrize("note", ["other-path", "other-repo", "second-bad-base", "second-short-base",
+                                  "second-ref-base"])
 def test_provenance_must_name_this_repository_path_and_base(
         world: World, tmp_path: Path, note: str) -> None:
     """The note must be btq's for this repository and this path; every note for the path must hold."""
@@ -403,7 +404,8 @@ def test_provenance_must_name_this_repository_path_and_base(
     else:
         line = bead.notes.splitlines()[-1]
         base = gitwip.git(repo, "rev-parse", "HEAD")
-        bead.notes += "\n" + line.replace(f"base={base}", f"base={'1' * 40}")
+        bad = {"second-bad-base": "1" * 40, "second-short-base": "short", "second-ref-base": "HEAD"}[note]
+        bead.notes += "\n" + line.replace(f"base={base}", f"base={bad}")
     with pytest.raises(WorktreeConflict):
         adapter.verify_worktree(WS, "btq-1", repo, path)
 

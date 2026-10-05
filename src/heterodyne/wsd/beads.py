@@ -49,9 +49,11 @@ BTQ_ROUTING_CHANGED = "Routing/design changed during claim"
 BTQ_NOT_OWNED = "Task is not in progress under this worker"
 NOT_FOUND = "no issue found matching"
 RECORD_KEY = "wsd_session"
-# The provenance line btq's `worktree` appends to the bead's notes.
+# The provenance line btq's `worktree` appends to the bead's notes. The base is matched loosely so that a
+# malformed one is still seen (and refused by verify_worktree), never skipped.
 PROVENANCE = re.compile(r"^worker=(?P<worker>[^;]+); repository=(?P<repo>.+); "
-                        r"base=(?P<base>[0-9a-f]{40}|[0-9a-f]{64}); worktree=(?P<worktree>.+)$")
+                        r"base=(?P<base>[^;]*); worktree=(?P<worktree>.+)$")
+FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _FAILURES = (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError,
              IndexError, AttributeError)
 
@@ -516,7 +518,8 @@ class BeadsAdapter:
                   and gitwip.toplevel(worktree) == worktree.resolve()
                   and gitwip.branch(worktree) == f"btq/{bead}"
                   and gitwip.common_dir(worktree) == gitwip.common_dir(repo)
-                  and all(gitwip.descends_from(worktree, base) for base in bases))
+                  and all(FULL_SHA.fullmatch(base) and gitwip.descends_from(worktree, base)
+                          for base in bases))
         except (OSError, gitwip.GitFailed):
             ok = False
         if not ok:
