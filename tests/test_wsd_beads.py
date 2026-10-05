@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,17 @@ def test_claim_errors_are_classified(world: World) -> None:
     assert adapter.read_claim(WS, "btq-2") is ClaimView.OURS
 
 
+def test_routing_change_during_the_claim_is_not_uncertain(world: World) -> None:
+    """btq's claim landed but its post-claim check failed: the bead is ours and must never run."""
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    world.fault("claim", RuntimeError("Routing/design changed during claim; ask Bel to reconcile"),
+                after=True)
+    with pytest.raises(RoutingChanged):
+        adapter.claim(WS, "btq-1")
+    assert adapter.read_claim(WS, "btq-1") is ClaimView.OURS
+
+
 def test_ours_lists_only_per_bead_workers(world: World) -> None:
     world.add("btq-1")
     world.add("btq-2", status="in_progress", assignee="claude:host:x")
@@ -149,6 +161,16 @@ def test_unsettled_actions_include_closed_beads_and_unknown_values(world: World)
     assert sorted(found) == ["btq-a", "btq-b", "btq-d"]
 
 
+@pytest.mark.parametrize("value", [{"state": "succeeded"}, ["succeeded"], None, 5, True])
+def test_a_non_string_action_value_is_unsettled(world: World, value: Any) -> None:
+    """An object, list, null or number in the action metadata is never settled, and never escapes as a
+    TypeError past the fail-closed boundary."""
+    world.add("btq-a", metadata={"action_state": value})
+    adapter = BeadsAdapter(factory(world))
+    settled = frozenset({"pending", "succeeded", "failed"})
+    assert adapter.with_metadata(WS, "action_state", settled) == ["btq-a"]
+
+
 def test_validate_reruns_btqs_post_claim_checks(world: World) -> None:
     world.add("btq-1")
     world.add("btq-2", kind="research", metadata={"design_approval": ""})
@@ -179,6 +201,93 @@ def test_session_record_round_trips_and_never_guesses(world: World) -> None:
     world.beads["btq-1"].metadata[RECORD_KEY] = '{"role": "coder"}'
     with pytest.raises(RecordUnreadable):
         adapter.show(WS, "btq-1").record()
+
+
+FIELDS = {"role": "coder", "profile": "p-one", "session_key": "key-1", "repo": "/r",
+          "worktree": "/r-btq-btq-1"}
+
+
+@pytest.mark.parametrize("value", [None, 5, True, [], FIELDS])
+def test_a_present_record_that_is_not_a_json_string_is_unreadable(world: World, value: Any) -> None:
+    """Only an absent key means "no record". A null or any other non-string value is unreadable evidence,
+    replaced only by the operator's release (`replace_unreadable`), never treated as missing."""
+    world.add("btq-1", metadata={RECORD_KEY: value})
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    with pytest.raises(RecordUnreadable):
+        adapter.show(WS, "btq-1").record()
+    rec = SessionRecord("coder", "p-one", "key-1", "/r", "/r-btq-btq-1")
+    with pytest.raises(RecordUnreadable):
+        adapter.ensure_record(WS, "btq-1", rec)
+    assert world.beads["btq-1"].metadata[RECORD_KEY] == value
+    adapter.ensure_record(WS, "btq-1", rec, replace_unreadable=True)
+    assert adapter.show(WS, "btq-1").record() == rec
+
+
+def test_there_is_no_generic_metadata_writer() -> None:
+    """btq's agent:wsd exception lets wsd write only `metadata.wsd_session`, through `ensure_record`."""
+    assert not hasattr(BeadsAdapter, "ensure_metadata")
+
+
+def test_owned_writes_wait_for_the_workers_exclusive_lock(world: World) -> None:
+    """Every owned write runs under the per-bead worker's `exclusive()` lock: while another holder has it,
+    a write neither checks ownership nor writes. Deterministic: the writer signals when it reaches the
+    lock."""
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    queue = adapter.bead_queue(WS, "btq-1")
+
+    class Door:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.reached = threading.Event()
+
+        def __enter__(self) -> None:
+            self.reached.set()
+            self.lock.acquire()
+
+        def __exit__(self, *exc: object) -> None:
+            self.lock.release()
+
+    door = Door()
+    queue._exclusive = door  # pyright: ignore[reportAttributeAccessIssue]
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            adapter.ensure_label(WS, "btq-1", PARKED)
+        except BaseException as exc:  # noqa: BLE001 - reported to the main thread
+            errors.append(exc)
+
+    assert door.lock.acquire(timeout=5)
+    writer = threading.Thread(target=write)
+    held = True
+    try:
+        writer.start()
+        assert door.reached.wait(timeout=5), "the write never asked for the exclusive lock"
+        calls = len(world.calls)
+        assert PARKED not in world.beads["btq-1"].labels
+        assert (queue.worker, "owned") not in world.calls[calls:]
+        door.lock.release()
+        held = False
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+    finally:
+        if held:
+            door.lock.release()
+        writer.join(timeout=5)
+    assert errors == []
+    assert PARKED in world.beads["btq-1"].labels
+
+
+def test_comments_that_read_as_null_are_unavailable(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """bd answers [] when a bead has no comments; null (btq's reading of empty output) is not evidence."""
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    monkeypatch.setattr(adapter.ws_queue(WS), "bd", lambda *args: None)
+    with pytest.raises(UnexpectedShape):
+        adapter.comments(WS, "btq-1")
 
 
 def test_ensure_record_never_rewrites_an_existing_record(world: World) -> None:
@@ -241,7 +350,75 @@ def test_replaced_worktree_directory_is_a_conflict(world: World, tmp_path: Path)
         adapter.worktree(WS, "btq-1", repo)
 
 
-@pytest.mark.parametrize("write", ["label", "unlabel", "blocker", "comment", "record", "metadata"])
+def test_same_branch_with_unrelated_history_is_a_conflict(world: World, tmp_path: Path) -> None:
+    """D22: the worktree must hold the base btq recorded. The same repository, path and branch name with
+    history that does not descend from the base is not this bead's worktree."""
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    ident = ("-c", "user.name=t", "-c", "user.email=t@example.org")
+    gitwip.git(path, "checkout", "-q", "--orphan", "elsewhere")
+    gitwip.git(path, *ident, "commit", "-q", "--allow-empty", "-m", "unrelated")
+    gitwip.git(path, "branch", "-q", "-D", "btq/btq-1")
+    gitwip.git(path, "branch", "-q", "-m", "btq/btq-1")
+    assert gitwip.branch(path) == "btq/btq-1"
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+    with pytest.raises(WorktreeConflict):
+        adapter.worktree(WS, "btq-1", repo)
+
+
+@pytest.mark.parametrize("base", ["0" * 40, "short", "tree"])
+def test_a_recorded_base_that_is_not_a_commit_is_a_conflict(world: World, tmp_path: Path, base: str) -> None:
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    bead = world.beads["btq-1"]
+    real = gitwip.git(repo, "rev-parse", "HEAD")
+    if base == "tree":        # an object that exists, but is not a commit
+        base = gitwip.git(repo, "rev-parse", "HEAD^{tree}")
+    bead.notes = bead.notes.replace(f"base={real}", f"base={base}")
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+
+
+@pytest.mark.parametrize("note", ["other-path", "other-repo", "second-bad-base"])
+def test_provenance_must_name_this_repository_path_and_base(
+        world: World, tmp_path: Path, note: str) -> None:
+    """The note must be btq's for this repository and this path; every note for the path must hold."""
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    bead = world.beads["btq-1"]
+    if note == "other-path":
+        bead.notes = bead.notes.replace(f"worktree={path}", f"worktree={path}-old")
+    elif note == "other-repo":
+        bead.notes = bead.notes.replace(f"repository={repo.resolve()};", f"repository={tmp_path / 'x'};")
+    else:
+        line = bead.notes.splitlines()[-1]
+        base = gitwip.git(repo, "rev-parse", "HEAD")
+        bead.notes += "\n" + line.replace(f"base={base}", f"base={'1' * 40}")
+    with pytest.raises(WorktreeConflict):
+        adapter.verify_worktree(WS, "btq-1", repo, path)
+
+
+def test_a_worktree_ahead_of_its_base_is_verified(world: World, tmp_path: Path) -> None:
+    repo = git_repo(tmp_path / "proj")
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    adapter.claim(WS, "btq-1")
+    path = adapter.worktree(WS, "btq-1", repo)
+    gitwip.wip_commit(path, "op1", "parked btq-1")
+    assert adapter.verify_worktree(WS, "btq-1", repo, path) == path
+
+
+@pytest.mark.parametrize("write", ["label", "unlabel", "blocker", "comment", "record"])
 def test_a_write_that_does_not_read_back_is_unavailable(
         world: World, monkeypatch: pytest.MonkeyPatch, write: str) -> None:
     """S6: `bd label add` on a missing bead exits 0 and writes nothing. A write is only trusted once it
@@ -258,7 +435,6 @@ def test_a_write_that_does_not_read_back_is_unavailable(
         "blocker": lambda: adapter.ensure_blocker(WS, "btq-1", "btq-2"),
         "comment": lambda: adapter.ensure_comment(WS, "btq-1", "m-1", "parked (m-1)"),
         "record": lambda: adapter.ensure_record(WS, "btq-1", rec),
-        "metadata": lambda: adapter.ensure_metadata(WS, "btq-1", "action_state", "pending"),
     }
     with pytest.raises(BeadsUnavailable):
         writes[write]()
@@ -371,6 +547,15 @@ def test_contract_with_real_btq(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     config = tmp_path / "btq-config"
     config.mkdir()
     (config / "credentials.json").write_text(json.dumps({"wsd": "test-only"}))
+    (config / "policy.json").write_text("{}")
+    checkout = Path(os.environ["BTQ_REPO"])
+    for name in list(os.environ):      # btq reads BTQ_* locations and BTQ_POLICY; bd inherits BEADS_*
+        if name.startswith(("BTQ_", "BEADS_", "BD_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("BTQ_POLICY", str(config / "policy.json"))
+    locations = {"config_dir": str(config), "repo": str(tmp_path), "dolt_host": "127.0.0.1",
+                 "dolt_port": "1", "dolt_database": "test-only",
+                 "credentials": str(config / "credentials.json"), "tls_cert": str(config / "server.crt")}
 
     def bead(bead_id: str, kind: str, **extra: Any) -> dict[str, Any]:
         worker = f"wsd:fakehost:{ids.bead_session(WS, bead_id)}"
@@ -387,12 +572,16 @@ def test_contract_with_real_btq(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setattr("socket.gethostname", lambda: "fakehost")
-    module = btq.load(Path(os.environ["BTQ_REPO"]))
-    adapter = BeadsAdapter(btq.factory(module, {"config_dir": str(config), "repo": str(tmp_path)}))
+    module = btq.load(checkout)
+    assert module.locations() == module.LOCATION_DEFAULTS      # no inherited override is left
+    assert module.LOCATION_DEFAULTS["config_dir"].startswith(str(home))
+    adapter = BeadsAdapter(btq.factory(module, locations))
     assert adapter.show(WS, "btq-1").labels == ("agent:wsd", f"ws:{WS}", "kind:task")
     assert adapter.read_claim(WS, "btq-1") is ClaimView.OURS
     assert adapter.paused(WS) is False
     assert str(adapter.ws_queue(WS).state).startswith(str(home))
+    opened: Any = adapter.ws_queue(WS)
+    assert (opened.env["BEADS_DOLT_PASSWORD"], opened.policy) == ("test-only", {})
 
     def actors() -> set[str]:
         logged = [json.loads(line) for line in (tmp_path / "bd.log").read_text().splitlines()]

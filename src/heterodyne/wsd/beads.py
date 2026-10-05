@@ -50,8 +50,8 @@ BTQ_NOT_OWNED = "Task is not in progress under this worker"
 NOT_FOUND = "no issue found matching"
 RECORD_KEY = "wsd_session"
 # The provenance line btq's `worktree` appends to the bead's notes.
-PROVENANCE = re.compile(r"^worker=(?P<worker>[^;]+); repository=(?P<repo>.+); base=[0-9a-f]+; "
-                        r"worktree=(?P<worktree>.+)$")
+PROVENANCE = re.compile(r"^worker=(?P<worker>[^;]+); repository=(?P<repo>.+); "
+                        r"base=(?P<base>[0-9a-f]{40}|[0-9a-f]{64}); worktree=(?P<worktree>.+)$")
 _FAILURES = (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError,
              IndexError, AttributeError)
 
@@ -147,24 +147,27 @@ class Bead:
         return any(OPERATOR_INPUT_LABELS & set(d.labels) for d in self.open_blockers())
 
     def record(self) -> SessionRecord | None:
-        """The launched-session record; None if there is none. RecordUnreadable if it does not parse."""
-        value = self.metadata.get(RECORD_KEY)
-        if value is None:
+        """The launched-session record; None only if the key is absent. A present value that is not a JSON
+        string holding a record (null, a number, an object bd did not store as a string) is RecordUnreadable,
+        never "no record": only the operator's release may replace it."""
+        if RECORD_KEY not in self.metadata:
             return None
+        value = self.metadata[RECORD_KEY]
+        if not isinstance(value, str):
+            raise RecordUnreadable(self.id)
         try:
-            if isinstance(value, str):
-                return msgspec.json.decode(value, type=SessionRecord)
-            return msgspec.convert(value, SessionRecord)
+            return msgspec.json.decode(value, type=SessionRecord)
         except (msgspec.DecodeError, msgspec.ValidationError):
             raise RecordUnreadable(self.id) from None
 
-    def provenance(self, worker: str) -> list[tuple[str, str]]:
-        """(repository, worktree) pairs btq recorded in the notes when `worker` made a worktree."""
-        found: list[tuple[str, str]] = []
+    def provenance(self, worker: str) -> list[tuple[str, str, str]]:
+        """(repository, base, worktree) triples btq recorded in the notes when `worker` made a worktree,
+        oldest first."""
+        found: list[tuple[str, str, str]] = []
         for line in self.notes.splitlines():
             m = PROVENANCE.match(line.strip())
             if m and m["worker"] == worker:
-                found.append((m["repo"], m["worktree"]))
+                found.append((m["repo"], m["base"], m["worktree"]))
         return found
 
 
@@ -213,6 +216,10 @@ def parse(raw: object, detail: bool) -> Bead:
     return Bead(cast(str, _str(item, "id")), cast(str, _str(item, "title")), cast(str, _str(item, "status")),
                 _str(item, "assignee", required=False) or None, _labels(item),
                 cast(dict[str, Any], metadata), deps, _str(item, "notes", required=False) or "", item)
+
+
+def _settled(value: object, settled: frozenset[str]) -> bool:
+    return isinstance(value, str) and value in settled
 
 
 def _one(result: object) -> Bead:
@@ -307,13 +314,14 @@ class BeadsAdapter:
     def with_metadata(self, ws: str, key: str, settled: frozenset[str]) -> list[str]:
         """IDs of beads labelled `ws:<ws>`, closed ones included, whose metadata `key` is set to anything
         but one of the `settled` values. Closing a bead says nothing about its action, so status is never
-        a reason to skip one, and a value wsd doesn't know is never read as settled."""
+        a reason to skip one, and a value wsd doesn't know (a number, an object, null) is never read as
+        settled."""
         queue = self.ws_queue(ws)
         raw = self._call(lambda: queue.bd("list", "--all", "--label", f"ws:{ws}", "--limit", "0"))
         if not isinstance(raw, list):
             raise UnexpectedShape("list did not return a list")
         beads = [parse(item, detail=False) for item in cast(list[Any], raw)]
-        return [b.id for b in beads if key in b.metadata and b.metadata[key] not in settled]
+        return [b.id for b in beads if key in b.metadata and not _settled(b.metadata[key], settled)]
 
     def validate(self, ws: str, bead: str) -> Bead:
         """btq's post-claim checks, run again right before a launch: the bead is in progress under our
@@ -334,9 +342,7 @@ class BeadsAdapter:
     def comments(self, ws: str, bead: str) -> list[str]:
         queue = self.ws_queue(ws)
         raw = self._call(lambda: queue.bd("comments", bead))
-        if raw is None:
-            return []
-        if not isinstance(raw, list):
+        if not isinstance(raw, list):      # bd answers [] when there are none; null is not evidence of none
             raise UnexpectedShape("comments did not return a list")
         texts: list[str] = []
         for item in cast(list[Any], raw):
@@ -465,13 +471,6 @@ class BeadsAdapter:
             if current != record:
                 raise RecordConflict(bead)
 
-    def ensure_metadata(self, ws: str, bead: str, key: str, value: str) -> None:
-        if self.show(ws, bead).metadata.get(key) == value:
-            return
-        self._write(ws, bead, "update", bead, "--set-metadata", f"{key}={value}")
-        if self.show(ws, bead).metadata.get(key) != value:
-            raise BeadsUnavailable("metadata did not read back")
-
     # --- worktrees (§4.3: btq's convention) ---
 
     def worktree(self, ws: str, bead: str, repository: Path) -> Path:
@@ -500,21 +499,26 @@ class BeadsAdapter:
 
     def verify_worktree(self, ws: str, bead: str, repository: Path, worktree: Path) -> Path:
         """`worktree` is this bead's worktree of `repository`: a real directory at its own top level, on
-        branch `btq/<id>`, sharing the repository's git common directory, and recorded on the bead by btq
-        for our per-bead worker. A path that fails any check (including a worktree whose provenance note
-        was never written) is a WorktreeConflict: inspected by a human, never deleted or reused."""
+        branch `btq/<id>`, sharing the repository's git common directory, recorded on the bead by btq for
+        our per-bead worker, and holding the base btq recorded (a commit HEAD descends from; should several
+        notes name the path, every one must hold). A path that fails any check (including a worktree whose
+        provenance note was never written, or a branch of the same name with unrelated history) is a
+        WorktreeConflict: inspected by a human, never deleted or reused."""
         worker = self.bead_queue(ws, bead).worker
         try:
             repo = repository.resolve(strict=True)
         except OSError:
             raise WorktreeConflict("repository missing") from None
+        bases = [base for r, base, w in self.show(ws, bead).provenance(worker)
+                 if (r, w) == (str(repo), str(worktree))]
         try:
-            ok = (worktree.is_dir() and not worktree.is_symlink()
+            ok = (bool(bases) and worktree.is_dir() and not worktree.is_symlink()
                   and gitwip.toplevel(worktree) == worktree.resolve()
                   and gitwip.branch(worktree) == f"btq/{bead}"
-                  and gitwip.common_dir(worktree) == gitwip.common_dir(repo))
+                  and gitwip.common_dir(worktree) == gitwip.common_dir(repo)
+                  and all(gitwip.descends_from(worktree, base) for base in bases))
         except (OSError, gitwip.GitFailed):
             ok = False
-        if not ok or (str(repo), str(worktree)) not in self.show(ws, bead).provenance(worker):
+        if not ok:
             raise WorktreeConflict("the path is not this bead's recorded worktree")
         return worktree
