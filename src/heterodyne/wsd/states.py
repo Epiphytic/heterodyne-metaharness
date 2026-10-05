@@ -80,7 +80,7 @@ ALLOWED: dict[BeadState | None, frozenset[BeadState]] = {
     BeadState.RESUMING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.PARKED,
                                    BeadState.WAITING_INPUT, BeadState.HELD, BeadState.STUCK,
                                    BeadState.CLOSED}),
-    BeadState.STUCK: _PARKED_LIKE | {BeadState.RESUMING, BeadState.RUNNING, BeadState.CLOSED},
+    BeadState.STUCK: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},  # RESUMING: only by release
     BeadState.CLOSED: frozenset({BeadState.CLAIMING}),   # a reopened bead can be claimed again
     BeadState.DROPPED: frozenset({BeadState.CLAIMING}),
 }
