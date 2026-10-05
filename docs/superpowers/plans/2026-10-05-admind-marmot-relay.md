@@ -266,7 +266,7 @@ ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 MAX_OPEN, MAX_PER_HOUR, MAX_IN_FLIGHT = 20, 30, 2
 MAX_ANSWER, MAX_ANSWERS, MAX_ANSWER_TOTAL = 16_000, 50, 64_000
 CARD_LINES, CARD_CHARS = 40, 3_500
-NON_TERMINAL = ("open", "answered", "deciding", "blocked", "uncertain")
+ACTIVE = ("open", "answered", "deciding", "uncertain")      # counted by MAX_OPEN; blocked is terminal (r2-4)
 AskKind = Literal["question", "merge", "approval"]
 
 class AskPost(msgspec.Struct, frozen=True, tag="post", forbid_unknown_fields=True):
@@ -342,7 +342,7 @@ Daemon changes:
   2. Refuse if latched (R17) or over a limit (R15). For an `approval` ask, Task 2 refuses with "approval asks are not available yet"; Task 3 replaces this.
   3. In one transaction: insert the ask with `card_parts`; queue the card's chunks as `ask:<id>:<i>` (lane 1, unthreaded).
   4. Audit `ask/posted`, with `peer.pid`.
-- `get` returns `AskView`; `list` returns the non-terminal summaries plus `recent_asks(20)`.
+- `get` returns `AskView`; `list` returns the active summaries plus `recent_asks(20)`.
 - `cancel` of an `open` or `answered` ask sets `cancelled` and threads `asknote:<id>:cancelled:0:<i>` to `first_card_message` (unthreaded if none was sent).
 - `handle(mid, text, target)`, after the control-character check and before `commands.parse`:
 
@@ -357,7 +357,7 @@ if ask_id is not None and not text.startswith("!"):
   - refuse when the ask is `cancelled`/`superseded`, when the text is over `MAX_ANSWER`, or when the count or the total would pass `MAX_ANSWERS`/`MAX_ANSWER_TOTAL` (fixed wording each);
   - otherwise, in one transaction: add an answer (status `answered`), then `finish(mid, "done", <spec §6 wording>, "ask")`.
   - Approval asks: Task 3.
-- `!asks` lists the non-terminal asks (`finish`). `!answer` resolves the ID; an unknown ID gets `No ask <id>.` and an approval ask the R13 hint. Otherwise it is the same as `ask_reply`.
+- `!asks` lists the active asks (`finish`). `!answer` resolves the ID; an unknown ID gets `No ask <id>.` and an approval ask the R13 hint. Otherwise it is the same as `ask_reply`.
 - `details()`: if `self.store.ask_for_message(target)` names an ask, send `asks.full_text(row)`:
   - in one transaction, chunk it as `askd:<id>:<mid>:<i>` (lane 2, threaded to `mid`) and call `add_ask_details(…, parts=n)`;
   - audit `ask/details`;
@@ -438,7 +438,7 @@ def test_question_answered_by_reply(tmp_path: Path) -> None:
   - `test_merge_requires_pr_and_head` (refused, nothing posted);
   - `test_merge_card_shows_url_and_never_merges`;
   - `test_post_refused_while_latched`;
-  - `test_limits` (the 21st non-terminal ask refused; the 31st within an hour refused, with a patched clock in `asks`). Concurrency limits need an await inside a post, so they are tested in Task 3, with approval posts;
+  - `test_limits` (the 21st active ask refused; the 31st within an hour refused, with a patched clock in `asks`). Concurrency limits need an await inside a post, so they are tested in Task 3, with approval posts;
   - `test_answer_limits` (over 16,000 characters refused; the 51st answer refused; the total over 64,000 refused);
   - `test_details_on_card` (`askd:` in lane 2, threaded, `ask_details.parts` recorded);
   - `test_cancel` (status, notice, `!answer` afterwards refused);
@@ -512,11 +512,12 @@ def settle(r: Readout, a: Attempt) -> Literal["recorded", "untouched", "blocked"
 
 Card rendering (`asks.py`):
 
-- `approval_card(row, r: Readout) -> tuple[str, str, bool] | None`.
-  - It returns `(card, details, truncated)`, or None when R21 fails.
+- `approval_card(row, r: Readout, chunk_chars: int) -> ApprovalCard | None`.
+  - `ApprovalCard(card_chunks: list[str], details_chunks: list[str], truncated: bool)`; None when R21 fails.
   - Digest lines are rewritten with `PINNED_DIGEST_LINE` to `\1\2…`. Links are appended under their refs.
   - The budget is spent on title, ask, description; the decision lines are appended after it.
-  - Then `redact(card) == card and redact(details) == details` must hold.
+  - The chunks are `chunk.split(redact(text), chunk_chars)`, exactly what `Admind.reply` would queue. R21 holds when `redact(text) == text` for both texts and `redact(c) == c` for every chunk.
+  - The daemon queues these chunks as they are, with `post` per chunk; it never re-splits them. The details chunks are stored in `body` with the readout, so a later `!details` sends the checked chunks, not a fresh rendering (r2-1).
 
 Settings:
 
@@ -525,9 +526,10 @@ Settings:
 
 Store: the `ask_attempts` table (spec §5), with these methods:
 
-- `insert_attempt(a)`;
-- `attempt_for(ask_id) -> Attempt | None` (the unsettled one);
-- `settle_attempt(ask_id, message_id, exit_status, settled)`.
+- `begin_attempt(a) -> bool`: one transaction. It sets the ask `open → deciding` and `asks.attempt = a.message_id`, and inserts the row; it returns False, changing nothing, if the ask is not `open`.
+- `current_attempt(ask_id) -> Attempt | None`: the row named by `asks.attempt`.
+- `close_attempt(ask_id, message_id, *, expect_status, settled, exit_status, new_status, outcome, decided_by) -> bool`: one compare-and-set transaction. It does nothing and returns False unless the ask's status is `expect_status` and its `attempt` is `message_id`. Otherwise it sets `settled` and `exit_status`, and the ask's status, outcome and `decided_by`. It clears `asks.attempt` unless `settled == "uncertain"`. The caller queues its reply or notice inside the same transaction.
+- `recovery_snapshot() -> list[tuple[str, str]]`: (ask ID, attempt message ID) for every `deciding`/`uncertain` ask.
 
 Commands:
 
@@ -541,15 +543,19 @@ Daemon:
 - **Plain reply to an approval card:** `add_answer(kind="note")`, then the R13 notice.
 - **Deciding** follows spec §8 "Decide", steps 1–8, as `async def decide(self, mid, cmd, target)`.
   - Every refusal is `finish(mid, "done", <spec §6 wording>, "ask")` plus an `ask/refused` audit with a reason word.
-  - Step 4 is one synchronous transaction.
+  - Step 4 is `begin_attempt`. Every later exit (stale, each refusal, the authorisation failure, the settlement) goes through `close_attempt` with `expect_status="deciding"`, so no attempt is ever left unresolved by a refusal (r2-2).
   - Step 6 is `if not self.authorised(mid)` immediately followed by `await approve_bead.decide(…)`, with no other await in between.
   - `ref = "marmot:" + audit.ref_id(mid)`.
   - `latched_during = self.latched()` is computed after the run.
-- **Startup reconcile:** `recover()` leaves `deciding` asks alone. A new `reconcile_asks()` runs once, after the first successful `check_group` with `may_post`. It also runs on `!asks` for `uncertain` asks. For each `deciding` or `uncertain` ask it:
-  - takes `attempt_for` and reads back;
-  - maps `recorded` to `approved`/`denied`, `untouched` to `open` (with the restart notice), and `blocked` to `blocked`; a read error or busy stays `uncertain`;
-  - posts its notices threaded to `first_card_message`, as `asknote:<id>:reconciled:<n>:<i>`.
-- **Supersede** on posting: an `open`/`answered` ask for the bead becomes `superseded`, with `asknote:<old>:superseded:<new>:<i>` threaded to the old card. A `deciding`/`blocked`/`uncertain` ask for the bead makes the post refused (R22).
+- **Startup reconcile** (R26):
+  - `recover()` leaves `deciding` asks alone.
+  - In `run()`, after `recover()` and before the `TaskGroup` starts any loop, `snapshot = store.recovery_snapshot()`.
+  - A `reconcile` task in the group handles each (ask, attempt) in the snapshot under `async with self.work_lock`:
+    - read back;
+    - `close_attempt(…, expect_status=<the status in the snapshot>)`, mapping `recorded` to `approved`/`denied`, `untouched` to `open` (with the restart notice), `blocked` to `blocked`, and a read error or busy to `uncertain` (the attempt is kept);
+    - queue its notice threaded to `first_card_message`, as `asknote:<id>:reconciled:<n>:<i>`, in the same transaction; it is sent once admind may post.
+  - `!asks` runs the same routine, already in the worker under `work_lock`, for the current `uncertain` asks before listing.
+- **Supersede** on posting: an `open`/`answered` ask for the bead becomes `superseded`, with `asknote:<old>:superseded:<new>:<i>` threaded to the old card. A `deciding`/`uncertain` ask for the bead makes the post refused (R22); a `blocked` bead is refused by `postable`, because it has decision fields.
 
 Steps:
 
@@ -567,7 +573,9 @@ Steps:
     - readout lines copied verbatim, except the digest lines, which are cut to 12 hex digits;
     - links;
     - `truncated` set when the description is cut;
-    - None for a readout line holding a token-shaped string, a 64-hex run outside a digest line, or `-----BEGIN PRIVATE KEY-----` with no END.
+    - None for a readout line holding a token-shaped string, a 64-hex run outside a digest line, or `-----BEGIN PRIVATE KEY-----` with no END;
+    - None for a text that survives redaction whole but has a chunk that does not. Build it by searching `chunk_chars` and the padding so that a chunk boundary falls inside a value that one of `SECRET_VALUES` matches only once it is cut. Keep the found example as a fixed fixture;
+    - the chunks returned are exactly those the daemon queues (the integration test compares the outbox rows with them).
   - `commands.parse`: `!approve` arity, case and length; `!deny` with no reason.
   - Settings: the key is optional; relative paths and non-executables are refused; the error does not contain the value.
 - [ ] **3.2 Failing integration tests.** Each runs through `run_with` with:
@@ -581,7 +589,7 @@ Steps:
     - `decisions(h) == [[…expected argv…]]`, with `--via-ref=marmot:id:<12 hex>`, and the `ask_attempts` row matches.
     - The ask is `approved`; the reply says "Approved … btq's design gate accepts it".
     - The audit has `ask/deciding` and `ask/decided` with `gate_valid: true`.
-  - `test_gate_rejects_is_reported`: the fake's `gate: false` makes the reply say "the gate rejects it".
+  - `test_gate_rejects_is_reported`: the fake's `gate: false` makes the reply say "the gate rejects it". With empty `gate_reasons`, the reply uses the fallback wording.
   - `test_unthreaded_approve_refused` and `test_approve_as_reply_to_agent_message_refused`: `decisions(h) == []`.
   - `test_wrong_digest_refused`, `test_wrong_bead_refused`.
   - `test_card_not_fully_delivered`: the last chunk is held by `send_gate` (or failed with `fail_sends`), so `!approve` is refused.
@@ -607,10 +615,14 @@ Steps:
   - `test_foreign_decision_blocks`: `decide="foreign"`, so `blocked`.
   - `test_read_failure_uncertain_then_retried`: the read-back fails, so the ask is `uncertain`. Once the fake recovers, `!asks` retries and settles it.
   - `test_busy_read_back`: a fake `busy` makes the read-back retry, then `uncertain`.
+  - `test_refused_then_retried_then_restart`: an `!approve` refused at step 5 (not an approver), then a successful one, then a restart. Only the second attempt is current; the first is `refused`; the reconcile has nothing to do.
+  - `test_uncertain_then_reconciled_at_restart`.
+  - `test_reconcile_does_not_touch_live_attempt`: a restart snapshot with ask A `deciding`, while a live decision on ask B pauses (gated fake read) after `begin_attempt`. The reconcile settles A only; B is untouched and completes.
+  - `test_blocked_asks_do_not_exhaust_quota`: 20 `blocked` asks, then a question post is admitted.
   - `test_restart_while_deciding`: in `before_store`, set the ask to `deciding`, the inbound row to `executing`, and the `ask_attempts` row, with the fake bead closed by that attempt. At start, the inbound row gets `RESTARTED_NOTICE` and the ask becomes `approved` with the reconcile notice. A variant where the bead is closed by a different `via_ref` becomes `blocked`.
   - `test_supersede`: a second post for the same bead; the old card's `!approve` is refused as superseded.
   - `test_post_refused_while_bead_deciding`.
-  - `test_concurrent_posts_respect_limit`: with the fake `--json` gated, `asyncio.gather` of 5 approval posts at 18 non-terminal asks admits exactly 2, and a third concurrent post is refused "busy".
+  - `test_concurrent_posts_respect_limit`: with the fake `--json` gated, `asyncio.gather` of 5 approval posts at 18 active asks admits exactly 2, and a third concurrent post is refused "busy".
   - `test_latch_during_post_read_refused`: latch while the post's `--json` is gated; the post is refused and nothing is queued.
   - `test_not_configured`: without `approve_bead`, an approval post is refused, and question asks still work.
   - `test_answer_command_refused_for_approval`.
@@ -668,3 +680,9 @@ Steps:
 - `btq.Queue()` only reads files (policy, credentials) and creates its state directory, so Task 1's tests build it offline with temp `HOME` and `BTQ_*` paths.
 - Review r1 findings and where they land: 1 (Task 1 lock and re-check), 2 (Task 3 `ask_attempts`, reaping), 3 (R21, Task 3 `approval_card`), 4 (Task 1 `gate_valid`, Task 3 `settle`/`blocked`), 5 (R11, Task 3 test), 6 (R8, `card_parts`), 7 (R22, Task 3 tests), 8 (P4), 9 (R24, Task 2), 10 (nullable digest), 11 (offline btq gate), 12 (`two_operators`, `decisions(h)`), 13 (R25 links, spec §10 §5.9 delta, swap wording), 14 (`queue.repo`; no lazy queue).
 - ADR text is not edited by this plan. The §8 and §5.4 deltas are in the spec §10, for the r14 editor.
+- Review r2 findings and where they land:
+  - 1: R21 is checked per queued chunk; `approval_card` returns the chunks; the details chunks are stored and resent as they are.
+  - 2: `asks.attempt`, `begin_attempt`/`close_attempt` compare-and-set, `settled` values.
+  - 3: R26 startup snapshot, reconcile under `work_lock`.
+  - 4: `blocked` is terminal and outside `ACTIVE`.
+  - 5: the fallback wording for empty `gate_reasons`.
