@@ -32,6 +32,7 @@ from heterodyne.wsd.beads import (
     NEEDS_HUMAN,
     PARKED,
     Bead,
+    ClaimView,
     NotOurs,
     RecordConflict,
     RecordUnreadable,
@@ -56,7 +57,8 @@ PARK_MARK = "wsd-park: "
 REASONS = {BeadState.HELD: Reason.HELD_BY_OPERATOR, BeadState.WAITING_INPUT: Reason.WAITING_ON_OPERATOR,
            BeadState.PARKED: Reason.BLOCKED_ON_BEAD}
 RELEASABLE = frozenset({BeadState.HELD, BeadState.STUCK})
-# Holds the guard settles itself from the session list instead of waiting on.
+# Holds the guard settles itself from the session list instead of waiting on, but only an operation's
+# own: the hold's detail names the bead whose launch was uncertain, and every other operation waits (D17).
 GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
 
 
@@ -152,14 +154,38 @@ class Parker:
     def escalate_from(self, op: Op, reason: Reason, detail: str = "") -> None:
         """End `op` as STUCK and open the escalation in the same transaction, so a crash can't leave a
         stuck bead without its pending `needs-human`."""
+        self._handoff(self._stuck(op, reason, detail))
+
+    def _stuck(self, op: Op, reason: Reason, detail: str) -> Op:
+        """The journal half of `escalate_from`; inside a caller's transaction it joins that one."""
         j = self.d.journal
         with j.transaction():
             j.op_finish(op.op_id, OpStatus.STUCK)
             self._settle_uncertain(op)
             esc = j.op_open(OpKind.ESCALATE, self.ws.name, op.bead, {"reason": reason.value})
             j.set_state(self.ws.name, op.bead, BeadState.STUCK, reason, detail, op.data.get("ref") or None)
+        return esc
+
+    def _handoff(self, esc: Op) -> None:
         self.d.cp("escalate.intent")
         self.replay_escalate(esc)
+
+    def _spend(self, op: Op, limit: int, reason: Reason, detail: str) -> bool:
+        """Count one failed attempt of `op`. The attempt that exhausts the budget ends the operation as
+        STUCK and opens its escalation in the same transaction as the count, so no restart can find an
+        open operation with a spent budget and try its effect again. True if it escalated."""
+        j, ws = self.d.journal, self.ws.name
+        with j.transaction():
+            if j.op_failed(op.op_id) >= limit:
+                esc = self._stuck(op, reason, detail)
+            else:
+                esc = None
+                row = j.state(ws, op.bead)
+                j.set_state(ws, op.bead, row.state if row else BeadState.STUCK, reason, detail)
+        if esc is None:
+            return False
+        self._handoff(esc)
+        return True
 
     def escalate(self, bead: str, reason: Reason, detail: str = "") -> None:
         """Recovery's escalation: the journal row is rebuilt as STUCK whatever it said (beads are the
@@ -203,6 +229,9 @@ class Parker:
 
     def replay_park(self, op: Op) -> BeadState:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
+        if op.attempts >= self.ws.limits.park_attempts_before_human:      # a budget spent before a crash
+            self.escalate_from(op, Reason.PARK_FAILED, "the park's attempts are spent")
+            return BeadState.STUCK
         try:
             if op.step == "intent":
                 for session in self._sessions(bead):
@@ -211,6 +240,10 @@ class Parker:
                 op = j.op_step(op.op_id, "stopped")
                 self.d.cp("park.stopped")
             if op.step == "stopped":
+                # The worktree's provenance says nothing about who holds the bead now: never commit into
+                # the worktree of a bead that is no longer ours.
+                if self.d.beads.read_claim(ws, bead) is not ClaimView.OURS:
+                    raise NotOurs(bead)
                 rec = self.d.beads.show(ws, bead).record()
                 if rec is None:
                     self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record names the worktree")
@@ -252,10 +285,8 @@ class Parker:
         except RuntimeUnavailable:
             return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
         except gitwip.GitFailed as exc:
-            if j.op_failed(op.op_id) >= self.ws.limits.park_attempts_before_human:
-                self.escalate_from(op, Reason.PARK_FAILED, str(exc))
+            if self._spend(op, self.ws.limits.park_attempts_before_human, Reason.PARK_FAILED, str(exc)):
                 return BeadState.STUCK
-            j.set_state(ws, bead, BeadState.PARKING, Reason.PARK_FAILED, str(exc))
             return BeadState.PARKING
 
     # --- resume ---
@@ -381,10 +412,13 @@ class Parker:
         never frees the role while an old session may run."""
         ws, bead, j = self.ws.name, op.bead, self.d.journal
         kind = op.kind.value
+        if op.attempts >= self.ws.limits.launch_failures_before_human:    # a budget spent before a crash
+            self.escalate_from(op, Reason.LAUNCH_FAILED, "the launch's attempts are spent")
+            return Launch.ENDED
         if not self.d.runtime.available():
             j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
             return Launch.WAIT
-        if set(j.holds(ws)) - GUARD_SETTLES:
+        if any(reason not in GUARD_SETTLES or held != bead for reason, held in j.holds(ws).items()):
             return Launch.WAIT
         try:
             listed = self._sessions()
@@ -440,11 +474,9 @@ class Parker:
                 j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
                 return Launch.WAIT
             except LaunchFailed as exc:
-                if j.op_failed(op.op_id) >= self.ws.limits.launch_failures_before_human:
-                    self.escalate_from(op, Reason.LAUNCH_FAILED, str(exc))
+                if self._spend(op, self.ws.limits.launch_failures_before_human, Reason.LAUNCH_FAILED,
+                               str(exc)):
                     return Launch.ENDED
-                row = j.state(ws, bead)
-                j.set_state(ws, bead, row.state if row else BeadState.STUCK, Reason.LAUNCH_FAILED, str(exc))
                 return Launch.FAILED
             except Exception as exc:  # noqa: BLE001 - any other outcome is uncertain, never a failure
                 return self._uncertain(op, type(exc).__name__)

@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
@@ -10,7 +10,7 @@ from wsd_env import WS, Rig, git_repo, make_rig
 
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
-from heterodyne.wsd.journal import JournalBusy, OpKind
+from heterodyne.wsd.journal import JournalBusy, Op, OpKind
 from heterodyne.wsd.park import (
     ESCALATE_POINTS,
     PARK_MARK,
@@ -21,7 +21,7 @@ from heterodyne.wsd.park import (
     NotReleasable,
     resumable,
 )
-from heterodyne.wsd.runtime import Liveness
+from heterodyne.wsd.runtime import LaunchSpec, Liveness
 from heterodyne.wsd.states import Reason
 from heterodyne.wsd.workstream import REPO_KEY, ConfigInvalid, Limits, WorkstreamSettings, place
 
@@ -203,10 +203,27 @@ def test_beads_outage_during_park_never_escalates(tmp_path: Path) -> None:
 
 def test_park_of_a_bead_not_ours_is_abandoned(tmp_path: Path) -> None:
     rig = running(tmp_path)
+    head = gitwip.git(rig.worktree("btq-1"), "rev-parse", "HEAD")
     rig.world.beads["btq-1"].assignee = "someone-else"
     assert rig.parker.park("btq-1", ("btq-2",)).value == "stuck"
     assert reason(rig) is Reason.CLAIM_LOST
     assert PARKED not in rig.world.beads["btq-1"].labels
+    # review r1: the worktree of a bead that is no longer ours is never committed into
+    assert gitwip.git(rig.worktree("btq-1"), "rev-parse", "HEAD") == head and wip_commits(rig) == []
+    assert gitwip.git(rig.worktree("btq-1"), "status", "--porcelain") == "?? work.txt"
+
+
+def test_replayed_park_of_a_bead_lost_meanwhile_commits_nothing(tmp_path: Path) -> None:
+    rig = running(tmp_path)
+    head = gitwip.git(rig.worktree("btq-1"), "rev-parse", "HEAD")
+    rig.restart(CrashAt("park.stopped"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    rig.world.beads["btq-1"].assignee = "someone-else"
+    rig.restart()
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.CLAIM_LOST
+    assert gitwip.git(rig.worktree("btq-1"), "rev-parse", "HEAD") == head and wip_commits(rig) == []
 
 
 def test_operator_hold_is_not_resumable(tmp_path: Path) -> None:
@@ -747,6 +764,32 @@ def test_release_refuses_a_bead_with_an_open_operation(tmp_path: Path) -> None:
     assert op.kind is OpKind.ESCALATE
 
 
+class Worker(threading.Thread):
+    """A test thread that keeps what its body raised, so `finish` can report it."""
+
+    def __init__(self, body: Callable[[], object], name: str) -> None:
+        super().__init__(name=name, daemon=True)
+        self.body = body
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            self.body()
+        except BaseException as exc:  # noqa: BLE001 - re-raised by finish() in the test's thread
+            self.error = exc
+
+
+def finish(*threads: Worker) -> None:
+    """Join every thread that started, then require each to have ended without raising."""
+    started = [t for t in threads if t.ident is not None]
+    for t in started:
+        t.join(10)
+    assert [t.name for t in started if t.is_alive()] == []
+    errors = [t.error for t in started if t.error is not None]
+    if errors:
+        raise errors[0]
+
+
 def test_entry_admits_one_operation_at_a_time(tmp_path: Path) -> None:
     """A park in progress holds the workstream lock; a second caller waits at the door until it ends."""
     held = PauseAt("park.stopped")
@@ -769,8 +812,8 @@ def test_entry_admits_one_operation_at_a_time(tmp_path: Path) -> None:
             states.append(rig.state("btq-1"))
             inside.set()
 
-    first = threading.Thread(target=lambda: rig.parker.park("btq-1", ("btq-2",)), name="first")
-    other = threading.Thread(target=second, name="second")
+    first = Worker(lambda: rig.parker.park("btq-1", ("btq-2",)), "first")
+    other = Worker(second, "second")
     try:
         first.start()
         assert held.reached.wait(10)
@@ -782,8 +825,7 @@ def test_entry_admits_one_operation_at_a_time(tmp_path: Path) -> None:
         assert states == ["parked"]              # admitted only after the park finished
     finally:
         held.go.set()
-        first.join(10)
-        other.join(10)
+        finish(first, other)
 
 
 @pytest.mark.parametrize("change", ["repo", "profile", "ambiguous"])
@@ -817,3 +859,104 @@ def test_release_that_cannot_place_a_missing_record_escalates(tmp_path: Path) ->
     assert rig.parker.release("btq-1").value == "stuck"
     assert reason(rig) is Reason.CONFIG_INVALID and NEEDS_HUMAN in bead.labels
     assert rig.beads.show(WS, "btq-1").record() is None and rig.journal.ops_open() == []
+
+
+# --- review r1 ---
+
+def counting(rig: Rig) -> list[str]:
+    """Record every runtime.launch call, whatever it does."""
+    calls: list[str] = []
+    real = rig.runtime.launch
+
+    def launch(spec: LaunchSpec) -> None:
+        calls.append(spec.session_key)
+        real(spec)
+
+    rig.runtime.launch = launch
+    return calls
+
+
+def test_another_beads_uncertain_launch_holds_the_guard(tmp_path: Path) -> None:
+    """D17: the guard settles only its own operation's LAUNCH_UNCERTAIN. Another bead's hold makes it
+    wait, even with nothing listed."""
+    rig = parked(tmp_path)
+    rig.journal.hold(WS, Reason.LAUNCH_UNCERTAIN, "btq-3")
+    calls = counting(rig)
+    assert resume(rig) is Launch.WAIT
+    assert calls == [] and rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-3"}
+    [op] = rig.journal.ops_open()
+    assert op.attempts == 0
+
+
+def busy_escalation(rig: Rig) -> None:
+    """The journal is busy exactly when the escalation is opened (once), as if another connection took
+    the write lock there."""
+    real = rig.journal.op_open
+
+    def op_open(kind: OpKind, ws: str, bead: str, data: dict[str, str] | None = None) -> Op:
+        if kind is OpKind.ESCALATE:
+            rig.journal.op_open = real
+            raise JournalBusy("SQLITE_BUSY")
+        return real(kind, ws, bead, data)
+
+    rig.journal.op_open = op_open
+
+
+def test_the_launch_that_spends_the_budget_escalates_with_its_count(tmp_path: Path) -> None:
+    """review r1: the failure count and the escalation commit together. A busy journal at the escalation
+    undoes the count too, so the restart neither finds a spent budget on an open operation nor launches:
+    the replay fails again and escalates."""
+    rig = parked(tmp_path, limits=Limits(launch_failures_before_human=1))
+    rig.runtime.failing_beads.add("btq-1")
+    busy_escalation(rig)
+    with pytest.raises(JournalBusy):
+        resume(rig)
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.attempts) == (OpKind.RESUME, 0) and rig.state("btq-1") == "resuming"
+    rig.restart()
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.LAUNCH_FAILED
+    assert rig.world.beads["btq-1"].labels.count(NEEDS_HUMAN) == 1 and rig.journal.ops_open() == []
+    assert [s.resume for s in rig.runtime.launches] == [False] and rig.runtime.coders() == []
+
+
+def test_the_park_that_spends_the_budget_escalates_with_its_count(tmp_path: Path) -> None:
+    rig = running(tmp_path, limits=Limits(park_attempts_before_human=1))
+    gitdir = Path(gitwip.git(rig.worktree("btq-1"), "rev-parse", "--absolute-git-dir").strip())
+    (gitdir / "index.lock").write_text("")
+    busy_escalation(rig)
+    with pytest.raises(JournalBusy):
+        rig.parker.park("btq-1", ("btq-2",))
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.attempts) == (OpKind.PARK, 0)
+    rig.restart()
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.PARK_FAILED
+    assert rig.world.beads["btq-1"].labels.count(NEEDS_HUMAN) == 1 and rig.journal.ops_open() == []
+    assert wip_commits(rig) == [] and PARKED not in rig.world.beads["btq-1"].labels
+
+
+def test_a_launch_whose_budget_is_already_spent_is_escalated_not_tried(tmp_path: Path) -> None:
+    """A journal that recorded the spent budget without the escalation (written before this fix, or by a
+    crash in a path that had no shared transaction) is escalated on replay; the runtime is not called."""
+    rig = at_unlabelled(tmp_path)
+    [op] = rig.journal.ops_open()
+    rig.journal.op_failed(op.op_id)
+    rig.journal.op_failed(op.op_id)                                 # the default budget is 2
+    calls = counting(rig)
+    rig.replay_open()
+    assert calls == [] and rig.state("btq-1") == "stuck" and reason(rig) is Reason.LAUNCH_FAILED
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels and rig.journal.ops_open() == []
+
+
+def test_a_park_whose_budget_is_already_spent_is_escalated_not_tried(tmp_path: Path) -> None:
+    rig = running(tmp_path, limits=Limits(park_attempts_before_human=1))
+    rig.restart(CrashAt("park.stopped"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    rig.restart()
+    [op] = rig.journal.ops_open()
+    rig.journal.op_failed(op.op_id)
+    rig.replay_open()
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.PARK_FAILED
+    assert wip_commits(rig) == [] and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
