@@ -8,10 +8,14 @@ recovery could not confirm.
 
 Pickup and recovery are blocking (btq runs bd as a subprocess), so they run in worker threads, one lane
 (a single worker thread) per workstream and one for status: a workstream's jobs wait only on that
-workstream, and status waits on none of them. A lane holds at most one queued job of each kind (pickup,
-reconcile, pause, resume, recover): a request for a kind already queued and not yet started joins it, and
-gets its outcome, which loses nothing, because that job has not looked at anything yet. Its trigger is
-the first request's. A pickup or reconcile that raises is recorded as `tick_failed`, whoever asked. Each
+workstream, and status waits on none of them. Each workstream has its own backstop and reconcile timers,
+so a workstream whose job is stuck delays only its own ticks. A lane holds at most one queued job per key:
+a request whose key is queued and not yet started joins that job and gets its outcome, which loses
+nothing, because that job has not looked at anything yet. A pickup's key is its kind and its trigger's
+ref, so only triggers for the same event (or none) share a job, and a joined one shares the first one's
+trigger. Pause and resume share one key, `pause-state`: the job applies whichever was asked last, when it
+starts, and every caller is told the state it published, so a pause overtaken by a later resume is never
+acknowledged as a pause. A pickup or reconcile that raises is recorded as `tick_failed`, whoever asked. Each
 workstream's operation lock (`Parker.entry`, a reentrant lock also taken by park and release) is held
 across the whole job: the "was it recovered?" decision, the recovery, the pickup and the `recovered`
 update are one critical section, so no pickup can pass the check and then run after another job left the
@@ -19,8 +23,9 @@ workstream unrecovered. A job that raises (JournalBusy while another process hol
 leaves its workstream unrecovered, so the next trigger recovers it again before any pickup. A timer task
 that dies anyway ends `serve` with its error rather than leave wsd running without its backstop.
 
-Shutdown stops dispatch first (a request that arrives after it is refused), stops listening, cancels the
-timers and every job that has not started, then waits up to DRAIN_SECONDS for jobs already running (a
+Shutdown stops dispatch and cancels every job that has not started, in one step before anything else
+(a lane only starts a job under its lock, after checking it is still open), then stops listening, cancels
+the timers, waits up to DRAIN_SECONDS for jobs already running (a
 thread can't be cancelled), then closes the socket's connections. A stop during startup does the same at
 once: the socket and the timers never start after a stop. Jobs still running after the drain raise
 Undrained, and `cli.run` then ends the process at once (a crash, which the journal is built to replay).
@@ -32,8 +37,9 @@ claimed that only a human can move on. Status and tick replies say so.
 import asyncio
 import concurrent.futures as cf
 import contextlib
+import threading
+from collections import deque
 from collections.abc import Callable, Coroutine, Hashable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,15 +75,78 @@ class JobFailed(Exception):
 
 
 STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
+PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last one asked is applied
 
 
 class Lane:
-    """One worker thread, and the jobs queued on it by kind: at most one queued (not started) per kind."""
+    """One worker thread running its jobs in order, with at most one queued (not started) job per key.
+    Admission, the start of each job and closing all happen under `lock`: once `close` returns, no job
+    that had not started ever does."""
 
     def __init__(self, name: str) -> None:
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"wsd-lane-{name or 'status'}")
+        self.name = name or "status"
+        self.lock = threading.Lock()
+        self.ready = threading.Condition(self.lock)
+        self.pending: deque[tuple[cf.Future[object], Hashable, Callable[[], object]]] = deque()
         self.queued: dict[Hashable, cf.Future[object]] = {}
-        self.jobs: set[cf.Future[object]] = set()
+        self.jobs: set[cf.Future[object]] = set()       # queued or running
+        self.closed = False
+        self.worker: threading.Thread | None = None
+
+    def submit(self, key: Hashable, fn: Callable[[], object]) -> cf.Future[object]:
+        """Queue `fn`, or return the job queued under `key` that has not started. Raises Stopping once
+        closed."""
+        with self.lock:
+            if self.closed:
+                raise Stopping
+            joined = self.queued.get(key)
+            if joined is not None:
+                return joined
+            fut: cf.Future[object] = cf.Future()
+            self.pending.append((fut, key, fn))
+            self.queued[key] = fut
+            self.jobs.add(fut)
+            fut.add_done_callback(self._forget)
+            if self.worker is None:
+                self.worker = threading.Thread(target=self._work, name=f"wsd-lane-{self.name}")
+                self.worker.start()
+            self.ready.notify()
+            return fut
+
+    def _forget(self, fut: cf.Future[object]) -> None:
+        with self.lock:
+            self.jobs.discard(fut)
+
+    def _work(self) -> None:
+        while True:
+            with self.lock:
+                while not self.pending and not self.closed:
+                    self.ready.wait()
+                if self.closed:             # checked under the lock each job starts under
+                    return
+                fut, key, fn = self.pending.popleft()
+                del self.queued[key]        # started: a later request queues a new job
+                if not fut.set_running_or_notify_cancel():
+                    continue
+            try:
+                result = fn()
+            except BaseException as exc:  # noqa: BLE001 - handed to whoever awaits the job
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+
+    def close(self) -> set[cf.Future[object]]:
+        """Admit nothing more, cancel every job not started, and return the one still running (if any)."""
+        with self.lock:
+            self.closed = True
+            cancelled = [fut for fut, _, _ in self.pending]
+            self.pending.clear()
+            self.queued.clear()
+            running = {f for f in self.jobs if f not in cancelled}
+            self.ready.notify_all()
+        for fut in cancelled:
+            fut.cancel()                    # its callbacks run outside the lock
+        return {f for f in running if not f.done()}
 
 
 @dataclass(frozen=True)
@@ -104,6 +173,7 @@ class Wsd:
         self.recovered: set[str] = set()
         self.stopping = False
         self.lanes = {name: Lane(name) for name in [STATUS_LANE, *parts.schedulers]}
+        self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
 
     # --- blocking work (worker threads) ---
 
@@ -130,8 +200,8 @@ class Wsd:
         return self._locked(name, lambda: self._recover(name))
 
     def pickup_one(self, name: str, trigger: Trigger) -> Outcome:
-        """Pickup, after a recovery if this workstream's last one did not succeed: the event entry point
-        (plan 6 triggers come in here, never through Scheduler.pickup directly)."""
+        """Pickup, after a recovery if this workstream's last one did not succeed. Blocking: events reach
+        it through `pickup`, on the workstream's lane, never through Scheduler.pickup directly."""
         def work() -> Outcome:
             if name not in self.recovered and not self._recover(name).ok:
                 return Outcome.HELD
@@ -176,6 +246,12 @@ class Wsd:
         outcome = self._operator_pickup(name)
         return CtlReply("ok", f"{name}: resumed.", {name: outcome_fields(outcome)})
 
+    def apply_pause_state(self, name: str) -> tuple[bool, CtlReply]:
+        """Apply the pause or resume asked last (read as the job starts, so after every request that
+        joined it), and say which one it was."""
+        paused = self.wanted_pause[name]
+        return paused, self.set_pause(name, paused)
+
     def status(self, only: str | None, everything: bool = False) -> dict[str, dict[str, str]]:
         """Each workstream's state. Closed and dropped beads (history) are counted, not listed, unless
         `everything`: the reply must stay within ctl.MAX_REPLY however long wsd has run."""
@@ -202,26 +278,13 @@ class Wsd:
     def _names(self, only: str | None) -> list[str]:
         return [n for n in self.parts.schedulers if only is None or n == only]
 
-    def _submit(self, lane: str, kind: Hashable, fn: Callable[[], object]) -> cf.Future[object]:
-        """Queue `fn` on `lane`, or join the job of the same kind queued there and not yet started.
-        Called from the event loop thread only. Refused once shutdown has begun."""
+    async def _run[T](self, lane: str, key: Hashable, fn: Callable[[], T]) -> T:
+        """Run blocking work on a lane, or join the job queued there under `key` and not yet started, and
+        wait for it. Cancelling the caller leaves the job to its lane (a thread can't be stopped; shutdown
+        drains it). Refused, and a job that shutdown cancelled before it started reads, as Stopping."""
         if self.stopping:
             raise Stopping
-        ln = self.lanes[lane]
-        ln.jobs = {f for f in ln.jobs if not f.done()}
-        queued = ln.queued.get(kind)
-        if queued is not None and not queued.running() and not queued.done():
-            return queued
-        fut = ln.pool.submit(fn)
-        ln.queued[kind] = fut
-        ln.jobs.add(fut)
-        return fut
-
-    async def _run[T](self, lane: str, kind: Hashable, fn: Callable[[], T]) -> T:
-        """Run blocking work on a lane and wait for it. Cancelling the caller leaves the job to its lane
-        (a thread can't be stopped; shutdown drains it). A job that shutdown cancelled before it started
-        reads as Stopping."""
-        fut = self._submit(lane, kind, fn)
+        fut = self.lanes[lane].submit(key, fn)
         try:
             return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
         except asyncio.CancelledError:
@@ -246,8 +309,7 @@ class Wsd:
             return CtlReply("ok", "status", await self._run(STATUS_LANE, ("status", ws, everything),
                                                             lambda: self.status(ws, everything)))
         if req.op in ("pause", "resume") and req.ws is not None:
-            name, paused = req.ws, req.op == "pause"
-            return await self._run(name, req.op, lambda: self.set_pause(name, paused))
+            return await self._pause_state(req.ws, req.op == "pause")
         job = self.reconcile_one if req.job == "reconcile" else self._operator_pickup
         kind = req.job or "pickup"
         names = self._names(req.ws)
@@ -267,8 +329,25 @@ class Wsd:
                                       "next pickup", results)
         return CtlReply("ok", f"{req.job} done", results)
 
-    async def _job(self, name: str, kind: str, job: Callable[[str], Outcome]) -> Outcome:
-        return await self._run(name, kind, lambda: self._guarded(job, name))
+    async def _pause_state(self, name: str, paused: bool) -> CtlReply:
+        """Ask for a pause or a resume. Asked before the lane's pause-state job starts, it joins that job,
+        which applies the last one asked. The reply is that job's, which says what was published; a caller
+        whose request a later one overtook is told so, and is never told its own request took effect."""
+        if self.stopping:
+            raise Stopping
+        self.wanted_pause[name] = paused        # before joining: the job reads it only once started
+        applied, reply = await self._run(name, PAUSE_STATE, lambda: self.apply_pause_state(name))
+        if applied == paused or reply.result != "ok":
+            return reply
+        asked, now = ("pause", "resumed") if paused else ("resume", "paused")
+        return CtlReply("refused", f"{name}: your {asked} was overtaken by a later request before it ran; "
+                                   f"{name} is {now}. {reply.message}", reply.data)
+
+    async def _job(self, name: str, kind: str, job: Callable[[str], Outcome],
+                   ref: str | None = None) -> Outcome:
+        """A pickup or reconcile on the workstream's lane. Requests share a job only if they share both
+        the kind and the trigger's ref: one event's ref is never recorded as another's."""
+        return await self._run(name, (kind, ref), lambda: self._guarded(job, name))
 
     def _guarded(self, job: Callable[[str], Outcome], name: str) -> Outcome:
         """A pickup or reconcile that fails unexpectedly is recorded and raised as JobFailed; the
@@ -286,23 +365,30 @@ class Wsd:
             pass        # nothing to record it in; `recovered` already says what matters
         raise JobFailed(failure) from cause
 
-    async def _every(self, seconds: float, job: Callable[[str], Outcome], kind: str = "pickup") -> None:
-        async def one(name: str) -> None:
+    async def _every(self, name: str, seconds: float, kind: str, job: Callable[[str], Outcome]) -> None:
+        """One workstream's timer: its ticks wait on its own jobs only."""
+        while True:
+            await asyncio.sleep(seconds)
             with contextlib.suppress(JobFailed, Stopping):      # recorded, or shutting down: carry on
                 await self._job(name, kind, job)
 
-        while True:
-            await asyncio.sleep(seconds)
-            await asyncio.gather(*(one(name) for name in self.parts.schedulers))
+    async def pickup(self, name: str, trigger: Trigger) -> Outcome:
+        """The event entry point from the loop (plan 6): `pickup_one` on the workstream's lane, sharing a
+        queued job only with requests of the same ref. Raises JobFailed (recorded) or Stopping."""
+        return await self._job(name, "pickup", lambda n: self.pickup_one(n, trigger), trigger.ref)
+
+    def _backstop(self, name: str) -> Outcome:
+        return self.pickup_one(name, Trigger(TriggerKind.BACKSTOP))
 
     async def _startup(self) -> None:
-        """`startup`, on the lanes: each workstream's recovery, then its startup pickup, in its own lane."""
-        jobs: list[Coroutine[Any, Any, object]] = []
-        for name in self.parts.schedulers:
-            jobs.append(self._run(name, "recover", lambda n=name: self.recover_one(n)))
-            jobs.append(self._run(name, "pickup",
-                                  lambda n=name: self.pickup_one(n, Trigger(TriggerKind.STARTUP))))
-        await asyncio.gather(*jobs)
+        """`startup`, on the lanes: every workstream's recovery, and only then the startup pickups."""
+        recoveries: list[Coroutine[Any, Any, object]] = [
+            self._run(name, "recover", lambda n=name: self.recover_one(n)) for name in self.parts.schedulers]
+        await asyncio.gather(*recoveries)
+        pickups: list[Coroutine[Any, Any, object]] = [
+            self._run(name, ("pickup", None), lambda n=name: self.pickup_one(n, Trigger(TriggerKind.STARTUP)))
+            for name in self.parts.schedulers]
+        await asyncio.gather(*pickups)
 
     async def serve(self, stop: asyncio.Event) -> None:
         """Run until `stop` is set or a timer dies. Returns (or raises) only once no job is running, or
@@ -324,9 +410,10 @@ class Wsd:
             return
         server = CtlServer(self.s.socket, self.handle)
         await server.start()
-        timers = [asyncio.create_task(self._every(
-                      self.s.backstop_seconds, lambda n: self.pickup_one(n, Trigger(TriggerKind.BACKSTOP)))),
-                  asyncio.create_task(self._every(self.s.reconcile_seconds, self.reconcile_one))]
+        timers = [asyncio.create_task(self._every(name, seconds, kind, job))
+                  for name in self.parts.schedulers
+                  for seconds, kind, job in ((self.s.backstop_seconds, "pickup", self._backstop),
+                                             (self.s.reconcile_seconds, "reconcile", self.reconcile_one))]
         stopping = asyncio.create_task(stop.wait())
         try:
             await asyncio.wait([stopping, *timers], return_when=asyncio.FIRST_COMPLETED)
@@ -334,7 +421,7 @@ class Wsd:
                 if task.done():
                     task.result()       # a timer only ends by raising: wsd must not run on without it
         finally:
-            self.stopping = True        # from here no request or timer starts a job
+            self._cancel_queued()       # before any await: from here no request, timer or queued job starts
             server.stop_accepting()
             for task in (stopping, *timers):
                 task.cancel()
@@ -347,9 +434,7 @@ class Wsd:
     def _cancel_queued(self) -> set[cf.Future[object]]:
         """Stop admitting, cancel every job not yet started, and return those still running."""
         self.stopping = True
-        for ln in self.lanes.values():
-            ln.pool.shutdown(wait=False, cancel_futures=True)
-        return {f for ln in self.lanes.values() for f in ln.jobs if not f.done()}
+        return {f for ln in self.lanes.values() for f in ln.close()}
 
     async def _drain(self) -> None:
         running = self._cancel_queued()

@@ -64,11 +64,13 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
             return 0
         except Undrained as exc:
             held = True
-            print(f"wsd: {exc}; exiting now, as a crash would (recovery replays the journal)",
-                  file=sys.stderr)
-            sys.stderr.flush()
-            sys.stdout.flush()
-            exit_now(1)
+            try:
+                print(f"wsd: {exc}; exiting now, as a crash would (recovery replays the journal)",
+                      file=sys.stderr)
+                sys.stderr.flush()
+                sys.stdout.flush()
+            finally:
+                exit_now(1)     # even if stderr is gone (a closed pipe): nothing may keep the process up
             return 1        # only a test's exit_now returns
         finally:
             if not held:

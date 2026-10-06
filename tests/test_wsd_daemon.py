@@ -347,7 +347,7 @@ def test_timer_outlives_a_busy_journal(tmp_path: Path) -> None:
     other.execute("BEGIN IMMEDIATE")
 
     async def scenario() -> None:
-        timer = asyncio.create_task(wsd._every(0.01, backstop))  # pyright: ignore[reportPrivateUsage]
+        timer = asyncio.create_task(wsd._every(WS, 0.01, "pickup", backstop))  # pyright: ignore[reportPrivateUsage]
         try:
             await until(lambda: len(ticks) >= 3)
             assert not timer.done() and WS not in wsd.recovered and world.claims == []
@@ -1152,3 +1152,300 @@ def test_a_stop_that_lands_as_startup_ends_still_serves_nothing(tmp_path: Path,
 
     asyncio.run(scenario())
     assert Recording.made == [] and not s.socket.exists() and wsd.stopping
+
+
+def held_lane(wsd: Wsd, name: str) -> tuple[threading.Event, threading.Event, Callable[[], object]]:
+    """A job that holds `name`'s lane until released: (inside, release, the job)."""
+    inside, release = threading.Event(), threading.Event()
+
+    def hold() -> object:
+        inside.set()
+        return release.wait(10)
+
+    return inside, release, hold
+
+
+@pytest.mark.parametrize("asked", [["pause", "resume", "pause"], ["resume", "pause", "resume"],
+                                   ["pause", "resume"]])
+def test_pause_and_resume_queued_together_apply_the_last_asked(tmp_path: Path, asked: list[str]) -> None:
+    """r3 review: requests queued behind a busy lane end in the state asked last; a caller is told its
+    request took effect only if that is the state published, and the state is published once."""
+    s = settings(tmp_path)
+    j = Journal(s.journal)
+    wsd = Wsd(s, assemble(s, j, factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    wsd.startup()
+    if asked[0] == "resume":
+        assert wsd.set_pause(WS, True).result == "ok"
+    inside, release, hold = held_lane(wsd, WS)
+    before = j.events_since(0)[-1].seq
+
+    async def scenario() -> list[ctl.CtlReply]:
+        holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+        replies: list[asyncio.Task[ctl.CtlReply]] = []
+        try:
+            await until(inside.is_set)
+            for op in asked:
+                req = ctl.CtlRequest("pause" if op == "pause" else "resume", ws=WS)
+                replies.append(asyncio.create_task(wsd.handle(req)))
+                await until(lambda: WS in wsd.wanted_pause)
+                await asyncio.sleep(0.02)           # in the order asked
+            assert len(wsd.lanes[WS].jobs) == 2      # the hold, and one pause-state job for them all
+        finally:
+            release.set()
+        await asyncio.wait_for(holder, 10)
+        return list(await asyncio.wait_for(asyncio.gather(*replies), 10))
+
+    replies = asyncio.run(scenario())
+    last = asked[-1]
+    paused = last == "pause"
+    assert (j.snapshot(WS).state is WsState.PAUSED) is paused
+    assert [e.kind for e in j.events_since(before) if e.kind in ("paused", "resumed")] == [
+        "paused" if paused else "resumed"]
+    for op, reply in zip(asked, replies, strict=True):
+        if op == last:
+            assert reply.result == "ok" and ("paused" if paused else "resumed") in reply.message
+        else:
+            assert reply.result == "refused" and "overtaken" in reply.message
+            assert f"is {'paused' if paused else 'resumed'}" in reply.message
+
+
+def test_a_timer_reconcile_never_joins_a_queued_pickup(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3 review: the reconcile timer queues a reconcile, not a pickup, behind an operator pickup."""
+    s = replace(settings(tmp_path), backstop_seconds=3600, reconcile_seconds=0.05)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    inside, release, hold = held_lane(wsd, WS)
+    reconciles: list[str] = []
+    real = wsd.reconcile_one
+
+    def reconcile(name: str) -> Outcome:
+        reconciles.append(name)
+        return real(name)
+
+    monkeypatch.setattr(wsd, "reconcile_one", reconcile)
+
+    async def scenario() -> ctl.CtlReply:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        try:
+            await until(s.socket.exists)
+            holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+            await until(inside.is_set)
+            ticked = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
+            await until(lambda: len(wsd.lanes[WS].jobs) == 3)       # the hold, the pickup, the reconcile
+            release.set()
+            await asyncio.wait_for(holder, 10)
+            await until(lambda: bool(reconciles))
+            return await asyncio.wait_for(ticked, 10)
+        finally:
+            release.set()
+            stop.set()
+            await asyncio.wait_for(task, 10)
+
+    assert asyncio.run(scenario()).result == "ok"
+
+
+class StopProbe(ctl.CtlServer):
+    """Releases the job holding the lane as the socket stops listening, then waits for the lane's
+    worker to end: anything queued that could still start does so before this returns."""
+    release: threading.Event
+    lane: "daemon.Lane"
+
+    def stop_accepting(self) -> None:
+        StopProbe.release.set()
+        worker = StopProbe.lane.worker
+        assert worker is not None
+        worker.join(5)
+        super().stop_accepting()
+
+
+def test_no_queued_job_starts_once_stopping_even_if_a_worker_frees_up(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3 review: the lane's worker frees up between `stopping` and the timers' cancellation; the job
+    queued behind it was already cancelled, and never runs."""
+    s = replace(settings(tmp_path), backstop_seconds=3600)     # nothing else queues on the lane
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    inside, release, hold = held_lane(wsd, WS)
+    StopProbe.release, StopProbe.lane = release, wsd.lanes[WS]
+    monkeypatch.setattr(daemon, "CtlServer", StopProbe)
+    reconciles: list[str] = []
+    monkeypatch.setattr(wsd, "reconcile_one", lambda name: reconciles.append(name) or Outcome.NOTHING)
+
+    async def scenario() -> ctl.CtlReply:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        try:
+            await until(s.socket.exists)
+            holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+            await until(inside.is_set)
+            queued = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="reconcile", ws=WS)))
+            await until(lambda: ("reconcile", None) in wsd.lanes[WS].queued)
+            stop.set()
+            await asyncio.wait_for(task, 10)
+            await asyncio.wait_for(holder, 10)
+            return await asyncio.wait_for(queued, 10)
+        finally:
+            release.set()
+
+    reply = asyncio.run(scenario())
+    worker = wsd.lanes[WS].worker
+    assert worker is not None and not worker.is_alive()
+    assert reconciles == [] and reply.result == "refused" and "stopping" in reply.message
+
+
+def test_a_blocked_workstream_never_holds_up_another_ones_timers(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3 review: alpha's backstop pickup is stuck; beta's backstop ticks carry on."""
+    s = two_workstreams(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    inside, release = threading.Event(), threading.Event()
+    beta: list[str] = []
+    alpha_sched, beta_sched = wsd.parts.schedulers[WS], wsd.parts.schedulers["beta"]
+    real_alpha, real_beta = alpha_sched.pickup, beta_sched.pickup
+
+    def alpha(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.BACKSTOP:
+            inside.set()
+            assert release.wait(10)
+        return real_alpha(trigger)
+
+    def counted(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.BACKSTOP:
+            beta.append(trigger.kind.value)
+        return real_beta(trigger)
+
+    monkeypatch.setattr(alpha_sched, "pickup", alpha)
+    monkeypatch.setattr(beta_sched, "pickup", counted)
+
+    async def scenario() -> int:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        try:
+            await until(inside.is_set)
+            seen = len(beta)
+            await until(lambda: len(beta) >= seen + 3)      # alpha still stuck
+            assert not release.is_set()
+            return len(beta)
+        finally:
+            release.set()
+            stop.set()
+            await asyncio.wait_for(task, 10)
+
+    assert asyncio.run(scenario()) >= 3
+
+
+def test_startup_recovers_every_workstream_before_any_pickup(tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3 review: the startup barrier. beta's recovery is slow; alpha's startup pickup waits for it."""
+    s = two_workstreams(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    order: list[str] = []
+    real_recover, real_pickup = wsd.recover_one, wsd.pickup_one
+
+    def recover(name: str) -> object:
+        if name == "beta":
+            time.sleep(0.2)
+        result = real_recover(name)
+        order.append(f"recovered {name}")
+        return result
+
+    def pickup(name: str, trigger: Trigger) -> Outcome:
+        order.append(f"pickup {name}")
+        return real_pickup(name, trigger)
+
+    monkeypatch.setattr(wsd, "recover_one", recover)
+    monkeypatch.setattr(wsd, "pickup_one", pickup)
+    asyncio.run(asyncio.wait_for(wsd._startup(), 10))  # pyright: ignore[reportPrivateUsage]
+    assert sorted(order[:2]) == [f"recovered {WS}", "recovered beta"]
+    assert sorted(order[2:]) == [f"pickup {WS}", "pickup beta"]
+
+
+@pytest.mark.parametrize(("refs", "pickups"), [(["a", "a"], 1), (["a", "b"], 2), ([None, None], 1)])
+def test_only_triggers_with_the_same_ref_share_a_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     refs: list[str | None], pickups: int) -> None:
+    """r3 review: one event's ref is never recorded as another's."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    wsd.startup()
+    seen: list[str | None] = []
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+
+    def counted(trigger: Trigger) -> Outcome:
+        seen.append(trigger.ref)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", counted)
+    inside, release, hold = held_lane(wsd, WS)
+
+    async def scenario() -> None:
+        holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await until(inside.is_set)
+            asked = [asyncio.create_task(wsd.pickup(WS, Trigger(TriggerKind.OPERATOR, ref))) for ref in refs]
+            await until(lambda: len(wsd.lanes[WS].jobs) == 1 + pickups)
+        finally:
+            release.set()
+        await asyncio.wait_for(holder, 10)
+        await asyncio.wait_for(asyncio.gather(*asked), 10)
+
+    asyncio.run(scenario())
+    assert seen == list(dict.fromkeys(refs))
+
+
+def test_the_hard_exit_happens_even_if_stderr_is_gone(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3 review: a closed stderr (BrokenPipeError) can't keep an undrained wsd alive."""
+    s = settings(tmp_path)
+
+    class Gone:
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    async def undrained(d: Wsd) -> None:
+        raise daemon.Undrained("1 job(s) still running after 120 s")
+
+    exits: list[int] = []
+    monkeypatch.setattr(cli, "_serve", undrained)
+    monkeypatch.setattr(sys, "stderr", Gone())
+    try:
+        with pytest.raises(BrokenPipeError):        # only because this exit_now returns
+            cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime(), exit_now=exits.append)
+    finally:
+        for fd in Path("/proc/self/fd").iterdir():
+            with contextlib.suppress(OSError):
+                if fd.readlink() == s.instance_lock:
+                    os.close(int(fd.name))
+    assert exits == [1]
+
+
+def test_a_closed_lane_admits_nothing() -> None:
+    lane = daemon.Lane("t")
+    assert lane.close() == set()
+    with pytest.raises(daemon.Stopping):
+        lane.submit("k", lambda: None)
+
+
+def test_a_lane_never_runs_a_job_its_caller_cancelled() -> None:
+    lane = daemon.Lane("t")
+    inside, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def hold() -> object:
+        inside.set()
+        return release.wait(10)
+
+    held = lane.submit("hold", hold)
+    try:
+        assert inside.wait(10)
+        queued = lane.submit("k", lambda: ran.append("k"))
+        assert queued.cancel()
+        after = lane.submit("after", lambda: ran.append("after"))
+    finally:
+        release.set()
+    assert after.result(10) is None and held.result(10) is True
+    assert ran == ["after"]
+    assert lane.close() == set()
