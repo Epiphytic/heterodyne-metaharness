@@ -684,3 +684,52 @@ def test_runtime_that_cannot_list_replays_nothing(tmp_path: Path) -> None:
     [op] = rig.journal.ops_open()
     assert (op.kind, op.step) == (OpKind.PARK, "blocked") and PARKED not in rig.world.beads["btq-1"].labels
     assert recover(rig.sched).ok and rig.state("btq-1") == "parked"
+
+
+def two_dead(tmp_path: Path) -> Rig:
+    """Two running beads of ours whose recorded sessions are both gone (the second started by hand)."""
+    rig = started(tmp_path, "btq-2")
+    rig.start("btq-2")
+    for bead in ("btq-1", "btq-2"):
+        rig.runtime.end(rig.key(bead))
+    return rig
+
+
+def crash_in_the_batch(rig: Rig) -> None:
+    """A crash inside open_resumes' transaction, after the first resume's row is written."""
+    real = rig.journal.set_state
+    calls: list[str] = []
+
+    def set_state(*args: object, **kwargs: object) -> object:
+        calls.append(str(args[1]))
+        if len(calls) == 2:
+            raise SimulatedCrash("open_resumes")
+        return real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    rig.journal.set_state = set_state  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("point", ["recovery.journals", "in-batch", "recovery.sessions"])
+def test_crash_around_the_deferred_resume_batch(tmp_path: Path, point: str) -> None:
+    """Task 8 r2: recovery opens both dead sessions' resumes in one transaction. A crash before it, inside
+    it or after it leaves both open or neither; recovery launches neither, and pickup launches one."""
+    rig = two_dead(tmp_path)
+    if point == "in-batch":
+        rig.restart()
+        crash_in_the_batch(rig)
+    else:
+        rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        recover(rig.sched)
+    opened = sorted(op.bead for op in rig.journal.ops_open())
+    assert opened == (["btq-1", "btq-2"] if point == "recovery.sessions" else [])
+    assert len(rig.runtime.launches) == 2
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.resumes == (0 if point == "recovery.sessions" else 2)
+    assert sorted(op.bead for op in rig.journal.ops_open()) == ["btq-1", "btq-2"]
+    assert all(op.kind is OpKind.RESUME for op in rig.journal.ops_open())
+    assert len(rig.runtime.launches) == 2                       # recovery launched neither
+    assert rig.pickup() is Outcome.BUSY
+    assert len(rig.runtime.launches) == 3 and rig.runtime.coders() == ["btq-1"]
+    assert [op.bead for op in rig.journal.ops_open()] == ["btq-2"]       # waiting on the role
