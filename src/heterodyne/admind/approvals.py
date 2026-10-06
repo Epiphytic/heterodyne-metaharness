@@ -126,9 +126,9 @@ class ApproveBead:
     async def _run(self, argv: list[str], timeout: float, cap: int,
                    on_launch: Callable[[], None] | None) -> tuple[int, bytes, bytes]:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, start_new_session=True)
+            proc = await reap.spawn("approve-bead", argv, seconds=REAP_SECONDS,
+                                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
         except OSError:
             raise BtqError("unavailable") from None
         try:

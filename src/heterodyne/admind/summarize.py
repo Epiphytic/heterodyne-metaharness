@@ -86,8 +86,10 @@ async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: floa
     private_dir(cwd)
     payload = await asyncio.to_thread(lambda: PROMPT.format(reply=redact(reply)).encode())   # off the loop
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+        proc = await reap.spawn(       # a cancellation during creation still reaps the group
+            "summarizer",
+            argv,
+            seconds=REAP_SECONDS,
             cwd=cwd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

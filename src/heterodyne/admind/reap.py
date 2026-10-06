@@ -12,6 +12,7 @@ import os
 import signal
 import sys
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 READ_CHUNK = 65536
 
@@ -72,6 +73,26 @@ async def reap(proc: asyncio.subprocess.Process, what: str, *, seconds: float, d
         note(f"{what} cleanup failed", exc)
     finally:
         close_transport(proc, what)
+
+
+async def spawn(what: str, argv: list[str], *, seconds: float, **kwargs: Any) -> asyncio.subprocess.Process:
+    """`asyncio.create_subprocess_exec(*argv, **kwargs)`, owned through a cancellation. A cancellation that
+    lands while the pipes are being set up would make asyncio kill only the direct child, leaving the rest
+    of its group running; instead the creation is let finish, its group is reaped (`reap_shielded`, bounded
+    by `seconds`), and then the cancellation propagates. A creation failure (OSError) propagates as it is,
+    unless the caller was cancelled meanwhile."""
+    task = asyncio.ensure_future(asyncio.create_subprocess_exec(*argv, **kwargs))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.wait({task})      # unlike awaiting the task, a cancellation here leaves it running
+        except asyncio.CancelledError:
+            cancelled = True
+    if not cancelled:
+        return task.result()
+    if not task.cancelled() and task.exception() is None:
+        await reap_shielded(task.result(), what, seconds=seconds)
+    raise asyncio.CancelledError
 
 
 async def reap_shielded(proc: asyncio.subprocess.Process, what: str, *, seconds: float,

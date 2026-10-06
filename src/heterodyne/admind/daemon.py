@@ -985,23 +985,26 @@ class Admind:
                    line: str) -> tuple[str, str]:
         """(the ask's new status, the reply) for a settled attempt (R12, spec §6). Exit 5 (written, then
         the content changed) and "written, but the gate rejects it" are not read from the exit status:
-        both settle from the read-back like every other outcome."""
-        if settled == "recorded" and back is not None:
-            if a.action == "deny":
-                return "denied", DENIED.format(bead=bead, name=a.operator)
-            if back.gate_valid:
-                return "approved", APPROVED_ACCEPTED.format(bead=bead, name=a.operator,
-                                                            digest12=a.digest[:12])
-            why = (f'"{back.gate_reasons[0]}"' if back.gate_reasons
-                   else f"(btq gave no reason; run approve-bead {bead} on the host)")
-            return "approved", APPROVED_REJECTED.format(bead=bead, name=a.operator, digest12=a.digest[:12],
-                                                        why=why)
+        both settle from the read-back like every other outcome. approve-bead's stderr line is quoted in
+        every reply that has one (R12): inside the untouched and blocked wording, and on a line of its own
+        after the recorded and uncertain wording (exit 5's warning, say)."""
         if settled == "untouched":
             return "open", (UNTOUCHED.format(line=line, bead=bead) if line
                             else UNTOUCHED_SILENT.format(bead=bead))
         if settled == "blocked":
             return "blocked", BLOCKED.format(bead=bead, quoted=f' ("{line}")' if line else "")
-        return "uncertain", UNCERTAIN_READ.format(bead=bead)
+        said = f'\napprove-bead said: "{line}"' if line else ""
+        if settled == "recorded" and back is not None:
+            if a.action == "deny":
+                return "denied", DENIED.format(bead=bead, name=a.operator) + said
+            if back.gate_valid:
+                return "approved", APPROVED_ACCEPTED.format(bead=bead, name=a.operator,
+                                                            digest12=a.digest[:12]) + said
+            why = (f'"{back.gate_reasons[0]}"' if back.gate_reasons
+                   else f"(btq gave no reason; run approve-bead {bead} on the host)")
+            return "approved", APPROVED_REJECTED.format(bead=bead, name=a.operator, digest12=a.digest[:12],
+                                                        why=why) + said
+        return "uncertain", UNCERTAIN_READ.format(bead=bead) + said
 
     async def reconcile_asks(self, snapshot: list[tuple[str, str, str]]) -> None:
         """The startup reconcile (R26): each ask of the snapshot `run()` took before any loop started,

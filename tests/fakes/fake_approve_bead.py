@@ -7,12 +7,17 @@ readout fields; a busy bead prints `{"format": 1, "busy": true}` for `--json` an
 rejects it), 2 (usage, or gaps), 3 (not the expected content), 4 (busy) or 5 (written, but the content
 changed during the write). Every non-zero exit prints exactly one stderr line.
 
-A bead's record holds its readout fields plus test controls:
+A bead's record holds its readout fields, the decision metadata, and test controls. As the real tool, a
+bead holds a decision once any key `decision` or `via_ref`, or starting `approved_` or `denied_`, is present,
+whatever its value (so a test removes such a key to undo a decision, rather than setting it to None). The
+controls:
 - `busy`: every call is busy (exit 4);
 - `fail_read`: `--json` fails like bd (exit 1);
 - `read`: `"hang"` (sleeps; the caller's timeout must end it), `"garbage"` (non-JSON, exit 0), `"big"` (past
   the read cap on stdout and past the pipe buffer on stderr, still writing), `"held"` (a grandchild in its
-  own session keeps stdout open; its PID goes to `<db dir>/held.pid`), `"wait"` (see `wait`);
+  own session keeps stdout open; its PID goes to `<db dir>/held.pid`), `"descendant"` (a grandchild in the
+  process group, off the pipes, sleeps; its PID goes to `<db dir>/descendant.pid`; then it hangs), `"wait"`
+  (see `wait`);
 - `decide`: `"ok"` (default), `"fail"` (refused, exit 1), `"hang"`, `"orphan"` (a grandchild in the
   process group writes the decision 1 s later; its PID goes to `<db dir>/orphan.pid`; exit 1 at once),
   `"partial"` (fields written, close failed), `"foreign"` (closed by someone else), `"edit-before"` (the ask
@@ -39,7 +44,6 @@ DB = Path(os.environ["FAKE_BTQ_DB"])
 DIGEST = re.compile(r"[0-9a-f]{64}")
 VIA_REF = re.compile(r"[A-Za-z0-9:._-]{1,80}")
 WAIT_SECONDS = 60.0
-DECISION_FIELDS = ("decision", "approved_by", "approved_digest", "denied_by", "denied_digest", "via_ref")
 VALUE_FLAGS = {"--as", "--note", "--expect-digest", "--via", "--via-ref", "--tree", "--doc"}
 BOOL_FLAGS = {"--json", "--yes", "--deny", "--detail", "--dry-run"}
 READ_ONLY_REFUSED = ("--tree", "--detail", "--doc", "--deny", "--note", "--yes", "--dry-run",
@@ -96,7 +100,8 @@ def parse(argv: list[str]) -> tuple[str, dict[str, str | bool]] | str:
 
 
 def decided(bead: dict[str, Any]) -> bool:
-    return any(bead.get(k) for k in DECISION_FIELDS)
+    """The real tool's `decision_fields(meta)` is not empty: key presence, not the values."""
+    return any(key in ("decision", "via_ref") or key.startswith(("approved_", "denied_")) for key in bead)
 
 
 def readout(bead_id: str, bead: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +144,21 @@ def hold_stdout() -> None:
     (DB.parent / "held.pid").write_text(str(child.pid))
 
 
+def descendant() -> None:
+    """A grandchild that stays in the process group, with its output off the pipes, and sleeps. Its PID is
+    written (atomically) once it exists."""
+    pid = os.fork()
+    if pid == 0:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, 1)
+        os.dup2(null, 2)
+        time.sleep(60)
+        os._exit(0)
+    tmp = DB.parent / "descendant.pid.tmp"
+    tmp.write_text(str(pid))
+    tmp.replace(DB.parent / "descendant.pid")
+
+
 def write_decision(bead_id: str, f: dict[str, str | bool], by: str, close: bool) -> dict[str, Any]:
     deny = bool(f.get("--deny"))
     prefix = "denied" if deny else "approved"
@@ -172,6 +192,9 @@ def json_read(bead_id: str, bead: dict[str, Any]) -> int:
     if mode == "held":
         hold_stdout()
         return 0
+    if mode == "descendant":
+        descendant()
+        time.sleep(600)
     print(json.dumps(readout(bead_id, bead), ensure_ascii=True))
     return 0
 

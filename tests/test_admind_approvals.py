@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import stat
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -25,7 +26,7 @@ from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_asks import NONE, audited, joined, posted, row
 from test_admind_daemon import Harness, needs_tmux, run_with
 
-from heterodyne.admind import approvals, asks, chunk, commands, reap
+from heterodyne.admind import approvals, asks, chunk, commands, reap, summarize
 from heterodyne.admind.approvals import ApproveBead, Attempt, BtqError, Busy, Readout
 from heterodyne.admind.audit import ref_id
 from heterodyne.admind.daemon import (
@@ -89,6 +90,19 @@ def edit(tmp_path: Path, bead_id: str = BEAD, **fields: Any) -> None:
     db = tmp_path / "btq.json"
     beads = json.loads(db.read_text())
     beads[bead_id].update(fields)
+    db.write_text(json.dumps(beads))
+
+
+def undecide(tmp_path: Path, bead_id: str = BEAD) -> None:
+    """Undo a decision on the fake bead: its decision keys removed (their presence is the decision) and the
+    bead open again."""
+    db = tmp_path / "btq.json"
+    beads = json.loads(db.read_text())
+    record = beads[bead_id]
+    prefixes = ("approved_", "denied_")
+    for key in [k for k in record if k in ("decision", "via_ref", "via") or k.startswith(prefixes)]:
+        del record[key]
+    record["status"] = "open"
     db.write_text(json.dumps(beads))
 
 
@@ -162,11 +176,11 @@ def test_decision_argv(tmp_path: Path) -> None:
         assert await ab.decide(APPROVE, BEAD) == (0, "")
         assert btq_log(tmp_path)[-1] == [BEAD, "--as=op", "--yes", f"--expect-digest={D}", "--via=marmot",
                                          f"--via-ref={APPROVE.ref}"]
-        edit(tmp_path, status="open", decision=None, approved_by=None, approved_digest=None, via_ref=None)
+        undecide(tmp_path)
         assert await ab.decide(DENY, BEAD) == (0, "")
         assert btq_log(tmp_path)[-1] == [BEAD, "--as=op", "--yes", f"--expect-digest={D}", "--via=marmot",
                                          f"--via-ref={DENY.ref}", "--deny", "--note=too broad"]
-        edit(tmp_path, status="open", decision=None, denied_by=None, denied_digest=None, via_ref=None)
+        undecide(tmp_path)
         code, line = await ab.decide(Attempt("k7m2", MID, "approve", "--json", APPROVE.ref, D, None), BEAD)
         assert code == 1 and line.startswith("Approver must be one of")        # one argument, not an option
     asyncio.run(scenario())
@@ -239,6 +253,80 @@ def test_overflow_kills_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             assert time.monotonic() - started < 10
         assert len(pids(tmp_path)) == 2 and all(gone(p) for p in pids(tmp_path))
     asyncio.run(scenario())
+
+
+def test_cancel_during_creation_reaps_the_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancellation that lands while asyncio is still connecting the child's pipes: the child and a
+    descendant it already started in its group are both killed (asyncio alone kills only the child)."""
+    async def scenario() -> None:
+        ab = fake(tmp_path, read="descendant")
+        loop = asyncio.get_running_loop()
+        connect = loop.connect_read_pipe
+        connecting, release = asyncio.Event(), asyncio.Event()
+
+        async def held(*args: Any, **kw: Any) -> Any:
+            connecting.set()
+            await release.wait()
+            return await connect(*args, **kw)
+        monkeypatch.setattr(loop, "connect_read_pipe", held)
+        task = asyncio.create_task(ab.read(BEAD))
+        await wait_until(lambda: connecting.is_set() and (tmp_path / "descendant.pid").exists(), 20)
+        task.cancel()       # synchronously cancels the future the task waits on, inside the creation
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, approvals.REAP_SECONDS + 5)
+        child, grandchild = pids(tmp_path)[0], int((tmp_path / "descendant.pid").read_text())
+        await wait_until(lambda: gone(child) and gone(grandchild), 10)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(tmp_path / "descendant.pid")
+
+
+DESCENDANT = """\
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    time.sleep(60)
+    os._exit(0)
+with open(sys.argv[1] + ".tmp", "w") as f:
+    f.write(str(pid))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(600)
+"""
+
+
+def test_summarizer_cancel_during_creation_reaps_the_group(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summarizer starts its child through the same `reap.spawn`."""
+    pid_file = tmp_path / "descendant.pid"
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        connect = loop.connect_read_pipe
+        connecting, release = asyncio.Event(), asyncio.Event()
+
+        async def held(*args: Any, **kw: Any) -> Any:
+            connecting.set()
+            await release.wait()
+            return await connect(*args, **kw)
+        monkeypatch.setattr(loop, "connect_read_pipe", held)
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
+        await wait_until(lambda: connecting.is_set() and pid_file.exists(), 20)
+        task.cancel()       # synchronously cancels the future the task waits on, inside the creation
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, summarize.REAP_SECONDS + 5)
+        grandchild = int(pid_file.read_text())
+        await wait_until(lambda: gone(grandchild), 10)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(pid_file)
 
 
 def test_reap_bounded_when_pipe_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -622,13 +710,14 @@ def test_gate_rejects_is_reported(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         text = await say(h, approve(), first)
         assert text == (f'Approved {BEAD} as op (digest {D12}, via Marmot), but btq\'s design gate rejects '
-                        'it: "design_review is stale". Check it on the host.')
+                        'it: "design_review is stale". Check it on the host.\napprove-bead said: "Closed '
+                        f'{BEAD}, but btq approval_valid() rejects it: design_review is stale; second"')
         assert ask_status(h, ask_id) == "approved"
         assert audited(h, kind="ask", action="decided", ask_id=ask_id, gate_valid=False, exit_status=1)
         other, other_first = await card(h, asks.AskPost("approval", bead=OTHER), join=False)
         text = await say(h, approve(D2[:12], OTHER), other_first)
-        assert text.endswith(f"rejects it: (btq gave no reason; run approve-bead {OTHER} on the host). "
-                             "Check it on the host.")
+        assert (f"rejects it: (btq gave no reason; run approve-bead {OTHER} on the host). Check it on the "
+                "host.\n") in text
         assert ask_status(h, other) == "approved"
     go(tmp_path, scenario, {BEAD: bead(gate_ok=False, gate_reasons=["design_review is stale", "second"]),
                             OTHER: bead(digest=D2, gate_ok=False)})
@@ -883,6 +972,8 @@ def test_race_exit_5_settles_from_the_read_back(tmp_path: Path) -> None:
         edit(tmp_path, decide="race", gate_ok=False, gate_reasons=["the ask changed after the decision"])
         text = await say(h, approve(), first)
         assert text.startswith(f"Approved {BEAD} as op") and "rejects it" in text
+        assert text.endswith(f'\napprove-bead said: "{BEAD} written, but the bead changed during the write; '
+                             'btq will reject this approval."')        # R12: exit 5's warning is quoted
         assert attempts(h, ask_id)[0][-2:] == (5, "recorded") and ask_status(h, ask_id) == "approved"
     go(tmp_path, scenario)
 
@@ -1513,4 +1604,60 @@ def test_reconcile_skips_a_replaced_attempt(tmp_path: Path) -> None:
         await h.daemon.reconcile_one(ask_id, old, "deciding", restarted=False)
         assert audited(h, kind="ask", action="reconcile-skipped", ask_id=ask_id)
         assert reads(h) == before and ask_status(h, ask_id) == "deciding" and current(h, ask_id) == new
+    go(tmp_path, scenario)
+
+
+THIRD = "btq-ef56g"
+PARTIAL = [{"approved_at": "2026-10-06T10:00:00Z"}, {"approved_by": ""}, {"via_ref": None}]
+
+
+@pytest.mark.parametrize("partial", PARTIAL)
+def test_fake_partial_record_is_decided(tmp_path: Path, partial: dict[str, Any]) -> None:
+    """The fake follows the real tool: a decision key present, whatever its value, is a decision."""
+    async def scenario() -> None:
+        ab = fake(tmp_path, **partial)
+        r = await ab.read(BEAD)
+        assert isinstance(r, Readout) and r.decided
+        assert await ab.decide(APPROVE, BEAD) == (1, "Already holds a decision; refusing.")
+    asyncio.run(scenario())
+
+
+@needs_tmux
+@pytest.mark.parametrize("partial", PARTIAL)
+def test_partial_record_at_post_preflight_and_read_back(tmp_path: Path, partial: dict[str, Any]) -> None:
+    """A partial decision record (any decision key, even empty or null) is refused at post, stops the
+    attempt in preflight, and makes a read-back `blocked`."""
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        refused = await h.daemon.on_ask(asks.AskPost("approval", bead=OTHER), NONE)           # post
+        assert refused.result == "refused" and "already holds a decision" in refused.message
+        assert h.store.db.execute("SELECT COUNT(*) FROM outbox WHERE key LIKE 'ask:%'").fetchone()[0] == 0
+        ask_id, first = await card(h, join=False)                                            # preflight
+        edit(tmp_path, **partial)
+        text = await say(h, approve(), first)
+        assert text.startswith(f"{BEAD} holds a decision admind cannot confirm as yours. Nothing more")
+        assert decisions(h) == [] and ask_status(h, ask_id) == "blocked"
+        assert attempts(h, ask_id)[0][-1] == "refused"
+        third, third_first = await card(h, asks.AskPost("approval", bead=THIRD), join=False)  # read-back
+        edit(tmp_path, THIRD, decide="fail", after_decide=partial)
+        text = await say(h, approve(D12, THIRD), third_first)
+        assert text == (f'{THIRD} holds a decision admind cannot confirm as yours ("refused: something is '
+                        'wrong; nothing written."). Nothing more will be done from Marmot. Resolve it on '
+                        f"the host with approve-bead {THIRD}.")
+        assert len(decisions(h)) == 1 and ask_status(h, third) == "blocked"
+        assert attempts(h, third)[0][-2:] == (1, "blocked")
+    go(tmp_path, scenario, {BEAD: bead(), OTHER: bead(digest=D2, **partial), THIRD: bead()})
+
+
+@needs_tmux
+def test_uncertain_quotes_the_stderr_line(tmp_path: Path) -> None:
+    """R12: the stderr line is quoted after the uncertain wording too."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        edit(tmp_path, decide="fail", after_decide={"fail_read": True})
+        text = await say(h, approve(), first)
+        assert text == (f"admind could not read {BEAD} back. No further decision is taken from Marmot until "
+                        f"it can; check it on the host with approve-bead {BEAD}.\napprove-bead said: "
+                        '"refused: something is wrong; nothing written."')
+        assert ask_status(h, ask_id) == "uncertain"
     go(tmp_path, scenario)
