@@ -6,10 +6,12 @@ running daemon, which owns the wn-agent connection, over `ctl.sock`. `admind ask
 served by `JsonSocketServer`. Each socket is 0600 inside the 0700 state directory; anything able to use it
 can already act as admind.
 
-Every connection is bounded: a reply its peer doesn't read within WRITE_SECONDS is dropped, a hang-up that
-doesn't finish within CLOSE_SECONDS (or a handler cancelled meanwhile) aborts the connection, and `close()`
-waits CLOSE_SECONDS for the accepted connections' handlers before cancelling them. So `close()` returns
-within about twice CLOSE_SECONDS whatever the clients do.
+Every connection is bounded: a reply its peer hasn't read in full (flushed, not just drained to the
+high-water mark) within WRITE_SECONDS is dropped, a hang-up that doesn't finish within CLOSE_SECONDS (or a
+handler cancelled meanwhile) aborts the connection, and `close()` waits CLOSE_SECONDS for the accepted
+connections' handlers before cancelling them and aborting their connections. A connection is registered
+the moment it is accepted, and one accepted once closing has begun is aborted at once, so none outlives
+`close()`, even a cancelled one. `close()` returns within about twice CLOSE_SECONDS whatever the clients do.
 """
 
 import asyncio
@@ -84,6 +86,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         self.server: asyncio.Server | None = None
         self.created: tuple[int, ...] | None = None     # identity of the socket this instance bound
         self.handlers: dict[asyncio.Task[Any], asyncio.StreamWriter] = {}     # accepted connections
+        self.closing = False
 
     async def start(self) -> None:
         """Bind the socket ourselves: asyncio's path-based start would follow a symlink at the path and
@@ -101,7 +104,8 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             self.created = self.identity(made)
             sock.listen()
             sock.setblocking(False)
-            self.server = await asyncio.start_unix_server(self._track, sock=sock, limit=self.max_request + 2)
+            self.closing = False
+            self.server = await asyncio.start_unix_server(self._accept, sock=sock, limit=self.max_request + 2)
         except BaseException:
             sock.close()
             self.remove_own_socket()
@@ -124,28 +128,38 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
         self.created = None
 
     async def close(self) -> None:
-        """Stop listening, give the accepted connections CLOSE_SECONDS, then cancel what is left."""
+        """Stop listening, give the accepted connections CLOSE_SECONDS, then cancel what is left and abort
+        its connections. The cleanup runs even if `close()` itself is cancelled (it then re-raises)."""
+        self.closing = True
         if self.server is not None:
             self.server.close()
+        try:
+            if self.handlers:
+                await asyncio.wait(set(self.handlers), timeout=CLOSE_SECONDS)
+        finally:
+            self.drop_handlers()        # synchronous, so a cancelled close() still does it
+            self.remove_own_socket()
         if self.handlers:
             await asyncio.wait(set(self.handlers), timeout=CLOSE_SECONDS)
-        for task in set(self.handlers):
-            task.cancel()
-        await asyncio.gather(*self.handlers, return_exceptions=True)
         if self.server is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.server.wait_closed(), CLOSE_SECONDS)
-        self.remove_own_socket()
+        self.drop_handlers()            # any registered late
 
-    async def _track(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()       # the server runs each connection in its own task
-        if task is not None:
-            self.handlers[task] = writer
-        try:
-            await self._handle(reader, writer)
-        finally:
-            if task is not None:
-                self.handlers.pop(task, None)
+    def drop_handlers(self) -> None:
+        for task, writer in list(self.handlers.items()):
+            task.cancel()
+            writer.transport.abort()
+
+    def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """The connection callback, run as the connection is made: register its handler before anything
+        can await, so `close()` always sees it. Once closing has begun a new connection is aborted."""
+        if self.closing:
+            writer.transport.abort()
+            return
+        task = asyncio.get_running_loop().create_task(self._handle(reader, writer))
+        self.handlers[task] = writer
+        task.add_done_callback(lambda done: self.handlers.pop(done, None))
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -174,6 +188,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             if len(data) > self.max_reply:
                 self.audit.write(self.kind, action="reply-too-large", size=len(data))
                 data = msgspec.json.encode(self.failed())
+            writer.transport.set_write_buffer_limits(high=0)   # drain() returns once all of it is flushed
             writer.write(data + b"\n")
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
         except Exception as exc:  # noqa: BLE001 - one bad client must not end the server

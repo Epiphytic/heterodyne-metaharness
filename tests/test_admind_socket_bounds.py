@@ -177,6 +177,133 @@ def test_hang_up_cancelled_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(body())
 
 
+def test_slow_reader_gets_the_whole_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that keeps reading, slowly, gets every byte: the write budget covers the whole flush, not
+    just the drain to the high-water mark, and the hang-up's CLOSE_SECONDS doesn't cut the tail."""
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.001)      # any tail left for the hang-up to flush is cut
+    monkeypatch.setattr(ctl, "WRITE_SECONDS", 20.0)
+    size = 300_000
+
+    go = asyncio.Event()
+
+    async def reply(_req: asks.AskRequest, _peer: ctl.Peer) -> asks.AskReply:
+        await go.wait()
+        return asks.AskReply("ok", "h" * size)
+
+    async def body() -> None:
+        server = await ask_server(tmp_path, reply)
+        try:
+            client = unread_request(server.path)
+            await until(lambda: len(server.handlers) == 1)
+            # a small kernel send buffer, so the reply's tail waits in the transport for the reader
+            [writer] = server.handlers.values()
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            go.set()
+            await until(lambda: blocked(server))
+            loop = asyncio.get_running_loop()
+            got = bytearray()
+            start = time.monotonic()
+            try:
+                while chunk := await asyncio.wait_for(loop.sock_recv(client, 4096), 5):
+                    got += chunk
+                    await asyncio.sleep(0.002)          # the slowness under test, not synchronisation
+            finally:
+                client.close()
+            assert time.monotonic() - start > ctl.CLOSE_SECONDS
+            assert msgspec.json.decode(bytes(got), type=asks.AskReply).message == "h" * size
+        finally:
+            await server.close()
+
+    asyncio.run(body())
+
+
+def test_a_connection_is_registered_as_it_is_accepted(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.1)
+
+    async def body() -> None:
+        server = await ask_server(tmp_path, big_reply)
+        ours, theirs = socket.socketpair(socket.AF_UNIX)
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock=ours)
+            server._accept(reader, writer)             # pyright: ignore[reportPrivateUsage]
+            assert list(server.handlers.values()) == [writer]          # before any await
+        finally:
+            await server.close()
+            theirs.close()
+        assert server.handlers == {}
+
+    asyncio.run(body())
+
+
+def test_a_connection_accepted_while_closing_is_aborted(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The interleave the review found: a connection whose callback runs once close() has begun (here,
+    during the grace for another connection). It is aborted at once, never registered, and close() leaves
+    no handler or transport behind."""
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.2)
+    entered = asyncio.Event()
+
+    async def never(_req: asks.AskRequest, _peer: ctl.Peer) -> asks.AskReply:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def body() -> None:
+        server = await ask_server(tmp_path, never)
+        first = unread_request(server.path)
+        await asyncio.wait_for(entered.wait(), 5)
+        closing = asyncio.create_task(server.close())
+        await until(lambda: server.closing)
+        ours, theirs = socket.socketpair(socket.AF_UNIX)
+        theirs.setblocking(False)
+        reader, writer = await asyncio.open_unix_connection(sock=ours)
+        server._accept(reader, writer)                 # pyright: ignore[reportPrivateUsage]
+        assert writer.transport.is_closing() and len(server.handlers) == 1     # only the first
+        await asyncio.wait_for(closing, 5)
+        assert server.handlers == {}
+        assert await read_to_end(theirs) == 0 and await read_to_end(first) == 0
+
+    asyncio.run(body())
+
+
+def test_cancelled_close_still_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 30.0)        # the grace would outlast the test
+    entered = asyncio.Event()
+
+    async def never(_req: asks.AskRequest, _peer: ctl.Peer) -> asks.AskReply:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def either(req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
+        return await (big_reply if isinstance(req, asks.AskList) else never)(req, peer)
+
+    async def body() -> None:
+        server = await ask_server(tmp_path, either)
+        unread = unread_request(server.path)                  # a list: a big reply it never reads
+        await until(lambda: blocked(server))
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(5)
+        client.connect(str(server.path))
+        client.sendall(msgspec.json.encode(asks.AskGet("k7m2")) + b"\n")
+        client.setblocking(False)
+        await asyncio.wait_for(entered.wait(), 5)
+        handlers = list(server.handlers)
+        assert len(handlers) == 2
+        closing = asyncio.create_task(server.close())
+        await until(lambda: server.closing)               # close() is in its grace wait
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, 5)
+        assert all(h.cancelling() for h in handlers) and not server.path.exists()
+        await until(lambda: server.handlers == {})
+        assert await read_to_end(client) == 0             # the connections were dropped, not left open
+        assert await read_to_end(unread) < BIG            # aborted now, not after another CLOSE_SECONDS
+
+    asyncio.run(body())
+
+
 @pytest.mark.parametrize("stall", ["reply", "connect"])
 def test_wait_keeps_to_its_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                    capsys: pytest.CaptureFixture[str], stall: str) -> None:
