@@ -76,6 +76,40 @@ async def until(check: Callable[[], bool], seconds: float = 10.0) -> None:
     raise AssertionError("timed out waiting")
 
 
+def open_fds() -> list[int]:
+    """This process's open descriptors. /proc/self/fd is Linux's; macOS (CI runs both) has /dev/fd. Either
+    listing includes the descriptor that reads it."""
+    where = Path("/proc/self/fd")
+    return [int(fd.name) for fd in (where if where.is_dir() else Path("/dev/fd")).iterdir()]
+
+
+def let_go(path: Path) -> None:
+    """Close every descriptor this process holds on `path`, found by device and inode: /dev/fd entries
+    on macOS are not links to read."""
+    want, closed = path.stat(), 0
+    for fd in open_fds():
+        with contextlib.suppress(OSError):         # the listing's own descriptor is closed by now
+            got = os.fstat(fd)
+            if (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+                os.close(fd)
+                closed += 1
+    assert closed, f"nothing held {path}"
+
+
+def counted_submits(lane: daemon.Lane, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The keys of every job asked of `lane` from now on, joined or queued, recorded as submit returns."""
+    keys: list[object] = []
+    real = lane.submit
+
+    def submit(key: Any, fn: Callable[[], object]) -> cf.Future[object]:
+        fut = real(key, fn)
+        keys.append(key)
+        return fut
+
+    monkeypatch.setattr(lane, "submit", submit)
+    return keys
+
+
 def settings(tmp_path: Path) -> WsdSettings:
     repo = git_repo(tmp_path / "repos" / "proj")
     ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES)
@@ -841,10 +875,7 @@ def test_undrained_jobs_end_the_process_holding_the_journal_and_lock(
         assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime(), exit_now=exit_now) == 1
         assert exits == [1] and "exiting now" in capsys.readouterr().err
     finally:
-        for fd in Path("/proc/self/fd").iterdir():     # the test, not the process, ends here: let go
-            with contextlib.suppress(OSError):
-                if fd.readlink() == s.instance_lock:
-                    os.close(int(fd.name))
+        let_go(s.instance_lock)                          # the test, not the process, ends here
 
 
 def test_a_reply_over_64_kib_arrives_whole(tmp_path: Path) -> None:
@@ -927,12 +958,14 @@ def test_ticks_on_a_busy_workstream_queue_one_job_and_starve_nothing(
 
     monkeypatch.setattr(sched, "pickup", slow)
 
+    submitted = counted_submits(wsd.lanes[WS], monkeypatch)
+
     async def scenario() -> list[ctl.CtlReply]:
         ticks = [asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
                  for _ in range(50)]
         try:
             await until(inside.is_set)
-            await asyncio.sleep(0.1)            # every tick has been dispatched
+            await until(lambda: len(submitted) == 50)   # every tick has reached the lane
             assert len(wsd.lanes[WS].jobs) == 2       # one running, one queued: no more
             status = await asyncio.wait_for(wsd.handle(ctl.CtlRequest("status")), 5)
             other = await asyncio.wait_for(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws="beta")), 5)
@@ -1057,7 +1090,15 @@ def test_a_stop_during_startup_that_drains_returns_without_serving(tmp_path: Pat
 def test_close_aborts_a_client_that_stops_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """r2 review: a peer that never reads a large reply can't hold close() open."""
     monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.1)
-    answered = asyncio.Event()
+    answered, stuck = asyncio.Event(), asyncio.Event()
+    real_drain = asyncio.StreamWriter.drain
+
+    async def drain(writer: asyncio.StreamWriter) -> None:
+        if writer.transport.get_write_buffer_size():   # more written than the socket took
+            stuck.set()
+        await real_drain(writer)
+
+    monkeypatch.setattr(asyncio.StreamWriter, "drain", drain)
 
     async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
         answered.set()
@@ -1066,18 +1107,17 @@ def test_close_aborts_a_client_that_stops_reading(tmp_path: Path, monkeypatch: p
     async def scenario() -> None:
         server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
         await server.start()
-        fds = Path("/proc/self/fd")
-        before = len(list(fds.iterdir()))              # with the listening socket
+        before = len(open_fds())                       # with the listening socket
         _, writer = await asyncio.open_unix_connection(str(tmp_path / "ctl.sock"))
         try:
             writer.write(msgspec.json.encode(ctl.CtlRequest("status")) + b"\n")
             await writer.drain()
             await asyncio.wait_for(answered.wait(), 10)
-            await asyncio.sleep(0.1)                    # the reply is written and stuck in drain()
+            await asyncio.wait_for(stuck.wait(), 10)    # the reply is written and stuck in drain()
             await asyncio.wait_for(server.close(), 5)   # we never read a byte of it
             assert not server.handlers
             # The listening socket went and our end is still open: wsd's end of it was dropped.
-            assert len(list(fds.iterdir())) == before
+            assert len(open_fds()) == before
         finally:
             writer.transport.abort()
 
@@ -1168,7 +1208,8 @@ def held_lane(wsd: Wsd, name: str) -> tuple[threading.Event, threading.Event, Ca
 
 @pytest.mark.parametrize("asked", [["pause", "resume", "pause"], ["resume", "pause", "resume"],
                                    ["pause", "resume"]])
-def test_pause_and_resume_queued_together_apply_the_last_asked(tmp_path: Path, asked: list[str]) -> None:
+def test_pause_and_resume_queued_together_apply_the_last_asked(tmp_path: Path, asked: list[str],
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     """r3 review: requests queued behind a busy lane end in the state asked last; a caller is told its
     request took effect only if that is the state published, and the state is published once."""
     s = settings(tmp_path)
@@ -1179,17 +1220,18 @@ def test_pause_and_resume_queued_together_apply_the_last_asked(tmp_path: Path, a
         assert wsd.set_pause(WS, True).result == "ok"
     inside, release, hold = held_lane(wsd, WS)
     before = j.events_since(0)[-1].seq
+    submitted = counted_submits(wsd.lanes[WS], monkeypatch)
 
     async def scenario() -> list[ctl.CtlReply]:
         holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
         replies: list[asyncio.Task[ctl.CtlReply]] = []
         try:
             await until(inside.is_set)
-            for op in asked:
+            for n, op in enumerate(asked, 1):
                 req = ctl.CtlRequest("pause" if op == "pause" else "resume", ws=WS)
                 replies.append(asyncio.create_task(wsd.handle(req)))
-                await until(lambda: WS in wsd.wanted_pause)
-                await asyncio.sleep(0.02)           # in the order asked
+                # In the order asked: each has reached the lane before the next is made.
+                await until(lambda n=n: submitted.count(daemon.PAUSE_STATE) == n)
             assert len(wsd.lanes[WS].jobs) == 2      # the hold, and one pause-state job for them all
         finally:
             release.set()
@@ -1429,10 +1471,7 @@ def test_the_hard_exit_happens_even_if_stderr_is_gone(tmp_path: Path,
         with pytest.raises(BrokenPipeError):        # only because this exit_now returns
             cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime(), exit_now=exits.append)
     finally:
-        for fd in Path("/proc/self/fd").iterdir():
-            with contextlib.suppress(OSError):
-                if fd.readlink() == s.instance_lock:
-                    os.close(int(fd.name))
+        let_go(s.instance_lock)
     assert exits == [1]
 
 
