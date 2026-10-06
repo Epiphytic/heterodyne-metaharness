@@ -19,6 +19,12 @@ leaves every launch to pickup's launch guard.
    disagree on is held as STUCK, never relaunched;
 6. only then does the caller accept events.
 
+A failed recovery opens nothing: BeadsUnavailable or RuntimeUnavailable anywhere fails it (`ok=False`)
+with the matching hold, including a failure a step only records (a claim that can't be read back is
+CLAIM_UNCERTAIN; a stop the runtime can't confirm is STOP_UNCONFIRMED), and the resume operations the
+sweep finds are opened only once the whole pass has succeeded. Progress on journals already open, and the
+sweep's per-bead records and escalations (which only ever hold), stay.
+
 Doubt always holds: a bead the journal has no row for (a lost journal), a missing or unreadable session
 record, `v2:held` without `v2:parked`, a parked bead with a session, a routing change, or a stop the
 runtime can't confirm. Rows that are STUCK or HELD stay so until the operator's release.
@@ -27,11 +33,11 @@ runtime can't confirm. Rows that are STUCK or HELD stay so until the operator's 
 from dataclasses import dataclass
 
 from heterodyne.wsd.beads import BeadsUnavailable
-from heterodyne.wsd.journal import OpKind
+from heterodyne.wsd.journal import Op, OpKind
 from heterodyne.wsd.runtime import RuntimeUnavailable
 from heterodyne.wsd.scheduler import Scheduler
 from heterodyne.wsd.states import Reason
-from heterodyne.wsd.sweep import sweep
+from heterodyne.wsd.sweep import open_resumes, sweep
 
 RECOVERY_POINTS = ("lock.waiting", "recovery.read", "recovery.actions", "recovery.journals",
                    "recovery.sessions")
@@ -88,19 +94,37 @@ class _Recovery:
         replayed = 0
         for op in j.ops_open(name):
             if op.kind is OpKind.PICKUP and op.step == "intent":
-                self.s.resolve_claim(op)
+                if self.s.resolve_claim(op) is None and self._still_open(op):
+                    raise BeadsUnavailable("the claim could not be read back")    # held CLAIM_UNCERTAIN
             elif op.kind in (OpKind.PARK, OpKind.RELEASE, OpKind.ESCALATE):
                 self.s.replay(op)   # the scheduler's dispatch: a bead bd confirms is gone ends its op
+                if self._stop_unconfirmed(op):
+                    raise RuntimeUnavailable("a stop was not confirmed")
             else:
                 continue            # a pickup past its claim, or a resume: pickup's guard carries it on
             replayed += 1
         self._settle_orphans()
         d.cp("recovery.journals")
         # 5. sessions, read again: the replays changed both
-        swept = sweep(self.s.parker)
+        swept = sweep(self.s.parker, defer=True)
+        if swept.unconfirmed:
+            raise RuntimeUnavailable("a stop was not confirmed")    # each bead is STUCK/STOP_UNCONFIRMED
+        resumes = open_resumes(self.s.parker, swept.deferred)
         d.cp("recovery.sessions")
-        return Recovered(name, ok=True, replayed=replayed, resumes=swept.resumes, held=swept.held,
+        return Recovered(name, ok=True, replayed=replayed, resumes=resumes, held=swept.held,
                          stopped=swept.stopped)
+
+    def _still_open(self, op: Op) -> bool:
+        found = self.j.op_for(self.name, op.bead)
+        return found is not None and found.op_id == op.op_id
+
+    def _stop_unconfirmed(self, op: Op) -> bool:
+        """A park or release replay that couldn't confirm a stop holds the workstream and leaves its
+        operation open with the bead's reason STOP_UNCONFIRMED (no row: nothing to record it on)."""
+        if not self._still_open(op):
+            return False
+        row = self.j.state(self.name, op.bead)
+        return row is None or row.reason is Reason.STOP_UNCONFIRMED
 
     def _settle_orphans(self) -> None:
         """End each uncertainty hold whose bead has no open operation left. Its operation would have

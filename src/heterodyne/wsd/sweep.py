@@ -14,6 +14,11 @@ Only beads with no open operation are swept: an open operation's replay owns its
   there is nothing to release, and it is dropped.
 - A RUNNING bead with no session and a readable record gets a resume operation at `unlabelled` (it was
   never parked). With no readable record, or with a session under another key, it is escalated.
+
+Recovery sweeps with `defer=True`: the resume operations are only collected, and recovery opens them
+(`open_resumes`, one transaction) once the whole pass has read beads and the runtime and every stop was
+confirmed, so a failed recovery opens nothing. Pickup opens them as it goes: a resume opened before a later
+failure is carried on by the next pickup's launch guard, which waits on every hold and listed session.
 """
 
 from collections import defaultdict
@@ -33,16 +38,34 @@ class Swept:
     resumes: int = 0         # dead sessions handed to the guard as resume operations
     held: int = 0            # beads escalated because beads and the journal disagree
     stopped: int = 0         # sessions stopped because their bead is not ours
+    unconfirmed: int = 0     # stops the runtime could not confirm (each bead is STUCK/STOP_UNCONFIRMED)
+    deferred: tuple[str, ...] = ()      # with defer=True: the beads that need a resume operation
 
 
-def sweep(parker: Parker) -> Swept:
-    """Run under `parker.entry()`. BeadsUnavailable and RuntimeUnavailable propagate: the caller holds."""
-    return _Sweep(parker).run()
+def sweep(parker: Parker, defer: bool = False) -> Swept:
+    """Run under `parker.entry()`. BeadsUnavailable and RuntimeUnavailable propagate: the caller holds.
+    With `defer`, no resume operation is opened; their beads are returned in `deferred`."""
+    return _Sweep(parker, defer).run()
+
+
+def open_resumes(parker: Parker, beads: tuple[str, ...]) -> int:
+    """Open the resume operations a deferred sweep collected, all in one transaction. Run under
+    `parker.entry()`, with nothing read or changed since that sweep."""
+    j, name = parker.d.journal, parker.ws.name
+    with j.transaction():
+        for bead in beads:
+            op = j.op_open(OpKind.RESUME, name, bead, {"ref": ""})
+            j.op_step(op.op_id, "unlabelled")      # never parked: nothing to unlabel
+            j.set_state(name, bead, BeadState.RESUMING, Reason.SESSION_DEAD)
+    return len(beads)
 
 
 class _Sweep:
-    def __init__(self, parker: Parker) -> None:
+    def __init__(self, parker: Parker, defer: bool) -> None:
         self.p = parker
+        self.defer = defer
+        self.deferred: list[str] = []
+        self.unconfirmed = 0
         self.d = parker.d
         self.j = parker.d.journal
         self.name = parker.ws.name
@@ -69,7 +92,7 @@ class _Sweep:
         for bead in sorted(ours.values(), key=lambda b: b.id):
             if j.op_for(name, bead.id) is None:
                 self._ours(bead, by_bead.get(bead.id, []))
-        return Swept(self.resumes, self.held, self.stopped)
+        return Swept(self.resumes, self.held, self.stopped, self.unconfirmed, tuple(self.deferred))
 
     def _not_ours(self, bead: str, sessions: list[Session]) -> None:
         """Nothing runs without our claim: stop the bead's sessions, then record what beads say."""
@@ -81,6 +104,7 @@ class _Sweep:
             except RuntimeUnavailable:
                 confirmed = False
         if not confirmed:
+            self.unconfirmed += 1
             self.j.adopt(self.name, bead, BeadState.STUCK, Reason.STOP_UNCONFIRMED)
         elif not self.d.beads.exists(self.name, bead):
             self.j.adopt(self.name, bead, BeadState.DROPPED, Reason.CLAIM_LOST, "the bead no longer exists")
@@ -143,8 +167,7 @@ class _Sweep:
         elif any(s.key != rec.session_key for s in sessions):
             self._hold(bead, Reason.UNEXPECTED_STATE, "a session not in its record is listed")
         elif not sessions:
-            with self.j.transaction():
-                op = self.j.op_open(OpKind.RESUME, self.name, bead.id, {"ref": ""})
-                self.j.op_step(op.op_id, "unlabelled")      # never parked: nothing to unlabel
-                self.j.set_state(self.name, bead.id, BeadState.RESUMING, Reason.SESSION_DEAD)
-            self.resumes += 1
+            if self.defer:
+                self.deferred.append(bead.id)
+            else:
+                self.resumes += open_resumes(self.p, (bead.id,))

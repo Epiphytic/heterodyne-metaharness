@@ -5,8 +5,10 @@ import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
 from wsd_env import WS, LockAt, Rig, Worker, finish, make_rig, probe_lock
 
+from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY
 from heterodyne.wsd.journal import JournalBusy, OpKind
+from heterodyne.wsd.park import PARK_MARK, PARK_POINTS, RELEASE_POINTS, RESUME_POINTS
 from heterodyne.wsd.recovery import RECOVERY_POINTS, Recovered, recover
 from heterodyne.wsd.runtime import Liveness
 from heterodyne.wsd.scheduler import POINTS, Outcome
@@ -218,15 +220,88 @@ def test_session_of_a_bead_not_ours_is_stopped(tmp_path: Path) -> None:
 
 
 def test_unconfirmed_stop_of_a_closed_bead_is_stuck_until_confirmed(tmp_path: Path) -> None:
+    """r1 (deviation from the plan's test): a stop the runtime can't confirm fails recovery with the
+    runtime hold; the bead is still recorded STUCK/STOP_UNCONFIRMED, and the resume the same sweep found
+    for another bead is not opened. The next recovery confirms the stop and opens it."""
     rig = started(tmp_path, "btq-2")
+    rig.start("btq-2")
+    rig.runtime.end(rig.key("btq-2"))
     rig.world.close("btq-1")
     rig.runtime.stop_failures = 1
     rig.restart()
-    assert recover(rig.sched).ok
-    assert row_of(rig) == ("stuck", Reason.STOP_UNCONFIRMED)
-    assert rig.runtime.coders() == ["btq-1"]
-    assert rig.pickup() is Outcome.STARTED            # the sweep's retried stop is confirmed
-    assert rig.state("btq-1") == "closed" and rig.runtime.coders() == ["btq-2"]
+    result = recover(rig.sched)
+    assert not result.ok and Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+    assert row_of(rig) == ("stuck", Reason.STOP_UNCONFIRMED) and rig.runtime.coders() == ["btq-1"]
+    assert rig.journal.ops_open() == [] and rig.state("btq-2") == "running"     # opens nothing
+    result = recover(rig.sched)
+    assert result.ok and result.stopped == 1 and result.resumes == 1
+    assert rig.runtime.coders() == []
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.bead) == (OpKind.RESUME, "btq-2")
+    rig.pickup()                                      # only pickup clears the runtime hold
+    assert rig.journal.holds(WS) == {} and rig.runtime.coders() == ["btq-2"]
+    assert [s.bead for s in rig.runtime.launches if s.resume] == ["btq-2"]
+
+
+def test_unconfirmed_stop_in_an_interrupted_park_fails_recovery(tmp_path: Path) -> None:
+    """r1: the park's replay can't confirm its stop. Recovery fails with the runtime hold, the park stays
+    open at its step with the bead STOP_UNCONFIRMED, and another bead's dead session gets no resume
+    until a recovery succeeds."""
+    rig = started(tmp_path, "btq-2", "btq-3")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    rig.start("btq-3")
+    rig.runtime.end(rig.key("btq-3"))
+    rig.restart(CrashAt("park.intent"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    rig.restart()
+    rig.runtime.stop_failures = 1
+    result = recover(rig.sched)
+    assert not result.ok and Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.bead) == (OpKind.PARK, "btq-1")
+    assert row_of(rig) == ("parking", Reason.STOP_UNCONFIRMED) and rig.state("btq-3") == "running"
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == 1 and result.resumes == 1
+    assert rig.state("btq-1") == "parked"
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.bead) == (OpKind.RESUME, "btq-3")
+
+
+def test_park_left_open_by_a_git_failure_is_not_a_failed_recovery(tmp_path: Path) -> None:
+    """r1: only a dependency failure fails recovery. A park whose WIP commit fails under its budget stays
+    open for the next replay, with no hold."""
+    rig = started(tmp_path, "btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    (rig.worktree("btq-1") / "work.txt").write_text("half done")
+    rig.restart(CrashAt("park.intent"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    rig.restart()
+    lock = Path(gitwip.git(rig.worktree("btq-1"), "rev-parse", "--absolute-git-dir").strip()) / "index.lock"
+    lock.write_text("")                                             # every `git add` fails
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == 1 and rig.journal.holds(WS) == {}
+    assert row_of(rig) == ("parking", Reason.PARK_FAILED) and len(rig.journal.ops_open()) == 1
+    lock.unlink()
+    assert recover(rig.sched).ok and rig.state("btq-1") == "parked" and rig.journal.ops_open() == []
+
+
+def test_failed_sweep_opens_no_resume(tmp_path: Path) -> None:
+    """r1: the sweep finds btq-1's session dead, then can't validate btq-3's claim. Recovery fails with
+    the beads hold, and btq-1's resume, found first, was never opened."""
+    rig = started(tmp_path, "btq-3")
+    rig.start("btq-3")
+    rig.runtime.end(rig.key("btq-1"))
+    rig.restart()
+    rig.world.fault("owned", RuntimeError("dolt down"), bead="btq-3")
+    result = recover(rig.sched)
+    assert not result.ok and Reason.BEADS_UNREACHABLE in rig.journal.holds(WS)
+    assert rig.journal.ops_open() == [] and row_of(rig) == ("running", None)
+    result = recover(rig.sched)
+    assert result.ok and result.resumes == 1 and rig.journal.holds(WS) == {}
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.bead) == (OpKind.RESUME, "btq-1")
 
 
 def test_beads_down_at_startup_holds_and_claims_nothing(tmp_path: Path) -> None:
@@ -434,7 +509,9 @@ def test_uncertain_launch_hold_stays_while_its_operation_is_open(tmp_path: Path)
     assert rig.pickup() is Outcome.HELD and rig.world.claims == ["btq-1"]
 
 
-def test_unreadable_claim_hold_stays_while_its_operation_is_open(tmp_path: Path) -> None:
+def test_unreadable_claim_fails_recovery_and_keeps_its_hold(tmp_path: Path) -> None:
+    """r1 (deviation from the plan's test): the claim can't be read back, so recovery fails with the
+    beads hold beside the claim's own; the pickup stays open. The next recovery reads it back."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.world.fault("claim", RuntimeError("timeout"), bead="btq-1")
@@ -442,9 +519,15 @@ def test_unreadable_claim_hold_stays_while_its_operation_is_open(tmp_path: Path)
     assert rig.pickup() is Outcome.HELD
     rig.world.fault("show", RuntimeError("dolt down"), times=2, bead="btq-1")
     rig.restart()
-    assert recover(rig.sched).ok
-    assert rig.journal.holds(WS) == {Reason.CLAIM_UNCERTAIN: "btq-1"} and len(rig.journal.ops_open()) == 1
-    assert rig.pickup() is Outcome.STARTED and rig.journal.holds(WS) == {}
+    result = recover(rig.sched)
+    assert not result.ok and result.replayed == 0
+    assert rig.journal.holds(WS) == {Reason.CLAIM_UNCERTAIN: "btq-1",
+                                     Reason.BEADS_UNREACHABLE: "BeadsUnavailable"}
+    assert len(rig.journal.ops_open()) == 1
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == 1 and rig.journal.holds(WS) == {}
+    assert row_of(rig) == ("dropped", Reason.CLAIM_ABANDONED) and rig.journal.ops_open() == []
+    assert rig.pickup() is Outcome.STARTED
 
 
 def test_successful_recovery_clears_its_own_holds_only(tmp_path: Path) -> None:
@@ -491,10 +574,10 @@ def test_busy_journal_propagates_and_is_never_held(tmp_path: Path) -> None:
     assert rig.journal.holds(WS) == {Reason.ACTIONS_UNRECONCILED: "btq-ap"}
 
 
-@pytest.mark.parametrize("point", ["resume.intent", "resume.unlabelled!", "resume.unlabelled"])
+@pytest.mark.parametrize("point", RESUME_POINTS)
 def test_interrupted_resume_is_left_to_pickup(tmp_path: Path, point: str) -> None:
     """An open resume is the guard's: recovery neither unlabels nor launches it, and the next pickup
-    resumes it once."""
+    carries it on. Whatever the point, the bead is resumed exactly once."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.world.add("btq-2")
@@ -506,14 +589,78 @@ def test_interrupted_resume_is_left_to_pickup(tmp_path: Path, point: str) -> Non
     with pytest.raises(SimulatedCrash):
         rig.pickup()
     rig.restart()
-    labels = list(rig.world.beads["btq-1"].labels)
+    labels, launches = list(rig.world.beads["btq-1"].labels), len(rig.runtime.launches)
     result = recover(rig.sched)
-    assert result.ok and result.replayed == 0
-    assert rig.world.beads["btq-1"].labels == labels and len(rig.runtime.launches) == 1
-    [op] = rig.journal.ops_open()
-    assert op.kind is OpKind.RESUME
-    assert rig.pickup() is Outcome.BUSY
+    assert result.ok and result.replayed == 0 and result.resumes == 0
+    assert rig.world.beads["btq-1"].labels == labels and len(rig.runtime.launches) == launches
+    assert [op.kind for op in rig.journal.ops_open()] == ([] if point == "resume.done" else [OpKind.RESUME])
+    rig.pickup()
     assert [s.resume for s in rig.runtime.launches] == [False, True] and rig.journal.ops_open() == []
+    assert rig.state("btq-1") == "running" and rig.runtime.coders() == ["btq-1"]
+    assert PARKED not in rig.world.beads["btq-1"].labels
+
+
+def wip_commits(rig: Rig) -> list[str]:
+    return gitwip.git(rig.worktree("btq-1"), "log", "--format=%H", f"--grep={PARK_MARK}").split()
+
+
+@pytest.mark.parametrize("point", [p for p in PARK_POINTS if p != "lock.waiting"])
+def test_recovery_completes_a_park_cut_short_anywhere(tmp_path: Path, point: str) -> None:
+    """Through recovery's dispatch, not Parker.replay: the park finishes once and nothing relaunches."""
+    rig = started(tmp_path, "btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    (rig.worktree("btq-1") / "work.txt").write_text("half done")
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",), why="w")
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == (0 if point == "park.done" else 1) and result.resumes == 0
+    bead = rig.world.beads["btq-1"]
+    assert PARKED in bead.labels and bead.deps == [("btq-2", "blocks")] and len(bead.comments) == 1
+    assert len(wip_commits(rig)) == 1 and rig.state("btq-1") == "parked"
+    assert rig.journal.ops_open() == [] and rig.journal.holds(WS) == {}
+    assert rig.runtime.live() == [] and len(rig.runtime.launches) == 1
+
+
+@pytest.mark.parametrize("point", RELEASE_POINTS[1:])
+def test_recovery_completes_a_release_cut_short_anywhere(tmp_path: Path, point: str) -> None:
+    rig = started(tmp_path)
+    rig.parker.park("btq-1", (), why="operator /stop", hold=True)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.release("btq-1")
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == (0 if point == "release.done" else 1)
+    assert rig.state("btq-1") == "parked" and rig.journal.ops_open() == []
+    assert HELD not in rig.world.beads["btq-1"].labels and len(rig.runtime.launches) == 1
+
+
+@pytest.mark.parametrize("point", ["release.stopped!", "release.recorded!"])
+def test_recovery_completes_a_release_that_replaces_a_record(tmp_path: Path, point: str) -> None:
+    """The conditional release points: the replay stops the stray session, writes the record once and
+    opens one resume, which recovery leaves to pickup."""
+    rig = started(tmp_path)
+    del rig.world.beads["btq-1"].metadata[RECORD_KEY]
+    first = rig.runtime.launches[0]
+    rig.runtime.adopt(type(first)(WS, "btq-1", "coder", "p-two", "stray", first.label, first.worktree,
+                                  resume=False), Liveness.UNKNOWN)
+    rig.parker.escalate("btq-1", Reason.LAUNCH_UNRECORDED)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.release("btq-1")
+    rig.restart()
+    result = recover(rig.sched)
+    assert result.ok and result.replayed == 1
+    assert "stray" not in rig.runtime.listed
+    rec = rig.beads.show(WS, "btq-1").record()
+    assert rec is not None and rec.session_key == first.session_key
+    [op] = rig.journal.ops_open()
+    assert (op.kind, op.step) == (OpKind.RESUME, "unlabelled")
+    rig.pickup()
+    assert rig.state("btq-1") == "running" and rig.journal.ops_open() == []
+    assert rig.runtime.coders() == ["btq-1"] and len(rig.runtime.launches) == 1
 
 
 def test_claim_hold_left_by_an_ended_operation_is_settled_after_the_replays(tmp_path: Path) -> None:
