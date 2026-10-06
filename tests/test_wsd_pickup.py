@@ -1,14 +1,12 @@
 import json
 import os
-import sqlite3
-import threading
 from pathlib import Path
 
 import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
+from wsd_env import WS, LockAt, Rig, Worker, finish, git_repo, make_rig, probe_lock
 
 from heterodyne.wsd import ids
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
@@ -680,30 +678,6 @@ def test_closed_bead_with_unconfirmed_stop_keeps_the_role(tmp_path: Path) -> Non
     assert rig.world.claims == ["btq-1", "btq-2"]
 
 
-class ProbedLock:
-    """The operation lock, instrumented: before the thread named `who` waits on it, that thread probes it
-    without blocking and records the answer, so a test knows the caller asked for the lock and was
-    refused (not merely that it reached the door)."""
-
-    def __init__(self, real: "threading.RLock", who: str) -> None:
-        self.real = real
-        self.who = who
-        self.probes: list[str] = []
-        self.asked = threading.Event()
-
-    def __enter__(self) -> None:
-        if threading.current_thread().name == self.who and not self.asked.is_set():
-            got = self.real.acquire(blocking=False)
-            self.probes.append("acquired" if got else "blocked")
-            self.asked.set()
-            if got:
-                return
-        self.real.acquire()
-
-    def __exit__(self, *_exc: object) -> None:
-        self.real.release()
-
-
 def test_pickup_waits_at_the_door_while_a_park_runs(tmp_path: Path) -> None:
     """Finding 13: a park has stopped the session (the coder role looks free) but not yet labelled the
     bead. A pickup arriving now waits on the operation lock; it never claims in that window.
@@ -718,8 +692,7 @@ def test_pickup_waits_at_the_door_while_a_park_runs(tmp_path: Path) -> None:
     rig.pickup()
     rig.world.add("btq-3")
     rig.restart(pause)
-    lock = ProbedLock(rig.parker.lock, "pickup")
-    rig.parker.lock = lock  # pyright: ignore[reportAttributeAccessIssue] - a test double for the RLock
+    lock = probe_lock(rig, "pickup")
     outcome: list[Outcome] = []
     parker = Worker(lambda: rig.parker.park("btq-1", ("btq-2",)), "park")
     picker = Worker(lambda: outcome.append(rig.pickup()), "pickup")
@@ -809,22 +782,6 @@ def test_replayed_pickup_never_makes_a_worktree_for_a_lost_claim(tmp_path: Path)
     assert row is not None and (row.state.value, row.reason) == ("stuck", Reason.CLAIM_LOST)
     assert rig.world.worktrees == [] and not rig.worktree("btq-1").exists()
     assert rig.runtime.launches == [] and rig.journal.ops_open() == []
-
-
-class LockAt(Recorder):
-    """Another process takes the journal's write lock at `point`, and wsd's connection does not wait."""
-
-    def __init__(self, point: str, db: Path) -> None:
-        super().__init__()
-        self.point = point
-        self.db = db
-        self.other: sqlite3.Connection | None = None
-
-    def __call__(self, name: str) -> None:
-        super().__call__(name)
-        if name == self.point and self.other is None:
-            self.other = sqlite3.connect(self.db, isolation_level=None)
-            self.other.execute("BEGIN IMMEDIATE")
 
 
 def test_a_busy_journal_mid_pickup_propagates_and_replays(tmp_path: Path) -> None:

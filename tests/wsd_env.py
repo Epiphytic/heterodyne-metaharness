@@ -4,6 +4,7 @@
 while the queue, the repository and the agent sessions (other processes) carry on.
 """
 
+import sqlite3
 import subprocess
 import threading
 from collections.abc import Callable
@@ -130,3 +131,50 @@ def finish(*threads: Worker) -> None:
     errors = [t.error for t in started if t.error is not None]
     if errors:
         raise errors[0]
+
+
+class ProbedLock:
+    """The operation lock, instrumented: before the thread named `who` waits on it, that thread probes it
+    without blocking and records the answer, so a test knows the caller asked for the lock and was
+    refused (not merely that it reached the door)."""
+
+    def __init__(self, real: threading.RLock, who: str) -> None:
+        self.real = real
+        self.who = who
+        self.probes: list[str] = []
+        self.asked = threading.Event()
+
+    def __enter__(self) -> None:
+        if threading.current_thread().name == self.who and not self.asked.is_set():
+            got = self.real.acquire(blocking=False)
+            self.probes.append("acquired" if got else "blocked")
+            self.asked.set()
+            if got:
+                return
+        self.real.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.real.release()
+
+
+def probe_lock(rig: Rig, who: str) -> ProbedLock:
+    """Install a ProbedLock as the rig's operation lock (after any restart that rebuilds the Parker)."""
+    lock = ProbedLock(rig.parker.lock, who)
+    rig.parker.lock = lock  # pyright: ignore[reportAttributeAccessIssue] - a test double for the RLock
+    return lock
+
+
+class LockAt(Recorder):
+    """Another process takes the journal's write lock at `point`, and wsd's connection does not wait."""
+
+    def __init__(self, point: str, db: Path) -> None:
+        super().__init__()
+        self.point = point
+        self.db = db
+        self.other: sqlite3.Connection | None = None
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        if name == self.point and self.other is None:
+            self.other = sqlite3.connect(self.db, isolation_level=None)
+            self.other.execute("BEGIN IMMEDIATE")
