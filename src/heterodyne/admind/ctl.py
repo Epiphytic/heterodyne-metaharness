@@ -6,12 +6,14 @@ running daemon, which owns the wn-agent connection, over `ctl.sock`. `admind ask
 served by `JsonSocketServer`. Each socket is 0600 inside the 0700 state directory; anything able to use it
 can already act as admind.
 
-Every connection is bounded: a reply its peer hasn't read in full (flushed, not just drained to the
-high-water mark) within WRITE_SECONDS is dropped, a hang-up that doesn't finish within CLOSE_SECONDS (or a
-handler cancelled meanwhile) aborts the connection, and `close()` waits CLOSE_SECONDS for the accepted
-connections' handlers before cancelling them and aborting their connections. A connection is registered
-the moment it is accepted, and one accepted once closing has begun is aborted at once, so none outlives
-`close()`, even a cancelled one. `close()` returns within about twice CLOSE_SECONDS whatever the clients do.
+Every connection is bounded: a reply whose bytes haven't all left asyncio's output buffer for the kernel
+within WRITE_SECONDS is dropped (the reply sets the high-water mark to 0, so `drain()` waits for an empty
+buffer rather than the default low-water mark; the kernel then delivers the rest), a hang-up that doesn't
+finish within CLOSE_SECONDS (or a handler cancelled meanwhile) aborts the connection, and `close()` waits
+CLOSE_SECONDS for the accepted connections' handlers before cancelling them and aborting their
+connections. A connection is registered the moment it is accepted, and one accepted once closing has
+begun is aborted at once, so none outlives `close()`, even a cancelled one. `close()` returns within about
+twice CLOSE_SECONDS whatever the clients do.
 """
 
 import asyncio
@@ -188,7 +190,7 @@ class JsonSocketServer[Req, Rep: msgspec.Struct]:
             if len(data) > self.max_reply:
                 self.audit.write(self.kind, action="reply-too-large", size=len(data))
                 data = msgspec.json.encode(self.failed())
-            writer.transport.set_write_buffer_limits(high=0)   # drain() returns once all of it is flushed
+            writer.transport.set_write_buffer_limits(high=0)   # drain() waits for an empty buffer
             writer.write(data + b"\n")
             await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
         except Exception as exc:  # noqa: BLE001 - one bad client must not end the server

@@ -178,8 +178,9 @@ def test_hang_up_cancelled_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_slow_reader_gets_the_whole_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A client that keeps reading, slowly, gets every byte: the write budget covers the whole flush, not
-    just the drain to the high-water mark, and the hang-up's CLOSE_SECONDS doesn't cut the tail."""
+    """A client that keeps reading, slowly, gets every byte: the write budget lasts until asyncio's output
+    buffer is empty (handed to the kernel), not just until the default low-water mark, so the hang-up's
+    CLOSE_SECONDS has no tail left to cut."""
     monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.001)      # any tail left for the hang-up to flush is cut
     monkeypatch.setattr(ctl, "WRITE_SECONDS", 20.0)
     size = 300_000
