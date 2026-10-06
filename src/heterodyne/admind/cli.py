@@ -1,4 +1,4 @@
-"""`admind` command line: init, run, operators, rearm, unit, hook (ADR 0001 §8)."""
+"""`admind` command line: init, run, operators, rearm, ask, unit, hook (ADR 0001 §8; relay spec R1, R2)."""
 
 import argparse
 import asyncio
@@ -8,10 +8,14 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import NoReturn, cast
 
+import msgspec
+
 from heterodyne import config as hconfig
-from heterodyne.admind import ctl, unit
+from heterodyne.admind import asks, ctl, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -25,6 +29,12 @@ from heterodyne.services import ServiceManager, for_backend
 from heterodyne.tmux import Tmux
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
+EX_UNAVAILABLE = 69     # sysexits: `admind ask` found no daemon
+EX_TIMEOUT = 3          # `admind ask wait` ran out of time with no answer (R2)
+WAIT_POLL = 2.0         # seconds between `admind ask wait` polls (R2); replaced in tests
+WAIT_TIMEOUT = 540.0
+ASK_READ_SECONDS = 30.0     # one ask.sock reply
+NOT_RUNNING = "admind is not running (or did not answer)."
 IDENTITY_LABEL = "heterodyne-admind"
 
 
@@ -100,7 +110,118 @@ def ask_daemon(s: AdmindSettings, req: ctl.CtlRequest) -> int:
     return 0 if reply.result in ("committed", "rearmed") else 1
 
 
+def _ask_request(s: AdmindSettings, req: asks.AskRequest) -> asks.AskReply:
+    """One request on ask.sock (raises ctl.CtlUnavailable). The reply limit matches the daemon's (R24)."""
+    return asyncio.run(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
+                                   reply_type=asks.AskReply, max_reply=asks.MAX_REPLY))
+
+
+def _terminal(text: str) -> str:
+    """Poster-facing text for a terminal: line by line through `show`, so newlines survive and control
+    characters, secrets and identifiers do not. `--json` gives the text verbatim."""
+    return "\n".join(show(line, False) for line in text.split("\n"))
+
+
+def _print_view(view: asks.AskView) -> None:
+    sm = view.summary
+    head = f"ask {sm.ask_id} · {sm.kind} · {sm.status}" + ("" if sm.delivered else " · not yet delivered")
+    print(head)
+    for a in view.answers:
+        print(f"--- {a.kind} from {_terminal(a.operator)} at {a.at}")
+        print(_terminal(a.text))
+    if sm.outcome is not None:
+        print(f"outcome: {_terminal(sm.outcome)}")
+
+
+def _ask_post(args: argparse.Namespace) -> asks.AskPost | None:
+    body = ""
+    if args.body_file is not None:
+        try:
+            body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text()
+        except (OSError, ValueError) as exc:     # ValueError: not UTF-8
+            print(f"admind: cannot read the body ({type(exc).__name__})", file=sys.stderr)
+            return None
+    return asks.AskPost(args.kind, args.title, body, args.pr, args.head, args.bead, args.poster)
+
+
+def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
+    """`admind ask post|get|wait|list|cancel`. Exit 0 on success, 1 when refused or failed (the reason on
+    stderr), 69 when no daemon answers, 3 when `wait` times out."""
+    req: asks.AskRequest
+    if args.ask_command == "post":
+        post = _ask_post(args)
+        if post is None:
+            return 1
+        req = post
+    elif args.ask_command == "list":
+        req = asks.AskList()
+    elif args.ask_command == "cancel":
+        req = asks.AskCancel(args.ask_id)
+    else:
+        req = asks.AskGet(args.ask_id)
+    refusal = asks.check(req)       # the daemon checks again; this gives the reason without a round trip
+    if refusal is not None:
+        print(f"admind: {show(refusal, False)}", file=sys.stderr)
+        return 1
+    if args.ask_command == "wait":
+        return _ask_wait(s, req, args.timeout, args.json)
+    try:
+        reply = _ask_request(s, req)
+    except ctl.CtlUnavailable:
+        print(NOT_RUNNING, file=sys.stderr)
+        return EX_UNAVAILABLE
+    if getattr(args, "json", False):
+        print(msgspec.json.encode(reply).decode())
+    elif reply.result in ("refused", "failed"):
+        print(f"admind: {_terminal(reply.message)}", file=sys.stderr)
+    elif reply.asks is not None:
+        for sm in reply.asks:
+            print(f"{sm.ask_id} {sm.kind} · {sm.status} · {sm.answer_count} answers · {_terminal(sm.title)}")
+    elif args.ask_command == "get" and reply.ask is not None:
+        _print_view(reply.ask)
+    else:
+        print(_terminal(reply.message))
+    return 0 if reply.result in ("posted", "ok") else 1
+
+
+def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:
+    """Poll `get` every WAIT_POLL seconds until the ask has an answer or note, or is terminal (R2). A
+    daemon that is down or restarting is retried until the timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            reply = _ask_request(s, req)
+        except ctl.CtlUnavailable:
+            reply = None
+        if reply is not None and reply.result != "ok":
+            print(f"admind: {_terminal(reply.message)}", file=sys.stderr)
+            return 1
+        view = None if reply is None else reply.ask
+        if reply is not None and view is not None and (view.answers or view.summary.status in asks.TERMINAL):
+            if as_json:
+                print(msgspec.json.encode(reply).decode())
+            else:
+                _print_view(view)
+            return 0
+        left = deadline - time.monotonic()
+        if left <= 0:
+            print("admind: no answer yet (timed out)" if reply is not None else NOT_RUNNING, file=sys.stderr)
+            return EX_TIMEOUT
+        time.sleep(min(WAIT_POLL, left))
+
+
+def _settings_only() -> AdmindSettings:
+    return resolve(hconfig.load(), os.environ)
+
+
 def _with_settings(args: argparse.Namespace) -> int:
+    if args.command == "ask":       # a client only: it opens no database (the daemon owns it)
+        try:
+            s = _settings_only()
+        except hconfig.ConfigError as exc:
+            print(f"config error: {show(str(exc), False)}", file=sys.stderr)
+            return EX_CONFIG
+        return ask_command(s, args)
     try:
         s, store, audit = _load()
     except hconfig.ConfigError as exc:
@@ -239,10 +360,35 @@ def build_parser() -> argparse.ArgumentParser:
     ops.add_argument("name")
     sub.add_parser("rearm", help="trust the group's current member count and clear the latch "
                                  "(check the members in your client first)")
+    _ask_parser(sub.add_parser("ask", help="post a question or merge request to the operators and read "
+                                           "the answers"))
     sub.add_parser("unit", help="print a systemd user unit for this install")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")
     return parser
+
+
+def _ask_parser(ask: argparse.ArgumentParser) -> None:
+    sub = ask.add_subparsers(dest="ask_command", required=True, parser_class=_QuietParser)
+    post = sub.add_parser("post", help="post an ask; prints `ask <id> posted`")
+    post.add_argument("--kind", required=True, choices=["question", "merge", "approval"])
+    post.add_argument("--title", default="")
+    post.add_argument("--body-file", help="the context, from a file or - for stdin")
+    post.add_argument("--pr", help="merge: https://github.com/<owner>/<repo>/pull/<n>")
+    post.add_argument("--head", help="merge: the pull request's 40-hex head commit")
+    post.add_argument("--bead")
+    post.add_argument("--from", dest="poster", default="local", help="a label for the card (unverified)")
+    post.add_argument("--json", action="store_true")
+    for name, what in (("get", "an ask's status and answers"), ("cancel", "cancel an open or answered ask"),
+                       ("wait", "wait for an answer, or for the ask to end")):
+        one = sub.add_parser(name, help=what)
+        one.add_argument("ask_id")
+        if name != "cancel":
+            one.add_argument("--json", action="store_true")
+        if name == "wait":
+            one.add_argument("--timeout", type=float, default=WAIT_TIMEOUT)
+    sub.add_parser("list", help="active asks and the 20 most recent others").add_argument(
+        "--json", action="store_true")
 
 
 def main(argv: list[str] | None = None) -> int:

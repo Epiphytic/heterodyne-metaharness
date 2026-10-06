@@ -13,6 +13,7 @@ Peer- and child-supplied text (a stranger's message, an agent reply, a terminal 
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import hmac
 import json
 import os
@@ -25,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from heterodyne.admind import alerts, backstop, chunk, commands, ctl, guard, membership, summarize
+from heterodyne.admind import alerts, asks, backstop, chunk, commands, ctl, guard, membership, summarize
 from heterodyne.admind.agent import AdminAgent, AgentStuck
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.hook import (
@@ -43,7 +44,7 @@ from heterodyne.admind.hook import (
 )
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
-from heterodyne.admind.store import Store, TurnRow, now
+from heterodyne.admind.store import AskRow, Store, TurnRow, now
 from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -72,6 +73,14 @@ LONG_TURN = ("The admin agent is still working, so later messages are held. "
 ALERT_FAILED = ("🚨 A wsd alert file could not be relayed (ref {ref}). "
                 "Check the alert directory on the host.")
 UNCERTAIN = "delivery to the admin agent is uncertain; not retried — resend if needed"
+# Asks (relay spec §6, R15, R17). Fixed wording; an ask ID is from asks.ID_ALPHABET and safe to show.
+ASK_BUSY = "admind is already handling two posts; try again shortly."
+ASK_LATCHED = "admind is latched and posts nothing; the ask was not posted."
+ASK_NO_APPROVALS = "approval asks are not available yet."
+ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or wait for answers."
+ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
+ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
+NO_ACTIVE_ASKS = "No active asks."
 MAX_SEND_ATTEMPTS = 10
 AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
@@ -287,6 +296,9 @@ class Admind:
         self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
+        self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
+        self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
+        self.ask_server: ctl.JsonSocketServer[asks.AskRequest, asks.AskReply] | None = None
 
     # --- state helpers -------------------------------------------------------------------------
     def mark_ready(self, nonce: str | None = None) -> None:
@@ -462,11 +474,16 @@ class Admind:
         self.recover()
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
-        control: ctl.CtlServer | None = None
+        control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            self.ask_server = ctl.JsonSocketServer(
+                self.s.state_dir / asks.ASK_SOCKET, self.on_ask, self.audit, kind="ask",
+                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY, request_type=asks.AskRequest,
+                check=asks.check, refused=asks.refused, failed=asks.failed, describe=asks.describe)
+            await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
@@ -483,6 +500,8 @@ class Admind:
             for timer in self._backoff.values():
                 timer.cancel()
             self._backoff.clear()
+            if self.ask_server is not None:
+                await self.ask_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -499,6 +518,164 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
                 self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
         return ctl.CtlReply(result, redact(message))
+
+    # --- asks (relay spec) ----------------------------------------------------------------------
+    async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
+        """A request on ask.sock, already checked by `asks.check`. Get, list and cancel work while
+        latched (R17); a post does not."""
+        if isinstance(req, asks.AskPost):
+            return await self.serialised_post(req, peer)
+        if isinstance(req, asks.AskList):
+            rows = self.store.asks_with_status(*asks.ACTIVE) + self.store.recent_asks(20)
+            return asks.AskReply("ok", f"{len(rows)} asks", asks=[self.ask_summary(r) for r in rows])
+        ask_id = asks.normalise_id(req.ask_id)
+        row = None if ask_id is None else self.store.ask(ask_id)
+        if row is None:
+            return asks.refused(f"no ask {show(req.ask_id, False)}")
+        if isinstance(req, asks.AskGet):
+            return asks.AskReply("ok", row.status, ask=self.ask_view(row))
+        return self.cancel_ask(row)
+
+    async def serialised_post(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+        """At most MAX_IN_FLIGHT posts at once (the next is refused), run one at a time (R15, R22)."""
+        if self.posts_in_flight >= asks.MAX_IN_FLIGHT:
+            return asks.refused(ASK_BUSY)
+        self.posts_in_flight += 1
+        try:
+            async with self.ask_post_lock:
+                return self.post_ask(req, peer)
+        finally:
+            self.posts_in_flight -= 1
+
+    def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+        """Under `ask_post_lock`: check the latch and the limits, then store the ask and queue its card in
+        one transaction. Approval asks arrive with Task 3."""
+        if self.latched():
+            return asks.refused(ASK_LATCHED)
+        if req.kind == "approval":
+            return asks.refused(ASK_NO_APPROVALS)
+        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+            return asks.refused(ASK_TOO_MANY)
+        if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
+            return asks.refused(ASK_TOO_OFTEN)
+        at = asks.stamp(asks.now())
+        row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
+                     req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at)
+        text, truncated = asks.question_card(row)
+        parts = chunk.split(text, self.s.chunk_chars)
+        row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
+        with self.store.transaction():
+            self.store.insert_ask(row, peer.pid)
+            for i, part in enumerate(parts):
+                self.post(f"ask:{row.ask_id}:{i}", part, None)
+        self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
+                         pid=peer.pid, parts=len(parts), truncated=truncated, title_chars=len(row.title),
+                         body_chars=len(row.body))
+        return asks.AskReply("posted", f"ask {row.ask_id} posted", ask=self.ask_view(row))
+
+    def cancel_ask(self, row: AskRow) -> asks.AskReply:
+        if row.status not in ("open", "answered"):
+            return asks.refused(f"ask {row.ask_id} is {row.status}; only an open or answered ask can be "
+                                "cancelled")
+        with self.store.transaction():
+            self.store.set_ask(row.ask_id, "cancelled")
+            self.ask_notice(row.ask_id, "cancelled", "0", ASK_CANCELLED_NOTICE.format(ask_id=row.ask_id))
+        self.audit.write("ask", action="cancelled", ask_id=row.ask_id)
+        return asks.AskReply("ok", f"ask {row.ask_id} cancelled")
+
+    def ask_notice(self, ask_id: str, what: str, ref: str, text: str) -> None:
+        """A notice about an ask, threaded to its card's first sent chunk (unthreaded if none was sent)."""
+        thread = self.store.first_card_message(ask_id)
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
+            self.post(f"asknote:{ask_id}:{what}:{ref}:{i}", part, thread)
+
+    def ask_summary(self, row: AskRow) -> asks.AskSummary:
+        count, _ = self.store.answer_totals(row.ask_id)
+        return asks.summary(row, self.store.card_delivered(row.ask_id), count)
+
+    def ask_view(self, row: AskRow) -> asks.AskView:
+        return asks.view(row, self.store.card_delivered(row.ask_id), self.store.answers(row.ask_id))
+
+    def operator_name(self, mid: str) -> str:
+        return self.operators.get(self.senders.get(mid, ""), "?")
+
+    async def ask_reply(self, mid: str, ask_id: str, text: str) -> None:
+        """A plain reply to a card (R13, R14): stored as the answer, never pasted to the agent."""
+        self.store.set_inbound(mid, "executing")
+        if not self.authorised(mid):
+            self.deny(mid, "ask")
+            return
+        self.answer_ask(mid, ask_id, text)
+
+    def answer_ask(self, mid: str, ask_id: str, text: str) -> None:
+        """Store an operator's answer to a question or merge ask and reply in thread, as one step."""
+        row = self.store.ask(ask_id)
+        if row is None:
+            self.finish(mid, "done", f"No ask {ask_id}.", "ask")
+            return
+        if row.kind == "approval":      # Task 3 stores a reply to an approval card as a note (R13)
+            self.finish(mid, "done", f"Ask {ask_id} is an approval ask; reply to its card with !approve or "
+                        "!deny. Nothing recorded.", "ask")
+            return
+        refusal = self.answer_refusal(row, text)
+        if refusal is not None:
+            self.finish(mid, "done", refusal, "ask")
+            self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
+            return
+        again = row.status == "answered"
+        with self.store.transaction():
+            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text)
+            self.store.set_ask(ask_id, "answered")
+            self.finish(mid, "done", (f"Added to ask {ask_id}; it was already answered, and the poster sees "
+                                      "both.") if again else f"Answer recorded for ask {ask_id}.", "ask")
+        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text))
+
+    def answer_refusal(self, row: AskRow, text: str) -> str | None:
+        """Why an answer is not stored (R15): fixed wording, or None."""
+        if row.status not in ("open", "answered"):
+            return f"Ask {row.ask_id} is already {row.status}. Nothing recorded."
+        if not text.strip():
+            return "Not recorded: the answer is empty."
+        if len(text) > asks.MAX_ANSWER:
+            return f"Not recorded: an answer is at most {asks.MAX_ANSWER:,} characters."
+        count, total = self.store.answer_totals(row.ask_id)
+        if count >= asks.MAX_ANSWERS:
+            return f"Not recorded: ask {row.ask_id} already has {asks.MAX_ANSWERS} answers."
+        if total + len(text) > asks.MAX_ANSWER_TOTAL:
+            return (f"Not recorded: ask {row.ask_id}'s answers would pass {asks.MAX_ANSWER_TOTAL:,} "
+                    "characters.")
+        return None
+
+    def list_asks(self, mid: str) -> None:
+        """`!asks`: the active asks, one line each. The r5-1 backstop for stranded decisions is Task 3's."""
+        at = asks.now()
+        lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
+        self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
+        self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
+
+    def bang_answer(self, mid: str, cmd: commands.Command) -> None:
+        """`!answer <id> <text>`: as a reply to the card, from anywhere."""
+        ask_id = asks.normalise_id(cmd.arg or "")
+        row = None if ask_id is None else self.store.ask(ask_id)
+        if row is None or ask_id is None:
+            self.finish(mid, "done", show(f"No ask {cmd.arg}.", False), "cmd")
+            return
+        self.answer_ask(mid, ask_id, cmd.rest or "")
+
+    def ask_details(self, mid: str, ask_id: str) -> None:
+        """`!details` as a reply to a card or its details: the whole ask in lane 2, threaded to the
+        command, with the number of parts recorded for R8."""
+        row = self.store.ask(ask_id)
+        if row is None:
+            self.finish(mid, "done", f"No ask {ask_id}.", "cmd")
+            return
+        parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
+        with self.store.transaction():
+            for i, part in enumerate(parts):
+                self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)
+            self.store.add_ask_details(ask_id, self.operator_name(mid), mid, len(parts))
+            self.store.set_inbound(mid, "done")
+        self.audit.write("ask", action="details", message_id=mid, ask_id=ask_id, parts=len(parts))
 
     async def guarded(self, coro: Awaitable[None]) -> None:
         """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets
@@ -964,6 +1141,10 @@ class Admind:
         if commands.has_control_chars(text):
             self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None and not text.startswith("!"):
+            await self.ask_reply(mid, ask_id, text)        # R13/R14: never pasted to the agent
+            return
         try:
             cmd = commands.parse(text)
         except commands.CommandError as exc:
@@ -982,6 +1163,9 @@ class Admind:
                 return
             if not self.authorised(mid):
                 self.deny(mid, "command")
+                return
+            if cmd.name in ("asks", "answer"):
+                self.list_asks(mid) if cmd.name == "asks" else self.bang_answer(mid, cmd)
                 return
             result, _ = await self.execute(cmd)
             self.audit.write("command", message_id=mid, command=cmd.name,
@@ -1002,6 +1186,10 @@ class Admind:
         it ran out before says it was not read."""
         if not self.authorised(mid):
             self.deny(mid, "command")
+            return
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None:
+            self.ask_details(mid, ask_id)
             return
         post = self.store.details_target(target)
         if post is not None and post.turn_id is not None:

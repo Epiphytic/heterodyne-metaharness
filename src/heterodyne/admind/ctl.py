@@ -1,8 +1,10 @@
-"""admind's host control socket (ADR 0001 §8, revision 13; plan 2b B6).
+"""admind's host sockets (ADR 0001 §8, revision 13; plan 2b B6; relay spec R1, R24).
 
 `admind operators add|remove NAME` and `admind rearm` run on the host as the service user and ask the
-running daemon, which owns the wn-agent connection. One JSON request per connection, one JSON reply.
-The socket is 0600 inside the 0700 state directory; anything able to use it can already act as admind.
+running daemon, which owns the wn-agent connection, over `ctl.sock`. `admind ask …` uses a second socket,
+`ask.sock`, with its own limits and request types. Both are one JSON request per connection, one JSON reply,
+served by `JsonSocketServer`. Each socket is 0600 inside the 0700 state directory; anything able to use it
+can already act as admind.
 """
 
 import asyncio
@@ -12,10 +14,12 @@ import socket
 import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal
+from types import UnionType
+from typing import Any, Literal, NamedTuple, overload
 
 import msgspec
 
+from heterodyne import platform
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.settings import MAX_NAME
 from heterodyne.admind.settings import NAME_CONTROLS as CONTROL  # one contract with policy (B2)
@@ -23,6 +27,7 @@ from heterodyne.admind.store import private_dir
 
 CTL_SOCKET = "ctl.sock"
 MAX_REQUEST = 4096
+CTL_MAX_REPLY = 65_536
 READ_SECONDS = 5.0
 INTERNAL_ERROR = "admind hit an internal error; see the audit log."
 
@@ -41,14 +46,34 @@ class CtlUnavailable(Exception):
     """No daemon is listening (or it did not answer)."""
 
 
+class Peer(NamedTuple):
+    """The connecting process, as far as the kernel says (audit only; R16)."""
+    pid: int | None
+
+
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
 
 
-class CtlServer:
-    def __init__(self, path: Path, handler: Handler, audit: Audit) -> None:
+class JsonSocketServer[Req, Rep: msgspec.Struct]:
+    """One JSON request per connection, one JSON reply. Every request-specific part is passed in: the
+    request type and its limit, the refusal check, the replies for a refusal and a failure, the audit kind
+    and the audit fields of a request, and the reply limit (a reply over it is replaced by `failed()`)."""
+
+    def __init__(self, path: Path, handler: Callable[[Req, Peer], Awaitable[Rep]], audit: Audit, *,
+                 kind: str, max_request: int, max_reply: int, request_type: type[Req] | UnionType,
+                 check: Callable[[Req], str | None], refused: Callable[[str], Rep], failed: Callable[[], Rep],
+                 describe: Callable[[Req], dict[str, object]]) -> None:
         self.path = path
         self.handler = handler
         self.audit = audit
+        self.kind = kind
+        self.max_request = max_request
+        self.max_reply = max_reply
+        self.request_type = request_type
+        self.check = check
+        self.refused = refused
+        self.failed = failed
+        self.describe = describe
         self.server: asyncio.Server | None = None
         self.created: tuple[int, ...] | None = None     # identity of the socket this instance bound
 
@@ -68,7 +93,7 @@ class CtlServer:
             self.created = self.identity(made)
             sock.listen()
             sock.setblocking(False)
-            self.server = await asyncio.start_unix_server(self._handle, sock=sock, limit=MAX_REQUEST + 2)
+            self.server = await asyncio.start_unix_server(self._handle, sock=sock, limit=self.max_request + 2)
         except BaseException:
             sock.close()
             self.remove_own_socket()
@@ -97,57 +122,84 @@ class CtlServer:
                 await asyncio.wait_for(self.server.wait_closed(), 2)
         self.remove_own_socket()
 
-    @staticmethod
-    def check(req: CtlRequest) -> str | None:
-        """Why a request is refused before it is logged or handled; None if it may go on. Any policy
-        name is allowed (the daemon looks it up exactly), apart from control characters and length."""
-        if req.op == "rearm":
-            return None if req.name is None else "rearm takes no NAME"
-        if req.name is None or not 1 <= len(req.name) <= MAX_NAME or CONTROL.search(req.name):
-            return f"NAME must be an operator name from policy.toml (1-{MAX_NAME} printable characters)"
-        return None
-
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             try:
                 line = await asyncio.wait_for(reader.readline(), READ_SECONDS)
-                if len(line.rstrip(b"\n")) > MAX_REQUEST:      # the delimiter does not count
+                if len(line.rstrip(b"\n")) > self.max_request:      # the delimiter does not count
                     raise ValueError("request too long")
-                req = msgspec.json.decode(line, type=CtlRequest)
+                req: Req = msgspec.json.decode(line, type=self.request_type)
             except (TimeoutError, ValueError, msgspec.DecodeError):
-                reply = CtlReply("refused", "malformed request")
+                reply = self.refused("malformed request")
             else:
                 refusal = self.check(req)
                 if refusal is not None:
-                    reply = CtlReply("refused", refusal)
+                    reply = self.refused(refusal)
                 else:
-                    self.audit.write("ctl", op=req.op, name=req.name)     # redacted centrally (B16)
+                    fields = self.describe(req)
+                    self.audit.write(self.kind, **fields)     # redacted centrally (B16)
                     try:
-                        reply = await self.handler(req)
+                        peer = Peer(platform.peer_pid(writer.get_extra_info("socket")))
+                        reply = await self.handler(req, peer)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type goes to the audit
-                        self.audit.write("ctl", action="handler-failed", op=req.op, error=type(exc).__name__)
-                        reply = CtlReply("failed", INTERNAL_ERROR)
-            writer.write(msgspec.json.encode(reply) + b"\n")
+                        self.audit.write(self.kind, action="handler-failed", op=fields.get("op"),
+                                         error=type(exc).__name__)
+                        reply = self.failed()
+            data = msgspec.json.encode(reply)
+            if len(data) > self.max_reply:
+                self.audit.write(self.kind, action="reply-too-large", size=len(data))
+                data = msgspec.json.encode(self.failed())
+            writer.write(data + b"\n")
             await writer.drain()
         except Exception as exc:  # noqa: BLE001 - one bad client must not end the server
             with contextlib.suppress(Exception):     # the log may be what failed
-                self.audit.write("ctl", action="failed", error=type(exc).__name__)
+                self.audit.write(self.kind, action="failed", error=type(exc).__name__)
         finally:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
 
-async def request(path: Path, req: CtlRequest, timeout: float = 300.0) -> CtlReply:
+def check(req: CtlRequest) -> str | None:
+    """Why a request is refused before it is logged or handled; None if it may go on. Any policy
+    name is allowed (the daemon looks it up exactly), apart from control characters and length."""
+    if req.op == "rearm":
+        return None if req.name is None else "rearm takes no NAME"
+    if req.name is None or not 1 <= len(req.name) <= MAX_NAME or CONTROL.search(req.name):
+        return f"NAME must be an operator name from policy.toml (1-{MAX_NAME} printable characters)"
+    return None
+
+
+def CtlServer(path: Path, handler: Handler, audit: Audit) -> JsonSocketServer[CtlRequest, CtlReply]:  # noqa: N802 - it keeps the class's name for its callers
+    """Exactly today's ctl.sock: kind "ctl", 4096 bytes, CtlRequest, the existing check, refusal and
+    failure wording, and audit fields op/name. The handler ignores the peer."""
+    async def handle(req: CtlRequest, _peer: Peer) -> CtlReply:
+        return await handler(req)
+    return JsonSocketServer(path, handle, audit, kind="ctl", max_request=MAX_REQUEST, max_reply=CTL_MAX_REPLY,
+                            request_type=CtlRequest, check=check,
+                            refused=lambda message: CtlReply("refused", message),
+                            failed=lambda: CtlReply("failed", INTERNAL_ERROR),
+                            describe=lambda req: {"op": req.op, "name": req.name})
+
+
+@overload
+async def request(path: Path, req: msgspec.Struct, timeout: float = ..., *,
+                  max_reply: int = ...) -> CtlReply: ...
+@overload
+async def request[R](path: Path, req: msgspec.Struct, timeout: float = ..., *, reply_type: type[R],
+                     max_reply: int = ...) -> R: ...
+async def request(path: Path, req: msgspec.Struct, timeout: float = 300.0, *, reply_type: Any = CtlReply,
+                  max_reply: int = CTL_MAX_REPLY) -> Any:
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(path)), 5)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(str(path), limit=max_reply + 2), 5)
     except (OSError, TimeoutError) as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     try:
         writer.write(msgspec.json.encode(req) + b"\n")
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout)
-        return msgspec.json.decode(line, type=CtlReply)
+        return msgspec.json.decode(line, type=reply_type)
     except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:     # ValueError: framing
         raise CtlUnavailable(type(exc).__name__) from None
     finally:
