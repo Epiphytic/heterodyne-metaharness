@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures as cf
 import contextlib
 import gc
 import os
@@ -1531,9 +1532,27 @@ def test_a_stop_while_the_socket_starts_starts_no_timer(tmp_path: Path,
     assert timers == [] and wsd.stopping and not s.socket.exists()
 
 
+class ProbedLock:
+    """Wraps a lane's shutdown lock: `tried` once a worker reaches its start checkpoint and asks for
+    the lock, `left` once it lets go of it."""
+
+    def __init__(self, real: threading.Lock) -> None:
+        self.real = real
+        self.tried, self.left = threading.Event(), threading.Event()
+
+    def __enter__(self) -> bool:
+        self.tried.set()
+        return self.real.__enter__()
+
+    def __exit__(self, *exc: object) -> None:
+        self.real.__exit__(None, None, None)
+        self.left.set()
+
+
 def test_shutdown_closes_every_lane_before_any_starts_a_queued_job(tmp_path: Path) -> None:
     """r4 review: shutdown is under way but still waiting for the status lane's lock (the first lane it
-    closes) when alpha's running job ends; alpha's queued job must not start in that gap."""
+    closes) when alpha's running job ends; alpha's worker reaches its start checkpoint in that gap, and
+    its queued job must not start."""
     s = settings(tmp_path)
     wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
     alpha = wsd.lanes[WS]
@@ -1546,6 +1565,8 @@ def test_shutdown_closes_every_lane_before_any_starts_a_queued_job(tmp_path: Pat
 
     held = alpha.submit("hold", hold)
     assert inside.wait(10)
+    probe = ProbedLock(wsd.shutdown)
+    alpha.shutdown = probe  # type: ignore[assignment]   # the worker's next start goes through it
     queued = alpha.submit("queued", lambda: ran.append("queued"))
     shutdown_done: list[set[Any]] = []
     status = wsd.lanes[daemon.STATUS_LANE]
@@ -1561,12 +1582,14 @@ def test_shutdown_closes_every_lane_before_any_starts_a_queued_job(tmp_path: Pat
             assert wsd.stopping and not alpha.closed
             release.set()
             assert held.result(10) is True
-            for _ in range(50):             # a window for alpha's worker to (wrongly) start the job
-                if ran:
-                    break
-                time.sleep(0.01)
+            assert probe.tried.wait(10), "alpha's worker never reached its start checkpoint"
+            # It is past the checkpoint: blocked there (as it must be), or through it at once. Let a
+            # worker that got through let go of the lock before shutdown can close alpha.
+            probe.left.wait(0.5)
+            assert not probe.left.is_set(), "alpha's worker got the shutdown lock mid-shutdown"
         finally:
             release.set()
     closing.join(10)
     assert not closing.is_alive() and shutdown_done
+    cf.wait([queued], 10)
     assert ran == [] and queued.cancelled()
