@@ -6,7 +6,12 @@ which is how events (timer ticks, and from plan 6 Marmot) reach wsd. A workstrea
 stays held, and every later tick retries its recovery before any pickup: pickup never runs on state
 recovery could not confirm.
 
-Pickup and recovery are blocking (btq runs bd as a subprocess), so they run in worker threads. Each
+Pickup and recovery are blocking (btq runs bd as a subprocess), so they run in worker threads, one lane
+(a single worker thread) per workstream and one for status: a workstream's jobs wait only on that
+workstream, and status waits on none of them. A lane holds at most one queued job of each kind (pickup,
+reconcile, pause, resume, recover): a request for a kind already queued and not yet started joins it, and
+gets its outcome, which loses nothing, because that job has not looked at anything yet. Its trigger is
+the first request's. A pickup or reconcile that raises is recorded as `tick_failed`, whoever asked. Each
 workstream's operation lock (`Parker.entry`, a reentrant lock also taken by park and release) is held
 across the whole job: the "was it recovered?" decision, the recovery, the pickup and the `recovered`
 update are one critical section, so no pickup can pass the check and then run after another job left the
@@ -15,16 +20,19 @@ leaves its workstream unrecovered, so the next trigger recovers it again before 
 that dies anyway ends `serve` with its error rather than leave wsd running without its backstop.
 
 Shutdown stops dispatch first (a request that arrives after it is refused), stops listening, cancels the
-timers, then waits up to DRAIN_SECONDS for jobs already in worker threads (a thread can't be cancelled),
-then closes the socket's connections. Jobs still running after that raise Undrained: the caller must keep
-the journal and the instance lock until the process exits.
+timers and every job that has not started, then waits up to DRAIN_SECONDS for jobs already running (a
+thread can't be cancelled), then closes the socket's connections. A stop during startup does the same at
+once: the socket and the timers never start after a stop. Jobs still running after the drain raise
+Undrained, and `cli.run` then ends the process at once (a crash, which the journal is built to replay).
 
 A workstream that is `stuck` (or a pickup whose outcome is `stuck`) is not idle: beads are ready or
 claimed that only a human can move on. Status and tick replies say so.
 """
 
 import asyncio
-from collections.abc import Callable
+import concurrent.futures as cf
+import contextlib
+from collections.abc import Callable, Coroutine, Hashable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -55,6 +63,23 @@ class Undrained(Exception):
     """Jobs were still running in worker threads when shutdown gave up waiting for them."""
 
 
+class JobFailed(Exception):
+    """A pickup or reconcile raised. It was recorded (tick_failed, unless the journal was busy) and the
+    workstream will be recovered again before its next pickup."""
+
+
+STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
+
+
+class Lane:
+    """One worker thread, and the jobs queued on it by kind: at most one queued (not started) per kind."""
+
+    def __init__(self, name: str) -> None:
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"wsd-lane-{name or 'status'}")
+        self.queued: dict[Hashable, cf.Future[object]] = {}
+        self.jobs: set[cf.Future[object]] = set()
+
+
 @dataclass(frozen=True)
 class Parts:
     journal: Journal
@@ -78,8 +103,7 @@ class Wsd:
         self.parts = parts
         self.recovered: set[str] = set()
         self.stopping = False
-        self.pool = ThreadPoolExecutor(thread_name_prefix="wsd-job")
-        self._inflight: set[asyncio.Future[Any]] = set()
+        self.lanes = {name: Lane(name) for name in [STATUS_LANE, *parts.schedulers]}
 
     # --- blocking work (worker threads) ---
 
@@ -178,15 +202,32 @@ class Wsd:
     def _names(self, only: str | None) -> list[str]:
         return [n for n in self.parts.schedulers if only is None or n == only]
 
-    async def _offload[T](self, fn: Callable[..., T], *args: object) -> T:
-        """Run blocking work in a worker thread that shutdown waits for. Cancelling the caller doesn't
-        stop the thread (nothing can); shutdown drains it instead. Refused once shutdown has begun."""
+    def _submit(self, lane: str, kind: Hashable, fn: Callable[[], object]) -> cf.Future[object]:
+        """Queue `fn` on `lane`, or join the job of the same kind queued there and not yet started.
+        Called from the event loop thread only. Refused once shutdown has begun."""
         if self.stopping:
             raise Stopping
-        fut = asyncio.get_running_loop().run_in_executor(self.pool, fn, *args)
-        self._inflight.add(fut)
-        fut.add_done_callback(self._inflight.discard)
-        return await asyncio.shield(fut)
+        ln = self.lanes[lane]
+        ln.jobs = {f for f in ln.jobs if not f.done()}
+        queued = ln.queued.get(kind)
+        if queued is not None and not queued.running() and not queued.done():
+            return queued
+        fut = ln.pool.submit(fn)
+        ln.queued[kind] = fut
+        ln.jobs.add(fut)
+        return fut
+
+    async def _run[T](self, lane: str, kind: Hashable, fn: Callable[[], T]) -> T:
+        """Run blocking work on a lane and wait for it. Cancelling the caller leaves the job to its lane
+        (a thread can't be stopped; shutdown drains it). A job that shutdown cancelled before it started
+        reads as Stopping."""
+        fut = self._submit(lane, kind, fn)
+        try:
+            return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
+        except asyncio.CancelledError:
+            if fut.cancelled():
+                raise Stopping from None
+            raise
 
     async def handle(self, req: CtlRequest) -> CtlReply:
         why = refusal(req)
@@ -201,46 +242,86 @@ class Wsd:
 
     async def _dispatch(self, req: CtlRequest) -> CtlReply:
         if req.op == "status":
-            return CtlReply("ok", "status", await self._offload(self.status, req.ws, req.all))
+            ws, everything = req.ws, req.all
+            return CtlReply("ok", "status", await self._run(STATUS_LANE, ("status", ws, everything),
+                                                            lambda: self.status(ws, everything)))
         if req.op in ("pause", "resume") and req.ws is not None:
-            return await self._offload(self.set_pause, req.ws, req.op == "pause")
+            name, paused = req.ws, req.op == "pause"
+            return await self._run(name, req.op, lambda: self.set_pause(name, paused))
         job = self.reconcile_one if req.job == "reconcile" else self._operator_pickup
+        kind = req.job or "pickup"
+        names = self._names(req.ws)
+        done = await asyncio.gather(*(self._job(name, kind, job) for name in names), return_exceptions=True)
         results: dict[str, dict[str, str]] = {}
-        for name in self._names(req.ws):
-            outcome = await self._offload(job, name)
-            results[name] = outcome_fields(outcome)
+        failed: list[str] = []
+        for name, outcome in zip(names, done, strict=True):
+            if isinstance(outcome, JobFailed):
+                failed.append(f"{name}: {outcome}")
+                results[name] = {"outcome": "failed", "error": str(outcome)}
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            else:
+                results[name] = outcome_fields(outcome)
+        if failed:
+            return CtlReply("failed", f"{req.job} failed ({'; '.join(failed)}); recovered again before the "
+                                      "next pickup", results)
         return CtlReply("ok", f"{req.job} done", results)
 
-    def _guarded(self, job: Callable[[str], Outcome], name: str) -> None:
-        """A timer job that fails unexpectedly is recorded, and the workstream is recovered again before
-        its next pickup (the job's own lock section saw to that): the timer keeps running, and nothing is
-        assumed about what the failure left. A journal another process holds can refuse the record too;
-        the timer outlives that as well."""
+    async def _job(self, name: str, kind: str, job: Callable[[str], Outcome]) -> Outcome:
+        return await self._run(name, kind, lambda: self._guarded(job, name))
+
+    def _guarded(self, job: Callable[[str], Outcome], name: str) -> Outcome:
+        """A pickup or reconcile that fails unexpectedly is recorded and raised as JobFailed; the
+        workstream is recovered again before its next pickup (the job's own lock section saw to that),
+        and nothing is assumed about what the failure left. A journal another process holds can refuse
+        the record too; that is not a further failure. Any other failure to record it propagates as
+        itself: a timer that meets it dies, and so does wsd."""
         try:
-            job(name)
-        except Exception as exc:  # noqa: BLE001 - recorded by type; the next tick re-recovers
-            failure = type(exc).__name__
-        else:
-            return
+            return job(name)
+        except Exception as exc:  # noqa: BLE001 - recorded by type; the next pickup re-recovers
+            failure, cause = type(exc).__name__, exc
         try:
             self.parts.journal.emit(name, None, "tick_failed", failure)
         except JournalBusy:
             pass        # nothing to record it in; `recovered` already says what matters
+        raise JobFailed(failure) from cause
 
-    async def _every(self, seconds: float, job: Callable[[str], Outcome]) -> None:
+    async def _every(self, seconds: float, job: Callable[[str], Outcome], kind: str = "pickup") -> None:
+        async def one(name: str) -> None:
+            with contextlib.suppress(JobFailed, Stopping):      # recorded, or shutting down: carry on
+                await self._job(name, kind, job)
+
         while True:
             await asyncio.sleep(seconds)
-            for name in self.parts.schedulers:
-                await self._offload(self._guarded, job, name)
+            await asyncio.gather(*(one(name) for name in self.parts.schedulers))
+
+    async def _startup(self) -> None:
+        """`startup`, on the lanes: each workstream's recovery, then its startup pickup, in its own lane."""
+        jobs: list[Coroutine[Any, Any, object]] = []
+        for name in self.parts.schedulers:
+            jobs.append(self._run(name, "recover", lambda n=name: self.recover_one(n)))
+            jobs.append(self._run(name, "pickup",
+                                  lambda n=name: self.pickup_one(n, Trigger(TriggerKind.STARTUP))))
+        await asyncio.gather(*jobs)
 
     async def serve(self, stop: asyncio.Event) -> None:
         """Run until `stop` is set or a timer dies. Returns (or raises) only once no job is running, or
-        raises Undrained if some still are after DRAIN_SECONDS."""
+        raises Undrained if some still are after DRAIN_SECONDS. A stop during startup goes straight to
+        the drain; the socket and the timers never start after it."""
+        starting = asyncio.create_task(self._startup())
+        stopped = asyncio.create_task(stop.wait())
         try:
-            await self._offload(self.startup)
-        except BaseException:
+            await asyncio.wait([starting, stopped], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (starting, stopped):
+                task.cancel()
+            await asyncio.gather(starting, stopped, return_exceptions=True)
+        failed = None if starting.cancelled() else starting.exception()
+        if starting.cancelled() or failed is not None or stop.is_set():
             await self._drain()
-            raise
+            if failed is not None:
+                raise failed
+            return
         server = CtlServer(self.s.socket, self.handle)
         await server.start()
         timers = [asyncio.create_task(self._every(
@@ -263,14 +344,26 @@ class Wsd:
             finally:
                 await server.close()    # the handlers waiting on drained jobs have their replies now
 
-    async def _drain(self) -> None:
+    def _cancel_queued(self) -> set[cf.Future[object]]:
+        """Stop admitting, cancel every job not yet started, and return those still running."""
         self.stopping = True
-        if self._inflight:
-            await asyncio.wait(set(self._inflight), timeout=DRAIN_SECONDS)
-        if self._inflight:
-            self.pool.shutdown(wait=False)
-            raise Undrained(f"{len(self._inflight)} job(s) still running after {DRAIN_SECONDS:g} s")
-        self.pool.shutdown(wait=True)       # every job is done; this only reaps the idle threads
+        for ln in self.lanes.values():
+            ln.pool.shutdown(wait=False, cancel_futures=True)
+        return {f for ln in self.lanes.values() for f in ln.jobs if not f.done()}
+
+    async def _drain(self) -> None:
+        running = self._cancel_queued()
+        if running:
+            await asyncio.wait([asyncio.wrap_future(f) for f in running], timeout=DRAIN_SECONDS)
+        left = [f for f in running if not f.done()]
+        if left:
+            raise Undrained(f"{len(left)} job(s) still running after {DRAIN_SECONDS:g} s")
+
+    def drain_now(self, timeout: float) -> bool:
+        """The same drain without an event loop (for an owner whose loop has gone): True once nothing is
+        running, False if something still is after `timeout`."""
+        _, left = cf.wait(self._cancel_queued(), timeout)
+        return not left
 
 
 def outcome_fields(outcome: Outcome) -> dict[str, str]:

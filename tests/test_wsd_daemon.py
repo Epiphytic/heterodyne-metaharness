@@ -2,8 +2,12 @@ import asyncio
 import contextlib
 import gc
 import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -36,17 +40,26 @@ def _no_queue_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Close every journal a test opened, so their descriptors don't close later inside another test's
-    count of open descriptors (test_wsd_gate checks that a refusal leaks none)."""
+    """Drain every daemon a test made (a cancelled timer leaves its job running on its lane), then close
+    every journal the test opened, so their descriptors don't close later inside another test's count of
+    open descriptors (test_wsd_gate checks that a refusal leaks none)."""
     opened: list[Journal] = []
-    real = Journal.__init__
+    daemons: list[Wsd] = []
+    real, real_wsd = Journal.__init__, Wsd.__init__
 
     def tracked(self: Journal, *args: Any, **kwargs: Any) -> None:
         opened.append(self)
         real(self, *args, **kwargs)
 
+    def tracked_wsd(self: Wsd, *args: Any, **kwargs: Any) -> None:
+        daemons.append(self)
+        real_wsd(self, *args, **kwargs)
+
     monkeypatch.setattr(Journal, "__init__", tracked)
+    monkeypatch.setattr(Wsd, "__init__", tracked_wsd)
     yield
+    for d in daemons:
+        assert d.drain_now(10), "a test's daemon still had a job running"
     for each in opened:
         if hasattr(each, "db"):                 # a journal whose open failed has nothing to close
             each.close()
@@ -392,7 +405,8 @@ def test_a_failed_tick_is_recorded_and_recovered_again(tmp_path: Path,
         raise RuntimeError("boom")
 
     monkeypatch.setattr(wsd.parts.schedulers[WS], "pickup", boom)
-    wsd._guarded(lambda n: wsd.pickup_one(n, Trigger(TriggerKind.BACKSTOP)), WS)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(daemon.JobFailed):
+        wsd._guarded(lambda n: wsd.pickup_one(n, Trigger(TriggerKind.BACKSTOP)), WS)  # pyright: ignore[reportPrivateUsage]
     assert calls == ["backstop"] and WS not in wsd.recovered
     assert [e.detail for e in j.events_since(0) if e.kind == "tick_failed"] == ["RuntimeError"]
 
@@ -441,8 +455,8 @@ def test_a_pickup_that_raises_is_recovered_again(tmp_path: Path, monkeypatch: py
         raise JournalBusy("SQLITE_BUSY")
 
     monkeypatch.setattr(sched, "pickup", busy)
-    with pytest.raises(JournalBusy):
-        asyncio.run(wsd.handle(ctl.CtlRequest("tick", job="pickup")))
+    failed = asyncio.run(wsd.handle(ctl.CtlRequest("tick", job="pickup")))
+    assert failed.result == "failed" and failed.data == {WS: {"outcome": "failed", "error": "JournalBusy"}}
     assert WS not in wsd.recovered
     monkeypatch.setattr(sched, "pickup", real)
     world.add("btq-1")
@@ -630,7 +644,7 @@ def test_jobs_outliving_the_drain_keep_wsd_from_finishing(tmp_path: Path,
         asyncio.run(scenario())
     finally:
         release.set()
-        wsd.pool.shutdown(wait=True)
+        assert wsd.drain_now(10)
     assert not s.socket.exists()
 
 
@@ -797,9 +811,10 @@ def test_a_failed_startup_closes_the_journal(tmp_path: Path, monkeypatch: pytest
     os.close(instance_lock(s.instance_lock))
 
 
-def test_undrained_jobs_keep_the_journal_and_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                      capsys: pytest.CaptureFixture[str]) -> None:
-    """A job still running after the drain must not see its journal closed, nor a second wsd start."""
+def test_undrained_jobs_end_the_process_holding_the_journal_and_lock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A job still running after the drain must not see its journal closed, nor a second wsd start: the
+    process ends at once (os._exit) with both still held; the kernel lets go of the lock."""
     s = settings(tmp_path)
     closed: list[Journal] = []
     real_close = Journal.close
@@ -811,14 +826,19 @@ def test_undrained_jobs_keep_the_journal_and_the_lock(tmp_path: Path, monkeypatc
     async def undrained(d: Wsd) -> None:
         raise daemon.Undrained("1 job(s) still running after 120 s")
 
-    monkeypatch.setattr(Journal, "close", close)
-    monkeypatch.setattr(cli, "_serve", undrained)
-    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 1
-    assert "stay held" in capsys.readouterr().err
-    try:
+    exits: list[int] = []
+
+    def exit_now(code: int) -> None:
+        exits.append(code)
         assert closed == []
         with pytest.raises(AlreadyRunning):
             instance_lock(s.instance_lock)
+
+    monkeypatch.setattr(Journal, "close", close)
+    monkeypatch.setattr(cli, "_serve", undrained)
+    try:
+        assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime(), exit_now=exit_now) == 1
+        assert exits == [1] and "exiting now" in capsys.readouterr().err
     finally:
         for fd in Path("/proc/self/fd").iterdir():     # the test, not the process, ends here: let go
             with contextlib.suppress(OSError):
@@ -875,3 +895,260 @@ def test_status_counts_finished_beads_unless_asked_for_all(tmp_path: Path) -> No
     assert (default["beads"], default["finished"]) == ("btq-7=claiming", "1")
     everything = asyncio.run(wsd.handle(ctl.CtlRequest("status", ws=WS, all=True))).data[WS]
     assert set(everything["beads"].split(",")) == {"btq-7=claiming", "btq-8=dropped(claim_lost)"}
+
+
+def two_workstreams(tmp_path: Path) -> WsdSettings:
+    s = settings(tmp_path)
+    beta = WorkstreamSettings("beta", {"default": git_repo(tmp_path / "repos" / "beta")}, "coder", "p-one",
+                              PROFILES)
+    return replace(s, workstreams=(*s.workstreams, beta))
+
+
+def test_ticks_on_a_busy_workstream_queue_one_job_and_starve_nothing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2 review: many ticks for one workstream whose pickup is stuck hold one running and one queued
+    job between them; status and the other workstream still answer; every tick gets an outcome."""
+    s = two_workstreams(tmp_path)
+    world = World(tmp_path / "btq-state")
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), FakeRuntime()))
+    wsd.startup()
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    inside, release = threading.Event(), threading.Event()
+    pickups: list[str] = []
+
+    def slow(trigger: Trigger) -> Outcome:
+        pickups.append(trigger.kind.value)
+        if len(pickups) == 1:
+            inside.set()
+            assert release.wait(10)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", slow)
+
+    async def scenario() -> list[ctl.CtlReply]:
+        ticks = [asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
+                 for _ in range(50)]
+        try:
+            await until(inside.is_set)
+            await asyncio.sleep(0.1)            # every tick has been dispatched
+            assert len(wsd.lanes[WS].jobs) == 2       # one running, one queued: no more
+            status = await asyncio.wait_for(wsd.handle(ctl.CtlRequest("status")), 5)
+            other = await asyncio.wait_for(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws="beta")), 5)
+            assert status.result == "ok" and other.data == {"beta": {"outcome": "nothing"}}
+        finally:
+            release.set()
+        return list(await asyncio.wait_for(asyncio.gather(*ticks), 10))
+
+    replies = asyncio.run(scenario())
+    assert all(r.result == "ok" for r in replies)
+    assert pickups == ["operator", "operator"]      # the running one, and one for all 49 that waited
+
+
+def test_queued_jobs_never_run_once_stopping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2 review: shutdown cancels what has not started; only the running job is drained."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    wsd.startup()
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    inside, release = threading.Event(), threading.Event()
+    reconciles: list[str] = []
+    real_reconcile = wsd.reconcile_one
+
+    def slow(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.OPERATOR:
+            inside.set()
+            assert release.wait(10)
+        return real(trigger)
+
+    def reconcile(name: str) -> Outcome:
+        reconciles.append(name)
+        return real_reconcile(name)
+
+    monkeypatch.setattr(sched, "pickup", slow)
+    monkeypatch.setattr(wsd, "reconcile_one", reconcile)
+
+    async def scenario() -> tuple[ctl.CtlReply, ctl.CtlReply]:
+        running = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup")))
+        await until(inside.is_set)
+        queued = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="reconcile")))
+        await until(lambda: len(wsd.lanes[WS].jobs) == 2)
+        drain = asyncio.create_task(wsd._drain())  # pyright: ignore[reportPrivateUsage]
+        await until(lambda: wsd.stopping)
+        release.set()
+        await asyncio.wait_for(drain, 10)
+        return await asyncio.wait_for(running, 10), await asyncio.wait_for(queued, 10)
+
+    try:
+        ran, cancelled = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert ran.result == "ok"
+    assert cancelled.result == "refused" and "stopping" in cancelled.message
+    assert reconciles == []
+
+
+class BlockingRuntime(FakeRuntime):
+    """sessions() waits for `release`: a recovery held where the runtime is slow to answer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def sessions(self, ws: str) -> list[Session]:
+        self.entered.set()
+        assert self.release.wait(10)
+        return super().sessions(ws)
+
+
+def test_a_stop_during_startup_drains_within_its_bound_and_opens_nothing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2 review: a stop while startup's recovery is held enters the drain at once, keeps to its bound,
+    and the control socket never opens, not even once the recovery ends."""
+    s = settings(tmp_path)
+    runtime = BlockingRuntime()
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), runtime))
+    monkeypatch.setattr(daemon, "DRAIN_SECONDS", 0.2)
+
+    async def scenario() -> float:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        assert await asyncio.to_thread(runtime.entered.wait, 10)
+        stop.set()
+        began = asyncio.get_running_loop().time()
+        with pytest.raises(daemon.Undrained):
+            await asyncio.wait_for(task, 10)
+        return asyncio.get_running_loop().time() - began
+
+    try:
+        assert asyncio.run(scenario()) < 3
+        assert not s.socket.exists()
+    finally:
+        runtime.release.set()
+    assert wsd.drain_now(10)
+    assert not s.socket.exists() and wsd.parts.journal.snapshot(WS).state is not WsState.RUNNING
+
+
+def test_a_stop_during_startup_that_drains_returns_without_serving(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    runtime = BlockingRuntime()
+    world = World(tmp_path / "btq-state")
+    world.add("btq-1")
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), runtime))
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        assert await asyncio.to_thread(runtime.entered.wait, 10)
+        stop.set()
+        await until(lambda: wsd.stopping)
+        runtime.release.set()
+        await asyncio.wait_for(task, 10)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        runtime.release.set()
+    assert not s.socket.exists() and world.claims == []       # the startup pickup was cancelled unstarted
+
+
+def test_close_aborts_a_client_that_stops_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2 review: a peer that never reads a large reply can't hold close() open."""
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.1)
+    answered = asyncio.Event()
+
+    async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+        answered.set()
+        return ctl.CtlReply("ok", "status", {f"ws{i}": {"beads": "x" * 1000} for i in range(900)})
+
+    async def scenario() -> None:
+        server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
+        await server.start()
+        fds = Path("/proc/self/fd")
+        before = len(list(fds.iterdir()))              # with the listening socket
+        _, writer = await asyncio.open_unix_connection(str(tmp_path / "ctl.sock"))
+        try:
+            writer.write(msgspec.json.encode(ctl.CtlRequest("status")) + b"\n")
+            await writer.drain()
+            await asyncio.wait_for(answered.wait(), 10)
+            await asyncio.sleep(0.1)                    # the reply is written and stuck in drain()
+            await asyncio.wait_for(server.close(), 5)   # we never read a byte of it
+            assert not server.handlers
+            # The listening socket went and our end is still open: wsd's end of it was dropped.
+            assert len(list(fds.iterdir())) == before
+        finally:
+            writer.transport.abort()
+
+    asyncio.run(scenario())
+
+
+HARD_EXIT = """
+import sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from fakes.fake_btq import World, factory
+from fakes.fake_runtime import FakeRuntime
+from wsd_env import PROFILES, WS, git_repo
+from heterodyne.wsd import cli, daemon
+from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.workstream import WorkstreamSettings
+
+tmp = Path(sys.argv[1])
+ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,))
+
+
+class Stuck(FakeRuntime):
+    def sessions(self, ws):
+        (tmp / "entered").touch()
+        threading.Event().wait()        # never answers
+
+
+daemon.DRAIN_SECONDS = 0.2
+sys.exit(cli.run(s, factory(World(tmp / "btq-state")), Stuck()))
+"""
+
+
+def test_an_undrained_wsd_process_exits_within_its_bound(tmp_path: Path) -> None:
+    """r2 review: with a job that never ends, SIGTERM still ends the process (exit 1) soon after the
+    drain bound, rather than waiting on the thread forever."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("BTQ_", "BEADS_", "BD_"))}
+    env["HOME"] = str(tmp_path)
+    tests = Path(__file__).parent
+    proc = subprocess.Popen([sys.executable, "-c", HARD_EXIT, str(tmp_path), str(tests)], env=env,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(1500):
+            if (tmp_path / "entered").exists() or proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert (tmp_path / "entered").exists(), "the daemon never reached recovery"
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+    assert proc.returncode == 1 and "exiting now" in err
+
+
+def test_a_stop_that_lands_as_startup_ends_still_serves_nothing(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup finishing in the same loop pass as the stop: the stop wins, nothing is served."""
+    Recording.made = []
+    monkeypatch.setattr(daemon, "CtlServer", Recording)
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    stop = asyncio.Event()
+
+    async def startup() -> None:
+        stop.set()                      # e.g. SIGTERM handled just as the last startup job came back
+
+    wsd._startup = startup  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        await asyncio.wait_for(wsd.serve(stop), 10)
+
+    asyncio.run(scenario())
+    assert Recording.made == [] and not s.socket.exists() and wsd.stopping

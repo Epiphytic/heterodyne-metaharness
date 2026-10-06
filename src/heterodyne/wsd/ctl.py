@@ -7,7 +7,9 @@ that would be longer is replaced by a "failed" reply saying so (TOO_LARGE), neve
 0600 inside the 0700 wsd state directory; anything able to use it can already act as wsd.
 
 Closing stops listening, refuses any request still to be read, and waits up to CLOSE_SECONDS for the
-accepted connections' handlers before cancelling them, so none outlives `close()`.
+accepted connections' handlers before cancelling them, so none outlives `close()`. Hanging up is bounded
+too: a connection whose peer stops reading is aborted after CLOSE_SECONDS, so `close()` returns within
+about twice CLOSE_SECONDS whatever the clients do.
 """
 
 import asyncio
@@ -27,6 +29,7 @@ MAX_REQUEST = 4096
 MAX_REPLY = 1 << 20         # 1 MiB; status leaves finished beads out unless asked, to stay well inside it
 READ_SECONDS = 5.0
 CLOSE_SECONDS = 2.0
+WRITE_SECONDS = 30.0        # a client that doesn't read its reply in this time is dropped
 TOO_LARGE = "reply too large"
 
 
@@ -142,13 +145,25 @@ class CtlServer:
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type is enough
                         reply = CtlReply("failed", f"wsd hit an internal error ({type(exc).__name__})")
             writer.write(frame(reply))
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), WRITE_SECONDS)
         except Exception:  # noqa: BLE001, S110 - one bad client must not end the server
             pass
         finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            await _hang_up(writer)
+
+
+async def _hang_up(writer: asyncio.StreamWriter) -> None:
+    """Close a connection within CLOSE_SECONDS. A peer that stops reading would hold a graceful close
+    (which flushes what is buffered) open forever, so one that doesn't finish in time, or a handler
+    cancelled meanwhile, aborts the connection and drops what is left unsent."""
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), CLOSE_SECONDS)
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
+    except Exception:  # noqa: BLE001 - timed out or failed: either way the peer is dropped
+        writer.transport.abort()
 
 
 def frame(reply: CtlReply) -> bytes:

@@ -8,9 +8,11 @@ A journal locked by another process (JournalBusy) at startup ends `wsd run` with
 nothing was changed, so the unit's restart retries safely.
 
 `run` closes the journal and then releases the instance lock, in that order, on every path, once the
-daemon has drained its jobs. If jobs are still running when it gives up waiting (Undrained), it keeps
-both: they are released when the process exits, after the interpreter has joined those threads, so a
-second wsd can never start beside them.
+daemon has drained its jobs. If jobs are still running when it gives up waiting (Undrained), it ends the
+process at once with exit 1 (`os._exit`, after flushing its message): a thread can't be stopped, and
+returning would leave it able to write to the journal with no lock held, or keep the process alive
+indefinitely. The kernel releases the lock with the process. To the journal that is a crash, which
+recovery replays like any other.
 """
 
 import argparse
@@ -18,7 +20,7 @@ import asyncio
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from heterodyne.config import ConfigError
 from heterodyne.wsd import btq, ctl
@@ -39,7 +41,8 @@ def _factory(s: WsdSettings) -> btq.QueueFactory:
     return btq.factory(btq.load(s.btq_checkout), s.btq_locations)
 
 
-def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime) -> int:
+def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
+        exit_now: Callable[[int], object] = os._exit) -> int:
     try:
         lock = instance_lock(s.instance_lock)
     except AlreadyRunning:
@@ -61,9 +64,12 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime) -> int
             return 0
         except Undrained as exc:
             held = True
-            print(f"wsd: {exc}; the journal and the instance lock stay held until they end and wsd exits",
+            print(f"wsd: {exc}; exiting now, as a crash would (recovery replays the journal)",
                   file=sys.stderr)
-            return 1
+            sys.stderr.flush()
+            sys.stdout.flush()
+            exit_now(1)
+            return 1        # only a test's exit_now returns
         finally:
             if not held:
                 journal.close()
