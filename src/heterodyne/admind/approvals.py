@@ -24,6 +24,8 @@ READ_SECONDS, DECIDE_SECONDS, MAX_OUTPUT, MAX_READ_OUTPUT = 60, 90, 1 << 20, 8 <
 REAP_SECONDS = 5.0
 BUSY_RETRIES, BUSY_WAIT = 3, 20.0   # a busy read-back is retried 3 times, 20 s apart (spec §7)
 MAX_LINE = 300                      # the quoted stderr line (R12)
+QUOTE_TRIES = 4
+UNQUOTABLE = "(a line that could not be shortened safely)"
 BEAD_ID = re.compile(r"[a-z0-9]{1,16}-[a-z0-9.]{1,32}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 PINNED_DIGEST_LINE = re.compile(r"^(\s*pinned digest \(recomputed\): )([0-9a-f]{12})[0-9a-f]{52}$")
@@ -100,18 +102,19 @@ async def _read(stream: asyncio.StreamReader | None, cap: int) -> bytes:
     return bytes(out)
 
 
-async def _collect(proc: asyncio.subprocess.Process, cap: int) -> tuple[bytes, bytes]:
-    """Read stdout (up to `cap`) and stderr (up to MAX_OUTPUT) together, so neither pipe can fill and
-    stall the child, then wait for it. Either over its cap stops both reads at once."""
-    tasks = [asyncio.ensure_future(_read(proc.stdout, cap)),
-             asyncio.ensure_future(_read(proc.stderr, MAX_OUTPUT))]
+async def _collect(child: reap.Child, cap: int) -> tuple[bytes, bytes]:
+    """Connect the pipes, then read stdout (up to `cap`) and stderr (up to MAX_OUTPUT) together, so neither
+    pipe can fill and stall the child, then wait for it. Either over its cap stops both reads at once."""
+    await child.connect()
+    tasks = [asyncio.ensure_future(_read(child.stdout, cap)),
+             asyncio.ensure_future(_read(child.stderr, MAX_OUTPUT))]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in tasks:
             if task.done() and task.exception() is not None:
                 task.result()
         out, err = tasks[0].result(), tasks[1].result()
-        await proc.wait()
+        await child.wait()
         return out, err
     finally:
         for task in tasks:
@@ -125,22 +128,29 @@ class ApproveBead:
 
     async def _run(self, argv: list[str], timeout: float, cap: int,
                    on_launch: Callable[[], None] | None) -> tuple[int, bytes, bytes]:
+        """Run approve-bead, launched with no await since the caller's last check (R11). `on_launch` is
+        called once a child may exist: from then on every exit reaps its group, and a decision is read back.
+        Popen's own OSError means there is none; anything else it raises can't rule one out."""
         try:
-            proc = await reap.spawn("approve-bead", argv, seconds=REAP_SECONDS,
-                                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
+            child = reap.spawn(argv)
         except OSError:
             raise BtqError("unavailable") from None
+        except BaseException:
+            if on_launch is not None:
+                on_launch()
+            raise
         try:
             if on_launch is not None:
                 on_launch()
             try:
-                out, err = await asyncio.wait_for(_collect(proc, cap), timeout)
+                out, err = await asyncio.wait_for(_collect(child, cap), timeout)
             except TimeoutError:
                 raise BtqError("timed out") from None
+            except OSError:
+                raise BtqError("unavailable") from None     # connecting the pipes failed: the child is reaped
         finally:
-            await reap.reap_shielded(proc, "approve-bead", seconds=REAP_SECONDS)
-        return proc.returncode if proc.returncode is not None else -1, out, err
+            await reap.reap_shielded(child, "approve-bead", seconds=REAP_SECONDS)
+        return child.returncode if child.returncode is not None else -1, out, err
 
     async def read(self, bead: str, on_launch: Callable[[], None] | None = None) -> Readout | Busy:
         """`approve-bead <bead> --json`: the readout, or Busy. Anything else is a BtqError."""
@@ -164,7 +174,19 @@ class ApproveBead:
         code, _, err = await self._run(decision_argv(self.binary, a, bead), DECIDE_SECONDS, MAX_OUTPUT,
                                        on_launch)
         lines = err.decode("utf-8", "replace").splitlines()
-        return code, redact(redact(lines[0].strip())[:MAX_LINE]) if lines else ""
+        return code, quoted(lines[0].strip()) if lines else ""
+
+
+def quoted(line: str) -> str:
+    """`line` redacted, in at most MAX_LINE characters (R12). Cutting can turn a secret's tail into a match
+    whose replacement is longer than what it replaced, so the cut is redacted again, until it fits; a line
+    that still doesn't fit after QUOTE_TRIES cuts is not quoted at all."""
+    text = redact(line)
+    for _ in range(QUOTE_TRIES):
+        if len(text) <= MAX_LINE:
+            return text
+        text = redact(text[:MAX_LINE])
+    return UNQUOTABLE
 
 
 def decision_argv(binary: Path, a: Attempt, bead: str) -> list[str]:

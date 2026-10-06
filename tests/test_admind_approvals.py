@@ -199,6 +199,22 @@ def test_decide_quotes_one_redacted_line(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_quoted_line_stays_within_the_cap() -> None:
+    """r2-NB: a cut can complete a secret's pattern, whose replacement is longer: it is cut and redacted
+    again until it fits."""
+    line = "x" * 279 + " " + "AKIA" + "Z" * 17
+    assert len(redact(redact(line)[:approvals.MAX_LINE])) > approvals.MAX_LINE      # the case itself
+    quoted = approvals.quoted(line)
+    assert len(quoted) <= approvals.MAX_LINE and redact(quoted) == quoted and "AKIA" + "Z" * 16 not in quoted
+    assert quoted.startswith("x" * 279 + " ")
+
+
+def test_quoted_line_that_never_fits_is_not_quoted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(approvals, "redact", lambda text: text + "!")     # every pass grows it
+    assert approvals.quoted("y" * 400) == approvals.UNQUOTABLE
+    assert approvals.quoted("y" * 10) == "y" * 10 + "!"
+
+
 def test_read_output_cap(tmp_path: Path) -> None:
     """A readout past MAX_OUTPUT is still read (the read cap is MAX_READ_OUTPUT); one past that is not."""
     async def scenario() -> None:
@@ -255,32 +271,94 @@ def test_overflow_kills_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     asyncio.run(scenario())
 
 
-def test_cancel_during_creation_reaps_the_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cancellation that lands while asyncio is still connecting the child's pipes: the child and a
-    descendant it already started in its group are both killed (asyncio alone kills only the child)."""
+def stall_connect(monkeypatch: pytest.MonkeyPatch, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
+    """Make connecting a child's pipes stall for good, as a stuck native creation would: the returned event
+    is set once one is stalled, and nothing ever releases it."""
+    stalled, never = asyncio.Event(), asyncio.Event()
+
+    async def held(*args: Any, **kw: Any) -> Any:
+        stalled.set()
+        await never.wait()
+    monkeypatch.setattr(loop, "connect_read_pipe", held)
+    monkeypatch.setattr(loop, "connect_write_pipe", held)
+    return stalled
+
+
+def test_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2-B3: a cancellation while the pipes are being connected, a stall never released: the read still
+    ends within REAP_SECONDS, and the child and a descendant it already started in its group are gone."""
+    monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
+
     async def scenario() -> None:
         ab = fake(tmp_path, read="descendant")
-        loop = asyncio.get_running_loop()
-        connect = loop.connect_read_pipe
-        connecting, release = asyncio.Event(), asyncio.Event()
-
-        async def held(*args: Any, **kw: Any) -> Any:
-            connecting.set()
-            await release.wait()
-            return await connect(*args, **kw)
-        monkeypatch.setattr(loop, "connect_read_pipe", held)
+        stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
         task = asyncio.create_task(ab.read(BEAD))
-        await wait_until(lambda: connecting.is_set() and (tmp_path / "descendant.pid").exists(), 20)
-        task.cancel()       # synchronously cancels the future the task waits on, inside the creation
-        release.set()
+        await wait_until(lambda: stalled.is_set() and (tmp_path / "descendant.pid").exists(), 20)
+        started = time.monotonic()
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, approvals.REAP_SECONDS + 5)
+            await asyncio.wait_for(task, 1 + 1)
+        assert time.monotonic() - started < 1 + 1
         child, grandchild = pids(tmp_path)[0], int((tmp_path / "descendant.pid").read_text())
-        await wait_until(lambda: gone(child) and gone(grandchild), 10)
+        await wait_until(lambda: gone(child) and gone(grandchild), 5)
     try:
         asyncio.run(scenario())
     finally:
         kill_quietly(tmp_path / "descendant.pid")
+
+
+def test_a_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's own timeout covers connecting the pipes too."""
+    monkeypatch.setattr(approvals, "READ_SECONDS", 1)
+    monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
+
+    async def scenario() -> None:
+        ab = fake(tmp_path, read="descendant")
+        stall_connect(monkeypatch, asyncio.get_running_loop())
+        with pytest.raises(BtqError, match="timed out"):
+            await asyncio.wait_for(ab.read(BEAD), 1 + 1 + 1)
+        await wait_until(lambda: (tmp_path / "descendant.pid").exists(), 20)
+        child, grandchild = pids(tmp_path)[0], int((tmp_path / "descendant.pid").read_text())
+        await wait_until(lambda: gone(child) and gone(grandchild), 5)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(tmp_path / "descendant.pid")
+
+
+def fail_connect(monkeypatch: pytest.MonkeyPatch, pid_file: Path, decision: bool = False) -> None:
+    """Make connecting the pipes of a run (only a decision's, if `decision`) fail with OSError once the
+    descendant `pid_file` names exists: a failure after the child, and more of its group, exist."""
+    connect = reap.Child.connect
+
+    async def failing(self: reap.Child) -> None:
+        args = self.popen.args
+        assert isinstance(args, list)
+        if decision and "--yes" not in args:
+            return await connect(self)
+        await wait_until(pid_file.exists, 20)
+        raise OSError("injected")
+    monkeypatch.setattr(reap.Child, "connect", failing)
+
+
+def test_failure_after_launch_reaps_the_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2-B2: connecting the pipes fails with the child and a descendant in its group running: both are
+    killed, and the failure is approve-bead's fixed word."""
+    pid_file = tmp_path / "descendant.pid"
+    fail_connect(monkeypatch, pid_file)
+
+    async def scenario() -> None:
+        ab = fake(tmp_path, read="descendant")
+        with pytest.raises(BtqError, match="unavailable"):
+            await asyncio.wait_for(ab.read(BEAD), approvals.REAP_SECONDS + 20)
+        child, grandchild = pids(tmp_path)[0], int(pid_file.read_text())
+        await wait_until(lambda: gone(child) and gone(grandchild), 5)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(pid_file)
 
 
 DESCENDANT = """\
@@ -299,54 +377,86 @@ time.sleep(600)
 """
 
 
-def test_summarizer_cancel_during_creation_reaps_the_group(tmp_path: Path,
-                                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    """The summarizer starts its child through the same `reap.spawn`."""
+def test_summarizer_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summarizer starts its child through the same `reap.spawn`: a stall never released, cancelled."""
+    monkeypatch.setattr(summarize, "REAP_SECONDS", 1)
     pid_file = tmp_path / "descendant.pid"
 
     async def scenario() -> None:
-        loop = asyncio.get_running_loop()
-        connect = loop.connect_read_pipe
-        connecting, release = asyncio.Event(), asyncio.Event()
-
-        async def held(*args: Any, **kw: Any) -> Any:
-            connecting.set()
-            await release.wait()
-            return await connect(*args, **kw)
-        monkeypatch.setattr(loop, "connect_read_pipe", held)
+        stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
         argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
         task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
-        await wait_until(lambda: connecting.is_set() and pid_file.exists(), 20)
-        task.cancel()       # synchronously cancels the future the task waits on, inside the creation
-        release.set()
+        await wait_until(lambda: stalled.is_set() and pid_file.exists(), 20)
+        started = time.monotonic()
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, summarize.REAP_SECONDS + 5)
+            await asyncio.wait_for(task, 1 + 1)
+        assert time.monotonic() - started < 1 + 1
         grandchild = int(pid_file.read_text())
-        await wait_until(lambda: gone(grandchild), 10)
+        await wait_until(lambda: gone(grandchild), 5)
     try:
         asyncio.run(scenario())
     finally:
         kill_quietly(pid_file)
 
 
+def test_summarizer_failure_after_launch_reaps_the_group(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    fail_connect(monkeypatch, pid_file)
+
+    async def scenario() -> None:
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        with pytest.raises(summarize.SummaryFailed) as info:
+            await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 30)
+        assert info.value.reason == "not-run"
+        grandchild = int(pid_file.read_text())
+        await wait_until(lambda: gone(grandchild), 5)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(pid_file)
+
+
+def test_cleanup_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                 capsys: pytest.CaptureFixture[str]) -> None:
+    """A child that never seems to exit costs REAP_SECONDS, noted by type, and the result stands."""
+    monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
+
+    async def forever(child: reap.Child) -> None:
+        await asyncio.Event().wait()
+    monkeypatch.setattr(summarize, "_wait", forever)
+
+    async def scenario() -> None:
+        argv = [sys.executable, "-c", "raise SystemExit(3)"]
+        with pytest.raises(summarize.SummaryFailed) as info:
+            await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 0.5 + 10)
+        assert info.value.reason == "failed"
+    asyncio.run(scenario())
+    assert "summarizer cleanup failed (TimeoutError)" in capsys.readouterr().err
+
+
 def test_reap_bounded_when_pipe_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(approvals, "READ_SECONDS", 1)
     monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
     closed: list[str] = []
-    close = reap.close_transport
+    close = reap.close_pipes
 
-    def recording(proc: asyncio.subprocess.Process, what: str) -> None:
-        close(proc, what)
-        transport = getattr(proc, "_transport", None)
-        closed.append(what if transport is not None and transport.is_closing() else "open")
-    monkeypatch.setattr(reap, "close_transport", recording)
+    def recording(child: reap.Child, what: str) -> None:
+        close(child, what)
+        pipes = (child.popen.stdout, child.popen.stderr)
+        shut = all(t.is_closing() for t in child.transports)
+        shut = shut and all(p is not None and p.closed for p in pipes)
+        closed.append(what if shut and len(child.transports) == 2 else "open")
+    monkeypatch.setattr(reap, "close_pipes", recording)
 
     async def scenario() -> None:
         ab = fake(tmp_path, read="held")
         started = time.monotonic()
         with pytest.raises(BtqError, match="timed out"):
             await ab.read(BEAD)
-        assert time.monotonic() - started < 1 + 1 + 1
+        assert time.monotonic() - started < 1 + 1
         assert closed == ["approve-bead"] and gone(pids(tmp_path)[0])
         held = int((tmp_path / "held.pid").read_text())
         assert not gone(held)            # it left the group, so the kill missed it: only the pipe was let go
@@ -361,8 +471,8 @@ def test_second_cancel_during_cleanup_is_bounded(tmp_path: Path, monkeypatch: py
     killed = asyncio.Event()
     kill = reap.kill
 
-    def recording(proc: asyncio.subprocess.Process) -> None:
-        kill(proc)
+    def recording(child: reap.Child) -> None:
+        kill(child)
         killed.set()
     monkeypatch.setattr(reap, "kill", recording)
 
@@ -1660,4 +1770,93 @@ def test_uncertain_quotes_the_stderr_line(tmp_path: Path) -> None:
                         f"it can; check it on the host with approve-bead {BEAD}.\napprove-bead said: "
                         '"refused: something is wrong; nothing written."')
         assert ask_status(h, ask_id) == "uncertain"
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_launch_follows_the_last_check_with_no_await(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2-B1 (R11): a latch callback queued the moment step 6's check passes runs only once the decision's
+    child exists: nothing awaits between the check and the launch."""
+    launches: list[tuple[bool, bool]] = []
+    init = reap.Child.__init__
+    latched = lambda: False  # noqa: E731 - replaced once the daemon exists
+
+    def recording(self: reap.Child, popen: Any) -> None:
+        launches.append(("--yes" in popen.args, latched()))
+        init(self, popen)
+    monkeypatch.setattr(reap.Child, "__init__", recording)
+
+    async def scenario(h: Harness) -> None:
+        nonlocal latched
+        latched = h.daemon.latched
+        ask_id, first = await card(h)
+        ab, check = h.daemon.approve_bead, h.daemon.authorised
+        assert ab is not None
+        read = ab.read
+        armed = queued_latch = False
+
+        async def reading(bead_id: str, on_launch: Any = None) -> Any:
+            nonlocal armed
+            r = await read(bead_id, on_launch)
+            armed = True        # the preflight read is back: the next check is step 6's
+            return r
+
+        def authorised(mid: str | None = None) -> bool:
+            nonlocal queued_latch
+            ok = check(mid)
+            if armed and ok and not queued_latch:
+                asyncio.get_running_loop().call_soon(h.daemon.latch, "test latch")
+                queued_latch = True
+            return ok
+        monkeypatch.setattr(ab, "read", reading)
+        monkeypatch.setattr(h.daemon, "authorised", authorised)
+        mid = await send(h, approve(), first)
+        await settled(h, mid)
+        assert queued_latch and h.daemon.latched()
+        assert [latched_then for decision, latched_then in launches if decision] == [False]
+        assert ask_status(h, ask_id) == "approved" and len(decisions(h)) == 1
+        assert audited(h, kind="ask", action="decided", ask_id=ask_id, latched_during=True)
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_failure_after_the_decision_launch_reads_back(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2-B2: the decision's child exists (it wrote the decision and started a descendant in its group), then
+    connecting its pipes fails: the group is reaped, and the outcome comes from the read-back, not "nothing
+    was recorded"."""
+    pid_file = tmp_path / "descendant.pid"
+    fail_connect(monkeypatch, pid_file, decision=True)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        edit(tmp_path, decide="descendant")
+        text = await say(h, approve(), first)
+        assert text == f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it."
+        assert ask_status(h, ask_id) == "approved" and attempts(h, ask_id)[0][-2:] == (None, "recorded")
+        assert reads(h) == 3 and len(decisions(h)) == 1
+        child, grandchild = pids(tmp_path)[2], int(pid_file.read_text())
+        await wait_until(lambda: gone(child) and gone(grandchild), 5)
+    try:
+        go(tmp_path, scenario)
+    finally:
+        kill_quietly(pid_file)
+
+
+@needs_tmux
+def test_a_launch_that_may_have_happened_reads_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Popen raising anything but OSError can't rule out a child: the outcome is read back."""
+    spawn = reap.spawn
+
+    def failing(argv: list[str], **kw: Any) -> reap.Child:
+        if "--yes" in argv:
+            raise RuntimeError("injected")
+        return spawn(argv, **kw)
+    monkeypatch.setattr(reap, "spawn", failing)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        text = await say(h, approve(), first)
+        assert text == f"Not recorded. {BEAD} is unchanged; you can decide again."
+        assert attempts(h, ask_id)[0][-2:] == (None, "untouched") and reads(h) == 3 and decisions(h) == []
     go(tmp_path, scenario)

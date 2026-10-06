@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from heterodyne.admind import backstop, summarize
+from heterodyne.admind import backstop, reap, summarize
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import resolve
 from heterodyne.agents.claude_code import headless_argv
@@ -387,27 +387,29 @@ while [ ! -s "{pidfile}" ]; do sleep 0.05; done"""     # ready once the descenda
 
 
 class Spy:
-    """Wraps `summarize._drain` to see when cleanup starts and which process it is cleaning up."""
+    """Wraps `summarize._wait` to see when cleanup's wait starts, which process it is cleaning up, and
+    whether the wait ended on its own (not at the REAP_SECONDS bound)."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, pidfile: Path) -> None:
         self.entered = asyncio.Event()
-        self.proc: asyncio.subprocess.Process | None = None
-        self.escaped = False
-        real = summarize._drain
+        self.proc: reap.Child | None = None
+        self.escaped = self.waited = False
+        real = summarize._wait
 
-        async def drain(proc: asyncio.subprocess.Process) -> None:
+        async def wait(proc: reap.Child) -> None:
             self.proc = proc
             self.escaped = os.getpgid(read_pids(pidfile)[0]) != proc.pid
             self.entered.set()
             await real(proc)
+            self.waited = True
 
-        monkeypatch.setattr(summarize, "_drain", drain)
+        monkeypatch.setattr(summarize, "_wait", wait)
 
 
 def run_escaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, steps) -> Spy:  # type: ignore[no-untyped-def]
-    """Run `summarize` on a child that leaves a descendant in its own session holding stdout, so cleanup
-    has to give up on the pipe after REAP_SECONDS. `steps(task, spy)` drives the test; the descendant is
-    always killed afterwards."""
+    """Run `summarize` on a child that leaves a descendant in its own session holding stdout; cleanup closes
+    the pipe rather than wait for it to close. `steps(task, spy)` drives the test; the descendant is always
+    killed afterwards."""
     pidfile = tmp_path / "escaped.pid"
     monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
     spy = Spy(monkeypatch, pidfile)
@@ -428,23 +430,22 @@ def run_escaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, step
 
 def transport_closed(spy: Spy) -> bool:
     assert spy.proc is not None
-    return spy.proc._transport.is_closing()  # type: ignore[attr-defined]  # noqa: SLF001
+    pipes = (spy.proc.popen.stdin, spy.proc.popen.stdout)
+    return all(t.is_closing() for t in spy.proc.transports) and all(p is None or p.closed for p in pipes)
 
 
 def test_a_descendant_outside_the_group_cannot_hang_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, big_pipe: None
 ) -> None:
-    start = time.monotonic()
 
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
         with pytest.raises(summarize.SummaryFailed) as info:
             await task
         assert info.value.reason == "too-long"
-        assert time.monotonic() - start >= 0.5  # the fallback ran: the drain timed out
-        assert alive(read_pids(tmp_path / "escaped.pid")[0])  # and it was still holding the pipe
+        assert alive(read_pids(tmp_path / "escaped.pid")[0])  # still holding the pipe, which was closed
 
     spy = run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
-    assert spy.escaped and transport_closed(spy)
+    assert spy.escaped and spy.waited and transport_closed(spy)  # the wait never needed the pipe
 
 
 def test_cancelling_during_cleanup_still_closes_the_pipe(
@@ -477,10 +478,10 @@ def test_cancelling_twice_still_closes_the_pipe(tmp_path: Path, monkeypatch: pyt
 def test_a_cleanup_failure_is_noted_by_type_and_does_not_replace_the_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def broken(proc: asyncio.subprocess.Process) -> None:
+    async def broken(proc: reap.Child) -> None:
         raise RuntimeError("SECRET-REPLY-TEXT")
 
-    monkeypatch.setattr(summarize, "_drain", broken)
+    monkeypatch.setattr(summarize, "_wait", broken)
     with pytest.raises(summarize.SummaryFailed) as info:
         asyncio.run(summarize.summarize(script(tmp_path, "exit 3"), tmp_path / "w", "r"))
     assert info.value.reason == "failed"
@@ -488,7 +489,7 @@ def test_a_cleanup_failure_is_noted_by_type_and_does_not_replace_the_result(
     assert "summarizer cleanup failed (RuntimeError)" in err and "SECRET" not in err
 
 
-def test_the_expected_drain_timeout_is_not_noted(
+def test_a_pipe_held_outside_the_group_is_not_noted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], big_pipe: None
 ) -> None:
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
@@ -508,10 +509,10 @@ class BrokenStderr:
 
 
 def test_a_broken_stderr_does_not_replace_the_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def broken(proc: asyncio.subprocess.Process) -> None:
-        raise RuntimeError("drain failed")
+    async def broken(proc: reap.Child) -> None:
+        raise RuntimeError("wait failed")
 
-    monkeypatch.setattr(summarize, "_drain", broken)
+    monkeypatch.setattr(summarize, "_wait", broken)
     monkeypatch.setattr("sys.stderr", BrokenStderr())
     with pytest.raises(summarize.SummaryFailed) as info:
         asyncio.run(summarize.summarize(script(tmp_path, "exit 3"), tmp_path / "w", "r"))

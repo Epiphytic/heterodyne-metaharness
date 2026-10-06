@@ -22,7 +22,8 @@ controls:
   process group writes the decision 1 s later; its PID goes to `<db dir>/orphan.pid`; exit 1 at once),
   `"partial"` (fields written, close failed), `"foreign"` (closed by someone else), `"edit-before"` (the ask
   changes before the pre-write re-check: exit 3), `"race"` (written, then the ask changes: exit 5), `"big"`
-  (past the decision cap on stderr), `"wait"`;
+  (past the decision cap on stderr), `"descendant"` (writes the decision, then starts the read mode's
+  grandchild and hangs), `"wait"`;
 - `wait`: a name. A `"wait"` mode creates `<db dir>/<name>.waiting`, then waits (bounded) for
   `<db dir>/<name>.go` before going on as normal;
 - `gate_ok` (default true) and `gate_reasons`: what btq's `approval_valid` says of a closed approval;
@@ -243,6 +244,10 @@ def decide(bead_id: str, bead: dict[str, Any], f: dict[str, str | bool]) -> int:
             os._exit(0)
         (DB.parent / "orphan.pid").write_text(str(pid))
         return fail(1, "bd update failed")
+    if mode == "descendant":
+        write_decision(bead_id, f, by, close=True)
+        descendant()
+        time.sleep(600)
     if mode == "partial":
         write_decision(bead_id, f, by, close=False)
         return fail(1, "bd close failed")

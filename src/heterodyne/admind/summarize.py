@@ -43,17 +43,23 @@ def needs_summary(text: str, lines: int, chars: int) -> bool:
     return len(text.splitlines()) > lines or len(text) > chars
 
 
-_drain = reap.drain      # looked up at call time by _reap, so tests can wrap it
+_wait = reap.wait_exit      # looked up at call time by _reap, so tests can wrap it
 
 
-async def _reap(proc: asyncio.subprocess.Process) -> None:
-    """Kill the whole process group (also anything it started and left running), then collect the process
-    (`reap.reap`). Runs on every exit path, including cancellation (also a second one), and is bounded: a
-    descendant that left the group and still holds the pipe costs REAP_SECONDS, not a hang."""
-    await reap.reap(proc, "summarizer", seconds=REAP_SECONDS, drain=_drain)
+async def _reap(child: reap.Child) -> None:
+    """Kill the whole process group (also anything it started and left running), close the pipes, then
+    collect the process (`reap.reap`). Runs on every exit path, including cancellation (also a second one),
+    and is bounded: a descendant that left the group and still holds a pipe costs nothing, and the wait for
+    the child's exit is bounded at REAP_SECONDS."""
+    await reap.reap_shielded(child, "summarizer", seconds=REAP_SECONDS, wait=_wait)
 
 
-async def _collect(proc: asyncio.subprocess.Process, data: bytes) -> bytes:
+async def _talk(child: reap.Child, data: bytes) -> bytes:
+    await child.connect()
+    return await _collect(child, data)
+
+
+async def _collect(proc: reap.Child, data: bytes) -> bytes:
     """Feed stdin while reading stdout, so neither pipe can fill and stall; stop past MAX_BYTES."""
     if proc.stdin is None or proc.stdout is None:
         raise SummaryFailed("not-run")
@@ -86,25 +92,18 @@ async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: floa
     private_dir(cwd)
     payload = await asyncio.to_thread(lambda: PROMPT.format(reply=redact(reply)).encode())   # off the loop
     try:
-        proc = await reap.spawn(       # a cancellation during creation still reaps the group
-            "summarizer",
-            argv,
-            seconds=REAP_SECONDS,
-            cwd=cwd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        child = reap.spawn(argv, cwd=cwd, feed=True, stderr=False)     # owned from here: reaped below
     except OSError:
         raise SummaryFailed("not-run") from None
     try:
-        out = await asyncio.wait_for(_collect(proc, payload), timeout)
+        out = await asyncio.wait_for(_talk(child, payload), timeout)
     except TimeoutError:
         raise SummaryFailed("timeout") from None
+    except OSError:
+        raise SummaryFailed("not-run") from None       # connecting the pipes failed
     finally:
-        await _reap(proc)
-    if proc.returncode != 0:
+        await _reap(child)
+    if child.returncode != 0:
         raise SummaryFailed("failed")
     text = await asyncio.to_thread(lambda: redact(out.decode("utf-8", errors="replace")).strip())
     if not text:
