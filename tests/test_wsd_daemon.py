@@ -961,10 +961,14 @@ def test_ticks_on_a_busy_workstream_queue_one_job_and_starve_nothing(
     submitted = counted_submits(wsd.lanes[WS], monkeypatch)
 
     async def scenario() -> list[ctl.CtlReply]:
-        ticks = [asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
-                 for _ in range(50)]
+        def tick() -> asyncio.Task[ctl.CtlReply]:
+            return asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
+
+        # The first is running before the rest arrive: until its job starts, every tick would join it.
+        ticks = [tick()]
         try:
             await until(inside.is_set)
+            ticks += [tick() for _ in range(49)]
             await until(lambda: len(submitted) == 50)   # every tick has reached the lane
             assert len(wsd.lanes[WS].jobs) == 2       # one running, one queued: no more
             status = await asyncio.wait_for(wsd.handle(ctl.CtlRequest("status")), 5)
