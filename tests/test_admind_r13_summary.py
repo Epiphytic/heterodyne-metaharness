@@ -4,6 +4,7 @@ import fcntl
 import os
 import signal
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -309,11 +310,10 @@ def read_pids(path: Path, count: int = 1) -> list[int]:
 
 
 def alive(pid: int) -> bool:
-    try:
-        stat_text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return stat_text.rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is dead, only not collected yet
+    # ps, not /proc: CI runs macOS too. Empty when there is no such process.
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=10).stdout.strip()
+    return state != "" and not state.startswith("Z")  # a zombie is dead, only not collected yet
 
 
 def gone(pid: int) -> bool:
@@ -382,7 +382,12 @@ def test_cancellation_still_kills_the_group(tmp_path: Path) -> None:
     assert gone(read_pids(pidfile)[0])
 
 
-ESCAPED = """setsid sh -c 'echo $$ > "$0"; exec sleep 20' "{pidfile}" &
+# The descendant makes its own session with os.setsid: macOS has no setsid command.
+ESCAPED = """python3 -c 'import os, sys
+os.setsid()
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+os.write(fd, str(os.getpid()).encode()); os.close(fd)
+os.execvp("sleep", ["sleep", "20"])' "{pidfile}" &
 while [ ! -s "{pidfile}" ]; do sleep 0.05; done"""     # ready once the descendant has its own session
 
 

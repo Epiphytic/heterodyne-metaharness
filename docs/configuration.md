@@ -62,7 +62,8 @@ See `examples/config.toml` for a commented sample.
 - **`[sandbox]`** must be a table, and holds two host allowlists:
   - `egress_approved`: a list of hosts a workstream may add as extra egress.
   - `ro_mounts_approved`: a list of **absolute** directory paths a workstream may add as extra read-only mounts. A missing or empty list allows none.
-- **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. Nothing reads these settings yet.
+- **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. `wsd` reads `[integrations.beads]` (see [wsd.md](wsd.md#1-configuration)); nothing reads `[integrations.marmot]` yet.
+- **`[wsd]`:** the workstream daemon's timers and limits; see [wsd.md](wsd.md#1-configuration).
 
 ### Workstream config (`workstreams/<ws>.toml`)
 
@@ -70,6 +71,7 @@ See `examples/workstreams/example.toml` for a commented sample. The file is load
 
 - **Allowed top-level tables:** `roles`, `repos`, `sandbox`, `cron`, `render`, `timeouts` and `restrict`. Any other key is an error, so no policy key can be set here.
 - **`[roles]`** must be a table of strings, and each value must name a profile that exists in the defaults or host config.
+- **`[repos]`** names the workstream's repositories for `wsd`: absolute or `~/` paths, one of them `default` (see [wsd.md](wsd.md#1-configuration)).
 - **`[sandbox]`** may contain only `extra_ro_mounts` and `extra_egress`, both lists of strings:
   - every `extra_egress` host must be listed in the host's `sandbox.egress_approved`;
   - every `extra_ro_mounts` entry must be an absolute path inside one of the host's `sandbox.ro_mounts_approved` entries.
