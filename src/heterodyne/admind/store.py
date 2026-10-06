@@ -8,8 +8,9 @@
   is deduplicated by wn-agent (S4 step 4).
 - `alerts`: alert files already relayed, by raw file-name bytes (a name need not be valid UTF-8).
 - `kv`: small named values (group, account, agent session, latch, ...).
-- `asks`, `ask_answers`, `ask_details`: the asks relay (relay spec §5). A card's chunks are outbox rows
-  keyed `ask:<id>:<i>`, an ask's `!details` rows `askd:<id>:<request mid>:<i>`.
+- `asks`, `ask_answers`, `ask_details`, `ask_attempts`: the asks relay (relay spec §5). A card's chunks are
+  outbox rows keyed `ask:<id>:<i>`, an ask's `!details` rows `askd:<id>:<request mid>:<i>`. A decision
+  attempt is persisted before approve-bead starts, and `asks.attempt` names the current one (R23).
 """
 
 import contextlib
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import cast
 
 from heterodyne.admind import chunk
+from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.redact import redact, redact_continuation
 
 SCHEMA = """
@@ -98,6 +100,13 @@ CREATE TABLE IF NOT EXISTS ask_answers (
 CREATE TABLE IF NOT EXISTS ask_details (
     ask_id TEXT NOT NULL, operator TEXT NOT NULL, message_id TEXT NOT NULL,
     parts INTEGER NOT NULL,
+    PRIMARY KEY (ask_id, message_id));
+CREATE TABLE IF NOT EXISTS ask_attempts (
+    ask_id TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE,
+    action TEXT NOT NULL CHECK (action IN ('approve', 'deny')),
+    operator TEXT NOT NULL, ref TEXT NOT NULL, digest TEXT NOT NULL, note TEXT,
+    started_at TEXT NOT NULL, exit_status INTEGER,
+    settled TEXT CHECK (settled IN ('refused', 'recorded', 'untouched', 'blocked', 'uncertain')),
     PRIMARY KEY (ask_id, message_id));
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
@@ -312,6 +321,11 @@ class Store:
     @_locked
     def set_inbound(self, message_id: str, status: str) -> None:
         self.db.execute("UPDATE inbound SET status = ? WHERE message_id = ?", (status, message_id))
+
+    @_locked
+    def inbound_status(self, message_id: str) -> str | None:
+        row = self.db.execute("SELECT status FROM inbound WHERE message_id = ?", (message_id,)).fetchone()
+        return None if row is None else str(row[0])
 
     @_locked
     def inbound_with_status(self, status: str) -> list[str]:
@@ -660,6 +674,62 @@ class Store:
         r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = ? AND status IN ({marks}) "  # noqa: S608
                             "ORDER BY created_at DESC, rowid DESC LIMIT 1", (bead, *statuses)).fetchone()
         return None if r is None else _ask(r)
+
+    # --- decision attempts (R23) ---------------------------------------------------------------
+    @_locked
+    def begin_attempt(self, a: Attempt) -> bool:
+        """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
+        inbound message `executing`. False, changing nothing, if the ask is not `open`."""
+        with self.transaction():
+            cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
+                                  "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
+            if cur.rowcount != 1:
+                return False
+            self.db.execute("INSERT INTO ask_attempts(ask_id, message_id, action, operator, ref, digest, "
+                            "note, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (a.ask_id, a.message_id, a.action, a.operator, a.ref, a.digest, a.note, now()))
+            self.db.execute("UPDATE inbound SET status = 'executing' WHERE message_id = ?", (a.message_id,))
+            return True
+
+    @_locked
+    def current_attempt(self, ask_id: str) -> Attempt | None:
+        """The attempt `asks.attempt` names; reconcile and settle use only that row."""
+        r = self.db.execute("SELECT t.ask_id, t.message_id, t.action, t.operator, t.ref, t.digest, t.note "
+                            "FROM asks a JOIN ask_attempts t ON t.ask_id = a.ask_id "
+                            "AND t.message_id = a.attempt WHERE a.ask_id = ?", (ask_id,)).fetchone()
+        if r is None:
+            return None
+        action = "deny" if r[2] == "deny" else "approve"
+        return Attempt(str(r[0]), str(r[1]), action, str(r[3]), str(r[4]), str(r[5]), _opt_str(r[6]))
+
+    @_locked
+    def close_attempt(self, ask_id: str, message_id: str, *, expect_status: str, settled: str,
+                      exit_status: int | None, new_status: str, outcome: str | None,
+                      decided_by: str | None) -> bool:
+        """Settle the current attempt, compare-and-set: nothing changes, and False is returned, unless the
+        ask is `expect_status` with `attempt == message_id`. Then the attempt's `settled` and `exit_status`
+        (kept if None: a reconcile does not know it) and the ask's status, outcome and `decided_by` are
+        set, and `asks.attempt` is cleared unless the outcome is `uncertain`. The caller queues its reply
+        or notice in the same transaction."""
+        with self.transaction():
+            r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
+            if r is None or r[0] != expect_status or r[1] != message_id:
+                return False
+            self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
+                            "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
+            self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
+                            "updated_at = ? WHERE ask_id = ?",
+                            (new_status, outcome, decided_by, message_id if settled == "uncertain" else None,
+                             now(), ask_id))
+            return True
+
+    @_locked
+    def recovery_snapshot(self) -> list[tuple[str, str, str]]:
+        """(ask ID, current attempt, status) of every `deciding` or `uncertain` ask (R26, r3-2)."""
+        rows = self.db.execute("SELECT ask_id, attempt, status FROM asks "
+                               "WHERE status IN ('deciding', 'uncertain') AND attempt IS NOT NULL "
+                               "ORDER BY created_at, rowid").fetchall()
+        return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:

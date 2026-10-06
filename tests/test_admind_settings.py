@@ -199,3 +199,26 @@ def test_malformed_relay_urls_are_rejected(tmp_path: Path, relay: str) -> None:
 def test_normal_relay_is_accepted(tmp_path: Path) -> None:
     env = write(tmp_path, BASE_CONFIG.replace("wss://relay.example.org", "wss://relay.example:443"))
     assert resolve(load(None, env), env).relays == ("wss://relay.example:443",)
+
+
+def with_approve_bead(value: str) -> str:
+    return BASE_CONFIG.replace('restart_units = [', f'approve_bead = "{value}"\nrestart_units = [', 1)
+
+
+def test_approve_bead_is_optional_and_must_be_an_absolute_executable(tmp_path: Path) -> None:
+    env = write(tmp_path)
+    assert resolve(load(None, env), env).approve_bead is None
+    tool = tmp_path / "approve-bead-tool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    env = write(tmp_path, with_approve_bead(str(tool)))
+    assert resolve(load(None, env), env).approve_bead == tool
+    plain = tmp_path / "not-executable-tool"
+    plain.write_text("#!/bin/sh\n")
+    plain.chmod(0o644)
+    for bad in ("relative/approve-bead-tool", str(plain), str(tmp_path / "missing-tool"), str(tmp_path), ""):
+        env = write(tmp_path, with_approve_bead(bad))
+        with pytest.raises(ConfigError) as err:
+            resolve(load(None, env), env)
+        assert "approve_bead must be an absolute path to an executable" in str(err.value)
+        assert "tool" not in str(err.value) and (not bad or bad not in str(err.value))

@@ -2,17 +2,22 @@
 
 Pure: request and reply structs for `ask.sock`, validation (R4, R16, R19), ask IDs (R3) and the rendering of
 cards, `!details` and `!asks` lines. Question and merge cards are redacted whole first, and their budget is
-counted on the redacted text (P5). The daemon does the I/O.
+counted on the redacted text (P5). An approval card is approve-bead's own readout, and is refused instead if
+redaction would change any of it (R21). The daemon does the I/O.
 """
 
+import json
 import re
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import msgspec
 
+from heterodyne.admind import chunk
+from heterodyne.admind.approvals import BEAD_ID, PINNED_DIGEST_LINE, Readout
 from heterodyne.admind.redact import redact
 from heterodyne.admind.store import ASK_ACTIVE, AnswerRow, AskRow
 
@@ -32,7 +37,7 @@ AskKind = Literal["question", "merge", "approval"]
 PR_URL = re.compile(r"https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}/pull/[1-9][0-9]{0,9}")
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
 POSTER = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
-BEAD = re.compile(r"[a-z0-9]{1,16}-[a-z0-9.]{1,32}")
+BEAD = BEAD_ID
 _TITLE_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 
 
@@ -219,6 +224,112 @@ def question_card(row: AskRow) -> tuple[str, bool]:
 def full_text(row: AskRow) -> str:
     """What `!details` on a card sends: the whole ask, redacted."""
     return redact(f"{head(row)}\n{context(row).rstrip(chr(10))}\n\n{footer(row)}")
+
+
+# --- approval cards (spec §6, R8, R21, R25) ------------------------------------------------------
+_REF_LINE = re.compile(r"^(\s*)- ref .*  \[--doc ([1-9][0-9]*)\]$")
+
+
+@dataclass(frozen=True)
+class ApprovalCard:
+    """The exact chunks to queue for the card and for its `!details`, each already checked (R21)."""
+    card_chunks: list[str]
+    details_chunks: list[str]
+    truncated: bool
+
+
+def approval_head(row: AskRow) -> str:
+    return (f"🛂 Approval ask {row.ask_id} · bead {row.bead} · posted by {row.poster} "
+            "(a local process; unverified)")
+
+
+def decision_lines(bead: str, digest12: str) -> list[str]:
+    """The fixed framing after the budgeted context; never cut."""
+    return ["", "Decide by replying to this message:", f"  !approve {bead} {digest12}",
+            f"  !deny {bead} <reason>",
+            f"!approve records your approval of {bead} in btq, as you, via Marmot. A reply without !approve "
+            "or !deny decides nothing."]
+
+
+def _linked(lines: list[str], links: dict[int, str]) -> list[str]:
+    """The ask's lines with each pinned digest cut to 12 hex digits (R21) and, under every numbered ref, its
+    forge link or a note that it has none (R25), after the ref's `resolved:` line."""
+    out: list[str] = []
+    pending: tuple[str, str] | None = None      # (indent, link line) owed after the current ref
+    for line in lines:
+        if pending is not None and not line.startswith(pending[0] + "    resolved:"):
+            out.append(pending[1])
+            pending = None
+        out.append(PINNED_DIGEST_LINE.sub(r"\1\2", line))
+        if pending is not None:
+            out.append(pending[1])
+            pending = None
+        m = _REF_LINE.match(line)
+        if m is not None:
+            n = int(m.group(2))
+            url = links.get(n)
+            shown = (f"link: {url}" if url is not None
+                     else f"(no forge link; read it on the host with approve-bead --doc {n})")
+            pending = (m.group(1), f"{m.group(1)}    {shown}")
+    if pending is not None:
+        out.append(pending[1])
+    return out
+
+
+def approval_title(r: Readout, bead: str) -> str:
+    """The ask's title for `!asks` and the poster: the readout's first title line, else the bead ID."""
+    for line in r.readout["title"][1:]:
+        text = line.strip().removeprefix("│").strip()
+        if text:
+            return text[:MAX_TITLE]
+    return bead
+
+
+def _checked(text: str, chunk_chars: int) -> list[str] | None:
+    """The chunks `Admind.post` will queue for `text`, if redaction changes neither the whole text nor any
+    chunk (a split can create a match the whole text did not have, r2-1); otherwise None."""
+    if redact(text) != text:
+        return None
+    parts = chunk.split(text, chunk_chars)
+    return parts if all(redact(p) == p for p in parts) else None
+
+
+def approval_card(row: AskRow, r: Readout, chunk_chars: int) -> ApprovalCard | None:
+    """The card and its `!details` for the readout `r`, or None if either fails R21. The context is the
+    title, the ask (linked beads and refs included) and the description, as approve-bead renders them; the
+    card's budget (CARD_LINES lines, CARD_CHARS characters) is spent in that order on whole lines."""
+    if row.bead is None or r.digest is None:
+        return None
+    digest12 = r.digest[:12]
+    links = {link.doc: link.url for link in r.links}
+    ask_lines = _linked(r.readout["ask"], links)
+    context = [*r.readout["title"], *(["ask:", *ask_lines] if ask_lines else []), *r.readout["description"]]
+    shown: list[str] = []
+    chars = 0
+    for line in context:
+        if len(shown) >= CARD_LINES or chars + len(line) + 1 > CARD_CHARS:
+            break
+        shown.append(line)
+        chars += len(line) + 1
+    truncated = len(shown) < len(context)
+    if truncated:
+        shown.append(f"(shortened: {len(context) - len(shown)} more lines. Reply !details to this message "
+                     "and read it before approving.)")
+    top = [approval_head(row), f"digest {digest12}"]
+    card = _checked("\n".join([*top, *shown, *decision_lines(row.bead, digest12)]), chunk_chars)
+    details = _checked("\n".join([*top, *context, *decision_lines(row.bead, digest12)]), chunk_chars)
+    if card is None or details is None:
+        return None
+    return ApprovalCard(card, details, truncated)
+
+
+def approval_body(r: Readout, card: ApprovalCard) -> str:
+    """What `asks.body` holds for an approval ask: the readout and the checked `!details` chunks (r2-1)."""
+    return json.dumps({"readout": msgspec.to_builtins(r), "details": card.details_chunks})
+
+
+def stored_details(row: AskRow) -> list[str]:
+    return [str(p) for p in json.loads(row.body)["details"]]
 
 
 def age(created_at: str, at: datetime) -> str:

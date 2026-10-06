@@ -446,14 +446,19 @@ def test_fake_approve_bead_modes(tmp_path: Path) -> None:
     wrapper = approve_bead_wrapper(tmp_path)
     digest = "d" * 64
     bead_db(tmp_path, **{"btq-ab12c": {"digest": digest, "approvers": ["a"]},
-                         "btq-busy": {"busy": True}, "btq-part": {"digest": digest, "decide": "partial"}})
+                         "btq-busy": {"busy": True},
+                         "btq-part": {"digest": digest, "approvers": ["a"], "decide": "partial"}})
 
     def run(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([str(wrapper), *args], capture_output=True, text=True, timeout=30, check=False)
 
     out = run("btq-ab12c", "--json")
     assert out.returncode == 0 and json.loads(out.stdout)["digest"] == digest
-    assert run("btq-busy", "--json").returncode == 4
+    busy = run("btq-busy", "--json")
+    assert busy.returncode == 4 and json.loads(busy.stdout) == {"format": 1, "busy": True}
+    assert len(busy.stderr.splitlines()) == 1
+    refused = run("btq-ab12c", "--json", "--yes")          # --json is read only (Task 1)
+    assert refused.returncode == 2 and len(refused.stderr.splitlines()) == 1
     assert run("btq-ab12c", "--as=a", "--yes", "--expect-digest=" + "0" * 64).returncode == 3
     assert run("btq-ab12c", "--as=a", "--yes", f"--expect-digest={digest}", "--via=marmot",
                "--via-ref=marmot:id:0123456789ab").returncode == 0
@@ -463,7 +468,7 @@ def test_fake_approve_bead_modes(tmp_path: Path) -> None:
     assert run("btq-part", "--as=a", "--yes", f"--expect-digest={digest}").returncode == 1
     part = json.loads(run("btq-part", "--json").stdout)
     assert part["status"] == "open" and part["decision"] == "approve"
-    assert sum("--yes" in argv for argv in btq_log(tmp_path)) == 3
+    assert sum("--yes" in argv for argv in btq_log(tmp_path)) == 4
 
 
 # --- integration ---------------------------------------------------------------------------------
