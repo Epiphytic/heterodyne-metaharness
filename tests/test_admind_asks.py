@@ -921,9 +921,9 @@ def test_cli_wait_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     polled_again = threading.Event()
     real = cli._ask_request
 
-    def observed(s: Any, req: asks.AskRequest) -> asks.AskReply:
+    def observed(s: Any, req: asks.AskRequest, timeout: float) -> asks.AskReply:
         try:
-            reply = real(s, req)
+            reply = real(s, req, timeout)
         except ctl.CtlUnavailable:
             unavailable.set()
             raise

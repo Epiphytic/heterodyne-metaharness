@@ -110,10 +110,17 @@ def ask_daemon(s: AdmindSettings, req: ctl.CtlRequest) -> int:
     return 0 if reply.result in ("committed", "rearmed") else 1
 
 
-def _ask_request(s: AdmindSettings, req: asks.AskRequest) -> asks.AskReply:
-    """One request on ask.sock (raises ctl.CtlUnavailable). The reply limit matches the daemon's (R24)."""
-    return asyncio.run(ctl.request(s.state_dir / asks.ASK_SOCKET, req, ASK_READ_SECONDS,
-                                   reply_type=asks.AskReply, max_reply=asks.MAX_REPLY))
+def _ask_request(s: AdmindSettings, req: asks.AskRequest, timeout: float = ASK_READ_SECONDS) -> asks.AskReply:
+    """One request on ask.sock, the whole of it (connect, write, read) within `timeout` seconds (raises
+    ctl.CtlUnavailable). The reply limit matches the daemon's (R24)."""
+    async def bounded() -> asks.AskReply:
+        try:
+            reply = ctl.request(s.state_dir / asks.ASK_SOCKET, req, timeout, reply_type=asks.AskReply,
+                                max_reply=asks.MAX_REPLY)
+            return await asyncio.wait_for(reply, timeout)
+        except TimeoutError:
+            raise ctl.CtlUnavailable("TimeoutError") from None
+    return asyncio.run(bounded())
 
 
 def _terminal(text: str) -> str:
@@ -188,9 +195,10 @@ def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: 
     """Poll `get` every WAIT_POLL seconds until the ask has an answer or note, or is terminal (R2). A
     daemon that is down or restarting is retried until the timeout."""
     deadline = time.monotonic() + timeout
-    while True:
+    reply: asks.AskReply | None = None
+    while (left := deadline - time.monotonic()) > 0:
         try:
-            reply = _ask_request(s, req)
+            reply = _ask_request(s, req, min(left, ASK_READ_SECONDS))
         except ctl.CtlUnavailable:
             reply = None
         if reply is not None and reply.result != "ok":
@@ -203,11 +211,9 @@ def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: 
             else:
                 _print_view(view)
             return 0
-        left = deadline - time.monotonic()
-        if left <= 0:
-            print("admind: no answer yet (timed out)" if reply is not None else NOT_RUNNING, file=sys.stderr)
-            return EX_TIMEOUT
-        time.sleep(min(WAIT_POLL, left))
+        time.sleep(max(0.0, min(WAIT_POLL, deadline - time.monotonic())))
+    print("admind: no answer yet (timed out)" if reply is not None else NOT_RUNNING, file=sys.stderr)
+    return EX_TIMEOUT
 
 
 def _settings_only() -> AdmindSettings:
