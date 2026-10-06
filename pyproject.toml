@@ -12,6 +12,8 @@ dependencies = [
 [project.scripts]
 heterodyne = "heterodyne.cli:main"
 admind = "heterodyne.admind.cli:main"
+wsd = "heterodyne.wsd.cli:wsd_main"
+wsctl = "heterodyne.wsd.cli:wsctl_main"
 
 [dependency-groups]
 dev = ["pytest>=8", "hypothesis>=6.100", "ruff>=0.6", "pyright>=1.1.380"]

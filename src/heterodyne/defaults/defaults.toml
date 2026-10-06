@@ -43,3 +43,12 @@ reply_verbatim_chars = 800
 [admind.marmot]
 wn_agent = "wn-agent"
 relays = []
+
+# The workstream daemon (§4.3, §9). Host only; [integrations.beads] says where btq and the queue are.
+[wsd]
+backstop_seconds = 60
+reconcile_seconds = 300
+launch_failures_before_human = 2
+park_attempts_before_human = 3
+inbox_attempts_before_human = 3
+coder_role = "coder"
