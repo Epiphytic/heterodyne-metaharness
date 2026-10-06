@@ -37,6 +37,7 @@ from heterodyne.admind.daemon import (
     RECONCILE_RESTARTED,
     RESTARTED_NOTICE,
 )
+from heterodyne.admind.redact import redact
 from heterodyne.admind.store import AskRow, Store
 
 BEAD, OTHER = "btq-ab12c", "btq-cd34e"
@@ -178,7 +179,24 @@ def test_decide_quotes_one_redacted_line(tmp_path: Path) -> None:
         edit(tmp_path, approvers=[TOKEN + "x" * 400])
         code, line = await ab.decide(APPROVE, BEAD)
         assert code == 1 and TOKEN not in line and "<redacted GitHub token>" in line
-        assert len(line) <= approvals.MAX_LINE
+        edit(tmp_path, approvers=["y" * 400])
+        code, line = await ab.decide(APPROVE, BEAD)
+        assert code == 1 and len(line) == approvals.MAX_LINE and line.startswith("Approver must be one of")
+    asyncio.run(scenario())
+
+
+def test_read_output_cap(tmp_path: Path) -> None:
+    """A readout past MAX_OUTPUT is still read (the read cap is MAX_READ_OUTPUT); one past that is not."""
+    async def scenario() -> None:
+        ab = fake(tmp_path, readout={**LINES, "description": ["x" * 1000] * 3000})
+        assert approvals.MAX_OUTPUT < 3_000_000 < approvals.MAX_READ_OUTPUT
+        r = await ab.read(BEAD)
+        assert isinstance(r, Readout) and len(r.readout["description"]) == 3000
+        edit(tmp_path, readout={**LINES, "description": ["x" * 1000] * 9000})
+        assert approvals.MAX_READ_OUTPUT < 9_000_000
+        with pytest.raises(BtqError, match="bad output"):
+            await ab.read(BEAD)
+        assert len(pids(tmp_path)) == 2 and all(gone(p) for p in pids(tmp_path))
     asyncio.run(scenario())
 
 
@@ -209,14 +227,16 @@ def test_cancel_kills_and_reaps(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_overflow_kills_and_reaps(tmp_path: Path) -> None:
+def test_overflow_kills_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(approvals, "REAP_SECONDS", 60)     # the drain ends the reap, not its bound (r4-1)
+
     async def scenario() -> None:
         ab = fake(tmp_path, read="big", decide="big")
         for run in (lambda: ab.read(BEAD), lambda: ab.decide(APPROVE, BEAD)):
             started = time.monotonic()
             with pytest.raises(BtqError, match="bad output"):
-                await run()
-            assert time.monotonic() - started < approvals.REAP_SECONDS + 1
+                await asyncio.wait_for(run(), 30)
+            assert time.monotonic() - started < 10
         assert len(pids(tmp_path)) == 2 and all(gone(p) for p in pids(tmp_path))
     asyncio.run(scenario())
 
@@ -309,6 +329,7 @@ DENIED = {**CLOSED, "decision": "deny", "denied_by": "op", "denied_digest": D}
     ({"decided": True}, APPROVE, "blocked"),
     (DENIED, APPROVE, "blocked"),
     (APPROVED, DENY, "blocked"),
+    ({**APPROVED, "decision": "deny"}, APPROVE, "blocked"),
     ({"status": "closed"}, APPROVE, "blocked"),
 ])
 def test_settle(fields: dict[str, Any], a: Attempt, settled: str) -> None:
@@ -402,6 +423,25 @@ def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
     assert asks.approval_card(card_row(), r, 200) is None
 
 
+def test_approval_card_refuses_a_value_split_across_chunks() -> None:
+    """The other half of R21: a token a chunk boundary cuts is in no chunk, but the whole text holds it, so
+    the card is refused all the same."""
+    def with_line(line: str) -> Readout:
+        return readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
+                                "description": ["description:", line]}, links=[])
+    stand_in_token = "Z" * len(TOKEN)
+    for pad in range(100, 200):
+        stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 4000)
+        assert stand_in is not None
+        text = stand_in.card_chunks[0].replace(stand_in_token, TOKEN)
+        if all(redact(part) == part for part in chunk.split(text, 200)):
+            break
+    else:
+        raise AssertionError("no padding splits the token")
+    assert redact(text) != text
+    assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) is None
+
+
 def test_approval_body_round_trip() -> None:
     card = asks.approval_card(card_row(), readout(), 300)
     assert card is not None
@@ -411,6 +451,32 @@ def test_approval_body_round_trip() -> None:
 
 
 # --- commands ------------------------------------------------------------------------------------
+def test_attempt_compare_and_set(tmp_path: Path) -> None:
+    """begin_attempt needs the ask `open` and marks the inbound message `executing`; close_attempt needs
+    both the status and the attempt it was given, and otherwise changes nothing."""
+    store = Store(tmp_path / "admind.db")
+    try:
+        store.insert_ask(card_row(), None)
+        assert store.claim_inbound(MID)
+        assert store.begin_attempt(APPROVE)
+        stored = store.ask("k7m2")
+        assert store.inbound_status(MID) == "executing" and stored is not None and stored.status == "deciding"
+        other = "cd" * 32
+        assert not store.begin_attempt(Attempt("k7m2", other, "approve", "op", "marmot:x", D, None))
+        assert store.current_attempt("k7m2") == APPROVE
+        for status, attempt in (("open", MID), ("deciding", other)):
+            assert not store.close_attempt("k7m2", attempt, expect_status=status, settled="recorded",
+                                           exit_status=0, new_status="approved", outcome="x", decided_by="op")
+        stored = store.ask("k7m2")
+        assert stored is not None and stored.status == "deciding" and store.current_attempt("k7m2") == APPROVE
+        assert store.close_attempt("k7m2", MID, expect_status="deciding", settled="recorded", exit_status=0,
+                                   new_status="approved", outcome="x", decided_by="op")
+        stored = store.ask("k7m2")
+        assert stored is not None and stored.status == "approved" and store.current_attempt("k7m2") is None
+    finally:
+        store.close()
+
+
 def test_parse_approve_and_deny() -> None:
     assert commands.parse(f"!approve {BEAD} {D12.upper()}") == commands.Command("approve", arg=BEAD, rest=D12)
     for bad in (f"!approve {BEAD}", f"!approve {BEAD} {D12} x", f"!approve {BEAD} {D12[:11]}",
@@ -1329,4 +1395,122 @@ def test_answer_command_refused_for_approval(tmp_path: Path) -> None:
         assert text == (f"Ask {ask_id} is an approval ask: reply to its card with !approve {BEAD} {D12} or "
                         f"!deny {BEAD} <reason>. Nothing recorded.")
         assert h.store.answers(ask_id) == [] and decisions(h) == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_near_miss_digest_refused(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        near = D12[:11] + ("0" if D12[-1] != "0" else "1")
+        assert (await say(h, approve(near), first)).startswith(f"That does not match ask {ask_id}")
+        assert decisions(h) == [] and attempts(h, ask_id) == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_decide_rechecks_authorisation(tmp_path: Path) -> None:
+    """Step 3, called as the worker would after `handle`'s check, but with admind latched since."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        h.daemon.latch("test latch")
+        mid = "de" * 32
+        cmd = commands.parse(approve())
+        assert cmd is not None
+        await h.daemon.decide(mid, cmd, first)
+        assert audited(h, kind="drop", message_id=ref_id(mid), what="decision")
+        assert attempts(h, ask_id) == [] and reads(h) == 1 and ask_status(h, ask_id) == "open"
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_latch_during_preflight_read_drops_decision(tmp_path: Path) -> None:
+    """Step 6, the commit point (R11): the preflight read awaited, so authorisation is checked again."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        edit(tmp_path, read="wait")
+        mid = await send(h, approve(), first)
+        await waiting(h)
+        h.daemon.latch("test latch")
+        go_file(h).touch()
+        await settled(h, mid)
+        assert h.store.inbound_status(mid) == "dropped"
+        assert audited(h, kind="drop", message_id=ref_id(mid), what="decision")
+        assert decisions(h) == [] and ask_status(h, ask_id) == "open" and current(h, ask_id) is None
+        assert attempts(h, ask_id)[0][-1] == "refused" and queued(h, mid) == ""
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_latch_during_asks_backstop_drops_listing(tmp_path: Path) -> None:
+    """`!asks` checks authorisation again after the backstop's read-backs."""
+    stale = "ee" * 32
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        assert h.store.begin_attempt(Attempt(ask_id, stale, "approve", "op", "marmot:" + ref_id(stale), D,
+                                             None))
+        edit(tmp_path, read="wait")
+        mid = await send(h, "!asks", None)
+        await waiting(h)
+        h.daemon.latch("test latch")
+        go_file(h).touch()
+        await settled(h, mid)
+        assert audited(h, kind="drop", message_id=ref_id(mid), what="command")
+        assert queued(h, mid, "cmd") == ""
+        assert ask_status(h, ask_id) == "open" and attempts(h, ask_id)[0][-1] == "untouched"
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_details_not_fully_delivered_does_not_count(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        gate = asyncio.Event()
+
+        def hold_after_first(req: dict[str, Any]) -> None:
+            if req["idempotency_key"].startswith("askd:") and req["idempotency_key"].endswith(":0"):
+                h.fake.send_gate = gate
+        h.fake.on_send = hold_after_first
+        request = await send(h, "!details", first)
+        await wait_until(lambda: sent_mid(h, f"askd:{ask_id}:{request}:0") is not None)
+        stored = h.store.ask(ask_id)
+        assert stored is not None and len(asks.stored_details(stored)) > 1
+        details = sent_mid(h, f"askd:{ask_id}:{request}:0")
+        assert (await say(h, approve(), details)).startswith(f"Ask {ask_id} was shortened.")
+        assert decisions(h) == [] and not h.store.details_delivered(ask_id, "op")
+        h.fake.on_send = None
+        h.fake.send_gate = None
+        gate.set()
+        await wait_until(lambda: h.store.details_delivered(ask_id, "op"))
+        assert (await say(h, approve(), details)).startswith(f"Approved {BEAD}")
+    go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=200)
+
+
+@needs_tmux
+def test_decided_open_bead_blocks_before_launch(tmp_path: Path) -> None:
+    """A bead that holds a decision but is still open (a partial write elsewhere) stops in preflight."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        edit(tmp_path, decision="approve", approved_by="someone-else")
+        text = await say(h, approve(), first)
+        assert text.startswith(f"{BEAD} holds a decision admind cannot confirm as yours. Nothing more")
+        assert decisions(h) == [] and ask_status(h, ask_id) == "blocked"
+        assert attempts(h, ask_id)[0][-1] == "refused"
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_reconcile_skips_a_replaced_attempt(tmp_path: Path) -> None:
+    """A reconcile of an attempt that is no longer the ask's current one reads nothing and settles
+    nothing."""
+    old, new = "ee" * 32, "ef" * 32
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        assert h.store.begin_attempt(Attempt(ask_id, new, "approve", "op", "marmot:" + ref_id(new), D, None))
+        before = reads(h)
+        await h.daemon.reconcile_one(ask_id, old, "deciding", restarted=False)
+        assert audited(h, kind="ask", action="reconcile-skipped", ask_id=ask_id)
+        assert reads(h) == before and ask_status(h, ask_id) == "deciding" and current(h, ask_id) == new
     go(tmp_path, scenario)
