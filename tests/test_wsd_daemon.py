@@ -1,12 +1,15 @@
 import asyncio
+import contextlib
 import gc
 import os
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
@@ -14,12 +17,12 @@ from wsd_env import PROFILES, WS, git_repo
 
 from heterodyne.wsd import cli, ctl, daemon, ids, journal
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
-from heterodyne.wsd.gate import instance_lock
+from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import Session
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings
-from heterodyne.wsd.states import Reason, WsState
+from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 
@@ -376,19 +379,21 @@ def test_a_timer_that_dies_ends_serve(tmp_path: Path) -> None:
     assert not s.socket.exists()
 
 
-def test_a_failed_tick_is_recorded_and_recovered_again(tmp_path: Path) -> None:
+def test_a_failed_tick_is_recorded_and_recovered_again(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     s = settings(tmp_path)
     j = Journal(s.journal)
     wsd = Wsd(s, assemble(s, j, factory(World(tmp_path / "btq-state")), FakeRuntime()))
     wsd.startup()
     calls: list[str] = []
 
-    def job(name: str) -> Outcome:
-        calls.append(name)
+    def boom(trigger: Trigger) -> Outcome:
+        calls.append(trigger.kind.value)
         raise RuntimeError("boom")
 
-    wsd._guarded(job, WS)  # pyright: ignore[reportPrivateUsage]
-    assert calls == [WS] and WS not in wsd.recovered
+    monkeypatch.setattr(wsd.parts.schedulers[WS], "pickup", boom)
+    wsd._guarded(lambda n: wsd.pickup_one(n, Trigger(TriggerKind.BACKSTOP)), WS)  # pyright: ignore[reportPrivateUsage]
+    assert calls == ["backstop"] and WS not in wsd.recovered
     assert [e.detail for e in j.events_since(0) if e.kind == "tick_failed"] == ["RuntimeError"]
 
 
@@ -475,7 +480,8 @@ def test_idle_status_has_no_attention(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("req", [ctl.CtlRequest("pause"), ctl.CtlRequest("resume"), ctl.CtlRequest("tick"),
-                                 ctl.CtlRequest("status", job="pickup")])
+                                 ctl.CtlRequest("status", job="pickup"),
+                                 ctl.CtlRequest("tick", job="pickup", all=True)])
 def test_handler_refuses_what_the_socket_refuses(tmp_path: Path, req: ctl.CtlRequest) -> None:
     """Called directly (plan 6 may), a pause or resume without a workstream, or a tick without a job, is
     refused rather than read as a pickup of every workstream."""
@@ -485,3 +491,387 @@ def test_handler_refuses_what_the_socket_refuses(tmp_path: Path, req: ctl.CtlReq
     world.add("btq-1")
     assert asyncio.run(wsd.handle(req)).result == "refused"
     assert world.claims == [] and not list((tmp_path / "btq-state").glob("*/paused"))
+
+
+class Threads:
+    """Worker threads for a test: each is started, joined with a bound and checked, and an exception in
+    one is kept for the test to assert on."""
+
+    def __init__(self) -> None:
+        self.started: list[threading.Thread] = []
+        self.errors: dict[str, BaseException] = {}
+        self.results: dict[str, object] = {}
+
+    def start(self, name: str, fn: Callable[[], object]) -> None:
+        def body() -> None:
+            try:
+                self.results[name] = fn()
+            except BaseException as exc:  # noqa: BLE001 - kept for the test
+                self.errors[name] = exc
+        thread = threading.Thread(target=body, name=name)
+        thread.start()
+        self.started.append(thread)
+
+    def join(self) -> None:
+        for thread in self.started:
+            thread.join(10)
+            assert not thread.is_alive(), f"{thread.name} did not finish"
+
+
+def test_a_pickup_waiting_behind_a_failing_one_recovers_first(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: pickup B arrives while pickup A holds the workstream; A then fails (JournalBusy) and so
+    leaves it unrecovered. B must decide whether to recover only once it has the lock, so it recovers
+    before picking up rather than act on the state A could not confirm."""
+    a_inside, b_waiting, release_a = threading.Event(), threading.Event(), threading.Event()
+
+    def cp(point: str) -> None:
+        if point == "lock.waiting" and threading.current_thread().name == "B":
+            b_waiting.set()
+
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), FakeRuntime(), cp=cp))
+    wsd.startup()
+    assert WS in wsd.recovered
+    sched = wsd.parts.schedulers[WS]
+    real_pickup, real_recover = sched.pickup, daemon.recover
+    recoveries: list[str] = []
+
+    def pickup(trigger: Trigger) -> Outcome:
+        if threading.current_thread().name == "A":
+            a_inside.set()
+            assert release_a.wait(10)
+            raise JournalBusy("SQLITE_BUSY")
+        return real_pickup(trigger)
+
+    def counted(sch: daemon.Scheduler) -> daemon.Recovered:
+        recoveries.append(threading.current_thread().name)
+        return real_recover(sch)
+
+    monkeypatch.setattr(sched, "pickup", pickup)
+    monkeypatch.setattr(daemon, "recover", counted)
+    world.add("btq-1")
+    threads = Threads()
+    try:
+        threads.start("A", lambda: wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP)))
+        assert a_inside.wait(10)
+        threads.start("B", lambda: wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP)))
+        assert b_waiting.wait(10)
+    finally:
+        release_a.set()
+        threads.join()
+    assert isinstance(threads.errors.pop("A"), JournalBusy) and threads.errors == {}
+    assert recoveries == ["B"] and WS in wsd.recovered
+    assert threads.results["B"] is Outcome.STARTED and world.claims == ["btq-1"]
+
+
+def test_serve_returns_only_after_a_running_job_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: a timer's pickup in its worker thread when stop comes is waited for, not abandoned."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    inside, release = threading.Event(), threading.Event()
+    finished: list[str] = []
+
+    def slow(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.BACKSTOP and not inside.is_set():
+            inside.set()
+            assert release.wait(10)
+            finished.append("pickup")
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", slow)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        try:
+            await until(inside.is_set)
+            stop.set()
+            done, _ = await asyncio.wait([task], timeout=0.3)
+            assert not done                 # still waiting for the job in its thread
+        finally:
+            release.set()
+        await asyncio.wait_for(task, 10)
+        assert finished == ["pickup"]
+
+    asyncio.run(scenario())
+    assert not s.socket.exists()
+
+
+def test_jobs_outliving_the_drain_keep_wsd_from_finishing(tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    inside, release = threading.Event(), threading.Event()
+
+    def stuck(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.BACKSTOP:
+            inside.set()
+            assert release.wait(10)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", stuck)
+    monkeypatch.setattr(daemon, "DRAIN_SECONDS", 0.1)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(inside.is_set)
+        stop.set()
+        with pytest.raises(daemon.Undrained):
+            await asyncio.wait_for(task, 10)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+        wsd.pool.shutdown(wait=True)
+    assert not s.socket.exists()
+
+
+class Recording(ctl.CtlServer):
+    made: list["Recording"] = []
+
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        Recording.made.append(self)
+
+
+def test_an_accepted_client_cannot_start_a_job_once_stopping(tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: a client accepted before stop whose request arrives during shutdown is refused; no
+    pickup starts after the socket stops."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    operator: list[Trigger] = []
+
+    def counted(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.OPERATOR:
+            operator.append(trigger)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", counted)
+    Recording.made = []
+    monkeypatch.setattr(daemon, "CtlServer", Recording)
+
+    async def scenario() -> bytes:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(s.socket.exists)
+        reader, writer = await asyncio.open_unix_connection(str(s.socket))
+        try:
+            await until(lambda: len(Recording.made[0].handlers) == 1)       # accepted, request unread
+            stop.set()
+            await until(lambda: wsd.stopping)
+            writer.write(msgspec.json.encode(ctl.CtlRequest("tick", job="pickup")) + b"\n")
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), 10)
+        finally:
+            writer.close()
+        await asyncio.wait_for(task, 10)
+        assert not Recording.made[0].handlers
+        return line
+
+    reply = msgspec.json.decode(asyncio.run(scenario()), type=ctl.CtlReply)
+    assert reply.result == "refused" and "stopping" in reply.message
+    assert operator == []
+
+
+def test_a_stopping_wsd_refuses_jobs_from_the_handler_too(tmp_path: Path) -> None:
+    """Plan 6 may call handle without the socket: once shutdown began it starts nothing either."""
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), FakeRuntime()))
+    wsd.startup()
+    world.add("btq-1")
+    wsd.stopping = True
+    for req in (ctl.CtlRequest("tick", job="pickup"), ctl.CtlRequest("resume", ws=WS),
+                ctl.CtlRequest("status")):
+        reply = asyncio.run(wsd.handle(req))
+        assert reply.result == "refused" and "stopping" in reply.message
+    assert world.claims == []
+
+
+def test_a_closing_socket_refuses_requests_it_has_not_read(tmp_path: Path) -> None:
+    calls: list[ctl.CtlRequest] = []
+
+    async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+        calls.append(req)
+        return ctl.CtlReply("ok", "ran")
+
+    async def scenario() -> ctl.CtlReply:
+        server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
+        await server.start()
+        reader, writer = await asyncio.open_unix_connection(str(tmp_path / "ctl.sock"))
+        try:
+            await until(lambda: len(server.handlers) == 1)
+            server.stop_accepting()
+            writer.write(msgspec.json.encode(ctl.CtlRequest("status")) + b"\n")
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), 10)
+        finally:
+            writer.close()
+            await server.close()
+        return msgspec.json.decode(line, type=ctl.CtlReply)
+
+    assert asyncio.run(scenario()).result == "refused" and calls == []
+
+
+def test_close_does_not_leave_a_handler_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connection whose handler is still busy when close() gives up waiting is cancelled, not left
+    to act after close returns."""
+    monkeypatch.setattr(ctl, "CLOSE_SECONDS", 0.1)
+    entered, never = asyncio.Event(), asyncio.Event()
+    ended: list[str] = []
+
+    async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+        entered.set()
+        try:
+            await asyncio.wait_for(never.wait(), 10)
+        finally:
+            ended.append("handler")
+        return ctl.CtlReply("ok", "late")
+
+    async def scenario() -> None:
+        server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
+        await server.start()
+        reader, writer = await asyncio.open_unix_connection(str(tmp_path / "ctl.sock"))
+        try:
+            writer.write(msgspec.json.encode(ctl.CtlRequest("status")) + b"\n")
+            await writer.drain()
+            await asyncio.wait_for(entered.wait(), 10)
+            await asyncio.wait_for(server.close(), 5)
+            assert ended == ["handler"] and not server.handlers
+        finally:
+            writer.close()
+
+    asyncio.run(scenario())
+
+
+def test_run_closes_the_journal_then_releases_the_lock(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: run closes the journal itself, on a clean stop as on a failed startup."""
+    s = settings(tmp_path)
+    closed: list[Journal] = []
+    real_close = Journal.close
+
+    def close(self: Journal) -> None:
+        closed.append(self)
+        real_close(self)
+
+    async def served(d: Wsd) -> None:
+        return None
+
+    monkeypatch.setattr(Journal, "close", close)
+    monkeypatch.setattr(cli, "_serve", served)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 0
+    assert len(closed) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        closed[0].db.execute("SELECT 1")
+    os.close(instance_lock(s.instance_lock))        # released
+
+
+def test_a_failed_startup_closes_the_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    closed: list[Journal] = []
+    real_close = Journal.close
+
+    def close(self: Journal) -> None:
+        closed.append(self)
+        real_close(self)
+
+    async def busy(d: Wsd) -> None:
+        raise JournalBusy("SQLITE_BUSY")
+
+    monkeypatch.setattr(Journal, "close", close)
+    monkeypatch.setattr(cli, "_serve", busy)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 1
+    assert len(closed) == 1
+    os.close(instance_lock(s.instance_lock))
+
+
+def test_undrained_jobs_keep_the_journal_and_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
+    """A job still running after the drain must not see its journal closed, nor a second wsd start."""
+    s = settings(tmp_path)
+    closed: list[Journal] = []
+    real_close = Journal.close
+
+    def close(self: Journal) -> None:
+        closed.append(self)
+        real_close(self)
+
+    async def undrained(d: Wsd) -> None:
+        raise daemon.Undrained("1 job(s) still running after 120 s")
+
+    monkeypatch.setattr(Journal, "close", close)
+    monkeypatch.setattr(cli, "_serve", undrained)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 1
+    assert "stay held" in capsys.readouterr().err
+    try:
+        assert closed == []
+        with pytest.raises(AlreadyRunning):
+            instance_lock(s.instance_lock)
+    finally:
+        for fd in Path("/proc/self/fd").iterdir():     # the test, not the process, ends here: let go
+            with contextlib.suppress(OSError):
+                if fd.readlink() == s.instance_lock:
+                    os.close(int(fd.name))
+
+
+def test_a_reply_over_64_kib_arrives_whole(tmp_path: Path) -> None:
+    """r1 review: asyncio's default 64 KiB line limit made a long status read as "wsd is not running"."""
+    big = {f"ws{i}": {"beads": "x" * 1000} for i in range(100)}        # about 100 KiB
+
+    async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+        return ctl.CtlReply("ok", "status", big)
+
+    async def scenario() -> ctl.CtlReply:
+        server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
+        await server.start()
+        try:
+            return await ctl.request(tmp_path / "ctl.sock", ctl.CtlRequest("status"))
+        finally:
+            await server.close()
+
+    reply = asyncio.run(scenario())
+    assert reply.result == "ok" and reply.data == big
+
+
+def test_a_reply_over_the_maximum_is_refused_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ctl, "MAX_REPLY", 70_000)
+
+    async def handler(req: ctl.CtlRequest) -> ctl.CtlReply:
+        return ctl.CtlReply("ok", "status", {f"ws{i}": {"beads": "x" * 1000} for i in range(100)})
+
+    async def scenario() -> ctl.CtlReply:
+        server = ctl.CtlServer(tmp_path / "ctl.sock", handler)
+        await server.start()
+        try:
+            return await ctl.request(tmp_path / "ctl.sock", ctl.CtlRequest("status"))
+        finally:
+            await server.close()
+
+    reply = asyncio.run(scenario())
+    assert reply.result == "failed" and reply.message.startswith(ctl.TOO_LARGE) and reply.data == {}
+
+
+def test_status_counts_finished_beads_unless_asked_for_all(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    j = Journal(s.journal)
+    wsd = Wsd(s, assemble(s, j, factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    wsd.startup()
+    for bead in ("btq-7", "btq-8"):
+        j.set_state(WS, bead, BeadState.CLAIMING)
+    j.set_state(WS, "btq-8", BeadState.DROPPED, Reason.CLAIM_LOST)
+    default = wsd.status(WS)[WS]
+    assert (default["beads"], default["finished"]) == ("btq-7=claiming", "1")
+    everything = asyncio.run(wsd.handle(ctl.CtlRequest("status", ws=WS, all=True))).data[WS]
+    assert set(everything["beads"].split(",")) == {"btq-7=claiming", "btq-8=dropped(claim_lost)"}

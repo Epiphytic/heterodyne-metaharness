@@ -6,6 +6,11 @@ acknowledged only once no claim can start. With wsd stopped nothing claims, and 
 
 A journal locked by another process (JournalBusy) at startup ends `wsd run` with exit 1, not EX_CONFIG:
 nothing was changed, so the unit's restart retries safely.
+
+`run` closes the journal and then releases the instance lock, in that order, on every path, once the
+daemon has drained its jobs. If jobs are still running when it gives up waiting (Undrained), it keeps
+both: they are released when the process exits, after the interpreter has joined those threads, so a
+second wsd can never start beside them.
 """
 
 import argparse
@@ -17,7 +22,7 @@ from collections.abc import Sequence
 
 from heterodyne.config import ConfigError
 from heterodyne.wsd import btq, ctl
-from heterodyne.wsd.daemon import Wsd, assemble
+from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
@@ -40,6 +45,7 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime) -> int
     except AlreadyRunning:
         print("wsd: another wsd is already running on this state directory", file=sys.stderr)
         return 1
+    held = False        # jobs outlived shutdown: keep the journal and the lock until the process exits
     try:
         try:
             journal = Journal(s.journal)
@@ -47,16 +53,26 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime) -> int
             print(f"wsd: the journal failed its check ({exc}); it was left in place for inspection. "
                   "Move it aside to start from beads alone.", file=sys.stderr)
             return EX_CONFIG
-        if journal.fresh:
-            journal.emit("-", None, "journal_created")
-        daemon = Wsd(s, assemble(s, journal, factory, runtime))
-        asyncio.run(_serve(daemon))
-        return 0
+        try:
+            if journal.fresh:
+                journal.emit("-", None, "journal_created")
+            daemon = Wsd(s, assemble(s, journal, factory, runtime))
+            asyncio.run(_serve(daemon))
+            return 0
+        except Undrained as exc:
+            held = True
+            print(f"wsd: {exc}; the journal and the instance lock stay held until they end and wsd exits",
+                  file=sys.stderr)
+            return 1
+        finally:
+            if not held:
+                journal.close()
     except JournalBusy:
         print("wsd: the journal is locked by another process; retrying is safe", file=sys.stderr)
         return 1
     finally:
-        os.close(lock)
+        if not held:
+            os.close(lock)
 
 
 async def _serve(daemon: Wsd) -> None:
@@ -109,12 +125,14 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name in ("pause", "resume"):
         sub.add_parser(name, help=f"{name} new claims for a workstream").add_argument("ws")
-    sub.add_parser("status", help="show what wsd is doing").add_argument("ws", nargs="?")
+    status = sub.add_parser("status", help="show what wsd is doing")
+    status.add_argument("ws", nargs="?")
+    status.add_argument("--all", action="store_true", help="list closed and dropped beads too")
     args = parser.parse_args(argv)
     try:
         s = _settings()
         if args.cmd == "status":
-            reply = _ask(s, ctl.CtlRequest("status", ws=args.ws))
+            reply = _ask(s, ctl.CtlRequest("status", ws=args.ws, all=args.all))
             return 1 if reply is None else _print(reply)
         reply = _ask(s, ctl.CtlRequest(args.cmd, ws=args.ws))
         return 1 if reply is None else _print(reply)

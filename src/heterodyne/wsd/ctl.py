@@ -1,8 +1,13 @@
 """wsd's host control socket (ADR 0001 §4.3, §9): `wsd tick <job>` from the timers, and `wsctl pause`,
 `resume` and `status`.
 
-One JSON request per connection, one JSON reply. The socket is 0600 inside the 0700 wsd state directory;
-anything able to use it can already act as wsd.
+One JSON request per connection, one JSON reply, each a single newline-terminated line. A request is at
+most MAX_REQUEST bytes and a reply at most MAX_REPLY bytes; the client reads up to MAX_REPLY, and a reply
+that would be longer is replaced by a "failed" reply saying so (TOO_LARGE), never cut off. The socket is
+0600 inside the 0700 wsd state directory; anything able to use it can already act as wsd.
+
+Closing stops listening, refuses any request still to be read, and waits up to CLOSE_SECONDS for the
+accepted connections' handlers before cancelling them, so none outlives `close()`.
 """
 
 import asyncio
@@ -19,7 +24,10 @@ import msgspec
 from heterodyne.fsutil import private_dir
 
 MAX_REQUEST = 4096
+MAX_REPLY = 1 << 20         # 1 MiB; status leaves finished beads out unless asked, to stay well inside it
 READ_SECONDS = 5.0
+CLOSE_SECONDS = 2.0
+TOO_LARGE = "reply too large"
 
 
 def _no_data() -> dict[str, dict[str, str]]:
@@ -30,6 +38,7 @@ class CtlRequest(msgspec.Struct, frozen=True):
     op: Literal["tick", "status", "pause", "resume"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause and resume need one
+    all: bool = False           # status only: list closed and dropped beads too
 
 
 class CtlReply(msgspec.Struct, frozen=True):
@@ -52,6 +61,8 @@ def refusal(req: CtlRequest) -> str:
         return "tick needs a job; nothing else takes one"
     if req.op in ("pause", "resume") and req.ws is None:
         return f"{req.op} needs a workstream"
+    if req.all and req.op != "status":
+        return "only status takes all"
     return ""
 
 
@@ -61,6 +72,8 @@ class CtlServer:
         self.handler = handler
         self.server: asyncio.Server | None = None
         self.created: tuple[int, int] | None = None
+        self.closing = False
+        self.handlers: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Bind the socket ourselves, so a symlink at the path is refused rather than followed. Only a
@@ -78,20 +91,37 @@ class CtlServer:
             self.created = (made.st_dev, made.st_ino)
             sock.listen()
             sock.setblocking(False)
-            self.server = await asyncio.start_unix_server(self._handle, sock=sock, limit=MAX_REQUEST + 2)
+            self.server = await asyncio.start_unix_server(self._track, sock=sock, limit=MAX_REQUEST + 2)
         except BaseException:
             sock.close()
             raise
 
-    async def close(self) -> None:
+    def stop_accepting(self) -> None:
+        """Stop listening and refuse every request not yet read; accepted handlers carry on."""
+        self.closing = True
         if self.server is not None:
             self.server.close()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self.server.wait_closed(), 2)
+
+    async def close(self) -> None:
+        self.stop_accepting()
+        if self.handlers:
+            await asyncio.wait(set(self.handlers), timeout=CLOSE_SECONDS)
+        for task in set(self.handlers):
+            task.cancel()
+        await asyncio.gather(*self.handlers, return_exceptions=True)
         with contextlib.suppress(OSError):
             current = os.lstat(self.path)
             if (current.st_dev, current.st_ino) == self.created:
                 self.path.unlink()
+
+    async def _track(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()       # the server runs each connection in its own task
+        if task is not None:
+            self.handlers.add(task)
+        try:
+            await self._handle(reader, writer)
+        finally:
+            self.handlers.discard(task)  # pyright: ignore[reportArgumentType]
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -103,7 +133,7 @@ class CtlServer:
             except (TimeoutError, ValueError, msgspec.DecodeError):
                 reply = CtlReply("refused", "malformed request")
             else:
-                why = refusal(req)
+                why = "wsd is stopping; nothing more was started" if self.closing else refusal(req)
                 if why:
                     reply = CtlReply("refused", why)
                 else:
@@ -111,7 +141,7 @@ class CtlServer:
                         reply = await self.handler(req)
                     except Exception as exc:  # noqa: BLE001 - fixed wording; the type is enough
                         reply = CtlReply("failed", f"wsd hit an internal error ({type(exc).__name__})")
-            writer.write(msgspec.json.encode(reply) + b"\n")
+            writer.write(frame(reply))
             await writer.drain()
         except Exception:  # noqa: BLE001, S110 - one bad client must not end the server
             pass
@@ -121,9 +151,20 @@ class CtlServer:
                 await writer.wait_closed()
 
 
+def frame(reply: CtlReply) -> bytes:
+    """One reply line, never over MAX_REPLY bytes: a longer one is refused as a whole, not truncated."""
+    line = msgspec.json.encode(reply) + b"\n"
+    if len(line) > MAX_REPLY:
+        line = msgspec.json.encode(CtlReply(
+            "failed", f"{TOO_LARGE}: {len(line)} bytes, more than {MAX_REPLY}; ask about one workstream, "
+                      "or leave out --all")) + b"\n"
+    return line
+
+
 async def request(path: Path, req: CtlRequest, timeout: float = 600.0) -> CtlReply:
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(path)), 5)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(str(path), limit=MAX_REPLY + 1), 5)
     except (OSError, TimeoutError) as exc:
         raise CtlUnavailable(type(exc).__name__) from None
     try:
