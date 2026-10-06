@@ -10,6 +10,8 @@ Only beads with no open operation are swept: an open operation's replay owns its
 - A bead of ours is checked against its row: `needs-human` is STUCK; no row (a lost journal) is held as
   JOURNAL_LOST; STUCK and HELD rows stay so until the operator's release; a status, label or row that
   doesn't fit is escalated as UNEXPECTED_STATE; btq's post-claim checks must still pass.
+- A STUCK or HELD row of a bead that is not ours stays, unless bd confirms the bead no longer exists: then
+  there is nothing to release, and it is dropped.
 - A RUNNING bead with no session and a readable record gets a resume operation at `unlabelled` (it was
   never parked). With no readable record, or with a session under another key, it is escalated.
 """
@@ -58,9 +60,12 @@ class _Sweep:
             if bead not in ours and j.op_for(name, bead) is None:
                 self._not_ours(bead, sessions)
         for row in j.states(name):
-            if (row.state not in TERMINAL and row.state not in KEEP and row.bead not in ours
-                    and row.bead not in by_bead and j.op_for(name, row.bead) is None):
-                self._not_ours(row.bead, [])
+            if (row.state not in TERMINAL and row.bead not in ours and row.bead not in by_bead
+                    and j.op_for(name, row.bead) is None):
+                if row.state not in KEEP:
+                    self._not_ours(row.bead, [])
+                elif not d.beads.exists(name, row.bead):     # nothing is left for a release to move on
+                    j.adopt(name, row.bead, BeadState.DROPPED, Reason.CLAIM_LOST, "the bead no longer exists")
         for bead in sorted(ours.values(), key=lambda b: b.id):
             if j.op_for(name, bead.id) is None:
                 self._ours(bead, by_bead.get(bead.id, []))

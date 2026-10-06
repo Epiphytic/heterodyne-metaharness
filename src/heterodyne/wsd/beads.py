@@ -114,6 +114,7 @@ class ClaimView(StrEnum):
     OURS = "ours"      # in_progress, assigned to our per-bead worker
     FREE = "free"      # open and unassigned: the claim did not happen
     OTHER = "other"    # anything else: someone else holds it, or it moved on
+    GONE = "gone"      # bd says the bead does not exist
 
 
 @dataclass(frozen=True)
@@ -287,8 +288,25 @@ class BeadsAdapter:
             raise BeadsUnavailable(f"show failed ({type(exc).__name__})") from None
         return True
 
+    def claimable(self, ws: str, bead: Bead) -> bool:
+        """Whether btq's claim can take a bead the workstream worker's `ready()` listed. btq's claim lists
+        ready work again with the claiming per-bead worker and refuses anything outside it, and the two
+        workers' `matches` differ only in the session: a bead pinned with `session:<workstream session>`
+        is listed but can never be claimed. A bead whose ID is not a slug has no per-bead worker."""
+        if not ids.SLUG.fullmatch(bead.id):
+            return False
+        queue = self.bead_queue(ws, bead.id)
+        return self._call(lambda: queue.matches(bead.raw))
+
     def read_claim(self, ws: str, bead: str) -> ClaimView:
-        found = self.show(ws, bead)
+        """Who holds the claim. GONE only when bd confirms the bead does not exist; any other failure to
+        read it raises BeadsUnavailable."""
+        try:
+            found = self.show(ws, bead)
+        except BeadsUnavailable:
+            if self.exists(ws, bead):
+                raise
+            return ClaimView.GONE
         if found.status == "in_progress" and found.assignee == self.bead_queue(ws, bead).worker:
             return ClaimView.OURS
         if found.status == "open" and found.assignee is None:

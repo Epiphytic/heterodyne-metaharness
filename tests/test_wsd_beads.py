@@ -101,6 +101,35 @@ def test_claim_read_back_views(world: World) -> None:
     assert adapter.read_claim(WS, "btq-1") is ClaimView.OURS
     world.beads["btq-1"].assignee = "someone:else"
     assert adapter.read_claim(WS, "btq-1") is ClaimView.OTHER
+    del world.beads["btq-1"]
+    assert adapter.read_claim(WS, "btq-1") is ClaimView.GONE
+
+
+def test_an_unreadable_claim_is_never_gone(world: World) -> None:
+    world.add("btq-1")
+    adapter = BeadsAdapter(factory(world))
+    world.fault("show", RuntimeError("dolt down"))
+    with pytest.raises(BeadsUnavailable):         # the show failed, and the bead still exists
+        adapter.read_claim(WS, "btq-1")
+    world.down = True
+    del world.beads["btq-1"]
+    with pytest.raises(BeadsUnavailable):         # gone, but bd can't confirm it
+        adapter.read_claim(WS, "btq-1")
+
+
+def test_a_session_pin_is_listed_but_never_claimable(world: World) -> None:
+    """btq's ready() for the workstream worker lists a bead pinned to that worker's session; the claim, by
+    the per-bead worker, refuses it. `claimable` gives the claim's answer before trying."""
+    world.add("btq-1", labels=[f"session:{ids.ws_session(WS)}"])
+    world.add("btq-2")
+    world.add("btq-3", labels=[f"session:{ids.bead_session(WS, 'btq-3')}"])
+    adapter = BeadsAdapter(factory(world))
+    listed = {b.id: b for b in adapter.ready(WS)}
+    assert sorted(listed) == ["btq-1", "btq-2"]           # btq-3 is pinned to its own per-bead worker
+    assert [adapter.claimable(WS, b) for b in listed.values()] == [False, True]
+    with pytest.raises(ClaimRefused):
+        adapter.claim(WS, "btq-1")
+    assert adapter.claim(WS, "btq-2").status == "in_progress"
 
 
 def test_claim_errors_are_classified(world: World) -> None:
@@ -567,11 +596,14 @@ beads = json.loads({beads!r})
 with open(log, "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
 args = sys.argv[1:]
+ready = json.loads({ready!r})
 if "show" in args:
     bead = beads.get(args[args.index("show") + 1])
     if bead is None:
         sys.exit("no issue found")
     print(json.dumps([bead]))
+elif "ready" in args:
+    print(json.dumps(ready))
 else:
     print("[]")
 """
@@ -607,7 +639,7 @@ def test_contract_with_real_btq(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
              "btq-3": bead("btq-3", "task", metadata={"design_approval": "btq-2"})}   # not an approval
     bd = bindir / "bd"
     bd.write_text(FAKE_BD.format(python=sys.executable, log=str(tmp_path / "bd.log"),
-                                 beads=json.dumps(beads)))
+                                 beads=json.dumps(beads), ready="[]"))
     bd.chmod(bd.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
@@ -647,3 +679,56 @@ def test_btq_without_wsd_agent_is_refused(tmp_path: Path) -> None:
 def test_missing_btq_is_unavailable(tmp_path: Path) -> None:
     with pytest.raises(btq.BtqUnavailable):
         btq.load(tmp_path)
+
+
+@pytest.mark.skipif(not os.environ.get("BTQ_REPO"), reason="needs $BTQ_REPO (a beads-task-queue checkout)")
+def test_contract_ready_and_claim_agree_with_real_btq(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex r1 finding 1, against the real btq Queue and a fake `bd`: the workstream worker's ready()
+    lists a bead pinned to its own session, the per-bead worker's claim refuses exactly that bead, and
+    `claimable` agrees. The unpinned bead passes eligibility (the fake bd never records the claim, so
+    btq's ownership read-back fails after it: uncertain, not refused)."""
+    home, bindir, config = tmp_path / "home", tmp_path / "bin", tmp_path / "btq-config"
+    for d in (home, bindir, config):
+        d.mkdir()
+    (config / "credentials.json").write_text(json.dumps({"wsd": "test-only"}))
+    (config / "policy.json").write_text("{}")
+    checkout = Path(os.environ["BTQ_REPO"])
+    for name in list(os.environ):
+        if name.startswith(("BTQ_", "BEADS_", "BD_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("BTQ_POLICY", str(config / "policy.json"))
+    locations = {"config_dir": str(config), "repo": str(tmp_path), "dolt_host": "127.0.0.1",
+                 "dolt_port": "1", "dolt_database": "test-only",
+                 "credentials": str(config / "credentials.json"), "tls_cert": str(config / "server.crt")}
+
+    def bead(bead_id: str, *labels: str) -> dict[str, Any]:
+        return {"id": bead_id, "title": "t", "status": "open", "dependency_count": 0,
+                "labels": ["agent:wsd", f"ws:{WS}", "kind:research", *labels]}
+
+    ready = [bead("btq-1", f"session:{ids.ws_session(WS)}"), bead("btq-2")]
+    bd = bindir / "bd"
+    bd.write_text(FAKE_BD.format(python=sys.executable, log=str(tmp_path / "bd.log"),
+                                 beads=json.dumps({b["id"]: b for b in ready}), ready=json.dumps(ready)))
+    bd.chmod(bd.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr("socket.gethostname", lambda: "fakehost")
+    adapter = BeadsAdapter(btq.factory(btq.load(checkout), locations))
+    listed = adapter.ready(WS)
+    assert [b.id for b in listed] == ["btq-1", "btq-2"]
+    assert [adapter.claimable(WS, b) for b in listed] == [False, True]
+    with pytest.raises(ClaimRefused, match="not eligible"):
+        adapter.claim(WS, "btq-1")
+    with pytest.raises(ClaimUncertain):
+        adapter.claim(WS, "btq-2")
+    logged = [json.loads(line) for line in (tmp_path / "bd.log").read_text().splitlines()]
+    assert [a for a in logged if "update" in a and "--claim" in a] != []
+    assert all("btq-1" not in a for a in logged if "update" in a)
+
+
+def test_a_bead_id_that_is_not_a_slug_is_never_claimable(world: World) -> None:
+    world.add("BTQ-1")
+    adapter = BeadsAdapter(factory(world))
+    [listed] = adapter.ready(WS)
+    assert adapter.claimable(WS, listed) is False

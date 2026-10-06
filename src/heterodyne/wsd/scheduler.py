@@ -16,17 +16,37 @@ the workstream's operation lock (`Parker.entry`):
    starts. A refused claim, a lost claim or a confirmed launch failure moves on to the next candidate
    (the "never idle while an unblocked bead exists" rule); an uncertain launch keeps the role and holds.
 
-New work is journaled: intent (with the coder role it is for), claim (inside the claim gate), worktree,
-then the launch guard, which writes the launched-session record before launching. A replay launches the
-role, profile, session key and worktree its journal recorded; a coder role renamed in the configuration
-before the worktree step escalates the pickup rather than mix the two. A claim with an uncertain outcome is
-read back before anything else; while it can't be read back, the workstream is held.
+Discovery and claiming agree: btq's claim refuses whatever its per-bead worker's own `ready()` would not
+list, so a listed bead that worker can't claim (a `session:` pin on the workstream session), or one still
+carrying wsd's park labels, is never claimed: it is recorded STUCK as UNCLAIMABLE, and pickup reports STUCK
+rather than NOTHING while only such beads are ready. A claim refused for a bead that is still free is
+recorded the same way. Such a row is dropped once the bead is no longer listed, and a bead that becomes
+claimable is tried again.
+
+A ready bead is open and unassigned: whoever held it gave it back to the queue, and claims are beads'
+(§3.3). So a row the journal kept for it (STUCK after a lost claim, HELD, any other) is dropped as
+"returned to the queue" in the transaction that opens the new claim. The operator's release can't apply
+to it: it moves on only beads wsd still holds.
+
+New work is journaled: intent (with the coder role it is for), claim (inside the claim gate), placement
+(repository, worktree, profile and session key, recorded before any effect), worktree, then the launch
+guard, which writes the launched-session record before launching. A replay creates the worktree and
+launches exactly what the placement recorded, whatever the configuration says since; a coder role renamed
+in the configuration before the placement escalates the pickup rather than mix the two. A claim with an
+uncertain outcome is read back before anything else; while it can't be read back, the workstream is held.
+
+An open operation whose bead bd confirms no longer exists can never finish: its sessions are stopped (an
+unconfirmed stop holds, and the operation stays open), then it ends, with any hold it set, and the bead is
+dropped.
 """
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from heterodyne.wsd.beads import (
+    HELD,
+    PARKED,
     Bead,
     BeadsUnavailable,
     ClaimRefused,
@@ -41,12 +61,13 @@ from heterodyne.wsd.gate import Paused
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
 from heterodyne.wsd.park import Launch, Parker, resumable
 from heterodyne.wsd.runtime import RuntimeUnavailable
-from heterodyne.wsd.states import BeadState, Reason, ws_state
+from heterodyne.wsd.states import BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place, record
 
 POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed",
-          "pickup.worktree!", "pickup.worktree", "pickup.recorded!", "pickup.launched!", "pickup.done")
+          "pickup.placed", "pickup.worktree!", "pickup.worktree", "pickup.recorded!", "pickup.launched!",
+          "pickup.done")
 RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 
 
@@ -71,6 +92,7 @@ class Outcome(StrEnum):
     RESUMED = "resumed"          # a parked bead resumed
     BUSY = "busy"                # the coder role already has a session
     NOTHING = "nothing"          # nothing is ready and nothing is resumable
+    STUCK = "stuck"              # only beads btq's claim can't take are ready; their rows say why
     HELD = "held"                # pickup is held (see the workstream's holds)
 
 
@@ -138,8 +160,16 @@ class Scheduler:
                 return self._stalled()
         if self.d.beads.paused(name):
             return Outcome.NOTHING       # pausing stops new claims only (§4.3)
-        for bead in self.d.beads.ready(name):
+        ready = self.d.beads.ready(name)
+        self._forget_unlisted({b.id for b in ready})
+        stuck = False
+        for bead in ready:
             if j.op_for(name, bead.id) is not None:
+                continue
+            why = self._unclaimable(bead)
+            if why:
+                j.adopt(name, bead.id, BeadState.STUCK, Reason.UNCLAIMABLE, why)
+                stuck = True
                 continue
             try:
                 result = self.start_new(bead, trigger.ref)
@@ -149,7 +179,25 @@ class Scheduler:
                 return Outcome.STARTED
             if result in (Launch.WAIT, Launch.UNCERTAIN):
                 return self._stalled()
-        return Outcome.NOTHING
+            row = j.state(name, bead.id)
+            stuck = stuck or (row is not None and row.reason is Reason.UNCLAIMABLE)
+        return Outcome.STUCK if stuck else Outcome.NOTHING
+
+    def _unclaimable(self, bead: Bead) -> str:
+        """Why btq's claim can't take a listed bead, or "" if it can."""
+        if not self.d.beads.claimable(self.ws.name, bead):
+            return "pinned to a btq session no per-bead worker has"
+        if PARKED in bead.labels or HELD in bead.labels:
+            return "unclaimed, but still labelled as parked by wsd"
+        return ""
+
+    def _forget_unlisted(self, listed: set[str]) -> None:
+        """UNCLAIMABLE rows of beads no longer listed as ready: nothing waits on them any more."""
+        j, name = self.d.journal, self.ws.name
+        for row in j.states(name):
+            if (row.state is BeadState.STUCK and row.reason is Reason.UNCLAIMABLE and row.bead not in listed
+                    and j.op_for(name, row.bead) is None):
+                j.adopt(name, row.bead, BeadState.DROPPED, Reason.CLAIM_ABANDONED, "no longer ready")
 
     def _stalled(self) -> Outcome:
         return Outcome.HELD if self.d.journal.holds(self.ws.name) else Outcome.BUSY
@@ -169,6 +217,11 @@ class Scheduler:
     def start_new(self, bead: Bead, ref: str | None) -> Launch:
         j, name = self.d.journal, self.ws.name
         with j.transaction():
+            row = j.state(name, bead.id)
+            if row is not None and not allowed(row.state, BeadState.CLAIMING):
+                # Listed as ready, so open and unassigned: the claim this row describes was given back to
+                # the queue, and beads are the truth for claims (§3.3).
+                j.adopt(name, bead.id, BeadState.DROPPED, Reason.CLAIM_LOST, "returned to the queue")
             op = j.op_open(OpKind.PICKUP, name, bead.id, {"ref": ref or "", "role": self.ws.coder_role})
             j.set_state(name, bead.id, BeadState.CLAIMING, ref=ref)
         self.d.cp("pickup.intent")
@@ -177,9 +230,13 @@ class Scheduler:
         except Paused:
             self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
             raise
-        except ClaimRefused:
-            self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
-            return Launch.ENDED
+        except ClaimRefused as exc:
+            # Nothing was written. Still free means btq won't let this worker take it (taken by someone
+            # else is a lost race): recorded, so a bead that stays ready never reads as idle.
+            resolved = self.resolve_claim(op, (BeadState.STUCK, Reason.UNCLAIMABLE, str(exc)))
+            if resolved is not None:
+                return self._start(resolved)
+            return Launch.WAIT if Reason.CLAIM_UNCERTAIN in j.holds(name) else Launch.ENDED
         except RoutingChanged:
             # btq claimed it but routing or the design gate changed: the claim stays (wsd never
             # unclaims), the bead is never executed, and a human decides.
@@ -204,9 +261,11 @@ class Scheduler:
             self.d.journal.op_finish(op.op_id, status)
             self.d.journal.set_state(self.ws.name, op.bead, state, reason, detail, op.data.get("ref") or None)
 
-    def resolve_claim(self, op: Op) -> Op | None:
+    def resolve_claim(self, op: Op, free: tuple[BeadState, Reason, str] = (
+            BeadState.DROPPED, Reason.CLAIM_ABANDONED, "")) -> Op | None:
         """A pickup journal at `intent`: read the claim back. Returns the operation at `claimed` if the
-        claim is ours, or None if it was finished (not ours) or can't be read (held)."""
+        claim is ours, or None if it was finished (not ours, or gone) or can't be read (held). A bead
+        still free ends as `free` says."""
         j, name = self.d.journal, self.ws.name
         try:
             view = self.d.beads.read_claim(name, op.bead)
@@ -214,9 +273,12 @@ class Scheduler:
             j.hold(name, Reason.CLAIM_UNCERTAIN, op.bead)
             j.set_state(name, op.bead, BeadState.CLAIMING, Reason.CLAIM_UNCERTAIN, type(exc).__name__)
             return None
+        if view is ClaimView.GONE:
+            self._vanished(op)
+            return None
         j.unhold(name, Reason.CLAIM_UNCERTAIN)
         if view is ClaimView.FREE:
-            self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_ABANDONED)
+            self._finish(op, OpStatus.ABANDONED, *free)
             return None
         if view is ClaimView.OTHER:
             self._finish(op, OpStatus.ABANDONED, BeadState.DROPPED, Reason.CLAIM_LOST)
@@ -226,11 +288,32 @@ class Scheduler:
         return op
 
     def replay(self, op: Op) -> None:
-        """Continue an open journal from the step it reached."""
-        if op.kind is OpKind.PICKUP:
-            self.replay_pickup(op)
-        else:
-            self.parker.replay(op)
+        """Continue an open journal from the step it reached. A bead bd confirms is gone ends it."""
+        try:
+            if op.kind is OpKind.PICKUP:
+                self.replay_pickup(op)
+            else:
+                self.parker.replay(op)
+        except BeadsUnavailable:
+            if self.d.beads.exists(self.ws.name, op.bead):
+                raise
+            self._vanished(op)
+
+    def _vanished(self, op: Op) -> None:
+        """bd confirms `op`'s bead no longer exists, so the operation can never finish. Nothing runs
+        without its bead: its sessions are stopped first (RuntimeUnavailable propagates and the operation
+        stays open), then the operation ends with the holds it set, and the bead is dropped."""
+        j, name = self.d.journal, self.ws.name
+        for session in self.d.runtime.sessions(name):
+            if session.bead == op.bead:
+                self.d.runtime.stop(session.key)
+        with j.transaction():
+            j.op_finish(op.op_id, OpStatus.ABANDONED)
+            holds = j.holds(name)
+            for reason in (Reason.LAUNCH_UNCERTAIN, Reason.CLAIM_UNCERTAIN):
+                if holds.get(reason) == op.bead:
+                    j.unhold(name, reason)
+            j.adopt(name, op.bead, BeadState.DROPPED, Reason.CLAIM_LOST, "the bead no longer exists")
 
     def replay_pickup(self, op: Op) -> Launch:
         if op.step == "intent":
@@ -250,27 +333,33 @@ class Scheduler:
                 return Launch.ENDED
             try:
                 spot = place(self.ws, self.d.beads.show(name, op.bead))
-                j.set_state(name, op.bead, BeadState.STARTING)
-                path = self.d.beads.worktree(name, op.bead, spot.repo)
-            except NotOurs:
-                self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
-                return Launch.ENDED
             except ConfigInvalid as exc:
                 self.parker.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+                return Launch.ENDED
+            rec = record(self.ws, spot)
+            with j.transaction():      # the placement is the journal's before any effect depends on it
+                op = j.op_step(op.op_id, "placed", {"worktree": rec.worktree, "repo": rec.repo,
+                                                    "profile": rec.profile, "session_key": rec.session_key})
+                j.set_state(name, op.bead, BeadState.STARTING)
+            self.d.cp("pickup.placed")
+        if op.step == "placed":
+            try:
+                self.d.beads.worktree(name, op.bead, Path(op.data["repo"]))
+            except NotOurs:
+                self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
                 return Launch.ENDED
             except WorktreeConflict as exc:
                 self.parker.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
                 return Launch.ENDED
             self.d.cp("pickup.worktree!")
-            rec = record(self.ws, spot)
-            op = j.op_step(op.op_id, "worktree", {"worktree": str(path), "repo": rec.repo,
-                                                  "profile": rec.profile, "session_key": rec.session_key})
+            op = j.op_step(op.op_id, "worktree")
             self.d.cp("pickup.worktree")
+        # The guard verifies the recorded worktree itself before launching into it.
         return self.parker.launch(op, record_from(op))
 
 
 def record_from(op: Op) -> SessionRecord:
-    """The record a pickup decided on at its worktree step, from its journal: a replay launches what the
-    pickup chose, role included, even if the configuration changed since."""
+    """The record a pickup decided on at its placement step, from its journal: a replay creates and
+    launches what the pickup chose, role included, even if the configuration changed since."""
     data = op.data
     return SessionRecord(data["role"], data["profile"], data["session_key"], data["repo"], data["worktree"])

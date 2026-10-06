@@ -8,7 +8,7 @@ import pytest
 from fakes.checkpoints import CrashAt, Many, PauseAt, Recorder, SimulatedCrash
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from wsd_env import WS, Rig, Worker, finish, make_rig
+from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
 
 from heterodyne.wsd import ids
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
@@ -244,8 +244,8 @@ def test_crash_at_pickup_worktree_then_role_change_launches_the_recorded_role(tm
     assert rig.pickup() is Outcome.BUSY and rig.world.claims == ["btq-1"]
 
 
-def test_role_rename_before_the_worktree_step_escalates(tmp_path: Path) -> None:
-    """The claim landed under `coder` but no worktree or launch was chosen yet: the pickup can't tell which
+def test_role_rename_before_the_placement_escalates(tmp_path: Path) -> None:
+    """The claim landed under `coder` but no placement was recorded yet: the pickup can't tell which
     role it is for, so a human decides. Nothing is launched."""
     rig = make_rig(tmp_path, cp=CrashAt("pickup.claimed"))
     rig.world.add("btq-1")
@@ -444,17 +444,56 @@ def test_unknown_liveness_never_starts_a_second_session(tmp_path: Path) -> None:
 # --- never idle while an unblocked bead exists ---
 
 KINDS = ("ok", "lost_race", "bad_repo", "launch_fails", "launch_uncertain", "uncertain_landed",
-         "uncertain_missed", "blocked", "closed_blocker")
+         "uncertain_missed", "blocked", "closed_blocker", "parks", "released", "deleted", "pinned")
 
 
-def settle(rig: Rig) -> None:
+def gate_of(bead: str) -> str:
+    return f"btq-zz-gate-{bead}"
+
+
+def settle(rig: Rig, plan: dict[str, str] | None = None, done: set[tuple[str, str]] | None = None) -> None:
     """What the world does between triggers: an uncertain launch turns out live, and every bead with a
-    live session is finished and closed by its agent."""
+    live session is finished and closed by its agent. Per `plan`, once each: a "parks" bead parks on its
+    gate bead, which closes at the next settle; a "released" bead's claim is handed back to the queue; a
+    "deleted" bead is deleted while its launch is uncertain."""
+    plan = plan or {}
+    done = set() if done is None else done
+    for bead, kind in plan.items():
+        if kind == "parks" and ("parked", bead) in done and ("opened", bead) not in done:
+            rig.world.close(gate_of(bead))
+            done.add(("opened", bead))
     for key, session in list(rig.runtime.listed.items()):
         if session.liveness is Liveness.UNKNOWN:
-            rig.runtime.set(key, Liveness.LIVE)
+            if plan.get(session.bead) == "deleted":
+                rig.world.beads.pop(session.bead, None)
+            else:
+                rig.runtime.set(key, Liveness.LIVE)
     for key in rig.runtime.live():
-        rig.world.close(rig.runtime.listed[key].bead)
+        bead = rig.runtime.listed[key].bead
+        kind = plan.get(bead, "")
+        if kind in ("parks", "released") and (kind, bead) not in done:
+            done.add((kind, bead))
+            if kind == "parks":
+                rig.parker.park(bead, (gate_of(bead),))
+                done.add(("parked", bead))
+            else:
+                released(rig, bead)
+        else:
+            rig.world.close(bead)
+
+
+def resumable_now(rig: Rig) -> list[str]:
+    """Parked beads of ours that pickup must resume: in progress under their per-bead worker, parked,
+    neither held nor `needs-human`, and with every blocker closed."""
+    return sorted(b.id for b in rig.world.beads.values()
+                  if b.assignee == rig.beads.bead_queue(WS, b.id).worker and b.status == "in_progress"
+                  and PARKED in b.labels and HELD not in b.labels and NEEDS_HUMAN not in b.labels
+                  and not rig.world.blocked(b))
+
+
+def claimable_now(rig: Rig) -> list[str]:
+    return [b.id for b in rig.world.ready_for(WS)
+            if not any(x.startswith("session:") for x in b.labels) and PARKED not in b.labels]
 
 
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -462,14 +501,20 @@ def settle(rig: Rig) -> None:
 def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.TempPathFactory,
                                                     kinds: list[str]) -> None:
     """The oracle, per pickup: STARTED, RESUMED and BUSY each mean exactly one coder session is listed;
-    HELD means a hold names why; NOTHING means no ready bead is left and no coder runs. Faults are scoped
-    to their bead, so one bead's trouble never hides another's."""
+    HELD means a hold names why; NOTHING means no bead is ready, none is resumable and no coder runs;
+    STUCK means the same except that ready beads btq's claim can't take are left, each recorded as
+    UNCLAIMABLE. Faults are scoped to their bead, so one bead's trouble never hides another's. The world
+    also parks beads and unblocks them, hands claims back, deletes a bead under its open operation and
+    pins beads to the workstream session. (Configuration changes across a crash are covered by
+    test_replay_after_a_repository_change_uses_the_recorded_placement.)"""
     rig = make_rig(tmp_path_factory.mktemp("never-idle"))
     rig.world.add("btq-zz-blocker")
     rig.world.beads["btq-zz-blocker"].labels.remove("agent:wsd")      # someone else's bead
     rig.world.add("btq-zz-done", status="closed")
+    plan: dict[str, str] = {}
     for n, kind in enumerate(kinds):
         bead = f"btq-{n}"
+        plan[bead] = kind
         rig.world.add(bead)
         if kind == "bad_repo":
             rig.world.beads[bead].metadata["repo"] = "nope"
@@ -481,13 +526,19 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
             rig.world.stolen.add(bead)
         elif kind == "launch_fails":
             rig.runtime.failing_beads.add(bead)
-        elif kind == "launch_uncertain":
+        elif kind in ("launch_uncertain", "deleted"):
             rig.runtime.uncertain_beads.add(bead)
         elif kind == "uncertain_landed":
             rig.world.fault("claim", RuntimeError("timeout"), after=True, bead=bead)
         elif kind == "uncertain_missed":
             rig.world.fault("claim", RuntimeError("timeout"), bead=bead)
-    for _ in range(6 * len(kinds) + 6):
+        elif kind == "parks":
+            rig.world.add(gate_of(bead))
+            rig.world.beads[gate_of(bead)].labels.remove("agent:wsd")
+        elif kind == "pinned":
+            pinned(rig, bead)
+    done: set[tuple[str, str]] = set()
+    for _ in range(8 * len(kinds) + 8):
         outcome = rig.pickup()
         coders = rig.runtime.coders()
         assert len(coders) <= 1
@@ -496,18 +547,25 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
         elif outcome is Outcome.HELD:
             assert rig.journal.holds(WS)
         else:
-            assert outcome is Outcome.NOTHING
-            assert rig.world.ready_for(WS) == [] and coders == []
-            if not rig.journal.ops_open():
+            assert outcome in (Outcome.NOTHING, Outcome.STUCK)
+            assert claimable_now(rig) == [] and resumable_now(rig) == [] and coders == []
+            left = [b.id for b in rig.world.ready_for(WS)]
+            if outcome is Outcome.NOTHING:
+                assert left == []
+            else:
+                assert left and all(reason(rig, b) == ("stuck", Reason.UNCLAIMABLE) for b in left)
+            pending = any(("parked", b) in done and ("opened", b) not in done for b in plan)
+            if not rig.journal.ops_open() and not pending:
                 break
-        settle(rig)
+        settle(rig, plan, done)
     else:
         pytest.fail("pickup never settled")
     assert "btq-zz-blocker" not in rig.world.claims
     for n, kind in enumerate(kinds):
         expected = {"ok": "closed", "closed_blocker": "closed", "launch_uncertain": "closed",
                     "uncertain_landed": "closed", "uncertain_missed": "closed", "lost_race": "dropped",
-                    "bad_repo": "stuck", "launch_fails": "stuck", "blocked": None}[kind]
+                    "bad_repo": "stuck", "launch_fails": "stuck", "blocked": None, "parks": "closed",
+                    "released": "closed", "deleted": "dropped", "pinned": "stuck"}[kind]
         assert rig.state(f"btq-{n}") == expected, (n, kind)
 
 
@@ -942,3 +1000,252 @@ def test_sweep_escalates_an_unrecorded_bead_itself(tmp_path: Path) -> None:
     with rig.parker.entry():
         assert sweep(rig.parker) == Swept(resumes=0, held=1, stopped=0)
     assert reason(rig) == ("stuck", Reason.LAUNCH_UNRECORDED) and rig.journal.ops_open() == []
+
+
+# --- discovery agrees with claiming ---
+
+
+def pinned(rig: Rig, bead: str) -> None:
+    """The bead is pinned to the workstream session, which only lists ready work: btq's ready() for that
+    worker lists it, and every per-bead worker's claim refuses it."""
+    rig.world.beads[bead].labels.append(f"session:{ids.ws_session(WS)}")
+
+
+def test_pinned_bead_is_never_claimed_and_never_reads_as_idle(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    pinned(rig, "btq-1")
+    assert [b.id for b in rig.beads.ready(WS)] == ["btq-1"]
+    for _ in range(2):
+        assert rig.pickup() is Outcome.STUCK
+        assert reason(rig) == ("stuck", Reason.UNCLAIMABLE)
+        assert rig.journal.snapshot(WS).state is WsState.STUCK
+    assert rig.world.claims == [] and rig.journal.ops_open() == []
+    rig.world.add("btq-2")
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-2"] and reason(rig) == ("stuck", Reason.UNCLAIMABLE)
+
+
+def test_unpinned_bead_is_claimed_and_a_vanished_one_forgotten(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    pinned(rig, "btq-1")
+    pinned(rig, "btq-2")
+    assert rig.pickup() is Outcome.STUCK
+    rig.world.beads["btq-1"].labels.pop()           # a human removed the pin
+    rig.world.close("btq-2")
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1"] and rig.state("btq-1") == "running"
+    assert reason(rig, "btq-2") == ("dropped", Reason.CLAIM_ABANDONED)
+
+
+def test_refused_claim_of_a_free_bead_is_recorded(tmp_path: Path) -> None:
+    """btq refuses for a reason wsd can't see (here the per-bead worker's own pause flag): the bead stays
+    free and ready, so it is recorded as unclaimable, never left to read as idle."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    (rig.beads.bead_queue(WS, "btq-1").state / "paused").touch()
+    assert rig.pickup() is Outcome.STUCK
+    assert reason(rig) == ("stuck", Reason.UNCLAIMABLE) and rig.journal.ops_open() == []
+    assert rig.journal.snapshot(WS).state is WsState.STUCK
+    (rig.beads.bead_queue(WS, "btq-1").state / "paused").unlink()
+    assert rig.pickup() is Outcome.STARTED and rig.world.claims == ["btq-1"]
+
+
+def test_refusal_that_reads_back_as_ours_is_started(tmp_path: Path) -> None:
+    """A refusal is read back like any claim outcome, and beads are the truth: a claim that reads back as
+    ours (not something btq does, injected here) is started, never left claimed and idle."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.fault("claim", ValueError("Task is not eligible for this worker"), after=True)
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.state("btq-1") == "running" and rig.world.claims == ["btq-1"]
+
+
+def test_uncertain_claim_of_a_bead_bd_says_is_gone_moves_on(tmp_path: Path) -> None:
+    """The claim's outcome is unknown and the read-back finds no such bead (bd says so twice): the pickup
+    ends, the bead is dropped, and the next candidate is tried in the same pickup."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.fault("claim", RuntimeError("timeout"), bead="btq-1")
+    rig.world.fault("show", RuntimeError("Error: no issue found matching 'btq-1'"), times=2, bead="btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST) and rig.state("btq-2") == "running"
+
+
+def test_unclaimed_bead_still_labelled_parked_is_not_new_work(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1", labels=[PARKED])
+    rig.world.add("btq-2")
+    assert rig.pickup() is Outcome.STARTED
+    assert reason(rig) == ("stuck", Reason.UNCLAIMABLE) and rig.world.claims == ["btq-2"]
+
+
+# --- a claim given back to the queue ---
+
+
+def released(rig: Rig, bead: str = "btq-1") -> None:
+    """Someone with the right (the operator, Bel's recovery) handed the claim back to the queue."""
+    rig.world.beads[bead].status, rig.world.beads[bead].assignee = "open", None
+
+
+def test_released_running_bead_is_claimed_again(tmp_path: Path) -> None:
+    """Codex r1 finding 2: the session ended and the claim went back to the queue. The sweep records the
+    lost claim; the bead is then ready, so it is claimed afresh rather than wedging every pickup."""
+    rig = started(tmp_path)
+    rig.world.add("btq-2")
+    rig.runtime.end(rig.key("btq-1"))
+    released(rig)
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1", "btq-1"] and rig.state("btq-1") == "running"
+    assert len(rig.runtime.launches) == 2 and rig.world.worktrees == ["btq-1"]     # the worktree reused
+
+
+def test_released_lost_claim_never_stops_the_next_candidate(tmp_path: Path) -> None:
+    """A STUCK row left from a lost claim, on a bead that is ready again but can't start: the next ready
+    bead is still tried."""
+    rig = started(tmp_path)
+    rig.world.add("btq-2")
+    rig.runtime.end(rig.key("btq-1"))
+    released(rig)
+    rig.runtime.failing_beads.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1", "btq-1", "btq-2"] and rig.state("btq-2") == "running"
+
+
+@pytest.mark.parametrize("labels", [True, False])
+def test_released_held_bead(tmp_path: Path, labels: bool) -> None:
+    """A bead the operator stopped (HELD) is given back to the queue. Still labelled as parked by wsd it
+    is no new work and the next bead starts; once the labels are gone it is claimed like any other."""
+    rig = started(tmp_path)
+    rig.parker.park("btq-1", (), why="operator /stop", hold=True)
+    released(rig)
+    rig.world.add("btq-2")
+    if not labels:
+        rig.world.beads["btq-1"].labels[:] = [x for x in rig.world.beads["btq-1"].labels
+                                              if x not in (PARKED, HELD)]
+    assert rig.pickup() is Outcome.STARTED
+    if labels:
+        assert reason(rig) == ("stuck", Reason.UNCLAIMABLE) and rig.state("btq-2") == "running"
+    else:
+        assert rig.state("btq-1") == "running" and rig.world.claims == ["btq-1", "btq-1"]
+
+
+# --- a bead deleted under an open operation ---
+
+
+@pytest.mark.parametrize("point", [p for p in POINTS if p != "lock.waiting"])
+def test_bead_deleted_after_a_crash_is_dropped(tmp_path: Path, point: str) -> None:
+    """Codex r1 finding 3: bd confirms the bead is gone, so whatever the crash left open ends, its session
+    (if one started) is stopped, and the next bead starts."""
+    rig = make_rig(tmp_path, cp=CrashAt(point))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    del rig.world.beads["btq-1"]
+    rig.world.add("btq-2")
+    rig.restart()
+    assert rig.pickup() is Outcome.STARTED
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST)
+    assert rig.runtime.coders() == ["btq-2"] and rig.journal.holds(WS) == {}
+    assert [op.bead for op in rig.journal.ops_open()] == []
+
+
+def test_deleted_bead_keeps_its_session_stop_confirmation(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.launched!"))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    del rig.world.beads["btq-1"]
+    rig.world.add("btq-2")
+    rig.restart()
+    rig.runtime.stop_failures = 1
+    assert rig.pickup() is Outcome.HELD
+    assert rig.runtime.coders() == ["btq-1"] and len(rig.journal.ops_open()) == 1
+    assert rig.pickup() is Outcome.STARTED
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST) and rig.runtime.coders() == ["btq-2"]
+
+
+def test_deleted_bead_with_an_unreadable_claim_ends_its_hold(tmp_path: Path) -> None:
+    """The claim could not be read back (held as CLAIM_UNCERTAIN); then the bead was deleted."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.fault("claim", RuntimeError("timeout"), after=True, bead="btq-1")
+    rig.world.fault("show", RuntimeError("dolt down"), times=2, bead="btq-1")
+    assert rig.pickup() is Outcome.HELD and Reason.CLAIM_UNCERTAIN in rig.journal.holds(WS)
+    del rig.world.beads["btq-1"]
+    assert rig.pickup() is Outcome.STARTED
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST) and rig.journal.holds(WS) == {}
+
+
+def test_deleted_bead_ends_an_interrupted_park(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    rig.world.add("btq-2")
+    rig.world.add("btq-3")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    rig.restart(CrashAt("park.committed!"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.park("btq-1", ("btq-2",))
+    del rig.world.beads["btq-1"]
+    rig.restart()
+    assert rig.pickup() is Outcome.STARTED          # the park's replay reads no claim of ours: it ends
+    assert rig.runtime.coders() == ["btq-3"] and rig.journal.ops_open() == []
+    assert rig.pickup() is Outcome.BUSY             # and the sweep drops the row of a bead that is gone
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST)
+
+
+def test_unreachable_queue_is_never_read_as_a_deleted_bead(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.placed"))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.restart()
+    rig.world.fault("worktree", RuntimeError("dolt down"))
+    assert rig.pickup() is Outcome.HELD             # the bead still exists: the failure is the queue's
+    assert Reason.BEADS_UNREACHABLE in rig.journal.holds(WS) and len(rig.journal.ops_open()) == 1
+    assert rig.pickup() is Outcome.BUSY and rig.state("btq-1") == "running"
+
+
+# --- the placement is the journal's before its worktree exists ---
+
+
+@pytest.mark.parametrize("point", ["pickup.placed", "pickup.worktree!"])
+def test_replay_after_a_repository_change_uses_the_recorded_placement(tmp_path: Path, point: str) -> None:
+    """Codex r1 finding 4: the default repository changed across the crash. The replay makes (or reuses)
+    the worktree the pickup placed, never a second one in the new repository."""
+    rig = make_rig(tmp_path, cp=CrashAt(point))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    other = git_repo(tmp_path / "repos" / "other")
+    rig.ws = WorkstreamSettings(WS, {"default": other}, "coder", "p-one", rig.ws.profiles, rig.ws.limits)
+    rig.restart()
+    assert rig.pickup() is Outcome.BUSY             # the replay started it
+    [spec] = rig.runtime.launches
+    assert spec.worktree == rig.worktree("btq-1") and rig.world.worktrees == ["btq-1"]
+    assert not (other.parent / "other-btq-btq-1").exists()
+    rec = rig.beads.show(WS, "btq-1").record()
+    assert rec is not None and rec.repo == str(rig.repo.resolve())
+
+
+# --- the pause flag can't be read ---
+
+
+def test_unreadable_pause_flag_is_paused_not_unreachable(tmp_path: Path) -> None:
+    """Codex r1 finding 5: the workstream worker's state directory can't be read. paused() fails closed
+    (paused) while ready() would raise: pickup claims nothing and reports the workstream PAUSED."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads any directory")
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    state = rig.beads.ws_queue(WS).state
+    state.chmod(0)
+    try:
+        assert rig.pickup() is Outcome.NOTHING
+        assert rig.journal.snapshot(WS).state is WsState.PAUSED
+        assert rig.journal.holds(WS) == {} and rig.world.claims == []
+    finally:
+        state.chmod(0o700)

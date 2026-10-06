@@ -28,6 +28,7 @@ class Reason(StrEnum):
     CLAIM_UNCERTAIN = "claim_uncertain"
     CLAIM_LOST = "claim_lost"
     CLAIM_ABANDONED = "claim_abandoned"
+    UNCLAIMABLE = "unclaimable"                # listed as ready, but btq's claim can never take it
     ROUTING_CHANGED = "routing_changed"
     WORKTREE_FAILED = "worktree_failed"
     LAUNCH_FAILED = "launch_failed"            # the runtime confirmed nothing is running

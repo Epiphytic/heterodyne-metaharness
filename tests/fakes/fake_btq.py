@@ -4,7 +4,9 @@ It answers in the bd 1.1 JSON shapes recorded in spike S6 (`docs/spikes/S6-beads
 `labels` and `metadata` are omitted, `dependencies` is omitted when `dependency_count` is 0, and `list`
 gives dependency edges where `show` gives the beads depended on. Claims, ownership, routing (`matches`),
 the design gate (`design_allowed`, simplified: a `kind:task` needs a `design_approval` the world
-accepts), worktree provenance notes and the pause flag follow btq's rules and error messages. Faults are
+accepts), worktree provenance notes and the pause flag follow btq's rules and error messages. As in btq,
+`ready()` keeps only what the listing worker's `matches` and design gate pass, and `claim()` refuses a
+bead its own worker's `ready()` does not list (so a `session:` pin is honoured by both). Faults are
 injected per call name, optionally for one bead only; `after=True` performs the write and then fails,
 which is how an uncertain write looks to wsd.
 """
@@ -155,9 +157,15 @@ class FakeQueue:
     def ready(self) -> Any:
         with self.world.lock:
             self.world.check("ready", self.worker)
-            if (self.state / "paused").exists():
-                return []
-            return [self.world.json(b, detail=False) for b in self.world.ready_for(self.ws)]
+            return self._ready()
+
+    def _ready(self) -> list[dict[str, Any]]:
+        """btq's `ready()`: [] while this worker is paused, else `bd ready` for its agent and workstream,
+        kept only where this worker's `matches` and the design gate pass (a `session:` pin included)."""
+        if (self.state / "paused").exists():
+            return []
+        listed = [self.world.json(b, detail=False) for b in self.world.ready_for(self.ws)]
+        return [item for item in listed if self.matches(item) and self.design_allowed(item)]
 
     def claim(self, issue_id: str) -> Any:
         with self.world.lock:
@@ -166,9 +174,9 @@ class FakeQueue:
             if issue_id in self.world.stolen:
                 bead.status, bead.assignee = "in_progress", "codex:otherhost:x"
             mine = [b for b in self.world.beads.values() if b.assignee == self.worker]
-            if any(b.status == "in_progress" for b in mine):
+            if any(b.status in ("in_progress", "blocked") for b in mine):
                 raise ValueError("Finish or release this worker's existing claim first")
-            if bead not in self.world.ready_for(self.ws):
+            if issue_id not in {item["id"] for item in self._ready()}:    # this worker's own ready()
                 raise ValueError("Task is not eligible for this worker")
             bead.status, bead.assignee = "in_progress", self.worker
             self.world.claims.append(issue_id)

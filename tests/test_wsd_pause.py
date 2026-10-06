@@ -1,14 +1,16 @@
 """Pause at the pickup level (ADR 0001 §4.3): it stops new claims only, and an acknowledged pause is
 never followed by a claim. Interleavings are forced with checkpoints."""
 
+import fcntl
 import os
 import threading
 from pathlib import Path
 
 import pytest
-from fakes.checkpoints import Many, PauseAt, Seen
+from fakes.checkpoints import PauseAt
 from wsd_env import WS, Worker, finish, make_rig
 
+from heterodyne.wsd import gate
 from heterodyne.wsd.scheduler import Outcome
 
 
@@ -50,14 +52,35 @@ def test_direct_btq_pause_after_listing_is_honoured(tmp_path: Path) -> None:
     assert rig.state("btq-1") == "dropped"
 
 
-def test_pause_waits_for_in_flight_claim(tmp_path: Path) -> None:
+def test_pause_waits_for_in_flight_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The claim has passed the flag check when the operator pauses. The pause is not acknowledged until
-    that claim is done, and after the acknowledgement no claim starts."""
+    that claim is done, and after the acknowledgement no claim starts.
+
+    Codex r1 finding 6: the pauser's lock request is instrumented. Before its blocking flock, the pauser's
+    thread probes the same lock without blocking and records the answer; the test waits for that probe, so
+    it knows the pauser has asked for the lock (and been refused) before checking that nothing was
+    acknowledged or written."""
     cp = PauseAt("gate.checked")
-    door = Seen("gate.pause.waiting")
-    rig = make_rig(tmp_path, cp=Many(cp, door))
+    rig = make_rig(tmp_path, cp=cp)
     rig.world.add("btq-1")
     rig.world.add("btq-2")
+    real = gate.fcntl.flock
+    probes: list[str] = []
+    asked = threading.Event()
+
+    def flock(fd: int, op: int) -> None:
+        if threading.current_thread().name == "pause" and op == fcntl.LOCK_EX and not asked.is_set():
+            try:
+                real(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                probes.append("acquired")
+            except BlockingIOError:
+                probes.append("blocked")
+            asked.set()
+            if probes[-1] == "acquired":
+                return
+        real(fd, op)
+
+    monkeypatch.setattr(gate.fcntl, "flock", flock)
     outcome: list[Outcome] = []
     acked = threading.Event()
     picker = Worker(lambda: outcome.append(rig.pickup()), "pickup")
@@ -66,13 +89,14 @@ def test_pause_waits_for_in_flight_claim(tmp_path: Path) -> None:
         picker.start()
         assert cp.reached.wait(10)
         pauser.start()
-        assert door.reached.wait(10)        # the pauser is at the claim lock's door, which the claim holds
-        assert not acked.is_set()
+        assert asked.wait(10)               # the pauser asked for the claim lock, which the claim holds
+        assert probes == ["blocked"]
+        assert not acked.is_set() and not rig.beads.paused(WS)
         cp.go.set()
     finally:
         cp.go.set()
         finish(picker, pauser)
-    assert acked.is_set()
+    assert acked.is_set() and rig.beads.paused(WS)
     assert outcome == [Outcome.STARTED]
     assert rig.world.claims == ["btq-1"]
     rig.world.close("btq-1")
