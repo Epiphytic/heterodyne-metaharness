@@ -19,7 +19,7 @@ The platform is detected once, when `heterodyne setup` runs, and the chosen back
 | [uv](https://docs.astral.sh/uv/) | dependencies, running and testing | yes |
 | git | the repository checks | yes (the install-agnostic checker lists tracked files with git) |
 | bubblewrap (Linux) | the agent sandbox | not yet (plan 4) |
-| btq, the Beads task-queue client | beads integration | not yet; its location goes in `config.toml` `[integrations.beads]` |
+| btq, the Beads task-queue client | beads integration | by `wsd`, from `config.toml` `[integrations.beads]` (`btq` is the checkout) |
 | `wn-agent`, the Marmot client | the Marmot surface; `admind` runs its own private copy | by `admind`; the `wsd` surface goes in `config.toml` `[integrations.marmot]` later |
 | tmux, `claude` | the `admind` admin agent | yes |
 

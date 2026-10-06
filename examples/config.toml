@@ -27,7 +27,8 @@ egress_approved = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"]
 ro_mounts_approved = []
 
 [integrations.beads]
-btq = "<path-to-btq>"
+btq = "<path-to-btq-checkout>"           # wsd loads <checkout>/bin/btq
+# credentials = { file = "<path-to-btq-credentials.json>" }   # optional; inline secrets are refused
 
 [integrations.marmot]
 socket = "<path-to-wn-agent-socket>"
