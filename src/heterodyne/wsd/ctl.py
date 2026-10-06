@@ -69,6 +69,10 @@ def refusal(req: CtlRequest) -> str:
     return ""
 
 
+class SocketPathTaken(FileExistsError):
+    """Something other than a socket is at the control socket's path; wsd won't remove it."""
+
+
 class CtlServer:
     def __init__(self, path: Path, handler: Handler) -> None:
         self.path = path
@@ -84,7 +88,7 @@ class CtlServer:
         private_dir(self.path.parent)
         with contextlib.suppress(FileNotFoundError):
             if not stat.S_ISSOCK(os.lstat(self.path).st_mode):
-                raise FileExistsError("the control socket path exists and is not a socket")
+                raise SocketPathTaken(f"{self.path} exists and is not a socket")
             self.path.unlink()
         sock = socket.socket(socket.AF_UNIX)
         try:

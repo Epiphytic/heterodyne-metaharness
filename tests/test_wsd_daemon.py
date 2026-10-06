@@ -25,7 +25,7 @@ from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import Session
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
-from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.workstream import WorkstreamSettings
 
@@ -1336,15 +1336,18 @@ def test_a_blocked_workstream_never_holds_up_another_ones_timers(
 
 def test_startup_recovers_every_workstream_before_any_pickup(tmp_path: Path,
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    """r3 review: the startup barrier. beta's recovery is slow; alpha's startup pickup waits for it."""
+    """r3 review: the startup barrier. beta's recovery is held; alpha recovers, and its lane then sits
+    empty, its startup pickup not even queued, until beta's recovery ends."""
     s = two_workstreams(tmp_path)
     wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
     order: list[str] = []
+    beta_in, beta_go = threading.Event(), threading.Event()
     real_recover, real_pickup = wsd.recover_one, wsd.pickup_one
 
     def recover(name: str) -> object:
         if name == "beta":
-            time.sleep(0.2)
+            beta_in.set()
+            assert beta_go.wait(10)
         result = real_recover(name)
         order.append(f"recovered {name}")
         return result
@@ -1355,8 +1358,18 @@ def test_startup_recovers_every_workstream_before_any_pickup(tmp_path: Path,
 
     monkeypatch.setattr(wsd, "recover_one", recover)
     monkeypatch.setattr(wsd, "pickup_one", pickup)
-    asyncio.run(asyncio.wait_for(wsd._startup(), 10))  # pyright: ignore[reportPrivateUsage]
-    assert sorted(order[:2]) == [f"recovered {WS}", "recovered beta"]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(wsd._startup())  # pyright: ignore[reportPrivateUsage]
+        try:
+            await until(lambda: beta_in.is_set() and f"recovered {WS}" in order and not wsd.lanes[WS].jobs)
+            assert order == [f"recovered {WS}"]         # alpha's pickup was never queued
+        finally:
+            beta_go.set()
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+    assert order[:2] == [f"recovered {WS}", "recovered beta"]
     assert sorted(order[2:]) == [f"pickup {WS}", "pickup beta"]
 
 
@@ -1423,14 +1436,14 @@ def test_the_hard_exit_happens_even_if_stderr_is_gone(tmp_path: Path,
 
 
 def test_a_closed_lane_admits_nothing() -> None:
-    lane = daemon.Lane("t")
+    lane = daemon.Lane("t", threading.Lock())
     assert lane.close() == set()
     with pytest.raises(daemon.Stopping):
         lane.submit("k", lambda: None)
 
 
 def test_a_lane_never_runs_a_job_its_caller_cancelled() -> None:
-    lane = daemon.Lane("t")
+    lane = daemon.Lane("t", threading.Lock())
     inside, release = threading.Event(), threading.Event()
     ran: list[str] = []
 
@@ -1449,3 +1462,111 @@ def test_a_lane_never_runs_a_job_its_caller_cancelled() -> None:
     assert after.result(10) is None and held.result(10) is True
     assert ran == ["after"]
     assert lane.close() == set()
+
+
+SOCKET_TAKEN = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from fakes.fake_btq import World, factory
+from fakes.fake_runtime import FakeRuntime
+from wsd_env import PROFILES, WS, git_repo
+from heterodyne.wsd import cli
+from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.workstream import WorkstreamSettings
+
+tmp = Path(sys.argv[1])
+ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,))
+s.socket.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+s.socket.write_text("not a socket")
+sys.exit(cli.run(s, factory(World(tmp / "btq-state")), FakeRuntime()))
+"""
+
+
+def test_a_socket_that_fails_to_start_still_ends_the_process(tmp_path: Path) -> None:
+    """r4 review: a regular file at the socket path fails the socket after startup ran jobs on every
+    lane; wsd still shuts its lanes down and exits EX_CONFIG, leaving the file alone."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("BTQ_", "BEADS_", "BD_"))}
+    env["HOME"] = str(tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", SOCKET_TAKEN, str(tmp_path), str(Path(__file__).parent)],
+                            env=env, stderr=subprocess.PIPE, text=True)
+    try:
+        _, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+    assert proc.returncode == cli.EX_CONFIG, err
+    assert "is not a socket" in err
+    assert (tmp_path / "state" / "wsd" / CTL_SOCKET).read_text() == "not a socket"
+
+
+class StopWhileStarting(ctl.CtlServer):
+    """Sets `stop` as the socket finishes starting: the stop arrives during `await server.start()`."""
+    stop: asyncio.Event
+
+    async def start(self) -> None:
+        await super().start()
+        StopWhileStarting.stop.set()
+
+
+def test_a_stop_while_the_socket_starts_starts_no_timer(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    timers: list[str] = []
+
+    async def every(name: str, seconds: float, kind: str, job: Callable[[str], Outcome]) -> None:
+        timers.append(f"{name} {kind}")
+
+    monkeypatch.setattr(wsd, "_every", every)
+    monkeypatch.setattr(daemon, "CtlServer", StopWhileStarting)
+
+    async def scenario() -> None:
+        StopWhileStarting.stop = asyncio.Event()
+        await asyncio.wait_for(wsd.serve(StopWhileStarting.stop), 10)
+
+    asyncio.run(scenario())
+    assert timers == [] and wsd.stopping and not s.socket.exists()
+
+
+def test_shutdown_closes_every_lane_before_any_starts_a_queued_job(tmp_path: Path) -> None:
+    """r4 review: shutdown is under way but still waiting for the status lane's lock (the first lane it
+    closes) when alpha's running job ends; alpha's queued job must not start in that gap."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    alpha = wsd.lanes[WS]
+    inside, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def hold() -> object:
+        inside.set()
+        return release.wait(10)
+
+    held = alpha.submit("hold", hold)
+    assert inside.wait(10)
+    queued = alpha.submit("queued", lambda: ran.append("queued"))
+    shutdown_done: list[set[Any]] = []
+    status = wsd.lanes[daemon.STATUS_LANE]
+    with status.lock:
+        closing = threading.Thread(target=lambda: shutdown_done.append(
+            wsd._cancel_queued()))  # pyright: ignore[reportPrivateUsage]
+        closing.start()
+        try:
+            for _ in range(500):            # shutdown has begun: it holds the daemon's shutdown lock
+                if wsd.stopping:
+                    break
+                time.sleep(0.01)
+            assert wsd.stopping and not alpha.closed
+            release.set()
+            assert held.result(10) is True
+            for _ in range(50):             # a window for alpha's worker to (wrongly) start the job
+                if ran:
+                    break
+                time.sleep(0.01)
+        finally:
+            release.set()
+    closing.join(10)
+    assert not closing.is_alive() and shutdown_done
+    assert ran == [] and queued.cancelled()

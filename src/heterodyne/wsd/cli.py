@@ -5,7 +5,9 @@ wsd as §4.3 requires: wsd sets btq's shared pause flag under the workstream's c
 acknowledged only once no claim can start. With wsd stopped nothing claims, and nothing is acknowledged.
 
 A journal locked by another process (JournalBusy) at startup ends `wsd run` with exit 1, not EX_CONFIG:
-nothing was changed, so the unit's restart retries safely.
+nothing was changed, so the unit's restart retries safely. Something other than a socket at the control
+socket's path ends it with EX_CONFIG, after the startup recovery and pickup, and after shutting down as
+on SIGTERM: a restart would only meet it again, and wsd never removes what it did not create.
 
 `run` closes the journal and then releases the instance lock, in that order, on every path, once the
 daemon has drained its jobs. If jobs are still running when it gives up waiting (Undrained), it ends the
@@ -62,6 +64,10 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
             daemon = Wsd(s, assemble(s, journal, factory, runtime))
             asyncio.run(_serve(daemon))
             return 0
+        except ctl.SocketPathTaken as exc:
+            print(f"wsd: the control socket can't be created ({exc}); move it aside and restart",
+                  file=sys.stderr)
+            return EX_CONFIG
         except Undrained as exc:
             held = True
             try:

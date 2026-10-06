@@ -23,12 +23,14 @@ workstream unrecovered. A job that raises (JournalBusy while another process hol
 leaves its workstream unrecovered, so the next trigger recovers it again before any pickup. A timer task
 that dies anyway ends `serve` with its error rather than leave wsd running without its backstop.
 
-Shutdown stops dispatch and cancels every job that has not started, in one step before anything else
-(a lane only starts a job under its lock, after checking it is still open), then stops listening, cancels
-the timers, waits up to DRAIN_SECONDS for jobs already running (a
-thread can't be cancelled), then closes the socket's connections. A stop during startup does the same at
-once: the socket and the timers never start after a stop. Jobs still running after the drain raise
-Undrained, and `cli.run` then ends the process at once (a crash, which the journal is built to replay).
+Shutdown stops dispatch and cancels every job that has not started, on every lane in one step under
+the daemon's shutdown lock, before anything else (a lane only starts a job under that lock, after
+checking it is still open). Then it stops listening, cancels the timers, waits up to DRAIN_SECONDS for
+jobs already running (a thread can't be cancelled), and closes the socket's connections. A stop during
+startup does the same at once: the socket and the timers never start after a stop, nor the timers after
+a stop that arrives while the socket starts. A socket that fails to start shuts down the same way, then
+raises. Jobs still running after the drain raise Undrained, and `cli.run` then ends the process at once
+(a crash, which the journal is built to replay).
 
 A workstream that is `stuck` (or a pickup whose outcome is `stuck`) is not idle: beads are ready or
 claimed that only a human can move on. Status and tick replies say so.
@@ -80,11 +82,14 @@ PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last o
 
 class Lane:
     """One worker thread running its jobs in order, with at most one queued (not started) job per key.
-    Admission, the start of each job and closing all happen under `lock`: once `close` returns, no job
-    that had not started ever does."""
+    Admission and closing happen under `lock`; a job starts only under `shutdown` (shared by every lane
+    of a daemon, which closes them all under it at once) and then `lock`, so once shutdown has begun no
+    job that had not started ever does, on any lane. Lock order: `shutdown`, then `lock`; neither is
+    held while a job runs."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, shutdown: threading.Lock) -> None:
         self.name = name or "status"
+        self.shutdown = shutdown
         self.lock = threading.Lock()
         self.ready = threading.Condition(self.lock)
         self.pending: deque[tuple[cf.Future[object], Hashable, Callable[[], object]]] = deque()
@@ -122,8 +127,11 @@ class Lane:
             with self.lock:
                 while not self.pending and not self.closed:
                     self.ready.wait()
-                if self.closed:             # checked under the lock each job starts under
+            with self.shutdown, self.lock:  # every lane closes under `shutdown`: all of them, or none
+                if self.closed:
                     return
+                if not self.pending:
+                    continue
                 fut, key, fn = self.pending.popleft()
                 del self.queued[key]        # started: a later request queues a new job
                 if not fut.set_running_or_notify_cancel():
@@ -172,7 +180,8 @@ class Wsd:
         self.parts = parts
         self.recovered: set[str] = set()
         self.stopping = False
-        self.lanes = {name: Lane(name) for name in [STATUS_LANE, *parts.schedulers]}
+        self.shutdown = threading.Lock()        # held while every lane closes; see Lane
+        self.lanes = {name: Lane(name, self.shutdown) for name in [STATUS_LANE, *parts.schedulers]}
         self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
 
     # --- blocking work (worker threads) ---
@@ -409,13 +418,16 @@ class Wsd:
                 raise failed
             return
         server = CtlServer(self.s.socket, self.handle)
-        await server.start()
-        timers = [asyncio.create_task(self._every(name, seconds, kind, job))
-                  for name in self.parts.schedulers
-                  for seconds, kind, job in ((self.s.backstop_seconds, "pickup", self._backstop),
-                                             (self.s.reconcile_seconds, "reconcile", self.reconcile_one))]
+        timers: list[asyncio.Task[None]] = []
         stopping = asyncio.create_task(stop.wait())
         try:
+            await server.start()        # inside: a socket that fails to start still closes every lane
+            if stop.is_set():
+                return                  # stopped while the socket started: no timer starts
+            timers = [asyncio.create_task(self._every(name, seconds, kind, job))
+                      for name in self.parts.schedulers
+                      for seconds, kind, job in ((self.s.backstop_seconds, "pickup", self._backstop),
+                                                 (self.s.reconcile_seconds, "reconcile", self.reconcile_one))]
             await asyncio.wait([stopping, *timers], return_when=asyncio.FIRST_COMPLETED)
             for task in timers:
                 if task.done():
@@ -432,9 +444,11 @@ class Wsd:
                 await server.close()    # the handlers waiting on drained jobs have their replies now
 
     def _cancel_queued(self) -> set[cf.Future[object]]:
-        """Stop admitting, cancel every job not yet started, and return those still running."""
-        self.stopping = True
-        return {f for ln in self.lanes.values() for f in ln.close()}
+        """Stop admitting, cancel every job not yet started, and return those still running: on every lane
+        at once, under `shutdown`, which each lane takes before it starts a job."""
+        with self.shutdown:
+            self.stopping = True
+            return {f for ln in self.lanes.values() for f in ln.close()}
 
     async def _drain(self) -> None:
         running = self._cancel_queued()
