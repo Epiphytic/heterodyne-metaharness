@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from fakes.checkpoints import CrashAt, Many, PauseAt, Recorder, SimulatedCrash
+from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
@@ -680,31 +680,46 @@ def test_closed_bead_with_unconfirmed_stop_keeps_the_role(tmp_path: Path) -> Non
     assert rig.world.claims == ["btq-1", "btq-2"]
 
 
-class DoorWatch(Recorder):
-    """Signals when the thread named `who` reaches the operation lock's door."""
+class ProbedLock:
+    """The operation lock, instrumented: before the thread named `who` waits on it, that thread probes it
+    without blocking and records the answer, so a test knows the caller asked for the lock and was
+    refused (not merely that it reached the door)."""
 
-    def __init__(self, who: str) -> None:
-        super().__init__()
+    def __init__(self, real: "threading.RLock", who: str) -> None:
+        self.real = real
         self.who = who
-        self.reached = threading.Event()
+        self.probes: list[str] = []
+        self.asked = threading.Event()
 
-    def __call__(self, name: str) -> None:
-        super().__call__(name)
-        if name == "lock.waiting" and threading.current_thread().name == self.who:
-            self.reached.set()
+    def __enter__(self) -> None:
+        if threading.current_thread().name == self.who and not self.asked.is_set():
+            got = self.real.acquire(blocking=False)
+            self.probes.append("acquired" if got else "blocked")
+            self.asked.set()
+            if got:
+                return
+        self.real.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.real.release()
 
 
 def test_pickup_waits_at_the_door_while_a_park_runs(tmp_path: Path) -> None:
     """Finding 13: a park has stopped the session (the coder role looks free) but not yet labelled the
-    bead. A pickup arriving now waits on the operation lock; it never claims in that window."""
-    pause, door = PauseAt("park.stopped!"), DoorWatch("pickup")
+    bead. A pickup arriving now waits on the operation lock; it never claims in that window.
+
+    Task 7 r2: the pickup's acquisition of the operation lock is probed, so the test proves the pickup
+    asked for the lock and was blocked by the park, rather than having merely reached the door."""
+    pause = PauseAt("park.stopped!")
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     rig.world.beads["btq-2"].labels.remove("agent:wsd")
     rig.pickup()
     rig.world.add("btq-3")
-    rig.restart(Many(pause, door))
+    rig.restart(pause)
+    lock = ProbedLock(rig.parker.lock, "pickup")
+    rig.parker.lock = lock  # pyright: ignore[reportAttributeAccessIssue] - a test double for the RLock
     outcome: list[Outcome] = []
     parker = Worker(lambda: rig.parker.park("btq-1", ("btq-2",)), "park")
     picker = Worker(lambda: outcome.append(rig.pickup()), "pickup")
@@ -712,7 +727,8 @@ def test_pickup_waits_at_the_door_while_a_park_runs(tmp_path: Path) -> None:
         parker.start()
         assert pause.reached.wait(10)
         picker.start()
-        assert door.reached.wait(10)
+        assert lock.asked.wait(10)          # the pickup asked for the lock, which the park holds
+        assert lock.probes == ["blocked"]
         assert outcome == [] and rig.world.claims == ["btq-1"] and rig.runtime.coders() == []
         pause.go.set()
     finally:
@@ -1179,6 +1195,32 @@ def test_deleted_bead_with_an_unreadable_claim_ends_its_hold(tmp_path: Path) -> 
     del rig.world.beads["btq-1"]
     assert rig.pickup() is Outcome.STARTED
     assert reason(rig) == ("dropped", Reason.CLAIM_LOST) and rig.journal.holds(WS) == {}
+
+
+def test_deleted_bead_keeps_another_beads_claim_hold(tmp_path: Path) -> None:
+    """Task 7 r2 (R18): an older pickup of btq-2 can't read its claim back (CLAIM_UNCERTAIN, btq-2). An
+    operator release of btq-1 crashes and btq-1 is deleted. The replays re-establish btq-2's hold, then
+    end btq-1's release; ending it must keep btq-2's hold, so nothing new is claimed."""
+    rig = started(tmp_path)
+    rig.parker.park("btq-1", (), why="operator /stop", hold=True)
+    rig.world.add("btq-2")
+    rig.world.fault("claim", RuntimeError("timeout"), bead="btq-2")
+    rig.world.fault("show", RuntimeError("dolt down"), times=2, bead="btq-2")
+    assert rig.pickup() is Outcome.HELD
+    assert rig.journal.holds(WS) == {Reason.CLAIM_UNCERTAIN: "btq-2"}
+    rig.restart(CrashAt("release.intent"))
+    with pytest.raises(SimulatedCrash):
+        rig.parker.release("btq-1")
+    del rig.world.beads["btq-1"]
+    rig.world.add("btq-3")
+    rig.world.fault("show", RuntimeError("dolt down"), times=2, bead="btq-2")
+    rig.restart()
+    assert [op.bead for op in rig.journal.ops_open()] == ["btq-2", "btq-1"]     # the pickup is older
+    assert rig.pickup() is Outcome.HELD
+    assert rig.journal.holds(WS) == {Reason.CLAIM_UNCERTAIN: "btq-2"}
+    assert reason(rig) == ("dropped", Reason.CLAIM_LOST)
+    assert rig.world.claims == ["btq-1"] and rig.journal.state(WS, "btq-3") is None
+    assert [op.bead for op in rig.journal.ops_open()] == ["btq-2"]
 
 
 def test_deleted_bead_ends_an_interrupted_park(tmp_path: Path) -> None:
