@@ -419,6 +419,73 @@ def test_summarizer_failure_after_launch_reaps_the_group(tmp_path: Path,
         kill_quietly(pid_file)
 
 
+def test_summarizer_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summarizer's own timeout covers connecting the pipes too: a stall never released ends as
+    "timeout", and its group is gone."""
+    monkeypatch.setattr(summarize, "REAP_SECONDS", 1)
+    pid_file = tmp_path / "descendant.pid"
+
+    async def scenario() -> None:
+        stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        with pytest.raises(summarize.SummaryFailed) as info:
+            await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=1), 20 + 1 + 1)
+        assert info.value.reason == "timeout" and stalled.is_set()
+        await wait_until(pid_file.exists, 20)
+        grandchild = int(pid_file.read_text())
+        await wait_until(lambda: gone(grandchild), 5)
+    try:
+        asyncio.run(scenario())
+    finally:
+        kill_quietly(pid_file)
+
+
+@pytest.mark.parametrize("released", [True, False])
+def test_cancel_waits_for_the_exit_wait(tmp_path: Path, released: bool) -> None:
+    """A cancellation while `reap_shielded` waits for the exit propagates only once that wait has finished
+    (`released`) or reached its bound (not released)."""
+    async def scenario() -> None:
+        child = reap.spawn([sys.executable, "-c", "import time; time.sleep(60)"])
+        entered, gate = asyncio.Event(), asyncio.Event()
+        finished = False
+
+        async def gated(c: reap.Child) -> None:
+            nonlocal finished
+            entered.set()
+            await gate.wait()
+            await c.wait()
+            finished = True
+        try:
+            await child.connect()
+            task = asyncio.create_task(reap.reap_shielded(child, "test", seconds=1 if not released else 30,
+                                                          wait=gated))
+            await asyncio.wait_for(entered.wait(), 10)
+            task.cancel()
+            await stays(lambda: not task.done(), 0.2)
+            if released:
+                gate.set()
+            started = time.monotonic()
+            done, _ = await asyncio.wait({task}, timeout=10)    # not wait_for: it would wait out the shield
+            gate.set()
+            assert done
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert finished == released and gone(child.pid)
+            if not released:
+                assert time.monotonic() - started < 1
+        finally:
+            kill_quietly_pid(child.pid)
+    asyncio.run(scenario())
+
+
+def kill_quietly_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def test_cleanup_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                  capsys: pytest.CaptureFixture[str]) -> None:
     """A child that never seems to exit costs REAP_SECONDS, noted by type, and the result stands."""

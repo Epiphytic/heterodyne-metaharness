@@ -94,7 +94,12 @@ Wait = Callable[[Child], Awaitable[object]]
 
 def spawn(argv: list[str], *, cwd: Path | None = None, feed: bool = False, stderr: bool = True) -> Child:
     """Launch `argv` in a new session (its own process group): stdin a pipe if `feed`, else /dev/null;
-    stdout a pipe; stderr a pipe, or /dev/null. Synchronous; OSError means there is no child."""
+    stdout a pipe; stderr a pipe, or /dev/null. Synchronous; OSError means there is no child.
+
+    The launch runs before any run timeout starts and blocks the event loop until the exec has completed
+    (Popen waits for it), so an executable on a stalled filesystem can stall admind here. That is accepted:
+    Python's own subprocess timeouts don't cover the initial process creation either, and a synchronous
+    launch is what keeps any await from coming between the last check and the launch (R11)."""
     pipe, null = subprocess.PIPE, subprocess.DEVNULL
     return Child(subprocess.Popen(argv, cwd=cwd, start_new_session=True, stdin=pipe if feed else null,
                                   stdout=pipe, stderr=pipe if stderr else null))
