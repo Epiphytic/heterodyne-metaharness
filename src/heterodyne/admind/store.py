@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS asks (
     outcome TEXT,
     decided_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    refreshed_from TEXT);       -- the stale ask this fresh card replaced (relay delta R29)
+    refreshed_from TEXT,        -- the stale ask this fresh card replaced (relay delta R29)
+    last_activity_at TEXT);     -- the automatic-bump clock, moved only forward (asks bump B14)
 CREATE TABLE IF NOT EXISTS ask_answers (
     ask_id TEXT NOT NULL, seq INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('answer', 'note')),
@@ -176,6 +177,7 @@ class AskRow:
     created_at: str
     updated_at: str
     refreshed_from: str | None = None
+    last_activity_at: str | None = None     # set from created_at when the ask is stored (B14)
 
 
 @dataclass(frozen=True)
@@ -200,13 +202,13 @@ _TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_
 
 
 _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, truncated, card_parts, status, "
-        "outcome, decided_by, created_at, updated_at, refreshed_from")    # fixed, interpolated like _TURN
+        "outcome, decided_by, created_at, updated_at, refreshed_from, last_activity_at")   # fixed, as _TURN
 
 
 def _ask(r: tuple[object, ...]) -> AskRow:
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
-                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]))
+                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]))
 
 
 def _opt_int(v: object) -> int | None:
@@ -282,6 +284,12 @@ class Store:
             if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
                 with self.transaction():
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        # A database from before automatic bumps (asks bump B14): every existing ask's clock starts now, so
+        # none is bumped at deploy. The column and its values: both or neither, once.
+        if "last_activity_at" not in {str(r[1]) for r in self.db.execute("PRAGMA table_info(asks)")}:
+            with self.transaction():
+                self.db.execute("ALTER TABLE asks ADD COLUMN last_activity_at TEXT")
+                self.db.execute("UPDATE asks SET last_activity_at = ?", (now(),))
 
     @_locked
     def close(self) -> None:
@@ -561,10 +569,17 @@ class Store:
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
         self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
                          row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
-                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from, peer_pid))
+                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from,
+                         row.last_activity_at or row.created_at, peer_pid))
+
+    @_locked
+    def touch_ask(self, ask_id: str, at: str) -> None:
+        """Move the ask's activity clock forward to `at` (UTC ISO-8601); never back (B14)."""
+        self.db.execute("UPDATE asks SET last_activity_at = ? WHERE ask_id = ? "
+                        "AND (last_activity_at IS NULL OR last_activity_at < ?)", (at, ask_id, at))
 
     @_locked
     def ask(self, ask_id: str) -> AskRow | None:
