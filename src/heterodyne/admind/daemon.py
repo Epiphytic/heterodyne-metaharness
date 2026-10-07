@@ -140,6 +140,9 @@ ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or w
 ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
 ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
 NO_ACTIVE_ASKS = "No active asks."
+BUMP_HINT = ("That was a reminder. React or reply on ask {ask_id}'s card (the message the reminder replies "
+             "to).")
+CARD_COMMANDS = (["approve"], ["deny"], ["details"])     # what B6 intercepts on a bump, as parse names them
 MAX_SEND_ATTEMPTS = 10
 AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
@@ -923,6 +926,16 @@ class Admind:
         for i, part in enumerate(parts):
             self.post(f"askr:{row.ask_id}:{mid}:{i}", part, None)
         self.store.add_repeat(row.ask_id, mid, len(parts), asks.stamp(at))
+
+    def bump_hint(self, mid: str, ask_id: str) -> None:
+        """A reply, a card command or a decision emoji on a reminder (B6): where to decide instead, in the
+        reply's thread or on the reacted reminder (delta §5). Nothing reaches the agent or the ask."""
+        self.store.set_inbound(mid, "executing")
+        if not self.authorised(mid):
+            self.deny(mid, "ask")
+            return
+        self.finish(mid, "done", BUMP_HINT.format(ask_id=ask_id), "ask")
+        self.audit.write("ask", action="bump-hint", message_id=mid, ask_id=ask_id)
 
     def bang_answer(self, mid: str, cmd: commands.Command) -> None:
         """`!answer <id> <text>`: as a reply to the card, from anywhere."""
@@ -1764,7 +1777,11 @@ class Admind:
     async def react(self, mid: str, emoji: str, target: str | None) -> None:
         """What a claimed reaction does (R27): on an approval card an approve or deny emoji decides and any
         other is ignored; on a question or merge card the emoji is the answer; on anything else it is
-        ignored. Ignored reactions get no reply."""
+        ignored. Ignored reactions get no reply. On a bump an approve or deny emoji gets B6's hint."""
+        bump = self.store.bump_for_message(target)
+        if bump is not None and verbs.emoji_action(emoji) is not None:
+            self.bump_hint(mid, bump)
+            return
         ask_id = self.store.ask_for_message(target)
         row = None if ask_id is None else self.store.ask(ask_id)
         if row is None or commands.has_control_chars(emoji):
@@ -1806,6 +1823,10 @@ class Admind:
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
             self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
+            return
+        bump = self.store.bump_for_message(target)
+        if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
+            self.bump_hint(mid, bump)                       # B6: never decided, answered or pasted
             return
         ask_id = self.store.ask_for_message(target)
         if ask_id is not None and not text.startswith("!"):

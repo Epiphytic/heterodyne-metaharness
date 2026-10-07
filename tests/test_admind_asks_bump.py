@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from admind_asks_fixture import sent_mid
-from admind_waits import wait_until
+from admind_waits import stays, wait_until
 from test_admind_approvals import (
     BEAD,
     D2,
@@ -25,6 +25,7 @@ from test_admind_approvals import (
     edit,
     go,
     go_file,
+    queued,
     say,
     send,
     settled,
@@ -32,7 +33,7 @@ from test_admind_approvals import (
 )
 from test_admind_asks import NONE, audited, card_sent, joined, outbox, pasted, posted, question, row
 from test_admind_daemon import Harness, needs_tmux
-from test_admind_reactions import OLD_TABLES, columns
+from test_admind_reactions import OLD_TABLES, columns, outbox_count, react, reacted, threads
 from test_admind_settings import BASE_CONFIG, write
 
 from heterodyne.admind import asks, chunk, commands
@@ -404,6 +405,7 @@ def test_bump_threads_each_open_ask_to_its_card_and_reports_the_rest(tmp_path: P
         set_status(h, uncertain, "uncertain")
         set_status(h, cancelled, "cancelled")
         undelivered(h, "n2n2")
+        mid = ""
         for _ in range(3):
             mid = await send(h, "!asks bump", None)
             await settled(h, mid)
@@ -565,4 +567,146 @@ def test_a_failure_inside_the_bump_leaves_nothing(tmp_path: Path) -> None:
         await wait_until(lambda: audited(h, kind="handler", action="failed", error="RuntimeError"))
         assert bump_rows(h, a, mid) == [] and bump_rows(h, q, mid) == [] and cmd_reply(h, mid) == ""
         assert h.store.inbound_status(mid) == "executing"
+    go(tmp_path, scenario)
+
+
+# --- B6: a bump is not a card ---------------------------------------------------------------------------
+def hint(ask_id: str) -> str:
+    return (f"That was a reminder. React or reply on ask {ask_id}'s card "
+            "(the message the reminder replies to).")
+
+
+async def bumped(h: Harness, ask_id: str) -> str:
+    """Send `!asks bump` and return the message ID of ask `ask_id`'s sent reminder."""
+    command = await send(h, "!asks bump", None)
+    await settled(h, command)
+    await wait_until(lambda: sent_mid(h, f"asknote:{ask_id}:bump:{command}:0") is not None)
+    reminder = sent_mid(h, f"asknote:{ask_id}:bump:{command}:0")
+    assert reminder is not None
+    return reminder
+
+
+def untouched(h: Harness, ask_id: str, text: str) -> None:
+    """Nothing decided, answered, noted, detailed or pasted for ask `ask_id`."""
+    assert decisions(h) == [] and attempts(h, ask_id) == [] and h.store.answers(ask_id) == []
+    assert ask_status(h, ask_id) == "open" and outbox_count(h, "askd:%") == 0
+    assert f"echo: {text}" not in h.texts() and text not in pasted(h)
+
+
+@needs_tmux
+@pytest.mark.parametrize("text", ["approve", "deny too broad", "what is this", "!approve", "!deny no",
+                                  "!details", "!details full"])
+def test_a_reply_on_a_bump_gets_the_hint_and_nothing_else(tmp_path: Path, text: str) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        reminder = await bumped(h, ask_id)
+        assert h.store.ask_for_message(reminder) is None
+        mid = await send(h, text, reminder)
+        await settled(h, mid)
+        assert queued(h, mid) == hint(ask_id) and threads(h, mid) == {mid}   # the reply's thread (delta §5)
+        assert h.store.inbound_status(mid) == "done" and outbox_count(h, f"cmd:{mid}:%") == 0
+        assert audited(h, kind="ask", action="bump-hint", message_id=ref_id(mid), ask_id=ask_id)
+        untouched(h, ask_id, text)
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_reply_on_a_question_bump_is_not_an_answer(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        q = await posted(h, question())
+        await card_sent(h, q)
+        reminder = await bumped(h, q)
+        assert await say(h, "the first one", reminder) == hint(q)
+        untouched(h, q, "the first one")
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+@pytest.mark.parametrize("emoji", ["👍", "👎"])
+def test_a_decision_emoji_on_a_bump_gets_the_hint(tmp_path: Path, emoji: str) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        reminder = await bumped(h, ask_id)
+        mid, text = await reacted(h, emoji, reminder)
+        assert text == hint(ask_id) and threads(h, mid) == {reminder}       # the reacted message (delta §5)
+        untouched(h, ask_id, emoji)
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_another_emoji_on_a_bump_does_nothing(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        reminder = await bumped(h, ask_id)
+        mid, text = await reacted(h, "🎉", reminder)
+        assert text == "" and outbox_count(h, f"%{mid}%") == 0 and h.store.inbound_status(mid) == "done"
+        assert audited(h, kind="event", action="ignored", what="reaction", message_id=f"r:{ref_id(mid[2:])}")
+        untouched(h, ask_id, "🎉")
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_independent_commands_on_a_bump_run_normally(tmp_path: Path) -> None:
+    """B1: `!asks`, `!asks bump` and `!answer <id> <text>` keep their routing as replies to a bump."""
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        q = await posted(h, question())
+        await card_sent(h, q)
+        reminder = await bumped(h, q)
+        assert (await say(h, "!asks", reminder, tag="cmd")).startswith(f"{q} question")
+        mid = await send(h, "!asks bump", reminder)
+        await settled(h, mid)
+        assert cmd_reply(h, mid) == f"Bumped 1 ask: {q}."
+        assert await say(h, f"!answer {q} the first one", reminder) == f"Answer recorded for ask {q}."
+        assert [a.text for a in h.store.answers(q)] == ["the first one"]
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_reply_to_another_ask_notice_keeps_its_routing(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        q = await posted(h, question())
+        await card_sent(h, q)
+        assert (await h.daemon.on_ask(asks.AskCancel(q), NONE)).result == "ok"
+        await wait_until(lambda: sent_mid(h, f"asknote:{q}:cancelled:0:0") is not None)
+        notice = sent_mid(h, f"asknote:{q}:cancelled:0:0")
+        assert notice is not None and h.store.bump_for_message(notice) is None
+        await send(h, "thanks", notice)
+        await h.until(lambda: "echo: thanks" in h.texts())                   # to the agent, as today
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_bump_reply_from_a_stranger_or_while_latched_is_refused_as_any_message(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        reminder = await bumped(h, ask_id)
+        stranger = "f7" * 32
+        mid = await send(h, "approve", reminder, stranger)
+        await wait_until(lambda: audited(h, kind="drop", sender_prefix=stranger[:8],
+                                         reason="sender is not an operator"))
+        assert h.store.inbound_status(mid) is None
+        h.daemon.latch("test latch")
+        mid = await send(h, "approve", reminder)
+        r = await react(h, "👍", reminder)
+        await wait_until(lambda: audited(h, kind="drop", operator="op", what="reaction", emoji="👍"))
+        await stays(lambda: outbox_count(h, f"ask:{mid}:%") == 0 and outbox_count(h, f"ask:{r}:%") == 0)
+        untouched(h, ask_id, "approve")
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_replayed_reaction_on_a_bump_gets_no_second_hint(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        reminder = await bumped(h, ask_id)
+        eid = "e3" * 32
+        mid = await react(h, "👍", reminder, event=eid)
+        await settled(h, mid)
+        await react(h, "👎", reminder, event=eid)
+        await wait_until(lambda: audited(h, kind="drop", reason="replayed reaction id", ref=ref_id(eid)))
+        assert queued(h, mid) == hint(ask_id) and outbox_count(h, "ask:r:%") == 1
+        untouched(h, ask_id, "👍")
     go(tmp_path, scenario)
