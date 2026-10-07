@@ -626,17 +626,19 @@ def test_postable_accepts() -> None:
 
 # --- the card (R8, R21, R25) ---------------------------------------------------------------------
 HEAD = "🛂 Approval ask k7m2 · bead btq-ab12c · posted by controller (a local process; unverified)"
-DECIDE = ["", "Decide by replying to this message:", f"  !approve {BEAD} {D12}", f"  !deny {BEAD} <reason>",
-          f"!approve records your approval of {BEAD} in btq, as you, via Marmot. A reply without !approve or "
-          "!deny decides nothing."]
+ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
+TOP = [HEAD, ACTIONS, f"digest {D12}"]
+END = ["", f"Approving records your approval of {BEAD} in btq, as you, via Marmot. Any other reply is a note "
+       "for the poster."]
 
 
 def test_approval_card_is_the_readout_verbatim() -> None:
+    """The R30 wording, pinned: the head, the actions, the digest, the readout, the closing line."""
     card = asks.approval_card(card_row(), readout(), 4000)
-    assert card is not None and not card.truncated
-    whole = "\n".join([HEAD, f"digest {D12}", *TITLE, "ask:", *LINKED, *DESCRIPTION, *DECIDE])
+    assert isinstance(card, asks.ApprovalCard)
+    whole = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == [whole] and card.details_chunks == [whole]
-    assert D not in whole and f"  !approve {BEAD} {D12}" in whole.splitlines()
+    assert D not in whole and whole.splitlines()[:3] == TOP and "!approve" not in whole
     assert asks.approval_title(readout(), BEAD) == "Approve the plan 4 sandbox runtime"
     assert asks.approval_title(readout(readout={"title": ["title:"], "ask": [], "description": []}),
                                BEAD) == BEAD
@@ -644,28 +646,37 @@ def test_approval_card_is_the_readout_verbatim() -> None:
 
 def test_approval_card_chunks_are_what_is_queued() -> None:
     card = asks.approval_card(card_row(), readout(), 200)
-    assert card is not None and len(card.card_chunks) > 1
-    text = "\n".join([HEAD, f"digest {D12}", *TITLE, "ask:", *LINKED, *DESCRIPTION, *DECIDE])
+    assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
+    text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == chunk.split(text, 200)
 
 
-def test_approval_card_truncates_and_keeps_the_decision_lines() -> None:
-    long = ["description:", *(f"  │ line {i} of the plan" for i in range(60))]
+def test_approval_card_is_never_shortened() -> None:
+    """R8, R15 (revised): past the question card's 40 lines and 3,500 characters, the whole readout is the
+    card, in as many chunks as it needs, and the card is its own `!details`."""
+    long = ["description:", *(f"  │ line {i} of the plan" for i in range(60)), *(["  │ " + "w" * 900] * 4)]
     r = readout(readout={**LINES, "description": long})
     card = asks.approval_card(card_row(), r, 4000)
-    assert card is not None and card.truncated
-    text = "".join(card.card_chunks)
-    shown = asks.CARD_LINES - len(TITLE) - 1 - len(LINKED)
-    assert f"  │ line {shown - 2} of the plan" in text and f"  │ line {shown - 1} of the plan" not in text
-    assert (f"(shortened: {len(long) - shown} more lines. Reply !details to this message and read it before "
-            "approving.)") in text
-    assert text.endswith("\n".join(DECIDE)) and text.startswith(f"{HEAD}\ndigest {D12}\n")
-    details = "".join(card.details_chunks)
-    assert "  │ line 59 of the plan" in details and "shortened" not in details
-    wide = readout(readout={**LINES, "description": ["description:", *(["  │ " + "w" * 900] * 4)]})
-    by_chars = asks.approval_card(card_row(), wide, 4000)
-    assert by_chars is not None and by_chars.truncated
-    assert "(shortened: 1 more lines." in by_chars.card_chunks[0]
+    assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
+    text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *long, *END])
+    assert card.card_chunks == chunk.split(text, 4000) and card.details_chunks == card.card_chunks
+    assert "  │ line 59 of the plan" in "".join(card.card_chunks) and "shortened" not in text
+    assert len(text.splitlines()) > asks.CARD_LINES and len(text) > asks.CARD_CHARS
+
+
+def test_approval_card_cap() -> None:
+    """R8: a readout over MAX_APPROVAL_CARD characters is refused at post time, after the R21 check."""
+    def sized(n: int, extra: str = "") -> Readout:
+        fixed = "\n".join([*TITLE, "ask:", *LINKED, "description:", "  │ "])
+        line = "  │ " + "w" * (n - len(fixed)) + extra
+        return readout(readout={**LINES, "description": ["description:", line]})
+    assert asks.MAX_APPROVAL_CARD == 24_000
+    at_cap = asks.approval_card(card_row(), sized(asks.MAX_APPROVAL_CARD), 4000)
+    assert isinstance(at_cap, asks.ApprovalCard) and len(at_cap.card_chunks) == 7
+    assert asks.approval_card(card_row(), sized(asks.MAX_APPROVAL_CARD + 1), 4000) == asks.TOO_LONG
+    assert asks.TOO_LONG == "this bead is too long to decide from the phone; decide it at the terminal"
+    over_and_secret = sized(asks.MAX_APPROVAL_CARD + 100, " " + TOKEN)
+    assert asks.approval_card(card_row(), over_and_secret, 4000) == asks.REDACTED      # R21 is checked first
 
 
 @pytest.mark.parametrize("line", [
@@ -676,18 +687,18 @@ def test_approval_card_truncates_and_keeps_the_decision_lines() -> None:
 ])
 def test_approval_card_refuses_what_redaction_would_change(line: str) -> None:
     r = readout(readout={**LINES, "description": [*DESCRIPTION, line]})
-    assert asks.approval_card(card_row(), r, 4000) is None
+    assert asks.approval_card(card_row(), r, 4000) == asks.REDACTED
 
 
 def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
-    """The R21 fixture found by search: the whole text survives redaction; a chunk boundary cuts the key
-    so that one chunk holds a run `SECRET_VALUES` matches."""
+    """The R21 fixture found by search (again for the R30 layout): the whole text survives redaction; a
+    chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES` matches."""
     key = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
     r = readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
-                         "description": ["description:", "  │ " + "w" * 175 + " " + key]}, links=[])
+                         "description": ["description:", "  │ " + "w" * 124 + " " + key]}, links=[])
     whole = asks.approval_card(card_row(), r, 4000)
-    assert whole is not None and key in whole.card_chunks[0]
-    assert asks.approval_card(card_row(), r, 200) is None
+    assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
+    assert asks.approval_card(card_row(), r, 200) == asks.REDACTED
 
 
 def test_approval_card_refuses_a_value_split_across_chunks() -> None:
@@ -699,19 +710,19 @@ def test_approval_card_refuses_a_value_split_across_chunks() -> None:
     stand_in_token = "Z" * len(TOKEN)
     for pad in range(100, 200):
         stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 4000)
-        assert stand_in is not None
+        assert isinstance(stand_in, asks.ApprovalCard)
         text = stand_in.card_chunks[0].replace(stand_in_token, TOKEN)
         if all(redact(part) == part for part in chunk.split(text, 200)):
             break
     else:
         raise AssertionError("no padding splits the token")
     assert redact(text) != text
-    assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) is None
+    assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) == asks.REDACTED
 
 
 def test_approval_body_round_trip() -> None:
     card = asks.approval_card(card_row(), readout(), 300)
-    assert card is not None
+    assert isinstance(card, asks.ApprovalCard)
     body = asks.approval_body(readout(), card)
     assert msgspec.convert(json.loads(body)["readout"], Readout) == readout()
     assert asks.stored_details(card_row(body=body)) == card.details_chunks
@@ -1237,10 +1248,18 @@ def test_latch_during_decision_completes(tmp_path: Path) -> None:
 LONG = {"description": ["description:", *(f"  │ line {i} of the plan" for i in range(60))]}
 
 
+def legacy(h: Harness, ask_id: str) -> None:
+    """Make the ask one stored before the reply/reaction delta, whose card was shortened (`asks.truncated
+    = 1`): R8's old rule still holds for it."""
+    h.store.db.execute("UPDATE asks SET truncated = 1 WHERE ask_id = ?", (ask_id,))
+
+
 @needs_tmux
-def test_truncated_needs_details(tmp_path: Path) -> None:
+def test_legacy_truncated_needs_details(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        assert not (h.store.ask(ask_id) or card_row()).truncated     # a new ask is never shortened
+        legacy(h, ask_id)
         stored = h.store.ask(ask_id)
         assert stored is not None and stored.truncated
         text = await say(h, approve(), first)
@@ -1259,9 +1278,10 @@ def test_truncated_needs_details(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_details_by_other_operator_does_not_count(tmp_path: Path) -> None:
+def test_legacy_details_by_other_operator_does_not_count(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        legacy(h, ask_id)
         await send(h, "!details", first, SECOND_HEX)
         await wait_until(lambda: h.store.details_delivered(ask_id, "llctest"))
         assert (await say(h, approve(), first)).startswith(f"Ask {ask_id} was shortened.")
@@ -1840,9 +1860,10 @@ def test_latch_during_asks_backstop_drops_listing(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_details_not_fully_delivered_does_not_count(tmp_path: Path) -> None:
+def test_legacy_details_not_fully_delivered_does_not_count(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        legacy(h, ask_id)
         gate = asyncio.Event()
 
         def hold_after_first(req: dict[str, Any]) -> None:

@@ -89,7 +89,7 @@ UNCERTAIN = "delivery to the admin agent is uncertain; not retried — resend if
 ASK_BUSY = "admind is already handling two posts; try again shortly."
 ASK_LATCHED = "admind is latched and posts nothing; the ask was not posted."
 ASK_NO_APPROVALS = "Approval asks are not configured on this host ([admind] approve_bead)."
-ASK_REDACTED = "this bead holds text admind would redact; decide it at the terminal"
+ASK_REDACTED = asks.REDACTED
 ASK_BEAD_BUSY = "ask {ask_id} for {bead} is being decided or awaits a read-back; post again once it settles."
 ASK_SUPERSEDED_NOTICE = ("Ask {old} is superseded by ask {new}, a newer card for {bead}. This card decides "
                          "nothing any more.")
@@ -675,10 +675,9 @@ class Admind:
                      asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
                      None, at, at)
         card = asks.approval_card(row, r, self.s.chunk_chars)
-        if card is None:
-            return self.approval_refused(bead, ASK_REDACTED, "redaction")
-        row = dataclasses.replace(row, body=asks.approval_body(r, card), truncated=card.truncated,
-                                  card_parts=len(card.card_chunks))
+        if isinstance(card, str):
+            return self.approval_refused(bead, card, "redaction" if card == ASK_REDACTED else "too long")
+        row = dataclasses.replace(row, body=asks.approval_body(r, card), card_parts=len(card.card_chunks))
         refusal = self.approval_post_refusal(bead)      # the read awaited: the latch and limits again (R22)
         if refusal is not None:
             return self.approval_refused(bead, refusal, "limits")
@@ -695,7 +694,7 @@ class Admind:
                 self.post(f"ask:{row.ask_id}:{i}", part, None)
         self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
                          pid=peer.pid, bead=bead, digest12=(r.digest or "")[:12], parts=len(card.card_chunks),
-                         details_parts=len(card.details_chunks), truncated=card.truncated,
+                         details_parts=len(card.details_chunks), truncated=False,
                          superseded=superseded)
         return asks.AskReply("posted", f"ask {row.ask_id} posted", ask=self.ask_view(row))
 
