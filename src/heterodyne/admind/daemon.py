@@ -974,6 +974,12 @@ class Admind:
         """Accepted activity on the ask, in the caller's transaction: its clock moves to now (B14)."""
         self.store.touch_ask(ask_id, asks.stamp(asks.now()))
 
+    def touch_card(self, target: str | None) -> None:
+        """`touch` the ask whose card, `!details` or repeat `target` is, if it is one (B14)."""
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None:
+            self.touch(ask_id)
+
     def bump_hint(self, mid: str, ask_id: str) -> None:
         """A reply, a card command or a decision emoji on a reminder (B6): where to decide instead, in the
         reply's thread or on the reacted reminder (delta §5). Nothing reaches the agent or the ask."""
@@ -991,8 +997,10 @@ class Admind:
         if row is None or ask_id is None:
             self.finish(mid, "done", show(f"No ask {cmd.arg}.", False), "cmd")
             return
-        if row.kind == "approval":
-            self.finish(mid, "done", APPROVAL_NOT_ANSWERED.format(ask_id=ask_id), "cmd")
+        if row.kind == "approval":     # refused, yet accepted activity on the ask (B14)
+            with self.store.transaction():
+                self.touch(ask_id)
+                self.finish(mid, "done", APPROVAL_NOT_ANSWERED.format(ask_id=ask_id), "cmd")
             return
         self.answer_ask(mid, ask_id, cmd.rest or "")
 
@@ -1840,7 +1848,10 @@ class Admind:
         ask_id = self.store.ask_for_message(target)
         row = None if ask_id is None else self.store.ask(ask_id)
         if row is None or commands.has_control_chars(emoji):
-            self.store.set_inbound(mid, "done")
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                if row is not None:             # accepted on a card, though ignored (B14)
+                    self.touch(row.ask_id)
             self.audit.write("event", action="ignored", what="reaction", message_id=mid, ask_id=ask_id)
             return
         if row.kind != "approval":
@@ -1879,7 +1890,9 @@ class Admind:
         # Control characters are refused before anything else: they can break out of bracketed paste,
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
-            self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
+            with self.store.transaction():      # refused, yet accepted activity on a card it replies to (B14)
+                self.touch_card(target)
+                self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
         bump = self.store.bump_for_message(target)
         if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
@@ -1892,7 +1905,9 @@ class Admind:
         try:
             cmd = commands.parse(text)
         except commands.CommandError as exc:
-            self.finish(mid, "done", show(str(exc), False), "cmd")   # may echo the operator's mistyped word
+            with self.store.transaction():      # e.g. an oversized `!deny` on a card: its clock moves (B14)
+                self.touch_card(target)
+                self.finish(mid, "done", show(str(exc), False), "cmd")   # may echo the mistyped word
             return
         if cmd is not None:
             # Persisted before anything runs (or waits for the dispatch lock): a crash from here until

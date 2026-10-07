@@ -44,7 +44,16 @@ from heterodyne.admind import daemon as daemon_mod
 from heterodyne.admind import store as store_mod
 from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.audit import ref_id
-from heterodyne.admind.daemon import NEEDS_DETAILS, NOT_DELIVERED
+from heterodyne.admind.daemon import (
+    APPROVAL_NOT_ANSWERED,
+    ASK_NO_APPROVALS,
+    CONTROL_REFUSED,
+    MISMATCH,
+    NEEDS_DETAILS,
+    NOT_A_CARD_REPLY,
+    NOT_DELIVERED,
+    REASON_TOO_LONG,
+)
 from heterodyne.admind.settings import resolve
 from heterodyne.admind.store import Store
 from heterodyne.config import ConfigError, load
@@ -990,6 +999,7 @@ def test_accepted_activity_on_an_approval_ask_moves_its_clock(
         before = c.advance(1)
         await react(h, "👍", first, stranger)
         await wait_until(lambda: audited(h, kind="drop", sender_prefix=stranger[:8], what="reaction"))
+        assert activity(h.store, ask_id) == at                              # a stranger's: dropped
         eid = "e4" * 32
         mid = await react(h, "👎", repeat, event=eid)
         await settled(h, mid)
@@ -1036,6 +1046,105 @@ def test_a_refused_approve_moves_the_clock(tmp_path: Path, monkeypatch: pytest.M
         at = c.advance(1)
         assert await say(h, "approve", first) == NOT_DELIVERED.format(ask_id=ask_id)
         assert activity(h.store, ask_id) == at
+    go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
+
+
+# Each accepted refusal on an identified ask (B14), as (the ask's kind, how it is refused on `first`, the
+# card's chunk 0). Each asserts its own refusal, so a route that stops refusing fails rather than passes.
+async def answer_on_an_approval(h: Harness, ask_id: str, first: str) -> None:
+    text = await say(h, f"!answer {ask_id} hi", None, tag="cmd")
+    assert text == APPROVAL_NOT_ANSWERED.format(ask_id=ask_id)
+
+
+async def oversized_deny_command(h: Harness, ask_id: str, first: str) -> None:
+    text = await say(h, f"!deny {BEAD} " + "x" * (commands.MAX_REASON + 1), first, tag="cmd")
+    assert "the reason is at most" in text
+
+
+async def oversized_deny_reply(h: Harness, ask_id: str, first: str) -> None:
+    assert await say(h, "deny " + "x" * (commands.MAX_REASON + 1), first) == REASON_TOO_LONG
+
+
+async def mismatched_bead(h: Harness, ask_id: str, first: str) -> None:
+    assert await say(h, "!approve hz-nope", first) == MISMATCH.format(bead=BEAD)
+
+
+async def approve_on_a_question(h: Harness, ask_id: str, first: str) -> None:
+    assert await say(h, "!approve", first) == NOT_A_CARD_REPLY
+
+
+async def not_delivered(h: Harness, ask_id: str, first: str) -> None:
+    fail_original(h, ask_id)
+    assert await say(h, "approve", first) == NOT_DELIVERED.format(ask_id=ask_id)
+
+
+async def needs_details(h: Harness, ask_id: str, first: str) -> None:
+    await wait_until(lambda: h.store.card_delivered(ask_id))
+    h.store.db.execute("UPDATE asks SET truncated = 1 WHERE ask_id = ?", (ask_id,))
+    assert await say(h, "approve", first) == NEEDS_DETAILS.format(ask_id=ask_id)
+
+
+async def not_configured(h: Harness, ask_id: str, first: str) -> None:
+    await wait_until(lambda: h.store.card_delivered(ask_id))
+    h.daemon.approve_bead = None
+    assert await say(h, "approve", first) == ASK_NO_APPROVALS
+
+
+async def already_decided(h: Harness, ask_id: str, first: str) -> None:
+    set_status(h, ask_id, "approved")
+    assert (await say(h, "approve", first)).startswith(f"Ask {ask_id} is already approved")
+    set_status(h, ask_id, "open")                       # so the deadline below can be observed
+
+
+async def control_characters(h: Harness, ask_id: str, first: str) -> None:
+    assert await say(h, "approve\x07", first, tag="refused") == CONTROL_REFUSED
+
+
+async def control_character_reaction(h: Harness, ask_id: str, first: str) -> None:
+    mid, text = await reacted(h, "👍\x07", first)
+    assert text == "" and attempts(h, ask_id) == []
+
+
+REFUSALS = {
+    "!answer on an approval": ("approval", answer_on_an_approval),
+    "oversized !deny": ("approval", oversized_deny_command),
+    "oversized deny reply": ("approval", oversized_deny_reply),
+    "MISMATCH": ("approval", mismatched_bead),
+    "NOT_A_CARD_REPLY": ("question", approve_on_a_question),
+    "not delivered": ("approval", not_delivered),
+    "needs details": ("approval", needs_details),
+    "not configured": ("approval", not_configured),
+    "already decided": ("approval", already_decided),
+    "control characters": ("approval", control_characters),
+    "control-character reaction": ("approval", control_character_reaction),
+}
+
+
+@needs_tmux
+@pytest.mark.parametrize("route", list(REFUSALS))
+def test_an_accepted_refusal_moves_the_reminder_deadline(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str) -> None:
+    """B14: a refusal at hour 10 on an identified ask moves its clock, so it is first auto-bumped at hour
+    22, not at hour 12 (review r1)."""
+    c = clock(monkeypatch)
+    kind, refuse = REFUSALS[route]
+
+    async def scenario(h: Harness) -> None:
+        if kind == "approval":
+            ask_id, first = await card(h)
+        else:
+            await joined(h)
+            ask_id = await posted(h, question())
+            first = await card_sent(h, ask_id)
+        at = c.advance(10)
+        await refuse(h, ask_id, first)
+        assert activity(h.store, ask_id) == at
+        c.advance(2)
+        await check(h)
+        assert auto_rows(h, ask_id) == []                                   # 12 h after the post: not due
+        c.advance(10)
+        await check(h)
+        assert len(auto_rows(h, ask_id)) == 1                               # 12 h after the refusal
     go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
 
 
