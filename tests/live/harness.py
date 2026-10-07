@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -39,7 +40,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,10 +51,22 @@ from heterodyne import config as hconfig
 from heterodyne.admind.settings import resolve
 from heterodyne.config import paths
 from heterodyne.config.secret_scan import show
-from heterodyne.marmot.control import ControlClient, ControlError, FinalSent, InboundMessage, ReactionAdded
+from heterodyne.marmot.control import (
+    ControlClient,
+    ControlError,
+    Event,
+    FinalSent,
+    InboundMessage,
+    ProtocolError,
+    ReactionAdded,
+    decode_event,
+    decode_head,
+)
 from heterodyne.marmot.nip19 import hex_to_npub
 
-REAL_HOME = Path.home()     # captured at import, before any child environment exists
+# The account's real home from the password database, not $HOME: a hostile or stale HOME in the parent
+# environment must not move the forbidden locations.
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 BTQ_LIVE = Path(os.environ.get("HZ_LIVE_BTQ", str(REAL_HOME / "repos" / "beads-task-queue")))
 APPROVE_BEAD = BTQ_LIVE / "bin" / "approve-bead"
 BTQ_SCRIPT = BTQ_LIVE / "bin" / "btq"
@@ -65,8 +78,8 @@ PRODUCTION_DATABASE = "tasks"
 DATABASE = "hzlive"
 PREFIX = "hzl"
 ADMIND_LABEL = "heterodyne-admind"      # cli.IDENTITY_LABEL: admind init reuses an account it finds
-OPERATORS = ("tester", "outsider")      # tester is a btq approver; outsider is not
-BTQ_APPROVERS = ("tester",)
+OPERATORS = ("tester", "tester2", "outsider")  # all admind operators; outsider is not a btq approver
+BTQ_APPROVERS = ("tester", "tester2")
 DESIGN_REVIEW = "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model"
 READY_PREFIX = "admind is listening"
 WAIT = 90.0                 # one relay round trip can take seconds; every wait is bounded
@@ -145,6 +158,64 @@ def self_check(root: Path) -> None:
         raise LiveError("isolation guard self-check: a production location was not refused")
 
 
+# The root's layout; `child_env` and `Stack` both use it.
+LAYOUT = {"home": "home", "hconfig": "hc", "hstate": "hs", "btq": "btq", "repo": "repo", "dolt": "dolt",
+          "logs": "logs", "work": "work", "ops": "ops", "tmp": "tmp", "run": "run"}
+
+# Every key a child environment may hold. Anything else (from the parent or a later edit) is refused.
+CHILD_KEYS = frozenset({
+    "PATH", "LANG", "TERM", "HZ_LIVE_ROOT", "HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+    "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "TMUX_TMPDIR", "HETERODYNE_CONFIG_DIR",
+    "HETERODYNE_STATE_DIR", "BTQ_CONFIG_DIR", "BTQ_POLICY", "BTQ_REPO", "BTQ_DOLT_HOST", "BTQ_DOLT_PORT",
+    "BTQ_DOLT_DATABASE", "BD_NON_INTERACTIVE", "PYTHONDONTWRITEBYTECODE",
+    # what btq's Queue gives bd (bin/btq Queue.__init__), provisioned for the private server
+    "BEADS_DOLT_PASSWORD", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_TLS", "SSL_CERT_FILE", "BEADS_DIR",
+    "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE"})
+PATH_KEYS = ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+             "XDG_RUNTIME_DIR", "TMUX_TMPDIR", "HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR",
+             "BTQ_CONFIG_DIR", "BTQ_POLICY", "BTQ_REPO", "SSL_CERT_FILE", "BEADS_DIR")
+ENDPOINT_KEYS = (("BTQ_DOLT_HOST", "BTQ_DOLT_PORT", "BTQ_DOLT_DATABASE"),
+                 ("BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE"))
+
+
+def child_env(root: Path, port: int, parent: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """The environment every child gets, built from an allowlist: only PATH comes from `parent`.
+    Every location is under `root` and the beads endpoint is the private server on `port`."""
+    d = {name: str(root / rel) for name, rel in LAYOUT.items()}
+    home = root / LAYOUT["home"]
+    return {
+        "PATH": parent.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "dumb",
+        "HZ_LIVE_ROOT": str(root), "HOME": str(home), "TMPDIR": d["tmp"],
+        "XDG_CONFIG_HOME": str(home / ".config"), "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_DATA_HOME": str(home / ".local/share"), "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_RUNTIME_DIR": d["run"], "TMUX_TMPDIR": d["run"],
+        "HETERODYNE_CONFIG_DIR": d["hconfig"], "HETERODYNE_STATE_DIR": d["hstate"],
+        "BTQ_CONFIG_DIR": d["btq"], "BTQ_POLICY": str(Path(d["btq"]) / "policy.json"), "BTQ_REPO": d["repo"],
+        "BTQ_DOLT_HOST": "127.0.0.1", "BTQ_DOLT_PORT": str(port), "BTQ_DOLT_DATABASE": DATABASE,
+        "BD_NON_INTERACTIVE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def check_child_env(root: Path, env: Mapping[str, str]) -> None:
+    """Refuse a child environment unless it holds only allowlisted keys, every location in it is under
+    `root` (and clear of production), and every beads endpoint in it is loopback and not production."""
+    extra = sorted(set(env) - CHILD_KEYS)
+    if extra:
+        raise LiveError(f"isolation guard: child environment has keys outside the allowlist: {extra}")
+    if env.get("HZ_LIVE_ROOT") != str(root):
+        raise LiveError("isolation guard: child environment is not marked with this run's root")
+    checked = {k: Path(env[k]) for k in PATH_KEYS if k in env}
+    if any(not v.is_absolute() for v in checked.values()):
+        raise LiveError("isolation guard: a location in the child environment is not absolute")
+    for host_key, port_key, db_key in ENDPOINT_KEYS:
+        if port_key not in env and db_key not in env and host_key not in env:
+            continue
+        if env.get(host_key) != "127.0.0.1" or not env.get(port_key, "").isdigit() or not env.get(db_key):
+            raise LiveError(f"isolation guard: {host_key}/{port_key}/{db_key} are incomplete or not loopback")
+        guard(root, checked, int(env[port_key]), env[db_key])
+    guard(root, checked, 0, DATABASE)
+
+
 class Procs:
     """Every process the harness starts, each in its own session; stopped by process group, by PID."""
 
@@ -156,6 +227,7 @@ class Procs:
 
     def start(self, name: str, argv: list[str], env: Mapping[str, str], log: Path,
               cwd: Path | None = None) -> subprocess.Popen[bytes]:
+        check_child_env(self.root, env)
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             proc = subprocess.Popen(argv, env=dict(env), cwd=cwd, stdin=subprocess.DEVNULL, stdout=fd,
@@ -169,6 +241,7 @@ class Procs:
     def run(self, argv: list[str], env: Mapping[str, str], timeout: float, stdin: bytes | None = None,
             cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
         """A short-lived child, in its own session; its whole group is killed if it outlives `timeout`."""
+        check_child_env(self.root, env)
         proc = subprocess.Popen(argv, env=dict(env), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, start_new_session=True)
         with self.lock:
@@ -231,17 +304,43 @@ def send_reaction(client: ControlClient, account: str, group: str, target: str, 
                                    "app_event_sent", FinalSent))
 
 
+class RawControlClient(ControlClient):
+    """The src client plus a subscription that also yields each event frame as parsed JSON, so fields the
+    src decoder drops (`event_id_hex` on `reaction_added`, per spike S4) stay available to tests."""
+
+    async def subscribe_raw(self, account: str, group: str, on_ack: Callable[[], Awaitable[None]]
+                            ) -> AsyncIterator[tuple[dict[str, Any], Event]]:
+        request_id = uuid.uuid4().hex
+        frame = self._frame({"type": "subscribe_inbound", "account_id_hex": account, "group_id_hex": group},
+                            request_id)
+        reader, writer = await self._open()
+        try:
+            await self._write(writer, frame)
+            ack = await self._readline(reader, self.timeout)
+            if decode_head(ack, request_id) != "ack":
+                raise ProtocolError("subscribe_inbound was not acknowledged")
+            await on_ack()
+            while True:
+                line = await self._readline(reader, None)
+                yield json.loads(line), decode_event(line, request_id)
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+
+
 @dataclass
 class Seen:
     """One event an operator's subscription delivered."""
     kind: str                   # "message" or "reaction"
-    message_id: str
+    message_id: str             # for a reaction, its own event ID (`event_id_hex`)
     sender: str
     is_self: bool
     text: str = ""
     reply_to: str | None = None
     emoji: str | None = None
     target: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict[str, Any])    # the frame as wn-agent sent it
     at: float = field(default_factory=time.monotonic)
 
 
@@ -257,8 +356,9 @@ class Operator:
         self.account = ""
         self.npub = ""
         self.group = ""
-        self.client: ControlClient | None = None
+        self.client: RawControlClient | None = None
         self.events: list[Seen] = []
+        self.frames: list[dict[str, Any]] = []      # every event frame received, raw, in order
         self.cond = threading.Condition()
         self.stopping = threading.Event()
         self.subscribed = threading.Event()
@@ -289,7 +389,7 @@ class Operator:
         self.account = str(info["account_id_hex"]).lower()
         self.npub = hex_to_npub(self.account)
         token = self.token_file.read_text().strip()
-        self.client = ControlClient(self.socket, token, timeout=60)
+        self.client = RawControlClient(self.socket, token, timeout=60)
 
     def joined(self, group: str, members: int) -> bool:
         """This operator's wn-agent knows the group with the expected member count (welcome accepted)."""
@@ -313,8 +413,8 @@ class Operator:
         async def loop() -> None:
             while not self.stopping.is_set():
                 try:
-                    async for ev in self._client.subscribe(self.account, self.group, on_ack=ack):
-                        self._record(ev)
+                    async for raw, ev in self._client.subscribe_raw(self.account, self.group, ack):
+                        self._record(raw, ev)
                 except ControlError:
                     if self.stopping.is_set():
                         return
@@ -322,23 +422,24 @@ class Operator:
         with contextlib.suppress(Exception):
             asyncio.run(loop())
 
-    def _record(self, ev: object) -> None:
+    def _record(self, raw: dict[str, Any], ev: Event) -> None:
         seen: Seen | None = None
         if isinstance(ev, InboundMessage) and ev.group_id_hex.lower() == self.group:
             m = ev.message
             reply_to = None if ev.reply_to is None else ev.reply_to.message_id_hex.lower()
             seen = Seen("message", m.message_id_hex.lower(), m.sender.account_id_hex.lower(),
-                        m.sender.is_self, text=m.text, reply_to=reply_to)
+                        m.sender.is_self, text=m.text, reply_to=reply_to, raw=raw)
         elif isinstance(ev, ReactionAdded) and ev.group_id_hex.lower() == self.group:
-            seen = Seen("reaction", "", ev.actor.account_id_hex.lower(), ev.actor.is_self, emoji=ev.emoji,
-                        target=ev.target_message_id_hex.lower())
-        if seen is not None:
-            with self.cond:
+            seen = Seen("reaction", str(raw.get("event_id_hex", "")).lower(), ev.actor.account_id_hex.lower(),
+                        ev.actor.is_self, emoji=ev.emoji, target=ev.target_message_id_hex.lower(), raw=raw)
+        with self.cond:
+            self.frames.append(raw)
+            if seen is not None:
                 self.events.append(seen)
-                self.cond.notify_all()
+            self.cond.notify_all()
 
     @property
-    def _client(self) -> ControlClient:
+    def _client(self) -> RawControlClient:
         if self.client is None:
             raise LiveError(f"{self.name} is not started")
         return self.client
@@ -386,6 +487,22 @@ class Operator:
                                 f"admind's reply{'' if contains is None else ' with ' + repr(contains)}",
                                 timeout)
         return hit.text
+
+    def wait_reaction(self, target: str, emoji: str | None = None, sender: str | None = None,
+                      timeout: float = WAIT) -> Seen:
+        """The first reaction seen on message `target` (with `emoji`, from account `sender`, if given).
+        `Seen.message_id` is the reaction's own event ID; `Seen.raw` is wn-agent's frame."""
+        deadline = time.monotonic() + timeout
+        with self.cond:
+            while True:
+                for e in self.events:
+                    if (e.kind == "reaction" and e.target == target and emoji in (None, e.emoji)
+                            and sender in (None, e.sender)):
+                        return e
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise LiveError(f"{self.name}: timed out after {timeout:.0f}s waiting for a reaction")
+                self.cond.wait(min(left, 1.0))
 
     def wait_card(self, ask_id: str, timeout: float = WAIT) -> list[str]:
         """The message IDs of ask `ask_id`'s card chunks, in order, once this operator has received every
@@ -454,14 +571,14 @@ class Stack:
         self.procs = Procs(self.root)
         self.timings: dict[str, float] = {}
         self.closed = False
-        self.home = self.root / "home"
-        self.hconfig = self.root / "hc"
-        self.hstate = self.root / "hs"
-        self.btq_dir = self.root / "btq"
-        self.repo = self.root / "repo"
-        self.dolt_dir = self.root / "dolt"
-        self.logs = self.root / "logs"
-        self.workdir = self.root / "work"
+        self.home = self.root / LAYOUT["home"]
+        self.hconfig = self.root / LAYOUT["hconfig"]
+        self.hstate = self.root / LAYOUT["hstate"]
+        self.btq_dir = self.root / LAYOUT["btq"]
+        self.repo = self.root / LAYOUT["repo"]
+        self.dolt_dir = self.root / LAYOUT["dolt"]
+        self.logs = self.root / LAYOUT["logs"]
+        self.workdir = self.root / LAYOUT["work"]
         for d in (self.home, self.hconfig, self.hstate, self.btq_dir, self.repo, self.dolt_dir / "data",
                   self.dolt_dir / "cfg", self.logs, self.workdir, self.root / "ops"):
             d.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -478,20 +595,7 @@ class Stack:
         self.sweep_found: list[int] = []
 
     def _env(self) -> dict[str, str]:
-        """A minimal environment for every child, built from scratch."""
-        root = str(self.root)
-        return {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "dumb",
-            "HZ_LIVE_ROOT": root, "HOME": str(self.home), "TMPDIR": str(self.root / "tmp"),
-            "XDG_CONFIG_HOME": str(self.home / ".config"), "XDG_STATE_HOME": str(self.home / ".local/state"),
-            "XDG_DATA_HOME": str(self.home / ".local/share"), "XDG_CACHE_HOME": str(self.home / ".cache"),
-            "XDG_RUNTIME_DIR": str(self.root / "run"), "TMUX_TMPDIR": str(self.root / "run"),
-            "HETERODYNE_CONFIG_DIR": str(self.hconfig), "HETERODYNE_STATE_DIR": str(self.hstate),
-            "BTQ_CONFIG_DIR": str(self.btq_dir), "BTQ_POLICY": str(self.btq_dir / "policy.json"),
-            "BTQ_REPO": str(self.repo), "BTQ_DOLT_HOST": "127.0.0.1", "BTQ_DOLT_PORT": str(self.port),
-            "BTQ_DOLT_DATABASE": DATABASE, "BD_NON_INTERACTIVE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
+        return child_env(self.root, self.port)
 
     def timed(self, step: str, fn: Callable[[], None]) -> None:
         start = time.monotonic()
@@ -538,10 +642,9 @@ class Stack:
         checked["heterodyne state_dir"] = paths.state_dir(env)
         checked["dolt data"] = self.dolt_dir
         checked.update({f"operator {n} home": op.home for n, op in self.ops.items()})
-        for name, value in self.btq_locations().items():
-            if name in ("config_dir", "repo", "credentials", "tls_cert"):
-                checked[f"btq {name}"] = Path(value)
         locs = self.btq_locations()
+        for name in ("config_dir", "repo", "credentials", "tls_cert", "policy"):
+            checked[f"btq {name}"] = Path(locs[name])
         if locs["dolt_port"] != str(self.port) or locs["dolt_database"] != DATABASE:
             raise LiveError("isolation guard: btq does not resolve the private beads endpoint")
         if with_admind:
@@ -561,7 +664,9 @@ class Stack:
                 "loader = importlib.machinery.SourceFileLoader('btq', sys.argv[1])\n"
                 "spec = importlib.util.spec_from_loader('btq', loader)\n"
                 "mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)\n"
-                "print(json.dumps(mod.locations()))\n")
+                "loc = mod.locations()\n"
+                "loc['policy'] = mod.os.environ.get('BTQ_POLICY', loc['config_dir'] + '/policy.json')\n"
+                "print(json.dumps(loc))\n")
         out = self.procs.run([sys.executable, "-c", code, str(BTQ_SCRIPT)], self.env, timeout=30)
         if out.returncode != 0:
             raise LiveError("cannot read btq's locations")

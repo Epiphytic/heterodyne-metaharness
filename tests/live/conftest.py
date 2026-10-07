@@ -1,4 +1,5 @@
-"""The live admind suite is opt-in: everything under tests/live/ is skipped unless HZ_LIVE=1.
+"""The live admind suite is opt-in: everything under tests/live/ is skipped unless HZ_LIVE=1, except the
+offline isolation checks in OFFLINE, which run in the normal suite.
 
 With HZ_LIVE=1, one isolated stack (harness.Stack) is started per session and torn down in a finally
 block, with an atexit backup in case the session dies before the fixture's finalizer runs.
@@ -19,6 +20,7 @@ from harness import Stack, mask  # noqa: E402
 
 LIVE = os.environ.get("HZ_LIVE") == "1"
 HERE = Path(__file__).parent
+OFFLINE = {"test_isolation_offline.py"}    # no network, no live binaries: part of the normal suite
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -26,7 +28,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip = pytest.mark.skip(reason="live admind suite: set HZ_LIVE=1 to run (uses the real Marmot relays)")
     for item in items:
-        if item.path.is_relative_to(HERE):
+        if item.path.is_relative_to(HERE) and item.path.name not in OFFLINE:
             item.add_marker(skip)
 
 
