@@ -119,7 +119,7 @@ def test_reaction_frame_keeps_event_id(stack: Stack) -> None:
         assert seen.message_id == event_id
         assert seen.raw["type"] == "reaction_added" and seen.raw["event_id_hex"].lower() == event_id
         assert seen.raw["target_message_id_hex"].lower() == notice.message_id
-        assert stack.ops[name].reactions(notice.message_id)[0] is seen
+        assert any(r is seen for r in stack.ops[name].reactions(notice.message_id))   # others may react too
         frames = stack.ops[name].raw_frames("reaction_added")
         assert any(f.get("event_id_hex", "").lower() == event_id for f in frames)
 

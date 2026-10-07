@@ -905,6 +905,26 @@ relays = [{relays}]
             return self.admind_cmd("ask", "list", timeout=40).returncode == 0
         wait_for(answering, 90, "the stub admind to answer on ask.sock", every=1)
 
+    def kill_admind(self) -> None:
+        """SIGKILL the stub admind's process group (admind and its wn-agent child), as a crash would, then
+        wait for any approve-bead it started to finish: those run in their own sessions and outlive it."""
+        if self.admind is None:
+            raise LiveError("admind is not running")
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(self.admind.pid, signal.SIGKILL)
+        self.admind.wait(10)
+        self.admind = None
+        wait_for(lambda: not self.running("approve-bead"), 120, "approve-bead started by the killed admind")
+
+    def running(self, name: str) -> list[int]:
+        """PIDs of this run's live processes whose command line mentions `name`."""
+        found: list[int] = []
+        for pid in self.procs.marked():
+            with contextlib.suppress(OSError):
+                if name.encode() in Path(f"/proc/{pid}/cmdline").read_bytes():
+                    found.append(pid)
+        return found
+
     def join_signal(self) -> None:
         """admind posts nothing until an operator speaks (docs/admind.md §2 step 5). `!asks` is handled
         by admind itself, so nothing reaches the (stub) agent."""
@@ -961,6 +981,12 @@ relays = [{relays}]
     # --- reading admind's state (read only) -------------------------------------------------------
     def _db(self) -> sqlite3.Connection:
         return sqlite3.connect(f"file:{self.admind_state / 'admind.db'}?mode=ro", uri=True, timeout=5)
+
+    def ask_status(self, ask_id: str) -> str | None:
+        """The ask's status straight from admind's store: cheap enough to poll while a decision runs."""
+        with contextlib.closing(self._db()) as db:
+            row = db.execute("SELECT status FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
+        return None if row is None else str(row[0])
 
     def store_get(self, key: str) -> str | None:
         with contextlib.closing(self._db()) as db:

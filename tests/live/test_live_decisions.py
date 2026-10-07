@@ -1,8 +1,7 @@
 """Live scenarios for deciding by reply or reaction (HZ_LIVE=1 only).
 
 They follow the reviewed delta, docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md
-(R7, R8, R13, R27-R31 and its section 7.2), which the daemon on this branch does not implement yet: the
-whole module is expected to fail until it does.
+(R7, R8, R13, R27-R31 and its section 7.2).
 
 Each scenario makes its own throwaway beads and asks on the session's isolated stack, and checks what can
 be observed from outside: what `approve-bead --json` reads back, the text admind sends and the message it
@@ -20,8 +19,6 @@ import pytest
 from harness import WAIT, LiveError, Operator, Seen, Stack, wait_for
 
 from heterodyne.marmot.control import ControlError
-
-pytestmark = pytest.mark.xfail(strict=False, reason="awaits relay delta")
 
 DECIDE = 120.0      # a decision runs approve-bead against the private dolt server
 QUIET = 20.0        # how long "admind sent nothing" is watched for
@@ -57,9 +54,10 @@ def posted(stack: Stack) -> Iterator[list[str]]:
             pass
 
 
-def approval(stack: Stack, posted: list[str], title: str, pin: bool = False) -> Card:
+def approval(stack: Stack, posted: list[str], title: str, pin: bool = False,
+             description: str | None = None) -> Card:
     """A fresh approval bead, posted, with its card received by all three operators."""
-    bead = stack.create_approval_bead(title)
+    bead = stack.create_approval_bead(title, description)
     digest = stack.pin(bead) if pin else str(stack.approve_bead_json(bead)["digest"])
     ask_id = stack.post_approval(bead)
     posted.append(ask_id)
@@ -199,12 +197,12 @@ def test_approve_command_arguments(stack: Stack, posted: list[str]) -> None:
 
 def test_stale_card_gets_a_fresh_one(stack: Stack, posted: list[str]) -> None:
     """An unpinned bead edited after its card was posted: tester's 👍 records nothing, and the reply
-    threaded to the card names a fresh ask (R29). The fresh card shows the new digest, and a 👍 on it
-    approves the new content."""
+    threaded to the card names a fresh ask (R29). tester2's 👍 on the stale card is told to see the fresh ask
+    (R31). The fresh card shows the new digest, and a 👍 on it approves the new content."""
     card = approval(stack, posted, "live: edit me after posting")
     tester = stack.ops["tester"]
     stack.edit_bead(card.bead, description="This throwaway bead was edited after its card was posted, so "
-                    "the card's digest no longer matches. A fresh card should follow. " * 2)
+                    "the card's digest no longer matches. A fresh card should follow. " * 4)
     now = str(readback(stack, card.bead)["digest"])
     assert now != card.digest
     pastes = stack.pastes()
@@ -219,6 +217,11 @@ def test_stale_card_gets_a_fresh_one(stack: Stack, posted: list[str]) -> None:
     posted.append(fresh_id)
     assert_undecided(stack, card.bead)
     assert stack.ask_get(card.ask_id)["ask"]["summary"]["status"] == "stale"
+
+    tester2 = stack.ops["tester2"]      # a second decider on the stale card is pointed at the fresh one
+    tester2.react(card.ids[0], "👍")
+    late = plain(threaded(tester2, card.ids[0], f"Ask {card.ask_id} is already stale").text)
+    assert f"Ask {card.ask_id} is already stale; see ask {fresh_id}. Nothing recorded." in late
 
     fresh = tester.wait_card(fresh_id)
     assert stack.ask_get(fresh_id)["ask"]["summary"]["digest12"] == now[:12]
@@ -241,7 +244,7 @@ def test_pinned_bead_edited_gets_undecidable_content(stack: Stack, posted: list[
     assert readback(stack, card.bead)["posted_digest"] == card.digest
     tester, tester2 = stack.ops["tester"], stack.ops["tester2"]
     stack.edit_bead(card.bead, description="This pinned throwaway bead was edited after its card was "
-                    "posted, so its stored pin no longer matches its content. " * 2)
+                    "posted, so its stored pin no longer matches its content. " * 4)
     now = str(readback(stack, card.bead)["digest"])
     assert now != card.digest
     pastes = stack.pastes()
@@ -337,6 +340,26 @@ def test_question_answered_by_reaction_and_reply(stack: Stack, posted: list[str]
     assert stack.pastes() == pastes
 
 
+@pytest.mark.parametrize("emoji", ["❤", "♥"])
+def test_heart_variants_approve(stack: Stack, posted: list[str], emoji: str) -> None:
+    """❤ without its U+FE0F, and a bare ♥, approve like ❤️ (R27)."""
+    card = approval(stack, posted, f"live: approve me with U+{ord(emoji):04X}")
+    tester = stack.ops["tester"]
+    tester.react(card.ids[0], emoji)
+    threaded(tester, card.ids[0], f"Approved {card.bead} as tester", DECIDE)
+    assert_approved(stack, card, "tester")
+
+
+def test_reaction_on_non_card_ignored(stack: Stack) -> None:
+    """A 👍 on admind's ready notice, which is no card, gets no reply and is not pasted to the agent."""
+    tester = stack.ops["tester"]
+    notice = tester.wait_message(lambda e: e.text.startswith("admind is listening"), "admind's ready notice")
+    pastes = stack.pastes()
+    tester.react(notice.message_id, "👍")
+    silent(tester, lambda e: e.reply_to == notice.message_id, "a reply to a reaction on a non-card")
+    assert stack.pastes() == pastes
+
+
 def test_ignored_emoji_on_approval_card(stack: Stack, posted: list[str]) -> None:
     """🎉 on an approval card decides nothing and gets no reply; it is audited as an ignored reaction."""
     card = approval(stack, posted, "live: an emoji that means nothing")
@@ -374,6 +397,7 @@ def test_legacy_truncated_ask_needs_details(stack: Stack, posted: list[str]) -> 
     keeps the old rule (R8): tester's 👍 is refused until tester's `!details` for it is delivered, and
     approves after."""
     card = approval(stack, posted, "live: a legacy shortened ask")
+    # Simulates an ask stored before the delta: nothing the daemon does now sets truncated = 1.
     stack.mark_legacy_truncated(card.ask_id)
     tester = stack.ops["tester"]
     tester.react(card.ids[0], "👍")
@@ -385,4 +409,38 @@ def test_legacy_truncated_ask_needs_details(stack: Stack, posted: list[str]) -> 
     tester.wait_details(card.ask_id, request=mid)
     tester.react(card.ids[0], "✅")
     threaded(tester, card.ids[0], f"Approved {card.bead} as tester", DECIDE)
+    assert_approved(stack, card, "tester")
+
+
+LONG = ("This throwaway approval bead's description is long on purpose, so that its card is posted in more "
+        "than one part and a reaction can target a part other than the first. ") * 60
+
+
+def test_restart_during_decision_threads_to_reacted_part(stack: Stack, posted: list[str]) -> None:
+    """tester reacts 👍 to the last part of a card that is several parts long. admind is killed (SIGKILL,
+    with its wn-agent) as soon as the ask is `deciding`, then restarted. The startup reconcile settles the
+    attempt, and its notice is threaded to the part tester reacted to, not to the first (R26, section 5).
+    If nothing was recorded, a fresh 👍 then approves."""
+    card = approval(stack, posted, "live: restart mid-decision", description=LONG)
+    assert len(card.ids) >= 2, "the card fits in one part; the scenario needs several"
+    tester = stack.ops["tester"]
+    target = card.ids[-1]
+    tester.react(target, "👍")
+    wait_for(lambda: stack.ask_status(card.ask_id) != "open" or None, DECIDE, "the decision to start",
+             every=0.02)
+    caught = stack.ask_status(card.ask_id) == "deciding"
+    stack.kill_admind()
+    stack.start_admind()
+    assert caught, f"the decision ended before admind was killed (status {stack.ask_status(card.ask_id)})"
+
+    notice = tester.wait_message(
+        lambda e: any(t in e.text for t in ("admind restarted while recording", f"Approved {card.bead}")),
+        "the reconcile notice", DECIDE)
+    parts = {mid: f"part {i + 1} of {len(card.ids)}" for i, mid in enumerate(card.ids)}
+    where = parts.get(notice.reply_to or "", "a message outside the card")
+    assert where == parts[target], f"the reconcile notice is threaded to {where}, not the reacted part"
+    if "admind restarted while recording" in notice.text:
+        assert_undecided(stack, card.bead)
+        tester.react(target, "✅")
+        threaded(tester, target, f"Approved {card.bead} as tester", DECIDE)
     assert_approved(stack, card, "tester")
