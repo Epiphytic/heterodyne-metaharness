@@ -991,7 +991,8 @@ def test_accepted_activity_on_an_approval_ask_moves_its_clock(
         c.advance(1)
         assert await say(h, "approve", reminder) == hint(ask_id)
         assert (await reacted(h, "👍", reminder))[1] == hint(ask_id)
-        assert activity(h.store, ask_id) == at                              # a hint is not card activity
+        assert await say(h, "approve\x07", reminder, tag="refused") == CONTROL_REFUSED
+        assert activity(h.store, ask_id) == at                              # a reminder is not a card
         at = c.advance(1)
         _, repeat = await repeated_card(h, ask_id)
         assert activity(h.store, ask_id) == at                              # a repeat, when queued
