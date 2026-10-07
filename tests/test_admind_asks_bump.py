@@ -5,6 +5,7 @@ with a fake. Nothing here sleeps to order events.
 """
 
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from test_admind_asks import outbox, row
 from test_admind_reactions import OLD_TABLES, columns
 from test_admind_settings import BASE_CONFIG, write
 
-from heterodyne.admind import commands
+from heterodyne.admind import asks, chunk, commands
 from heterodyne.admind import store as store_mod
 from heterodyne.admind.settings import resolve
 from heterodyne.admind.store import Store
@@ -290,3 +291,44 @@ def test_pending_reminders(tmp_path: Path, key: str, blocks: bool) -> None:
     store.mark_failed(seq)
     assert not store.reminder_pending("k7m2")
     store.close()
+
+
+# --- B4: the reminder's wording ----------------------------------------------------------------------
+APPROVAL_TAIL = "React 👍 or 👎 on the card above, or reply to it with approve or deny <reason>."
+ANSWER_TAIL = "Reply to the card above to answer."
+TOKEN = "ghp_" + "A" * 36
+
+
+def three_hours_on() -> datetime:
+    return datetime.fromisoformat(row().created_at) + timedelta(hours=3, minutes=5)
+
+
+@pytest.mark.parametrize(("kind", "tail"), [("approval", APPROVAL_TAIL), ("question", ANSWER_TAIL),
+                                            ("merge", ANSWER_TAIL)])
+def test_reminder_wording(kind: str, tail: str) -> None:
+    r = row(kind=kind, title="Approve the plan 4 sandbox runtime")
+    assert asks.reminder(r, three_hours_on()) == (
+        f"Still outstanding: ask k7m2 · {kind} · 3h · Approve the plan 4 sandbox runtime.\n{tail}")
+    assert asks.reminder(r, three_hours_on(), every=12) == (
+        "Still outstanding (automatic reminder, every 12 h): ask k7m2 · "
+        f"{kind} · 3h · Approve the plan 4 sandbox runtime.\n{tail}")
+
+
+def test_reminder_title_is_cut_at_80() -> None:
+    r = row(title="t" * 79 + "uv")
+    assert f"· {'t' * 79}u.\n" in asks.reminder(r, three_hours_on())
+
+
+@pytest.mark.parametrize("secret", [TOKEN, "ab" * 40])
+def test_reminder_title_is_redacted_whole_before_it_is_cut(secret: str) -> None:
+    """A secret that crosses character 80 is redacted whole: no fragment of it appears (B4)."""
+    r = row(title="x" * 59 + " " + secret + " tail")
+    text = asks.reminder(r, three_hours_on())
+    assert secret[:8] not in text and "ab" * 4 not in text and "AAAA" not in text
+    assert "x" * 59 + " <redacted" in text
+
+
+def test_a_reminder_splits_like_any_notice() -> None:
+    """B8: at the 200-character minimum an approval reminder with a long title takes two chunks."""
+    r = row(kind="approval", title="t" * 80)
+    assert len(chunk.split(asks.reminder(r, three_hours_on()), 200)) == 2
