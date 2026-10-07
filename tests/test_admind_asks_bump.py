@@ -122,8 +122,8 @@ def test_the_clock_only_moves_forward(tmp_path: Path) -> None:
     store.close()
 
 
-def test_the_migration_starts_existing_clocks_at_the_migration_time(tmp_path: Path,
-                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_migration_starts_existing_clocks_at_the_migration_time(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An ask created days ago, with a note an hour ago: not due at deploy; its clock starts then."""
     db = sqlite3.connect(tmp_path / "admind.db")
     db.executescript(OLD_TABLES)
@@ -909,3 +909,104 @@ def test_bumps_thread_to_the_repeat_until_the_original_arrives(tmp_path: Path) -
         await settled(h, mid)
         assert {r for _, r, _ in bump_rows(h, ask_id, mid)} == {first}
     go(tmp_path, scenario)
+
+
+# --- B14: the activity clock moves with accepted activity ----------------------------------------------
+class Clock:
+    """A fake `asks.now`: starts at START and moves only when told to."""
+    def __init__(self) -> None:
+        self.at = START
+
+    def __call__(self) -> datetime:
+        return self.at
+
+    def advance(self, hours: float) -> str:
+        self.at += timedelta(hours=hours)
+        return asks.stamp(self.at)
+
+
+START = datetime.fromisoformat("2026-10-07T00:00:00+00:00")
+
+
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    c = Clock()
+    monkeypatch.setattr(asks, "now", c)
+    return c
+
+
+@needs_tmux
+def test_accepted_activity_on_an_approval_ask_moves_its_clock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        assert activity(h.store, ask_id) == asks.stamp(START)               # set when posted
+        at = c.advance(1)
+        assert (await say(h, "looks fine to me", first)).startswith("Noted")
+        assert activity(h.store, ask_id) == at                              # a note
+        at = c.advance(1)
+        request = await send(h, "!details", first)
+        await settled(h, request)
+        assert activity(h.store, ask_id) == at                              # `!details`
+        at = c.advance(1)
+        await reacted(h, "🎉", first)
+        assert activity(h.store, ask_id) == at                              # an accepted, ignored reaction
+        at = c.advance(1)
+        await bumped(h, ask_id)
+        assert activity(h.store, ask_id) == at                              # a manual bump, when queued
+        at = c.advance(1)
+        _, repeat = await repeated_card(h, ask_id)
+        assert activity(h.store, ask_id) == at                              # a repeat, when queued
+        stranger = "f7" * 32
+        before = c.advance(1)
+        await react(h, "👍", first, stranger)
+        await wait_until(lambda: audited(h, kind="drop", sender_prefix=stranger[:8], what="reaction"))
+        eid = "e4" * 32
+        mid = await react(h, "👎", repeat, event=eid)
+        await settled(h, mid)
+        at = before
+        assert activity(h.store, ask_id) == at                              # a deny attempt, on a repeat
+        c.advance(1)
+        await react(h, "👍", first, event=eid)                              # the replayed reaction
+        await wait_until(lambda: audited(h, kind="drop", reason="replayed reaction id", ref=ref_id(eid)))
+        assert activity(h.store, ask_id) == at
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_answers_and_refusals_on_a_question_move_its_clock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        q = await posted(h, question())
+        first = await card_sent(h, q)
+        at = c.advance(1)
+        assert await say(h, "the first one", first) == f"Answer recorded for ask {q}."
+        assert activity(h.store, q) == at
+        at = c.advance(1)
+        assert (await say(h, f"!answer {q} or the second", None)).startswith(f"Added to ask {q}")
+        assert activity(h.store, q) == at
+        at = c.advance(1)
+        assert (await say(h, " ", first)).startswith("Not recorded")
+        assert activity(h.store, q) == at                                   # accepted, then refused
+        c.advance(1)
+        assert (await say(h, "!asks", None, tag="cmd")).startswith(q)       # a listing is not activity
+        assert activity(h.store, q) == at
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_refused_approve_moves_the_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        fail_original(h, ask_id)
+        at = c.advance(1)
+        assert await say(h, "approve", first) == NOT_DELIVERED.format(ask_id=ask_id)
+        assert activity(h.store, ask_id) == at
+    go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
+

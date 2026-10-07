@@ -834,12 +834,15 @@ class Admind:
             return
         refusal = self.answer_refusal(row, text)
         if refusal is not None:
-            self.finish(mid, "done", refusal, "ask")
+            with self.store.transaction():
+                self.touch(ask_id)
+                self.finish(mid, "done", refusal, "ask")
             self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
             return
         if row.kind == "approval":      # a note the poster sees; never a decision (R13)
             with self.store.transaction():
                 self.store.add_answer(ask_id, "note", self.operator_name(mid), mid, text)
+                self.touch(ask_id)
                 self.finish(mid, "done", NOTED.format(ask_id=ask_id), "ask")
             self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
             return
@@ -847,6 +850,7 @@ class Admind:
         with self.store.transaction():
             self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text)
             self.store.set_ask(ask_id, "answered")
+            self.touch(ask_id)
             self.finish(mid, "done", (f"Added to ask {ask_id}; it was already answered, and the poster sees "
                                       "both.") if again else f"Answer recorded for ask {ask_id}.", "ask")
         self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text))
@@ -927,6 +931,10 @@ class Admind:
             self.post(f"askr:{row.ask_id}:{mid}:{i}", part, None)
         self.store.add_repeat(row.ask_id, mid, len(parts), asks.stamp(at))
 
+    def touch(self, ask_id: str) -> None:
+        """Accepted activity on the ask, in the caller's transaction: its clock moves to now (B14)."""
+        self.store.touch_ask(ask_id, asks.stamp(asks.now()))
+
     def bump_hint(self, mid: str, ask_id: str) -> None:
         """A reply, a card command or a decision emoji on a reminder (B6): where to decide instead, in the
         reply's thread or on the reacted reminder (delta §5). Nothing reaches the agent or the ask."""
@@ -964,13 +972,17 @@ class Admind:
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)
             self.store.add_ask_details(ask_id, self.operator_name(mid), mid, len(parts))
+            self.touch(ask_id)
             self.store.set_inbound(mid, "done")
         self.audit.write("ask", action="details", message_id=mid, ask_id=ask_id, parts=len(parts))
 
     # --- approval decisions (relay spec §8 "Decide", R7-R12, R23, R26) ------------------------------
     def decide_refused(self, mid: str, text: str, why: str, ask_id: str | None = None) -> None:
-        """A refusal before the attempt exists: the ask is unchanged."""
-        self.finish(mid, "done", text, "ask")
+        """A refusal before the attempt exists: the ask is unchanged, but for its activity clock (B14)."""
+        with self.store.transaction():
+            if ask_id is not None:
+                self.touch(ask_id)
+            self.finish(mid, "done", text, "ask")
         self.audit.write("ask", action="refused", message_id=mid, ask_id=ask_id, reason=why)
 
     def not_open(self, row: AskRow) -> str:
@@ -1027,7 +1039,11 @@ class Admind:
             return
         a = Attempt(row.ask_id, mid, action, name, "marmot:" + canonical_ref(mid), row.digest,
                     note if action == "deny" else None)
-        if not self.store.begin_attempt(a):             # step 4 (R22, R23)
+        with self.store.transaction():
+            begun = self.store.begin_attempt(a)
+            if begun:
+                self.touch(row.ask_id)
+        if not begun:                                   # step 4 (R22, R23)
             now_row = self.store.ask(row.ask_id)
             self.decide_refused(mid, self.not_open(now_row or row), "not open", row.ask_id)
             return
@@ -1794,7 +1810,9 @@ class Admind:
         action = verbs.emoji_action(emoji)
         card = self.approval_card_for(target)
         if action is None or card is None:
-            self.store.set_inbound(mid, "done")
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                self.touch(row.ask_id)
             self.audit.write("ask", action="reaction-ignored", message_id=mid, ask_id=row.ask_id,
                              emoji=own_text(emoji))
             return
