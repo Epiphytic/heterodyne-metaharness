@@ -112,14 +112,25 @@ CREATE TABLE IF NOT EXISTS ask_attempts (
     started_at TEXT NOT NULL, exit_status INTEGER,
     settled TEXT CHECK (settled IN ('refused', 'recorded', 'untouched', 'blocked', 'uncertain')),
     PRIMARY KEY (ask_id, message_id));
+CREATE TABLE IF NOT EXISTS ask_repeats (
+    ask_id TEXT NOT NULL, request TEXT NOT NULL,
+    parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (ask_id, request));
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
 REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
-# The outbox keys that make a delivered message a card (R7): a card chunk, or a chunk of an ask's !details.
-# The ID part is checked exactly, so a `reply()` key with the tag `ask` (`ask:<64 hex>:<i>`) never counts.
-_CARD_KEY = re.compile(r"\Aask:([2-9a-hjkmnp-z]{4}):\d+\Z|\Aaskd:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z")
+# The outbox keys that make a delivered message a card (R7): a card chunk, a chunk of an ask's !details, or
+# a chunk of an `!asks repeat` (asks bump B12). The ID part is checked exactly, so a `reply()` key with the
+# tag `ask` (`ask:<64 hex>:<i>`) never counts.
+_CARD_KEY = re.compile(r"\Aask:([2-9a-hjkmnp-z]{4}):\d+\Z|\Aaskd:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z"
+                       r"|\Aaskr:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z")
+# The outbox keys of a reminder (asks bump B6): an `!asks bump` chunk, `asknote:<id>:bump:<command mid>:<i>`,
+# or an automatic bump's, `asknote:<id>:autobump:<seq>:<i>`. Never a card; each form is checked exactly.
+_BUMP_KEY = re.compile(r"\Aasknote:([2-9a-hjkmnp-z]{4}):bump:[0-9a-f]{64}:[0-9]+\Z"
+                       r"|\Aasknote:([2-9a-hjkmnp-z]{4}):autobump:[0-9]+:[0-9]+\Z")
 
 
 def now() -> str:
@@ -639,10 +650,25 @@ class Store:
         if message_id is None:
             return None
         rows = self.db.execute("SELECT key FROM outbox WHERE message_id = ? AND status = 'sent' "
-                               "AND (key LIKE 'ask:%' OR key LIKE 'askd:%')", (message_id,)).fetchall()
+                               "AND (key LIKE 'ask:%' OR key LIKE 'askd:%' OR key LIKE 'askr:%')",
+                               (message_id,)).fetchall()
+        return self._matching_ask(rows, _CARD_KEY)
+
+    @_locked
+    def bump_for_message(self, message_id: str | None) -> str | None:
+        """The ask a delivered reminder is about (asks bump B6): the **sent** outbox row with that message ID,
+        keyed exactly `asknote:<id>:bump:<64 hex>:<i>` or `asknote:<id>:autobump:<seq>:<i>`, of an ask that
+        exists. Every other `asknote:` notice, and pending or failed rows, never match."""
+        if message_id is None:
+            return None
+        rows = self.db.execute("SELECT key FROM outbox WHERE message_id = ? AND status = 'sent' "
+                               "AND key LIKE 'asknote:%'", (message_id,)).fetchall()
+        return self._matching_ask(rows, _BUMP_KEY)
+
+    def _matching_ask(self, rows: list[tuple[object]], pattern: re.Pattern[str]) -> str | None:
         for (key,) in rows:
-            m = _CARD_KEY.match(str(key))
-            ask_id = None if m is None else m.group(1) or m.group(2)
+            m = pattern.match(str(key))
+            ask_id = None if m is None else next((g for g in m.groups() if g), None)
             if ask_id is not None and self.ask(ask_id) is not None:
                 return ask_id
         return None
@@ -658,9 +684,49 @@ class Store:
 
     @_locked
     def card_delivered(self, ask_id: str) -> bool:
-        """Every one of the card's `card_parts` chunks is sent."""
+        """Every one of the card's `card_parts` chunks is sent, or every chunk of one recorded repeat, by that
+        repeat's own count (R8; asks bump B12). Chunks of different repeats never combine."""
         row = self.ask(ask_id)
-        return row is not None and self._all_sent([f"ask:{ask_id}:{i}" for i in range(row.card_parts)])
+        if row is None:
+            return False
+        return (self._all_sent([f"ask:{ask_id}:{i}" for i in range(row.card_parts)])
+                or self._first_full_repeat(ask_id) is not None)
+
+    def _first_full_repeat(self, ask_id: str) -> str | None:
+        """The request ID of the earliest repeat of the ask whose every chunk is sent."""
+        rows = self.db.execute("SELECT request, parts FROM ask_repeats WHERE ask_id = ? "
+                               "ORDER BY created_at, rowid", (ask_id,)).fetchall()
+        return next((str(request) for request, parts in rows
+                     if self._all_sent([f"askr:{ask_id}:{request}:{i}" for i in range(int(parts))])), None)
+
+    @_locked
+    def add_repeat(self, ask_id: str, request: str, parts: int, at: str) -> None:
+        """Record an `!asks repeat` of the ask, with its own chunk count (B11). A replay changes nothing."""
+        self.db.execute("INSERT OR IGNORE INTO ask_repeats(ask_id, request, parts, created_at) "
+                        "VALUES (?, ?, ?, ?)", (ask_id, request, parts, at))
+
+    @_locked
+    def bump_target(self, ask_id: str) -> str | None:
+        """What a reminder threads to (B3, B13): the original card's chunk 0 whenever it is sent; otherwise
+        the first chunk of the earliest fully sent repeat; otherwise None. Never a reminder or `!details`."""
+        first = self.first_card_message(ask_id)
+        if first is not None:
+            return first
+        request = self._first_full_repeat(ask_id)
+        if request is None:
+            return None
+        r = self.db.execute("SELECT message_id FROM outbox WHERE key = ? AND status = 'sent'",
+                            (f"askr:{ask_id}:{request}:0",)).fetchone()
+        return None if r is None or r[0] is None else str(r[0])
+
+    @_locked
+    def reminder_pending(self, ask_id: str) -> bool:
+        """Is a reminder or repeat chunk of the ask still waiting to be sent (B14)? Failed ones are not."""
+        prefixes = (f"asknote:{ask_id}:bump:", f"asknote:{ask_id}:autobump:", f"askr:{ask_id}:")
+        r = self.db.execute("SELECT 1 FROM outbox WHERE status = 'pending' AND (key LIKE ? ESCAPE '\\' "
+                            "OR key LIKE ? ESCAPE '\\' OR key LIKE ? ESCAPE '\\') LIMIT 1",
+                            tuple(_like(p) + "%" for p in prefixes)).fetchone()
+        return r is not None
 
     @_locked
     def first_card_message(self, ask_id: str) -> str | None:
