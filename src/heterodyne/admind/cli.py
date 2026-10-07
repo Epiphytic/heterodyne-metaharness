@@ -15,7 +15,7 @@ from typing import NoReturn, cast
 import msgspec
 
 from heterodyne import config as hconfig
-from heterodyne.admind import asks, ctl, unit
+from heterodyne.admind import approvals, asks, ctl, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -35,6 +35,8 @@ WAIT_POLL = 2.0         # seconds between `admind ask wait` polls (R2); replaced
 WAIT_TIMEOUT = 540.0
 ASK_READ_SECONDS = 30.0     # one ask.sock reply
 NOT_RUNNING = "admind is not running (or did not answer)."
+POST_UNANSWERED = ("admind did not answer in time. The ask may still have been posted: check "
+                   "`admind ask list` before posting it again.")
 IDENTITY_LABEL = "heterodyne-admind"
 
 
@@ -110,6 +112,13 @@ def ask_daemon(s: AdmindSettings, req: ctl.CtlRequest) -> int:
     return 0 if reply.result in ("committed", "rearmed") else 1
 
 
+def post_seconds() -> float:
+    """A post's whole budget. Posts run one at a time (R22), so a post may wait for every other post in
+    flight, and each may read a bead with approve-bead, reap it, and then its own read; plus the margin of
+    an ordinary request. Bounded, and derived from the daemon's own limits."""
+    return asks.MAX_IN_FLIGHT * (approvals.READ_SECONDS + approvals.REAP_SECONDS) + ASK_READ_SECONDS
+
+
 def _ask_request(s: AdmindSettings, req: asks.AskRequest, timeout: float = ASK_READ_SECONDS) -> asks.AskReply:
     """One request on ask.sock, the whole of it (connect, write, read) within `timeout` seconds (raises
     ctl.CtlUnavailable). The reply limit matches the daemon's (R24)."""
@@ -172,10 +181,12 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
         return 1
     if args.ask_command == "wait":
         return _ask_wait(s, req, args.timeout, args.json)
+    post = isinstance(req, asks.AskPost)
     try:
-        reply = _ask_request(s, req)
+        reply = _ask_request(s, req, post_seconds() if post else ASK_READ_SECONDS)
     except ctl.CtlUnavailable:
-        print(NOT_RUNNING, file=sys.stderr)
+        # a post the daemon received goes on without its client, so it may still be stored and its card sent
+        print(NOT_RUNNING + (" " + POST_UNANSWERED if post else ""), file=sys.stderr)
         return EX_UNAVAILABLE
     if getattr(args, "json", False):
         print(msgspec.json.encode(reply).decode())
@@ -193,7 +204,9 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
 
 def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: bool) -> int:
     """Poll `get` every WAIT_POLL seconds until the ask has an answer or note, or is terminal (R2). A
-    daemon that is down or restarting is retried until the timeout."""
+    daemon that is down or restarting is retried until the timeout. Exit 0 is not approval evidence: an
+    approval ask's first note ends the wait too, and only the read-back status (`get`) says it was decided.
+    A refusal goes to stderr, even with `--json`."""
     deadline = time.monotonic() + timeout
     reply: asks.AskReply | None = None
     while (left := deadline - time.monotonic()) > 0:
@@ -386,8 +399,9 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
     post.add_argument("--from", dest="poster", default="local", help="a label for the card (unverified)")
     post.add_argument("--json", action="store_true")
     for name, what in (("get", "an ask's status and answers"), ("cancel", "cancel an open or answered ask"),
-                       ("wait", "wait for an answer, or for the ask to end")):
-        one = sub.add_parser(name, help=what)
+                       ("wait", "wait for an answer or note, or for the ask to end; for an approval ask "
+                                "this is not approval evidence: read the decision with get")):
+        one = sub.add_parser(name, help=what, description=what)
         one.add_argument("ask_id")
         if name != "cancel":
             one.add_argument("--json", action="store_true")

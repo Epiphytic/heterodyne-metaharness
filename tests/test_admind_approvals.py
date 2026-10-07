@@ -12,6 +12,7 @@ import os
 import signal
 import stat
 import sys
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -23,10 +24,10 @@ from admind_asks_fixture import approve_bead_wrapper, bead_db, btq_log, decision
 from admind_waits import lock_waiters, stays, wait_until
 from fakes.fake_wn_agent import ACCOUNT
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
-from test_admind_asks import NONE, audited, joined, posted, row
+from test_admind_asks import NONE, audited, joined, posted, row, via_main
 from test_admind_daemon import Harness, needs_tmux, run_with
 
-from heterodyne.admind import approvals, asks, chunk, commands, reap, summarize
+from heterodyne.admind import approvals, asks, chunk, cli, commands, reap, summarize
 from heterodyne.admind.approvals import ApproveBead, Attempt, BtqError, Busy, Readout
 from heterodyne.admind.audit import ref_id
 from heterodyne.admind.daemon import (
@@ -1636,6 +1637,39 @@ def test_concurrent_posts_respect_limit(tmp_path: Path) -> None:
         full = await h.daemon.on_ask(asks.AskPost("approval", bead="btq-p4"), NONE)
         assert full == asks.refused(ASK_TOO_MANY)
     go(tmp_path, scenario, beads, before_store=before_store)
+
+
+@needs_tmux
+def test_cli_post_budget_covers_queued_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                             capsys: pytest.CaptureFixture[str]) -> None:
+    """Two `admind ask post` clients: one held in its approve-bead read, one queued behind it (R22). Both
+    get their reply: the post budget covers the reads, not an ordinary request's margin, which is cut to
+    almost nothing here so that a client on that margin alone would give up (exit 69)."""
+    beads = {"btq-p0": bead(read="wait"), "btq-p1": bead(read="wait")}
+
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        via_main(monkeypatch, h.settings)
+        monkeypatch.setattr(cli, "ASK_READ_SECONDS", 0.01)
+        codes: dict[str, int] = {}
+
+        def client(b: str) -> None:
+            codes[b] = cli.main(["ask", "post", "--kind", "approval", "--bead", b])
+        threads = [threading.Thread(target=client, args=(b,), daemon=True) for b in beads]
+        for t in threads:
+            t.start()
+        await waiting(h)
+        await wait_until(lambda: h.daemon.posts_in_flight == 2, 20)
+        await stays(lambda: all(t.is_alive() for t in threads), 0.2)  # well past the cut margin
+        go_file(h).touch()
+        for t in threads:
+            await asyncio.to_thread(t.join, 30)
+            assert not t.is_alive()
+        assert codes == {b: 0 for b in beads}
+        out = capsys.readouterr()
+        assert out.out.count(" posted") == 2 and out.err == ""
+        assert len(h.store.asks_with_status(*asks.ACTIVE)) == 2
+    go(tmp_path, scenario, beads)
 
 
 @needs_tmux
