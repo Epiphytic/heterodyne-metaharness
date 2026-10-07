@@ -756,23 +756,26 @@ def test_attempt_compare_and_set(tmp_path: Path) -> None:
 
 
 def test_parse_approve_and_deny() -> None:
+    """R7 (revised): no arguments are needed, and any given are kept for the card check, which refuses any
+    that are not the card's bead (and digest). Only a too-long reason is a usage error."""
+    assert commands.parse("!approve") == commands.Command("approve")
+    assert commands.parse(f"!approve {BEAD}") == commands.Command("approve", arg=BEAD)
     assert commands.parse(f"!approve {BEAD} {D12.upper()}") == commands.Command("approve", arg=BEAD, rest=D12)
-    for bad in (f"!approve {BEAD}", f"!approve {BEAD} {D12} x", f"!approve {BEAD} {D12[:11]}",
-                f"!approve {BEAD} {D12}0", f"!approve {BEAD} {D12[:11]}g", f"!approve BTQ-AB12C {D12}",
-                f"!approve -x {D12}", "!approve"):
-        with pytest.raises(commands.CommandError, match="Usage: !approve"):
-            commands.parse(bad)
+    assert commands.parse(f"!approve {BEAD} {D12} x") == commands.Command("approve", arg=BEAD,
+                                                                         rest=f"{D12} x")
+    assert commands.parse("!approve BTQ-AB12C") == commands.Command("approve", arg="BTQ-AB12C")
+    assert commands.parse("!deny") == commands.Command("deny")
+    assert commands.parse("!deny   ") == commands.Command("deny")
+    assert commands.parse(f"!deny {BEAD}") == commands.Command("deny", arg=BEAD)
     assert commands.parse(f"!deny {BEAD}  too broad\n for now ") == commands.Command(
         "deny", arg=BEAD, rest="too broad\n for now")
     assert commands.parse(f"!deny {BEAD} leaks {TOKEN}") == commands.Command(
         "deny", arg=BEAD, rest="leaks <redacted GitHub token>")
-    for bad in (f"!deny {BEAD}", f"!deny {BEAD}   ", "!deny", f"!deny -{BEAD} why"):
-        with pytest.raises(commands.CommandError, match="Usage: !deny"):
-            commands.parse(bad)
+    assert commands.parse("!deny too broad") == commands.Command("deny", arg="too", rest="broad")
     assert commands.parse(f"!deny {BEAD} " + "x" * 1000) is not None
     with pytest.raises(commands.CommandError, match="at most 1,000"):
         commands.parse(f"!deny {BEAD} " + "x" * 1001)
-    assert "!approve <bead> <digest> · !deny <bead> <reason>" in commands.HELP
+    assert "!approve · !deny (as a reply to an approval card)" in commands.HELP
 
 
 # --- integration ---------------------------------------------------------------------------------
