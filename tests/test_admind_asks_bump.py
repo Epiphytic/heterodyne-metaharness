@@ -4,9 +4,11 @@ Every ID is an obvious fake. Ordering uses gates and bounded waits; B14's clock 
 with a fake. Nothing here sleeps to order events.
 """
 
+import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from admind_asks_fixture import sent_mid
@@ -25,6 +27,7 @@ from test_admind_approvals import (
     edit,
     go,
     go_file,
+    legacy,
     queued,
     say,
     send,
@@ -40,6 +43,7 @@ from heterodyne.admind import asks, chunk, commands
 from heterodyne.admind import store as store_mod
 from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.audit import ref_id
+from heterodyne.admind.daemon import NEEDS_DETAILS, NOT_DELIVERED
 from heterodyne.admind.settings import resolve
 from heterodyne.admind.store import Store
 from heterodyne.config import ConfigError, load
@@ -709,4 +713,199 @@ def test_a_replayed_reaction_on_a_bump_gets_no_second_hint(tmp_path: Path) -> No
         await wait_until(lambda: audited(h, kind="drop", reason="replayed reaction id", ref=ref_id(eid)))
         assert queued(h, mid) == hint(ask_id) and outbox_count(h, "ask:r:%") == 1
         untouched(h, ask_id, "👍")
+    go(tmp_path, scenario)
+
+
+# --- B11-B13: `!asks repeat` --------------------------------------------------------------------------
+def repeat_rows(h: Harness, ask_id: str, command: str) -> list[tuple[str, str | None, str]]:
+    return rows(h, f"askr:{ask_id}:{command}:%")
+
+
+async def repeated_card(h: Harness, ask_id: str) -> tuple[str, str]:
+    """Send `!asks repeat`, wait until ask `ask_id`'s repeat is wholly sent: (command, its chunk 0's ID)."""
+    command = await send(h, "!asks repeat", None)
+    await settled(h, command)
+    parts = len(repeat_rows(h, ask_id, command))
+    await wait_until(lambda: all(sent_mid(h, f"askr:{ask_id}:{command}:{i}") for i in range(parts)))
+    first = sent_mid(h, f"askr:{ask_id}:{command}:0")
+    assert first is not None
+    return command, first
+
+
+def fail_original(h: Harness, ask_id: str, part: int | None = None) -> None:
+    """Mark the original card's chunk `part` (the last by default) failed, as the sender does after its
+    retries."""
+    row_ = h.store.ask(ask_id)
+    assert row_ is not None
+    last = row_.card_parts - 1 if part is None else part
+    h.store.db.execute("UPDATE outbox SET status = 'failed', message_id = NULL WHERE key = ?",
+                       (f"ask:{ask_id}:{last}",))
+
+
+@needs_tmux
+def test_repeat_reposts_every_open_card_top_level_from_its_stored_chunks(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        a, _ = await card(h)
+        q = await posted(h, question())
+        await card_sent(h, q)
+        deciding = await posted(h, question("Which port?"))
+        set_status(h, deciding, "deciding")
+        mid = await send(h, "!asks repeat", None)
+        await settled(h, mid)
+        assert cmd_reply(h, mid) == f"Repeated 2 asks: {a}, {q}.\n{deciding} is deciding"
+        approval, question_row = h.store.ask(a), h.store.ask(q)
+        assert approval is not None and question_row is not None
+        assert [t for _, _, t in repeat_rows(h, a, mid)] == asks.stored_details(approval)
+        assert [t for _, _, t in repeat_rows(h, q, mid)] == chunk.split(asks.full_text(question_row),
+                                                                         h.settings.chunk_chars)
+        assert {r for _, r, _ in repeat_rows(h, a, mid) + repeat_rows(h, q, mid)} == {None}   # top-level
+        assert repeat_rows(h, deciding, "%") == []
+        assert h.store.db.execute("SELECT ask_id, parts FROM ask_repeats WHERE request = ? ORDER BY rowid",
+                                  (mid,)).fetchall() == [(a, len(asks.stored_details(approval))),
+                                                         (q, len(repeat_rows(h, q, mid)))]
+        assert audited(h, kind="command", message_id=ref_id(mid), command="asks", sub="repeat",
+                       bumped=[a, q], skipped=[{"ask_id": deciding, "why": "deciding"}])
+        before = h.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        async with h.daemon.work_lock:                                         # B7: a replay
+            await h.daemon.handle(mid, "!asks repeat", None)
+        assert h.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == before
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_an_approve_reaction_on_a_repeat_approves(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        _, first = await repeated_card(h, ask_id)
+        mid, text = await reacted(h, "👍", first)
+        assert text.startswith(f"Approved {BEAD} as op") and threads(h, mid) == {first}
+        assert ask_status(h, ask_id) == "approved" and len(decisions(h)) == 1
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_deny_reply_on_a_repeat_denies(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        command, _ = await repeated_card(h, ask_id)
+        last = sent_mid(h, f"askr:{ask_id}:{command}:{len(repeat_rows(h, ask_id, command)) - 1}")
+        assert last is not None
+        assert await say(h, "deny no", last) == f"Denied {BEAD} as op (via Marmot)."
+        assert ask_status(h, ask_id) == "denied" and decisions(h)[0][-2:] == ["--deny", "--note=no"]
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_failed_card_is_decidable_from_one_wholly_sent_repeat(tmp_path: Path) -> None:
+    """B12: with the original's last chunk failed, an approve on the repeat is refused while one of its
+    chunks is pending and accepted once it is wholly sent."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        fail_original(h, ask_id)
+        assert await say(h, "approve", first) == NOT_DELIVERED.format(ask_id=ask_id)
+        gate = asyncio.Event()
+
+        def hold_after_first(req: dict[str, Any]) -> None:
+            if req["idempotency_key"].startswith("askr:") and req["idempotency_key"].endswith(":0"):
+                h.fake.send_gate = gate
+        h.fake.on_send = hold_after_first
+        command = await send(h, "!asks repeat", None)
+        await wait_until(lambda: sent_mid(h, f"askr:{ask_id}:{command}:0") is not None)
+        repeat = sent_mid(h, f"askr:{ask_id}:{command}:0")
+        assert len(repeat_rows(h, ask_id, command)) > 1
+        assert await say(h, "approve", repeat) == NOT_DELIVERED.format(ask_id=ask_id)
+        h.fake.on_send = None
+        h.fake.send_gate = None
+        gate.set()
+        await wait_until(lambda: h.store.card_delivered(ask_id))
+        assert (await say(h, "approve", repeat)).startswith(f"Approved {BEAD} as op")
+        assert len(decisions(h)) == 1
+    go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
+
+
+@needs_tmux
+def test_a_reply_on_a_repeat_of_a_decided_ask_gets_the_r31_answer(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        _, repeat = await repeated_card(h, ask_id)
+        assert (await say(h, "approve", first)).startswith(f"Approved {BEAD}")
+        assert await say(h, "approve", repeat) == f"Ask {ask_id} is already approved by op. Nothing recorded."
+        assert len(decisions(h)) == 1
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_repeat_does_not_replace_a_legacy_asks_details(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        legacy(h, ask_id)
+        _, repeat = await repeated_card(h, ask_id)
+        assert await say(h, "approve", repeat) == NEEDS_DETAILS.format(ask_id=ask_id)
+        assert decisions(h) == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_competing_decisions_on_the_card_and_a_repeat_record_one(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        _, repeat = await repeated_card(h, ask_id)
+        edit(tmp_path, read="wait")
+        on_card = await send(h, "approve", first)
+        await waiting(h)
+        on_repeat = await react(h, "👍", repeat)
+        edit(tmp_path, read=None)
+        go_file(h).touch()
+        await settled(h, on_card)
+        await settled(h, on_repeat)
+        assert len(decisions(h)) == 1 and ask_status(h, ask_id) == "approved"
+        assert queued(h, on_card).startswith(f"Approved {BEAD}")
+        assert queued(h, on_repeat) == f"Ask {ask_id} is already approved by op. Nothing recorded."
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_repeated_approval_chunks_survive_a_chunk_size_change(tmp_path: Path) -> None:
+    """B12: the stored checked chunks are reused as they are, whatever chunk_chars is now."""
+    ids: list[str] = []
+
+    async def first_run(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        ids.append(ask_id)
+    go(tmp_path, first_run, {BEAD: bead(readout={**LINES, **LONG})})
+
+    async def smaller(h: Harness) -> None:
+        h.seq += 1000                       # past the first run's message IDs, which a restart remembers
+        stored = h.store.ask(ids[0])
+        assert stored is not None
+        assert chunk.split("".join(asks.stored_details(stored)), 200) != asks.stored_details(stored)
+        mid = await send(h, "!asks repeat", None)
+        await settled(h, mid)
+        assert [t for _, _, t in repeat_rows(h, ids[0], mid)] == asks.stored_details(stored)
+    go(tmp_path, smaller, fresh=False, chunk_chars=200)
+
+
+@needs_tmux
+def test_bumps_thread_to_the_repeat_until_the_original_arrives(tmp_path: Path) -> None:
+    """B13: with the original's chunk 0 undelivered, bumps thread to the earliest wholly sent repeat (never
+    to a later one or a bump); once the original is sent, late, to the original."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        fail_original(h, ask_id, 0)
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        assert cmd_reply(h, mid) == f"Bumped 0 asks.\n{ask_id}: card not delivered; try !asks repeat"
+        assert bump_rows(h, ask_id, "%") == []
+        _, earliest = await repeated_card(h, ask_id)
+        await repeated_card(h, ask_id)
+        for _ in range(2):
+            mid = await send(h, "!asks bump", None)
+            await settled(h, mid)
+            assert {r for _, r, _ in bump_rows(h, ask_id, mid)} == {earliest}
+            await wait_until(lambda m=mid: sent_mid(h, f"asknote:{ask_id}:bump:{m}:0") is not None)
+        h.store.db.execute("UPDATE outbox SET status = 'sent', message_id = ? WHERE key = ?",
+                           (first, f"ask:{ask_id}:0"))
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        assert {r for _, r, _ in bump_rows(h, ask_id, mid)} == {first}
     go(tmp_path, scenario)
