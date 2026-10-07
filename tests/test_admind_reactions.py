@@ -9,7 +9,8 @@ import json
 import pytest
 from fakes.fake_wn_agent import ACCOUNT, GROUP
 
-from heterodyne.admind import guard
+from heterodyne.admind import guard, verbs
+from heterodyne.admind.verbs import Reading
 from heterodyne.marmot.control import InboundMessage, Message, ReactionAdded, Sender, decode_event
 
 EVENT = "e1" * 32
@@ -78,3 +79,86 @@ def test_a_reaction_is_judged_on_its_actor_exactly_as_a_message(sender: Sender, 
     assert by_reaction == by_message
     assert (by_reaction.action, by_reaction.reason) == (action, why)
     assert by_reaction.operator == ("op" if action == "process" or "latched" in why else None)
+
+
+# --- reading a reply or an emoji (R27, R28) ------------------------------------------------------
+TONES = ["", "\U0001f3fb", "\U0001f3fc", "\U0001f3fd", "\U0001f3fe", "\U0001f3ff"]
+APPROVE_EMOJIS = [*("👍" + t for t in TONES), "✅", "❤️", "❤", "♥️"]
+DENY_EMOJIS = [*("👎" + t for t in TONES), "❌"]
+APPROVE_WORDS = ["approve", "approved", "yes", "y", "ok", "okay", "lgtm"]
+DENY_WORDS = ["deny", "denied", "reject", "rejected"]
+
+
+def test_the_sets_are_the_spec_lists() -> None:
+    assert verbs.APPROVE_WORDS == frozenset(APPROVE_WORDS)
+    assert verbs.DENY_WORDS == frozenset(DENY_WORDS)
+    assert verbs.DENY_ALONE == frozenset({"no", "n"})
+
+
+@pytest.mark.parametrize("emoji", APPROVE_EMOJIS)
+def test_approve_emojis(emoji: str) -> None:
+    assert verbs.emoji_action(emoji) == "approve"
+    assert verbs.read_reply(emoji) == Reading("approve")
+    assert verbs.read_reply(f"  {emoji} \n") == Reading("approve")
+
+
+@pytest.mark.parametrize("emoji", DENY_EMOJIS)
+def test_deny_emojis(emoji: str) -> None:
+    assert verbs.emoji_action(emoji) == "deny"
+    assert verbs.read_reply(emoji) == Reading("deny", "")
+    assert verbs.read_reply(f"{emoji} too broad") == Reading("deny", "too broad")
+
+
+@pytest.mark.parametrize("emoji", ["😀", "👀", "🎉", "👍👍", "👍 ✅", "💔", "♡", "", " ", "👌", "🙏",
+                                   "👍\U0001f3fb\U0001f3fb", "\U0001f3fb", "x"])
+def test_other_emojis_decide_nothing(emoji: str) -> None:
+    assert verbs.emoji_action(emoji) is None
+    assert verbs.read_reply(emoji) is None
+
+
+@pytest.mark.parametrize("word", APPROVE_WORDS)
+def test_approve_words(word: str) -> None:
+    for text in (word, word.upper(), word.title(), f"  {word}  ", f"{word}.", f"{word}!", f"{word}!!",
+                 f"{word} .", f"{word}.!\n"):
+        assert verbs.read_reply(text) == Reading("approve"), text
+
+
+@pytest.mark.parametrize("word", DENY_WORDS)
+def test_deny_words_with_and_without_a_reason(word: str) -> None:
+    for text in (word, word.upper(), f" {word}. ", f"{word}!"):
+        assert verbs.read_reply(text) == Reading("deny", ""), text
+    assert verbs.read_reply(f"{word} the scope is too wide") == Reading("deny", "the scope is too wide")
+    assert verbs.read_reply(f"{word.upper()}:  Too Wide.\n") is None       # "deny:" is not the word
+    assert verbs.read_reply(f"{word}. Too wide, see the ADR.") == Reading("deny", "Too wide, see the ADR.")
+    assert verbs.read_reply(f"{word}\n\nline one\nline two ") == Reading("deny", "line one\nline two")
+
+
+@pytest.mark.parametrize("text", ["no", "No", "NO.", "n", "N!", " no "])
+def test_no_alone_denies(text: str) -> None:
+    assert verbs.read_reply(text) == Reading("deny", "")
+
+
+@pytest.mark.parametrize("text", [
+    "yes but what about X?", "yes, but", "yes but", "ok? then go", "ok?", "okay then", "approve it later",
+    "approve later", "lgtm with nits", "y?", "yes please", "approved?", "no idea", "no way", "n/a", "nope",
+    "not approved", "I approve", "please approve", "👍 but wait", "✅ later", "denying", "rejects",
+    "deny-this", "ok ok", "yes yes", "", "   ", "approve\u200b", "+1", "sure", "👍?", "y e s", "o.k.",
+])
+def test_near_misses_are_notes(text: str) -> None:
+    assert verbs.read_reply(text) is None, text
+
+
+def test_a_presentation_selector_is_ignored() -> None:
+    """U+FE0F only asks for emoji presentation: `✅️` is `✅`, and `♥` is `♥️` (a superset of the spec's
+    list, recorded as a deviation)."""
+    for emoji in ("✅\ufe0f", "♥", "👍\ufe0f", "👍\U0001f3fd\ufe0f"):
+        assert verbs.emoji_action(emoji) == "approve", emoji
+    for emoji in ("❌\ufe0f", "👎\ufe0f"):
+        assert verbs.emoji_action(emoji) == "deny", emoji
+    assert verbs.emoji_action("\ufe0f") is None and verbs.emoji_action("👍\ufe0f\ufe0f") is None
+
+
+def test_casefold_is_unicode() -> None:
+    assert verbs.read_reply("OKAY") == Reading("approve")
+    assert verbs.read_reply("DENİED") is None           # a dotted capital I folds to "i̇", not "i"
+    assert verbs.read_reply("ﬁne") is None
