@@ -5,11 +5,14 @@ is an obvious fake. Waits are bounded and checked; nothing here sleeps to order 
 """
 
 import json
+import sqlite3
+from pathlib import Path
 
 import pytest
 from fakes.fake_wn_agent import ACCOUNT, GROUP
 
 from heterodyne.admind import guard, verbs
+from heterodyne.admind.store import Store
 from heterodyne.admind.verbs import Reading
 from heterodyne.marmot.control import InboundMessage, Message, ReactionAdded, Sender, decode_event
 
@@ -162,3 +165,64 @@ def test_casefold_is_unicode() -> None:
     assert verbs.read_reply("OKAY") == Reading("approve")
     assert verbs.read_reply("DENİED") is None           # a dotted capital I folds to "i̇", not "i"
     assert verbs.read_reply("ﬁne") is None
+
+
+# --- the store (delta §5) ------------------------------------------------------------------------
+# The two tables as PR #18 created them, before `asks.refreshed_from` and `inbound.reply_to`.
+OLD_TABLES = """
+CREATE TABLE inbound (
+    message_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('received', 'dispatched', 'executing', 'done', 'dropped')),
+    received_at TEXT NOT NULL);
+CREATE TABLE asks (
+    ask_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'merge', 'approval')),
+    poster TEXT NOT NULL, peer_pid INTEGER, title TEXT NOT NULL, body TEXT NOT NULL,
+    pr_url TEXT, head_sha TEXT, bead TEXT, digest TEXT,
+    truncated INTEGER NOT NULL DEFAULT 0, card_parts INTEGER NOT NULL, attempt TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open', 'answered', 'deciding', 'approved', 'denied', 'stale',
+                                           'superseded', 'cancelled', 'blocked', 'uncertain')),
+    outcome TEXT, decided_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+INSERT INTO inbound VALUES ('c4c4', 'done', '2026-10-05T00:00:00+00:00');
+INSERT INTO asks(ask_id, kind, poster, title, body, bead, digest, truncated, card_parts, status, created_at,
+                 updated_at)
+    VALUES ('p4xw', 'approval', 'controller', 'T', '{}', 'btq-ab12c', 'ab', 1, 3, 'open',
+            '2026-10-05T00:00:00+00:00', '2026-10-05T00:00:00+00:00');
+"""
+
+
+def columns(store: Store, table: str) -> set[str]:
+    return {str(r[1]) for r in store.db.execute(f"PRAGMA table_info({table})")}
+
+
+def test_an_existing_database_gains_the_new_columns(tmp_path: Path) -> None:
+    db = sqlite3.connect(tmp_path / "admind.db")
+    db.executescript(OLD_TABLES)
+    db.close()
+    store = Store(tmp_path / "admind.db")
+    try:
+        assert "refreshed_from" in columns(store, "asks") and "reply_to" in columns(store, "inbound")
+        old = store.ask("p4xw")
+        assert old is not None and old.truncated and old.refreshed_from is None and old.card_parts == 3
+        assert store.inbound_status("c4c4") == "done" and store.reply_target("c4c4") == "c4c4"
+    finally:
+        store.close()
+    again = Store(tmp_path / "admind.db")      # the migration runs once; a second open changes nothing
+    try:
+        assert "refreshed_from" in columns(again, "asks")
+    finally:
+        again.close()
+
+
+def test_a_reaction_row_keeps_its_reply_target(tmp_path: Path) -> None:
+    """A reaction's inbound key is `r:<event id>`; every reply to it threads to the reacted message, and no
+    post ever uses the `r:` key as a reply target (delta §5)."""
+    store = Store(tmp_path / "admind.db")
+    try:
+        assert store.claim_inbound("r:" + EVENT, reply_to=CARD)
+        assert not store.claim_inbound("r:" + EVENT, reply_to=CARD)        # a replay
+        assert store.reply_target("r:" + EVENT) == CARD
+        assert store.claim_inbound(EVENT) and store.reply_target(EVENT) == EVENT      # a message: itself
+        assert store.reply_target("r:" + "f0" * 32) is None             # unknown: unthreaded, never `r:`
+    finally:
+        store.close()
