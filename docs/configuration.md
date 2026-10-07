@@ -113,7 +113,7 @@ Any other variable starting with `HETERODYNE_` is an error: "environment overrid
 
 `[admind]` is host-only: a workstream file can't set it.
 
-**`approve_bead` and rollback.** `heterodyne config check` does not read `[admind]`. admind checks it when it starts, and so does every `admind` command that reads the configuration (`admind ask list` is a quick check). A bad value exits 78 (`EX_CONFIG`), so the unit does not restart-loop. An admind older than the relay does not know the key and also exits 78 on it. To roll back the code, remove `approve_bead` from `config.toml` **first**, then check out the older commit and restart. The relay's database tables are left in place, and the older code ignores them.
+**`approve_bead` and rollback.** `heterodyne config check` does not read `[admind]`. admind checks it when it starts, and so does every `admind` command that reads the configuration (`admind ask list` is a quick check; [admind.md](admind.md#setting-it-up) says how to read its exit status before a restart). A bad value exits 78 (`EX_CONFIG`), so the unit does not restart-loop. An admind older than the relay does not know the key and also exits 78 on it. To roll back the code, remove `approve_bead` from `config.toml` **first**, then check out the older commit and restart. The relay's database tables are left in place, and the older code ignores them.
 
 ## Policy (host-only)
 
