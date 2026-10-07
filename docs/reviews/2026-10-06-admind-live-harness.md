@@ -152,8 +152,8 @@ since fixed: the docs render the ask ID in backticks, but the message text has n
 
 **Other checks:**
 - `uv run pytest -q tests/live` without HZ_LIVE: 6 skipped.
-- Full suite, run once at the end: `uv run pytest -q -x` gave 1797 passed and 8 skipped (the 6 live tests
-  and 2 that were already skipped) in 14 min 53 s.
+- Full suite, run once at the end: `uv run pytest -q -x` gave 1797 passed and 8 skipped (the 6 live tests among them)
+  in 14 min 53 s.
 - `uv run ruff check`: clean. `uv run pyright` (0 errors) covers `tests/live`.
 - A kept root contained no reference to the real home except the two read-only binaries (`wn-agent` and
   btq's `approve-bead`).
