@@ -879,7 +879,7 @@ def test_approve_happy_path(tmp_path: Path) -> None:
         expected = asks.approval_card(stored, r, h.settings.chunk_chars)
         rows = h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ? ORDER BY seq",
                                   (f"ask:{ask_id}:%",)).fetchall()
-        assert expected is not None and [x[0] for x in rows] == expected.card_chunks
+        assert not isinstance(expected, str) and [x[0] for x in rows] == expected.card_chunks
         mid = await send(h, approve(), first)
         await settled(h, mid)
         ref = "marmot:" + ref_id(mid)
@@ -921,7 +921,8 @@ def test_unthreaded_approve_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, _ = await card(h)
         text = await say(h, approve(), None)
-        assert text == "To decide, reply to the approval card itself (or its !details). Nothing recorded."
+        assert text == "To decide, react to the approval card or reply to it. Nothing recorded."
+        assert (await say(h, "!approve", None)) == text and (await say(h, "!deny", None)) == text
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -932,9 +933,10 @@ def test_approve_as_reply_to_agent_message_refused(tmp_path: Path) -> None:
         ask_id, _ = await card(h)
         echo = next(r["_message_id"] for r in h.fake.sent if r["text"] == "echo: hello")
         text = await say(h, approve(), echo)
-        assert text.startswith("To decide, reply to the approval card itself")
+        assert text == "To decide, react to the approval card or reply to it. Nothing recorded."
         notice = next(r["_message_id"] for r in h.fake.sent if r["idempotency_key"] == "ready")
-        assert (await say(h, approve(), notice)).startswith("To decide, reply to the approval card itself")
+        assert (await say(h, approve(), notice)) == text
+        assert (await say(h, "!approve", notice)) == text
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -944,7 +946,8 @@ def test_wrong_digest_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         text = await say(h, approve(D2[:12]), first)
-        assert text == f"That does not match ask {ask_id} (bead {BEAD}, digest {D12}). Nothing recorded."
+        assert text == (f"This card is for {BEAD}. React 👍 to approve or 👎 to deny, or reply approve / "
+                        "deny <reason>. Nothing recorded.")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open" and attempts(h, ask_id) == []
         assert (await say(h, approve(D12.upper()), first)).startswith(f"Approved {BEAD}")   # case-insensitive
     go(tmp_path, scenario)
@@ -954,8 +957,9 @@ def test_wrong_digest_refused(tmp_path: Path) -> None:
 def test_wrong_bead_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        assert (await say(h, approve(D12, OTHER), first)).startswith(f"That does not match ask {ask_id}")
-        assert (await say(h, f"!deny {OTHER} no", first)).startswith(f"That does not match ask {ask_id}")
+        assert (await say(h, approve(D12, OTHER), first)).startswith(f"This card is for {BEAD}. ")
+        assert (await say(h, f"!deny {OTHER} no", first)).startswith(f"This card is for {BEAD}. ")
+        assert (await say(h, f"!approve {OTHER}", first)).startswith(f"This card is for {BEAD}. ")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -976,8 +980,8 @@ def test_card_not_fully_delivered(tmp_path: Path) -> None:
         await wait_until(lambda: sent_mid(h, f"ask:{ask_id}:0") is not None)
         first = sent_mid(h, f"ask:{ask_id}:0")
         text = await say(h, approve(), first)
-        assert text == (f"Ask {ask_id} has not been fully delivered yet. Wait for every part, then reply "
-                        "again. Nothing recorded.")
+        assert text == (f"Ask {ask_id} has not been fully delivered yet. Wait for every part, then react or "
+                        "reply again. Nothing recorded.")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
         h.fake.on_send = None
         h.fake.send_gate = None
@@ -1142,10 +1146,13 @@ def test_digest_changed_before_read(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         edit(tmp_path, digest=D2)
         text = await say(h, approve(), first)
-        assert text == (f"{BEAD} changed after it was shown (shown {D12}, now {D2[:12]}). Nothing recorded; "
-                        f"ask {ask_id} is stale and the poster must post it again.")
+        new = h.store.newer_ask(ask_id)
+        assert new is not None and new.refreshed_from == ask_id
+        assert text == (f"{BEAD} changed after this card was posted (shown {D12}, now {D2[:12]}). Nothing "
+                        f"recorded. A fresh card follows: ask {new.ask_id}.")
         assert ask_status(h, ask_id) == "stale" and decisions(h) == []
-        assert (await say(h, approve(), first)) == f"Ask {ask_id} is already stale. Nothing recorded."
+        assert (await say(h, approve(), first)) == (f"Ask {ask_id} is already stale; see ask {new.ask_id}. "
+                                                    "Nothing recorded.")
     go(tmp_path, scenario)
 
 
@@ -1155,9 +1162,13 @@ def test_digest_changed_inside_approve_bead(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         edit(tmp_path, decide="edit-before")
         text = await say(h, approve(), first)
-        assert text == (f'Not recorded: "The ask is not the one you were shown (expected {D12}, now '
-                        f'changed); nothing written.". {BEAD} is unchanged; you can decide again.')
-        assert ask_status(h, ask_id) == "open" and len(decisions(h)) == 1
+        new = h.store.newer_ask(ask_id)
+        assert new is not None and new.refreshed_from == ask_id and new.digest != D
+        now = (new.digest or "")[:12]
+        assert text == (f"{BEAD} changed after this card was posted (shown {D12}, now {now}). Nothing "
+                        f"recorded. A fresh card follows: ask {new.ask_id}.\napprove-bead said: \"The ask is "
+                        f"not the one you were shown (expected {D12}, now changed); nothing written.\"")
+        assert ask_status(h, ask_id) == "stale" and len(decisions(h)) == 1
         assert attempts(h, ask_id)[0][-2:] == (3, "untouched")
     go(tmp_path, scenario)
 
@@ -1314,12 +1325,12 @@ def test_redacted_content_refused_at_post(tmp_path: Path) -> None:
 def test_plain_yes_is_a_note(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        mid = await send(h, "yes", first)
+        mid = await send(h, "yes but", first)       # "yes" alone approves now (R28)
         await settled(h, mid)
-        assert queued(h, mid) == (f"Noted on ask {ask_id}; this is not a decision. To decide, reply to the "
-                                  f"card with !approve {BEAD} {D12} or !deny {BEAD} <reason>.")
+        assert queued(h, mid) == (f"Noted on ask {ask_id}; this is not a decision. React 👍 to approve or "
+                                  "👎 to deny, or reply approve / deny <reason>.")
         assert ask_status(h, ask_id) == "open" and decisions(h) == []
-        assert [(a.kind, a.operator, a.text) for a in h.store.answers(ask_id)] == [("note", "op", "yes")]
+        assert [(a.kind, a.operator, a.text) for a in h.store.answers(ask_id)] == [("note", "op", "yes but")]
     go(tmp_path, scenario)
 
 
@@ -1792,8 +1803,8 @@ def test_answer_command_refused_for_approval(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, _ = await card(h)
         text = await say(h, f"!answer {ask_id} yes", None, tag="cmd")
-        assert text == (f"Ask {ask_id} is an approval ask: reply to its card with !approve {BEAD} {D12} or "
-                        f"!deny {BEAD} <reason>. Nothing recorded.")
+        assert text == (f"Ask {ask_id} is an approval ask. To decide, react to its card or reply to it. "
+                        "Nothing recorded.")
         assert h.store.answers(ask_id) == [] and decisions(h) == []
     go(tmp_path, scenario)
 
@@ -1803,7 +1814,7 @@ def test_near_miss_digest_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         near = D12[:11] + ("0" if D12[-1] != "0" else "1")
-        assert (await say(h, approve(near), first)).startswith(f"That does not match ask {ask_id}")
+        assert (await say(h, approve(near), first)).startswith(f"This card is for {BEAD}. ")
         assert decisions(h) == [] and attempts(h, ask_id) == []
     go(tmp_path, scenario)
 
