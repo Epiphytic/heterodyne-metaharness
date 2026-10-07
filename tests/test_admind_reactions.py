@@ -6,9 +6,11 @@ is an obvious fake. Waits are bounded and checked; nothing here sleeps to order 
 
 import json
 
+import pytest
 from fakes.fake_wn_agent import ACCOUNT, GROUP
 
-from heterodyne.marmot.control import ReactionAdded, decode_event
+from heterodyne.admind import guard
+from heterodyne.marmot.control import InboundMessage, Message, ReactionAdded, Sender, decode_event
 
 EVENT = "e1" * 32
 CARD = "c4" * 32
@@ -43,3 +45,36 @@ def test_reaction_frame_without_or_with_a_malformed_event_id_still_decodes() -> 
     assert isinstance(short, ReactionAdded) and short.event_id_hex == "e1" * 8
     bare = decode_event(frame(target=None, recorded_at=None), "r1")     # optional fields absent
     assert isinstance(bare, ReactionAdded) and bare.event_id_hex == EVENT
+
+
+# --- one guard for messages and reactions (R27) --------------------------------------------------
+def as_message(sender: Sender, group: str) -> InboundMessage:
+    return InboundMessage(account_id_hex=ACCOUNT, group_id_hex=group,
+                          message=Message(message_id_hex=CARD, text="hi", recorded_at=1, sender=sender))
+
+
+def as_reaction(actor: Sender, group: str) -> ReactionAdded:
+    return ReactionAdded(account_id_hex=ACCOUNT, group_id_hex=group, target_message_id_hex=CARD, actor=actor,
+                         emoji="👍", event_id_hex=EVENT)
+
+
+@pytest.mark.parametrize(("sender", "group", "latched", "action", "why"), [
+    (Sender(ACTOR, False), GROUP, False, "process", "operator message"),
+    (Sender(ACTOR.upper(), False), GROUP.upper(), False, "process", "operator message"),
+    (Sender(ACTOR, False), "f6" * 32, False, "drop", "message from another group"),
+    (Sender(ACTOR, True), GROUP, False, "ignore", "admind's own message"),
+    (Sender(ACTOR, True), "f6" * 32, False, "drop", "message from another group"),
+    (Sender("e5" * 32, False), GROUP, False, "drop", "sender is not an operator"),
+    (Sender("e5" * 32, False), GROUP, True, "drop", "sender is not an operator"),
+    (Sender(ACTOR, False), GROUP, True, "drop", "admind is latched; run `admind rearm` on the host"),
+])
+def test_a_reaction_is_judged_on_its_actor_exactly_as_a_message(sender: Sender, group: str, latched: bool,
+                                                                 action: str, why: str) -> None:
+    ops = {ACTOR: "op"}
+    by_message = guard.judge_message(as_message(sender, group), group_id=GROUP, operators=ops,
+                                     latched=latched)
+    by_reaction = guard.judge_message(as_reaction(sender, group), group_id=GROUP, operators=ops,
+                                      latched=latched)
+    assert by_reaction == by_message
+    assert (by_reaction.action, by_reaction.reason) == (action, why)
+    assert by_reaction.operator == ("op" if action == "process" or "latched" in why else None)
