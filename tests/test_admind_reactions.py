@@ -895,14 +895,19 @@ def test_a_changed_pinned_bead_gets_its_updated_content_marked_undecidable(tmp_p
                                   "stored pin no longer matches, so its originator must renew the pin and "
                                   "post it again. Reactions and replies here decide nothing.")
         assert "OpenShell does; bubblewrap does not." in content and "approve · 👎" not in content
-        await wait_until(lambda: sent_mid(h, f"askd:{ask_id}:{hexid}:0") is not None)
-        updated = sent_mid(h, f"askd:{ask_id}:{hexid}:0")
-        assert updated is not None and h.store.ask_for_message(updated) == ask_id     # the card recognizer
+        assert len(rows) > 1                                # several chunks: each one is checked
+        keys = [r[0] for r in rows]
+        await wait_until(lambda: all(sent_mid(h, k) is not None for k in keys), 30)
         stale = f"Ask {ask_id} is already stale. Nothing recorded."
-        assert (await reacted(h, "👍", updated))[1] == stale
-        assert (await say(h, "approve", updated)) == stale
-        assert decisions(h) == [] and "echo: approve" not in h.texts()
-    go(tmp_path, scenario, {BEAD: bead(posted_digest=D)})
+        for key in keys:
+            updated = sent_mid(h, key)
+            assert updated is not None and h.store.ask_for_message(updated) == ask_id    # the card recognizer
+            assert (await reacted(h, "👍", updated))[1] == stale
+            assert (await say(h, "approve", updated)) == stale
+            assert (await say(h, "what changed?", updated)) == stale
+        assert decisions(h) == [] and h.store.newer_ask(ask_id) is None
+        assert not any(t.startswith("echo: ") and t != "echo: hello" for t in h.texts())   # never the agent
+    go(tmp_path, scenario, {BEAD: bead(posted_digest=D)}, chunk_chars=200)
 
 
 @needs_tmux
