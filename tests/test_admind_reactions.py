@@ -172,9 +172,31 @@ def test_deny_words_with_and_without_a_reason(word: str) -> None:
     for text in (word, word.upper(), f" {word}. ", f"{word}!"):
         assert verbs.read_reply(text) == Reading("deny", ""), text
     assert verbs.read_reply(f"{word} the scope is too wide") == Reading("deny", "the scope is too wide")
-    assert verbs.read_reply(f"{word.upper()}:  Too Wide.\n") is None       # "deny:" is not the word
+    assert verbs.read_reply(f"{word.upper()}:  Too Wide.\n") == Reading("deny", "Too Wide.")
     assert verbs.read_reply(f"{word}. Too wide, see the ADR.") == Reading("deny", "Too wide, see the ADR.")
     assert verbs.read_reply(f"{word}\n\nline one\nline two ") == Reading("deny", "line one\nline two")
+
+
+@pytest.mark.parametrize(("text", "reason"), [
+    ("rejected: too broad", "too broad"), ("deny, too broad", "too broad"),
+    ("Denied- too broad", "too broad"),
+    ("reject— too broad", "too broad"), ("deny:", ""), ("DENY,", ""), ("deny:.", ""), ("Rejected:!", ""),
+    ("👎: not yet", "not yet"), ("denied:\nline one", "line one"),
+    ("deny - too broad", "- too broad"),         # a separator on its own is not on the first word: the reason
+    ("deny, see below:", "see below:"),          # the reason is kept as typed
+])
+def test_a_deny_word_may_be_followed_by_one_separator(text: str, reason: str) -> None:
+    """The operator's call (2026-10-06): one trailing `:`, `,`, `-` or `—` on the first word is allowed
+    after a deny word, never after an approve word."""
+    assert verbs.read_reply(text) == Reading("deny", reason), text
+
+
+@pytest.mark.parametrize("text", ["approve, but", "approve:", "yes,", "ok -", "lgtm—", "y:",
+                                  "approved, thanks",
+                                  "deny:too broad", "deny::", "deny,, x", "deny;", "deny/ x", "no: idea",
+                                  "no,", "deny-this"])
+def test_separators_never_make_an_approve_or_a_second_deny_form(text: str) -> None:
+    assert verbs.read_reply(text) is None, text
 
 
 @pytest.mark.parametrize("text", ["no", "No", "NO.", "n", "N!", " no "])
@@ -653,7 +675,9 @@ def test_an_approve_reply_approves(tmp_path: Path, text: str) -> None:
 
 @needs_tmux
 @pytest.mark.parametrize(("text", "note"), [("deny", ""), ("Denied.", ""), ("reject too broad", "too broad"),
-                                            ("rejected wrong runtime", "wrong runtime"), ("no", ""),
+                                            ("rejected wrong runtime", "wrong runtime"),
+                                            ("rejected: wrong runtime", "wrong runtime"),
+                                            ("deny, too broad", "too broad"), ("no", ""),
                                             ("n", ""), ("👎 not yet", "not yet"),
                                             ("deny the key is " + TOKEN,
                                              "the key is <redacted GitHub token>")])
@@ -678,7 +702,8 @@ def test_a_deny_reason_over_the_limit_is_refused(tmp_path: Path) -> None:
 
 @needs_tmux
 @pytest.mark.parametrize("text", ["yes but", "yes, but what about X?", "ok? then ship it", "no idea",
-                                  "approve it later", "lgtm once CI passes", "nope", "denial is a river"])
+                                  "approve it later", "lgtm once CI passes", "nope", "denial is a river",
+                                  "approve, but"])
 def test_anything_else_is_a_note(tmp_path: Path, text: str) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)

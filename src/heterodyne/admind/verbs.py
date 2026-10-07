@@ -2,7 +2,8 @@
 
 Only an unambiguous reply decides. An approve is a reply that is exactly one approve word or one approve
 emoji; a deny is a reply whose first word is a deny word or a deny emoji (the rest is its reason), or that
-is exactly "no" or "n". Everything else is a note. The words and emojis are listed here and nowhere else.
+is exactly "no" or "n". A deny word may be followed by one `:`, `,`, `-` or `—` ("rejected: too broad"); an
+approve word may not. Everything else is a note. The words and emojis are listed here and nowhere else.
 """
 
 import re
@@ -21,6 +22,7 @@ APPROVE_EMOJIS = frozenset({*("\U0001f44d" + t for t in SKIN_TONES), "\u2705", "
 DENY_EMOJIS = frozenset({*("\U0001f44e" + t for t in SKIN_TONES), "\u274c"})
 VARIATION_SELECTOR = "\ufe0f"
 _TRAILING = re.compile(r"[.!\s]+\Z")
+_DENY_SEPARATOR = re.compile(r"[:,\-\u2014]\Z")     # one `:` `,` `-` `—` after a deny word (operator call)
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,7 @@ def read_reply(text: str) -> Reading | None:
     words = text.strip().split(maxsplit=1)
     if not words:
         return None
-    first = fold(words[0])
+    first = _DENY_SEPARATOR.sub("", fold(words[0]))
     if first in DENY_WORDS or emoji_action(first) == "deny":
         return Reading("deny", words[1].strip() if len(words) == 2 else "")
     return None
