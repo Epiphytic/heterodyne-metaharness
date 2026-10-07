@@ -122,6 +122,9 @@ CONFLICT = "Ask {ask_id} changed while this decision was settled; see !asks. Che
 RECONCILE_RESTARTED = "admind restarted while recording this decision; nothing was recorded. Decide again."
 RECONCILE_STRANDED = ("admind could not finish settling the last decision on ask {ask_id}; nothing was "
                       "recorded. Decide again.")
+RECONCILE_UNVERIFIED = ("admind could not check whether this decision on {bead} was recorded: "
+                        "approve-bead is not configured on this host ([admind] approve_bead). Check it on "
+                        "the host with approve-bead {bead}.")
 ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or wait for answers."
 ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
 ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
@@ -1029,12 +1032,15 @@ class Admind:
     async def reconcile_one(self, ask_id: str, attempt: str, status: str, *, restarted: bool) -> None:
         """Read back one stranded attempt and settle it with a compare-and-set on the status it was seen
         in (r3-2). Its notice is threaded to the card; the attempt's inbound message, if it is still
-        `executing`, is marked `done` in the same transaction (r6), so a restart does not answer it."""
+        `executing` (or, defensively, `received`), is marked `done` in the same transaction (r6), so a
+        restart does not answer it."""
         a = self.store.current_attempt(ask_id)
         row = self.store.ask(ask_id)
-        if (a is None or a.message_id != attempt or row is None or row.bead is None
-                or self.approve_bead is None):
+        if a is None or a.message_id != attempt or row is None or row.bead is None:
             self.audit_quietly("ask", action="reconcile-skipped", ask_id=ask_id)
+            return
+        if self.approve_bead is None:
+            self.unverified(ask_id, attempt, row.bead)
             return
         settled, back = await self.read_and_settle(a, row.bead)
         new_status, text = self.settlement(settled, back, a, row.bead, "")
@@ -1045,7 +1051,7 @@ class Admind:
                                               exit_status=None, new_status=new_status, outcome=text,
                                               decided_by=a.operator if settled == "recorded" else None)
             if closed:
-                if self.store.inbound_status(attempt) == "executing":
+                if self.store.inbound_status(attempt) in ("received", "executing"):
                     self.store.set_inbound(attempt, "done")
                 if new_status != status:
                     self.ask_notice(ask_id, "reconciled", str(self.next_seq("reconcile_seq")), text)
@@ -1054,6 +1060,19 @@ class Admind:
             return
         self.audit.write("ask", action="reconciled", ask_id=ask_id, message_id=attempt, outcome=settled,
                          status=new_status, was=status, restarted=restarted)
+
+    def unverified(self, ask_id: str, attempt: str, bead: str) -> None:
+        """A stranded attempt that cannot be read back: approve_bead was removed (say, for a rollback).
+        recover() left its message to the reconcile, so it is answered here, once: the notice and `done`
+        commit together, and a later run finds the message done. It says the decision may be recorded, never
+        "decide again". The ask and its attempt stay as they are, for a reconcile with approve_bead set."""
+        with self.store.transaction():
+            answered = self.store.inbound_status(attempt) in ("received", "executing")
+            if answered:
+                self.store.set_inbound(attempt, "done")
+                self.ask_notice(ask_id, "unverified", attempt, RECONCILE_UNVERIFIED.format(bead=bead))
+        self.audit_quietly("ask", action="reconcile-unverified" if answered else "reconcile-skipped",
+                           ask_id=ask_id)
 
     async def guarded(self, coro: Awaitable[None]) -> None:
         """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets

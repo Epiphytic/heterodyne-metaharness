@@ -37,6 +37,7 @@ from heterodyne.admind.daemon import (
     ASK_REDACTED,
     ASK_TOO_MANY,
     RECONCILE_RESTARTED,
+    RECONCILE_UNVERIFIED,
     RESTARTED_NOTICE,
 )
 from heterodyne.admind.redact import redact
@@ -1583,6 +1584,73 @@ def test_restart_while_deciding(tmp_path: Path, via_ref: str | None, status: str
         assert attempts(h, "d222")[0][-1] == ("recorded" if status == "approved" else "blocked")
     fields = closed_by(mid) if via_ref is None else closed_by(mid, via_ref=via_ref)
     go(tmp_path, scenario, {BEAD: fields}, before_store=before_store)
+
+
+def interrupted(tmp_path: Path, mid: str, inbound: str = "executing") -> Callable[[Harness], None]:
+    """Before the store opens: ask d222 left `deciding` by attempt `mid`, whose message is `inbound`."""
+    def before_store(h: Harness) -> None:
+        seed(tmp_path, ("d222", BEAD, mid, "deciding"))(h)
+        store = Store(h.settings.state_dir / "admind.db")
+        assert store.claim_inbound(mid)
+        if inbound != "received":
+            store.set_inbound(mid, inbound)
+        store.close()
+    return before_store
+
+
+def restart_notices(h: Harness) -> int:
+    return h.store.db.execute("SELECT COUNT(*) FROM outbox WHERE text = ?", (RESTARTED_NOTICE,)).fetchone()[0]
+
+
+@needs_tmux
+def test_reconcile_without_approve_bead(tmp_path: Path) -> None:
+    """approve_bead removed after an interrupted decision (a rollback, say): the message is answered once
+    with the uncertainty notice, never "resend it", and the ask is kept for a later read-back."""
+    mid = "dd" * 32
+    unverified = f"asknote:d222:unverified:{mid}:%"
+
+    def notes(h: Harness) -> list[str]:
+        return [r[0] for r in h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ?", (unverified,))]
+
+    async def first(h: Harness) -> None:
+        await wait_until(lambda: audited(h, kind="ask", action="reconcile-unverified", ask_id="d222"))
+        assert notes(h) == [RECONCILE_UNVERIFIED.format(bead=BEAD)]
+        assert "Decide again" not in notes(h)[0]
+        assert h.store.inbound_status(mid) == "done"
+        assert row_text(h, f"restarted:{mid}") is None and restart_notices(h) == 0
+        assert ask_status(h, "d222") == "deciding" and current(h, "d222") == mid
+        assert attempts(h, "d222")[0][-1] is None
+    go(tmp_path, first, {BEAD: closed_by(mid)}, before_store=interrupted(tmp_path, mid), approve_bead=None)
+
+    async def again(h: Harness) -> None:
+        await wait_until(lambda: audited(h, kind="ask", action="reconcile-skipped", ask_id="d222"))
+        assert len(notes(h)) == 1 and restart_notices(h) == 0
+        assert ask_status(h, "d222") == "deciding" and current(h, "d222") == mid
+    go(tmp_path, again, fresh=False, approve_bead=None)
+
+    async def enabled(h: Harness) -> None:
+        await wait_until(lambda: ask_status(h, "d222") == "approved")
+        assert attempts(h, "d222")[0][-1] == "recorded"
+        assert (row_text(h, "asknote:d222:reconciled:1:0") or "").startswith(f"Approved {BEAD} as op")
+        assert len(notes(h)) == 1 and restart_notices(h) == 0
+    go(tmp_path, enabled, fresh=False)
+
+
+@needs_tmux
+def test_reconcile_settles_received_message(tmp_path: Path) -> None:
+    """Defence in depth: an attempt whose message is still `received` (begin_attempt makes it `executing`,
+    so this is an anomaly) is settled done too, so the next restart does not say "resend it"."""
+    mid = "dd" * 32
+
+    async def scenario(h: Harness) -> None:
+        await wait_until(lambda: ask_status(h, "d222") == "approved")
+        assert h.store.inbound_status(mid) == "done"
+    go(tmp_path, scenario, {BEAD: closed_by(mid)}, before_store=interrupted(tmp_path, mid, "received"))
+
+    async def restarted(h: Harness) -> None:
+        await joined(h)
+        assert row_text(h, f"restarted:{mid}") is None and restart_notices(h) == 0
+    go(tmp_path, restarted, fresh=False)
 
 
 @needs_tmux
