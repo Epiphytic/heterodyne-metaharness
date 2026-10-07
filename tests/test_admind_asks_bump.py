@@ -640,6 +640,29 @@ def test_a_decision_emoji_on_a_bump_gets_the_hint(tmp_path: Path, emoji: str) ->
 
 
 @needs_tmux
+def test_the_hint_threads_to_the_reacted_chunk_or_to_the_reply(tmp_path: Path) -> None:
+    """B6, delta §5: on a split reminder, a reaction on chunk 1 gets its hint threaded to chunk 1, not chunk 0
+    or the card; a reply on chunk 1 gets it threaded to the reply itself."""
+    readout = {**LINES, "title": ["title:", f"  │ {'t' * 80}"], "description": LONG["description"]}
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        command = await send(h, "!asks bump", None)
+        await settled(h, command)
+        key = f"asknote:{ask_id}:bump:{command}:"
+        await wait_until(lambda: sent_mid(h, key + "0") is not None and sent_mid(h, key + "1") is not None)
+        chunk0, chunk1 = sent_mid(h, key + "0"), sent_mid(h, key + "1")
+        assert chunk1 is not None and len({chunk0, chunk1, first}) == 3
+        mid, text = await reacted(h, "👍", chunk1)
+        assert text == hint(ask_id) and threads(h, mid) == {chunk1}
+        reply = await send(h, "approve", chunk1)
+        await settled(h, reply)
+        assert queued(h, reply) == hint(ask_id) and threads(h, reply) == {reply}
+        untouched(h, ask_id, "approve")
+    go(tmp_path, scenario, {BEAD: bead(readout=readout)}, chunk_chars=200)
+
+
+@needs_tmux
 def test_another_emoji_on_a_bump_does_nothing(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, _ = await card(h)
