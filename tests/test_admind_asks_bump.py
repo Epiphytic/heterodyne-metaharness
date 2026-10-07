@@ -1050,6 +1050,35 @@ def test_a_refused_approve_moves_the_clock(tmp_path: Path, monkeypatch: pytest.M
     go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
 
 
+@needs_tmux
+def test_commands_on_a_card_leave_its_clock_but_parse_errors_move_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B14 (review r2): `!asks` and `!ps` as replies to the original card, its `!details` or a repeat are not
+    about the ask and leave its clock; a parse error replying to each is refused activity and moves it."""
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        request = await send(h, "!details", first)
+        await settled(h, request)
+        await wait_until(lambda: sent_mid(h, f"askd:{ask_id}:{request}:0") is not None)
+        details = sent_mid(h, f"askd:{ask_id}:{request}:0")
+        _, repeat = await repeated_card(h, ask_id)
+        assert details is not None and len({first, details, repeat}) == 3
+        for target in (first, details, repeat):
+            at = activity(h.store, ask_id)
+            c.advance(1)
+            assert (await say(h, "!asks", target, tag="cmd")).startswith(ask_id)
+            mid = await send(h, "!ps", target)
+            await settled(h, mid)
+            assert queued(h, mid, "cmd") != ""
+            assert activity(h.store, ask_id) == at                          # not about the ask
+            at = c.advance(1)
+            assert (await say(h, "!answer", target, tag="cmd")).startswith("Usage: !answer")
+            assert activity(h.store, ask_id) == at                          # a parse error on it
+    go(tmp_path, scenario)
+
+
 # Each accepted refusal on an identified ask (B14), as (the ask's kind, how it is refused on `first`, the
 # card's chunk 0). Each asserts its own refusal, so a route that stops refusing fails rather than passes.
 async def answer_on_an_approval(h: Harness, ask_id: str, first: str) -> None:
