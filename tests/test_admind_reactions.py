@@ -387,6 +387,26 @@ def test_reactions_that_are_dropped_or_ignored_before_the_claim(tmp_path: Path) 
 
 
 @needs_tmux
+def test_a_reaction_while_the_group_is_unverified_is_dropped_at_the_claim(tmp_path: Path) -> None:
+    """The same check_group() and authorised() as a message, right after the claim: dropped as a reaction,
+    on a card or not, before anything reads the target."""
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        h.fake.fail_group_info = True
+        on_card = await react(h, "👍", first)
+        elsewhere = await react(h, "👍", "f8" * 32)
+        await settled(h, on_card)
+        await settled(h, elsewhere)
+        assert h.store.inbound_status(on_card) == "dropped" and h.store.inbound_status(elsewhere) == "dropped"
+        drops = [r for r in records(h)
+                 if r.get("kind") == "drop" and r.get("reason") == "no longer authorised"]
+        assert [r["what"] for r in drops] == ["reaction", "reaction"]
+        assert decisions(h) == [] and attempts(h, ask_id) == [] and ask_status(h, ask_id) == "open"
+        h.fake.fail_group_info = False
+    go(tmp_path, scenario)
+
+
+@needs_tmux
 def test_a_replayed_reaction_is_dropped(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
