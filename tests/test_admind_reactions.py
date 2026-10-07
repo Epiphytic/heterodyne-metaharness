@@ -182,13 +182,31 @@ def test_deny_words_with_and_without_a_reason(word: str) -> None:
     ("Denied- too broad", "too broad"),
     ("reject— too broad", "too broad"), ("deny:", ""), ("DENY,", ""), ("deny:.", ""), ("Rejected:!", ""),
     ("👎: not yet", "not yet"), ("denied:\nline one", "line one"),
-    ("deny - too broad", "- too broad"),         # a separator on its own is not on the first word: the reason
     ("deny, see below:", "see below:"),          # the reason is kept as typed
 ])
 def test_a_deny_word_may_be_followed_by_one_separator(text: str, reason: str) -> None:
     """The operator's call (2026-10-06): one trailing `:`, `,`, `-` or `—` on the first word is allowed
     after a deny word, never after an approve word."""
     assert verbs.read_reply(text) == Reading("deny", reason), text
+
+
+@pytest.mark.parametrize(("text", "reason"), [
+    ("deny - too broad", "too broad"), ("Rejected : too broad", "too broad"),
+    ("deny ,  too broad", "too broad"),
+    ("denied —\ntoo broad", "too broad"), ("👎 - not yet", "not yet"), ("deny: - too broad", "too broad"),
+    ("deny -x", "-x"), ("deny -- too broad", "-- too broad"), ("deny ; too broad", "; too broad"),
+    ("deny - - too broad", "- too broad"), ("deny -", "-"), ("deny x - y", "x - y"),
+])
+def test_a_lone_separator_before_the_reason_is_dropped(text: str, reason: str) -> None:
+    """The operator's call (2026-10-06): a reason that opens with one `:`, `,`, `-` or `—` on its own,
+    then whitespace, loses both; any other opening is kept as typed."""
+    assert verbs.read_reply(text) == Reading("deny", reason), text
+
+
+@pytest.mark.parametrize("text", ["approve - ok", "yes : fine", "no - idea", "ok — go", "- yes", ": ok",
+                                  "— 👍"])
+def test_a_lone_separator_never_makes_an_approve_or_a_deny(text: str) -> None:
+    assert verbs.read_reply(text) is None, text
 
 
 @pytest.mark.parametrize("text", ["approve, but", "approve:", "yes,", "ok -", "lgtm—", "y:",
