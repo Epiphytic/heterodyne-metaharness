@@ -7,13 +7,10 @@ that it is top level), at every operator; admind's replies; `approve-bead --json
 paste count.
 """
 
-import pytest
 from harness import BUMP_HOURS, WAIT, Operator, Seen, Stack, wait_for
 
 from heterodyne.admind.settings import resolve
 from heterodyne.config import load
-
-pytestmark = pytest.mark.xfail(strict=False, reason="awaits the asks bump/repeat daemon")
 
 DECIDE = 120.0      # a decision runs approve-bead against the private dolt server
 NAMES = ("tester", "tester2", "outsider")
@@ -104,7 +101,7 @@ def test_reminder_decides_nothing(stack: Stack) -> None:
     bead, ask_id, card = approval(stack, "live: a reminder is not a card")
     tester, tester2 = stack.ops["tester"], stack.ops["tester2"]
     command = tester.send("!asks bump")
-    threaded(tester, command, "Bumped 1 asks")
+    assert f"Bumped 1 ask: {ask_id}." in plain(threaded(tester, command, "Bumped").text)
     reminder = reminders(stack, ask_id, command)[0]
     received(tester2, reminder)
     pastes = stack.pastes()
@@ -179,4 +176,4 @@ def test_bump_hours_setting_is_read(stack: Stack) -> None:
     """The automatic bump cannot be timed live (`ask_bump_hours` is at least 1); its clock is covered
     offline. Live, the setting written to the isolated config is the one admind's settings resolve (B14)."""
     settings = resolve(load(env=stack.env), stack.env)
-    assert getattr(settings, "ask_bump_hours", None) == BUMP_HOURS
+    assert settings.ask_bump_hours == BUMP_HOURS

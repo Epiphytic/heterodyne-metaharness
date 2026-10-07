@@ -48,7 +48,7 @@ from typing import Any
 import msgspec
 
 from heterodyne import config as hconfig
-from heterodyne.admind.settings import ADMIND_KEYS, resolve
+from heterodyne.admind.settings import resolve
 from heterodyne.config import paths
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -83,7 +83,7 @@ BTQ_APPROVERS = ("tester", "tester2")
 DESIGN_REVIEW = "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model"
 READY_PREFIX = "admind is listening"
 WAIT = 90.0                 # one relay round trip can take seconds; every wait is bounded
-BUMP_HOURS = 6              # [admind] ask_bump_hours when admind knows the key; not the default, so it shows
+BUMP_HOURS = 6              # [admind] ask_bump_hours; not the default, so it shows
 
 # Never used, opened or modified (the brief's isolation list, resolved against the real HOME).
 FORBIDDEN = tuple(REAL_HOME / p for p in (
@@ -844,7 +844,7 @@ start_timeout_seconds = 3600
 group_check_seconds = 20
 alert_poll_seconds = 5
 approve_bead = {toml_str(str(APPROVE_BEAD))}
-{f"ask_bump_hours = {BUMP_HOURS}" if "ask_bump_hours" in ADMIND_KEYS else ""}
+ask_bump_hours = {BUMP_HOURS}
 
 [admind.marmot]
 wn_agent = {toml_str(self.wn_agent)}
