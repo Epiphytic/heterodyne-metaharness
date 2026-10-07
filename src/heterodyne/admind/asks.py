@@ -243,6 +243,9 @@ class ApprovalCard:
     details_chunks: list[str]
 
 
+UPDATED = ("Updated content of {bead} (now {digest12}). It cannot be decided yet: its stored pin no longer "
+           "matches, so its originator must renew the pin and post it again. Reactions and replies here "
+           "decide nothing.")
 APPROVAL_ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
 
 
@@ -306,16 +309,29 @@ def approval_card(row: AskRow, r: Readout, chunk_chars: int) -> ApprovalCard | s
     and refs included) and the description, as approve-bead renders them."""
     if row.bead is None or r.digest is None:
         return REDACTED         # not reached: postable() refuses a readout without a digest first
+    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}"]
+    card = _whole(top, r, decision_lines(row.bead), chunk_chars)
+    return card if isinstance(card, str) else ApprovalCard(card, card)
+
+
+def updated_content(bead: str, r: Readout, chunk_chars: int) -> list[str] | str:
+    """A pinned bead's changed readout, built and checked exactly as a card but marked undecidable (R29),
+    as its chunks, or why it is refused (REDACTED or TOO_LONG)."""
+    return _whole([UPDATED.format(bead=bead, digest12=(r.digest or "none")[:12])], r, [], chunk_chars)
+
+
+def _whole(top: list[str], r: Readout, bottom: list[str], chunk_chars: int) -> list[str] | str:
+    """`top`, the readout and `bottom` as checked chunks: REDACTED if it fails R21, then TOO_LONG if the
+    readout is over MAX_APPROVAL_CARD characters (R8)."""
     links = {link.doc: link.url for link in r.links}
     ask_lines = _linked(r.readout["ask"], links)
     context = [*r.readout["title"], *(["ask:", *ask_lines] if ask_lines else []), *r.readout["description"]]
-    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}"]
-    card = _checked("\n".join([*top, *context, *decision_lines(row.bead)]), chunk_chars)
-    if card is None:
+    parts = _checked("\n".join([*top, *context, *bottom]), chunk_chars)
+    if parts is None:
         return REDACTED
     if len("\n".join(context)) > MAX_APPROVAL_CARD:
         return TOO_LONG
-    return ApprovalCard(card, card)
+    return parts
 
 
 def approval_body(r: Readout, card: ApprovalCard) -> str:

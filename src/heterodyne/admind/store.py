@@ -675,6 +675,14 @@ class Store:
                             "ORDER BY created_at DESC, rowid DESC LIMIT 1", (bead, *statuses)).fetchone()
         return None if r is None else _ask(r)
 
+    @_locked
+    def newer_ask(self, ask_id: str) -> AskRow | None:
+        """The newest ask for the same bead posted after `ask_id`, in any status (R31)."""
+        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = (SELECT bead FROM asks "  # noqa: S608
+                            "WHERE ask_id = ?) AND rowid > (SELECT rowid FROM asks WHERE ask_id = ?) "
+                            "ORDER BY rowid DESC LIMIT 1", (ask_id, ask_id)).fetchone()
+        return None if r is None else _ask(r)
+
     # --- decision attempts (R23) ---------------------------------------------------------------
     @_locked
     def begin_attempt(self, a: Attempt) -> bool:
