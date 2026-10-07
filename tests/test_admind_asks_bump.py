@@ -9,12 +9,36 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from test_admind_asks import outbox, row
+from admind_asks_fixture import sent_mid
+from admind_waits import wait_until
+from test_admind_approvals import (
+    BEAD,
+    D2,
+    LINES,
+    LONG,
+    D,
+    ask_status,
+    attempts,
+    bead,
+    card,
+    decisions,
+    edit,
+    go,
+    go_file,
+    say,
+    send,
+    settled,
+    waiting,
+)
+from test_admind_asks import NONE, audited, card_sent, joined, outbox, pasted, posted, question, row
+from test_admind_daemon import Harness, needs_tmux
 from test_admind_reactions import OLD_TABLES, columns
 from test_admind_settings import BASE_CONFIG, write
 
 from heterodyne.admind import asks, chunk, commands
 from heterodyne.admind import store as store_mod
+from heterodyne.admind.approvals import Attempt
+from heterodyne.admind.audit import ref_id
 from heterodyne.admind.settings import resolve
 from heterodyne.admind.store import Store
 from heterodyne.config import ConfigError, load
@@ -332,3 +356,213 @@ def test_a_reminder_splits_like_any_notice() -> None:
     """B8: at the 200-character minimum an approval reminder with a long title takes two chunks."""
     r = row(kind="approval", title="t" * 80)
     assert len(chunk.split(asks.reminder(r, three_hours_on()), 200)) == 2
+
+
+# --- B1-B5, B7-B9: `!asks bump` ------------------------------------------------------------------------
+def rows(h: Harness, like: str) -> list[tuple[str, str | None, str]]:
+    """(key, reply_to, text) of the outbox rows whose key is LIKE `like`, in queue order."""
+    return [(str(k), r, str(t)) for k, r, t in h.store.db.execute(
+        "SELECT key, reply_to, text FROM outbox WHERE key LIKE ? ORDER BY seq", (like,)).fetchall()]
+
+
+def bump_rows(h: Harness, ask_id: str, command: str) -> list[tuple[str, str | None, str]]:
+    return rows(h, f"asknote:{ask_id}:bump:{command}:%")
+
+
+def cmd_reply(h: Harness, mid: str) -> str:
+    return "".join(t for _, _, t in rows(h, f"cmd:{mid}:%"))
+
+
+def set_status(h: Harness, ask_id: str, status: str) -> None:
+    """Put an ask in `status` without an attempt (so the `!asks` backstop leaves it alone)."""
+    h.store.db.execute("UPDATE asks SET status = ? WHERE ask_id = ?", (status, ask_id))
+
+
+def undelivered(h: Harness, ask_id: str, kind: str = "question") -> None:
+    """An open ask whose card was never queued, let alone sent."""
+    at = asks.stamp(asks.now())
+    h.store.insert_ask(row(ask_id, kind=kind, created_at=at, updated_at=at), None)
+
+
+@needs_tmux
+def test_bump_threads_each_open_ask_to_its_card_and_reports_the_rest(tmp_path: Path) -> None:
+    """B2, B3, B5, B9: open asks only, oldest first, each reminder threaded to exactly its card's chunk 0;
+    a second and a third bump thread there again, never to an earlier bump."""
+    async def scenario(h: Harness) -> None:
+        a, a_first = await card(h)
+        q = await posted(h, question())
+        q_first = await card_sent(h, q)
+        answered = await posted(h, question("Which host?"))
+        await card_sent(h, answered)
+        assert (await say(h, f"!answer {answered} the first one", None)).startswith("Answer")
+        await h.daemon.on_ask(asks.AskGet(answered), NONE)        # collecting it changes nothing (B2)
+        deciding = await posted(h, question("Which port?"))
+        uncertain = await posted(h, question("Which user?"))
+        cancelled = await posted(h, question("Which disk?"))
+        await card_sent(h, cancelled)
+        set_status(h, deciding, "deciding")
+        set_status(h, uncertain, "uncertain")
+        set_status(h, cancelled, "cancelled")
+        undelivered(h, "n2n2")
+        for _ in range(3):
+            mid = await send(h, "!asks bump", None)
+            await settled(h, mid)
+            assert cmd_reply(h, mid) == (f"Bumped 2 asks: {a}, {q}.\n"
+                                         f"{answered} is answered; awaiting its asker\n"
+                                         f"{deciding} is deciding\n{uncertain} is uncertain\n"
+                                         "n2n2: card not delivered; try !asks repeat")
+            assert {r for _, r, _ in rows(h, f"cmd:{mid}:%")} == {mid}         # threaded to the command
+            assert [(k, r) for k, r, _ in bump_rows(h, a, mid)] == [(f"asknote:{a}:bump:{mid}:0", a_first)]
+            assert [(k, r) for k, r, _ in bump_rows(h, q, mid)] == [(f"asknote:{q}:bump:{mid}:0", q_first)]
+            for other in (answered, deciding, uncertain, cancelled, "n2n2"):
+                assert bump_rows(h, other, "%") == []
+            assert h.store.inbound_status(mid) == "done"
+            assert audited(h, kind="command", message_id=ref_id(mid), command="asks", sub="bump",
+                           bumped=[a, q], skipped=[{"ask_id": answered, "why": "answered"},
+                                                   {"ask_id": deciding, "why": "deciding"},
+                                                   {"ask_id": uncertain, "why": "uncertain"},
+                                                   {"ask_id": "n2n2", "why": "card not delivered"}])
+            await wait_until(lambda m=mid: sent_mid(h, f"asknote:{q}:bump:{m}:0") is not None)
+        approval = h.store.ask(a)
+        assert approval is not None
+        _, _, text = bump_rows(h, a, mid)[0]
+        assert text.startswith(f"Still outstanding: ask {a} · approval · ")
+        assert text.endswith(f" · {approval.title[:80]}.\n{APPROVAL_TAIL}")
+        _, _, text = bump_rows(h, q, mid)[0]
+        assert text.startswith(f"Still outstanding: ask {q} · question · ")
+        assert text.endswith(f" · Which relay?.\n{ANSWER_TAIL}")
+        assert decisions(h) == [] and "Still outstanding" not in pasted(h)
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_bump_summary_with_one_and_with_none(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        assert await say(h, "!asks bump", None, tag="cmd") == "No outstanding asks."
+        q = await posted(h, question())
+        await card_sent(h, q)
+        assert await say(h, "!asks bump", None, tag="cmd") == f"Bumped 1 ask: {q}."
+        set_status(h, q, "deciding")
+        assert await say(h, "!asks bump", None, tag="cmd") == f"Bumped 0 asks.\n{q} is deciding"
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_split_reminder_threads_every_chunk_to_chunk_0(tmp_path: Path) -> None:
+    """B3, B8: a card of several chunks threads to chunk 0; at chunk_chars=200 an approval reminder with an
+    80-character title splits, and every chunk of it threads there too."""
+    title = "t" * 80
+    readout = {**LINES, "title": ["title:", f"  │ {title}"], "description": LONG["description"]}
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        assert h.store.ask(ask_id).card_parts > 2  # type: ignore[union-attr]
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        bumps = bump_rows(h, ask_id, mid)
+        assert len(bumps) == 2 and {r for _, r, _ in bumps} == {first}
+        assert "".join(t for _, _, t in bumps).endswith(f"{title}.\n{APPROVAL_TAIL}")
+    go(tmp_path, scenario, {BEAD: bead(readout=readout)}, chunk_chars=200)
+
+
+@needs_tmux
+def test_a_refreshed_ask_is_bumped_on_its_own_card(tmp_path: Path) -> None:
+    """R29: the fresh ask's bumps thread to its own chunk 0; the stale one is not bumped."""
+    async def scenario(h: Harness) -> None:
+        old, old_first = await card(h)
+        edit(tmp_path, digest=D2)
+        await say(h, "approve", old_first)
+        fresh = h.store.newer_ask(old)
+        assert fresh is not None and fresh.refreshed_from == old and ask_status(h, old) == "stale"
+        await wait_until(lambda: h.store.card_delivered(fresh.ask_id))
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        assert cmd_reply(h, mid) == f"Bumped 1 ask: {fresh.ask_id}."
+        assert {r for _, r, _ in bump_rows(h, fresh.ask_id, mid)} == {sent_mid(h, f"ask:{fresh.ask_id}:0")}
+        assert bump_rows(h, old, "%") == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_bump_runs_the_backstop_first(tmp_path: Path) -> None:
+    """B1: a stranded `deciding` ask is reconciled back to open, then bumped."""
+    stale = "ee" * 32
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        assert h.store.begin_attempt(Attempt(ask_id, stale, "approve", "op", "marmot:" + ref_id(stale), D,
+                                             None))
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        assert ask_status(h, ask_id) == "open" and attempts(h, ask_id)[0][-1] == "untouched"
+        assert cmd_reply(h, mid) == f"Bumped 1 ask: {ask_id}."
+        assert {r for _, r, _ in bump_rows(h, ask_id, mid)} == {first}
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_bump_rechecks_authorisation_after_the_backstop(tmp_path: Path) -> None:
+    stale = "ee" * 32
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        assert h.store.begin_attempt(Attempt(ask_id, stale, "approve", "op", "marmot:" + ref_id(stale), D,
+                                             None))
+        edit(tmp_path, read="wait")
+        mid = await send(h, "!asks bump", None)
+        await waiting(h)
+        h.daemon.latch("test latch")
+        go_file(h).touch()
+        await settled(h, mid)
+        assert audited(h, kind="drop", message_id=ref_id(mid), what="command")
+        assert cmd_reply(h, mid) == "" and bump_rows(h, ask_id, "%") == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_bump_from_a_non_operator_is_dropped(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        stranger = "f7" * 32
+        await send(h, "!asks bump", None, stranger)
+        await wait_until(lambda: audited(h, kind="drop", sender_prefix=stranger[:8],
+                                         reason="sender is not an operator"))
+        assert bump_rows(h, ask_id, "%") == []
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_replayed_bump_queues_nothing_new(tmp_path: Path) -> None:
+    """B7: the same inbound row run again queues no new reminder and no second summary."""
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        before = h.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        async with h.daemon.work_lock:
+            await h.daemon.handle(mid, "!asks bump", None)
+        assert h.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == before
+        assert len(bump_rows(h, ask_id, mid)) == 1
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_failure_inside_the_bump_leaves_nothing(tmp_path: Path) -> None:
+    """B7: the reminders, the summary and `done` commit together, or not at all."""
+    async def scenario(h: Harness) -> None:
+        a, _ = await card(h)
+        q = await posted(h, question())
+        await card_sent(h, q)
+        touch = h.store.touch_ask
+
+        def fail_on_second(ask_id: str, at: str) -> None:
+            if ask_id == q:
+                raise RuntimeError("store failure")
+            touch(ask_id, at)
+        h.store.touch_ask = fail_on_second  # type: ignore[method-assign]
+        mid = await send(h, "!asks bump", None)
+        await wait_until(lambda: audited(h, kind="handler", action="failed", error="RuntimeError"))
+        assert bump_rows(h, a, mid) == [] and bump_rows(h, q, mid) == [] and cmd_reply(h, mid) == ""
+        assert h.store.inbound_status(mid) == "executing"
+    go(tmp_path, scenario)

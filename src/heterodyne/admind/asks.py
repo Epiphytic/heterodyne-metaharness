@@ -368,6 +368,22 @@ def reminder(row: AskRow, at: datetime, every: int | None = None) -> str:
             f"{how}")
 
 
+NO_OUTSTANDING = "No outstanding asks."
+SKIPPED = {"answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
+           "uncertain": "{ask_id} is uncertain",
+           "card not delivered": "{ask_id}: card not delivered; try !asks repeat"}
+
+
+def remind_summary(verb: str, done: list[str], skipped: list[tuple[str, str]]) -> str:
+    """`!asks bump` and `!asks repeat`'s own reply (B5, B11): `<verb> <n> asks: <id>, <id>.` and one line
+    per skipped ask, as (ask ID, why), or NO_OUTSTANDING when there is no active ask at all."""
+    if not done and not skipped:
+        return NO_OUTSTANDING
+    head = f"{verb} {len(done)} ask{'' if len(done) == 1 else 's'}"
+    head += f": {', '.join(done)}." if done else "."
+    return "\n".join([head, *(SKIPPED[why].format(ask_id=ask_id) for ask_id, why in skipped)])
+
+
 def summary(row: AskRow, delivered: bool, answer_count: int) -> AskSummary:
     return AskSummary(row.ask_id, row.kind, row.status, row.title, row.bead,
                       None if row.digest is None else row.digest[:12], delivered, answer_count, row.outcome,

@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -863,19 +864,65 @@ class Admind:
                     "characters.")
         return None
 
-    async def list_asks(self, mid: str) -> None:
+    async def list_asks(self, mid: str, sub: str | None = None) -> None:
         """`!asks`: first the backstop (spec §8): in the worker, under `work_lock`, no decision is in
         flight, so every `deciding` or `uncertain` ask is stranded and is reconciled as at startup. Then
-        the active asks, one line each."""
+        the active asks, one line each; or, for `!asks bump` and `!asks repeat`, the reminders (B1, B11)."""
         for ask_id, attempt, status in self.store.recovery_snapshot():
             await self.reconcile_quietly(ask_id, attempt, status, restarted=False)
         if not self.authorised(mid):        # the read-backs awaited
             self.deny(mid, "command")
             return
+        if sub is not None:
+            self.remind(mid, sub)
+            return
         at = asks.now()
         lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
+
+    def remind(self, mid: str, sub: str) -> None:
+        """`!asks bump` (B2-B9) or `!asks repeat` (B11) for every `open` ask, oldest first, with the clock
+        moves (B14), the summary and `done` in one transaction. The keys hold the command's ID, so a replay
+        queues nothing new (B7)."""
+        at = asks.now()
+        done: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        with self.store.transaction():
+            for row in self.store.asks_with_status(*asks.ACTIVE):
+                if row.status != "open":
+                    skipped.append((row.ask_id, row.status))
+                    continue
+                if sub == "repeat":
+                    self.repeat_card(mid, row, at)
+                else:
+                    target = self.store.bump_target(row.ask_id)
+                    if target is None:
+                        skipped.append((row.ask_id, "card not delivered"))
+                        continue
+                    self.bump(f"asknote:{row.ask_id}:bump:{mid}", asks.reminder(row, at), target)
+                self.store.touch_ask(row.ask_id, asks.stamp(at))
+                done.append(row.ask_id)
+            verb = "Repeated" if sub == "repeat" else "Bumped"
+            self.finish(mid, "done", asks.remind_summary(verb, done, skipped), "cmd")
+        self.audit.write("command", message_id=mid, command="asks", sub=sub, bumped=done,
+                         skipped=[{"ask_id": ask_id, "why": why} for ask_id, why in skipped])
+
+    def bump(self, key: str, text: str, target: str) -> None:
+        """One reminder, redacted whole and then split, every chunk threaded to `target` (B3, B4, B8)."""
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
+            self.post(f"{key}:{i}", part, target)
+
+    def repeat_card(self, mid: str, row: AskRow, at: datetime) -> None:
+        """The ask's whole card again, top-level (B11): an approval's stored checked chunks as they are
+        (R21), a question's or merge's whole text split; recorded with its own part count (B12)."""
+        if row.kind == "approval":
+            parts = asks.stored_details(row)
+        else:
+            parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
+        for i, part in enumerate(parts):
+            self.post(f"askr:{row.ask_id}:{mid}:{i}", part, None)
+        self.store.add_repeat(row.ask_id, mid, len(parts), asks.stamp(at))
 
     def bang_answer(self, mid: str, cmd: commands.Command) -> None:
         """`!answer <id> <text>`: as a reply to the card, from anywhere."""
@@ -1787,7 +1834,7 @@ class Admind:
                 await self.decide(mid, cmd, target)
                 return
             if cmd.name == "asks":
-                await self.list_asks(mid)
+                await self.list_asks(mid, cmd.arg)
                 return
             if cmd.name == "answer":
                 self.bang_answer(mid, cmd)
