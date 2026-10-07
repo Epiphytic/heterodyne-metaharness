@@ -93,6 +93,20 @@ def test_redacted_bead_refused_at_post(stack: Stack) -> None:
     assert "decide it at the terminal" in reply["message"]
 
 
+def test_reaction_frame_keeps_event_id(stack: Stack) -> None:
+    """A reaction by tester on admind's ready notice reaches the other operators with its raw frame kept:
+    `event_id_hex` (dropped by the src decoder) equals the ID `send_reaction` returned, and the target and
+    actor are the notice and tester. The current daemon ignores reactions, so nothing else happens."""
+    tester = stack.ops["tester"]
+    notice = tester.wait_message(lambda e: e.text.startswith("admind is listening"), "admind's ready notice")
+    event_id = tester.react(notice.message_id, "👀").lower()
+    for name in ("tester2", "outsider"):
+        seen = stack.ops[name].wait_reaction(notice.message_id, "👀", sender=tester.account)
+        assert seen.message_id == event_id
+        assert seen.raw["type"] == "reaction_added" and seen.raw["event_id_hex"].lower() == event_id
+        assert seen.raw["target_message_id_hex"].lower() == notice.message_id
+
+
 def test_audit_holds_no_identifiers(stack: Stack) -> None:
     """After the scenarios above, admind's audit log names no npub and holds no 64-hex run."""
     text = stack.audit_text()
