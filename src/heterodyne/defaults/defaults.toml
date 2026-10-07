@@ -39,6 +39,7 @@ turn_notice_seconds = 1800
 group_name = "heterodyne admin"
 reply_verbatim_lines = 8
 reply_verbatim_chars = 800
+ask_bump_hours = 12
 
 [admind.marmot]
 wn_agent = "wn-agent"
