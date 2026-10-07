@@ -232,29 +232,51 @@ Setup steps (s):
 
 ## Decision scenarios (test_live_decisions.py)
 
-`tests/live/test_live_decisions.py` holds 15 tests for deciding by reply or reaction, from the reviewed delta
-(`docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md`, R7, R8, R13, R27–R31 and
-§7.2). The module is `xfail(strict=False)` until the daemon implements it.
+`tests/live/test_live_decisions.py` holds 21 tests for deciding by reply or reaction, counting parametrized
+cases. They follow the reviewed delta (`docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md`:
+R7, R8, R13, R27–R31 and §7.2). They run against the daemon from `admind-relay-react` (ffee049), merged into this
+branch, with no xfail. Each test checks:
 
-Run once against the current code (HZ_LIVE=1, whole of `tests/live/`): 30 passed, 14 xfailed, 1 xpassed,
-0 errors, in 26 min. The other 30 tests still pass alongside it. A second run of the module with `--runxfail`
-showed where each one stops: every one of the 14 fails at its first wait for new behaviour (a decision, a
-refusal, a stale reply or a reaction answer), or, for the ignored emoji, at the audit check. Every setup step
-before that point ran: posting, pinning, editing and the legacy `truncated` write. The xpass is
-`test_question_reply_is_a_note`: the current daemon already answers a free-form reply with "Noted on ask
-<id>; this is not a decision."
+- the `approve-bead --json` read-back;
+- admind's reply text and the message it is threaded to;
+- the stub agent's paste count.
 
-Not yet exercised, because each comes after a wait that fails today:
+**Cases:**
 
-- the `askd:<ask>:<reaction event>:` chunk lookup (`Stack.sent_ids`);
-- parsing the fresh ask ID out of the stale reply;
-- the race after both reactions have been sent;
-- the `Note: too risky` read-back from `bd show`;
-- `remove_reaction` (the test skips if wn-agent refuses it or never sends `reaction_removed`).
+- **Reactions:** 👍 approves and 👎 denies. ❤ without U+FE0F, and a bare ♥, approve. 🎉 on a card, or 👍 on a
+  message that is not a card, gets no reply (🎉 is audited as `reaction-ignored`).
+- **Replies:** `approve` and `yes` approve. A free-form reply is a note. `deny too risky`, `deny, too broad`
+  and `deny - too broad` deny, with the notes "too risky", "too broad" and "too broad".
+- **`!approve`:** with a wrong digest it is refused; with no arguments it approves.
+- **Changed beads:**
+  - Unpinned and edited: a fresh card. A second decider on the stale card is told "see ask <new>", and a 👍 on
+    the fresh card approves with the new digest.
+  - Pinned and edited: the updated content arrives as undecidable chunks under the stale ask's `askd:` keys,
+    keyed by the reaction's bare event ID. A 👍 or a reply on them gets "already stale".
+- **Who decides:** two approvers react at once, and exactly one decision is recorded. outsider is refused.
+- **Question:** a 👍 and a reply are stored as two answers.
+- **Reaction removed:** wn-agent supports `remove_reaction` and sends `reaction_removed`. The decision stands,
+  and admind sends nothing more.
+- **Legacy ask:** a `truncated = 1` ask needs `!details` first. The harness sets the column itself after posting,
+  to simulate an ask from before the delta. This is the harness's only write to admind's store.
+- **Restart:** a card is posted in 3 parts, and tester reacts 👍 to part 3. As soon as the ask is `deciding`,
+  admind is SIGKILLed along with its wn-agent, by process group. The harness polls the store every 20 ms, and this
+  timing was reliable on every run. Then admind is restarted. The reconcile notice must be threaded to part 3.
+  This failed before ffee049 (it went to part 1) and passes now.
 
-Harness additions:
+**Bugs found:**
 
-- `Stack.pin`, `bead_text`, `sent_ids` and `pastes`;
-- `Operator.unreact`;
-- `Stack.mark_legacy_truncated`. This is the one write the harness makes to admind's store. It sets
-  `asks.truncated = 1` after posting, because the delta leaves no other way to create a legacy ask.
+- Daemon: the restart notice was threaded to the card's first part, not to the part that was reacted to. It is
+  fixed in ffee049.
+- Tests, both fixed here:
+  - edited descriptions were under btq's 300-character stub threshold;
+  - the relay reaction-frame test assumed it was the only reaction on admind's ready notice.
+
+**Results after ffee049:** 3 consecutive live runs of `tests/live/` (HZ_LIVE=1), each 51 passed in about
+4 min 24 s. Each left 0 processes after teardown and needed 0 stale runs reaped.
+
+**New harness helpers:**
+
+- `Stack`: `pin`, `bead_text`, `sent_ids`, `pastes`, `ask_status`, `kill_admind`, `running` and
+  `mark_legacy_truncated`;
+- `Operator`: `unreact`.

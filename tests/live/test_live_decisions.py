@@ -147,17 +147,19 @@ def test_one_word_reply_approves(stack: Stack, posted: list[str], word: str) -> 
     assert stack.pastes() == pastes
 
 
-def test_deny_reply_with_reason(stack: Stack, posted: list[str]) -> None:
-    """`deny too risky` replied to the card denies it with the note "too risky", which approve-bead
-    writes into the bead's decision comment."""
-    card = approval(stack, posted, "live: deny me with a reason")
+@pytest.mark.parametrize(("text", "reason"), [
+    ("deny too risky", "too risky"), ("deny, too broad", "too broad"), ("deny - too broad", "too broad")])
+def test_deny_reply_with_reason(stack: Stack, posted: list[str], text: str, reason: str) -> None:
+    """A deny reply with a reason denies the card; the reason, without a lone separator after the deny
+    word or one leading it, is the note approve-bead writes into the bead's decision comment."""
+    card = approval(stack, posted, f"live: deny me with {text!r}")
     tester = stack.ops["tester"]
     pastes = stack.pastes()
-    mid = tester.reply(card.ids[0], "deny too risky")
+    mid = tester.reply(card.ids[0], text)
     assert f"Denied {card.bead} as tester" in plain(threaded(tester, mid, f"Denied {card.bead}", DECIDE).text)
     got = readback(stack, card.bead)
     assert (got["decision"], got["denied_by"], got["denied_digest"]) == ("deny", "tester", card.digest)
-    assert "Note: too risky" in stack.bead_text(card.bead)
+    assert f"Note: {reason}" in stack.bead_text(card.bead)
     assert stack.pastes() == pastes
 
 
