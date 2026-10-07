@@ -1,0 +1,7 @@
+Verdict: REVISE
+
+1. **[MAJOR] `docs/superpowers/specs/2026-10-05-admind-marmot-relay-design.md:279`; `docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:549` — Preflight read errors lack a settlement path.** Step 4 persists `deciding` before step 5’s `--json` read, but step 5 handles only returned readouts. A timeout, subprocess failure or malformed output raises `BtqError`; the existing worker merely logs exceptions (`src/heterodyne/admind/daemon.py:906`). This can strand the ask and attempt: decisions and replacement asks are refused, while `!asks` retries only `uncertain` records. Recovery then requires restarting admind.
+
+   **Fix:** explicitly handle preflight read failures after bounded cleanup. Since no decision was launched, atomically close the attempt as `refused`, return the ask to `open`, clear its attempt pointer, finish the inbound message and queue a fixed failure reply. Add integration tests where posting succeeds but the decision-time preflight times out or returns malformed output; assert no decision launches and retry succeeds without restarting.
+
+Summary: The r4 bounded cleanup fix is addressed; preflight read-error settlement remains a major approval blocker.

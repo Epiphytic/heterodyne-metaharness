@@ -41,6 +41,9 @@ restart_units = ["<unit-name>.service"]   # the only units `!restart` accepts
 # Use a dedicated directory: Claude Code does not remember workspace trust for the home directory
 # (the default), so every relaunch would block on the trust dialog and end in AgentStuck.
 workdir = "<dedicated-admin-workdir>"
+# Optional: lets operators decide btq approval asks from Marmot (docs/admind.md, section 10). Absolute
+# path, no ~. Remove it before rolling back to an admind older than the relay: that one exits 78 on it.
+# approve_bead = "/path/to/beads-task-queue/bin/approve-bead"
 
 [admind.marmot]
 relays = ["<wss-relay-url>"]

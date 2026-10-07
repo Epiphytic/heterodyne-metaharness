@@ -1,0 +1,7 @@
+Verdict: REVISE
+
+1. **[MAJOR] docs/superpowers/plans/2026-10-05-admind-marmot-relay.md:507 — Cleanup can hang after output overflow.** Once capped reading stops, an output pipe can have a paused asyncio transport. Killing the process group does not drain that buffer, so the prescribed shielded `proc.wait()` can remain pending after the child exits. Reproduced on the repository’s Python 3.12.3; draining the pipes released the wait. During a decision, this strands `work_lock`, blocking operator commands and membership recovery. **Fix:** specify concurrent draining of stdout and stderr after the kill, with bounded, cancellation-safe cleanup and transport closure on timeout. Extend the overflow test to fill a paused pipe and assert cleanup completes. The existing approach in `src/heterodyne/admind/summarize.py:53` provides a starting point.
+
+R3 verification: the exited-parent process-group hole is addressed, but cleanup remains incomplete as above. The captured recovery status and percent-encoded blob paths are correctly specified, with appropriate regression cases. No other blocking or major finding remains.
+
+Summary: Fix bounded pipe cleanup before approval; the other round 3 fixes are verified.

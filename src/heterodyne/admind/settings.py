@@ -6,6 +6,7 @@
 npub is an operator.
 """
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,7 +22,8 @@ from heterodyne.services import UNIT_NAME
 
 ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "alert_poll_seconds",
                          "group_check_seconds", "start_timeout_seconds", "turn_notice_seconds", "group_name",
-                         "summarizer", "reply_verbatim_lines", "reply_verbatim_chars", "marmot"})
+                         "summarizer", "reply_verbatim_lines", "reply_verbatim_chars", "marmot",
+                         "approve_bead"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
 MAX_NAME = 128
@@ -59,6 +61,7 @@ class AdmindSettings:
     state_dir: Path
     alerts_dir: Path
     service_manager: str
+    approve_bead: Path | None = None    # approval asks are refused without it (relay spec R5)
 
 
 def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
@@ -114,6 +117,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         operators=operators(cfg),
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
+        approve_bead=_executable(admind.get("approve_bead")),
     )
 
 
@@ -185,6 +189,17 @@ def _abs(value: Any, env: Mapping[str, str], where: str) -> Path:
     path = paths.expand(value, env)
     if not path.is_absolute():
         raise ConfigError(f"{where} must be an absolute path or start with ~/")
+    return path
+
+
+def _executable(value: Any) -> Path | None:
+    """`[admind] approve_bead`: optional; an absolute path to an existing executable file. The value is
+    never echoed."""
+    if value is None:
+        return None
+    path = Path(value) if isinstance(value, str) and value else None
+    if path is None or not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        raise ConfigError("[admind] approve_bead must be an absolute path to an executable")
     return path
 
 

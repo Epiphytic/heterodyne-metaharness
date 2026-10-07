@@ -8,6 +8,9 @@
   is deduplicated by wn-agent (S4 step 4).
 - `alerts`: alert files already relayed, by raw file-name bytes (a name need not be valid UTF-8).
 - `kv`: small named values (group, account, agent session, latch, ...).
+- `asks`, `ask_answers`, `ask_details`, `ask_attempts`: the asks relay (relay spec §5). A card's chunks are
+  outbox rows keyed `ask:<id>:<i>`, an ask's `!details` rows `askd:<id>:<request mid>:<i>`. A decision
+  attempt is persisted before approve-bead starts, and `asks.attempt` names the current one (R23).
 """
 
 import contextlib
@@ -24,6 +27,7 @@ from pathlib import Path
 from typing import cast
 
 from heterodyne.admind import chunk
+from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.redact import redact, redact_continuation
 from heterodyne.fsutil import private_dir
 
@@ -72,7 +76,46 @@ CREATE TABLE IF NOT EXISTS posts (
     kind TEXT NOT NULL CHECK (kind IN ('verbatim', 'summary', 'batch')),
     turn_id INTEGER,
     batch_id INTEGER);
+CREATE TABLE IF NOT EXISTS asks (
+    ask_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'merge', 'approval')),
+    poster TEXT NOT NULL,
+    peer_pid INTEGER,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    pr_url TEXT, head_sha TEXT,
+    bead TEXT, digest TEXT,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    card_parts INTEGER NOT NULL,
+    attempt TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open', 'answered', 'deciding', 'approved', 'denied', 'stale',
+                                           'superseded', 'cancelled', 'blocked', 'uncertain')),
+    outcome TEXT,
+    decided_by TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ask_answers (
+    ask_id TEXT NOT NULL, seq INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('answer', 'note')),
+    operator TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, at TEXT NOT NULL,
+    PRIMARY KEY (ask_id, seq));
+CREATE TABLE IF NOT EXISTS ask_details (
+    ask_id TEXT NOT NULL, operator TEXT NOT NULL, message_id TEXT NOT NULL,
+    parts INTEGER NOT NULL,
+    PRIMARY KEY (ask_id, message_id));
+CREATE TABLE IF NOT EXISTS ask_attempts (
+    ask_id TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE,
+    action TEXT NOT NULL CHECK (action IN ('approve', 'deny')),
+    operator TEXT NOT NULL, ref TEXT NOT NULL, digest TEXT NOT NULL, note TEXT,
+    started_at TEXT NOT NULL, exit_status INTEGER,
+    settled TEXT CHECK (settled IN ('refused', 'recorded', 'untouched', 'blocked', 'uncertain')),
+    PRIMARY KEY (ask_id, message_id));
+CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
+# Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
+ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
+# The outbox keys that make a delivered message a card (R7): a card chunk, or a chunk of an ask's !details.
+# The ID part is checked exactly, so a `reply()` key with the tag `ask` (`ask:<64 hex>:<i>`) never counts.
+_CARD_KEY = re.compile(r"\Aask:([2-9a-hjkmnp-z]{4}):\d+\Z|\Aaskd:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z")
 
 
 def now() -> str:
@@ -112,6 +155,35 @@ class TurnRow:
 
 
 @dataclass(frozen=True)
+class AskRow:
+    ask_id: str
+    kind: str
+    poster: str
+    title: str
+    body: str
+    pr_url: str | None
+    head_sha: str | None
+    bead: str | None
+    digest: str | None
+    truncated: bool
+    card_parts: int
+    status: str
+    outcome: str | None
+    decided_by: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class AnswerRow:
+    kind: str
+    operator: str
+    message_id: str
+    text: str
+    at: str
+
+
+@dataclass(frozen=True)
 class PostRow:
     key: str
     kind: str
@@ -121,6 +193,16 @@ class PostRow:
 
 _TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_start, transcript_end, "
          "status, batch_id")       # fixed column list: the only thing interpolated into the queries below
+
+
+_ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, truncated, card_parts, status, "
+        "outcome, decided_by, created_at, updated_at")    # fixed column list, interpolated like _TURN
+
+
+def _ask(r: tuple[object, ...]) -> AskRow:
+    return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
+                  _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
+                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]))
 
 
 def _opt_int(v: object) -> int | None:
@@ -219,6 +301,11 @@ class Store:
     @_locked
     def set_inbound(self, message_id: str, status: str) -> None:
         self.db.execute("UPDATE inbound SET status = ? WHERE message_id = ?", (status, message_id))
+
+    @_locked
+    def inbound_status(self, message_id: str) -> str | None:
+        row = self.db.execute("SELECT status FROM inbound WHERE message_id = ?", (message_id,)).fetchone()
+        return None if row is None else str(row[0])
 
     @_locked
     def inbound_with_status(self, status: str) -> list[str]:
@@ -449,6 +536,180 @@ class Store:
                                 "ON o.key = p.key WHERE p.kind IN ('summary', 'batch') AND o.status = 'sent' "
                                 "ORDER BY o.seq DESC LIMIT 1").fetchone()
         return None if r is None else _post(r)
+
+    # --- asks (relay spec §5) ------------------------------------------------------------------
+    @_locked
+    def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
+        self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
+                         row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
+                         row.decided_by, row.created_at, row.updated_at, peer_pid))
+
+    @_locked
+    def ask(self, ask_id: str) -> AskRow | None:
+        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()  # noqa: S608
+        return None if r is None else _ask(r)
+
+    @_locked
+    def asks_with_status(self, *statuses: str) -> list[AskRow]:
+        marks = ", ".join("?" * len(statuses))
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status IN ({marks}) "  # noqa: S608
+                               "ORDER BY created_at, rowid", statuses).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def recent_asks(self, limit: int) -> list[AskRow]:
+        """The `limit` newest asks that are no longer active (R24)."""
+        marks = ", ".join("?" * len(ASK_ACTIVE))
+        rows = self.db.execute(f"SELECT {_ASK} FROM asks WHERE status NOT IN ({marks}) "  # noqa: S608
+                               "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                               (*ASK_ACTIVE, limit)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def ask_posted_since(self, iso: str) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM asks WHERE created_at >= ?", (iso,)).fetchone()[0])
+
+    @_locked
+    def set_ask(self, ask_id: str, status: str, *, outcome: str | None = None,
+                decided_by: str | None = None) -> None:
+        self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, updated_at = ? "
+                        "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
+
+    @_locked
+    def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str) -> None:
+        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at) "
+                        "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
+                        "?, ?, ?, ?, ?)", (ask_id, ask_id, kind, operator, message_id, text, now()))
+
+    @_locked
+    def answers(self, ask_id: str) -> list[AnswerRow]:
+        rows = self.db.execute("SELECT kind, operator, message_id, text, at FROM ask_answers "
+                               "WHERE ask_id = ? ORDER BY seq", (ask_id,)).fetchall()
+        return [AnswerRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4])) for r in rows]
+
+    @_locked
+    def answer_totals(self, ask_id: str) -> tuple[int, int]:
+        """(how many answers and notes, their characters in total)."""
+        r = self.db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(text)), 0) FROM ask_answers "
+                            "WHERE ask_id = ?", (ask_id,)).fetchone()
+        return int(r[0]), int(r[1])
+
+    @_locked
+    def ask_for_message(self, message_id: str | None) -> str | None:
+        """The ask whose card (or `!details`) a delivered message is (R7, P6): the **sent** outbox row with
+        that message ID, keyed `ask:<id>:<i>` or `askd:<id>:<mid>:<i>`, of an ask that exists. Pending and
+        failed rows never count, and neither does any other key (`asknote:`, a `reply()` key)."""
+        if message_id is None:
+            return None
+        rows = self.db.execute("SELECT key FROM outbox WHERE message_id = ? AND status = 'sent' "
+                               "AND (key LIKE 'ask:%' OR key LIKE 'askd:%')", (message_id,)).fetchall()
+        for (key,) in rows:
+            m = _CARD_KEY.match(str(key))
+            ask_id = None if m is None else m.group(1) or m.group(2)
+            if ask_id is not None and self.ask(ask_id) is not None:
+                return ask_id
+        return None
+
+    def _all_sent(self, keys: list[str]) -> bool:
+        """Every key exists in the outbox and is sent; an empty list never counts (R8)."""
+        if not keys:
+            return False
+        marks = ", ".join("?" * len(keys))
+        sent = self.db.execute(f"SELECT COUNT(*) FROM outbox WHERE status = 'sent' "  # noqa: S608
+                               f"AND key IN ({marks})", keys).fetchone()[0]
+        return int(sent) == len(keys)
+
+    @_locked
+    def card_delivered(self, ask_id: str) -> bool:
+        """Every one of the card's `card_parts` chunks is sent."""
+        row = self.ask(ask_id)
+        return row is not None and self._all_sent([f"ask:{ask_id}:{i}" for i in range(row.card_parts)])
+
+    @_locked
+    def first_card_message(self, ask_id: str) -> str | None:
+        """The message ID of the card's first chunk once it is sent, for threading notices to the card."""
+        r = self.db.execute("SELECT message_id FROM outbox WHERE key = ? AND status = 'sent'",
+                            (f"ask:{ask_id}:0",)).fetchone()
+        return None if r is None or r[0] is None else str(r[0])
+
+    @_locked
+    def add_ask_details(self, ask_id: str, operator: str, message_id: str, parts: int) -> None:
+        self.db.execute("INSERT OR REPLACE INTO ask_details(ask_id, operator, message_id, parts) "
+                        "VALUES (?, ?, ?, ?)", (ask_id, operator, message_id, parts))
+
+    @_locked
+    def details_delivered(self, ask_id: str, operator: str) -> bool:
+        """Every part of one of `operator`'s `!details` requests for the ask is sent (R8)."""
+        rows = self.db.execute("SELECT message_id, parts FROM ask_details WHERE ask_id = ? AND operator = ?",
+                               (ask_id, operator)).fetchall()
+        return any(self._all_sent([f"askd:{ask_id}:{mid}:{i}" for i in range(int(parts))])
+                   for mid, parts in rows)
+
+    @_locked
+    def ask_for_bead(self, bead: str, *statuses: str) -> AskRow | None:
+        """The newest ask for `bead` in one of `statuses`."""
+        marks = ", ".join("?" * len(statuses))
+        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = ? AND status IN ({marks}) "  # noqa: S608
+                            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (bead, *statuses)).fetchone()
+        return None if r is None else _ask(r)
+
+    # --- decision attempts (R23) ---------------------------------------------------------------
+    @_locked
+    def begin_attempt(self, a: Attempt) -> bool:
+        """In one transaction: the ask `open -> deciding` with `attempt` set, the attempt row, and the
+        inbound message `executing`. False, changing nothing, if the ask is not `open`."""
+        with self.transaction():
+            cur = self.db.execute("UPDATE asks SET status = 'deciding', attempt = ?, updated_at = ? "
+                                  "WHERE ask_id = ? AND status = 'open'", (a.message_id, now(), a.ask_id))
+            if cur.rowcount != 1:
+                return False
+            self.db.execute("INSERT INTO ask_attempts(ask_id, message_id, action, operator, ref, digest, "
+                            "note, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (a.ask_id, a.message_id, a.action, a.operator, a.ref, a.digest, a.note, now()))
+            self.db.execute("UPDATE inbound SET status = 'executing' WHERE message_id = ?", (a.message_id,))
+            return True
+
+    @_locked
+    def current_attempt(self, ask_id: str) -> Attempt | None:
+        """The attempt `asks.attempt` names; reconcile and settle use only that row."""
+        r = self.db.execute("SELECT t.ask_id, t.message_id, t.action, t.operator, t.ref, t.digest, t.note "
+                            "FROM asks a JOIN ask_attempts t ON t.ask_id = a.ask_id "
+                            "AND t.message_id = a.attempt WHERE a.ask_id = ?", (ask_id,)).fetchone()
+        if r is None:
+            return None
+        action = "deny" if r[2] == "deny" else "approve"
+        return Attempt(str(r[0]), str(r[1]), action, str(r[3]), str(r[4]), str(r[5]), _opt_str(r[6]))
+
+    @_locked
+    def close_attempt(self, ask_id: str, message_id: str, *, expect_status: str, settled: str,
+                      exit_status: int | None, new_status: str, outcome: str | None,
+                      decided_by: str | None) -> bool:
+        """Settle the current attempt, compare-and-set: nothing changes, and False is returned, unless the
+        ask is `expect_status` with `attempt == message_id`. Then the attempt's `settled` and `exit_status`
+        (kept if None: a reconcile does not know it) and the ask's status, outcome and `decided_by` are
+        set, and `asks.attempt` is cleared unless the outcome is `uncertain`. The caller queues its reply
+        or notice in the same transaction."""
+        with self.transaction():
+            r = self.db.execute("SELECT status, attempt FROM asks WHERE ask_id = ?", (ask_id,)).fetchone()
+            if r is None or r[0] != expect_status or r[1] != message_id:
+                return False
+            self.db.execute("UPDATE ask_attempts SET settled = ?, exit_status = COALESCE(?, exit_status) "
+                            "WHERE ask_id = ? AND message_id = ?", (settled, exit_status, ask_id, message_id))
+            self.db.execute("UPDATE asks SET status = ?, outcome = ?, decided_by = ?, attempt = ?, "
+                            "updated_at = ? WHERE ask_id = ?",
+                            (new_status, outcome, decided_by, message_id if settled == "uncertain" else None,
+                             now(), ask_id))
+            return True
+
+    @_locked
+    def recovery_snapshot(self) -> list[tuple[str, str, str]]:
+        """(ask ID, current attempt, status) of every `deciding` or `uncertain` ask (R26, r3-2)."""
+        rows = self.db.execute("SELECT ask_id, attempt, status FROM asks "
+                               "WHERE status IN ('deciding', 'uncertain') AND attempt IS NOT NULL "
+                               "ORDER BY created_at, rowid").fetchall()
+        return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:

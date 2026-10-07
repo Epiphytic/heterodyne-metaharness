@@ -13,6 +13,7 @@ Peer- and child-supplied text (a stranger's message, an agent reply, a terminal 
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import hmac
 import json
 import os
@@ -25,9 +26,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from heterodyne.admind import alerts, backstop, chunk, commands, ctl, guard, membership, summarize
+from heterodyne.admind import (
+    alerts,
+    approvals,
+    asks,
+    backstop,
+    chunk,
+    commands,
+    ctl,
+    guard,
+    membership,
+    summarize,
+)
 from heterodyne.admind.agent import AdminAgent, AgentStuck
-from heterodyne.admind.audit import Audit
+from heterodyne.admind.approvals import ApproveBead, Attempt, BtqError, Busy, Readout
+from heterodyne.admind.audit import Audit, ref_id
 from heterodyne.admind.hook import (
     HOOK_EVENTS,
     MAX_REPLY,
@@ -43,7 +56,7 @@ from heterodyne.admind.hook import (
 )
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
-from heterodyne.admind.store import Store, TurnRow, now
+from heterodyne.admind.store import AskRow, Store, TurnRow, now
 from heterodyne.agents.claude_code import headless_argv
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.control import (
@@ -72,6 +85,50 @@ LONG_TURN = ("The admin agent is still working, so later messages are held. "
 ALERT_FAILED = ("🚨 A wsd alert file could not be relayed (ref {ref}). "
                 "Check the alert directory on the host.")
 UNCERTAIN = "delivery to the admin agent is uncertain; not retried — resend if needed"
+# Asks (relay spec §6, R15, R17). Fixed wording; an ask ID is from asks.ID_ALPHABET and safe to show.
+ASK_BUSY = "admind is already handling two posts; try again shortly."
+ASK_LATCHED = "admind is latched and posts nothing; the ask was not posted."
+ASK_NO_APPROVALS = "Approval asks are not configured on this host ([admind] approve_bead)."
+ASK_REDACTED = "this bead holds text admind would redact; decide it at the terminal"
+ASK_BEAD_BUSY = "ask {ask_id} for {bead} is being decided or awaits a read-back; post again once it settles."
+ASK_SUPERSEDED_NOTICE = ("Ask {old} is superseded by ask {new}, a newer card for {bead}. This card decides "
+                         "nothing any more.")
+# Approval decisions (relay spec §6). Every value shown is a bead ID, a digest prefix, an ask ID, a policy
+# name, or approve-bead's first stderr line after `redact`; the replies go through `post` (redacted) too.
+NOTED = ("Noted on ask {ask_id}; this is not a decision. To decide, reply to the card with !approve {bead} "
+         "{digest12} or !deny {bead} <reason>.")
+NOT_A_CARD_REPLY = "To decide, reply to the approval card itself (or its !details). Nothing recorded."
+NO_MATCH = "That does not match ask {ask_id} (bead {bead}, digest {digest12}). Nothing recorded."
+NOT_DELIVERED = ("Ask {ask_id} has not been fully delivered yet. Wait for every part, then reply again. "
+                 "Nothing recorded.")
+NEEDS_DETAILS = "Ask {ask_id} was shortened. Reply !details to it and read it first. Nothing recorded."
+STALE = ("{bead} changed after it was shown (shown {shown}, now {now}). Nothing recorded; ask {ask_id} is "
+         "stale and the poster must post it again.")
+NOT_APPROVER = "{name} is not a btq approver. Nothing recorded."
+NOT_DECIDABLE = "{bead} is {why}. Nothing recorded."
+BEAD_BUSY = "{bead} is being decided elsewhere right now. Nothing recorded; try again in a minute."
+PREFLIGHT_FAILED = "admind could not check {bead} ({word}); nothing was recorded. Try again."
+APPROVED_ACCEPTED = "Approved {bead} as {name} (digest {digest12}, via Marmot). btq's design gate accepts it."
+APPROVED_REJECTED = ("Approved {bead} as {name} (digest {digest12}, via Marmot), but btq's design gate "
+                     "rejects it: {why}. Check it on the host.")
+DENIED = "Denied {bead} as {name} (via Marmot)."
+UNTOUCHED = "Not recorded: \"{line}\". {bead} is unchanged; you can decide again."
+UNTOUCHED_SILENT = "Not recorded. {bead} is unchanged; you can decide again."
+BLOCKED = ("{bead} holds a decision admind cannot confirm as yours{quoted}. Nothing more will be done from "
+           "Marmot. Resolve it on the host with approve-bead {bead}.")
+UNCERTAIN_READ = ("admind could not read {bead} back. No further decision is taken from Marmot until it can; "
+                  "check it on the host with approve-bead {bead}.")
+CONFLICT = "Ask {ask_id} changed while this decision was settled; see !asks. Check {bead} on the host."
+RECONCILE_RESTARTED = "admind restarted while recording this decision; nothing was recorded. Decide again."
+RECONCILE_STRANDED = ("admind could not finish settling the last decision on ask {ask_id}; nothing was "
+                      "recorded. Decide again.")
+RECONCILE_UNVERIFIED = ("admind could not check whether this decision on {bead} was recorded: "
+                        "approve-bead is not configured on this host ([admind] approve_bead). Check it on "
+                        "the host with approve-bead {bead}.")
+ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or wait for answers."
+ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
+ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
+NO_ACTIVE_ASKS = "No active asks."
 MAX_SEND_ATTEMPTS = 10
 AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
@@ -287,6 +344,10 @@ class Admind:
         self.bad_alerts: set[bytes] = set()     # alert files that could not even be marked; skipped
         self.retired: set[str] = set()          # sessions replaced by !new; their hooks are ignored
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep     # replaced in tests
+        self.posts_in_flight = 0                # ask posts on ask.sock being handled (R15)
+        self.ask_post_lock = asyncio.Lock()     # posts run one at a time (R22)
+        self.ask_server: ctl.JsonSocketServer[asks.AskRequest, asks.AskReply] | None = None
+        self.approve_bead = None if settings.approve_bead is None else ApproveBead(settings.approve_bead)
 
     # --- state helpers -------------------------------------------------------------------------
     def mark_ready(self, nonce: str | None = None) -> None:
@@ -404,10 +465,14 @@ class Admind:
         """Refuse a message that was accepted before admind stopped being authorised. Fixed wording; no
         reply is queued (a latch is final, and an unverified group re-answers via UNVERIFIED)."""
         with self.store.transaction():
-            self.store.set_inbound(mid, "dropped")
-            if not self.latched():
-                self.reply(mid, UNVERIFIED, "unverified")
+            self.deny_rows(mid)
         self.audit.write("drop", message_id=mid, reason="no longer authorised", what=what)
+
+    def deny_rows(self, mid: str) -> None:
+        """`deny`'s store writes, for a caller that joins them to its own transaction."""
+        self.store.set_inbound(mid, "dropped")
+        if not self.latched():
+            self.reply(mid, UNVERIFIED, "unverified")
 
     def post(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> None:
         """Queue one message. Everything admind posts is redacted here (B1); callers that chunk redact the
@@ -429,9 +494,14 @@ class Admind:
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
         # Received (held, never pasted) or executing (a command that may not have run to the end): each
-        # is answered once, and the state change and its notice commit together.
+        # is answered once, and the state change and its notice commit together. The message of a persisted
+        # decision attempt is left to the ask reconcile (R26), which reads the bead back first: it may have
+        # been recorded, and "resend it" would then be wrong. The reconcile marks it done with its notice.
+        attempts = {attempt for _, attempt, _ in self.store.recovery_snapshot()}
         for status in ("received", "executing"):
             for mid in self.store.inbound_with_status(status):
+                if mid in attempts:
+                    continue
                 with self.store.transaction():
                     self.store.set_inbound(mid, "dropped")
                     self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)
@@ -460,13 +530,19 @@ class Admind:
         if rewritten:
             self.audit.write("outbox", action="redacted-after-upgrade", rows=rewritten)
         self.recover()
+        snapshot = self.store.recovery_snapshot()      # before any loop starts (R26, r3-2)
         await self.check_group()
         server = self.make_server(self.s.state_dir / "hook.sock")
-        control: ctl.CtlServer | None = None
+        control: ctl.JsonSocketServer[ctl.CtlRequest, ctl.CtlReply] | None = None
         try:
             await server.start()
             control = ctl.CtlServer(self.s.state_dir / ctl.CTL_SOCKET, self.on_ctl, self.audit)
             await control.start()
+            self.ask_server = ctl.JsonSocketServer(
+                self.s.state_dir / asks.ASK_SOCKET, self.on_ask, self.audit, kind="ask",
+                max_request=asks.MAX_REQUEST, max_reply=asks.MAX_REPLY, request_type=asks.AskRequest,
+                check=asks.check, refused=asks.refused, failed=asks.failed, describe=asks.describe)
+            await self.ask_server.start()
             await self.start_agent(startup=True)
             async with asyncio.TaskGroup() as tg:
                 for name, loop in (("inbound", self.inbound_loop), ("worker", self.worker_loop),
@@ -475,6 +551,7 @@ class Admind:
                                    ("agent", self.agent_loop), ("summaries", self.summary_loop),
                                    ("batches", self.batch_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
+                tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
             self.shutting_down = True
             raise
@@ -483,6 +560,8 @@ class Admind:
             for timer in self._backoff.values():
                 timer.cancel()
             self._backoff.clear()
+            if self.ask_server is not None:
+                await self.ask_server.close()
             if control is not None:
                 await control.close()
             await server.close()
@@ -499,6 +578,501 @@ class Admind:
             except Exception as exc:  # noqa: BLE001 - the change is settled; the worker flushes later
                 self.audit_quietly("ctl", action="flush-failed", error=type(exc).__name__)
         return ctl.CtlReply(result, redact(message))
+
+    # --- asks (relay spec) ----------------------------------------------------------------------
+    async def on_ask(self, req: asks.AskRequest, peer: ctl.Peer) -> asks.AskReply:
+        """A request on ask.sock, already checked by `asks.check`. Get, list and cancel work while
+        latched (R17); a post does not."""
+        if isinstance(req, asks.AskPost):
+            return await self.serialised_post(req, peer)
+        if isinstance(req, asks.AskList):
+            rows = self.store.asks_with_status(*asks.ACTIVE) + self.store.recent_asks(20)
+            return asks.AskReply("ok", f"{len(rows)} asks", asks=[self.ask_summary(r) for r in rows])
+        ask_id = asks.normalise_id(req.ask_id)
+        row = None if ask_id is None else self.store.ask(ask_id)
+        if row is None:
+            return asks.refused(f"no ask {show(req.ask_id, False)}")
+        if isinstance(req, asks.AskGet):
+            return asks.AskReply("ok", row.status, ask=self.ask_view(row))
+        return self.cancel_ask(row)
+
+    async def serialised_post(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+        """At most MAX_IN_FLIGHT posts at once (the next is refused), run one at a time (R15, R22)."""
+        if self.posts_in_flight >= asks.MAX_IN_FLIGHT:
+            return asks.refused(ASK_BUSY)
+        self.posts_in_flight += 1
+        try:
+            async with self.ask_post_lock:
+                if req.kind == "approval":
+                    return await self.post_approval(req, peer)
+                return self.post_ask(req, peer)
+        finally:
+            self.posts_in_flight -= 1
+
+    def post_ask(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+        """Under `ask_post_lock`: check the latch and the limits, then store a question or merge ask and
+        queue its card in one transaction."""
+        if self.latched():
+            return asks.refused(ASK_LATCHED)
+        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+            return asks.refused(ASK_TOO_MANY)
+        if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
+            return asks.refused(ASK_TOO_OFTEN)
+        at = asks.stamp(asks.now())
+        row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
+                     req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at)
+        text, truncated = asks.question_card(row)
+        parts = chunk.split(text, self.s.chunk_chars)
+        row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
+        with self.store.transaction():
+            self.store.insert_ask(row, peer.pid)
+            for i, part in enumerate(parts):
+                self.post(f"ask:{row.ask_id}:{i}", part, None)
+        self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
+                         pid=peer.pid, parts=len(parts), truncated=truncated, title_chars=len(row.title),
+                         body_chars=len(row.body))
+        return asks.AskReply("posted", f"ask {row.ask_id} posted", ask=self.ask_view(row))
+
+    def approval_post_refusal(self, bead: str) -> str | None:
+        """Spec §8 "Post", steps 1 and 4 (R15, R17, R22): checked before the read and again after it."""
+        if self.latched():
+            return ASK_LATCHED
+        if self.approve_bead is None:
+            return ASK_NO_APPROVALS
+        if len(self.store.asks_with_status(*asks.ACTIVE)) >= asks.MAX_OPEN:
+            return ASK_TOO_MANY
+        if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
+            return ASK_TOO_OFTEN
+        busy = self.store.ask_for_bead(bead, "deciding", "uncertain")
+        if busy is not None:
+            return ASK_BEAD_BUSY.format(ask_id=busy.ask_id, bead=bead)
+        return None
+
+    def approval_refused(self, bead: str, message: str, why: str) -> asks.AskReply:
+        self.audit.write("ask", action="refused", ask_kind="approval", bead=bead, reason=why)
+        return asks.refused(message)
+
+    async def post_approval(self, req: asks.AskPost, peer: ctl.Peer) -> asks.AskReply:
+        """Spec §8 "Post an approval ask", under `ask_post_lock` (R22): read the bead with approve-bead,
+        render the card from its readout (R21), re-check, then supersede, store and queue in one
+        transaction."""
+        bead = req.bead or ""
+        refusal = self.approval_post_refusal(bead)
+        if refusal is not None or self.approve_bead is None:
+            return self.approval_refused(bead, refusal or ASK_NO_APPROVALS, "limits")
+        try:
+            r = await self.approve_bead.read(bead)
+        except BtqError as exc:
+            return self.approval_refused(bead, f"admind could not read {bead} ({exc.word}); try again.",
+                                         exc.word)
+        if isinstance(r, Busy):
+            return self.approval_refused(bead, BEAD_BUSY.format(bead=bead), "busy")
+        why = approvals.postable(r)
+        if why is not None:
+            return self.approval_refused(bead, redact(why), "not postable")
+        at = asks.stamp(asks.now())
+        row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), "approval", req.poster,
+                     asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
+                     None, at, at)
+        card = asks.approval_card(row, r, self.s.chunk_chars)
+        if card is None:
+            return self.approval_refused(bead, ASK_REDACTED, "redaction")
+        row = dataclasses.replace(row, body=asks.approval_body(r, card), truncated=card.truncated,
+                                  card_parts=len(card.card_chunks))
+        refusal = self.approval_post_refusal(bead)      # the read awaited: the latch and limits again (R22)
+        if refusal is not None:
+            return self.approval_refused(bead, refusal, "limits")
+        superseded: list[str] = []
+        with self.store.transaction():
+            for old in self.store.asks_with_status("open", "answered"):
+                if old.bead == bead:
+                    superseded.append(old.ask_id)
+                    self.store.set_ask(old.ask_id, "superseded")
+                    self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
+                        old=old.ask_id, new=row.ask_id, bead=bead))
+            self.store.insert_ask(row, peer.pid)
+            for i, part in enumerate(card.card_chunks):     # the checked chunks, as they are (R21)
+                self.post(f"ask:{row.ask_id}:{i}", part, None)
+        self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
+                         pid=peer.pid, bead=bead, digest12=(r.digest or "")[:12], parts=len(card.card_chunks),
+                         details_parts=len(card.details_chunks), truncated=card.truncated,
+                         superseded=superseded)
+        return asks.AskReply("posted", f"ask {row.ask_id} posted", ask=self.ask_view(row))
+
+    def cancel_ask(self, row: AskRow) -> asks.AskReply:
+        if row.status not in ("open", "answered"):
+            return asks.refused(f"ask {row.ask_id} is {row.status}; only an open or answered ask can be "
+                                "cancelled")
+        with self.store.transaction():
+            self.store.set_ask(row.ask_id, "cancelled")
+            self.ask_notice(row.ask_id, "cancelled", "0", ASK_CANCELLED_NOTICE.format(ask_id=row.ask_id))
+        self.audit.write("ask", action="cancelled", ask_id=row.ask_id)
+        return asks.AskReply("ok", f"ask {row.ask_id} cancelled")
+
+    def ask_notice(self, ask_id: str, what: str, ref: str, text: str) -> None:
+        """A notice about an ask, threaded to its card's first sent chunk (unthreaded if none was sent)."""
+        thread = self.store.first_card_message(ask_id)
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
+            self.post(f"asknote:{ask_id}:{what}:{ref}:{i}", part, thread)
+
+    def ask_summary(self, row: AskRow) -> asks.AskSummary:
+        count, _ = self.store.answer_totals(row.ask_id)
+        return asks.summary(row, self.store.card_delivered(row.ask_id), count)
+
+    def ask_view(self, row: AskRow) -> asks.AskView:
+        return asks.view(row, self.store.card_delivered(row.ask_id), self.store.answers(row.ask_id))
+
+    def operator_name(self, mid: str) -> str:
+        return self.operators.get(self.senders.get(mid, ""), "?")
+
+    async def ask_reply(self, mid: str, ask_id: str, text: str) -> None:
+        """A plain reply to a card (R13, R14): stored as the answer, never pasted to the agent."""
+        self.store.set_inbound(mid, "executing")
+        if not self.authorised(mid):
+            self.deny(mid, "ask")
+            return
+        self.answer_ask(mid, ask_id, text)
+
+    def answer_ask(self, mid: str, ask_id: str, text: str) -> None:
+        """Store an operator's answer to a question or merge ask and reply in thread, as one step."""
+        row = self.store.ask(ask_id)
+        if row is None:
+            self.finish(mid, "done", f"No ask {ask_id}.", "ask")
+            return
+        refusal = self.answer_refusal(row, text)
+        if refusal is not None:
+            self.finish(mid, "done", refusal, "ask")
+            self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
+            return
+        if row.kind == "approval":      # a note the poster sees; never a decision (R13)
+            with self.store.transaction():
+                self.store.add_answer(ask_id, "note", self.operator_name(mid), mid, text)
+                self.finish(mid, "done", NOTED.format(ask_id=ask_id, bead=row.bead,
+                                                      digest12=(row.digest or "")[:12]), "ask")
+            self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
+            return
+        again = row.status == "answered"
+        with self.store.transaction():
+            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text)
+            self.store.set_ask(ask_id, "answered")
+            self.finish(mid, "done", (f"Added to ask {ask_id}; it was already answered, and the poster sees "
+                                      "both.") if again else f"Answer recorded for ask {ask_id}.", "ask")
+        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text))
+
+    def answer_refusal(self, row: AskRow, text: str) -> str | None:
+        """Why an answer is not stored (R15): fixed wording, or None."""
+        if row.status not in ("open", "answered"):
+            return f"Ask {row.ask_id} is already {row.status}. Nothing recorded."
+        if not text.strip():
+            return "Not recorded: the answer is empty."
+        if len(text) > asks.MAX_ANSWER:
+            return f"Not recorded: an answer is at most {asks.MAX_ANSWER:,} characters."
+        count, total = self.store.answer_totals(row.ask_id)
+        if count >= asks.MAX_ANSWERS:
+            return f"Not recorded: ask {row.ask_id} already has {asks.MAX_ANSWERS} answers."
+        if total + len(text) > asks.MAX_ANSWER_TOTAL:
+            return (f"Not recorded: ask {row.ask_id}'s answers would pass {asks.MAX_ANSWER_TOTAL:,} "
+                    "characters.")
+        return None
+
+    async def list_asks(self, mid: str) -> None:
+        """`!asks`: first the backstop (spec §8): in the worker, under `work_lock`, no decision is in
+        flight, so every `deciding` or `uncertain` ask is stranded and is reconciled as at startup. Then
+        the active asks, one line each."""
+        for ask_id, attempt, status in self.store.recovery_snapshot():
+            await self.reconcile_quietly(ask_id, attempt, status, restarted=False)
+        if not self.authorised(mid):        # the read-backs awaited
+            self.deny(mid, "command")
+            return
+        at = asks.now()
+        lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
+        self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
+        self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
+
+    def bang_answer(self, mid: str, cmd: commands.Command) -> None:
+        """`!answer <id> <text>`: as a reply to the card, from anywhere."""
+        ask_id = asks.normalise_id(cmd.arg or "")
+        row = None if ask_id is None else self.store.ask(ask_id)
+        if row is None or ask_id is None:
+            self.finish(mid, "done", show(f"No ask {cmd.arg}.", False), "cmd")
+            return
+        if row.kind == "approval":
+            self.finish(mid, "done", f"Ask {ask_id} is an approval ask: reply to its card with !approve "
+                        f"{row.bead} {(row.digest or '')[:12]} or !deny {row.bead} <reason>. Nothing "
+                        "recorded.", "cmd")
+            return
+        self.answer_ask(mid, ask_id, cmd.rest or "")
+
+    def ask_details(self, mid: str, ask_id: str) -> None:
+        """`!details` as a reply to a card or its details: the whole ask in lane 2, threaded to the
+        command, with the number of parts recorded for R8."""
+        row = self.store.ask(ask_id)
+        if row is None:
+            self.finish(mid, "done", f"No ask {ask_id}.", "cmd")
+            return
+        if row.kind == "approval":     # the chunks checked when it was posted, as they are (R21, r2-1)
+            parts = asks.stored_details(row)
+        else:
+            parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
+        with self.store.transaction():
+            for i, part in enumerate(parts):
+                self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)
+            self.store.add_ask_details(ask_id, self.operator_name(mid), mid, len(parts))
+            self.store.set_inbound(mid, "done")
+        self.audit.write("ask", action="details", message_id=mid, ask_id=ask_id, parts=len(parts))
+
+    # --- approval decisions (relay spec §8 "Decide", R7-R12, R23, R26) ------------------------------
+    def decide_refused(self, mid: str, text: str, why: str, ask_id: str | None = None) -> None:
+        """A refusal before the attempt exists: the ask is unchanged."""
+        self.finish(mid, "done", text, "ask")
+        self.audit.write("ask", action="refused", message_id=mid, ask_id=ask_id, reason=why)
+
+    def not_open(self, row: AskRow) -> str:
+        """`Ask p4xw is already <status>[ by <name>][; see ask q9rt]. Nothing recorded.`"""
+        by = f" by {row.decided_by}" if row.decided_by else ""
+        newer = self.store.ask_for_bead(row.bead or "", *asks.ACTIVE, *asks.TERMINAL)
+        see = f"; see ask {newer.ask_id}" if row.status == "superseded" and newer is not None else ""
+        return f"Ask {row.ask_id} is already {row.status}{by}{see}. Nothing recorded."
+
+    async def decide(self, mid: str, cmd: commands.Command, target: str | None) -> None:
+        """`!approve <bead> <digest12>` / `!deny <bead> <reason>`, in the worker under `work_lock` and after
+        `handle`'s control-character and authorisation checks (spec §8 "Decide", steps 1-8)."""
+        bead, rest = cmd.arg or "", cmd.rest or ""
+        ask_id = self.store.ask_for_message(target)            # step 1 (R7)
+        row = None if ask_id is None else self.store.ask(ask_id)
+        if row is None or row.kind != "approval" or row.bead is None or row.digest is None:
+            self.decide_refused(mid, NOT_A_CARD_REPLY, "not a card reply", ask_id)
+            return
+        digest12 = row.digest[:12]
+        if bead != row.bead or (cmd.name == "approve" and rest != digest12):        # step 2
+            self.decide_refused(mid, NO_MATCH.format(ask_id=row.ask_id, bead=row.bead, digest12=digest12),
+                                "no match", row.ask_id)
+            return
+        if row.status != "open":
+            self.decide_refused(mid, self.not_open(row), "not open", row.ask_id)
+            return
+        name = self.operator_name(mid)
+        if cmd.name == "approve":                       # R8: the whole context was delivered
+            if not self.store.card_delivered(row.ask_id):
+                self.decide_refused(mid, NOT_DELIVERED.format(ask_id=row.ask_id), "not delivered", row.ask_id)
+                return
+            if row.truncated and not self.store.details_delivered(row.ask_id, name):
+                self.decide_refused(mid, NEEDS_DETAILS.format(ask_id=row.ask_id), "needs details", row.ask_id)
+                return
+        if not self.authorised(mid):                    # step 3
+            self.deny(mid, "decision")
+            return
+        if self.approve_bead is None:
+            self.decide_refused(mid, ASK_NO_APPROVALS, "not configured", row.ask_id)
+            return
+        deny = cmd.name == "deny"
+        a = Attempt(row.ask_id, mid, "deny" if deny else "approve", name, "marmot:" + ref_id(mid), row.digest,
+                    rest if deny else None)
+        if not self.store.begin_attempt(a):             # step 4 (R22, R23)
+            now_row = self.store.ask(row.ask_id)
+            self.decide_refused(mid, self.not_open(now_row or row), "not open", row.ask_id)
+            return
+        await self.run_attempt(a, row)
+
+    def preflight(self, r: Readout | Busy, a: Attempt, bead: str) -> tuple[str, str, str] | None:
+        """Step 5: why the attempt stops before the decision runs, as (new ask status, reply, reason), or
+        None to go on."""
+        if isinstance(r, Busy):
+            return "open", BEAD_BUSY.format(bead=bead), "busy"
+        if r.digest != a.digest:
+            return "stale", STALE.format(bead=bead, shown=a.digest[:12], now=(r.digest or "none")[:12],
+                                         ask_id=a.ask_id), "stale"
+        if r.decided:
+            return "blocked", BLOCKED.format(bead=bead, quoted=""), "decided"
+        if r.status != "open":
+            return "open", NOT_DECIDABLE.format(bead=bead, why=f"{r.status}, not open"), "not open"
+        if not r.kind_approval:
+            return "open", NOT_DECIDABLE.format(bead=bead, why="not a kind:approval bead"), "not approval"
+        if a.operator not in r.approvers:
+            return "open", NOT_APPROVER.format(name=a.operator), "not an approver"
+        return None
+
+    def close_refused(self, a: Attempt, new_status: str, text: str, why: str) -> None:
+        """Close the attempt before anything was launched, with its reply, in one compare-and-set."""
+        with self.store.transaction():
+            closed = self.store.close_attempt(a.ask_id, a.message_id, expect_status="deciding",
+                                              settled="refused", exit_status=None, new_status=new_status,
+                                              outcome=text, decided_by=None)
+            if closed:
+                self.finish(a.message_id, "done", text, "ask")
+        if not closed:
+            self.conflict(a, "deciding")
+            return
+        self.audit.write("ask", action="refused", message_id=a.message_id, ask_id=a.ask_id, reason=why,
+                         status=new_status)
+
+    def conflict(self, a: Attempt, expected: str) -> None:
+        """A compare-and-set found the ask changed: nothing was written. Fixed wording."""
+        self.audit_quietly("ask", action="conflict", ask_id=a.ask_id, message_id=a.message_id,
+                           expected=expected)
+
+    async def run_attempt(self, a: Attempt, row: AskRow) -> None:
+        """Steps 4-8 of a persisted attempt. Until the decision child exists, every failure closes the
+        attempt as `refused` (r5-1); once it exists, every exit goes through the reap and the read-back."""
+        assert self.approve_bead is not None and row.bead is not None      # noqa: S101 - checked by decide
+        ab, bead, mid = self.approve_bead, row.bead, a.message_id
+        launched = False
+
+        def on_launch() -> None:
+            nonlocal launched
+            launched = True
+
+        code: int | None = None
+        line = ""
+        audited = unauthorised = False
+        stop: tuple[str, str, str] | None = None
+        try:
+            self.audit.write("ask", action="deciding", message_id=mid, ask_id=a.ask_id, bead=bead,
+                             decision=a.action, operator=a.operator)
+            audited = True
+            r = await ab.read(bead)                                     # step 5
+            stop = self.preflight(r, a, bead)
+            if stop is None:
+                unauthorised = not self.authorised(mid)                 # step 6: the commit point (R11)
+                if not unauthorised:
+                    code, line = await ab.decide(a, bead, on_launch)    # step 7
+        except asyncio.CancelledError:
+            raise       # left `deciding`; the startup reconcile settles it (R26)
+        except Exception as exc:  # noqa: BLE001 - fixed words; nothing launched means nothing was written
+            if not launched:
+                # approve-bead's own failures carry their word (a spawn OSError is "unavailable"); the
+                # audit write failing, or a bug, is "error" (spec §8's table)
+                word = (exc.word if isinstance(exc, BtqError)
+                        else "unavailable" if isinstance(exc, OSError) and audited else "error")
+                stop = ("open", PREFLIGHT_FAILED.format(bead=bead, word=word), word)
+        if unauthorised:
+            with self.store.transaction():
+                closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled="refused",
+                                                  exit_status=None, new_status="open", outcome=None,
+                                                  decided_by=None)
+                if closed:
+                    self.deny_rows(mid)
+            if not closed:
+                self.conflict(a, "deciding")
+                return
+            self.audit.write("drop", message_id=mid, reason="no longer authorised", what="decision")
+            return
+        if stop is not None:
+            self.close_refused(a, *stop)
+            return
+        latched_during = self.latched()                                 # step 8
+        settled, back = await self.read_and_settle(a, bead)
+        new_status, text = self.settlement(settled, back, a, bead, line)
+        with self.store.transaction():
+            closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
+                                              exit_status=code, new_status=new_status, outcome=text,
+                                              decided_by=a.operator if settled == "recorded" else None)
+            if closed:
+                self.finish(mid, "done", text, "ask")
+        if not closed:
+            self.conflict(a, "deciding")
+            self.finish(mid, "done", CONFLICT.format(ask_id=a.ask_id, bead=bead), "ask")
+        self.audit.write("ask", action="decided", message_id=mid, ask_id=a.ask_id, bead=bead, outcome=settled,
+                         status=new_status, exit_status=code,
+                         gate_valid=None if back is None else back.gate_valid, latched_during=latched_during)
+
+    async def read_and_settle(self, a: Attempt, bead: str) -> tuple[str, Readout | None]:
+        """The read-back (R12) against the attempt: its `settled` value, and the readout if there was one.
+        Any failure, a bug included, is `uncertain`, which keeps the attempt for a later read-back."""
+        assert self.approve_bead is not None    # noqa: S101 - only reached with approve-bead configured
+        try:
+            back = await approvals.read_back(self.approve_bead, bead)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - by type only; the ask stays uncertain
+            self.audit_quietly("ask", action="read-back-failed", ask_id=a.ask_id, error=type(exc).__name__)
+            back = None
+        return ("uncertain" if back is None else approvals.settle(back, a)), back
+
+    def settlement(self, settled: str, back: Readout | None, a: Attempt, bead: str,
+                   line: str) -> tuple[str, str]:
+        """(the ask's new status, the reply) for a settled attempt (R12, spec §6). Exit 5 (written, then
+        the content changed) and "written, but the gate rejects it" are not read from the exit status:
+        both settle from the read-back like every other outcome. approve-bead's stderr line is quoted in
+        every reply that has one (R12): inside the untouched and blocked wording, and on a line of its own
+        after the recorded and uncertain wording (exit 5's warning, say)."""
+        if settled == "untouched":
+            return "open", (UNTOUCHED.format(line=line, bead=bead) if line
+                            else UNTOUCHED_SILENT.format(bead=bead))
+        if settled == "blocked":
+            return "blocked", BLOCKED.format(bead=bead, quoted=f' ("{line}")' if line else "")
+        said = f'\napprove-bead said: "{line}"' if line else ""
+        if settled == "recorded" and back is not None:
+            if a.action == "deny":
+                return "denied", DENIED.format(bead=bead, name=a.operator) + said
+            if back.gate_valid:
+                return "approved", APPROVED_ACCEPTED.format(bead=bead, name=a.operator,
+                                                            digest12=a.digest[:12]) + said
+            why = (f'"{back.gate_reasons[0]}"' if back.gate_reasons
+                   else f"(btq gave no reason; run approve-bead {bead} on the host)")
+            return "approved", APPROVED_REJECTED.format(bead=bead, name=a.operator, digest12=a.digest[:12],
+                                                        why=why) + said
+        return "uncertain", UNCERTAIN_READ.format(bead=bead) + said
+
+    async def reconcile_asks(self, snapshot: list[tuple[str, str, str]]) -> None:
+        """The startup reconcile (R26): each ask of the snapshot `run()` took before any loop started,
+        under `work_lock`, so never while the worker decides. It never raises."""
+        for ask_id, attempt, status in snapshot:
+            async with self.work_lock:
+                await self.reconcile_quietly(ask_id, attempt, status, restarted=True)
+
+    async def reconcile_quietly(self, ask_id: str, attempt: str, status: str, *, restarted: bool) -> None:
+        try:
+            await self.reconcile_one(ask_id, attempt, status, restarted=restarted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one ask's failure must not stop the rest; by type only
+            self.audit_quietly("ask", action="reconcile-failed", ask_id=ask_id, error=type(exc).__name__)
+
+    async def reconcile_one(self, ask_id: str, attempt: str, status: str, *, restarted: bool) -> None:
+        """Read back one stranded attempt and settle it with a compare-and-set on the status it was seen
+        in (r3-2). Its notice is threaded to the card; the attempt's inbound message, if it is still
+        `executing` (or, defensively, `received`), is marked `done` in the same transaction (r6), so a
+        restart does not answer it."""
+        a = self.store.current_attempt(ask_id)
+        row = self.store.ask(ask_id)
+        if a is None or a.message_id != attempt or row is None or row.bead is None:
+            self.audit_quietly("ask", action="reconcile-skipped", ask_id=ask_id)
+            return
+        if self.approve_bead is None:
+            self.unverified(ask_id, attempt, row.bead)
+            return
+        settled, back = await self.read_and_settle(a, row.bead)
+        new_status, text = self.settlement(settled, back, a, row.bead, "")
+        if settled == "untouched":
+            text = RECONCILE_RESTARTED if restarted else RECONCILE_STRANDED.format(ask_id=ask_id)
+        with self.store.transaction():
+            closed = self.store.close_attempt(ask_id, attempt, expect_status=status, settled=settled,
+                                              exit_status=None, new_status=new_status, outcome=text,
+                                              decided_by=a.operator if settled == "recorded" else None)
+            if closed:
+                if self.store.inbound_status(attempt) in ("received", "executing"):
+                    self.store.set_inbound(attempt, "done")
+                if new_status != status:
+                    self.ask_notice(ask_id, "reconciled", str(self.next_seq("reconcile_seq")), text)
+        if not closed:
+            self.conflict(a, status)
+            return
+        self.audit.write("ask", action="reconciled", ask_id=ask_id, message_id=attempt, outcome=settled,
+                         status=new_status, was=status, restarted=restarted)
+
+    def unverified(self, ask_id: str, attempt: str, bead: str) -> None:
+        """A stranded attempt that cannot be read back: approve_bead was removed (say, for a rollback).
+        recover() left its message to the reconcile, so it is answered here, once: the notice and `done`
+        commit together, and a later run finds the message done. It says the decision may be recorded, never
+        "decide again". The ask and its attempt stay as they are, for a reconcile with approve_bead set."""
+        with self.store.transaction():
+            answered = self.store.inbound_status(attempt) in ("received", "executing")
+            if answered:
+                self.store.set_inbound(attempt, "done")
+                self.ask_notice(ask_id, "unverified", attempt, RECONCILE_UNVERIFIED.format(bead=bead))
+        self.audit_quietly("ask", action="reconcile-unverified" if answered else "reconcile-skipped",
+                           ask_id=ask_id)
 
     async def guarded(self, coro: Awaitable[None]) -> None:
         """Run one of the daemon's loops; its cancellation (the TaskGroup tearing down on SIGTERM) sets
@@ -964,6 +1538,10 @@ class Admind:
         if commands.has_control_chars(text):
             self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
             return
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None and not text.startswith("!"):
+            await self.ask_reply(mid, ask_id, text)        # R13/R14: never pasted to the agent
+            return
         try:
             cmd = commands.parse(text)
         except commands.CommandError as exc:
@@ -982,6 +1560,15 @@ class Admind:
                 return
             if not self.authorised(mid):
                 self.deny(mid, "command")
+                return
+            if cmd.name in ("approve", "deny"):
+                await self.decide(mid, cmd, target)
+                return
+            if cmd.name == "asks":
+                await self.list_asks(mid)
+                return
+            if cmd.name == "answer":
+                self.bang_answer(mid, cmd)
                 return
             result, _ = await self.execute(cmd)
             self.audit.write("command", message_id=mid, command=cmd.name,
@@ -1002,6 +1589,10 @@ class Admind:
         it ran out before says it was not read."""
         if not self.authorised(mid):
             self.deny(mid, "command")
+            return
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None:
+            self.ask_details(mid, ask_id)
             return
         post = self.store.details_target(target)
         if post is not None and post.turn_id is not None:

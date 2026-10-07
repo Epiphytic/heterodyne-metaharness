@@ -36,6 +36,7 @@ class FakeWnAgent:
         self.membership_mode = "ok"         # ok, fail, ok-no-count, fail-count, hang, lost, gated
         self.membership_gate = asyncio.Event()      # "gated": the request waits until the test sets it
         self.info_gate: asyncio.Event | None = None  # when set to an Event, group_info waits for it
+        self.send_gate: asyncio.Event | None = None  # when set to an Event, send_final waits for it
         self.on_send: Callable[[dict[str, Any]], None] | None = None   # called after each new send
         self._keys: dict[str, str] = {}
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
@@ -151,6 +152,8 @@ class FakeWnAgent:
             await queue.put({"type": "_close"})
 
     async def _send_final(self, writer: asyncio.StreamWriter, rid: str, req: dict[str, Any]) -> None:
+        if self.send_gate is not None:
+            await self.send_gate.wait()
         if self.fail_sends > 0:
             self.fail_sends -= 1
             await self._reply(writer, rid, {"type": "error", "code": "relay_unavailable",
@@ -161,6 +164,7 @@ class FakeWnAgent:
             message_id = self._keys[key]
         else:
             message_id = hashlib.sha256(f"{len(self.sent)}:{req['text']}".encode()).hexdigest()
+            req["_message_id"] = message_id     # the ID this send returned; existing tests ignore it
             self.sent.append(req)
             if key is not None:
                 self._keys[key] = message_id
