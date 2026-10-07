@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inbound (
     message_id TEXT PRIMARY KEY,
     status TEXT NOT NULL CHECK (status IN ('received', 'dispatched', 'executing', 'done', 'dropped')),
-    received_at TEXT NOT NULL);
+    received_at TEXT NOT NULL,
+    reply_to TEXT);     -- a reaction (`r:<event id>`): the reacted message, which its replies thread to
 CREATE TABLE IF NOT EXISTS outbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE,
@@ -92,7 +93,8 @@ CREATE TABLE IF NOT EXISTS asks (
                                            'superseded', 'cancelled', 'blocked', 'uncertain')),
     outcome TEXT,
     decided_by TEXT,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    refreshed_from TEXT);       -- the stale ask this fresh card replaced (relay delta R29)
 CREATE TABLE IF NOT EXISTS ask_answers (
     ask_id TEXT NOT NULL, seq INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('answer', 'note')),
@@ -111,6 +113,7 @@ CREATE TABLE IF NOT EXISTS ask_attempts (
     PRIMARY KEY (ask_id, message_id));
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
+REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
 # The outbox keys that make a delivered message a card (R7): a card chunk, or a chunk of an ask's !details.
@@ -172,6 +175,7 @@ class AskRow:
     decided_by: str | None
     created_at: str
     updated_at: str
+    refreshed_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,13 +200,13 @@ _TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_
 
 
 _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, truncated, card_parts, status, "
-        "outcome, decided_by, created_at, updated_at")    # fixed column list, interpolated like _TURN
+        "outcome, decided_by, created_at, updated_at, refreshed_from")    # fixed, interpolated like _TURN
 
 
 def _ask(r: tuple[object, ...]) -> AskRow:
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
-                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]))
+                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]))
 
 
 def _opt_int(v: object) -> int | None:
@@ -273,6 +277,11 @@ class Store:
                 self.db.execute("ALTER TABLE outbox ADD COLUMN lane INTEGER NOT NULL DEFAULT 1")
                 self.db.execute("INSERT OR REPLACE INTO kv(key, value) "
                                 "VALUES ('outbox_needs_redaction', '1')")
+        # A database from before the reply/reaction delta: two nullable columns, added once.
+        for table, column in (("asks", "refreshed_from"), ("inbound", "reply_to")):
+            if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                with self.transaction():
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
     @_locked
     def close(self) -> None:
@@ -293,10 +302,21 @@ class Store:
         self.db.execute("DELETE FROM kv WHERE key = ?", (key,))
 
     @_locked
-    def claim_inbound(self, message_id: str) -> bool:
-        cur = self.db.execute("INSERT OR IGNORE INTO inbound(message_id, status, received_at) "
-                              "VALUES (?, 'received', ?)", (message_id, now()))
+    def claim_inbound(self, message_id: str, reply_to: str | None = None) -> bool:
+        """Claim an inbound message ID once (a replay is refused). A reaction (`r:<event id>`) stores the
+        message it reacted to as its reply target."""
+        cur = self.db.execute("INSERT OR IGNORE INTO inbound(message_id, status, received_at, reply_to) "
+                              "VALUES (?, 'received', ?, ?)", (message_id, now(), reply_to))
         return cur.rowcount == 1
+
+    @_locked
+    def reply_target(self, message_id: str) -> str | None:
+        """What a reply to inbound `message_id` threads to: a message is its own target; a reaction's is the
+        reacted message stored with it (None if there is none). Never an `r:` key (delta §5)."""
+        if not message_id.startswith(REACTION_PREFIX):
+            return message_id
+        row = self.db.execute("SELECT reply_to FROM inbound WHERE message_id = ?", (message_id,)).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
 
     @_locked
     def set_inbound(self, message_id: str, status: str) -> None:
@@ -541,10 +561,10 @@ class Store:
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
         self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
                          row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
-                         row.decided_by, row.created_at, row.updated_at, peer_pid))
+                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from, peer_pid))
 
     @_locked
     def ask(self, ask_id: str) -> AskRow | None:
@@ -653,6 +673,14 @@ class Store:
         marks = ", ".join("?" * len(statuses))
         r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = ? AND status IN ({marks}) "  # noqa: S608
                             "ORDER BY created_at DESC, rowid DESC LIMIT 1", (bead, *statuses)).fetchone()
+        return None if r is None else _ask(r)
+
+    @_locked
+    def newer_ask(self, ask_id: str) -> AskRow | None:
+        """The newest ask for the same bead posted after `ask_id`, in any status (R31)."""
+        r = self.db.execute(f"SELECT {_ASK} FROM asks WHERE bead = (SELECT bead FROM asks "  # noqa: S608
+                            "WHERE ask_id = ?) AND rowid > (SELECT rowid FROM asks WHERE ask_id = ?) "
+                            "ORDER BY rowid DESC LIMIT 1", (ask_id, ask_id)).fetchone()
         return None if r is None else _ask(r)
 
     # --- decision attempts (R23) ---------------------------------------------------------------

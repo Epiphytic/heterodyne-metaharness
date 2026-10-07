@@ -124,6 +124,7 @@ class ReactionAdded(msgspec.Struct, frozen=True):
     target_message_id_hex: str
     actor: Sender
     emoji: str
+    event_id_hex: str | None = None     # the reaction's own event ID; admind drops a reaction without one
 
 
 class GroupStateChanged(msgspec.Struct, frozen=True):

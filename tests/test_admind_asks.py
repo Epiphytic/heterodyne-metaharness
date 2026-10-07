@@ -152,7 +152,7 @@ def test_question_card() -> None:
     lines = text.split("\n")
     assert lines[0] == "❓ Ask k7m2 · question · posted by controller (a local process; unverified)"
     assert lines[1] == "Which relay?" and BODY in text and not truncated
-    assert lines[-1] == "Answer: reply to this message, or send !answer k7m2 <text>"
+    assert lines[-1] == "Answer by replying or reacting to this message, or send !answer k7m2 <text>"
 
 
 def test_merge_card() -> None:
@@ -160,7 +160,8 @@ def test_merge_card() -> None:
     lines = text.split("\n")
     assert lines[0] == "🔀 Ask k7m2 · merge request · posted by controller (a local process; unverified)"
     assert lines[1:4] == ["Merge plan 3 (wsd intake)", f"PR: {PR}", f"Head: {HEAD}"]
-    assert "admind never merges" in lines[-1] and "!answer k7m2 <text>" in lines[-1]
+    assert lines[-1] == ("Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it "
+                         "is merged, or reply with what to change.")
 
 
 def test_card_redacts_the_body() -> None:
@@ -187,7 +188,7 @@ def test_card_truncates_by_lines_and_characters() -> None:
     long = "y" * 5_000
     text, truncated = asks.question_card(row(body=long))
     assert truncated and max(map(len, text.split("\n"))) == asks.CARD_CHARS - len("Which relay?\n\n")
-    assert text.endswith("Answer: reply to this message, or send !answer k7m2 <text>")   # framing kept
+    assert text.endswith("Answer by replying or reacting to this message, or send !answer k7m2 <text>")
     _, truncated = asks.question_card(row(body="z" * (asks.CARD_CHARS - len("Which relay?\n\n"))))
     assert not truncated
 

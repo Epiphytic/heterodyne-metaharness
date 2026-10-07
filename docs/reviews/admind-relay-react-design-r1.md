@@ -1,0 +1,31 @@
+The trust change in §3 is stated honestly, and R29’s lock-order claim matches the code: posting takes `ask_post_lock`, never `work_lock`. Four blocking gaps remain.
+
+1. **[BLOCKING] Existing shortened cards lose their delivery safeguard.** [Design delta:41](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:41) removes the details check, while [delta:52](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:52) guarantees `truncated=0` only for **new** approval asks. Persisted shortened cards can therefore become approvable without their hidden context being delivered. The current safeguard is [daemon.py:859](src/heterodyne/admind/daemon.py:859). This weakens R8 beyond the declared trust change.
+
+   **Fix:** retain the details gate for legacy truncated asks, or supersede them with fully delivered replacement cards before allowing approval. Test an upgrade fixture containing an open shortened card with missing and partially delivered details, through both replies and reactions.
+
+2. **[BLOCKING] The normal repost path rejects an ordinary changed, previously pinned bead.** [Delta:46](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:46) promises a fresh card through the existing post path. However, [approvals.py:245](src/heterodyne/admind/approvals.py:245) refuses when the bead’s persisted `context_digest` differs from its computed digest. Even bypassing that check would leave [approve-bead:616](<BTQ-LIVE>/bin/approve-bead:616) refusing the eventual decision. This conflicts with the fixed requirement for changed beads and the “only admind changes” constraint.
+
+   **Fix:** specify the authorized grooming/reposting operation that refreshes the persisted pin while preserving validation and `--expect-digest`. Amend the scope explicitly if that requires btq changes. Test against real btq with persisted digest D, then edit the bead to D2 **without manually repinning it**.
+
+3. **[BLOCKING] R29 leaves an unrecoverable gap between stale settlement and fresh posting.** [Delta:46](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:46) first makes the ask stale, then awaits the normal post path, then replies with the new ask ID. Today [daemon.py:895](src/heterodyne/admind/daemon.py:895) settles the attempt and queues its reply atomically. Settlement clears the current attempt, and [store.py:707](src/heterodyne/admind/store.py:707) recovers only `deciding`/`uncertain` asks. A restart after stale settlement loses the refresh operation. Delaying the reply until afterward instead breaks R23’s atomic settlement requirement.
+
+   **Fix:** define either a durable, idempotent pending refresh with a replacement-ask link and recovery, or shared post preparation followed by one transaction that retires the old attempt, inserts the replacement and queues the final reply. Preserve R22’s checks; do not hold a SQLite transaction across awaits. Test crashes before replacement insertion and between replacement creation and reply settlement, plus concurrent socket posting.
+
+4. **[BLOCKING] The live isolation recipe does not establish production isolation.** [Delta:84](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:84) specifies a temporary `BTQ_CONFIG_DIR` and database, but btq resolves repository and database locations independently. [btq:25](<BTQ-LIVE>/bin/btq:25) defaults to its installed repository and port 3307/database `tasks`; [btq:47](<BTQ-LIVE>/bin/btq:47) lets inherited `BTQ_POLICY` override the temporary policy. [btq:478](<BTQ-LIVE>/bin/btq:478) constructs the actual Beads environment from those locations.
+
+   **Fix:** require a sanitized subprocess environment with temporary HOME/config/state, explicit private `BTQ_REPO`, policy, database endpoint, credentials and TLS certificate. Provision the private server credentials required by the real client. Assert all resolved locations before any database operation, and test with hostile inherited production overrides.
+
+5. **[NON-BLOCKING] Make the reaction ingress implementation and wire tests explicit.** [Delta:44](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:44) has the right intent, but [control.py:121](src/heterodyne/marmot/control.py:121) currently omits `event_id_hex`; decoding discards it. Also, [guard.py:30](src/heterodyne/admind/guard.py:30) reads `ev.message.sender`, whereas reactions supply `actor`.
+
+   **Fix:** explicitly require decoder support, canonicalized replay IDs, and a common sender/group/latch guard adapted to `actor`, including the existing group-health and commit-point checks. Add tests decoding actual reaction frames, including missing/malformed IDs; daemon fakes alone can conceal the decoder omission.
+
+6. **[NON-BLOCKING] Reaction threading must cover recovery outside `finish()`.** [Delta:52](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:52) mentions threading through `finish()`, but [daemon.py:507](src/heterodyne/admind/daemon.py:507) directly posts restart notices using the inbound key. For reactions that becomes the invalid message target `r:<event_id>`.
+
+   **Fix:** resolve the persisted reply target for every inbound-derived reply, including startup notices. Test a restart after reaction claim but before `begin_attempt`.
+
+7. **[NON-BLOCKING] Preserve audit correlation and strengthen the operator-race fixture.** With the proposed namespaced inbound key, [daemon.py:869](src/heterodyne/admind/daemon.py:869) hashes `r:<hex>` for provenance, while [audit.py:59](src/heterodyne/admind/audit.py:59) hashes only the embedded hex. The references no longer match R20. Separately, [delta:83](docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md:83) provisions only one approver, so its two-operator case cannot exercise competing authorized decisions.
+
+   **Fix:** define one canonical reaction reference shared by provenance and audit, and test equality. Use two authorized identities for the race and a separate non-approver fixture.
+
+REVISE

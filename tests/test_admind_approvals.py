@@ -626,17 +626,19 @@ def test_postable_accepts() -> None:
 
 # --- the card (R8, R21, R25) ---------------------------------------------------------------------
 HEAD = "🛂 Approval ask k7m2 · bead btq-ab12c · posted by controller (a local process; unverified)"
-DECIDE = ["", "Decide by replying to this message:", f"  !approve {BEAD} {D12}", f"  !deny {BEAD} <reason>",
-          f"!approve records your approval of {BEAD} in btq, as you, via Marmot. A reply without !approve or "
-          "!deny decides nothing."]
+ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
+TOP = [HEAD, ACTIONS, f"digest {D12}"]
+END = ["", f"Approving records your approval of {BEAD} in btq, as you, via Marmot. Any other reply is a note "
+       "for the poster."]
 
 
 def test_approval_card_is_the_readout_verbatim() -> None:
+    """The R30 wording, pinned: the head, the actions, the digest, the readout, the closing line."""
     card = asks.approval_card(card_row(), readout(), 4000)
-    assert card is not None and not card.truncated
-    whole = "\n".join([HEAD, f"digest {D12}", *TITLE, "ask:", *LINKED, *DESCRIPTION, *DECIDE])
+    assert isinstance(card, asks.ApprovalCard)
+    whole = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == [whole] and card.details_chunks == [whole]
-    assert D not in whole and f"  !approve {BEAD} {D12}" in whole.splitlines()
+    assert D not in whole and whole.splitlines()[:3] == TOP and "!approve" not in whole
     assert asks.approval_title(readout(), BEAD) == "Approve the plan 4 sandbox runtime"
     assert asks.approval_title(readout(readout={"title": ["title:"], "ask": [], "description": []}),
                                BEAD) == BEAD
@@ -644,28 +646,37 @@ def test_approval_card_is_the_readout_verbatim() -> None:
 
 def test_approval_card_chunks_are_what_is_queued() -> None:
     card = asks.approval_card(card_row(), readout(), 200)
-    assert card is not None and len(card.card_chunks) > 1
-    text = "\n".join([HEAD, f"digest {D12}", *TITLE, "ask:", *LINKED, *DESCRIPTION, *DECIDE])
+    assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
+    text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == chunk.split(text, 200)
 
 
-def test_approval_card_truncates_and_keeps_the_decision_lines() -> None:
-    long = ["description:", *(f"  │ line {i} of the plan" for i in range(60))]
+def test_approval_card_is_never_shortened() -> None:
+    """R8, R15 (revised): past the question card's 40 lines and 3,500 characters, the whole readout is the
+    card, in as many chunks as it needs, and the card is its own `!details`."""
+    long = ["description:", *(f"  │ line {i} of the plan" for i in range(60)), *(["  │ " + "w" * 900] * 4)]
     r = readout(readout={**LINES, "description": long})
     card = asks.approval_card(card_row(), r, 4000)
-    assert card is not None and card.truncated
-    text = "".join(card.card_chunks)
-    shown = asks.CARD_LINES - len(TITLE) - 1 - len(LINKED)
-    assert f"  │ line {shown - 2} of the plan" in text and f"  │ line {shown - 1} of the plan" not in text
-    assert (f"(shortened: {len(long) - shown} more lines. Reply !details to this message and read it before "
-            "approving.)") in text
-    assert text.endswith("\n".join(DECIDE)) and text.startswith(f"{HEAD}\ndigest {D12}\n")
-    details = "".join(card.details_chunks)
-    assert "  │ line 59 of the plan" in details and "shortened" not in details
-    wide = readout(readout={**LINES, "description": ["description:", *(["  │ " + "w" * 900] * 4)]})
-    by_chars = asks.approval_card(card_row(), wide, 4000)
-    assert by_chars is not None and by_chars.truncated
-    assert "(shortened: 1 more lines." in by_chars.card_chunks[0]
+    assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
+    text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *long, *END])
+    assert card.card_chunks == chunk.split(text, 4000) and card.details_chunks == card.card_chunks
+    assert "  │ line 59 of the plan" in "".join(card.card_chunks) and "shortened" not in text
+    assert len(text.splitlines()) > asks.CARD_LINES and len(text) > asks.CARD_CHARS
+
+
+def test_approval_card_cap() -> None:
+    """R8: a readout over MAX_APPROVAL_CARD characters is refused at post time, after the R21 check."""
+    def sized(n: int, extra: str = "") -> Readout:
+        fixed = "\n".join([*TITLE, "ask:", *LINKED, "description:", "  │ "])
+        line = "  │ " + "w" * (n - len(fixed)) + extra
+        return readout(readout={**LINES, "description": ["description:", line]})
+    assert asks.MAX_APPROVAL_CARD == 24_000
+    at_cap = asks.approval_card(card_row(), sized(asks.MAX_APPROVAL_CARD), 4000)
+    assert isinstance(at_cap, asks.ApprovalCard) and len(at_cap.card_chunks) == 7
+    assert asks.approval_card(card_row(), sized(asks.MAX_APPROVAL_CARD + 1), 4000) == asks.TOO_LONG
+    assert asks.TOO_LONG == "this bead is too long to decide from the phone; decide it at the terminal"
+    over_and_secret = sized(asks.MAX_APPROVAL_CARD + 100, " " + TOKEN)
+    assert asks.approval_card(card_row(), over_and_secret, 4000) == asks.REDACTED      # R21 is checked first
 
 
 @pytest.mark.parametrize("line", [
@@ -676,18 +687,18 @@ def test_approval_card_truncates_and_keeps_the_decision_lines() -> None:
 ])
 def test_approval_card_refuses_what_redaction_would_change(line: str) -> None:
     r = readout(readout={**LINES, "description": [*DESCRIPTION, line]})
-    assert asks.approval_card(card_row(), r, 4000) is None
+    assert asks.approval_card(card_row(), r, 4000) == asks.REDACTED
 
 
 def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
-    """The R21 fixture found by search: the whole text survives redaction; a chunk boundary cuts the key
-    so that one chunk holds a run `SECRET_VALUES` matches."""
+    """The R21 fixture found by search (again for the R30 layout): the whole text survives redaction; a
+    chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES` matches."""
     key = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
     r = readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
-                         "description": ["description:", "  │ " + "w" * 175 + " " + key]}, links=[])
+                         "description": ["description:", "  │ " + "w" * 124 + " " + key]}, links=[])
     whole = asks.approval_card(card_row(), r, 4000)
-    assert whole is not None and key in whole.card_chunks[0]
-    assert asks.approval_card(card_row(), r, 200) is None
+    assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
+    assert asks.approval_card(card_row(), r, 200) == asks.REDACTED
 
 
 def test_approval_card_refuses_a_value_split_across_chunks() -> None:
@@ -699,19 +710,19 @@ def test_approval_card_refuses_a_value_split_across_chunks() -> None:
     stand_in_token = "Z" * len(TOKEN)
     for pad in range(100, 200):
         stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 4000)
-        assert stand_in is not None
+        assert isinstance(stand_in, asks.ApprovalCard)
         text = stand_in.card_chunks[0].replace(stand_in_token, TOKEN)
         if all(redact(part) == part for part in chunk.split(text, 200)):
             break
     else:
         raise AssertionError("no padding splits the token")
     assert redact(text) != text
-    assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) is None
+    assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) == asks.REDACTED
 
 
 def test_approval_body_round_trip() -> None:
     card = asks.approval_card(card_row(), readout(), 300)
-    assert card is not None
+    assert isinstance(card, asks.ApprovalCard)
     body = asks.approval_body(readout(), card)
     assert msgspec.convert(json.loads(body)["readout"], Readout) == readout()
     assert asks.stored_details(card_row(body=body)) == card.details_chunks
@@ -745,23 +756,26 @@ def test_attempt_compare_and_set(tmp_path: Path) -> None:
 
 
 def test_parse_approve_and_deny() -> None:
+    """R7 (revised): no arguments are needed, and any given are kept for the card check, which refuses any
+    that are not the card's bead (and digest). Only a too-long reason is a usage error."""
+    assert commands.parse("!approve") == commands.Command("approve")
+    assert commands.parse(f"!approve {BEAD}") == commands.Command("approve", arg=BEAD)
     assert commands.parse(f"!approve {BEAD} {D12.upper()}") == commands.Command("approve", arg=BEAD, rest=D12)
-    for bad in (f"!approve {BEAD}", f"!approve {BEAD} {D12} x", f"!approve {BEAD} {D12[:11]}",
-                f"!approve {BEAD} {D12}0", f"!approve {BEAD} {D12[:11]}g", f"!approve BTQ-AB12C {D12}",
-                f"!approve -x {D12}", "!approve"):
-        with pytest.raises(commands.CommandError, match="Usage: !approve"):
-            commands.parse(bad)
+    assert commands.parse(f"!approve {BEAD} {D12} x") == commands.Command("approve", arg=BEAD,
+                                                                         rest=f"{D12} x")
+    assert commands.parse("!approve BTQ-AB12C") == commands.Command("approve", arg="BTQ-AB12C")
+    assert commands.parse("!deny") == commands.Command("deny")
+    assert commands.parse("!deny   ") == commands.Command("deny")
+    assert commands.parse(f"!deny {BEAD}") == commands.Command("deny", arg=BEAD)
     assert commands.parse(f"!deny {BEAD}  too broad\n for now ") == commands.Command(
         "deny", arg=BEAD, rest="too broad\n for now")
     assert commands.parse(f"!deny {BEAD} leaks {TOKEN}") == commands.Command(
         "deny", arg=BEAD, rest="leaks <redacted GitHub token>")
-    for bad in (f"!deny {BEAD}", f"!deny {BEAD}   ", "!deny", f"!deny -{BEAD} why"):
-        with pytest.raises(commands.CommandError, match="Usage: !deny"):
-            commands.parse(bad)
+    assert commands.parse("!deny too broad") == commands.Command("deny", arg="too", rest="broad")
     assert commands.parse(f"!deny {BEAD} " + "x" * 1000) is not None
     with pytest.raises(commands.CommandError, match="at most 1,000"):
         commands.parse(f"!deny {BEAD} " + "x" * 1001)
-    assert "!approve <bead> <digest> · !deny <bead> <reason>" in commands.HELP
+    assert "!approve · !deny (as a reply to an approval card)" in commands.HELP
 
 
 # --- integration ---------------------------------------------------------------------------------
@@ -865,7 +879,7 @@ def test_approve_happy_path(tmp_path: Path) -> None:
         expected = asks.approval_card(stored, r, h.settings.chunk_chars)
         rows = h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ? ORDER BY seq",
                                   (f"ask:{ask_id}:%",)).fetchall()
-        assert expected is not None and [x[0] for x in rows] == expected.card_chunks
+        assert not isinstance(expected, str) and [x[0] for x in rows] == expected.card_chunks
         mid = await send(h, approve(), first)
         await settled(h, mid)
         ref = "marmot:" + ref_id(mid)
@@ -907,7 +921,8 @@ def test_unthreaded_approve_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, _ = await card(h)
         text = await say(h, approve(), None)
-        assert text == "To decide, reply to the approval card itself (or its !details). Nothing recorded."
+        assert text == "To decide, react to the approval card or reply to it. Nothing recorded."
+        assert (await say(h, "!approve", None)) == text and (await say(h, "!deny", None)) == text
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -918,9 +933,10 @@ def test_approve_as_reply_to_agent_message_refused(tmp_path: Path) -> None:
         ask_id, _ = await card(h)
         echo = next(r["_message_id"] for r in h.fake.sent if r["text"] == "echo: hello")
         text = await say(h, approve(), echo)
-        assert text.startswith("To decide, reply to the approval card itself")
+        assert text == "To decide, react to the approval card or reply to it. Nothing recorded."
         notice = next(r["_message_id"] for r in h.fake.sent if r["idempotency_key"] == "ready")
-        assert (await say(h, approve(), notice)).startswith("To decide, reply to the approval card itself")
+        assert (await say(h, approve(), notice)) == text
+        assert (await say(h, "!approve", notice)) == text
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -930,7 +946,8 @@ def test_wrong_digest_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         text = await say(h, approve(D2[:12]), first)
-        assert text == f"That does not match ask {ask_id} (bead {BEAD}, digest {D12}). Nothing recorded."
+        assert text == (f"This card is for {BEAD}. React 👍 to approve or 👎 to deny, or reply approve / "
+                        "deny <reason>. Nothing recorded.")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open" and attempts(h, ask_id) == []
         assert (await say(h, approve(D12.upper()), first)).startswith(f"Approved {BEAD}")   # case-insensitive
     go(tmp_path, scenario)
@@ -940,8 +957,9 @@ def test_wrong_digest_refused(tmp_path: Path) -> None:
 def test_wrong_bead_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        assert (await say(h, approve(D12, OTHER), first)).startswith(f"That does not match ask {ask_id}")
-        assert (await say(h, f"!deny {OTHER} no", first)).startswith(f"That does not match ask {ask_id}")
+        assert (await say(h, approve(D12, OTHER), first)).startswith(f"This card is for {BEAD}. ")
+        assert (await say(h, f"!deny {OTHER} no", first)).startswith(f"This card is for {BEAD}. ")
+        assert (await say(h, f"!approve {OTHER}", first)).startswith(f"This card is for {BEAD}. ")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
     go(tmp_path, scenario)
 
@@ -962,8 +980,8 @@ def test_card_not_fully_delivered(tmp_path: Path) -> None:
         await wait_until(lambda: sent_mid(h, f"ask:{ask_id}:0") is not None)
         first = sent_mid(h, f"ask:{ask_id}:0")
         text = await say(h, approve(), first)
-        assert text == (f"Ask {ask_id} has not been fully delivered yet. Wait for every part, then reply "
-                        "again. Nothing recorded.")
+        assert text == (f"Ask {ask_id} has not been fully delivered yet. Wait for every part, then react or "
+                        "reply again. Nothing recorded.")
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
         h.fake.on_send = None
         h.fake.send_gate = None
@@ -1079,7 +1097,7 @@ def test_asks_backstop_reconciles_stranded(tmp_path: Path) -> None:
         note = next(r for r in h.fake.sent if r["idempotency_key"] == f"asknote:{ask_id}:reconciled:1:0")
         assert note["text"] == (f"admind could not finish settling the last decision on ask {ask_id}; "
                                 "nothing was recorded. Decide again.")
-        assert note["reply_to_message_id_hex"] == first
+        assert note["reply_to_message_id_hex"] == mid           # the stranded reply, not the card (delta §5)
         assert audited(h, kind="ask", action="reconciled", ask_id=ask_id, outcome="untouched", was="deciding",
                        restarted=False)
         edit(tmp_path, approvers=["op"])
@@ -1128,10 +1146,13 @@ def test_digest_changed_before_read(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         edit(tmp_path, digest=D2)
         text = await say(h, approve(), first)
-        assert text == (f"{BEAD} changed after it was shown (shown {D12}, now {D2[:12]}). Nothing recorded; "
-                        f"ask {ask_id} is stale and the poster must post it again.")
+        new = h.store.newer_ask(ask_id)
+        assert new is not None and new.refreshed_from == ask_id
+        assert text == (f"{BEAD} changed after this card was posted (shown {D12}, now {D2[:12]}). Nothing "
+                        f"recorded. A fresh card follows: ask {new.ask_id}.")
         assert ask_status(h, ask_id) == "stale" and decisions(h) == []
-        assert (await say(h, approve(), first)) == f"Ask {ask_id} is already stale. Nothing recorded."
+        assert (await say(h, approve(), first)) == (f"Ask {ask_id} is already stale; see ask {new.ask_id}. "
+                                                    "Nothing recorded.")
     go(tmp_path, scenario)
 
 
@@ -1141,9 +1162,13 @@ def test_digest_changed_inside_approve_bead(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         edit(tmp_path, decide="edit-before")
         text = await say(h, approve(), first)
-        assert text == (f'Not recorded: "The ask is not the one you were shown (expected {D12}, now '
-                        f'changed); nothing written.". {BEAD} is unchanged; you can decide again.')
-        assert ask_status(h, ask_id) == "open" and len(decisions(h)) == 1
+        new = h.store.newer_ask(ask_id)
+        assert new is not None and new.refreshed_from == ask_id and new.digest != D
+        now = (new.digest or "")[:12]
+        assert text == (f"{BEAD} changed after this card was posted (shown {D12}, now {now}). Nothing "
+                        f"recorded. A fresh card follows: ask {new.ask_id}.\napprove-bead said: \"The ask is "
+                        f"not the one you were shown (expected {D12}, now changed); nothing written.\"")
+        assert ask_status(h, ask_id) == "stale" and len(decisions(h)) == 1
         assert attempts(h, ask_id)[0][-2:] == (3, "untouched")
     go(tmp_path, scenario)
 
@@ -1237,10 +1262,18 @@ def test_latch_during_decision_completes(tmp_path: Path) -> None:
 LONG = {"description": ["description:", *(f"  │ line {i} of the plan" for i in range(60))]}
 
 
+def legacy(h: Harness, ask_id: str) -> None:
+    """Make the ask one stored before the reply/reaction delta, whose card was shortened (`asks.truncated
+    = 1`): R8's old rule still holds for it."""
+    h.store.db.execute("UPDATE asks SET truncated = 1 WHERE ask_id = ?", (ask_id,))
+
+
 @needs_tmux
-def test_truncated_needs_details(tmp_path: Path) -> None:
+def test_legacy_truncated_needs_details(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        assert not (h.store.ask(ask_id) or card_row()).truncated     # a new ask is never shortened
+        legacy(h, ask_id)
         stored = h.store.ask(ask_id)
         assert stored is not None and stored.truncated
         text = await say(h, approve(), first)
@@ -1259,9 +1292,10 @@ def test_truncated_needs_details(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_details_by_other_operator_does_not_count(tmp_path: Path) -> None:
+def test_legacy_details_by_other_operator_does_not_count(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        legacy(h, ask_id)
         await send(h, "!details", first, SECOND_HEX)
         await wait_until(lambda: h.store.details_delivered(ask_id, "llctest"))
         assert (await say(h, approve(), first)).startswith(f"Ask {ask_id} was shortened.")
@@ -1291,12 +1325,12 @@ def test_redacted_content_refused_at_post(tmp_path: Path) -> None:
 def test_plain_yes_is_a_note(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        mid = await send(h, "yes", first)
+        mid = await send(h, "yes but", first)       # "yes" alone approves now (R28)
         await settled(h, mid)
-        assert queued(h, mid) == (f"Noted on ask {ask_id}; this is not a decision. To decide, reply to the "
-                                  f"card with !approve {BEAD} {D12} or !deny {BEAD} <reason>.")
+        assert queued(h, mid) == (f"Noted on ask {ask_id}; this is not a decision. React 👍 to approve or "
+                                  "👎 to deny, or reply approve / deny <reason>.")
         assert ask_status(h, ask_id) == "open" and decisions(h) == []
-        assert [(a.kind, a.operator, a.text) for a in h.store.answers(ask_id)] == [("note", "op", "yes")]
+        assert [(a.kind, a.operator, a.text) for a in h.store.answers(ask_id)] == [("note", "op", "yes but")]
     go(tmp_path, scenario)
 
 
@@ -1578,7 +1612,7 @@ def test_restart_while_deciding(tmp_path: Path, via_ref: str | None, status: str
                                   (RESTARTED_NOTICE,)).fetchone()[0] == 0
         note = h.store.db.execute("SELECT text, reply_to FROM outbox "
                                   "WHERE key LIKE 'asknote:d222:reconciled:%'").fetchone()
-        assert note is not None and note[1] is None
+        assert note is not None and note[1] == mid      # threaded to the decision reply (relay delta §5)
         assert note[0].startswith(f"Approved {BEAD} as op" if status == "approved" else
                                   f"{BEAD} holds a decision admind cannot confirm as yours")
         assert attempts(h, "d222")[0][-1] == ("recorded" if status == "approved" else "blocked")
@@ -1769,8 +1803,8 @@ def test_answer_command_refused_for_approval(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, _ = await card(h)
         text = await say(h, f"!answer {ask_id} yes", None, tag="cmd")
-        assert text == (f"Ask {ask_id} is an approval ask: reply to its card with !approve {BEAD} {D12} or "
-                        f"!deny {BEAD} <reason>. Nothing recorded.")
+        assert text == (f"Ask {ask_id} is an approval ask. To decide, react to its card or reply to it. "
+                        "Nothing recorded.")
         assert h.store.answers(ask_id) == [] and decisions(h) == []
     go(tmp_path, scenario)
 
@@ -1780,7 +1814,7 @@ def test_near_miss_digest_refused(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         near = D12[:11] + ("0" if D12[-1] != "0" else "1")
-        assert (await say(h, approve(near), first)).startswith(f"That does not match ask {ask_id}")
+        assert (await say(h, approve(near), first)).startswith(f"This card is for {BEAD}. ")
         assert decisions(h) == [] and attempts(h, ask_id) == []
     go(tmp_path, scenario)
 
@@ -1840,9 +1874,10 @@ def test_latch_during_asks_backstop_drops_listing(tmp_path: Path) -> None:
 
 
 @needs_tmux
-def test_details_not_fully_delivered_does_not_count(tmp_path: Path) -> None:
+def test_legacy_details_not_fully_delivered_does_not_count(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        legacy(h, ask_id)
         gate = asyncio.Event()
 
         def hold_after_first(req: dict[str, Any]) -> None:

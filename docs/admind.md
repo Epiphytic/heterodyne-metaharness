@@ -106,8 +106,8 @@ Detach with `Ctrl-b d`. Until then the agent cannot start a turn, and `!tail` sh
 | `!details [full]` | The full reply behind a summary or batch, and with `full` its tool calls. Reply to the summary or batch, or send it alone for the latest. Capped, see "`!details` and `!details full`" above. As a reply to an ask's card, the whole ask (section 10). | `!details full` |
 | `!asks` | The active asks, one line each (section 10). | `!asks` |
 | `!answer <id> <text>` | Answer a question or merge ask without replying to its card (section 10). | `!answer k7m2 use the first relay` |
-| `!approve <bead> <digest12>` | Approve a btq approval bead, as a reply to its card (section 10). | `!approve <bead> 1a2b3c4d5e6f` |
-| `!deny <bead> <reason>` | Deny it, as a reply to its card (section 10). | `!deny <bead> the scope is too wide` |
+| `!approve` | Approve a btq approval bead, as a reply to its card (section 10). A 👍 reaction or a reply of `approve` does the same. Optional arguments `<bead> [<digest12>]` must be the card's. | `!approve` |
+| `!deny [<bead> [<reason>]]` | Deny it, as a reply to its card (section 10). A 👎 reaction or a reply of `deny <reason>` does the same. | `!deny <bead> the scope is too wide` |
 
 - **Control characters.** A message containing a C0 or C1 control character (other than tab and newline) is refused with a reply, never altered: such a character can break out of the terminal's bracketed paste. The check runs before commands are parsed, so a command name or argument holding one is never parsed or echoed.
 - **Output policy.** Everything admind posts, summarizes or audits goes through one redactor (`admind/redact.py`): a recognized secret pattern, npub or run of 64 or more hex digits is replaced by a marker such as `<redacted hex key>`, and every control character except newline and tab is escaped as `\xNN`. It runs on the whole text before it is chunked and again at delivery, and repeats until the text stops changing (text still changing after 10 passes becomes `<redacted text>`). That covers replies, summaries, batches, `!details`, `!tail`, command replies, alerts, notices and the audit log. This replaces the earlier "relayed verbatim" rule for the agent's reply and the `!tail` screen: the text is the agent's, but a recognized secret in it is masked and the rest is kept. The redactor does not detect arbitrary passwords or credentials, so none of this output is guaranteed secret-free. A short reply is therefore verbatim apart from redaction, not byte for byte. Failures are reported with fixed wording (`a tmux command failed`, `internal error`), never the underlying error text, which can contain paths or identifiers.
@@ -290,7 +290,7 @@ An older database from before plan 2 (for example an older `inbound` status cons
 
 ## 10. Asks and approvals (interim)
 
-A local process, such as a controller session, can put a question, a merge request or a btq design approval in front of the operators, and they answer or decide from their Marmot client. This is interim: it ships ahead of ADR revision 14, which absorbs it. The design is the [relay spec](superpowers/specs/2026-10-05-admind-marmot-relay-design.md); the `R` numbers below are its decisions. Placeholders as above, plus `<BTQ-LIVE>` for the live beads-task-queue checkout.
+A local process, such as a controller session, can put a question, a merge request or a btq design approval in front of the operators, and they answer or decide from their Marmot client. This is interim: it ships ahead of ADR revision 14, which absorbs it. The design is the [relay spec](superpowers/specs/2026-10-05-admind-marmot-relay-design.md), as amended by the [reply and reaction delta](superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md); the `R` numbers below are their decisions (R27 to R31 are the delta's). Placeholders as above, plus `<BTQ-LIVE>` for the live beads-task-queue checkout.
 
 ### The trust change
 
@@ -304,6 +304,15 @@ Copied verbatim from the spec, §3 (`§8` there is ADR 0001 §8):
 - arrives while the bead is still open, still `kind:approval`, and still hashes to the full digest admind showed.
 
 The typed digest takes the place of the terminal's `[y/N]` confirmation. So **whoever controls an approver's Marmot key, and so their phone or White Noise client, can approve designs.** This is the risk being accepted.
+
+**Amended by the delta (§3 there).** The typed digest is gone. Its place is taken by **an explicit approve action on admind's own card**: an approve reaction, or a reply that is exactly one approve word (R28). The digest pin is unchanged: admind stores the full digest when it renders the card and passes it to `approve-bead --expect-digest`, so an approval still binds to exactly the content on the card it answers. What remains of the friction the typed digest gave:
+
+- a free-form reply never decides: only a reply that is exactly an approve word, or begins with a deny word;
+- a reaction other than the listed ones decides nothing;
+- every decision is confirmed in the thread as "Approved `<bead>` as `<name>` …", and audited;
+- a decision is final: removing the reaction does not undo it.
+
+**Accepted risk:** an accidental 👍 on an approval card records an approval. The operator chose this on 2026-10-06.
 
 What it does **not** change, stated plainly so the change is not overstated:
 
@@ -365,7 +374,8 @@ admind ask cancel <id>
 - its `design_review` is not in valid two-LLM format, or its ask changed after it was posted;
 - the bead is busy, or another ask for it is `deciding` or `uncertain`;
 - the read failed: "admind could not read `<bead>` (`<word>`); try again.", where the word is `unavailable`, `timed out` or `bad output`;
-- any part of the card or of its `!details` would be changed by redaction: "this bead holds text admind would redact; decide it at the terminal". Nothing is posted (R21).
+- any part of the card would be changed by redaction: "this bead holds text admind would redact; decide it at the terminal". Nothing is posted (R21);
+- the readout is longer than 24,000 characters (`MAX_APPROVAL_CARD`, R8): "this bead is too long to decide from the phone; decide it at the terminal".
 
 Posts run one at a time, and a third post while two are in flight is refused as busy. The latch and the limits are checked again after the read. A new approval ask for a bead that already has an `open` or `answered` ask supersedes the old one (R9). The old card gets "Ask `<old>` is superseded by ask `<new>`, a newer card for `<bead>`. This card decides nothing any more." in its thread.
 
@@ -380,52 +390,55 @@ Cards are posted top-level, in lane 1. Each is redacted whole, then split into `
 <body>
 (40 lines shown of 52; reply !details for the rest)
 
-Answer: reply to this message, or send !answer k7m2 <text>
+Answer by replying or reacting to this message, or send !answer k7m2 <text>
 ```
 
-A merge card is headed `🔀 Ask m3qp · merge request · posted by …`. It shows `PR: <url>` and `Head: <sha>` under the title, and ends with "Merging is yours to do in GitHub; admind never merges. Reply to this message (or !answer m3qp `<text>`) when it is merged, or with what to change."
+A merge card is headed `🔀 Ask m3qp · merge request · posted by …`. It shows `PR: <url>` and `Head: <sha>` under the title, and ends with "Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it is merged, or reply with what to change."
 
 ```
 🛂 Approval ask p4xw · bead <bead> · posted by controller (a local process; unverified)
+👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>
 digest 1a2b3c4d5e6f
 <approve-bead's readout: the title, then "ask:" with the ask's fields, refs and linked beads, then the description>
-(shortened: 52 more lines. Reply !details to this message and read it before approving.)
 
-Decide by replying to this message:
-  !approve <bead> 1a2b3c4d5e6f
-  !deny <bead> <reason>
-!approve records your approval of <bead> in btq, as you, via Marmot. A reply without !approve or !deny decides nothing.
+Approving records your approval of <bead> in btq, as you, via Marmot. Any other reply is a note for the poster.
 ```
 
 - **The digest line** (`digest12`) is the first 12 hex digits of the bead's context digest, as `approve-bead` computes it. admind stores the full digest. A decision passes the full digest to `approve-bead` (`--expect-digest`), never the 12 typed characters. Linked beads' `pinned digest` lines are cut to 12 digits the same way.
 - **Refs.** Under each numbered ref is `link: <permalink>` pinned to the ref's commit, where the repo has a GitHub remote. Otherwise the card says `(no forge link; read it on the host with approve-bead --doc N)`. A link does not prove the commit is pushed: if it gives a 404, do not approve from the phone.
-- **The budget.** A card shows at most 40 lines and 3,500 characters of context. An approval card cuts at whole lines. A question or merge card counts its budget after redaction and cuts at 3,500 characters, then at 40 lines, so its last shown line can end mid-line. The first line and the closing lines are fixed framing and are never cut. When something is left out, the card says so, and `!details` has the rest.
-- **`!details` on a card.** Sent as a reply to any chunk of a card, or of its `!details`, `!details` (or `!details full`) returns the whole ask in lane 2, threaded to the command. For an approval, these are the chunks checked when the ask was posted. admind records which operator asked and how many chunks went out.
+- **An approval card is never shortened** (R8). Its whole readout, digest line and closing lines are the card, split into `chunk_chars` chunks, and any chunk is the card for a reaction or a reply. The readout is capped at 24,000 characters (`MAX_APPROVAL_CARD`); a longer one is refused at post time (above).
+- **The budget** (R15) applies to question and merge cards only: at most 40 lines and 3,500 characters of context, counted after redaction, cut at 3,500 characters, then at 40 lines, so the last shown line can end mid-line. The first line and the closing lines are fixed framing and are never cut. When something is left out, the card says so, and `!details` has the rest.
+- **`!details` on a card.** Sent as a reply to any chunk of a card, or of its `!details`, `!details` (or `!details full`) returns the whole ask in lane 2, threaded to the command. For an approval, these are the chunks checked when the ask was posted, the same as the card. admind records which operator asked and how many chunks went out. It is no longer a step before approving, except for an ask stored before the delta (below).
 - **What counts as a card.** Only messages admind itself queued as a card or as an ask's `!details`, and that were sent, count. A look-alike printed by the admin agent does not.
 
 ### Answering and deciding
 
 | You send | Effect |
 |---|---|
-| a reply to a question or merge card, or to its `!details` | Stored as the answer: "Answer recorded for ask `<id>`." (or "Added to ask `<id>`; it was already answered, and the poster sees both."). The status becomes `answered`. |
-| a reply to an approval card | Stored as a **note** the poster sees, never a decision: "Noted on ask `<id>`; this is not a decision. To decide, reply to the card with !approve `<bead>` `<digest12>` or !deny `<bead>` `<reason>`." A reply such as "yes" decides nothing. |
-| `!answer <id> <text>` | The same as a reply, from anywhere. `<text>` is everything after the ID, newlines included. Refused for an approval ask, with the two commands as a hint. |
+| a reply or a reaction to a question or merge card, or to its `!details` | Stored as the answer: "Answer recorded for ask `<id>`." (or "Added to ask `<id>`; it was already answered, and the poster sees both."). The status becomes `answered`. A reaction's answer is its emoji. |
+| a reaction to an approval card, or to its `!details` | 👍 (any skin tone), ✅, ❤️ or ♥️ approves; 👎 (any skin tone) or ❌ denies, with no reason. A trailing U+FE0F is ignored on every one. Any other emoji is ignored: no reply, audited `reaction-ignored` (R27). |
+| a reply to an approval card, or to its `!details` | Read by R28 (below): an approve, a deny, or otherwise a **note** the poster sees, never a decision: "Noted on ask `<id>`; this is not a decision. React 👍 to approve or 👎 to deny, or reply approve / deny `<reason>`." |
+| `!answer <id> <text>` | The same as a reply, from anywhere. `<text>` is everything after the ID, newlines included. Refused for an approval ask: "Ask `<id>` is an approval ask. To decide, react to its card or reply to it. Nothing recorded." |
 | `!asks` | First reconciles any ask stranded in `deciding` or `uncertain` (see "Outcomes"), then lists the active asks, one line each: `k7m2 question · 3h · <first 60 characters of the title>`. If none, "No active asks." |
-| `!approve <bead> <digest12>` | Approve, as a reply to the approval card or to its `!details`. Exactly two arguments; the digest is 12 hex digits in any case. |
-| `!deny <bead> <reason>` | Deny, as a reply to the card or its `!details`. The reason is everything after the bead, redacted, 1 to 1,000 characters, and is passed to `approve-bead` as the denial's note. |
+| `!approve` | Approve, as a reply to the approval card or to its `!details`. Arguments are optional: `!approve <bead> [<digest12>]`, and if given they must be the card's bead and digest (any case), or the command is refused (R7). |
+| `!deny [<bead> [<reason>]]` | Deny, as a reply to the card or its `!details`. With arguments, the first must be the card's bead; the rest is the reason. |
 | `!details` (as a reply to a card) | The ask's full text (above). |
 
-A reply to a card is never pasted to the admin agent. A reply that starts with `!` is a command. Every other message, replies to other messages included, behaves as in sections 4 and 5. An answer is refused if the ask is no longer `open` or `answered`, if it is empty, or if it would pass the limits below.
+**How a reply on an approval card is read** (R28). The text is trimmed, Unicode-casefolded, and stripped of trailing `.`, `!` and whitespace. It is an **approve** when the result is exactly one of `approve`, `approved`, `yes`, `y`, `ok`, `okay`, `lgtm`, or exactly one approve emoji. It is a **deny** when its first word, compared the same way and with one trailing `:`, `,`, `-` or `—` removed, is `deny`, `denied`, `reject`, `rejected` or a deny emoji, or the whole reply is `no` or `n`. The rest after the first word, trimmed, is the deny reason: redacted, at most 1,000 characters, possibly empty, and passed to `approve-bead` as the denial's note. A reason that opens with one of those marks on its own, followed by whitespace, loses the mark and the whitespace. So "rejected: too broad", "deny, too broad" and "deny - too broad" deny with the reason "too broad". An approve word takes no such mark. Anything else is a note. So "yes, but what about X?", "approve, but", "approve it later" and "no idea" are notes. The word and emoji lists live in one place, `heterodyne.admind.verbs`.
 
-**How `!approve` is checked**, in order. Each refusal leaves the ask as it was and records nothing:
+A reply or reaction to a card is never pasted to the admin agent, and neither is any reaction. A reply that starts with `!` is a command. Every other message, replies to other messages included, behaves as in sections 4 and 5. A reaction to anything that is not a card is ignored. An answer is refused if the ask is no longer `open` or `answered`, if it is empty, or if it would pass the limits below.
 
-1. It is a reply to a chunk of the card, or of its `!details`.
-2. The bead and the digest equal the card's (for `!deny`, the bead).
-3. The ask is `open`.
-4. Every chunk of the card is sent. If the card was shortened, **this operator** has asked for `!details` on it, and every chunk of that `!details` is sent. `!deny` needs neither (R8).
+**Reactions** (R27) go through the same guard and the same worker as messages, judged on the reacting member's key: one from another group, from a non-operator or while latched is dropped and audited; admind's own is ignored. Each reaction is claimed once, under its event ID (`r:<event id>` in the database), so a replay is dropped; a reaction without a 64-hex event ID is dropped (`malformed reaction id`). admind's reply to a reaction is threaded to the reacted message, never top-level. Removing a reaction changes nothing: a recorded decision is final, and an answer stays.
+
+**How a decision is checked**, in order, whether it is a reaction, a reply or a command. Each refusal leaves the ask as it was and records nothing:
+
+1. It is a reaction or reply to a chunk of the card, or of its `!details`.
+2. Any arguments of `!approve` or `!deny` are the card's bead (and, for `!approve`, digest).
+3. The ask is `open`. A second decider is told who decided first (R31).
+4. For an approve, every chunk of the card is sent. For an ask stored before the delta (`asks.truncated = 1`, a shortened card), **this operator** has also asked for `!details` on it, and every chunk of that `!details` is sent. A deny needs neither (R8).
 5. admind is still authorised for the message (not latched, group verified), and `approve_bead` is set.
 
-Then admind persists the attempt (`deciding`) and runs `approve-bead <bead> --json` (60 seconds). The decision stops before anything is written if the bead is busy, has changed since the card (`stale`), already holds a decision (`blocked`), is no longer open or no longer `kind:approval`, or the operator is not in its `approvers`. Right before it starts the decision run, admind checks authorisation once more (R11): this is the commit point. The run is `approve-bead <bead> --as=<name> --yes --expect-digest=<full digest> --via=marmot --via-ref=marmot:id:<12 hex>`, with `--deny --note=<reason>` for a denial, every value as one `--flag=value` argument. It has 90 seconds. Once started, the run is not cancelled by a latch, a lost subscription or a group change, because killing it mid-write would leave a partial write. The reply then waits in the outbox like every post of a latched admind, and the audit says `latched_during`. On every exit, admind kills the run's process group and reaps it before it settles anything.
+Then admind persists the attempt (`deciding`) and runs `approve-bead <bead> --json` (60 seconds). The decision stops before anything is written if the bead is busy, has changed since the card (`stale`), already holds a decision (`blocked`), is no longer open or no longer `kind:approval`, or the operator is not in its `approvers`. Right before it starts the decision run, admind checks authorisation once more (R11): this is the commit point. The run is `approve-bead <bead> --as=<name> --yes --expect-digest=<full digest> --via=marmot --via-ref=marmot:id:<12 hex>`, with `--deny --note=<reason>` for a denial, every value as one `--flag=value` argument. For a reaction, the `<12 hex>` is of the reaction's event ID. It has 90 seconds. Once started, the run is not cancelled by a latch, a lost subscription or a group change, because killing it mid-write would leave a partial write. The reply then waits in the outbox like every post of a latched admind, and the audit says `latched_during`. On every exit, admind kills the run's process group and reaps it before it settles anything.
 
 ### Outcomes and recovery
 
@@ -438,7 +451,9 @@ The outcome is **read back**, never parsed from the exit status (R12). Whatever 
 
 Exit 5 ("written, but the content changed during the write") and "written, but the gate rejects it" are settled the same way, from the read-back.
 
-**After a restart.** A decision interrupted by a stop leaves its ask `deciding`. At startup, before any loop runs, admind takes a snapshot of the asks in `deciding` or `uncertain` that have a persisted attempt. The read-back itself (`Admind.reconcile_asks`) then runs under the worker's lock as a task alongside the loops, since a busy bead can hold it for minutes. A notice goes to the card's thread. If nothing was recorded, the notice is "admind restarted while recording this decision; nothing was recorded. Decide again." Startup's generic recovery, which answers each interrupted message with "admind restarted", leaves the message of such an attempt to the read-back: the decision may have been recorded, and "resend it" would then be wrong. The read-back marks the message done, so its notice is the only one. `!asks` runs the same reconcile for anything left stranded. If nothing was recorded there, the notice is "admind could not finish settling the last decision on ask `<id>`; nothing was recorded. Decide again." If `approve_bead` has been removed since (for a rollback, say), there is nothing to read back with: the message is marked done and the thread gets the one "could not check whether this decision … was recorded" notice from the table below, never "decide again". The ask and its attempt are left as they are, so once `approve_bead` is set again the next start settles them from the read-back.
+**A changed bead gets a fresh card** (R29). If the decision read finds the bead's digest differs from the card's, or the read-back after the run finds nothing written (`--expect-digest` refused it) and a new digest, nothing is recorded and the ask becomes `stale`. In the same settlement, still in the worker and holding the post lock, admind posts a **fresh approval ask** for the bead's current content, with every check a post has (above), except that the stale ask's own attempt does not count as "another ask for it is `deciding`". The fresh ask keeps the stale one's `--from` and records `refreshed_from`. Closing the attempt, the fresh ask, its card and the reply are one transaction: a crash before it leaves the attempt `deciding` for the restart read-back (the ask is `open` again and the next decision refreshes), and after it they all exist. The decision is never carried over: decide the fresh card. If the fresh card cannot be posted, the reply says why. A bead whose stored `context_digest` pin no longer matches its content cannot be decided until its originator renews the pin and posts it again; admind never writes that pin. It still sends the updated content, threaded where the reply goes (the decision reply, or the chunk that was reacted to), headed "Updated content of `<bead>` (now `<digest12>`). It cannot be decided yet: its stored pin no longer matches, so its originator must renew the pin and post it again. Reactions and replies here decide nothing." Those chunks belong to the stale ask, so a reaction or reply on them gets "already stale". If the updated content would be redacted or is over the cap, the reply says so and nothing more is posted.
+
+**After a restart.** A decision interrupted by a stop, whether started by a reply or by a reaction, leaves its ask `deciding`. At startup, before any loop runs, admind takes a snapshot of the asks in `deciding` or `uncertain` that have a persisted attempt. The read-back itself (`Admind.reconcile_asks`) then runs under the worker's lock as a task alongside the loops, since a busy bead can hold it for minutes. A notice goes to the decision's thread: under the reply that started it, or under the chunk of the card or of `!details` that was reacted to. If nothing was recorded, the notice is "admind restarted while recording this decision; nothing was recorded. Decide again." Startup's generic recovery, which answers each interrupted message with "admind restarted", leaves the message of such an attempt to the read-back: the decision may have been recorded, and "resend it" would then be wrong. The read-back marks the message done, so its notice is the only one. `!asks` runs the same reconcile for anything left stranded. If nothing was recorded there, the notice is "admind could not finish settling the last decision on ask `<id>`; nothing was recorded. Decide again." If `approve_bead` has been removed since (for a rollback, say), there is nothing to read back with: the message is marked done and the thread gets the one "could not check whether this decision … was recorded" notice from the table below, never "decide again". The ask and its attempt are left as they are, so once `approve_bead` is set again the next start settles them from the read-back.
 
 **Replies in the thread** (fixed wording; `<line>` is the first line of `approve-bead`'s stderr, redacted, at most 300 characters):
 
@@ -451,11 +466,14 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 | nothing recorded | `Not recorded: "<line>". <bead> is unchanged; you can decide again.` (without the quote if there was no line) |
 | blocked | `<bead> holds a decision admind cannot confirm as yours ("<line>"). Nothing more will be done from Marmot. Resolve it on the host with approve-bead <bead>.` |
 | uncertain | `admind could not read <bead> back. No further decision is taken from Marmot until it can; check it on the host with approve-bead <bead>.` |
-| stale | `<bead> changed after it was shown (shown <digest12>, now <digest12>). Nothing recorded; ask <id> is stale and the poster must post it again.` |
-| not a reply to the card | `To decide, reply to the approval card itself (or its !details). Nothing recorded.` |
-| wrong bead or digest | `That does not match ask <id> (bead <bead>, digest <digest12>). Nothing recorded.` |
-| card not fully delivered | `Ask <id> has not been fully delivered yet. Wait for every part, then reply again. Nothing recorded.` |
-| needs `!details` | `Ask <id> was shortened. Reply !details to it and read it first. Nothing recorded.` |
+| stale, fresh card posted | `<bead> changed after this card was posted (shown <digest12>, now <digest12>). Nothing recorded. A fresh card follows: ask <new>.` |
+| stale, no fresh card | `<bead> changed after this card was posted (shown <digest12>, now <digest12>). Nothing recorded, and admind could not post a fresh card: <reason>.` For a pinned bead whose updated content cannot be shown, ` Its updated content is not shown: <reason>.` follows. |
+| stale, after the run | either stale reply, then a line `approve-bead said: "<line>"` |
+| `!approve`/`!deny` not on a card | `To decide, react to the approval card or reply to it. Nothing recorded.` |
+| arguments not the card's | `This card is for <bead>. React 👍 to approve or 👎 to deny, or reply approve / deny <reason>. Nothing recorded.` |
+| deny reason too long | `Not recorded: a deny reason is at most 1,000 characters.` |
+| card not fully delivered | `Ask <id> has not been fully delivered yet. Wait for every part, then react or reply again. Nothing recorded.` |
+| needs `!details` (an ask stored before the delta) | `Ask <id> was shortened. Reply !details to it and read it first. Nothing recorded.` |
 | not open | `Ask <id> is already <status>[ by <name>][; see ask <newer>]. Nothing recorded.` |
 | not an approver | `<name> is not a btq approver. Nothing recorded.` |
 | bead closed or not an approval | `<bead> is <status>, not open. Nothing recorded.` / `<bead> is not a kind:approval bead. Nothing recorded.` |
@@ -476,10 +494,11 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 | `ask.sock` reply | 1,048,576 bytes (1 MiB); the client allows 30 seconds for each request, and a `post` 160 seconds: 2 posts in flight × (a 60-second read + 5 seconds to reap it) + 30 |
 | title | 1 line, 1 to 200 characters |
 | body (question, merge) | at least 80 non-space characters, at most 16,000 characters |
-| card | 40 lines and 3,500 characters of context |
+| question or merge card | 40 lines and 3,500 characters of context |
+| approval card readout (`MAX_APPROVAL_CARD`) | 24,000 characters |
 | one answer or note | 16,000 characters |
 | answers and notes per ask | 50, and 64,000 characters in total |
-| `!deny` reason | 1,000 characters, after redaction |
+| deny reason | 1,000 characters, after redaction |
 | `approve-bead --json` read | 60 seconds; stdout capped at 8 MiB, stderr at 1 MiB |
 | decision run | 90 seconds; stdout and stderr capped at 1 MiB each |
 | reaping a child | 5 seconds |
@@ -488,17 +507,18 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 
 ### Audit records
 
-Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, never by text. Operator text is recorded whole in the `inbound` record, as for every message (section 7). A message ID appears only as `id:` plus 12 hex digits of its SHA-256.
+Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, never by text. Operator text is recorded whole in the `inbound` record, as for every message (section 7). A message ID appears only as `id:` plus 12 hex digits of its SHA-256; a reaction's key appears as `r:id:<12 hex>`, the hash being of its event ID.
 
 - A request on `ask.sock`: `op` (`post`, `get`, `list`, `cancel`), with `ask_kind`, `poster`, `bead` and the title and body lengths for a post.
-- `posted`: `ask_id`, `ask_kind`, `poster`, `pid`, `parts`, `truncated`; for an approval also `bead`, `digest12`, `details_parts` and `superseded` (the asks it replaced).
-- `refused`: a post or a decision refused before it started. `reason` is one of `limits`, `busy`, `not postable`, `redaction`, `not a card reply`, `no match`, `not open`, `not delivered`, `needs details`, `not configured`, `stale`, `decided`, `not approval`, `not an approver`, or a check's word (`unavailable`, `timed out`, `bad output`, `error`). A refusal after the attempt was persisted also has the ask's new `status`.
+- `posted`: `ask_id`, `ask_kind`, `poster`, `pid`, `parts`, `truncated`; for an approval also `bead`, `digest12`, `details_parts`, `superseded` (the asks it replaced) and `refreshed_from` (the stale ask a fresh card replaced, or null). A fresh card's `pid` is null.
+- `refused`: a post or a decision refused before it started. `reason` is one of `limits`, `busy`, `not postable`, `redaction`, `too long`, `not a card reply`, `no match` (arguments not the card's), `reason too long`, `not open`, `not delivered`, `needs details`, `not configured`, `stale`, `decided`, `not approval`, `not an approver`, or a check's word (`unavailable`, `timed out`, `bad output`, `error`). A refusal after the attempt was persisted also has the ask's new `status`. A `stale` one also has `fresh` (the fresh ask, or null), `refresh_refused` (why there is none, or null) and `updated_parts` (chunks of a pinned bead's updated content).
+- A reaction's `inbound` record has `what` `reaction`, `ref` (`id:<12 hex>`), `emoji` and `target`. Dropped reactions are `drop` records with `what` `reaction`.
 - `deciding`: an attempt is about to run (`message_id`, `ask_id`, `bead`, `decision`, `operator`).
-- `decided`: `outcome` (`recorded`, `untouched`, `blocked`, `uncertain`), `status`, `exit_status`, `gate_valid`, `latched_during`.
-- Also `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-unverified` (the notice above was sent because `approve_bead` is not set), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
+- `decided`: `outcome` (`recorded`, `untouched`, `blocked`, `uncertain`), `status`, `exit_status`, `gate_valid`, `latched_during`. An `untouched` read-back with a new digest is `reason` `stale`, with `fresh`, `refresh_refused` and `updated_parts` as above.
+- Also `reaction-ignored` (an emoji that decides nothing, on an approval card), `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-unverified` (the notice above was sent because `approve_bead` is not set), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
 
-**Matching a bead to the audit.** A bead decided from Marmot holds `via: marmot` and `via_ref: marmot:id:<12 hex>`. The `id:<12 hex>` part is exactly how the audit names the operator's command message. Search `audit.jsonl` for it to find that message's `inbound`, `deciding` and `decided` records:
+**Matching a bead to the audit.** A bead decided from Marmot holds `via: marmot` and `via_ref: marmot:id:<12 hex>`. The `id:<12 hex>` part is exactly how the audit names the operator's message, or a reaction's `ref` (R27). Search `audit.jsonl` for it to find that message's or reaction's `inbound`, `deciding` and `decided` records:
 
 ```sh
-grep -F '"id:<12 hex>"' <state>/admind/audit.jsonl
+grep -F 'id:<12 hex>' <state>/admind/audit.jsonl
 ```

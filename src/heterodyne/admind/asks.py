@@ -2,8 +2,9 @@
 
 Pure: request and reply structs for `ask.sock`, validation (R4, R16, R19), ask IDs (R3) and the rendering of
 cards, `!details` and `!asks` lines. Question and merge cards are redacted whole first, and their budget is
-counted on the redacted text (P5). An approval card is approve-bead's own readout, and is refused instead if
-redaction would change any of it (R21). The daemon does the I/O.
+counted on the redacted text (P5). An approval card is approve-bead's own readout, whole and never shortened
+(relay delta R8); it is refused instead if redaction would change any of it (R21), or if it is over
+MAX_APPROVAL_CARD. The daemon does the I/O.
 """
 
 import json
@@ -27,7 +28,10 @@ ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 ID_LENGTH = 4
 MAX_OPEN, MAX_PER_HOUR, MAX_IN_FLIGHT = 20, 30, 2
 MAX_ANSWER, MAX_ANSWERS, MAX_ANSWER_TOTAL = 16_000, 50, 64_000
-CARD_LINES, CARD_CHARS = 40, 3_500
+CARD_LINES, CARD_CHARS = 40, 3_500       # question and merge cards only (R15, revised)
+MAX_APPROVAL_CARD = 24_000      # an approval card's readout, in characters (R8, revised)
+REDACTED = "this bead holds text admind would redact; decide it at the terminal"
+TOO_LONG = "this bead is too long to decide from the phone; decide it at the terminal"
 MAX_TITLE, MIN_BODY_CHARS, MAX_BODY = 200, 80, 16_000
 ACTIVE = ASK_ACTIVE      # counted by MAX_OPEN; blocked is terminal (r2-4)
 TERMINAL = ("approved", "denied", "stale", "superseded", "cancelled", "blocked")
@@ -186,10 +190,11 @@ def head(row: AskRow) -> str:
 
 
 def footer(row: AskRow) -> str:
+    """The answering line (R30)."""
     if row.kind == "merge":
-        return (f"Merging is yours to do in GitHub; admind never merges. Reply to this message (or !answer "
-                f"{row.ask_id} <text>) when it is merged, or with what to change.")
-    return f"Answer: reply to this message, or send !answer {row.ask_id} <text>"
+        return ("Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it is merged, "
+                "or reply with what to change.")
+    return f"Answer by replying or reacting to this message, or send !answer {row.ask_id} <text>"
 
 
 def context(row: AskRow) -> str:
@@ -226,16 +231,22 @@ def full_text(row: AskRow) -> str:
     return redact(f"{head(row)}\n{context(row).rstrip(chr(10))}\n\n{footer(row)}")
 
 
-# --- approval cards (spec §6, R8, R21, R25) ------------------------------------------------------
+# --- approval cards (spec §6, R8, R21, R25; delta R8, R30) ---------------------------------------
 _REF_LINE = re.compile(r"^(\s*)- ref .*  \[--doc ([1-9][0-9]*)\]$")
 
 
 @dataclass(frozen=True)
 class ApprovalCard:
-    """The exact chunks to queue for the card and for its `!details`, each already checked (R21)."""
+    """The exact chunks to queue for the card and for its `!details`, each already checked (R21). The card
+    is never shortened, so the two are the same chunks."""
     card_chunks: list[str]
     details_chunks: list[str]
-    truncated: bool
+
+
+UPDATED = ("Updated content of {bead} (now {digest12}). It cannot be decided yet: its stored pin no longer "
+           "matches, so its originator must renew the pin and post it again. Reactions and replies here "
+           "decide nothing.")
+APPROVAL_ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
 
 
 def approval_head(row: AskRow) -> str:
@@ -243,12 +254,10 @@ def approval_head(row: AskRow) -> str:
             "(a local process; unverified)")
 
 
-def decision_lines(bead: str, digest12: str) -> list[str]:
-    """The fixed framing after the budgeted context; never cut."""
-    return ["", "Decide by replying to this message:", f"  !approve {bead} {digest12}",
-            f"  !deny {bead} <reason>",
-            f"!approve records your approval of {bead} in btq, as you, via Marmot. A reply without !approve "
-            "or !deny decides nothing."]
+def decision_lines(bead: str) -> list[str]:
+    """The fixed closing lines (R30)."""
+    return ["", f"Approving records your approval of {bead} in btq, as you, via Marmot. Any other reply is a "
+            "note for the poster."]
 
 
 def _linked(lines: list[str], links: dict[int, str]) -> list[str]:
@@ -294,33 +303,35 @@ def _checked(text: str, chunk_chars: int) -> list[str] | None:
     return parts if all(redact(p) == p for p in parts) else None
 
 
-def approval_card(row: AskRow, r: Readout, chunk_chars: int) -> ApprovalCard | None:
-    """The card and its `!details` for the readout `r`, or None if either fails R21. The context is the
-    title, the ask (linked beads and refs included) and the description, as approve-bead renders them; the
-    card's budget (CARD_LINES lines, CARD_CHARS characters) is spent in that order on whole lines."""
+def approval_card(row: AskRow, r: Readout, chunk_chars: int) -> ApprovalCard | str:
+    """The card for the readout `r`, whole, or why it is refused: REDACTED if it fails R21, then TOO_LONG if
+    the readout is over MAX_APPROVAL_CARD characters (R8). The readout is the title, the ask (linked beads
+    and refs included) and the description, as approve-bead renders them."""
     if row.bead is None or r.digest is None:
-        return None
-    digest12 = r.digest[:12]
+        return REDACTED         # not reached: postable() refuses a readout without a digest first
+    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}"]
+    card = _whole(top, r, decision_lines(row.bead), chunk_chars)
+    return card if isinstance(card, str) else ApprovalCard(card, card)
+
+
+def updated_content(bead: str, r: Readout, chunk_chars: int) -> list[str] | str:
+    """A pinned bead's changed readout, built and checked exactly as a card but marked undecidable (R29),
+    as its chunks, or why it is refused (REDACTED or TOO_LONG)."""
+    return _whole([UPDATED.format(bead=bead, digest12=(r.digest or "none")[:12])], r, [], chunk_chars)
+
+
+def _whole(top: list[str], r: Readout, bottom: list[str], chunk_chars: int) -> list[str] | str:
+    """`top`, the readout and `bottom` as checked chunks: REDACTED if it fails R21, then TOO_LONG if the
+    readout is over MAX_APPROVAL_CARD characters (R8)."""
     links = {link.doc: link.url for link in r.links}
     ask_lines = _linked(r.readout["ask"], links)
     context = [*r.readout["title"], *(["ask:", *ask_lines] if ask_lines else []), *r.readout["description"]]
-    shown: list[str] = []
-    chars = 0
-    for line in context:
-        if len(shown) >= CARD_LINES or chars + len(line) + 1 > CARD_CHARS:
-            break
-        shown.append(line)
-        chars += len(line) + 1
-    truncated = len(shown) < len(context)
-    if truncated:
-        shown.append(f"(shortened: {len(context) - len(shown)} more lines. Reply !details to this message "
-                     "and read it before approving.)")
-    top = [approval_head(row), f"digest {digest12}"]
-    card = _checked("\n".join([*top, *shown, *decision_lines(row.bead, digest12)]), chunk_chars)
-    details = _checked("\n".join([*top, *context, *decision_lines(row.bead, digest12)]), chunk_chars)
-    if card is None or details is None:
-        return None
-    return ApprovalCard(card, details, truncated)
+    parts = _checked("\n".join([*top, *context, *bottom]), chunk_chars)
+    if parts is None:
+        return REDACTED
+    if len("\n".join(context)) > MAX_APPROVAL_CARD:
+        return TOO_LONG
+    return parts
 
 
 def approval_body(r: Readout, card: ApprovalCard) -> str:

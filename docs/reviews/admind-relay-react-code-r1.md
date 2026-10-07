@@ -1,0 +1,11 @@
+1. **[BLOCKING] Reconciliation ignores the persisted reply target.** At [daemon.py:1202](src/heterodyne/admind/daemon.py:1202) and [daemon.py:1218](src/heterodyne/admind/daemon.py:1218), reconciliation calls `ask_notice()`, which always selects the first card chunk. A reaction on a later card or details chunk therefore receives its recovery notice on the wrong message, violating the amended contract’s threading requirement. I reproduced this using the reviewed method bodies: the stored target was a details chunk, but the notice targeted the first card chunk. **Fix:** resolve `reply_target(attempt)` for these notices within the settlement transaction. Add restart and `!asks` tests using non-first card and details targets, including the missing-`approve_bead` path; assert the exact `reply_to`.
+
+2. **[NON-BLOCKING] Refresh rollback coverage does not assert that fresh card chunks disappeared.** [test_admind_reactions.py:1005](tests/test_admind_reactions.py:1005) checks ask state and the decision reply after injected failures, but does not inspect freshly queued card chunks. An orphan card could escape these assertions. **Fix:** snapshot the outbox before refresh and assert that every injected failure leaves no fresh card, updated-content chunk, or reply.
+
+3. **[NON-BLOCKING] Updated-content isolation coverage exercises only the first chunk.** [test_admind_reactions.py:898](tests/test_admind_reactions.py:898) tests approval reactions and textual approval only against chunk zero. The recognizer appears correct, but the reviewed range lacks coverage for later updated-content chunks and denial or ordinary-note replies. **Fix:** exercise every emitted chunk with approval, denial, and a plain note; assert no decision subprocess invocation and no admin-agent dispatch.
+
+The nine reported deviations are safe or conservative under the amended contract. I found no additional actor, approver, digest, latch, redaction, replay, migration, CAS, or first-decision-wins defect. Denial’s delivery exemption is explicitly permitted by revised R8.
+
+The requested pytest run could not start because the read-only sandbox rejected creation of `/tmp/uvc-review`. References above use `cca8cd4`; later worktree changes were excluded.
+
+REVISE
