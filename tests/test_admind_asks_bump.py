@@ -954,8 +954,12 @@ def test_accepted_activity_on_an_approval_ask_moves_its_clock(
         await reacted(h, "🎉", first)
         assert activity(h.store, ask_id) == at                              # an accepted, ignored reaction
         at = c.advance(1)
-        await bumped(h, ask_id)
+        reminder = await bumped(h, ask_id)
         assert activity(h.store, ask_id) == at                              # a manual bump, when queued
+        c.advance(1)
+        assert await say(h, "approve", reminder) == hint(ask_id)
+        assert (await reacted(h, "👍", reminder))[1] == hint(ask_id)
+        assert activity(h.store, ask_id) == at                              # a hint is not card activity
         at = c.advance(1)
         _, repeat = await repeated_card(h, ask_id)
         assert activity(h.store, ask_id) == at                              # a repeat, when queued
