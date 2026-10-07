@@ -491,9 +491,14 @@ class Admind:
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
         # Received (held, never pasted) or executing (a command that may not have run to the end): each
-        # is answered once, and the state change and its notice commit together.
+        # is answered once, and the state change and its notice commit together. The message of a persisted
+        # decision attempt is left to the ask reconcile (R26), which reads the bead back first: it may have
+        # been recorded, and "resend it" would then be wrong. The reconcile marks it done with its notice.
+        attempts = {attempt for _, attempt, _ in self.store.recovery_snapshot()}
         for status in ("received", "executing"):
             for mid in self.store.inbound_with_status(status):
+                if mid in attempts:
+                    continue
                 with self.store.transaction():
                     self.store.set_inbound(mid, "dropped")
                     self.post(f"restarted:{mid}", RESTARTED_NOTICE, mid)

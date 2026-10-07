@@ -1108,9 +1108,13 @@ def test_cancel_during_preflight_left_for_reconcile(tmp_path: Path) -> None:
         ask_id, mid = ids
         await wait_until(lambda: ask_status(h, ask_id) == "open")
         assert attempts(h, ask_id)[0][-1] == "untouched" and current(h, ask_id) is None
-        assert row_text(h, f"restarted:{mid}") == RESTARTED_NOTICE
-        assert h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ?",
-                                  (f"asknote:{ask_id}:reconciled:%",)).fetchone()[0] == RECONCILE_RESTARTED
+        assert row_text(h, f"restarted:{mid}") is None          # the reconcile's notice only, not two
+        assert h.store.inbound_status(mid) == "done"
+        notes = h.store.db.execute("SELECT text FROM outbox WHERE key LIKE ?",
+                                   (f"asknote:{ask_id}:reconciled:%",))
+        assert [r[0] for r in notes] == [RECONCILE_RESTARTED]
+        assert h.store.db.execute("SELECT COUNT(*) FROM outbox WHERE text = ?",
+                                  (RESTARTED_NOTICE,)).fetchone()[0] == 0
         assert decisions(h) == []
     edit(tmp_path, read=None)
     go(tmp_path, restarted, fresh=False)
@@ -1566,7 +1570,10 @@ def test_restart_while_deciding(tmp_path: Path, via_ref: str | None, status: str
 
     async def scenario(h: Harness) -> None:
         await wait_until(lambda: ask_status(h, "d222") == status)
-        assert row_text(h, f"restarted:{mid}") == RESTARTED_NOTICE
+        assert row_text(h, f"restarted:{mid}") is None          # recorded or blocked: no "resend it"
+        assert h.store.inbound_status(mid) == "done"
+        assert h.store.db.execute("SELECT COUNT(*) FROM outbox WHERE text = ?",
+                                  (RESTARTED_NOTICE,)).fetchone()[0] == 0
         note = h.store.db.execute("SELECT text, reply_to FROM outbox "
                                   "WHERE key LIKE 'asknote:d222:reconciled:%'").fetchone()
         assert note is not None and note[1] is None
