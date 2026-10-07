@@ -40,6 +40,7 @@ from test_admind_reactions import OLD_TABLES, columns, outbox_count, react, reac
 from test_admind_settings import BASE_CONFIG, write
 
 from heterodyne.admind import asks, chunk, commands
+from heterodyne.admind import daemon as daemon_mod
 from heterodyne.admind import store as store_mod
 from heterodyne.admind.approvals import Attempt
 from heterodyne.admind.audit import ref_id
@@ -1010,3 +1011,220 @@ def test_a_refused_approve_moves_the_clock(tmp_path: Path, monkeypatch: pytest.M
         assert activity(h.store, ask_id) == at
     go(tmp_path, scenario, {BEAD: bead(readout={**LINES, **LONG})}, chunk_chars=500)
 
+
+# --- B14: automatic bumps ------------------------------------------------------------------------------
+def auto_rows(h: Harness, ask_id: str) -> list[tuple[str, str | None, str]]:
+    return rows(h, f"asknote:{ask_id}:autobump:%")
+
+
+async def check(h: Harness) -> None:
+    """One automatic-bump check, as the loop runs it."""
+    async with h.daemon.work_lock:
+        h.daemon.autobump()
+
+
+@needs_tmux
+def test_an_open_ask_is_bumped_once_it_has_been_quiet_for_ask_bump_hours(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        await joined(h)
+        q = await posted(h, question())
+        first = await card_sent(h, q)
+        others = [await posted(h, question(t)) for t in ("Which host?", "Which port?", "Which user?")]
+        for other in others:
+            await card_sent(h, other)
+        assert (await say(h, f"!answer {others[0]} the first one", None)).startswith("Answer")
+        set_status(h, others[1], "deciding")
+        set_status(h, others[2], "uncertain")
+        c.advance(12 - 1 / 60)
+        await check(h)
+        assert auto_rows(h, q) == []
+        at = c.advance(1 / 60)
+        await check(h)
+        assert [(k, r) for k, r, _ in auto_rows(h, q)] == [(f"asknote:{q}:autobump:1:0", first)]
+        assert auto_rows(h, q)[0][2] == (f"Still outstanding (automatic reminder, every 12 h): ask {q} · "
+                                         f"question · 12h · Which relay?.\n{ANSWER_TAIL}")
+        assert activity(h.store, q) == at
+        for other in others:
+            assert auto_rows(h, other) == []
+        assert audited(h, kind="ask", action="autobump", bumped=[q], skipped=[])
+        await check(h)                                                      # the clock moved: not due
+        assert len(auto_rows(h, q)) == 1
+        await wait_until(lambda: h.store.bump_for_message(sent_mid(h, f"asknote:{q}:autobump:1:0")) == q)
+        c.advance(6)
+        assert (await say(h, "or the second", first)).startswith("Answer")    # activity resets it ...
+        set_status(h, q, "open")
+        c.advance(11)
+        await check(h)
+        assert len(auto_rows(h, q)) == 1
+        c.advance(1)                                                         # ... to 12 h after the reply
+        await check(h)
+        assert [k for k, _, _ in auto_rows(h, q)] == [f"asknote:{q}:autobump:{n}:0" for n in (1, 2)]
+        assert {r for _, r, _ in auto_rows(h, q)} == {first}                 # never to a reminder (B3)
+        assert outbox_count(h, "cmd:%") == 0                                 # no summary is posted
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_ask_bump_hours_zero_disables_automatic_bumps(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        c.advance(24 * 30)
+        await check(h)
+        assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == asks.stamp(START)
+    go(tmp_path, scenario, ask_bump_hours=0)
+
+
+@needs_tmux
+def test_a_latch_or_an_unverified_group_defers_without_moving_the_clock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        c.advance(13)
+        async with h.daemon.work_lock:
+            h.daemon.group_ok = False
+            h.daemon.autobump()
+            h.daemon.group_ok = True
+        assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == asks.stamp(START)
+        assert not audited(h, kind="ask", action="autobump")
+        h.daemon.latch("test latch")
+        await check(h)
+        assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == asks.stamp(START)
+        assert not audited(h, kind="ask", action="autobump")
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_latch_after_the_enqueue_is_left_to_the_outbound_gate(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        c.advance(12)
+        async with h.daemon.work_lock:
+            h.daemon.autobump()
+            h.daemon.latch("test latch")                # before the outbox loop can see the row
+        key = f"asknote:{ask_id}:autobump:1:0"
+        assert [k for k, _, _ in auto_rows(h, ask_id)] == [key]
+        await stays(lambda: sent_mid(h, key) is None)
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_crash_before_the_commit_leaves_nothing_then_the_next_check_bumps_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        c.advance(12)
+        touch = h.store.touch_ask
+
+        def crash(ask: str, at: str) -> None:
+            raise RuntimeError("store failure")
+        h.store.touch_ask = crash  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await check(h)
+        assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == asks.stamp(START)
+        assert h.store.get("autobump_seq") is None
+        h.store.touch_ask = touch  # type: ignore[method-assign]
+        await check(h)
+        await check(h)
+        assert [(k, r) for k, r, _ in auto_rows(h, ask_id)] == [(f"asknote:{ask_id}:autobump:1:0", first)]
+    go(tmp_path, scenario)
+
+
+@needs_tmux
+def test_a_pending_reminder_blocks_until_it_fails_and_a_restart_keeps_that(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = clock(monkeypatch)
+    ids: list[str] = []
+
+    async def first_run(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        ids.append(ask_id)
+        gate = asyncio.Event()
+        h.fake.send_gate = gate                         # nothing more is sent
+        mid = await send(h, "!asks bump", None)
+        await settled(h, mid)
+        assert len(bump_rows(h, ask_id, mid)) == 1      # pending behind the gate
+        at = asks.stamp(c.at)
+        c.advance(13)
+        await check(h)
+        assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == at
+        assert audited(h, kind="ask", action="autobump", bumped=[],
+                       skipped=[{"ask_id": ask_id, "why": "pending delivery"}])
+        gate.set()
+    go(tmp_path, first_run)
+
+    async def restarted(h: Harness) -> None:
+        h.seq += 1000
+        ask_id = ids[0]
+        h.store.db.execute("UPDATE outbox SET status = 'failed' WHERE key LIKE ?",
+                           (f"asknote:{ask_id}:bump:%",))
+        await check(h)
+        assert [k for k, _, _ in auto_rows(h, ask_id)] == [f"asknote:{ask_id}:autobump:1:0"]
+    go(tmp_path, restarted, fresh=False)
+
+    async def again(h: Harness) -> None:
+        await check(h)
+        assert len(auto_rows(h, ids[0])) == 1
+    go(tmp_path, again, fresh=False)
+
+
+@needs_tmux
+def test_after_a_long_outage_each_ask_is_bumped_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop itself, after a restart with clocks 30 h old: one bump per ask, then none."""
+    c = clock(monkeypatch)
+    ids: list[str] = []
+
+    async def first_run(h: Harness) -> None:
+        await joined(h)
+        for title in ("Which relay?", "Which host?"):
+            ids.append(await posted(h, question(title)))
+            await card_sent(h, ids[-1])
+    go(tmp_path, first_run, ask_bump_hours=48)
+
+    c.advance(30)
+    monkeypatch.setattr(daemon_mod, "AUTOBUMP_SECONDS", 0.01)
+
+    async def restarted(h: Harness) -> None:
+        for ask_id in ids:
+            await wait_until(lambda a=ask_id: len(auto_rows(h, a)) == 1)
+        await stays(lambda: all(len(auto_rows(h, a)) == 1 for a in ids))
+    go(tmp_path, restarted, fresh=False)
+
+    async def again(h: Harness) -> None:
+        await stays(lambda: all(len(auto_rows(h, a)) == 1 for a in ids))
+    go(tmp_path, again, fresh=False)
+
+
+@needs_tmux
+@pytest.mark.parametrize("how", ["approve", "!approve", "👍", "👎"])
+def test_b6_applies_to_an_automatic_bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    c = clock(monkeypatch)
+
+    async def scenario(h: Harness) -> None:
+        ask_id, _ = await card(h)
+        c.advance(12)
+        await check(h)
+        key = f"asknote:{ask_id}:autobump:1:0"
+        await wait_until(lambda: sent_mid(h, key) is not None)
+        reminder = sent_mid(h, key)
+        assert reminder is not None
+        await wait_until(lambda: h.store.bump_for_message(reminder) == ask_id)    # marked sent
+        assert h.store.ask_for_message(reminder) is None
+        if how.startswith(("a", "!")):
+            assert await say(h, how, reminder) == hint(ask_id)
+        else:
+            assert (await reacted(h, how, reminder))[1] == hint(ask_id)
+        untouched(h, ask_id, how)
+    go(tmp_path, scenario)

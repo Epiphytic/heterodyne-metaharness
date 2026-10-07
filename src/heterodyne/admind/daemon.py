@@ -23,7 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +153,7 @@ EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled file
 OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20)
 SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
 DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
+AUTOBUMP_SECONDS = 300.0        # how often automatic bumps are checked (asks bump B14)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 NO_TOOL_CALLS = "(tool calls are not available for this turn)"
 DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
@@ -355,6 +356,7 @@ class Admind:
         self.summary_poll = SUMMARY_POLL                    # replaced in tests
         self.offset_timeout = OFFSET_SECONDS                # replaced in tests
         self.batch_seconds = backstop.BATCH_SECONDS         # replaced in tests
+        self.autobump_seconds = AUTOBUMP_SECONDS            # replaced in tests
         self.batch_poll = 1.0                               # replaced in tests
         self.wallclock: Callable[[], float] = time.time     # replaced in tests; batches outlive a restart
         self.group_ok = False
@@ -593,7 +595,7 @@ class Admind:
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
                                    ("agent", self.agent_loop), ("summaries", self.summary_loop),
-                                   ("batches", self.batch_loop)):
+                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
@@ -914,6 +916,43 @@ class Admind:
             self.finish(mid, "done", asks.remind_summary(verb, done, skipped), "cmd")
         self.audit.write("command", message_id=mid, command="asks", sub=sub, bumped=done,
                          skipped=[{"ask_id": ask_id, "why": why} for ask_id, why in skipped])
+
+    async def autobump_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.autobump_seconds)
+            async with self.work_lock:
+                self.autobump()
+
+    def autobump(self) -> None:
+        """One automatic-bump check (B14), under `work_lock` and with no await, so the gate, each ask's
+        eligibility, its enqueue and its clock move cannot interleave with anything. Every `open` ask quiet
+        for `ask_bump_hours` is bumped once, unless an earlier reminder or repeat of it is still pending.
+        The gate closed defers the whole check and moves no clock."""
+        hours = self.s.ask_bump_hours
+        if hours == 0 or not self.may_post():
+            return
+        at = asks.now()
+        due = at - timedelta(hours=hours)
+        bumped: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        for row in self.store.asks_with_status("open"):
+            if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
+                continue
+            if self.store.reminder_pending(row.ask_id):
+                skipped.append((row.ask_id, "pending delivery"))
+                continue
+            target = self.store.bump_target(row.ask_id)
+            if target is None:
+                skipped.append((row.ask_id, "card not delivered"))
+                continue
+            with self.store.transaction():
+                seq = self.next_seq("autobump_seq")
+                self.bump(f"asknote:{row.ask_id}:autobump:{seq}", asks.reminder(row, at, hours), target)
+                self.store.touch_ask(row.ask_id, asks.stamp(at))
+            bumped.append(row.ask_id)
+        if bumped or skipped:
+            self.audit.write("ask", action="autobump", bumped=bumped,
+                             skipped=[{"ask_id": ask_id, "why": why} for ask_id, why in skipped])
 
     def bump(self, key: str, text: str, target: str) -> None:
         """One reminder, redacted whole and then split, every chunk threaded to `target` (B3, B4, B8)."""
