@@ -1,6 +1,7 @@
 """Ingress decisions for admind (ADR 0001 §3.4, §8). Pure functions; the daemon acts on the verdicts.
 
-- Only MLS-authenticated messages from an operator's exact key, in admind's own group, are processed.
+- Only MLS-authenticated messages from an operator's exact key, in admind's own group, are processed. A
+  reaction is judged by the same rules on its actor (relay delta R27).
 - Any membership or admin change, or a member count other than the trusted expected count, latches
   admind (plan decision D4): `group_info` reports a count, not a member list, so a swap that keeps the
   count is visible only as an event.
@@ -10,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from heterodyne.marmot.control import GroupStateChanged, InboundMessage
+from heterodyne.marmot.control import GroupStateChanged, InboundMessage, ReactionAdded
 
 MEMBERSHIP_CHANGES = frozenset({"member_added", "member_removed", "member_left", "admin_added",
                                 "admin_removed"})
@@ -23,11 +24,12 @@ class Verdict:
     operator: str | None = None
 
 
-def judge_message(ev: InboundMessage, *, group_id: str, operators: Mapping[str, str],
+def judge_message(ev: InboundMessage | ReactionAdded, *, group_id: str, operators: Mapping[str, str],
                   latched: bool) -> Verdict:
+    """A message is judged on its sender, a reaction on its actor, by the same rules (R27)."""
     if ev.group_id_hex.lower() != group_id:
         return Verdict("drop", "message from another group")
-    sender = ev.message.sender
+    sender = ev.message.sender if isinstance(ev, InboundMessage) else ev.actor
     if sender.is_self:
         return Verdict("ignore", "admind's own message")
     name = operators.get(sender.account_id_hex.lower())

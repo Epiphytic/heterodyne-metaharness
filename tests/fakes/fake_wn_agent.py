@@ -73,6 +73,20 @@ class FakeWnAgent:
             event["reply_to"] = {"message_id_hex": reply_to, "availability": "available"}
         return event
 
+    def reaction_event(self, emoji: str, actor: str, event_id: str | None, target: str, *,
+                       is_self: bool = False, group: str | None = None) -> dict[str, Any]:
+        """A `reaction_added` frame in the shape spike S4 captured. `event_id=None` leaves the ID out."""
+        event: dict[str, Any] = {
+            "type": "reaction_added", "account_id_hex": ACCOUNT, "group_id_hex": group or self.group_id,
+            "target_message_id_hex": target,
+            "actor": {"account_id_hex": actor, "display_name": None, "is_self": is_self},
+            "emoji": emoji, "recorded_at": 1790738646,
+            "target": {"message_id_hex": target, "availability": "available"},
+        }
+        if event_id is not None:
+            event["event_id_hex"] = event_id
+        return event
+
     async def _reply(self, writer: asyncio.StreamWriter, request_id: str, body: dict[str, Any]) -> None:
         frame = {"marmot_agent_control": PROTOCOL, "id": request_id, **body}
         writer.write(json.dumps(frame).encode() + b"\n")

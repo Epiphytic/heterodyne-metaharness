@@ -9,12 +9,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from heterodyne.admind.approvals import BEAD_ID
 from heterodyne.admind.redact import redact
 from heterodyne.services import ServiceManager, shown
 
 HELP = ("admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps · !details [full] · !asks · "
-        "!answer <id> <text> · !approve <bead> <digest> · !deny <bead> <reason>")
+        "!answer <id> <text> · !approve · !deny (as a reply to an approval card)")
 FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
 TAIL_DEFAULT = 40
 TAIL_MAX = 500
@@ -22,7 +21,6 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 CommandName = Literal["new", "interrupt", "tail", "restart", "ps", "details", "asks", "answer", "approve",
                       "deny"]
-DIGEST12 = re.compile(r"[0-9a-fA-F]{12}")
 MAX_REASON = 1000
 
 
@@ -78,11 +76,9 @@ def parse(text: str) -> Command | None:
         if len(args) != 1:
             raise CommandError("Usage: !restart <unit>")
         return Command("restart", arg=args[0])
-    if name == "approve":
-        if len(args) != 2 or not BEAD_ID.fullmatch(args[0]) or not DIGEST12.fullmatch(args[1]):
-            raise CommandError("Usage: !approve <bead> <digest>, with the 12 hex digits the card shows, as a "
-                               "reply to the card.")
-        return Command("approve", arg=args[0], rest=args[1].lower())
+    if name == "approve":       # the arguments are optional, and checked against the card (relay delta R7)
+        return Command("approve", arg=args[0] if args else None,
+                       rest=" ".join(args[1:]).lower() if len(args) > 1 else None)
     if name == "details":
         if args not in ([], ["full"]):
             raise CommandError(
@@ -101,15 +97,13 @@ def _answer(text: str) -> Command:
 
 
 def _deny(text: str) -> Command:
-    """`!deny <bead> <reason>`: the reason is everything after the bead, redacted, 1 to MAX_REASON
-    characters (R19)."""
+    """`!deny [<bead> [<reason>]]`: the bead is optional and checked against the card (relay delta R7); the
+    reason is everything after it, redacted, at most MAX_REASON characters, and may be empty (R19, R28)."""
     parts = text[1:].split(maxsplit=2)
     reason = redact(parts[2].strip()) if len(parts) == 3 else ""
-    if len(parts) < 2 or not BEAD_ID.fullmatch(parts[1]) or not reason:
-        raise CommandError("Usage: !deny <bead> <reason>, as a reply to the card.")
     if len(reason) > MAX_REASON:
         raise CommandError(f"!deny: the reason is at most {MAX_REASON:,} characters.")
-    return Command("deny", arg=parts[1], rest=reason)
+    return Command("deny", arg=parts[1] if len(parts) > 1 else None, rest=reason or None)
 
 
 class AgentControl(Protocol):
