@@ -513,6 +513,28 @@ class Operator:
             self.wait_message(lambda e, mid=mid: e.message_id == mid, f"ask {ask_id}'s card", timeout)
         return ids
 
+    def wait_details(self, ask_id: str, request: str | None = None, timeout: float = WAIT) -> list[str]:
+        """The message IDs of admind's `!details` reply for ask `ask_id`, in order, once this operator has
+        received every part. `request` is the `!details` message's ID (as returned by `reply`); without
+        it, the most recent `!details` reply for the ask is used."""
+        ids: list[str] = wait_for(lambda: self.stack.details_message_ids(ask_id, request), timeout,
+                                  f"ask {ask_id}'s !details to be sent")
+        for mid in ids:
+            self.wait_message(lambda e, mid=mid: e.message_id == mid, f"ask {ask_id}'s !details", timeout)
+        return ids
+
+    def reactions(self, target: str | None = None) -> list[Seen]:
+        """Every reaction seen so far (on message `target`, if given), oldest first. `Seen.message_id` is
+        the reaction's `event_id_hex`; `Seen.raw` is its frame."""
+        with self.cond:
+            return [e for e in self.events if e.kind == "reaction" and target in (None, e.target)]
+
+    def raw_frames(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """Every event frame this operator's subscription received, raw, in order (of type `kind`, such as
+        "reaction_added", if given). Frames of other groups and unknown types are included."""
+        with self.cond:
+            return [f for f in self.frames if kind in (None, f.get("type"))]
+
     def stop(self) -> None:
         self.stopping.set()
 
@@ -932,6 +954,26 @@ relays = [{relays}]
                               (f"ask:{ask_id}:%",)).fetchall()
         parts = sorted(((int(str(k).rsplit(":", 1)[1]), str(m).lower()) for k, m in rows if m))
         return [m for _, m in parts] if len(parts) == int(row[0]) else None
+
+    def details_message_ids(self, ask_id: str, request: str | None = None) -> list[str] | None:
+        """The sent message IDs of a `!details` reply for ask `ask_id` (outbox `askd:<id>:<request>:<i>`), in
+        order, once every part is sent: the reply to `request`, or else the most recently queued one."""
+        with contextlib.closing(self._db()) as db:
+            rows = db.execute("SELECT message_id, parts FROM ask_details WHERE ask_id = ?",
+                              (ask_id,)).fetchall()
+            wanted = [(str(m).lower(), int(n)) for m, n in rows
+                      if request is None or str(m).lower() == request]
+            best: tuple[int, list[str]] | None = None
+            for req, parts in wanted:
+                sent = db.execute("SELECT key, message_id, seq FROM outbox "
+                                  "WHERE key LIKE ? AND status = 'sent'",
+                                  (f"askd:{ask_id}:{req}:%",)).fetchall()
+                ordered = sorted((int(str(k).rsplit(":", 1)[1]), str(m).lower(), int(q))
+                                 for k, m, q in sent if m)
+                last = max((q for *_, q in ordered), default=-1)
+                if len(ordered) == parts and (best is None or last > best[0]):
+                    best = (last, [m for _, m, _ in ordered])
+        return None if best is None else best[1]
 
     def audit_text(self) -> str:
         return (self.admind_state / "audit.jsonl").read_text()

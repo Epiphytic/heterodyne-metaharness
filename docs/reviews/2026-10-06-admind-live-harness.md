@@ -30,7 +30,7 @@ HZ_LIVE=1 uv run pytest tests/live -v
 | `tests/live/harness.py` | `Stack` (the isolated stack and its API), `Operator` (a throwaway wn-agent identity), `Procs` (process tracking and teardown), `guard`/`self_check`, `send_reaction`, `mask`, `reap_stale_runs`. |
 | `tests/live/conftest.py` | The HZ_LIVE skip hook, the session `stack` fixture (try/finally, atexit backup, SIGTERM → KeyboardInterrupt), and the timings summary. |
 | `tests/live/stub_admind.py` | The `admind run` entry point with the two stubs. |
-| `tests/live/test_live_relay.py` | The seven live scenarios. |
+| `tests/live/test_live_relay.py` | The eight live scenarios. |
 | `tests/live/test_isolation_offline.py` | The offline hostile-override tests. They run in the normal suite. |
 
 ## What it isolates, and how
@@ -165,7 +165,8 @@ Setup steps (s):
 
 - Three full live runs with two operators passed 6 of 6.
 - After the design-review changes, a run with three operators passed 28 of 28 (22 offline and 6 live).
-  The final run, with the reaction scenario added, passed 7 of 7 live.
+  With the reaction scenario added, a run passed 7 of 7 live.
+- The final run passed 30 of 30 (22 offline and 8 live) in 52.8 s, with setup at 28.4 s.
 - The first ever run failed only on an expected-string bug in the test, since fixed: the docs render the ask
   ID in backticks, but the message text has no backticks.
 
@@ -176,6 +177,7 @@ Setup steps (s):
 | `test_asks_lists_and_cancel_notice` | `!asks` lists `<id> question · … · <title>`. `admind ask cancel` posts "Ask … was cancelled by its poster." as a reply to the card, and the status becomes `cancelled`. | pass | 5.3 |
 | `test_approve_by_reply` | On an isolated `kind:approval` bead with no gaps, `!approve <bead> <digest12>` as outsider's reply is refused: "outsider is not a btq approver. Nothing recorded.", and the bead stays undecided. The same from tester gives "Approved … as tester (digest …, via Marmot).", and `approve-bead --json` reads back closed, `decision approve`, `approved_by tester`, `via marmot`. The ask is `approved`. | pass | 7.6 |
 | `test_redacted_bead_refused_at_post` | A bead whose description holds a token-shaped string (built at run time, never committed) is refused at post with "… decide it at the terminal", and no card is sent. | pass | 0.4 |
+| `test_details_reply_to_card` | `!details`, as tester2's reply to a question card, comes back in that command's thread with the ask's text. `wait_details` returns the parts' message IDs as tester2 received them. | pass | ~3 |
 | `test_reaction_frame_keeps_event_id` | Tester's `send_reaction` on admind's ready notice reaches tester2 and outsider with the raw frame kept. `event_id_hex`, which the src decoder drops, equals the ID `send_reaction` returned, and the target and actor are right. | pass | ~1 |
 | `test_audit_holds_no_identifiers` | After the scenarios, `audit.jsonl` (about 50 records) contains no `npub1` and no 64-hex run. | pass | <0.1 |
 
@@ -198,8 +200,8 @@ Setup steps (s):
     for example in CI.
 
 **Other checks:**
-- `uv run pytest -q tests/live` without HZ_LIVE: 22 passed, 6 skipped. 7 skipped since the reaction
-  scenario was added.
+- `uv run pytest -q tests/live` without HZ_LIVE: 22 passed, 6 skipped. 8 skipped with the current
+  scenarios.
 - Full suite, run once before the design-review changes: `uv run pytest -q -x` gave 1797 passed and
   8 skipped (the 6 live tests among them) in 14 min 53 s. The later changes touch only `tests/live/`. They
   were checked with `tests/live` and `tests/test_admind_daemon.py` in one session (63 passed, 6 skipped)
@@ -217,10 +219,12 @@ Setup steps (s):
   framing and decoding, but it also yields each frame as parsed JSON.
 - `op.frames` holds every frame raw. A reaction's `Seen.message_id` is its `event_id_hex`, and `Seen.raw`
   is its frame.
-- `op.wait_reaction(target, emoji=..., sender=...)` waits for one.
+- `op.wait_reaction(target, emoji=..., sender=...)` waits for one reaction.
+- `op.reactions(target=None)` and `op.raw_frames(kind=None)` read what has been seen so far.
 - `op.wait_card` takes the card's message IDs from admind's outbox. It reads `admind.db` with SQLite
-  `mode=ro`, then waits until that operator has received every chunk. `Stack.card_message_ids` is the place
-  to extend for `!details` chunks (`askd:` keys).
+  `mode=ro`, then waits until that operator has received every chunk. `op.wait_details(ask_id, request=mid)`
+  does the same for a `!details` reply. It reads outbox `askd:<id>:<request>:<i>` rows, with the part
+  count from `ask_details`. Without `request`, it uses the most recently sent reply for the ask.
 - `Stack.post_approval_reply` and `post_question_reply` return the raw reply for refusal tests.
   `Stack.edit_bead` exists for stale-digest scenarios.
 - One session stack is shared by all tests, so every test posts its own asks. Tests that decide an ask

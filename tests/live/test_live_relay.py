@@ -93,6 +93,20 @@ def test_redacted_bead_refused_at_post(stack: Stack) -> None:
     assert "decide it at the terminal" in reply["message"]
 
 
+def test_details_reply_to_card(stack: Stack) -> None:
+    """`!details` replied to a question card by tester2 gets the whole ask back as admind's reply in that
+    command's thread, and `wait_details` returns its parts' message IDs as tester2 received them."""
+    ask_id = stack.post_question("live: send me the details", QUESTION_BODY)
+    tester2 = stack.ops["tester2"]
+    card = tester2.wait_card(ask_id)
+    mid = tester2.reply(card[0], "!details")
+    parts = tester2.wait_details(ask_id, request=mid)
+    assert parts
+    got = [e for e in tester2.from_admind() if e.message_id in parts]
+    assert all(e.reply_to == mid for e in got)
+    assert "send me the details" in " ".join(e.text for e in got)
+
+
 def test_reaction_frame_keeps_event_id(stack: Stack) -> None:
     """A reaction by tester on admind's ready notice reaches the other operators with its raw frame kept:
     `event_id_hex` (dropped by the src decoder) equals the ID `send_reaction` returned, and the target and
@@ -105,6 +119,9 @@ def test_reaction_frame_keeps_event_id(stack: Stack) -> None:
         assert seen.message_id == event_id
         assert seen.raw["type"] == "reaction_added" and seen.raw["event_id_hex"].lower() == event_id
         assert seen.raw["target_message_id_hex"].lower() == notice.message_id
+        assert stack.ops[name].reactions(notice.message_id)[0] is seen
+        frames = stack.ops[name].raw_frames("reaction_added")
+        assert any(f.get("event_id_hex", "").lower() == event_id for f in frames)
 
 
 def test_audit_holds_no_identifiers(stack: Stack) -> None:
