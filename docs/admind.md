@@ -4,7 +4,7 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
 
 ## 1. What it is
 
-`admind` is the recovery path for when everything else is broken. It runs as its own service unit with its own Marmot identity, in a group made of the admin bot and one or more operators. The operator's text goes unmodified into a persistent interactive session of the admin agent (an LLM CLI running in a private tmux server), and the agent's replies come back to the group, verbatim when short, otherwise summarized or batched (section 4), and where possible as thread replies. A handful of `!` commands (`!new`, `!interrupt`, `!tail`, `!ps`, `!restart`, `!details`) are handled by admind itself and need no LLM. admind also relays `wsd`'s local alert files to the operator (section 6).
+`admind` is the recovery path for when everything else is broken. It runs as its own service unit with its own Marmot identity, in a group made of the admin bot and one or more operators. The operator's text goes unmodified into a persistent interactive session of the admin agent (an LLM CLI running in a private tmux server), and the agent's replies come back to the group, verbatim when short, otherwise summarized or batched (section 4), and where possible as thread replies. A handful of `!` commands (`!new`, `!interrupt`, `!tail`, `!ps`, `!restart`, `!details`) are handled by admind itself and need no LLM. admind also relays `wsd`'s local alert files to the operator (section 6), and relays questions, merge requests and btq design approvals from local processes (section 10, interim).
 
 **Independence** (ADR §8). admind:
 
@@ -103,7 +103,11 @@ Detach with `Ctrl-b d`. Until then the agent cannot start a turn, and `!tail` sh
   | `!tail [n]` | Show the last `n` lines (1 to 500, default 40) of the agent's screen. This is the only place admind reads the screen, and only on request. | `!tail 80` |
   | `!ps` | Status of each unit in `restart_units`, plus `wn-agent (admind)` and `admin agent`. | `!ps` |
   | `!restart <unit>` | Restart one unit from `restart_units`. Any other unit is refused with a reply that lists the allowed units and does not repeat what you typed. | `!restart <unit-name>.service` |
-| `!details [full]` | The full reply behind a summary or batch, and with `full` its tool calls. Reply to the summary or batch, or send it alone for the latest. Capped, see "`!details` and `!details full`" above. | `!details full` |
+| `!details [full]` | The full reply behind a summary or batch, and with `full` its tool calls. Reply to the summary or batch, or send it alone for the latest. Capped, see "`!details` and `!details full`" above. As a reply to an ask's card, the whole ask (section 10). | `!details full` |
+| `!asks` | The active asks, one line each (section 10). | `!asks` |
+| `!answer <id> <text>` | Answer a question or merge ask without replying to its card (section 10). | `!answer k7m2 use the first relay` |
+| `!approve <bead> <digest12>` | Approve a btq approval bead, as a reply to its card (section 10). | `!approve <bead> 1a2b3c4d5e6f` |
+| `!deny <bead> <reason>` | Deny it, as a reply to its card (section 10). | `!deny <bead> the scope is too wide` |
 
 - **Control characters.** A message containing a C0 or C1 control character (other than tab and newline) is refused with a reply, never altered: such a character can break out of the terminal's bracketed paste. The check runs before commands are parsed, so a command name or argument holding one is never parsed or echoed.
 - **Output policy.** Everything admind posts, summarizes or audits goes through one redactor (`admind/redact.py`): a recognized secret pattern, npub or run of 64 or more hex digits is replaced by a marker such as `<redacted hex key>`, and every control character except newline and tab is escaped as `\xNN`. It runs on the whole text before it is chunked and again at delivery, and repeats until the text stops changing (text still changing after 10 passes becomes `<redacted text>`). That covers replies, summaries, batches, `!details`, `!tail`, command replies, alerts, notices and the audit log. This replaces the earlier "relayed verbatim" rule for the agent's reply and the `!tail` screen: the text is the agent's, but a recognized secret in it is masked and the rest is kept. The redactor does not detect arbitrary passwords or credentials, so none of this output is guaranteed secret-free. A short reply is therefore verbatim apart from redaction, not byte for byte. Failures are reported with fixed wording (`a tmux command failed`, `internal error`), never the underlying error text, which can contain paths or identifiers.
@@ -223,10 +227,11 @@ Everything admind creates is private: directories 0700, files 0600. What is enfo
 | Path | Mode | Contents |
 |---|---|---|
 | `<state>/admind/` | 0700 | admind's state directory |
-| `<state>/admind/admind.db` | 0600 | SQLite (WAL): accepted message IDs, outbox (two lanes), reply turns and batches, `details_stage`, relayed alerts, latch, confirmed operators, agent session, turn state |
+| `<state>/admind/admind.db` | 0600 | SQLite (WAL): accepted message IDs, outbox (two lanes), reply turns and batches, `details_stage`, relayed alerts, latch, confirmed operators, agent session, turn state; and for asks (section 10) the four tables `asks`, `ask_answers` (answers and notes), `ask_details` (who asked for an ask's `!details`, and how many chunks) and `ask_attempts` (each decision attempt, persisted before `approve-bead` runs) |
 | `<state>/admind/audit.jsonl` | 0600 | append-only audit log, one JSON object per line (see below) |
 | `<state>/admind/hook.sock` | 0600 | the agent's hooks reach admind here |
 | `<state>/admind/ctl.sock` | 0600 | the host control socket for `admind operators` and `admind rearm` (below) |
+| `<state>/admind/ask.sock` | 0600 | the host socket for `admind ask` (section 10); same server and checks as `ctl.sock`, with its own limits (256 KiB requests, 1 MiB replies) |
 | `<state>/admind/claude-settings.json` | 0600 | the hook settings admind passes to the agent |
 | `<state>/admind/marmot/` | 0700 | the private `wn-agent` home (location is `[admind.marmot] home`) |
 | `<state>/admind/marmot/control.token` | 0600 | bearer token for the child's control socket; generated by admind, never printed or logged |
@@ -237,7 +242,7 @@ Everything admind creates is private: directories 0700, files 0600. What is enfo
 
 **The control socket** (`ctl.sock`). `admind operators add|remove` and `admind rearm` run as the service user and ask the daemon, which owns the `wn-agent` connection, over this socket: one JSON request per connection, one JSON reply. The daemon creates it 0600 inside the 0700 state directory. At startup it refuses a path that exists and is not a socket (`lstat`, so a symlink is refused too) and otherwise unlinks whatever socket is there, without probing for a live listener; at shutdown it removes the socket only if the path is still the one it bound (device, inode, change and modify times are compared). A request is limited to 4096 bytes (the newline does not count) and must arrive within 5 seconds; a malformed, oversize or invalid request (a NAME of 0 or over 128 characters, or with control characters; `rearm` with a NAME) is refused with a fixed reply. Anyone who can use the socket can already act as the service user, which is the trust boundary. Failures fail closed: a handler error gets a fixed reply and the type goes to the audit log. **There is no daemon-level single-instance lock.** Do not run two admind daemons on the same state directory (workdir): a second daemon would unlink the first's live control socket (the startup check only looks that the path is a socket, not that no one is listening) and nothing stops both from running against one database and one `wn-agent` home. This is a known follow-up.
 
-**The audit log** records timestamps, actions and outcomes. As of revision 13 it holds **whole messages**, redacted: an operator's text is recorded in full (not capped; it goes through `redact` and then `audit.clean`), under the operator's name from `policy.toml`, for accepted messages and for messages dropped while latched. Every string in every record is redacted by one function (`audit.clean`) before anything is formatted, recursively: bytes are decoded, containers are walked, compound dictionary keys are cleaned, an exception becomes `{"type", "args"}` with its args cleaned, an object whose `str()` contains a backslash is written as `<Type: withheld>` (an escaped rendering could hide where a token starts; the exact stdlib types whose `str()` is plain text, such as paths, dates, UUIDs and decimals, `PureWindowsPath` included, are redacted directly even with backslashes), a cycle is `<cycle>` and nesting deeper than 64 levels is `<too deep>`. A 64-hex identifier in an identifier field (`message_id`, `reply_to`, `key`, `target`, `anchor`) is written as `id:` plus 12 hex digits of its SHA-256, so records about one message still correlate without holding the ID. A message from anyone who is not an operator is recorded as an 8-character sender prefix, the reason and a character count, never its text. Agent replies, summaries and command results are recorded by length. The session ID of the admin agent's own accepted events is recorded; admind generates it as a local UUID and it is not a secret. What is omitted: any `detail` from the `wn-agent` peer (only an allowlisted error code), stranger text bodies, transcript paths, the group ID, and the identifiers of rejected input. New record kinds: `membership` (a change's journal and outcome), `summary` (queued, failed with a fixed reason word), `backstop` (a reply queued, a batch posted) and `ctl` (each control request, by operation and name).
+**The audit log** records timestamps, actions and outcomes. As of revision 13 it holds **whole messages**, redacted: an operator's text is recorded in full (not capped; it goes through `redact` and then `audit.clean`), under the operator's name from `policy.toml`, for accepted messages and for messages dropped while latched. Every string in every record is redacted by one function (`audit.clean`) before anything is formatted, recursively: bytes are decoded, containers are walked, compound dictionary keys are cleaned, an exception becomes `{"type", "args"}` with its args cleaned, an object whose `str()` contains a backslash is written as `<Type: withheld>` (an escaped rendering could hide where a token starts; the exact stdlib types whose `str()` is plain text, such as paths, dates, UUIDs and decimals, `PureWindowsPath` included, are redacted directly even with backslashes), a cycle is `<cycle>` and nesting deeper than 64 levels is `<too deep>`. A 64-hex identifier in an identifier field (`message_id`, `reply_to`, `key`, `target`, `anchor`) is written as `id:` plus 12 hex digits of its SHA-256, so records about one message still correlate without holding the ID. A message from anyone who is not an operator is recorded as an 8-character sender prefix, the reason and a character count, never its text. Agent replies, summaries and command results are recorded by length. The session ID of the admin agent's own accepted events is recorded; admind generates it as a local UUID and it is not a secret. What is omitted: any `detail` from the `wn-agent` peer (only an allowlisted error code), stranger text bodies, transcript paths, the group ID, and the identifiers of rejected input. New record kinds: `membership` (a change's journal and outcome), `summary` (queued, failed with a fixed reason word), `backstop` (a reply queued, a batch posted), `ctl` (each control request, by operation and name) and `ask` (asks and decisions, section 10).
 
 **The child log.** The private `wn-agent` writes its output to `wn-agent.log` in its home, not to the journal, because that output can contain invites, keys or the token. The file is truncated each time the child is spawned, so it holds only the current run. It is created 0600 (an older, looser file is tightened), opened without following symlinks, and must be a regular file. Read it on the host when `wn-agent` misbehaves; do not paste it into chat.
 
@@ -248,6 +253,7 @@ Everything admind creates is private: directories 0700, files 0600. What is enfo
 - **The outbox.** The `lane` column is added (existing rows are lane 1) and the replies queued but not yet sent are redacted once. A reply's pending chunks are joined, redacted and chunked again under new keys, so text already received may be re-sent; a continuation that cannot be checked against what was already sent is replaced whole by a fixed notice. This is recorded as an `outbox` record (`redacted-after-upgrade`).
 - **A pending membership record** latches admind on startup (a change interrupted by a stop is not trusted by count).
 - The `details_stage` table is created if missing (`CREATE TABLE IF NOT EXISTS`) and emptied at every start.
+- The four ask tables (section 10) and an index on the outbox's message IDs are created the same way. An older admind ignores them, so a rollback leaves them in place.
 
 An older database from before plan 2 (for example an older `inbound` status constraint or text alert names) is still not migrated: start from an empty `<state>/admind/` for that.
 
@@ -279,3 +285,218 @@ An older database from before plan 2 (for example an older `inbound` status cons
 - **Count-only re-verification** after an outage and **same-user forgery** on the control and hook sockets are accepted residual risks (section 5).
 - **Missed membership events** while disconnected cannot be detected.
 - **Schema upgrades** are in place from plan 2 (section 7); older databases are not migrated.
+- **Approver names are not mapped** (section 10): an operator's `policy.toml` name must equal a name in btq's `approvers` to approve from Marmot.
+- **Asks and approvals are interim** (section 10): there is no gatekeeper judgement on an ask's context, and ADR revision 14 absorbs the relay.
+
+## 10. Asks and approvals (interim)
+
+A local process, such as a controller session, can put a question, a merge request or a btq design approval in front of the operators, and they answer or decide from their Marmot client. This is interim: it ships ahead of ADR revision 14, which absorbs it. The design is the [relay spec](superpowers/specs/2026-10-05-admind-marmot-relay-design.md); the `R` numbers below are its decisions. Placeholders as above, plus `<BTQ-LIVE>` for the live beads-task-queue checkout.
+
+### The trust change
+
+Copied verbatim from the spec, §3 (`§8` there is ADR 0001 §8):
+
+**Approval authority moves from the terminal to an authenticated Marmot message.** Today a btq approval is recorded by a person running `approve-bead` at a terminal as the service user and confirming at its prompt. After this change it can also be recorded by admind, running as the same user, when a Marmot message:
+
+- is MLS-authenticated as an operator's key, in admind's group, not latched, not replayed (the existing ingress rules, §8);
+- comes from an operator whose `policy.toml` name is in btq's `approvers`;
+- is a reply to the genuine admind card for that bead, names the bead, and repeats the digest shown on the card;
+- arrives while the bead is still open, still `kind:approval`, and still hashes to the full digest admind showed.
+
+The typed digest takes the place of the terminal's `[y/N]` confirmation. So **whoever controls an approver's Marmot key, and so their phone or White Noise client, can approve designs.** This is the risk being accepted.
+
+What it does **not** change, stated plainly so the change is not overstated:
+
+- **The admind group already had this power, but not in the open.** The admin agent runs unsandboxed as the service user (§8, operator decision 2026-09-29). An operator message to it could already make it run `approve-bead --yes`. The relay makes that path explicit, pinned to a digest, attributed to a named approver, and audited, instead of leaving it to an LLM's interpretation.
+- **btq metadata is still trusted-agent policy, not authentication** (beads-task-queue `CLAUDE.md`). Any process running as the service user can still run `approve-bead`, or `bd` directly. The relay adds no way for such a process to approve: posting an ask never decides anything.
+- `approve-bead` at the terminal keeps working (`via=cli`). Every `approve-bead` decision, from the terminal or from the relay, takes the same per-bead lock and re-checks under it that the bead is still open, still `kind:approval`, unchanged and undecided (R6). So among `approve-bead` writers the first decision wins and a second one is refused. A same-user process that edits the bead with `bd` directly is outside that protocol. What it can do is make a recorded approval invalid: btq's `approval_valid` rejects any `*_digest` that differs from the current content, so a racing edit fails closed. It cannot make an approval valid.
+- **What the phone shows is all there is.** A card for an approval can only be posted if its whole readout survives admind's redaction unchanged (R21). Content that would be hidden (a token-shaped string, a 64-hex run, a PEM block) means the bead must be decided at the terminal. File, commit and range refs are shown as pinned forge links where the repo has a GitHub remote, and otherwise as their pinned JSON with "read on the host" (R25).
+
+### Setting it up
+
+- **Questions and merge requests** need nothing new: `ask.sock` is created at every start.
+- **Approvals** need `[admind] approve_bead`, the absolute path of `<BTQ-LIVE>/bin/approve-bead` (see [configuration.md](configuration.md#admin-channel-admind), which also has the rollback order). Without it an approval ask is refused with "Approval asks are not configured on this host ([admind] approve_bead)." and everything else works. admind runs `approve-bead` as a child in the unit's environment, so `bd` and btq's credentials must resolve there. admind never writes bead metadata itself and imports no btq code.
+- **The approver names (an existing gap).** admind decides as the operator's `policy.toml` name, passed as `--as=NAME`. There is no mapping table: for approvals, that name must equal a name in btq's own `approvers` list. admind never reads btq's policy; it takes the list from `approve-bead --json`. An operator whose name is not on it is refused with "`<name>` is not a btq approver. Nothing recorded.", and no decision is run. Keep the two lists in step by hand for every operator who approves. Being in `policy.toml`'s `approvers` (section 2) is a different list and is not enough.
+
+### Posting and reading: `admind ask`
+
+Run on the host as the service user. `admind ask` is a client of `ask.sock` (section 7) and opens no database.
+
+```sh
+admind ask post --kind question --title "<one line>" --body-file <file|-> [--from <label>] [--json]
+admind ask post --kind merge --title "<one line>" --body-file <file|-> \
+    --pr https://github.com/<owner>/<repo>/pull/<n> --head <40-hex-sha> [--from <label>] [--json]
+admind ask post --kind approval --bead <bead> [--from <label>] [--json]
+admind ask get <id> [--json]
+admind ask wait <id> [--timeout <seconds>] [--json]
+admind ask list [--json]
+admind ask cancel <id>
+```
+
+| Exit | Meaning |
+|---|---|
+| 0 | Done. `post` printed `ask <id> posted`; `get`, `list` and `cancel` were answered; `wait` found an answer or note, or the ask ended. |
+| 1 | Refused or failed, with the reason on stderr as `admind: <reason>`. This includes a body file that cannot be read, a rule the client checks before it connects, and, for `wait`, a refusal from the daemon (no such ask). |
+| 2 | Invalid arguments. The message is fixed (`admind: invalid arguments (see --help)`) and never repeats what was typed. |
+| 3 | `wait` timed out: `admind: no answer yet (timed out)`, or the not-running message if the daemon never answered. |
+| 69 | `post`, `get`, `list` or `cancel` found no daemon: `admind is not running (or did not answer).` |
+| 78 | A configuration error, for example a bad `approve_bead`. |
+
+- **`post`** checks the rules below, then stores the ask and queues its card. The client checks the same rules before it connects, so most refusals need no round trip; the daemon checks them again. `--body-file -` reads stdin. `--from` (default `local`) is shown on the card and is not verified: any process of the service user can post. The audit also records the poster's PID where the platform reports it.
+- **`get`** prints `ask <id> · <kind> · <status>` (with ` · not yet delivered` until every chunk of the card is sent), then each answer or note as `--- <answer|note> from <operator> at <time>` followed by its text, then `outcome: …` once there is one.
+- **`wait`** polls `get` every 2 seconds until the ask has an answer or note, or reaches a final status (`approved`, `denied`, `stale`, `superseded`, `cancelled`, `blocked`). The default `--timeout` is 540 seconds, under a 10-minute tool-call limit. A daemon that is down or restarting is retried until the timeout. For an approval ask the first note also ends the wait, so follow a decision with `get`.
+- **`list`** prints one line per ask, `<id> <kind> · <status> · <n> answers · <title>`: every active ask and the 20 most recent others.
+- **`cancel`** works on an `open` or `answered` ask only. It posts "Ask `<id>` was cancelled by its poster. Nothing more is needed." in the card's thread.
+- **`--json`** prints the daemon's whole reply as JSON, refusals included. The exit status still tells the outcome. The text output masks secrets and identifiers and escapes control characters line by line; `--json` returns the operators' answers verbatim.
+- `get`, `list` and `cancel` work while admind is latched. A `post` while latched is refused ("admind is latched and posts nothing; the ask was not posted."). A post before the join signal is stored and its card waits like any notice.
+
+**What a post must carry** (R4, R16). Every ask carries its context:
+
+- question and merge: `--title`, one line of 1 to 200 characters, and a body of at most 16,000 characters with at least 80 that are not spaces;
+- merge also needs `--pr`, matching `https://github.com/<owner>/<repo>/pull/<n>`, and `--head`, 40 lowercase hex digits; `--pr` and `--head` are refused on other kinds;
+- approval: `--bead` only. Its context is the bead, read with `approve-bead <bead> --json`;
+- `--from` must match `[a-z0-9][a-z0-9._-]{0,31}`, and `--bead` must match `[a-z0-9]{1,16}-[a-z0-9.]{1,32}`.
+
+**Posting an approval** reads the bead first, up to 60 seconds. The post is refused, with the reason going back to the poster and not to the operators, when:
+
+- the bead is not open, is not a `kind:approval` bead, or already holds a decision;
+- approve-bead computed no digest for it, or reports gaps ("send it back for grooming");
+- its `design_review` is not in valid two-LLM format, or its ask changed after it was posted;
+- the bead is busy, or another ask for it is `deciding` or `uncertain`;
+- the read failed: "admind could not read `<bead>` (`<word>`); try again.", where the word is `unavailable`, `timed out` or `bad output`;
+- any part of the card or of its `!details` would be changed by redaction: "this bead holds text admind would redact; decide it at the terminal". Nothing is posted (R21).
+
+Posts run one at a time, and a third post while two are in flight is refused as busy. The latch and the limits are checked again after the read. A new approval ask for a bead that already has an `open` or `answered` ask supersedes the old one (R9). The old card gets "Ask `<old>` is superseded by ask `<new>`, a newer card for `<bead>`. This card decides nothing any more." in its thread.
+
+### Cards
+
+Cards are posted top-level, in lane 1. Each is redacted whole, then split into `chunk_chars` chunks. An ask ID is 4 characters from `23456789abcdefghjkmnpqrstuvwxyz` and is matched in any case.
+
+```
+❓ Ask k7m2 · question · posted by controller (a local process; unverified)
+<title>
+
+<body>
+(40 lines shown of 52; reply !details for the rest)
+
+Answer: reply to this message, or send !answer k7m2 <text>
+```
+
+A merge card is headed `🔀 Ask m3qp · merge request · posted by …`. It shows `PR: <url>` and `Head: <sha>` under the title, and ends with "Merging is yours to do in GitHub; admind never merges. Reply to this message (or !answer m3qp `<text>`) when it is merged, or with what to change."
+
+```
+🛂 Approval ask p4xw · bead <bead> · posted by controller (a local process; unverified)
+digest 1a2b3c4d5e6f
+<approve-bead's readout: the title, then "ask:" with the ask's fields, refs and linked beads, then the description>
+(shortened: 52 more lines. Reply !details to this message and read it before approving.)
+
+Decide by replying to this message:
+  !approve <bead> 1a2b3c4d5e6f
+  !deny <bead> <reason>
+!approve records your approval of <bead> in btq, as you, via Marmot. A reply without !approve or !deny decides nothing.
+```
+
+- **The digest line** (`digest12`) is the first 12 hex digits of the bead's context digest, as `approve-bead` computes it. admind stores the full digest. A decision passes the full digest to `approve-bead` (`--expect-digest`), never the 12 typed characters. Linked beads' `pinned digest` lines are cut to 12 digits the same way.
+- **Refs.** Under each numbered ref is `link: <permalink>` pinned to the ref's commit, where the repo has a GitHub remote. Otherwise the card says `(no forge link; read it on the host with approve-bead --doc N)`. A link does not prove the commit is pushed: if it gives a 404, do not approve from the phone.
+- **The budget.** A card shows at most 40 lines and 3,500 characters of context, in whole lines. A question or merge card counts its budget after redaction. The first line and the closing lines are fixed framing and are never cut. When something is left out, the card says so, and `!details` has the rest.
+- **`!details` on a card.** Sent as a reply to any chunk of a card, or of its `!details`, `!details` (or `!details full`) returns the whole ask in lane 2, threaded to the command. For an approval, these are the chunks checked when the ask was posted. admind records which operator asked and how many chunks went out.
+- **What counts as a card.** Only messages admind itself queued as a card or as an ask's `!details`, and that were sent, count. A look-alike printed by the admin agent does not.
+
+### Answering and deciding
+
+| You send | Effect |
+|---|---|
+| a reply to a question or merge card, or to its `!details` | Stored as the answer: "Answer recorded for ask `<id>`." (or "Added to ask `<id>`; it was already answered, and the poster sees both."). The status becomes `answered`. |
+| a reply to an approval card | Stored as a **note** the poster sees, never a decision: "Noted on ask `<id>`; this is not a decision. To decide, reply to the card with !approve `<bead>` `<digest12>` or !deny `<bead>` `<reason>`." A reply such as "yes" decides nothing. |
+| `!answer <id> <text>` | The same as a reply, from anywhere. `<text>` is everything after the ID, newlines included. Refused for an approval ask, with the two commands as a hint. |
+| `!asks` | First reconciles any ask stranded in `deciding` or `uncertain` (see "Outcomes"), then lists the active asks, one line each: `k7m2 question · 3h · <first 60 characters of the title>`. If none, "No active asks." |
+| `!approve <bead> <digest12>` | Approve, as a reply to the approval card or to its `!details`. Exactly two arguments; the digest is 12 hex digits in any case. |
+| `!deny <bead> <reason>` | Deny, as a reply to the card or its `!details`. The reason is everything after the bead, redacted, 1 to 1,000 characters, and is passed to `approve-bead` as the denial's note. |
+| `!details` (as a reply to a card) | The ask's full text (above). |
+
+A reply to a card is never pasted to the admin agent. A reply that starts with `!` is a command. Every other message, replies to other messages included, behaves as in sections 4 and 5. An answer is refused if the ask is no longer `open` or `answered`, if it is empty, or if it would pass the limits below.
+
+**How `!approve` is checked**, in order. Each refusal leaves the ask as it was and records nothing:
+
+1. It is a reply to a chunk of the card, or of its `!details`.
+2. The bead and the digest equal the card's (for `!deny`, the bead).
+3. The ask is `open`.
+4. Every chunk of the card is sent. If the card was shortened, **this operator** has asked for `!details` on it, and every chunk of that `!details` is sent. `!deny` needs neither (R8).
+5. admind is still authorised for the message (not latched, group verified), and `approve_bead` is set.
+
+Then admind persists the attempt (`deciding`) and runs `approve-bead <bead> --json` (60 seconds). The decision stops before anything is written if the bead is busy, has changed since the card (`stale`), already holds a decision (`blocked`), is no longer open or no longer `kind:approval`, or the operator is not in its `approvers`. Right before it starts the decision run, admind checks authorisation once more (R11): this is the commit point. The run is `approve-bead <bead> --as=<name> --yes --expect-digest=<full digest> --via=marmot --via-ref=marmot:id:<12 hex>`, with `--deny --note=<reason>` for a denial, every value as one `--flag=value` argument. It has 90 seconds. Once started, the run is not cancelled by a latch, a lost subscription or a group change, because killing it mid-write would leave a partial write. The reply then waits in the outbox like every post of a latched admind, and the audit says `latched_during`. On every exit, admind kills the run's process group and reaps it before it settles anything.
+
+### Outcomes and recovery
+
+The outcome is **read back**, never parsed from the exit status (R12). Whatever the run did, admind reads the bead again with `--json` and compares it with the persisted attempt:
+
+- The bead is closed with this attempt's decision, name, digest and `via_ref`: `approved` or `denied`. For an approval, the reply also says whether btq's design gate accepts it.
+- The bead is open with no decision field: nothing was recorded, and the ask is `open` again.
+- Any other decision field, or a partial write: `blocked`. This is final; resolve the bead at the terminal. A blocked ask no longer counts toward the limits.
+- The read failed, or was still busy after 3 more tries 20 seconds apart: `uncertain`. No decision is taken from Marmot until a read-back settles it.
+
+Exit 5 ("written, but the content changed during the write") and "written, but the gate rejects it" are settled the same way, from the read-back.
+
+**After a restart.** A decision interrupted by a stop leaves its ask `deciding`. At startup, before any loop runs, admind takes the asks in `deciding` or `uncertain` and reads each one back under the worker's lock (`Admind.reconcile_asks`). A notice goes to the card's thread. If nothing was recorded, the notice is "admind restarted while recording this decision; nothing was recorded. Decide again." The operator's command message is then marked done, so no "admind restarted" notice follows for it. `!asks` runs the same reconcile for anything left stranded. If nothing was recorded there, the notice is "admind could not finish settling the last decision on ask `<id>`; nothing was recorded. Decide again."
+
+**Replies in the thread** (fixed wording; `<line>` is the first line of `approve-bead`'s stderr, redacted, at most 300 characters):
+
+| Event | Reply |
+|---|---|
+| approved, gate accepts | `Approved <bead> as <name> (digest <digest12>, via Marmot). btq's design gate accepts it.` |
+| approved, gate rejects | `Approved <bead> as <name> (digest <digest12>, via Marmot), but btq's design gate rejects it: "<first gate reason>". Check it on the host.` With no reason from btq: `(btq gave no reason; run approve-bead <bead> on the host)` in place of the quote. |
+| denied | `Denied <bead> as <name> (via Marmot).` |
+| recorded or uncertain, with a stderr line | the reply above (or the uncertain one), then a line `approve-bead said: "<line>"` |
+| nothing recorded | `Not recorded: "<line>". <bead> is unchanged; you can decide again.` (without the quote if there was no line) |
+| blocked | `<bead> holds a decision admind cannot confirm as yours ("<line>"). Nothing more will be done from Marmot. Resolve it on the host with approve-bead <bead>.` |
+| uncertain | `admind could not read <bead> back. No further decision is taken from Marmot until it can; check it on the host with approve-bead <bead>.` |
+| stale | `<bead> changed after it was shown (shown <digest12>, now <digest12>). Nothing recorded; ask <id> is stale and the poster must post it again.` |
+| not a reply to the card | `To decide, reply to the approval card itself (or its !details). Nothing recorded.` |
+| wrong bead or digest | `That does not match ask <id> (bead <bead>, digest <digest12>). Nothing recorded.` |
+| card not fully delivered | `Ask <id> has not been fully delivered yet. Wait for every part, then reply again. Nothing recorded.` |
+| needs `!details` | `Ask <id> was shortened. Reply !details to it and read it first. Nothing recorded.` |
+| not open | `Ask <id> is already <status>[ by <name>][; see ask <newer>]. Nothing recorded.` |
+| not an approver | `<name> is not a btq approver. Nothing recorded.` |
+| bead closed or not an approval | `<bead> is <status>, not open. Nothing recorded.` / `<bead> is not a kind:approval bead. Nothing recorded.` |
+| busy | `<bead> is being decided elsewhere right now. Nothing recorded; try again in a minute.` |
+| the check failed | `admind could not check <bead> (<word>); nothing was recorded. Try again.` The word is `timed out`, `unavailable`, `bad output` or `error`. |
+| not configured | `Approval asks are not configured on this host ([admind] approve_bead).` |
+| settled concurrently | `Ask <id> changed while this decision was settled; see !asks. Check <bead> on the host.` |
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| active asks (`open`, `answered`, `deciding`, `uncertain`) | 20 |
+| asks posted in any 60 minutes | 30 |
+| posts in flight on `ask.sock` | 2 (the third is refused as busy) |
+| `ask.sock` request | 262,144 bytes (256 KiB), read within 5 seconds |
+| `ask.sock` reply | 1,048,576 bytes (1 MiB); the client allows 30 seconds for each request |
+| title | 1 line, 1 to 200 characters |
+| body (question, merge) | at least 80 non-space characters, at most 16,000 characters |
+| card | 40 lines and 3,500 characters of context |
+| one answer or note | 16,000 characters |
+| answers and notes per ask | 50, and 64,000 characters in total |
+| `!deny` reason | 1,000 characters, after redaction |
+| `approve-bead --json` read | 60 seconds; stdout capped at 8 MiB, stderr at 1 MiB |
+| decision run | 90 seconds; stdout and stderr capped at 1 MiB each |
+| reaping a child | 5 seconds |
+| a busy read-back | retried 3 times, 20 seconds apart |
+| quoted stderr line | 300 characters |
+
+### Audit records
+
+Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, never by text. Operator text is recorded whole in the `inbound` record, as for every message (section 7). A message ID appears only as `id:` plus 12 hex digits of its SHA-256.
+
+- A request on `ask.sock`: `op` (`post`, `get`, `list`, `cancel`), with `ask_kind`, `poster`, `bead` and the title and body lengths for a post.
+- `posted`: `ask_id`, `ask_kind`, `poster`, `pid`, `parts`, `truncated`; for an approval also `bead`, `digest12`, `details_parts` and `superseded` (the asks it replaced).
+- `refused`: a post or a decision refused before it started. `reason` is one of `limits`, `busy`, `not postable`, `redaction`, `not a card reply`, `no match`, `not open`, `not delivered`, `needs details`, `not configured`, `stale`, `decided`, `not approval`, `not an approver`, or a check's word (`unavailable`, `timed out`, `bad output`, `error`). A refusal after the attempt was persisted also has the ask's new `status`.
+- `deciding`: an attempt is about to run (`message_id`, `ask_id`, `bead`, `decision`, `operator`).
+- `decided`: `outcome` (`recorded`, `untouched`, `blocked`, `uncertain`), `status`, `exit_status`, `gate_valid`, `latched_during`.
+- Also `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
+
+**Matching a bead to the audit.** A bead decided from Marmot holds `via: marmot` and `via_ref: marmot:id:<12 hex>`. The `id:<12 hex>` part is exactly how the audit names the operator's command message. Search `audit.jsonl` for it to find that message's `inbound`, `deciding` and `decided` records:
+
+```sh
+grep -F '"id:<12 hex>"' <state>/admind/audit.jsonl
+```

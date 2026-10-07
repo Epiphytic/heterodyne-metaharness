@@ -106,11 +106,14 @@ Any other variable starting with `HETERODYNE_` is an error: "environment overrid
 | `summarizer` | Optional. The name of a profile from `[profiles]` used to summarize long replies. Default none: without it, a reply longer than the verbatim limits goes to the batched backstop. claude-code only for now, like `profile` (any other adapter is a configuration error). It runs headless, without tools, hooks, MCP servers or user settings, and the profile's `args` are ignored. See [admind.md](admind.md#4-using-it). |
 | `reply_verbatim_lines` | A reply of at most this many lines (and `reply_verbatim_chars`) is sent as it is; a longer one is summarized or batched. Integer, 1 to 200. Default 8. |
 | `reply_verbatim_chars` | The character limit for a verbatim reply. Integer, 50 to 60000. Default 800. |
+| `approve_bead` | Optional. The absolute path of beads-task-queue's `bin/approve-bead` (for example `<BTQ-LIVE>/bin/approve-bead`), which admind runs to read and decide btq approval asks from Marmot. Default none: approval asks are then refused ("Approval asks are not configured on this host"), and question and merge asks still work. The path must be absolute (`~` is not expanded) and name an executable file; anything else is a configuration error, `[admind] approve_bead must be an absolute path to an executable`, which never repeats the value. See [admind.md](admind.md#10-asks-and-approvals-interim). |
 | `marmot.wn_agent` | The wn-agent executable. Default `wn-agent`. |
 | `marmot.home` | Marmot home directory. Default `<state>/admind/marmot`. |
 | `marmot.relays` | Required. A list of ws:// or wss:// relay URLs. |
 
 `[admind]` is host-only: a workstream file can't set it.
+
+**`approve_bead` and rollback.** `heterodyne config check` does not read `[admind]`. admind checks it when it starts, and so does every `admind` command that reads the configuration (`admind ask list` is a quick check). A bad value exits 78 (`EX_CONFIG`), so the unit does not restart-loop. An admind older than the relay does not know the key and also exits 78 on it. To roll back the code, remove `approve_bead` from `config.toml` **first**, then check out the older commit and restart. The relay's database tables are left in place, and the older code ignores them.
 
 ## Policy (host-only)
 
