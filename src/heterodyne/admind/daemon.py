@@ -778,11 +778,21 @@ class Admind:
         self.audit.write("ask", action="cancelled", ask_id=row.ask_id)
         return asks.AskReply("ok", f"ask {row.ask_id} cancelled")
 
-    def ask_notice(self, ask_id: str, what: str, ref: str, text: str) -> None:
-        """A notice about an ask, threaded to its card's first sent chunk (unthreaded if none was sent)."""
-        thread = self.store.first_card_message(ask_id)
+    def ask_notice(self, ask_id: str, what: str, ref: str, text: str, attempt: str | None = None) -> None:
+        """A notice about an ask. One that answers an attempt is threaded to that attempt's reply target (the
+        reply itself, or the chunk a reaction reacted to; delta §5); any other to the card's first sent chunk.
+        Unthreaded if there is neither."""
+        if attempt is not None:
+            thread = self.attempt_thread(ask_id, attempt)
+        else:
+            thread = self.store.first_card_message(ask_id)
         for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
             self.post(f"asknote:{ask_id}:{what}:{ref}:{i}", part, thread)
+
+    def attempt_thread(self, ask_id: str, attempt: str) -> str | None:
+        """What a reply derived from attempt `attempt` threads to: its stored reply target, or, for a reaction
+        stored without one, the card's first sent chunk. Never an `r:` key."""
+        return self.store.reply_target(attempt) or self.store.first_card_message(ask_id)
 
     def ask_summary(self, row: AskRow) -> asks.AskSummary:
         count, _ = self.store.answer_totals(row.ask_id)
@@ -1097,7 +1107,7 @@ class Admind:
                         updated = content
             if line:
                 text += f'\napprove-bead said: "{line}"'
-            thread = self.store.first_card_message(a.ask_id)
+            thread = self.attempt_thread(a.ask_id, mid)        # the updated content goes where the reply goes
             superseded: list[str] = []
             with self.store.transaction():
                 closed = self.store.close_attempt(a.ask_id, mid, expect_status="deciding", settled=settled,
@@ -1176,9 +1186,9 @@ class Admind:
 
     async def reconcile_one(self, ask_id: str, attempt: str, status: str, *, restarted: bool) -> None:
         """Read back one stranded attempt and settle it with a compare-and-set on the status it was seen
-        in (r3-2). Its notice is threaded to the card; the attempt's inbound message, if it is still
-        `executing` (or, defensively, `received`), is marked `done` in the same transaction (r6), so a
-        restart does not answer it."""
+        in (r3-2). Its notice is threaded to the attempt's reply target (delta §5); the attempt's inbound
+        message, if it is still `executing` (or, defensively, `received`), is marked `done` in the same
+        transaction (r6), so a restart does not answer it."""
         a = self.store.current_attempt(ask_id)
         row = self.store.ask(ask_id)
         if a is None or a.message_id != attempt or row is None or row.bead is None:
@@ -1199,7 +1209,7 @@ class Admind:
                 if self.store.inbound_status(attempt) in ("received", "executing"):
                     self.store.set_inbound(attempt, "done")
                 if new_status != status:
-                    self.ask_notice(ask_id, "reconciled", str(self.next_seq("reconcile_seq")), text)
+                    self.ask_notice(ask_id, "reconciled", str(self.next_seq("reconcile_seq")), text, attempt)
         if not closed:
             self.conflict(a, status)
             return
@@ -1215,7 +1225,8 @@ class Admind:
             answered = self.store.inbound_status(attempt) in ("received", "executing")
             if answered:
                 self.store.set_inbound(attempt, "done")
-                self.ask_notice(ask_id, "unverified", attempt, RECONCILE_UNVERIFIED.format(bead=bead))
+                self.ask_notice(ask_id, "unverified", attempt, RECONCILE_UNVERIFIED.format(bead=bead),
+                                attempt)
         self.audit_quietly("ask", action="reconcile-unverified" if answered else "reconcile-skipped",
                            ask_id=ask_id)
 
