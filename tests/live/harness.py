@@ -304,6 +304,14 @@ def send_reaction(client: ControlClient, account: str, group: str, target: str, 
                                    "app_event_sent", FinalSent))
 
 
+def remove_reaction(client: ControlClient, account: str, group: str, target: str, emoji: str) -> FinalSent:
+    """`remove_reaction` in the shape spike S4 assumed but never tested (`send_reaction`'s fields, answered by
+    `app_event_sent`). A wn-agent that does not support it answers with an error: ControlError."""
+    return asyncio.run(client.call({"type": "remove_reaction", "account_id_hex": account,
+                                    "group_id_hex": group, "target_message_id_hex": target, "emoji": emoji},
+                                   "app_event_sent", FinalSent))
+
+
 class RawControlClient(ControlClient):
     """The src client plus a subscription that also yields each event frame as parsed JSON, so fields the
     src decoder drops (`event_id_hex` on `reaction_added`, per spike S4) stay available to tests."""
@@ -461,6 +469,11 @@ class Operator:
     def react(self, message_id: str, emoji: str) -> str:
         """React to `message_id`; returns the reaction event's ID."""
         return send_reaction(self._client, self.account, self.group, message_id, emoji).message_ids_hex[0]
+
+    def unreact(self, message_id: str, emoji: str) -> str:
+        """Remove this operator's `emoji` reaction from `message_id`; returns the removal event's ID. Raises
+        ControlError if wn-agent does not support `remove_reaction`."""
+        return remove_reaction(self._client, self.account, self.group, message_id, emoji).message_ids_hex[0]
 
     def from_admind(self) -> list[Seen]:
         with self.cond:
@@ -793,6 +806,16 @@ privilege_file: {self.dolt_dir / 'cfg' / 'privileges.db'}
             args += ["--description", description]
         self.bd_json(*args)
 
+    def pin(self, bead: str) -> str:
+        """Pin the bead's current digest as its `context_digest`, as an originator does; returns it."""
+        digest = str(self.approve_bead_json(bead)["digest"])
+        self.bd_json("update", bead, "--set-metadata", f"context_digest={digest}")
+        return digest
+
+    def bead_text(self, bead: str) -> str:
+        """`bd show <bead> --json` as text (comments and close reason included), for substring checks."""
+        return json.dumps(self.bd_json("show", bead), ensure_ascii=False)
+
     def approve_bead_json(self, bead: str) -> dict[str, Any]:
         """`approve-bead <bead> --json`, as admind runs it (same environment)."""
         return json.loads(self.must([str(APPROVE_BEAD), bead, "--json"], "approve-bead --json"))
@@ -974,6 +997,25 @@ relays = [{relays}]
                 if len(ordered) == parts and (best is None or last > best[0]):
                     best = (last, [m for _, m, _ in ordered])
         return None if best is None else best[1]
+
+    def sent_ids(self, key_prefix: str) -> list[str]:
+        """The message IDs of sent outbox rows whose key starts with `key_prefix`, in part order."""
+        with contextlib.closing(self._db()) as db:
+            rows = db.execute("SELECT key, message_id FROM outbox WHERE substr(key, 1, ?) = ? "
+                              "AND status = 'sent'", (len(key_prefix), key_prefix)).fetchall()
+        return [m for _, m in sorted((int(str(k).rsplit(":", 1)[1]), str(m).lower()) for k, m in rows if m)]
+
+    def pastes(self) -> int:
+        """How many times the stub admin agent was pasted into (stub_admind.py counts, never the text)."""
+        path = self.root / "stub-pastes"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def mark_legacy_truncated(self, ask_id: str) -> None:
+        """Make ask `ask_id` look stored before the reply/reaction delta (`asks.truncated = 1`). The only
+        write the harness makes to admind's store: there is no other way to create a legacy ask now."""
+        with contextlib.closing(sqlite3.connect(self.admind_state / "admind.db", timeout=10)) as db, db:
+            if db.execute("UPDATE asks SET truncated = 1 WHERE ask_id = ?", (ask_id,)).rowcount != 1:
+                raise LiveError(f"ask {ask_id} is not in admind's store")
 
     def audit_text(self) -> str:
         return (self.admind_state / "audit.jsonl").read_text()
