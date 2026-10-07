@@ -6,6 +6,7 @@ block, with an atexit backup in case the session dies before the fixture's final
 
 import atexit
 import os
+import signal
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,8 +33,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 _STACKS: list[Stack] = []
 
 
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 @pytest.fixture(scope="session")
 def stack() -> Iterator[Stack]:
+    # SIGTERM would otherwise end the interpreter without running finally blocks or atexit; as a
+    # KeyboardInterrupt, pytest unwinds and this fixture's teardown runs. SIGKILL cannot be caught:
+    # the next run's reap_stale_runs cleans up after it.
+    signal.signal(signal.SIGTERM, _interrupt)
     s = Stack()
     _STACKS.append(s)
     atexit.register(s.close)
@@ -50,5 +59,6 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
         for step, seconds in s.timings.items():
             terminalreporter.write_line(f"{step:>20}: {seconds}")
         terminalreporter.write_line(f"processes left after teardown (killed by PID): {len(s.sweep_found)}")
+        terminalreporter.write_line(f"stale runs reaped at start: {len(s.reaped)}")
         if os.environ.get("HZ_LIVE_KEEP") == "1":
             terminalreporter.write_line(f"temp root kept: {mask(s.root)}")

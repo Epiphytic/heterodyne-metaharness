@@ -23,7 +23,7 @@ def test_question_card_and_reply(stack: Stack) -> None:
     card = tester.wait_card(ask_id)
     assert outsider.wait_card(ask_id) == card
     mid = tester.reply(card[0], "a reply from tester")
-    assert f"Answer recorded for ask `{ask_id}`" in tester.wait_reply(to=mid, contains="Answer recorded")
+    assert f"Answer recorded for ask {ask_id}" in tester.wait_reply(to=mid, contains="Answer recorded")
     got = stack.ask_get(ask_id)["ask"]
     assert got["summary"]["status"] == "answered"
     assert [(a["operator"], a["text"]) for a in got["answers"]] == [("tester", "a reply from tester")]
@@ -35,7 +35,7 @@ def test_answer_command_multiline(stack: Stack) -> None:
     outsider = stack.ops["outsider"]
     outsider.wait_card(ask_id)
     mid = outsider.send(f"!answer {ask_id} line1\nline2")
-    outsider.wait_reply(to=mid, contains=f"ask `{ask_id}`")
+    outsider.wait_reply(to=mid, contains=f"ask {ask_id}")
     assert [(a["operator"], a["text"]) for a in answers(stack, ask_id)] == [("outsider", "line1\nline2")]
 
 
@@ -50,7 +50,7 @@ def test_asks_lists_and_cancel_notice(stack: Stack) -> None:
     assert stack.ask_cancel(ask_id).returncode == 0
     notice = tester.wait_message(lambda e: e.reply_to in card and "was cancelled by its poster" in e.text,
                                  "the cancelled notice in the card's thread")
-    assert f"Ask `{ask_id}` was cancelled by its poster." in notice.text
+    assert f"Ask {ask_id} was cancelled by its poster." in notice.text
     assert stack.ask_get(ask_id)["ask"]["summary"]["status"] == "cancelled"
 
 

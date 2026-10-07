@@ -59,6 +59,7 @@ APPROVE_BEAD = BTQ_LIVE / "bin" / "approve-bead"
 BTQ_SCRIPT = BTQ_LIVE / "bin" / "btq"
 STUB_ADMIND = Path(__file__).with_name("stub_admind.py")
 RELAYS = ("wss://relay.eu.whitenoise.chat", "wss://relay.us.whitenoise.chat")
+TMP = Path("/tmp")  # noqa: S108 - not $TMPDIR: socket paths under the root must stay under 100 bytes
 PRODUCTION_DOLT_PORT = 3307
 PRODUCTION_DATABASE = "tasks"
 DATABASE = "hzlive"
@@ -129,6 +130,19 @@ def guard(root: Path, checked: Mapping[str, Path], port: int, database: str) -> 
         raise LiveError(f"isolation guard: these resolve outside the temp root: {sorted(set(bad))}")
     if port == PRODUCTION_DOLT_PORT or database == PRODUCTION_DATABASE:
         raise LiveError("isolation guard: the beads endpoint is the production one")
+
+
+def self_check(root: Path) -> None:
+    """The guard must refuse each production location and the production endpoint, or it proves nothing."""
+    cases: list[tuple[dict[str, Path], int, str]] = [({"x": f}, 0, DATABASE) for f in FORBIDDEN]
+    cases += [({"x": root / "ok"}, PRODUCTION_DOLT_PORT, DATABASE),
+              ({"x": root / "ok"}, 1, PRODUCTION_DATABASE), ({"x": root.parent}, 1, DATABASE)]
+    for checked, port, database in cases:
+        try:
+            guard(root, checked, port, database)
+        except LiveError:
+            continue
+        raise LiveError("isolation guard self-check: a production location was not refused")
 
 
 class Procs:
@@ -400,6 +414,30 @@ def toml_str(value: str) -> str:
     return json.dumps(value)      # a JSON string is a valid TOML basic string for these values
 
 
+def reap_stale_runs() -> list[str]:
+    """Clean up after a run that died without its teardown (SIGKILL, a lost terminal): for each earlier
+    root whose owner PID is gone, kill by PID every process carrying that root's marker, then remove the
+    root. Only roots this harness made (`/tmp/hzlive-*` holding `owner.pid`, owned by us) are touched."""
+    reaped: list[str] = []
+    for root in TMP.glob("hzlive-*"):
+        owner = root / "owner.pid"
+        try:
+            if root.is_symlink() or root.stat().st_uid != os.getuid():
+                continue
+            pid = int(owner.read_text())
+        except (OSError, ValueError):
+            continue
+        if Path(f"/proc/{pid}").exists():
+            continue                    # a live run (possibly a concurrent session): not ours to touch
+        procs = Procs(root)
+        for leftover in procs.marked():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(leftover, signal.SIGKILL)
+        shutil.rmtree(root, ignore_errors=True)
+        reaped.append(root.name)
+    return reaped
+
+
 class Stack:
     """The isolated stack: private beads, btq config, admind (stub agent) and two throwaway operators."""
 
@@ -409,8 +447,10 @@ class Stack:
         self.dolt = binary("dolt")
         self.git = binary("git")
         self.openssl = binary("openssl")
-        self.root = Path(tempfile.mkdtemp(prefix="hzlive-", dir="/tmp"))
+        self.reaped = reap_stale_runs()
+        self.root = Path(tempfile.mkdtemp(prefix="hzlive-", dir=TMP))
         self.root.chmod(0o700)
+        (self.root / "owner.pid").write_text(f"{os.getpid()}\n")
         self.procs = Procs(self.root)
         self.timings: dict[str, float] = {}
         self.closed = False
@@ -513,6 +553,7 @@ class Stack:
             if s.relays != RELAYS:
                 raise LiveError("isolation guard: admind's relays are not the configured test relays")
         guard(self.root, checked, int(locs["dolt_port"]), locs["dolt_database"])
+        self_check(self.root)
 
     def btq_locations(self) -> dict[str, str]:
         """btq's own `locations()` under the child environment (bin/btq is imported, never run)."""
