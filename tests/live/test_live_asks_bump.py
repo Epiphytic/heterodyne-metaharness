@@ -115,12 +115,10 @@ def test_reminder_decides_nothing(stack: Stack) -> None:
     first = threaded(tester2, reminder, "That was a reminder")
     assert hint in plain(first.text)
     mid = tester2.reply(reminder, "approve")
-    # The spec threads the hint to the reminder (2.1) or to the reply (delta section 5); either will do.
-    second = tester2.wait_message(lambda e: e.reply_to in (mid, reminder) and e.message_id != first.message_id
-                                  and "That was a reminder" in e.text, "the hint for the reply")
-    assert hint in plain(second.text)
+    # As delta section 5 has it: a reply's hint threads to the reply, a reaction's to the reacted chunk.
+    assert hint in plain(threaded(tester2, mid, "That was a reminder").text)
     hints = [e for e in tester2.from_admind() if "That was a reminder" in e.text]
-    assert len(hints) == 2, [e.reply_to for e in hints]
+    assert len(hints) == 2 and {e.reply_to for e in hints} == {reminder, mid}, [e.reply_to for e in hints]
     assert readback(stack, bead)["decided"] is False
     assert stack.pastes() == pastes
 
