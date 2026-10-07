@@ -1,0 +1,7 @@
+Reviewed HEAD `8bd84f7`. Fourteen fixture-free tests passed; the full suite was blocked by the read-only sandbox.
+
+1. [BLOCKING] **Some accepted refusals do not update the B14 clock.** [daemon.py:995](src/heterodyne/admind/daemon.py:995) refuses `!answer` on an approval ask without touching activity. [daemon.py:1895](src/heterodyne/admind/daemon.py:1895) similarly handles an oversized `!deny` on a card without updating it. An in-memory reproduction accepted the answer refusal at hour 10, then queued an automatic reminder at hour 12. **Fix:** update the identified ask’s clock in the same transaction as these refusals, preserving the exemptions for listings and reminder hints. Add regression tests for both routes and their resulting reminder deadlines.
+
+2. [NON-BLOCKING] **The guard-refusal clock assertion can miss a regression.** [test_admind_asks_bump.py:991](tests/test_admind_asks_bump.py:991) sends a stranger’s reaction, then an authorised denial at the same fake time before asserting activity. An erroneous clock update from the stranger would therefore pass. **Fix:** assert that activity is unchanged immediately after the stranger’s reaction is dropped, before sending the denial.
+
+REVISE

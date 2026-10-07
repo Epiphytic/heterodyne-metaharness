@@ -357,6 +357,33 @@ def list_line(row: AskRow, at: datetime) -> str:
     return f"{row.ask_id} {row.kind} · {age(row.created_at, at)} · {row.title[:60]}"
 
 
+def reminder(row: AskRow, at: datetime, every: int | None = None) -> str:
+    """A bump (asks bump B4, B14): enough of the ask to find its card without threading. The whole title
+    is redacted before it is cut, so a secret crossing character 80 never leaves a fragment; the caller
+    redacts the whole text again before splitting it, as for every notice."""
+    lead = "Still outstanding" + ("" if every is None else f" (automatic reminder, every {every} h)")
+    how = ("React 👍 or 👎 on the card above, or reply to it with approve or deny <reason>."
+           if row.kind == "approval" else "Reply to the card above to answer.")
+    return (f"{lead}: ask {row.ask_id} · {row.kind} · {age(row.created_at, at)} · {redact(row.title)[:80]}.\n"
+            f"{how}")
+
+
+NO_OUTSTANDING = "No outstanding asks."
+SKIPPED = {"answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
+           "uncertain": "{ask_id} is uncertain",
+           "card not delivered": "{ask_id}: card not delivered; try !asks repeat"}
+
+
+def remind_summary(verb: str, done: list[str], skipped: list[tuple[str, str]]) -> str:
+    """`!asks bump` and `!asks repeat`'s own reply (B5, B11): `<verb> <n> asks: <id>, <id>.` and one line
+    per skipped ask, as (ask ID, why), or NO_OUTSTANDING when there is no active ask at all."""
+    if not done and not skipped:
+        return NO_OUTSTANDING
+    head = f"{verb} {len(done)} ask{'' if len(done) == 1 else 's'}"
+    head += f": {', '.join(done)}." if done else "."
+    return "\n".join([head, *(SKIPPED[why].format(ask_id=ask_id) for ask_id, why in skipped)])
+
+
 def summary(row: AskRow, delivered: bool, answer_count: int) -> AskSummary:
     return AskSummary(row.ask_id, row.kind, row.status, row.title, row.bead,
                       None if row.digest is None else row.digest[:12], delivered, answer_count, row.outcome,

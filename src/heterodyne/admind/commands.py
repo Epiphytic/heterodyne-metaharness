@@ -12,8 +12,9 @@ from typing import Literal, Protocol
 from heterodyne.admind.redact import redact
 from heterodyne.services import ServiceManager, shown
 
-HELP = ("admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps · !details [full] · !asks · "
-        "!answer <id> <text> · !approve · !deny (as a reply to an approval card)")
+HELP = ("admind commands: !new · !interrupt · !tail [n] · !restart <unit> · !ps · !details [full] · "
+        "!asks [bump|repeat] · !answer <id> <text> · !approve · !deny (as a reply to an approval card)")
+ASKS_USAGE = "Usage: !asks [bump|repeat]."
 FENCE = "`" * 3  # a code block around !tail output (spelled this way so it can't close a Markdown fence)
 TAIL_DEFAULT = 40
 TAIL_MAX = 500
@@ -51,15 +52,17 @@ def parse(text: str) -> Command | None:
     if text[1:].split(maxsplit=1)[0] == "deny":
         return _deny(text)
     name, *args = text[1:].split()
-    if name in ("new", "interrupt", "ps", "asks"):
+    if name == "asks":      # `!asks`, `!asks bump` or `!asks repeat` (asks bump design B1, B11)
+        if args not in ([], ["bump"], ["repeat"]):
+            raise CommandError(ASKS_USAGE)
+        return Command("asks", arg=args[0] if args else None)
+    if name in ("new", "interrupt", "ps"):
         if args:
             raise CommandError(f"!{name} takes no arguments.")
         if name == "new":
             return Command("new")
         if name == "interrupt":
             return Command("interrupt")
-        if name == "asks":
-            return Command("asks")
         return Command("ps")
     if name == "tail":
         usage = f"Usage: !tail [n], with n from 1 to {TAIL_MAX}."

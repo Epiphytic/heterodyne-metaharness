@@ -83,6 +83,7 @@ BTQ_APPROVERS = ("tester", "tester2")
 DESIGN_REVIEW = "reviewer=gpt-6.1-sol author=claude-opus-5-5 mode=cross-model"
 READY_PREFIX = "admind is listening"
 WAIT = 90.0                 # one relay round trip can take seconds; every wait is bounded
+BUMP_HOURS = 6              # [admind] ask_bump_hours; not the default, so it shows
 
 # Never used, opened or modified (the brief's isolation list, resolved against the real HOME).
 FORBIDDEN = tuple(REAL_HOME / p for p in (
@@ -843,6 +844,7 @@ start_timeout_seconds = 3600
 group_check_seconds = 20
 alert_poll_seconds = 5
 approve_bead = {toml_str(str(APPROVE_BEAD))}
+ask_bump_hours = {BUMP_HOURS}
 
 [admind.marmot]
 wn_agent = {toml_str(self.wn_agent)}
@@ -1042,6 +1044,26 @@ relays = [{relays}]
         with contextlib.closing(sqlite3.connect(self.admind_state / "admind.db", timeout=10)) as db, db:
             if db.execute("UPDATE asks SET truncated = 1 WHERE ask_id = ?", (ask_id,)).rowcount != 1:
                 raise LiveError(f"ask {ask_id} is not in admind's store")
+
+    def repeat_message_ids(self, ask_id: str, request: str) -> list[str] | None:
+        """The sent message IDs of ask `ask_id`'s chunks repeated by the `!asks repeat` message `request`
+        (outbox `askr:<id>:<request>:<i>`), in order, once all `ask_repeats.parts` of them are sent."""
+        with contextlib.closing(self._db()) as db:
+            try:
+                row = db.execute("SELECT parts FROM ask_repeats WHERE ask_id = ? AND request = ?",
+                                 (ask_id, request)).fetchone()
+            except sqlite3.OperationalError:     # a store from before `!asks repeat`
+                return None
+        if row is None:
+            return None
+        ids = self.sent_ids(f"askr:{ask_id}:{request}:")
+        return ids if len(ids) == int(row[0]) else None
+
+    def cancel_active_asks(self) -> None:
+        """Cancel every active ask, so that a scenario starts from an empty `!asks`."""
+        for summary in self.ask_list().get("asks") or []:
+            if summary["status"] in ("open", "answered"):
+                self.ask_cancel(str(summary["ask_id"]))
 
     def audit_text(self) -> str:
         return (self.admind_state / "audit.jsonl").read_text()

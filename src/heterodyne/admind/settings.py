@@ -23,7 +23,7 @@ from heterodyne.services import UNIT_NAME
 ADMIND_KEYS = frozenset({"profile", "workdir", "restart_units", "chunk_chars", "alert_poll_seconds",
                          "group_check_seconds", "start_timeout_seconds", "turn_notice_seconds", "group_name",
                          "summarizer", "reply_verbatim_lines", "reply_verbatim_chars", "marmot",
-                         "approve_bead"})
+                         "approve_bead", "ask_bump_hours"})
 MARMOT_KEYS = frozenset({"wn_agent", "home", "relays"})
 ADMIN_ADAPTERS = ("claude-code",)
 MAX_NAME = 128
@@ -62,6 +62,7 @@ class AdmindSettings:
     alerts_dir: Path
     service_manager: str
     approve_bead: Path | None = None    # approval asks are refused without it (relay spec R5)
+    ask_bump_hours: int = 12            # open asks are bumped after this many quiet hours; 0 never (B14)
 
 
 def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
@@ -118,6 +119,7 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
         approve_bead=_executable(admind.get("approve_bead")),
+        ask_bump_hours=_int(admind, "ask_bump_hours", 0, 720),
     )
 
 

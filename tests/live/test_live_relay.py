@@ -1,7 +1,7 @@
 """Live round trips through an isolated admind over the real Marmot relays (HZ_LIVE=1 only).
 
 Each test drives the throwaway operators `tester` (a btq approver) and `outsider` (an admind operator who
-is not a btq approver) against the session's isolated stack; see harness.py for what is isolated.
+is not a btq approver) against the module's isolated stack; see harness.py for what is isolated.
 """
 
 import re

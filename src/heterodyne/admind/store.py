@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS asks (
     outcome TEXT,
     decided_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    refreshed_from TEXT);       -- the stale ask this fresh card replaced (relay delta R29)
+    refreshed_from TEXT,        -- the stale ask this fresh card replaced (relay delta R29)
+    last_activity_at TEXT);     -- the automatic-bump clock, moved only forward (asks bump B14)
 CREATE TABLE IF NOT EXISTS ask_answers (
     ask_id TEXT NOT NULL, seq INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('answer', 'note')),
@@ -111,14 +112,25 @@ CREATE TABLE IF NOT EXISTS ask_attempts (
     started_at TEXT NOT NULL, exit_status INTEGER,
     settled TEXT CHECK (settled IN ('refused', 'recorded', 'untouched', 'blocked', 'uncertain')),
     PRIMARY KEY (ask_id, message_id));
+CREATE TABLE IF NOT EXISTS ask_repeats (
+    ask_id TEXT NOT NULL, request TEXT NOT NULL,
+    parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (ask_id, request));
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
 REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
-# The outbox keys that make a delivered message a card (R7): a card chunk, or a chunk of an ask's !details.
-# The ID part is checked exactly, so a `reply()` key with the tag `ask` (`ask:<64 hex>:<i>`) never counts.
-_CARD_KEY = re.compile(r"\Aask:([2-9a-hjkmnp-z]{4}):\d+\Z|\Aaskd:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z")
+# The outbox keys that make a delivered message a card (R7): a card chunk, a chunk of an ask's !details, or
+# a chunk of an `!asks repeat` (asks bump B12). The ID part is checked exactly, so a `reply()` key with the
+# tag `ask` (`ask:<64 hex>:<i>`) never counts.
+_CARD_KEY = re.compile(r"\Aask:([2-9a-hjkmnp-z]{4}):\d+\Z|\Aaskd:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z"
+                       r"|\Aaskr:([2-9a-hjkmnp-z]{4}):[0-9a-f]{64}:\d+\Z")
+# The outbox keys of a reminder (asks bump B6): an `!asks bump` chunk, `asknote:<id>:bump:<command mid>:<i>`,
+# or an automatic bump's, `asknote:<id>:autobump:<seq>:<i>`. Never a card; each form is checked exactly.
+_BUMP_KEY = re.compile(r"\Aasknote:([2-9a-hjkmnp-z]{4}):bump:[0-9a-f]{64}:[0-9]+\Z"
+                       r"|\Aasknote:([2-9a-hjkmnp-z]{4}):autobump:[0-9]+:[0-9]+\Z")
 
 
 def now() -> str:
@@ -176,6 +188,7 @@ class AskRow:
     created_at: str
     updated_at: str
     refreshed_from: str | None = None
+    last_activity_at: str | None = None     # set from created_at when the ask is stored (B14)
 
 
 @dataclass(frozen=True)
@@ -200,13 +213,13 @@ _TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_
 
 
 _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, truncated, card_parts, status, "
-        "outcome, decided_by, created_at, updated_at, refreshed_from")    # fixed, interpolated like _TURN
+        "outcome, decided_by, created_at, updated_at, refreshed_from, last_activity_at")   # fixed, as _TURN
 
 
 def _ask(r: tuple[object, ...]) -> AskRow:
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
-                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]))
+                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]))
 
 
 def _opt_int(v: object) -> int | None:
@@ -282,6 +295,12 @@ class Store:
             if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
                 with self.transaction():
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        # A database from before automatic bumps (asks bump B14): every existing ask's clock starts now, so
+        # none is bumped at deploy. The column and its values: both or neither, once.
+        if "last_activity_at" not in {str(r[1]) for r in self.db.execute("PRAGMA table_info(asks)")}:
+            with self.transaction():
+                self.db.execute("ALTER TABLE asks ADD COLUMN last_activity_at TEXT")
+                self.db.execute("UPDATE asks SET last_activity_at = ?", (now(),))
 
     @_locked
     def close(self) -> None:
@@ -561,10 +580,17 @@ class Store:
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
         self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
                          row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
-                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from, peer_pid))
+                         row.decided_by, row.created_at, row.updated_at, row.refreshed_from,
+                         row.last_activity_at or row.created_at, peer_pid))
+
+    @_locked
+    def touch_ask(self, ask_id: str, at: str) -> None:
+        """Move the ask's activity clock forward to `at` (UTC ISO-8601); never back (B14)."""
+        self.db.execute("UPDATE asks SET last_activity_at = ? WHERE ask_id = ? "
+                        "AND (last_activity_at IS NULL OR last_activity_at < ?)", (at, ask_id, at))
 
     @_locked
     def ask(self, ask_id: str) -> AskRow | None:
@@ -624,10 +650,25 @@ class Store:
         if message_id is None:
             return None
         rows = self.db.execute("SELECT key FROM outbox WHERE message_id = ? AND status = 'sent' "
-                               "AND (key LIKE 'ask:%' OR key LIKE 'askd:%')", (message_id,)).fetchall()
+                               "AND (key LIKE 'ask:%' OR key LIKE 'askd:%' OR key LIKE 'askr:%')",
+                               (message_id,)).fetchall()
+        return self._matching_ask(rows, _CARD_KEY)
+
+    @_locked
+    def bump_for_message(self, message_id: str | None) -> str | None:
+        """The ask a delivered reminder is about (asks bump B6): the **sent** outbox row with that message ID,
+        keyed exactly `asknote:<id>:bump:<64 hex>:<i>` or `asknote:<id>:autobump:<seq>:<i>`, of an ask that
+        exists. Every other `asknote:` notice, and pending or failed rows, never match."""
+        if message_id is None:
+            return None
+        rows = self.db.execute("SELECT key FROM outbox WHERE message_id = ? AND status = 'sent' "
+                               "AND key LIKE 'asknote:%'", (message_id,)).fetchall()
+        return self._matching_ask(rows, _BUMP_KEY)
+
+    def _matching_ask(self, rows: list[tuple[object]], pattern: re.Pattern[str]) -> str | None:
         for (key,) in rows:
-            m = _CARD_KEY.match(str(key))
-            ask_id = None if m is None else m.group(1) or m.group(2)
+            m = pattern.match(str(key))
+            ask_id = None if m is None else next((g for g in m.groups() if g), None)
             if ask_id is not None and self.ask(ask_id) is not None:
                 return ask_id
         return None
@@ -643,9 +684,49 @@ class Store:
 
     @_locked
     def card_delivered(self, ask_id: str) -> bool:
-        """Every one of the card's `card_parts` chunks is sent."""
+        """Every one of the card's `card_parts` chunks is sent, or every chunk of one recorded repeat, by that
+        repeat's own count (R8; asks bump B12). Chunks of different repeats never combine."""
         row = self.ask(ask_id)
-        return row is not None and self._all_sent([f"ask:{ask_id}:{i}" for i in range(row.card_parts)])
+        if row is None:
+            return False
+        return (self._all_sent([f"ask:{ask_id}:{i}" for i in range(row.card_parts)])
+                or self._first_full_repeat(ask_id) is not None)
+
+    def _first_full_repeat(self, ask_id: str) -> str | None:
+        """The request ID of the earliest repeat of the ask whose every chunk is sent."""
+        rows = self.db.execute("SELECT request, parts FROM ask_repeats WHERE ask_id = ? "
+                               "ORDER BY created_at, rowid", (ask_id,)).fetchall()
+        return next((str(request) for request, parts in rows
+                     if self._all_sent([f"askr:{ask_id}:{request}:{i}" for i in range(int(parts))])), None)
+
+    @_locked
+    def add_repeat(self, ask_id: str, request: str, parts: int, at: str) -> None:
+        """Record an `!asks repeat` of the ask, with its own chunk count (B11). A replay changes nothing."""
+        self.db.execute("INSERT OR IGNORE INTO ask_repeats(ask_id, request, parts, created_at) "
+                        "VALUES (?, ?, ?, ?)", (ask_id, request, parts, at))
+
+    @_locked
+    def bump_target(self, ask_id: str) -> str | None:
+        """What a reminder threads to (B3, B13): the original card's chunk 0 whenever it is sent; otherwise
+        the first chunk of the earliest fully sent repeat; otherwise None. Never a reminder or `!details`."""
+        first = self.first_card_message(ask_id)
+        if first is not None:
+            return first
+        request = self._first_full_repeat(ask_id)
+        if request is None:
+            return None
+        r = self.db.execute("SELECT message_id FROM outbox WHERE key = ? AND status = 'sent'",
+                            (f"askr:{ask_id}:{request}:0",)).fetchone()
+        return None if r is None or r[0] is None else str(r[0])
+
+    @_locked
+    def reminder_pending(self, ask_id: str) -> bool:
+        """Is a reminder or repeat chunk of the ask still waiting to be sent (B14)? Failed ones are not."""
+        prefixes = (f"asknote:{ask_id}:bump:", f"asknote:{ask_id}:autobump:", f"askr:{ask_id}:")
+        r = self.db.execute("SELECT 1 FROM outbox WHERE status = 'pending' AND (key LIKE ? ESCAPE '\\' "
+                            "OR key LIKE ? ESCAPE '\\' OR key LIKE ? ESCAPE '\\') LIMIT 1",
+                            tuple(_like(p) + "%" for p in prefixes)).fetchone()
+        return r is not None
 
     @_locked
     def first_card_message(self, ask_id: str) -> str | None:

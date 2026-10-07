@@ -104,7 +104,7 @@ Detach with `Ctrl-b d`. Until then the agent cannot start a turn, and `!tail` sh
   | `!ps` | Status of each unit in `restart_units`, plus `wn-agent (admind)` and `admin agent`. | `!ps` |
   | `!restart <unit>` | Restart one unit from `restart_units`. Any other unit is refused with a reply that lists the allowed units and does not repeat what you typed. | `!restart <unit-name>.service` |
 | `!details [full]` | The full reply behind a summary or batch, and with `full` its tool calls. Reply to the summary or batch, or send it alone for the latest. Capped, see "`!details` and `!details full`" above. As a reply to an ask's card, the whole ask (section 10). | `!details full` |
-| `!asks` | The active asks, one line each (section 10). | `!asks` |
+| `!asks [bump\|repeat]` | The active asks, one line each. `bump` posts a reminder under each open ask's card; `repeat` posts each open ask's card again (section 10). | `!asks bump` |
 | `!answer <id> <text>` | Answer a question or merge ask without replying to its card (section 10). | `!answer k7m2 use the first relay` |
 | `!approve` | Approve a btq approval bead, as a reply to its card (section 10). A 👍 reaction or a reply of `approve` does the same. Optional arguments `<bead> [<digest12>]` must be the card's. | `!approve` |
 | `!deny [<bead> [<reason>]]` | Deny it, as a reply to its card (section 10). A 👎 reaction or a reply of `deny <reason>` does the same. | `!deny <bead> the scope is too wide` |
@@ -409,7 +409,7 @@ Approving records your approval of <bead> in btq, as you, via Marmot. Any other 
 - **An approval card is never shortened** (R8). Its whole readout, digest line and closing lines are the card, split into `chunk_chars` chunks, and any chunk is the card for a reaction or a reply. The readout is capped at 24,000 characters (`MAX_APPROVAL_CARD`); a longer one is refused at post time (above).
 - **The budget** (R15) applies to question and merge cards only: at most 40 lines and 3,500 characters of context, counted after redaction, cut at 3,500 characters, then at 40 lines, so the last shown line can end mid-line. The first line and the closing lines are fixed framing and are never cut. When something is left out, the card says so, and `!details` has the rest.
 - **`!details` on a card.** Sent as a reply to any chunk of a card, or of its `!details`, `!details` (or `!details full`) returns the whole ask in lane 2, threaded to the command. For an approval, these are the chunks checked when the ask was posted, the same as the card. admind records which operator asked and how many chunks went out. It is no longer a step before approving, except for an ask stored before the delta (below).
-- **What counts as a card.** Only messages admind itself queued as a card or as an ask's `!details`, and that were sent, count. A look-alike printed by the admin agent does not.
+- **What counts as a card.** Only messages admind itself queued as a card, as an ask's `!details` or as an `!asks repeat` of the card, and that were sent, count. A look-alike printed by the admin agent does not. A reminder (`!asks bump`, or an automatic one) is not a card.
 
 ### Answering and deciding
 
@@ -420,6 +420,8 @@ Approving records your approval of <bead> in btq, as you, via Marmot. Any other 
 | a reply to an approval card, or to its `!details` | Read by R28 (below): an approve, a deny, or otherwise a **note** the poster sees, never a decision: "Noted on ask `<id>`; this is not a decision. React 👍 to approve or 👎 to deny, or reply approve / deny `<reason>`." |
 | `!answer <id> <text>` | The same as a reply, from anywhere. `<text>` is everything after the ID, newlines included. Refused for an approval ask: "Ask `<id>` is an approval ask. To decide, react to its card or reply to it. Nothing recorded." |
 | `!asks` | First reconciles any ask stranded in `deciding` or `uncertain` (see "Outcomes"), then lists the active asks, one line each: `k7m2 question · 3h · <first 60 characters of the title>`. If none, "No active asks." |
+| `!asks bump` | The backstop as for `!asks`, then one reminder per `open` ask, oldest first, threaded to its card (see "Reminders"). The reply: "Bumped `<n>` asks: `<id>`, `<id>`." and one line per ask not bumped. |
+| `!asks repeat` | The backstop, then each `open` ask's whole card again, top-level (see "Reminders"). The reply: "Repeated `<n>` asks: …" and the same lines. |
 | `!approve` | Approve, as a reply to the approval card or to its `!details`. Arguments are optional: `!approve <bead> [<digest12>]`, and if given they must be the card's bead and digest (any case), or the command is refused (R7). |
 | `!deny [<bead> [<reason>]]` | Deny, as a reply to the card or its `!details`. With arguments, the first must be the card's bead; the rest is the reason. |
 | `!details` (as a reply to a card) | The ask's full text (above). |
@@ -435,10 +437,20 @@ A reply or reaction to a card is never pasted to the admin agent, and neither is
 1. It is a reaction or reply to a chunk of the card, or of its `!details`.
 2. Any arguments of `!approve` or `!deny` are the card's bead (and, for `!approve`, digest).
 3. The ask is `open`. A second decider is told who decided first (R31).
-4. For an approve, every chunk of the card is sent. For an ask stored before the delta (`asks.truncated = 1`, a shortened card), **this operator** has also asked for `!details` on it, and every chunk of that `!details` is sent. A deny needs neither (R8).
+4. For an approve, every chunk of the card is sent, or every chunk of one `!asks repeat` of it (chunks of different repeats never combine). For an ask stored before the delta (`asks.truncated = 1`, a shortened card), **this operator** has also asked for `!details` on it, and every chunk of that `!details` is sent. A deny needs neither (R8).
 5. admind is still authorised for the message (not latched, group verified), and `approve_bead` is set.
 
 Then admind persists the attempt (`deciding`) and runs `approve-bead <bead> --json` (60 seconds). The decision stops before anything is written if the bead is busy, has changed since the card (`stale`), already holds a decision (`blocked`), is no longer open or no longer `kind:approval`, or the operator is not in its `approvers`. Right before it starts the decision run, admind checks authorisation once more (R11): this is the commit point. The run is `approve-bead <bead> --as=<name> --yes --expect-digest=<full digest> --via=marmot --via-ref=marmot:id:<12 hex>`, with `--deny --note=<reason>` for a denial, every value as one `--flag=value` argument. For a reaction, the `<12 hex>` is of the reaction's event ID. It has 90 seconds. Once started, the run is not cancelled by a latch, a lost subscription or a group change, because killing it mid-write would leave a partial write. The reply then waits in the outbox like every post of a latched admind, and the audit says `latched_during`. On every exit, admind kills the run's process group and reaps it before it settles anything.
+
+### Reminders
+
+**`!asks bump`** posts one reminder per `open` ask, oldest first: `Still outstanding: ask <id> · <kind> · <age> · <title>.`, then "React 👍 or 👎 on the card above, or reply to it with approve or deny `<reason>`." for an approval, or "Reply to the card above to answer." otherwise. The title is redacted whole and then cut at 80 characters, so a secret is never partly shown. Every reminder, however often you bump, is threaded to chunk 0 of the ask's original card, never to a `!details` chunk or an earlier reminder; a refreshed ask (R29) is bumped on its own card. An ask that is not `open` is named in the reply instead: `<id> is answered; awaiting its asker` (an answered ask waits on its poster, even after it collected the answer), `<id> is deciding`, `<id> is uncertain`. An ask whose card's chunk 0 was never sent is named `<id>: card not delivered; try !asks repeat`. With no active asks, the reply is "No outstanding asks." The reminders, the reply and the command's `done` are one transaction, so a replay posts nothing twice. `!asks bump`, `!asks` and `!answer <id> <text>` work as replies to anything, a reminder included.
+
+**A reminder is not a card.** Reacting or replying to it never decides or answers. A plain reply to a reminder, `!approve`, `!deny` or `!details` sent as a reply to one, or a 👍 or 👎 on one, gets one reply and nothing else: "That was a reminder. React or reply on ask `<id>`'s card (the message the reminder replies to)." It is threaded to your reply, or for a reaction to the reminder. Any other reaction on a reminder is ignored. Nothing on a reminder reaches the admin agent.
+
+**`!asks repeat`** posts each `open` ask's whole card again as new top-level messages, for a card that failed to deliver or that you cannot find. An approval's repeat is the chunks checked when it was posted, unchanged even if `chunk_chars` has changed since; a question's or merge's is its whole text, split. A repeat is a card: react or reply to any chunk of it as to the original. Once every chunk of one repeat is sent, the ask counts as delivered for an approve. A repeat does not replace `!details` for an ask stored before the delta (step 4 below). While the original card's chunk 0 is not sent, reminders thread to chunk 0 of the earliest wholly sent repeat; once the original is sent, to the original.
+
+**Automatic reminders.** Every 5 minutes admind bumps each `open` ask that has been quiet for `ask_bump_hours` (`[admind]`, default 12, 0 turns them off; see [configuration](configuration.md)). The reminder starts `Still outstanding (automatic reminder, every <h> h):` and threads as above; no reply is posted. An ask's clock starts when it is posted and moves to the latest of: a reminder or repeat queued for it; and a reply, reaction, note, answer, decision attempt or `!details` on its card, or an `!answer <id>` naming it, once admind accepted it, even if it then refuses it (an oversized `!deny`, a decision that is not possible yet, a control character); a message dropped at the door or replayed, a reminder hint or a listing moves nothing. An ask whose earlier reminder or repeat is still waiting to be sent is skipped until that row is sent or has failed. Nothing is posted while admind is latched, the group is unverified or no operator has been seen; the check then waits for the next run and moves no clock. After a long stop each ask gets one reminder, not one per missed period. On upgrade every existing ask's clock starts at the upgrade, so the first automatic reminders come `ask_bump_hours` later.
 
 ### Outcomes and recovery
 
@@ -497,6 +509,7 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 | question or merge card | 40 lines and 3,500 characters of context |
 | approval card readout (`MAX_APPROVAL_CARD`) | 24,000 characters |
 | one answer or note | 16,000 characters |
+| automatic reminders | checked every 5 minutes; one per ask per `ask_bump_hours` of quiet (default 12, at most 720) |
 | answers and notes per ask | 50, and 64,000 characters in total |
 | deny reason | 1,000 characters, after redaction |
 | `approve-bead --json` read | 60 seconds; stdout capped at 8 MiB, stderr at 1 MiB |
@@ -515,6 +528,8 @@ Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, ne
 - A reaction's `inbound` record has `what` `reaction`, `ref` (`id:<12 hex>`), `emoji` and `target`. Dropped reactions are `drop` records with `what` `reaction`.
 - `deciding`: an attempt is about to run (`message_id`, `ask_id`, `bead`, `decision`, `operator`).
 - `decided`: `outcome` (`recorded`, `untouched`, `blocked`, `uncertain`), `status`, `exit_status`, `gate_valid`, `latched_during`. An `untouched` read-back with a new digest is `reason` `stale`, with `fresh`, `refresh_refused` and `updated_parts` as above.
+- `!asks bump` and `!asks repeat` are `command` records with `command` `asks`, `sub` (`bump` or `repeat`), `bumped` (the ask IDs) and `skipped` (`ask_id` and `why`: `answered`, `deciding`, `uncertain` or `card not delivered`). An automatic check that bumped or skipped something is an `autobump` record with `bumped` and `skipped` (`why` may also be `pending delivery`); a check that found nothing due writes nothing.
+- `bump-hint`: a reply or a decision emoji on a reminder was answered with the hint (`message_id`, `ask_id`).
 - Also `reaction-ignored` (an emoji that decides nothing, on an approval card), `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-unverified` (the notice above was sent because `approve_bead` is not set), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
 
 **Matching a bead to the audit.** A bead decided from Marmot holds `via: marmot` and `via_ref: marmot:id:<12 hex>`. The `id:<12 hex>` part is exactly how the audit names the operator's message, or a reaction's `ref` (R27). Search `audit.jsonl` for it to find that message's or reaction's `inbound`, `deciding` and `decided` records:

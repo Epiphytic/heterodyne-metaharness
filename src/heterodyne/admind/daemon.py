@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,9 @@ ASK_TOO_MANY = f"there are already {asks.MAX_OPEN} active asks; cancel some or w
 ASK_TOO_OFTEN = f"{asks.MAX_PER_HOUR} asks were posted in the last hour; try again later."
 ASK_CANCELLED_NOTICE = "Ask {ask_id} was cancelled by its poster. Nothing more is needed."
 NO_ACTIVE_ASKS = "No active asks."
+BUMP_HINT = ("That was a reminder. React or reply on ask {ask_id}'s card (the message the reminder replies "
+             "to).")
+CARD_COMMANDS = (["approve"], ["deny"], ["details"])     # what B6 intercepts on a bump, as parse names them
 MAX_SEND_ATTEMPTS = 10
 AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
@@ -149,6 +153,7 @@ EXTRACT_SECONDS = 10.0      # the transcript fallback's deadline (a stalled file
 OFFSET_SECONDS = 2.0        # a transcript size measurement's deadline (B19, B20)
 SUMMARY_POLL = 5.0          # summary_loop re-reads the database at least this often (B9)
 DETAILS_READ_SECONDS = 30.0     # `!details full`'s transcript read (B20)
+AUTOBUMP_SECONDS = 300.0        # how often automatic bumps are checked (asks bump B14)
 DETAILS_BUSY = "(the transcript is busy or slow; try `!details full` again)"
 NO_TOOL_CALLS = "(tool calls are not available for this turn)"
 DETAILS_NOT_READ = "(not read: time limit)"    # a turn the command's budget ran out before
@@ -351,6 +356,7 @@ class Admind:
         self.summary_poll = SUMMARY_POLL                    # replaced in tests
         self.offset_timeout = OFFSET_SECONDS                # replaced in tests
         self.batch_seconds = backstop.BATCH_SECONDS         # replaced in tests
+        self.autobump_seconds = AUTOBUMP_SECONDS            # replaced in tests
         self.batch_poll = 1.0                               # replaced in tests
         self.wallclock: Callable[[], float] = time.time     # replaced in tests; batches outlive a restart
         self.group_ok = False
@@ -589,7 +595,7 @@ class Admind:
                                    ("hooks", self.hook_loop), ("outbox", self.outbox_loop),
                                    ("alerts", self.alerts_loop), ("group", self.group_loop),
                                    ("agent", self.agent_loop), ("summaries", self.summary_loop),
-                                   ("batches", self.batch_loop)):
+                                   ("batches", self.batch_loop), ("autobump", self.autobump_loop)):
                     tg.create_task(self.guarded(supervised(name, loop, self.audit)))
                 tg.create_task(self.guarded(self.reconcile_asks(snapshot)))
         except BaseException:
@@ -830,12 +836,15 @@ class Admind:
             return
         refusal = self.answer_refusal(row, text)
         if refusal is not None:
-            self.finish(mid, "done", refusal, "ask")
+            with self.store.transaction():
+                self.touch(ask_id)
+                self.finish(mid, "done", refusal, "ask")
             self.audit.write("ask", action="answer-refused", message_id=mid, ask_id=ask_id, chars=len(text))
             return
         if row.kind == "approval":      # a note the poster sees; never a decision (R13)
             with self.store.transaction():
                 self.store.add_answer(ask_id, "note", self.operator_name(mid), mid, text)
+                self.touch(ask_id)
                 self.finish(mid, "done", NOTED.format(ask_id=ask_id), "ask")
             self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
             return
@@ -843,6 +852,7 @@ class Admind:
         with self.store.transaction():
             self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text)
             self.store.set_ask(ask_id, "answered")
+            self.touch(ask_id)
             self.finish(mid, "done", (f"Added to ask {ask_id}; it was already answered, and the poster sees "
                                       "both.") if again else f"Answer recorded for ask {ask_id}.", "ask")
         self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text))
@@ -863,19 +873,122 @@ class Admind:
                     "characters.")
         return None
 
-    async def list_asks(self, mid: str) -> None:
+    async def list_asks(self, mid: str, sub: str | None = None) -> None:
         """`!asks`: first the backstop (spec §8): in the worker, under `work_lock`, no decision is in
         flight, so every `deciding` or `uncertain` ask is stranded and is reconciled as at startup. Then
-        the active asks, one line each."""
+        the active asks, one line each; or, for `!asks bump` and `!asks repeat`, the reminders (B1, B11)."""
         for ask_id, attempt, status in self.store.recovery_snapshot():
             await self.reconcile_quietly(ask_id, attempt, status, restarted=False)
         if not self.authorised(mid):        # the read-backs awaited
             self.deny(mid, "command")
             return
+        if sub is not None:
+            self.remind(mid, sub)
+            return
         at = asks.now()
         lines = [asks.list_line(r, at) for r in self.store.asks_with_status(*asks.ACTIVE)]
         self.finish(mid, "done", "\n".join(lines) or NO_ACTIVE_ASKS, "cmd")
         self.audit.write("command", message_id=mid, command="asks", asks=len(lines))
+
+    def remind(self, mid: str, sub: str) -> None:
+        """`!asks bump` (B2-B9) or `!asks repeat` (B11) for every `open` ask, oldest first, with the clock
+        moves (B14), the summary and `done` in one transaction. The keys hold the command's ID, so a replay
+        queues nothing new (B7)."""
+        at = asks.now()
+        done: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        with self.store.transaction():
+            for row in self.store.asks_with_status(*asks.ACTIVE):
+                if row.status != "open":
+                    skipped.append((row.ask_id, row.status))
+                    continue
+                if sub == "repeat":
+                    self.repeat_card(mid, row, at)
+                else:
+                    target = self.store.bump_target(row.ask_id)
+                    if target is None:
+                        skipped.append((row.ask_id, "card not delivered"))
+                        continue
+                    self.bump(f"asknote:{row.ask_id}:bump:{mid}", asks.reminder(row, at), target)
+                self.store.touch_ask(row.ask_id, asks.stamp(at))
+                done.append(row.ask_id)
+            verb = "Repeated" if sub == "repeat" else "Bumped"
+            self.finish(mid, "done", asks.remind_summary(verb, done, skipped), "cmd")
+        self.audit.write("command", message_id=mid, command="asks", sub=sub, bumped=done,
+                         skipped=[{"ask_id": ask_id, "why": why} for ask_id, why in skipped])
+
+    async def autobump_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.autobump_seconds)
+            async with self.work_lock:
+                self.autobump()
+
+    def autobump(self) -> None:
+        """One automatic-bump check (B14), under `work_lock` and with no await, so the gate, each ask's
+        eligibility, its enqueue and its clock move cannot interleave with anything. Every `open` ask quiet
+        for `ask_bump_hours` is bumped once, unless an earlier reminder or repeat of it is still pending.
+        The gate closed defers the whole check and moves no clock."""
+        hours = self.s.ask_bump_hours
+        if hours == 0 or not self.may_post():
+            return
+        at = asks.now()
+        due = at - timedelta(hours=hours)
+        bumped: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        for row in self.store.asks_with_status("open"):
+            if row.last_activity_at is None or datetime.fromisoformat(row.last_activity_at) > due:
+                continue
+            if self.store.reminder_pending(row.ask_id):
+                skipped.append((row.ask_id, "pending delivery"))
+                continue
+            target = self.store.bump_target(row.ask_id)
+            if target is None:
+                skipped.append((row.ask_id, "card not delivered"))
+                continue
+            with self.store.transaction():
+                seq = self.next_seq("autobump_seq")
+                self.bump(f"asknote:{row.ask_id}:autobump:{seq}", asks.reminder(row, at, hours), target)
+                self.store.touch_ask(row.ask_id, asks.stamp(at))
+            bumped.append(row.ask_id)
+        if bumped or skipped:
+            self.audit.write("ask", action="autobump", bumped=bumped,
+                             skipped=[{"ask_id": ask_id, "why": why} for ask_id, why in skipped])
+
+    def bump(self, key: str, text: str, target: str) -> None:
+        """One reminder, redacted whole and then split, every chunk threaded to `target` (B3, B4, B8)."""
+        for i, part in enumerate(chunk.split(redact(text), self.s.chunk_chars)):
+            self.post(f"{key}:{i}", part, target)
+
+    def repeat_card(self, mid: str, row: AskRow, at: datetime) -> None:
+        """The ask's whole card again, top-level (B11): an approval's stored checked chunks as they are
+        (R21), a question's or merge's whole text split; recorded with its own part count (B12)."""
+        if row.kind == "approval":
+            parts = asks.stored_details(row)
+        else:
+            parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
+        for i, part in enumerate(parts):
+            self.post(f"askr:{row.ask_id}:{mid}:{i}", part, None)
+        self.store.add_repeat(row.ask_id, mid, len(parts), asks.stamp(at))
+
+    def touch(self, ask_id: str) -> None:
+        """Accepted activity on the ask, in the caller's transaction: its clock moves to now (B14)."""
+        self.store.touch_ask(ask_id, asks.stamp(asks.now()))
+
+    def touch_card(self, target: str | None) -> None:
+        """`touch` the ask whose card, `!details` or repeat `target` is, if it is one (B14)."""
+        ask_id = self.store.ask_for_message(target)
+        if ask_id is not None:
+            self.touch(ask_id)
+
+    def bump_hint(self, mid: str, ask_id: str) -> None:
+        """A reply, a card command or a decision emoji on a reminder (B6): where to decide instead, in the
+        reply's thread or on the reacted reminder (delta §5). Nothing reaches the agent or the ask."""
+        self.store.set_inbound(mid, "executing")
+        if not self.authorised(mid):
+            self.deny(mid, "ask")
+            return
+        self.finish(mid, "done", BUMP_HINT.format(ask_id=ask_id), "ask")
+        self.audit.write("ask", action="bump-hint", message_id=mid, ask_id=ask_id)
 
     def bang_answer(self, mid: str, cmd: commands.Command) -> None:
         """`!answer <id> <text>`: as a reply to the card, from anywhere."""
@@ -884,8 +997,10 @@ class Admind:
         if row is None or ask_id is None:
             self.finish(mid, "done", show(f"No ask {cmd.arg}.", False), "cmd")
             return
-        if row.kind == "approval":
-            self.finish(mid, "done", APPROVAL_NOT_ANSWERED.format(ask_id=ask_id), "cmd")
+        if row.kind == "approval":     # refused, yet accepted activity on the ask (B14)
+            with self.store.transaction():
+                self.touch(ask_id)
+                self.finish(mid, "done", APPROVAL_NOT_ANSWERED.format(ask_id=ask_id), "cmd")
             return
         self.answer_ask(mid, ask_id, cmd.rest or "")
 
@@ -904,13 +1019,17 @@ class Admind:
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)
             self.store.add_ask_details(ask_id, self.operator_name(mid), mid, len(parts))
+            self.touch(ask_id)
             self.store.set_inbound(mid, "done")
         self.audit.write("ask", action="details", message_id=mid, ask_id=ask_id, parts=len(parts))
 
     # --- approval decisions (relay spec §8 "Decide", R7-R12, R23, R26) ------------------------------
     def decide_refused(self, mid: str, text: str, why: str, ask_id: str | None = None) -> None:
-        """A refusal before the attempt exists: the ask is unchanged."""
-        self.finish(mid, "done", text, "ask")
+        """A refusal before the attempt exists: the ask is unchanged, but for its activity clock (B14)."""
+        with self.store.transaction():
+            if ask_id is not None:
+                self.touch(ask_id)
+            self.finish(mid, "done", text, "ask")
         self.audit.write("ask", action="refused", message_id=mid, ask_id=ask_id, reason=why)
 
     def not_open(self, row: AskRow) -> str:
@@ -967,7 +1086,11 @@ class Admind:
             return
         a = Attempt(row.ask_id, mid, action, name, "marmot:" + canonical_ref(mid), row.digest,
                     note if action == "deny" else None)
-        if not self.store.begin_attempt(a):             # step 4 (R22, R23)
+        with self.store.transaction():
+            begun = self.store.begin_attempt(a)
+            if begun:
+                self.touch(row.ask_id)
+        if not begun:                                   # step 4 (R22, R23)
             now_row = self.store.ask(row.ask_id)
             self.decide_refused(mid, self.not_open(now_row or row), "not open", row.ask_id)
             return
@@ -1717,11 +1840,18 @@ class Admind:
     async def react(self, mid: str, emoji: str, target: str | None) -> None:
         """What a claimed reaction does (R27): on an approval card an approve or deny emoji decides and any
         other is ignored; on a question or merge card the emoji is the answer; on anything else it is
-        ignored. Ignored reactions get no reply."""
+        ignored. Ignored reactions get no reply. On a bump an approve or deny emoji gets B6's hint."""
+        bump = self.store.bump_for_message(target)
+        if bump is not None and verbs.emoji_action(emoji) is not None:
+            self.bump_hint(mid, bump)
+            return
         ask_id = self.store.ask_for_message(target)
         row = None if ask_id is None else self.store.ask(ask_id)
         if row is None or commands.has_control_chars(emoji):
-            self.store.set_inbound(mid, "done")
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                if row is not None:             # accepted on a card, though ignored (B14)
+                    self.touch(row.ask_id)
             self.audit.write("event", action="ignored", what="reaction", message_id=mid, ask_id=ask_id)
             return
         if row.kind != "approval":
@@ -1730,7 +1860,9 @@ class Admind:
         action = verbs.emoji_action(emoji)
         card = self.approval_card_for(target)
         if action is None or card is None:
-            self.store.set_inbound(mid, "done")
+            with self.store.transaction():
+                self.store.set_inbound(mid, "done")
+                self.touch(row.ask_id)
             self.audit.write("ask", action="reaction-ignored", message_id=mid, ask_id=row.ask_id,
                              emoji=own_text(emoji))
             return
@@ -1758,7 +1890,13 @@ class Admind:
         # Control characters are refused before anything else: they can break out of bracketed paste,
         # and a command name or argument holding one must never be parsed or echoed (plan decision D3).
         if commands.has_control_chars(text):
-            self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
+            with self.store.transaction():      # refused, yet accepted activity on a card it replies to (B14)
+                self.touch_card(target)
+                self.finish(mid, "dropped", CONTROL_REFUSED, "refused")
+            return
+        bump = self.store.bump_for_message(target)
+        if bump is not None and (not text.startswith("!") or text[1:].split(maxsplit=1)[:1] in CARD_COMMANDS):
+            self.bump_hint(mid, bump)                       # B6: never decided, answered or pasted
             return
         ask_id = self.store.ask_for_message(target)
         if ask_id is not None and not text.startswith("!"):
@@ -1767,7 +1905,9 @@ class Admind:
         try:
             cmd = commands.parse(text)
         except commands.CommandError as exc:
-            self.finish(mid, "done", show(str(exc), False), "cmd")   # may echo the operator's mistyped word
+            with self.store.transaction():      # e.g. an oversized `!deny` on a card: its clock moves (B14)
+                self.touch_card(target)
+                self.finish(mid, "done", show(str(exc), False), "cmd")   # may echo the mistyped word
             return
         if cmd is not None:
             # Persisted before anything runs (or waits for the dispatch lock): a crash from here until
@@ -1787,7 +1927,7 @@ class Admind:
                 await self.decide(mid, cmd, target)
                 return
             if cmd.name == "asks":
-                await self.list_asks(mid)
+                await self.list_asks(mid, cmd.arg)
                 return
             if cmd.name == "answer":
                 self.bang_answer(mid, cmd)
