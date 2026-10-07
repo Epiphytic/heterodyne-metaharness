@@ -229,3 +229,32 @@ Setup steps (s):
   `Stack.edit_bead` exists for stale-digest scenarios.
 - One session stack is shared by all tests, so every test posts its own asks. Tests that decide an ask
   should use their own bead.
+
+## Decision scenarios (test_live_decisions.py)
+
+`tests/live/test_live_decisions.py` holds 15 tests for deciding by reply or reaction, from the reviewed delta
+(`docs/superpowers/specs/2026-10-06-admind-relay-replies-reactions-design.md`, R7, R8, R13, R27–R31 and
+§7.2). The module is `xfail(strict=False)` until the daemon implements it.
+
+Run once against the current code (HZ_LIVE=1, whole of `tests/live/`): 30 passed, 14 xfailed, 1 xpassed,
+0 errors, in 26 min. The other 30 tests still pass alongside it. A second run of the module with `--runxfail`
+showed where each one stops: every one of the 14 fails at its first wait for new behaviour (a decision, a
+refusal, a stale reply or a reaction answer), or, for the ignored emoji, at the audit check. Every setup step
+before that point ran: posting, pinning, editing and the legacy `truncated` write. The xpass is
+`test_question_reply_is_a_note`: the current daemon already answers a free-form reply with "Noted on ask
+<id>; this is not a decision."
+
+Not yet exercised, because each comes after a wait that fails today:
+
+- the `askd:<ask>:<reaction event>:` chunk lookup (`Stack.sent_ids`);
+- parsing the fresh ask ID out of the stale reply;
+- the race after both reactions have been sent;
+- the `Note: too risky` read-back from `bd show`;
+- `remove_reaction` (the test skips if wn-agent refuses it or never sends `reaction_removed`).
+
+Harness additions:
+
+- `Stack.pin`, `bead_text`, `sent_ids` and `pastes`;
+- `Operator.unreact`;
+- `Stack.mark_legacy_truncated`. This is the one write the harness makes to admind's store. It sets
+  `asks.truncated = 1` after posting, because the delta leaves no other way to create a legacy ask.
