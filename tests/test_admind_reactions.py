@@ -341,6 +341,10 @@ def threads(h: Harness, mid: str, tag: str = "ask") -> set[str | None]:
                                              (f"{tag}:{mid}:%",))}
 
 
+def outbox_keys(h: Harness) -> set[str]:
+    return {r[0] for r in h.store.db.execute("SELECT key FROM outbox")}
+
+
 def outbox_count(h: Harness, like: str) -> int:
     return h.store.db.execute("SELECT COUNT(*) FROM outbox WHERE key LIKE ?", (like,)).fetchone()[0]
 
@@ -679,6 +683,85 @@ def test_restart_after_a_reaction_was_claimed_before_begin_attempt(tmp_path: Pat
     go(tmp_path, scenario, before_store=with_card(tmp_path, mid, "executing"))
 
 
+TARGETS = ["a later card chunk", "a details chunk"]
+
+
+async def chunk_of(h: Harness, ask_id: str, first: str, which: str) -> str:
+    """The sent message ID of the card's last chunk, or of the first chunk of a `!details` reply."""
+    if which == "a later card chunk":
+        row = h.store.ask(ask_id)
+        assert row is not None and row.card_parts > 1
+        key = f"ask:{ask_id}:{row.card_parts - 1}"
+    else:
+        key = f"askd:{ask_id}:{await send(h, '!details', first)}:0"
+    await wait_until(lambda: sent_mid(h, key) is not None, 30)
+    target = sent_mid(h, key)
+    assert target is not None and target != first
+    return target
+
+
+def reply_tos(h: Harness, like: str) -> list[str | None]:
+    return [r[0] for r in h.store.db.execute("SELECT reply_to FROM outbox WHERE key LIKE ? ORDER BY seq",
+                                             (like,))]
+
+
+@needs_tmux
+@pytest.mark.parametrize("which", TARGETS)
+def test_restart_notices_thread_to_the_reacted_chunk(tmp_path: Path, which: str) -> None:
+    """Delta §5: the reconcile notices resolve their thread from the attempt's stored reply target, never
+    the card's first chunk: with approve_bead missing (the unverified notice), then with it back."""
+    ids: dict[str, str] = {}
+
+    async def crash(h: Harness) -> None:
+        ask_id, first = await card(h)
+        target = await chunk_of(h, ask_id, first, which)
+        edit(tmp_path, read="wait")
+        mid = await react(h, "👍", target)
+        await waiting(h)
+        assert ask_status(h, ask_id) == "deciding" and current(h, ask_id) == mid
+        ids.update(ask=ask_id, target=target, mid=mid)       # the run ends here, mid-read
+    go(tmp_path, crash, chunk_chars=200)
+    edit(tmp_path, read=None)
+
+    async def unverified(h: Harness) -> None:
+        await wait_until(lambda: audited(h, kind="ask", action="reconcile-unverified", ask_id=ids["ask"]))
+        assert reply_tos(h, f"asknote:{ids['ask']}:unverified:%") == [ids["target"]]
+        assert ask_status(h, ids["ask"]) == "deciding"
+    go(tmp_path, unverified, fresh=False, approve_bead=None, chunk_chars=200)
+
+    async def reconciled(h: Harness) -> None:
+        await wait_until(lambda: ask_status(h, ids["ask"]) == "open")
+        assert reply_tos(h, f"asknote:{ids['ask']}:reconciled:%") == [ids["target"]]
+        assert reply_tos(h, f"restarted:{ids['mid']}:%") == [] and decisions(h) == []
+    go(tmp_path, reconciled, fresh=False, chunk_chars=200)
+
+
+@needs_tmux
+@pytest.mark.parametrize("which", TARGETS)
+def test_the_asks_backstop_threads_its_notice_to_the_reacted_chunk(tmp_path: Path, which: str) -> None:
+    async def scenario(h: Harness) -> None:
+        ask_id, first = await card(h)
+        target = await chunk_of(h, ask_id, first, which)
+        edit(tmp_path, approvers=[])                        # a preflight refusal, nothing written
+        close, calls = h.store.close_attempt, 0
+
+        def once(*args: Any, **kw: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("store failure")
+            return close(*args, **kw)
+        h.store.close_attempt = once  # type: ignore[method-assign]
+        mid = await react(h, "👍", target)
+        await wait_until(lambda: audited(h, kind="handler", action="failed", error="RuntimeError"))
+        assert ask_status(h, ask_id) == "deciding" and h.store.inbound_status(mid) == "executing"
+        await say(h, "!asks", None, tag="cmd")
+        assert ask_status(h, ask_id) == "open" and h.store.inbound_status(mid) == "done"
+        assert reply_tos(h, f"asknote:{ask_id}:reconciled:%") == [target]
+        assert row_text(h, f"asknote:{ask_id}:reconciled:1:0") == RECONCILE_STRANDED.format(ask_id=ask_id)
+    go(tmp_path, scenario, chunk_chars=200)
+
+
 # --- replies and commands on an approval card (R7, R13, R28) -------------------------------------
 @needs_tmux
 @pytest.mark.parametrize("text", ["approve", "Approved.", "YES", "y", "ok!", "okay", "LGTM", " lgtm ", "👍🏻",
@@ -924,15 +1007,16 @@ def approvals_attempt(ask_id: str, mid: str) -> Any:
 def test_a_changed_pinned_bead_gets_its_updated_content_marked_undecidable(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
+        last = await chunk_of(h, ask_id, first, "a later card chunk")
         edit(tmp_path, digest=D2)               # the stored pin (posted_digest = D) no longer matches
-        mid, text = await reacted(h, "👍", first)
+        mid, text = await reacted(h, "👍", last)
         why = redact(f"the bead's ask changed after it was posted (posted {D12}, now {D2[:12]}); re-post it")
         assert text == not_refreshed(why) and h.store.newer_ask(ask_id) is None
         hexid = mid.removeprefix("r:")
         rows = h.store.db.execute("SELECT key, text, reply_to, lane FROM outbox WHERE key LIKE ? "
                                   "ORDER BY seq", (f"askd:{ask_id}:%",)).fetchall()
         assert rows and all(r[0].startswith(f"askd:{ask_id}:{hexid}:") for r in rows)     # bare hex, no r:
-        assert all(r[2] == first and r[3] == 2 for r in rows)
+        assert all(r[2] == last and r[3] == 2 for r in rows)          # threaded to the reacted chunk
         content = "".join(r[1] for r in rows)
         assert content.startswith(f"Updated content of {BEAD} (now {D2[:12]}). It cannot be decided yet: its "
                                   "stored pin no longer matches, so its originator must renew the pin and "
@@ -947,6 +1031,8 @@ def test_a_changed_pinned_bead_gets_its_updated_content_marked_undecidable(tmp_p
             assert updated is not None and h.store.ask_for_message(updated) == ask_id    # the card recognizer
             assert (await reacted(h, "👍", updated))[1] == stale
             assert (await say(h, "approve", updated)) == stale
+            assert (await reacted(h, "👎", updated))[1] == stale
+            assert (await say(h, "deny no", updated)) == stale
             assert (await say(h, "what changed?", updated)) == stale
         assert decisions(h) == [] and h.store.newer_ask(ask_id) is None
         assert not any(t.startswith("echo: ") and t != "echo: hello" for t in h.texts())   # never the agent
@@ -1020,10 +1106,15 @@ def test_a_socket_post_after_a_refresh_supersedes_it(tmp_path: Path) -> None:
 
 
 @needs_tmux
-@pytest.mark.parametrize("where", ["after the attempt closes", "after the fresh ask is inserted",
-                                   "before the reply is queued"])
+@pytest.mark.parametrize(("where", "pinned"), [
+    ("after the attempt closes", False), ("after the fresh ask is inserted", False),
+    ("before the reply is queued", False),
+    ("after the attempt closes", True), ("before the reply is queued", True),     # updated content instead
+])
 def test_a_failure_inside_the_refresh_rolls_everything_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                            where: str) -> None:
+                                                            where: str, pinned: bool) -> None:
+    """Each injected failure leaves the outbox as it was: no fresh card chunk, no updated-content chunk and
+    no reply (delta §6). The pinned cases fail inside the transaction that queues the updated content."""
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         store, daemon = h.daemon.store, h.daemon
@@ -1048,10 +1139,13 @@ def test_a_failure_inside_the_refresh_rolls_everything_back(tmp_path: Path, monk
         monkeypatch.setattr(store, "insert_ask", insert_ask)
         monkeypatch.setattr(daemon, "finish", finish)
         edit(tmp_path, digest=D2)
+        await wait_until(lambda: h.store.card_delivered(ask_id), 30)
+        before = outbox_keys(h)
         mid = await send(h, "approve", first)
         await wait_until(lambda: audited(h, kind="handler", action="failed", error="RuntimeError"))
         assert ask_status(h, ask_id) == "deciding" and current(h, ask_id) == mid      # nothing committed
         assert h.store.newer_ask(ask_id) is None and queued(h, mid) == ""
+        assert outbox_keys(h) == before
         assert len(h.store.asks_with_status(*asks.ACTIVE, *asks.TERMINAL)) == 1
         monkeypatch.undo()
         backstop = await send(h, "!asks", None)                 # recovery: the backstop reconciles it
@@ -1060,12 +1154,17 @@ def test_a_failure_inside_the_refresh_rolls_everything_back(tmp_path: Path, monk
         assert row_text(h, f"asknote:{ask_id}:reconciled:1:0") == RECONCILE_STRANDED.format(ask_id=ask_id)
         again = await send(h, "approve", first)                 # and the next decision refreshes
         await settled(h, again)
-        assert queued(h, again) == refreshed(ask_id, fresh_of(h, ask_id))
-    go(tmp_path, scenario)
+        if pinned:
+            assert queued(h, again).startswith(not_refreshed("")[:-2]) and outbox_count(h, f"askd:{ask_id}:%")
+        else:
+            assert queued(h, again) == refreshed(ask_id, fresh_of(h, ask_id))
+    go(tmp_path, scenario, {BEAD: bead(posted_digest=D)} if pinned else None, chunk_chars=200)
 
 
 @needs_tmux
-def test_a_failed_compare_and_set_refreshes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("pinned", [False, True])
+def test_a_failed_compare_and_set_refreshes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                    pinned: bool) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         real_close = h.daemon.store.close_attempt
@@ -1074,11 +1173,14 @@ def test_a_failed_compare_and_set_refreshes_nothing(tmp_path: Path, monkeypatch:
             return False if kw.get("new_status") == "stale" else real_close(*args, **kw)
         monkeypatch.setattr(h.daemon.store, "close_attempt", close_attempt)
         edit(tmp_path, digest=D2)
+        await wait_until(lambda: h.store.card_delivered(ask_id), 30)
+        before = outbox_keys(h)
         mid = await send(h, "approve", first)
         await wait_until(lambda: audited(h, kind="ask", action="conflict", ask_id=ask_id))
         assert h.store.newer_ask(ask_id) is None and queued(h, mid) == ""
         assert outbox_count(h, "ask:%") == h.store.ask(ask_id).card_parts  # type: ignore[union-attr]
-    go(tmp_path, scenario)
+        assert outbox_keys(h) == before         # no fresh card, no updated content, no reply
+    go(tmp_path, scenario, {BEAD: bead(posted_digest=D)} if pinned else None, chunk_chars=200)
 
 
 @needs_tmux

@@ -1097,7 +1097,7 @@ def test_asks_backstop_reconciles_stranded(tmp_path: Path) -> None:
         note = next(r for r in h.fake.sent if r["idempotency_key"] == f"asknote:{ask_id}:reconciled:1:0")
         assert note["text"] == (f"admind could not finish settling the last decision on ask {ask_id}; "
                                 "nothing was recorded. Decide again.")
-        assert note["reply_to_message_id_hex"] == first
+        assert note["reply_to_message_id_hex"] == mid           # the stranded reply, not the card (delta §5)
         assert audited(h, kind="ask", action="reconciled", ask_id=ask_id, outcome="untouched", was="deciding",
                        restarted=False)
         edit(tmp_path, approvers=["op"])
@@ -1612,7 +1612,7 @@ def test_restart_while_deciding(tmp_path: Path, via_ref: str | None, status: str
                                   (RESTARTED_NOTICE,)).fetchone()[0] == 0
         note = h.store.db.execute("SELECT text, reply_to FROM outbox "
                                   "WHERE key LIKE 'asknote:d222:reconciled:%'").fetchone()
-        assert note is not None and note[1] is None
+        assert note is not None and note[1] == mid      # threaded to the decision reply (relay delta §5)
         assert note[0].startswith(f"Approved {BEAD} as op" if status == "approved" else
                                   f"{BEAD} holds a decision admind cannot confirm as yours")
         assert attempts(h, "d222")[0][-1] == ("recorded" if status == "approved" else "blocked")
