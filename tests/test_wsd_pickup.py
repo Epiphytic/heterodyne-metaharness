@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,11 +12,12 @@ from wsd_env import WS, LockAt, Rig, Worker, finish, git_repo, make_rig, probe_l
 from heterodyne.wsd import ids
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
 from heterodyne.wsd.journal import JournalBusy
-from heterodyne.wsd.runtime import LaunchSpec, Liveness
+from heterodyne.wsd.park import UNRECEIPTED
+from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started
 from heterodyne.wsd.scheduler import POINTS, Outcome
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.sweep import Swept, sweep
-from heterodyne.wsd.workstream import Limits, WorkstreamSettings
+from heterodyne.wsd.workstream import Limits
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +42,7 @@ def test_clean_pickup_passes_every_point_once(tmp_path: Path) -> None:
     assert rig.journal.snapshot(WS).state is WsState.RUNNING
 
 
-@pytest.mark.parametrize("point", POINTS)
+@pytest.mark.parametrize("point", [p for p in POINTS if p.split(".")[1] not in UNRECEIPTED])
 def test_crash_at_every_pickup_point_replays_to_one_start(tmp_path: Path, point: str) -> None:
     rig = make_rig(tmp_path, cp=CrashAt(point))
     rig.world.add("btq-1")
@@ -52,6 +54,23 @@ def test_crash_at_every_pickup_point_replays_to_one_start(tmp_path: Path, point:
     assert rig.world.worktrees == ["btq-1"]
     assert len(rig.runtime.launches) == 1
     assert rig.state("btq-1") == "running"
+    assert rig.journal.ops_open() == []
+
+
+@pytest.mark.parametrize("step", UNRECEIPTED)
+def test_crash_between_dispatch_and_receipt_holds_the_pickup(tmp_path: Path, step: str) -> None:
+    """AU-3 §4.3: a dispatched generation with no receipt is never dispatched again: the bead is STUCK,
+    whether or not the session started."""
+    rig = make_rig(tmp_path, cp=CrashAt(f"pickup.{step}"))
+    rig.world.add("btq-1")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    calls = rig.runtime.calls
+    rig.restart()
+    rig.pickup()
+    assert rig.runtime.calls == calls
+    assert rig.journal.state(WS, "btq-1").reason is Reason.UNEXPECTED_STATE    # type: ignore[union-attr]
+    assert rig.state("btq-1") == "stuck"
     assert rig.journal.ops_open() == []
 
 
@@ -137,19 +156,24 @@ def test_confirmed_launch_failure_tries_the_next_candidate(tmp_path: Path) -> No
     assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
 
 
-def test_uncertain_launch_keeps_the_role_and_holds(tmp_path: Path) -> None:
+def test_uncertain_launch_is_stuck_and_keeps_the_role(tmp_path: Path) -> None:
+    """AU-3 §4.2 step 5: an uncertain launch leaves no receipt, so its bead is STUCK at once and never
+    launched again. Its listed session still holds the coder role: the next bead waits for it to end."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
     rig.world.add("btq-2")
     rig.runtime.launch_uncertain = 1
-    assert rig.pickup() is Outcome.HELD
-    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"}
-    assert rig.world.claims == ["btq-1"] and rig.runtime.coders() == ["btq-1"]
-    assert rig.pickup() is Outcome.HELD             # still listed as unknown: nothing else is tried
-    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
     assert rig.pickup() is Outcome.BUSY
-    assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
-    assert rig.world.claims == ["btq-1"] and len(rig.runtime.launches) == 1
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.UNEXPECTED_STATE and rig.state("btq-1") == "stuck"
+    assert rig.runtime.calls == 1 and rig.runtime.coders() == ["btq-1"]
+    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
+    assert rig.pickup() is Outcome.BUSY             # listed live: still never settled from the list
+    assert rig.state("btq-1") == "stuck" and rig.runtime.calls == 1
+    rig.runtime.end(rig.key("btq-1"))
+    rig.pickup()
+    assert rig.state("btq-1") == "stuck" and rig.state("btq-2") == "running"
+    assert [s.bead for s in rig.runtime.launches] == ["btq-1", "btq-2"]
 
 
 def test_no_runtime_never_spends_launch_budget(tmp_path: Path) -> None:
@@ -196,7 +220,7 @@ def test_replayed_pickup_launches_what_it_chose(tmp_path: Path) -> None:
     rig.world.add("btq-1")
     with pytest.raises(SimulatedCrash):
         rig.pickup()
-    rig.ws = WorkstreamSettings(WS, rig.ws.repos, "coder", "p-two", rig.ws.profiles, rig.ws.limits)
+    rig.ws = replace(rig.ws, coder_profile="p-two")
     rig.restart()
     rig.pickup()
     [spec] = rig.runtime.launches
@@ -207,7 +231,7 @@ def test_replayed_pickup_launches_what_it_chose(tmp_path: Path) -> None:
 
 def renamed(rig: Rig, role: str = "builder") -> None:
     """The operator renamed the coder role in the configuration, and wsd restarted."""
-    rig.ws = WorkstreamSettings(WS, rig.ws.repos, role, rig.ws.coder_profile, rig.ws.profiles, rig.ws.limits)
+    rig.ws = replace(rig.ws, coder_role=role)
     rig.restart()
 
 
@@ -259,17 +283,19 @@ def test_role_rename_before_the_placement_escalates(tmp_path: Path) -> None:
 def test_replay_after_the_launch_keeps_every_field_the_launch_added(tmp_path: Path,
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     """r2 finding 2: the launch enriched the record (as plan 4's runtime will, with a thread id and the
-    model it reports) and wsd died before journaling it. The replay leaves the record byte for byte."""
-    rig = make_rig(tmp_path, cp=CrashAt("pickup.launched!"))
+    model it reports) and wsd died after journaling its receipt (AU-3: a crash before the receipt is STUCK).
+    The replay finishes from the receipt and leaves the record byte for byte."""
+    rig = make_rig(tmp_path, cp=CrashAt("pickup.receipt"))
     rig.world.add("btq-1")
     real = rig.runtime.launch
 
-    def enriching(spec: LaunchSpec) -> None:
-        real(spec)
+    def enriching(spec: LaunchSpec) -> Started:
+        started = real(spec)
         meta = rig.world.beads[spec.bead].metadata
         doc = json.loads(meta[RECORD_KEY])
         doc.update({"thread_id": "th-7", "reported_model": "m-9", "extra": {"nested": [1, None, "x"]}})
         meta[RECORD_KEY] = json.dumps(doc)
+        return started
 
     monkeypatch.setattr(rig.runtime, "launch", enriching)
     with pytest.raises(SimulatedCrash):
@@ -546,7 +572,12 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
             assert rig.journal.holds(WS)
         else:
             assert outcome in (Outcome.NOTHING, Outcome.STUCK)
-            assert claimable_now(rig) == [] and resumable_now(rig) == [] and coders == []
+            # AU-3: an uncertain launch leaves no receipt, so its bead is STUCK at once while its session
+            # may still be listed; it holds the role until the sweep or the agent ends it.
+            unreceipted = [rig.runtime.listed[k].bead for k in rig.runtime.listed]
+            assert all(reason(rig, b) == ("stuck", Reason.UNEXPECTED_STATE) for b in unreceipted)
+            assert claimable_now(rig) == [] or unreceipted
+            assert resumable_now(rig) == []
             left = [b.id for b in rig.world.ready_for(WS)]
             if outcome is Outcome.NOTHING:
                 assert left == []
@@ -564,7 +595,12 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
                     "uncertain_landed": "closed", "uncertain_missed": "closed", "lost_race": "dropped",
                     "bad_repo": "stuck", "launch_fails": "stuck", "blocked": None, "parks": "closed",
                     "released": "closed", "deleted": "dropped", "pinned": "stuck"}[kind]
-        assert rig.state(f"btq-{n}") == expected, (n, kind)
+        # "launch_uncertain" and "deleted": the uncertain launch left no receipt, so its bead is STUCK at
+        # once (AU-3 §4.3); it ends closed or dropped only if its agent closes it or bd loses it first.
+        if kind in ("launch_uncertain", "deleted"):
+            assert rig.state(f"btq-{n}") in ("stuck", expected), (n, kind)
+        else:
+            assert rig.state(f"btq-{n}") == expected, (n, kind)
 
 
 # --- parked beads in pickup (§5.2: resumable before ready; a parked bead never pre-empts) ---
@@ -723,19 +759,16 @@ def test_external_label_removal_is_not_a_release(tmp_path: Path) -> None:
     assert [s.resume for s in rig.runtime.launches] == [False]
 
 
-def test_uncertain_hold_ends_with_its_operation(tmp_path: Path) -> None:
-    """The uncertain launch's bead was closed meanwhile: the replay finds the claim gone and ends the
-    operation, and the hold goes with it. The listed session is the sweep's to stop."""
+def test_uncertain_resume_is_stuck_until_its_bead_closes(tmp_path: Path) -> None:
+    """An uncertain resume leaves no hold and no open operation: the bead is STUCK at once (AU-3 §4.2
+    step 5). Once its bead is closed, the sweep stops the listed session and the bead reads closed."""
     rig = parked_rig(tmp_path)
     rig.world.close("btq-2")
     rig.runtime.launch_uncertain = 1
-    assert rig.pickup() is Outcome.HELD           # the resume's launch is uncertain
-    rig.world.close("btq-1")
-    for op in rig.journal.ops_open():
-        rig.parker.replay(op)
+    assert rig.pickup() is Outcome.NOTHING        # the resume's launch is uncertain
     assert rig.journal.ops_open() == [] and rig.journal.holds(WS) == {}
-    row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.reason is Reason.CLAIM_LOST
+    assert rig.state("btq-1") == "stuck"
+    rig.world.close("btq-1")
     assert rig.pickup() is Outcome.NOTHING
     assert rig.runtime.coders() == [] and rig.state("btq-1") == "closed"
 
@@ -1220,7 +1253,7 @@ def test_replay_after_a_repository_change_uses_the_recorded_placement(tmp_path: 
     with pytest.raises(SimulatedCrash):
         rig.pickup()
     other = git_repo(tmp_path / "repos" / "other")
-    rig.ws = WorkstreamSettings(WS, {"default": other}, "coder", "p-one", rig.ws.profiles, rig.ws.limits)
+    rig.ws = replace(rig.ws, repos={"default": other})
     rig.restart()
     assert rig.pickup() is Outcome.BUSY             # the replay started it
     [spec] = rig.runtime.launches

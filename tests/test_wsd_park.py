@@ -1,7 +1,6 @@
 import os
-import sqlite3
 import threading
-from collections.abc import Generator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,13 +16,14 @@ from heterodyne.wsd.park import (
     PARK_POINTS,
     RELEASE_POINTS,
     RESUME_POINTS,
+    UNRECEIPTED,
     Launch,
     NotReleasable,
     resumable,
 )
-from heterodyne.wsd.runtime import LaunchSpec, Liveness
+from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started
 from heterodyne.wsd.states import Reason
-from heterodyne.wsd.workstream import REPO_KEY, ConfigInvalid, Limits, WorkstreamSettings, place
+from heterodyne.wsd.workstream import REPO_KEY, ConfigInvalid, Limits, place
 
 
 @pytest.fixture(autouse=True)
@@ -268,7 +268,7 @@ def test_resume_sequence(tmp_path: Path) -> None:
     assert rig.state("btq-1") == "running"
 
 
-@pytest.mark.parametrize("point", RESUME_POINTS)
+@pytest.mark.parametrize("point", [p for p in RESUME_POINTS if p.split(".")[1] not in UNRECEIPTED])
 def test_crash_at_every_resume_point_launches_once(tmp_path: Path, point: str) -> None:
     """Finding 7 among them: at `resume.unlabelled!` the label is gone but the step is not journaled. The
     replay reads that as its own unlabel and goes on to launch; it is never a cancellation."""
@@ -285,13 +285,30 @@ def test_crash_at_every_resume_point_launches_once(tmp_path: Path, point: str) -
     assert rig.journal.ops_open() == []
 
 
+@pytest.mark.parametrize("step", UNRECEIPTED)
+def test_crash_between_dispatch_and_receipt_holds_the_resume(tmp_path: Path, step: str) -> None:
+    """AU-3 §4.3: a generation dispatched with no receipt is never dispatched again, nor settled from the
+    session list: the bead is STUCK, whether or not the session started."""
+    rig = parked(tmp_path)
+    rig.restart(CrashAt(f"resume.{step}"))
+    with pytest.raises(SimulatedCrash):
+        resume(rig)
+    calls = rig.runtime.calls
+    rig.restart()
+    rig.replay_open()
+    assert rig.runtime.calls == calls
+    assert rig.journal.state(WS, "btq-1").reason is Reason.UNEXPECTED_STATE    # type: ignore[union-attr]
+    assert rig.state("btq-1") == "stuck"
+    assert [op.kind for op in rig.journal.ops_open()] == []
+
+
 def test_resume_uses_the_recorded_identity_after_a_config_change(tmp_path: Path) -> None:
     """Finding 4: the operator changed the default profile and repository since the launch. The resume is
     the recorded session in the recorded worktree, never a new placement."""
     rig = parked(tmp_path)
     first = rig.runtime.launches[0]
     other = git_repo(tmp_path / "repos" / "other")
-    rig.ws = WorkstreamSettings(WS, {"default": other}, "coder", "p-two", rig.ws.profiles, rig.ws.limits)
+    rig.ws = replace(rig.ws, repos={"default": other}, coder_profile="p-two")
     rig.restart()
     assert resume(rig) is Launch.STARTED
     spec = rig.runtime.launches[-1]
@@ -386,8 +403,7 @@ def test_guard_counts_an_old_role_session_after_a_role_rename(tmp_path: Path, li
     rig.world.add("btq-3")
     rig.start("btq-3")
     rig.runtime.set(rig.key("btq-3"), liveness)
-    rig.ws = WorkstreamSettings(WS, rig.ws.repos, "builder", rig.ws.coder_profile, rig.ws.profiles,
-                                rig.ws.limits)
+    rig.ws = replace(rig.ws, coder_role="builder")
     rig.restart()
     assert resume(rig) is Launch.WAIT
     assert rig.runtime.coders() == ["btq-3"] and not any(s.resume for s in rig.runtime.launches)
@@ -417,29 +433,26 @@ def test_confirmed_launch_failure_retries_then_escalates(tmp_path: Path) -> None
     assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
 
 
-def test_uncertain_launch_keeps_the_role_until_the_list_settles_it(tmp_path: Path) -> None:
-    """Finding 16: an uncertain launch is never retried blind. The workstream holds LAUNCH_UNCERTAIN; the
-    replay waits while the session is listed UNKNOWN and finishes once it is listed live."""
+def test_uncertain_launch_holds_and_is_never_retried(tmp_path: Path) -> None:
+    """Finding 16, as AU-3 changed it (§4.2 step 5): a launch the runtime can't confirm or deny leaves no
+    receipt, so the bead is STUCK `unexpected_state` at once. It is never launched again, and the session
+    list never settles it, whether the session is listed live or ended. Release refuses it (§4.3)."""
     rig = parked(tmp_path)
     rig.runtime.launch_uncertain = 1
-    assert resume(rig) is Launch.UNCERTAIN
-    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"}
-    rig.replay_open()
-    assert len(rig.runtime.launches) == 2 and rig.journal.ops_open() != []
-    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
-    rig.replay_open()
-    assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
-    assert len(rig.runtime.launches) == 2 and rig.journal.ops_open() == []
-
-
-def test_uncertain_launch_that_never_started_is_launched_again(tmp_path: Path) -> None:
-    rig = parked(tmp_path)
-    rig.runtime.launch_uncertain = 1
-    assert resume(rig) is Launch.UNCERTAIN
-    rig.runtime.end(rig.key("btq-1"))                              # the runtime confirms it is not running
-    rig.replay_open()
-    assert rig.runtime.coders() == ["btq-1"] and rig.state("btq-1") == "running"
-    assert rig.journal.holds(WS) == {}
+    assert resume(rig) is Launch.ENDED
+    assert reason(rig) is Reason.UNEXPECTED_STATE and rig.state("btq-1") == "stuck"
+    assert rig.journal.holds(WS) == {} and rig.journal.ops_open() == []
+    calls = rig.runtime.calls
+    for liveness in (Liveness.LIVE, None):
+        if liveness is None:
+            rig.runtime.end(rig.key("btq-1"))
+        else:
+            rig.runtime.set(rig.key("btq-1"), liveness)
+        rig.replay_open()
+        rig.pickup()
+        assert rig.runtime.calls == calls and rig.state("btq-1") == "stuck"
+    with pytest.raises(NotReleasable, match="no launch receipt"):
+        rig.parker.release("btq-1")
 
 
 # --- release and escalate ---
@@ -697,58 +710,44 @@ def test_crash_right_after_a_stuck_park_still_escalates(tmp_path: Path) -> None:
     assert rig.world.beads["btq-1"].labels.count(NEEDS_HUMAN) == 1 and rig.journal.ops_open() == []
 
 
-@pytest.fixture
-def busy() -> Generator[list[sqlite3.Connection]]:
-    held: list[sqlite3.Connection] = []
-    try:
-        yield held
-    finally:
-        for db in held:
-            db.rollback()
-            db.close()
-
-
-def lock_journal(rig: Rig, held: list[sqlite3.Connection]) -> sqlite3.Connection:
-    """Another process holds the journal's write lock, and wsd's connection does not wait for it."""
-    other = sqlite3.connect(rig.root / "state" / "wsd.db", isolation_level=None)
-    held.append(other)
-    other.execute("BEGIN IMMEDIATE")
-    rig.journal.db.execute("PRAGMA busy_timeout = 0")
-    return other
-
-
-@pytest.mark.parametrize("outcome", ["started", "failed", "failed-once"])
+@pytest.mark.parametrize("outcome", ["started", "failed"])
 def test_a_busy_journal_after_the_launch_is_never_an_uncertain_launch(
-        tmp_path: Path, busy: list[sqlite3.Connection], outcome: str) -> None:
-    """Task 3: only `runtime.launch` is inside the guard's catch-all. A journal write that fails after it
-    (the DONE record, or the failure count) propagates as JournalBusy: nothing is recorded, no
-    LAUNCH_UNCERTAIN hold, no budget spent, and the replay settles it from the session list.
-    `failed-once`: the journal is busy for the failure count only, and free again for anything after."""
+        tmp_path: Path, outcome: str) -> None:
+    """Task 3, as AU-3 changed it: only `runtime.launch` is inside the guard's catch-all. A journal write
+    that fails after it propagates as JournalBusy: no LAUNCH_UNCERTAIN hold, no budget spent.
+    `started`: the receipt write fails, so the generation was dispatched with no receipt, and its
+    replay holds it, never launching again (§4.3). `failed`: the receipt is journaled and the failure
+    count fails; the replay takes the receipt's tail once, then the next attempt launches."""
     rig = at_unlabelled(tmp_path)
-    if outcome != "started":
+    if outcome == "failed":
         rig.runtime.launch_failures = 1
     [op] = rig.journal.ops_open()
-    if outcome == "failed-once":
-        real = rig.journal.op_failed
+    name = "receipt_put" if outcome == "started" else "op_failed"
+    real = getattr(rig.journal, name)
 
-        def op_failed(op_id: str) -> int:
-            rig.journal.op_failed = real
-            raise JournalBusy("SQLITE_BUSY")
+    def once(*args: object) -> object:
+        setattr(rig.journal, name, real)
+        raise JournalBusy("SQLITE_BUSY")
 
-        rig.journal.op_failed = op_failed
-        with rig.parker.entry(), pytest.raises(JournalBusy):
-            rig.parker.launch(op)
-    else:
-        other = lock_journal(rig, busy)
-        with rig.parker.entry(), pytest.raises(JournalBusy):
-            rig.parker.launch(op)
-        other.rollback()
+    setattr(rig.journal, name, once)
+    with rig.parker.entry(), pytest.raises(JournalBusy):
+        rig.parker.launch(op)
     assert rig.journal.holds(WS) == {}
     [still] = rig.journal.ops_open()
-    assert (still.step, still.attempts) == ("unlabelled", 0)
+    assert (still.step, still.attempts) == ("dispatched", 0)
+    calls = rig.runtime.calls
+    rig.replay_open()
+    assert rig.runtime.calls == calls
+    if outcome == "started":
+        assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.UNEXPECTED_STATE
+        assert rig.runtime.coders() == ["btq-1"]
+        return
+    [still] = rig.journal.ops_open()
+    assert still.attempts == 1 and "generation" not in still.data
     rig.replay_open()
     assert rig.state("btq-1") == "running" and rig.journal.ops_open() == []
     assert [s.resume for s in rig.runtime.launches] == [False, True] and rig.runtime.coders() == ["btq-1"]
+    assert [e.outcome for e in rig.journal.launches(rig.key("btq-1"))] == ["abandoned", "launched"]
 
 
 def test_release_refuses_a_bead_with_an_open_operation(tmp_path: Path) -> None:
@@ -842,9 +841,9 @@ def counting(rig: Rig) -> list[str]:
     calls: list[str] = []
     real = rig.runtime.launch
 
-    def launch(spec: LaunchSpec) -> None:
+    def launch(spec: LaunchSpec) -> Started:
         calls.append(spec.session_key)
-        real(spec)
+        return real(spec)
 
     rig.runtime.launch = launch
     return calls

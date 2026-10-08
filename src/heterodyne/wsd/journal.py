@@ -272,15 +272,15 @@ _DATA = msgspec.json.Decoder(dict[str, str])
 _LAUNCH_COLS = ("session_key", "generation", "ws", "bead", "role", "profile", "account", "credential_key",
                 "model_passed", "dispatched_at", "native_id", "model_reported", "outcome", "adopted",
                 "journaled_at")
-_LAUNCH = ", ".join(_LAUNCH_COLS)
-_LAUNCH_N = len(_LAUNCH_COLS)
+LAUNCH_SQL = ", ".join(_LAUNCH_COLS)
+LAUNCH_N = len(_LAUNCH_COLS)
 _RECEIPT = "session_key, generation, kind, refusal, tmux_session, tmux_pane, pane_pid, native_id, error"
 _ADOPTION = "ws, bead, session_key, verdict, detail, facts, settled, resolution, resolved_at, resolved_by"
 type ReceiptKind = Literal["started", "refused"]
 type Refusal = Literal["failed", "unavailable"]
 
 
-def _launch_row(entry: LaunchEntry) -> tuple[object, ...]:
+def launch_row(entry: LaunchEntry) -> tuple[object, ...]:
     return tuple(int(entry.adopted) if c == "adopted" else getattr(entry, c) for c in _LAUNCH_COLS)
 
 
@@ -378,6 +378,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         db.execute("PRAGMA journal_mode=WAL")
         _check_snapshot(db)
         db.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, False)
+        db.execute("PRAGMA foreign_keys = ON")      # a receipt needs its launch entry
     except BaseException:
         db.close()
         raise
@@ -712,8 +713,8 @@ class Journal:
                     raise EntryConflict(f"generation {entry.generation} is already journaled differently")
                 return
             self.db.execute(
-                f"INSERT INTO launches ({_LAUNCH}, rebuilt_at) VALUES ({', '.join('?' * _LAUNCH_N)}, ?)",  # noqa: S608
-                (*_launch_row(entry), now() if rebuilt else None))
+                f"INSERT INTO launches ({LAUNCH_SQL}, rebuilt_at) VALUES ({', '.join('?' * LAUNCH_N)}, ?)",  # noqa: S608
+                (*launch_row(entry), now() if rebuilt else None))
 
     @_locked
     def launch_set(self, session_key: str, generation: int, name: str, value: str) -> LaunchEntry:
@@ -736,19 +737,19 @@ class Journal:
 
     @_locked
     def launch(self, session_key: str, generation: int) -> LaunchEntry | None:
-        row = self.db.execute(f"SELECT {_LAUNCH} FROM launches WHERE session_key = ? AND generation = ?",  # noqa: S608
+        row = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE session_key = ? AND generation = ?",  # noqa: S608
                               (session_key, generation)).fetchone()
         return None if row is None else _launch(row)
 
     @_locked
     def launches(self, session_key: str) -> list[LaunchEntry]:
-        rows = self.db.execute(f"SELECT {_LAUNCH} FROM launches WHERE session_key = ? "  # noqa: S608
+        rows = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE session_key = ? "  # noqa: S608
                                "ORDER BY generation", (session_key,)).fetchall()
         return [_launch(r) for r in rows]
 
     @_locked
     def launches_of(self, ws: str, bead: str) -> list[LaunchEntry]:
-        rows = self.db.execute(f"SELECT {_LAUNCH} FROM launches WHERE ws = ? AND bead = ? "  # noqa: S608
+        rows = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE ws = ? AND bead = ? "  # noqa: S608
                                "ORDER BY session_key, generation", (ws, bead)).fetchall()
         return [_launch(r) for r in rows]
 

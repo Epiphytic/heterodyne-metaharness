@@ -18,7 +18,7 @@ import msgspec
 import pytest
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, git_repo
+from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
 
 from heterodyne.wsd import cli, ctl, daemon, ids, journal
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
@@ -112,8 +112,9 @@ def counted_submits(lane: daemon.Lane, monkeypatch: pytest.MonkeyPatch) -> list[
 
 def settings(tmp_path: Path) -> WsdSettings:
     repo = git_repo(tmp_path / "repos" / "proj")
-    ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES)
-    return WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,))
+    accounts = accounts_at(login_home(tmp_path / "home"))
+    ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
+    return WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts)
 
 
 def test_startup_recovers_before_accepting_events(tmp_path: Path) -> None:
@@ -932,7 +933,7 @@ def test_status_counts_finished_beads_unless_asked_for_all(tmp_path: Path) -> No
 def two_workstreams(tmp_path: Path) -> WsdSettings:
     s = settings(tmp_path)
     beta = WorkstreamSettings("beta", {"default": git_repo(tmp_path / "repos" / "beta")}, "coder", "p-one",
-                              PROFILES)
+                              PROFILES, accounts=s.accounts)
     return replace(s, workstreams=(*s.workstreams, beta))
 
 
@@ -1134,14 +1135,16 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, git_repo
+from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
 from heterodyne.wsd import cli, daemon
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 tmp = Path(sys.argv[1])
-ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES)
-s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,))
+accounts = accounts_at(login_home(tmp / "home"))
+ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES,
+                        accounts=accounts)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts)
 
 
 class Stuck(FakeRuntime):
@@ -1514,14 +1517,16 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, git_repo
+from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
 from heterodyne.wsd import cli
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 tmp = Path(sys.argv[1])
-ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES)
-s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,))
+accounts = accounts_at(login_home(tmp / "home"))
+ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES,
+                        accounts=accounts)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts)
 s.socket.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
 s.socket.write_text("not a socket")
 sys.exit(cli.run(s, factory(World(tmp / "btq-state")), FakeRuntime()))

@@ -8,7 +8,7 @@ from wsd_env import WS, LockAt, Rig, Worker, finish, make_rig, probe_lock
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY
 from heterodyne.wsd.journal import JournalBusy, OpKind
-from heterodyne.wsd.park import PARK_MARK, PARK_POINTS, RELEASE_POINTS, RESUME_POINTS
+from heterodyne.wsd.park import PARK_MARK, PARK_POINTS, RELEASE_POINTS, RESUME_POINTS, UNRECEIPTED
 from heterodyne.wsd.recovery import RECOVERY_POINTS, Recovered, recover
 from heterodyne.wsd.runtime import Liveness
 from heterodyne.wsd.scheduler import POINTS, Outcome
@@ -364,7 +364,8 @@ def test_recovery_takes_the_operation_lock(tmp_path: Path) -> None:
     assert [r.ok for r in result] == [True] and rig.state("btq-1") == "parked"
 
 
-@pytest.mark.parametrize("point", [p for p in POINTS if p != "lock.waiting"])
+@pytest.mark.parametrize("point", [p for p in POINTS
+                                   if p != "lock.waiting" and p.split(".")[1] not in UNRECEIPTED])
 def test_recovery_leaves_every_interrupted_pickup_to_pickup(tmp_path: Path, point: str) -> None:
     """Recovery never launches and never makes a worktree: a pickup cut short at any point is read back
     (if at its claim) and left open; the next pickup carries it to exactly one launch."""
@@ -381,6 +382,32 @@ def test_recovery_leaves_every_interrupted_pickup_to_pickup(tmp_path: Path, poin
     assert rig.world.claims == ["btq-1"] and rig.world.worktrees == ["btq-1"]
     assert len(rig.runtime.launches) == 1 and rig.state("btq-1") == "running"
     assert rig.journal.ops_open() == []
+
+
+@pytest.mark.parametrize("kind", ["pickup", "resume"])
+@pytest.mark.parametrize("step", UNRECEIPTED)
+def test_recovery_never_dispatches_an_unreceipted_generation_again(tmp_path: Path, kind: str,
+                                                                    step: str) -> None:
+    """AU-3 §4.3: an operation cut short between its dispatch and its receipt is left open by recovery
+    and never launched again; the next pickup finds no receipt and leaves the bead STUCK."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    if kind == "resume":
+        rig.world.add("btq-2")
+        rig.world.beads["btq-2"].labels.remove("agent:wsd")
+        rig.pickup()
+        rig.parker.park("btq-1", ("btq-2",))
+        rig.world.close("btq-2")
+    rig.restart(CrashAt(f"{kind}.{step}"))
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.restart()
+    calls = rig.runtime.calls
+    assert recover(rig.sched).ok and rig.runtime.calls == calls
+    rig.pickup()
+    assert rig.runtime.calls == calls and rig.state("btq-1") == "stuck"
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.UNEXPECTED_STATE and rig.journal.ops_open() == []
 
 
 def test_uncertain_claim_is_read_back_and_left_at_claimed(tmp_path: Path) -> None:
@@ -497,16 +524,18 @@ def test_orphan_claim_hold_of_a_claim_that_landed_is_escalated(tmp_path: Path) -
     assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels and rig.runtime.launches == []
 
 
-def test_uncertain_launch_hold_stays_while_its_operation_is_open(tmp_path: Path) -> None:
+def test_uncertain_launch_stays_stuck_through_recovery(tmp_path: Path) -> None:
+    """AU-3 §4.2 step 5: the uncertain launch was STUCK at once, with no hold and no open operation, and
+    recovery never settles it from the session list nor launches it again."""
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
-    rig.world.add("btq-2")
     rig.runtime.launch_uncertain = 1
-    assert rig.pickup() is Outcome.HELD
+    assert rig.pickup() is Outcome.NOTHING
+    rig.runtime.set(rig.key("btq-1"), Liveness.LIVE)
     rig.restart()
     assert recover(rig.sched).ok
-    assert rig.journal.holds(WS) == {Reason.LAUNCH_UNCERTAIN: "btq-1"} and len(rig.journal.ops_open()) == 1
-    assert rig.pickup() is Outcome.HELD and rig.world.claims == ["btq-1"]
+    assert rig.journal.holds(WS) == {} and rig.journal.ops_open() == []
+    assert rig.state("btq-1") == "stuck" and rig.runtime.calls == 1
 
 
 def test_unreadable_claim_fails_recovery_and_keeps_its_hold(tmp_path: Path) -> None:
@@ -574,7 +603,7 @@ def test_busy_journal_propagates_and_is_never_held(tmp_path: Path) -> None:
     assert rig.journal.holds(WS) == {Reason.ACTIONS_UNRECONCILED: "btq-ap"}
 
 
-@pytest.mark.parametrize("point", RESUME_POINTS)
+@pytest.mark.parametrize("point", [p for p in RESUME_POINTS if p.split(".")[-1] not in UNRECEIPTED])
 def test_interrupted_resume_is_left_to_pickup(tmp_path: Path, point: str) -> None:
     """An open resume is the guard's: recovery neither unlabels nor launches it, and the next pickup
     carries it on. Whatever the point, the bead is resumed exactly once."""
