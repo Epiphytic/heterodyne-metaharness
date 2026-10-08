@@ -119,8 +119,8 @@ def resolve_accounts(merged, env, capabilities=CAPABILITIES) -> dict[tuple[str, 
   - A `stat` error other than ENOENT (EACCES) is a `ConfigError`: "account <n>: login file can't be checked for aliases (<errno name>)". An identity that can't be verified fails closed.
 - **Path-free failures.** Every filesystem step (expanding, `resolve` of the directory and of each login file, `stat`, and the alias comparisons) runs inside one helper that catches `OSError`, `RuntimeError` and `ValueError`.
   - `OSError` covers ELOOP, EACCES and ENAMETOOLONG. `RuntimeError` is Python 3.12's symlink-loop error from `resolve(strict=False)`. `ValueError` covers an embedded NUL.
-  - The helper re-raises as `ConfigError("account <n> (<a>): login directory can't be resolved (<errno name or exception type>)") from None`.
-  - The message never includes `str(exc)`, which contains the path. `from None` keeps the original out of a printed chain.
+  - The helper's `except` block only records the reason (the errno name or the exception type). After the block, it raises `ConfigError("account <n> (<a>): login directory can't be resolved (<reason>)")`. Raising outside the `except` block leaves `__context__` and `__cause__` as None, so the original exception, and the path it holds, isn't attached to the error.
+  - The message never includes `str(exc)`, which contains the path.
   - So `config check` and wsd reload, which catch only `ConfigError`, never see an exception that carries a login path.
 
 ## Validation rules and error messages
@@ -228,7 +228,7 @@ Integration tests go through `load(env=…)` with `HOME` set to `tmp_path`. Fake
 | `test_implicit_defaults_alias` | `~/.codex` symlinked to `~/.claude` is refused on the real table |
 | `test_alias_stat_error_fails_closed` | an EACCES on `stat` (a 000-mode directory; skipped as root) gives the "can't be checked" error |
 | `test_credential_key` | `ck1-` plus 32 hex characters; deterministic; different for another adapter or path; equal through a symlinked spelling of the same dir; changes when the symlink is repointed |
-| `test_errors_never_show_login_paths` | a marker in `login_dir` (`/x/MARKER-login`) is absent from the message, and from `str(exc.__cause__)` and `exc.__context__`'s rendering, for: every rule 6–9 and 18 case; a symlink loop as the login dir; a symlink loop as a login file; a `resolve` that raises `OSError` naming the path (monkeypatched); and a NUL in `login_dir` |
+| `test_errors_never_show_login_paths` | a marker in `login_dir` (`/x/MARKER-login`) is absent from the message and from `traceback.format_exception(exc)`, and `exc.__cause__` and `exc.__context__` are None for the canonicalization errors, for: every rule 6–9 and 18 case; a symlink loop as the login dir; a symlink loop as a login file; a `resolve` that raises `OSError` naming the path (monkeypatched); and a NUL in `login_dir` |
 | `test_config_check_hides_login_dir` (cli) | with `ON` patched in, `config check` prints `accounts.acct-a.login_dir = <hidden>` with its source, and the marker path appears nowhere in stdout or stderr; a symlink-loop login dir gives exit 1 and a path-free `config error:` line, not a traceback |
 | `test_usage_rules` (parametrized) | rules 19–23: an unknown key; `reserve_percent` -1, 51, 5.0, `true`; each other key 0, -1, `"30"`, `true`; the boundaries (min_recheck = 60 × min passes, +1 fails; each defer key at 60 × max_window_hours passes, +1 fails); a host override is merged before checking |
 | `test_workstream_rejects_accounts_and_usage` | `[accounts.x]` and `[usage]` in a workstream file give the host-only message; `[profiles.p]` keeps the existing message |
