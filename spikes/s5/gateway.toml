@@ -1,0 +1,15 @@
+# S5 spike (btq-le4mq): podman compute driver. Original env saved as gateway.env.s5-orig.
+[openshell]
+version = 2
+
+[openshell.gateway]
+compute_driver = "podman"
+
+[openshell.drivers.podman]
+socket_path = "/run/user/1001/podman/podman.sock"
+allow_driver_config = true
+enable_bind_mounts = true
+userns = "keep-id"
+
+[openshell.drivers.podman.resource_admission]
+enabled = false
