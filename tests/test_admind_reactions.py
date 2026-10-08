@@ -356,7 +356,8 @@ def test_an_approve_reaction_approves_in_the_thread_with_one_canonical_ref(tmp_p
         mid, text = await reacted(h, "👍", first)
         hexid = mid.removeprefix("r:")
         ref = ref_id(hexid)
-        assert text == f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it."
+        assert text == (f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it.\n"
+                        "No more asks in flight.")
         assert threads(h, mid) == {first}                   # threaded to the reacted message, never `r:`
         assert decisions(h) == [[BEAD, "--as=op", "--yes", f"--expect-digest={D}", "--via=marmot",
                                  f"--via-ref=marmot:{ref}"]]
@@ -381,7 +382,7 @@ def test_a_deny_reaction_denies_with_no_reason(tmp_path: Path, emoji: str) -> No
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
         mid, text = await reacted(h, emoji, first)
-        assert text == f"Denied {BEAD} as op (via Marmot)."
+        assert text == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
         assert decisions(h)[0][-2:] == ["--deny", "--note="]
         assert ask_status(h, ask_id) == "denied" and threads(h, mid) == {first}
     go(tmp_path, scenario)
@@ -529,7 +530,7 @@ def test_a_reaction_before_the_card_is_delivered(tmp_path: Path) -> None:
         assert decisions(h) == [] and ask_status(h, ask_id) == "open"
         assert not h.store.card_delivered(ask_id)
         denied = (await reacted(h, "👎", first))[1]          # deny needs no delivery check
-        assert denied == f"Denied {BEAD} as op (via Marmot)."
+        assert denied == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
         assert ask_status(h, ask_id) == "denied"
         h.fake.on_send = None
         h.fake.send_gate = None
@@ -785,7 +786,7 @@ def test_an_approve_reply_approves(tmp_path: Path, text: str) -> None:
 def test_a_deny_reply_denies_with_its_reason(tmp_path: Path, text: str, note: str) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        assert (await say(h, text, first)) == f"Denied {BEAD} as op (via Marmot)."
+        assert (await say(h, text, first)) == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
         assert decisions(h)[0][-2:] == ["--deny", f"--note={note}"]
         assert ask_status(h, ask_id) == "denied"
     go(tmp_path, scenario)
@@ -831,7 +832,7 @@ def test_approve_command_without_or_with_matching_arguments(tmp_path: Path, comm
 def test_deny_command_without_or_with_matching_arguments(tmp_path: Path, command: str, note: str) -> None:
     async def scenario(h: Harness) -> None:
         ask_id, first = await card(h)
-        assert (await say(h, command, first)) == f"Denied {BEAD} as op (via Marmot)."
+        assert (await say(h, command, first)) == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
         assert decisions(h)[0][-1] == f"--note={note}" and ask_status(h, ask_id) == "denied"
     go(tmp_path, scenario)
 

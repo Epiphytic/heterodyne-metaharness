@@ -627,7 +627,7 @@ def test_postable_accepts() -> None:
 # --- the card (R8, R21, R25) ---------------------------------------------------------------------
 HEAD = "🛂 Approval ask k7m2 · bead btq-ab12c · posted by controller (a local process; unverified)"
 ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
-TOP = [HEAD, ACTIONS, f"digest {D12}"]
+TOP = [HEAD, ACTIONS, f"digest {D12}", "No more asks in flight."]
 END = ["", f"Approving records your approval of {BEAD} in btq, as you, via Marmot. Any other reply is a note "
        "for the poster."]
 
@@ -638,7 +638,7 @@ def test_approval_card_is_the_readout_verbatim() -> None:
     assert isinstance(card, asks.ApprovalCard)
     whole = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == [whole] and card.details_chunks == [whole]
-    assert D not in whole and whole.splitlines()[:3] == TOP and "!approve" not in whole
+    assert D not in whole and whole.splitlines()[:4] == TOP and "!approve" not in whole
     assert asks.approval_title(readout(), BEAD) == "Approve the plan 4 sandbox runtime"
     assert asks.approval_title(readout(readout={"title": ["title:"], "ask": [], "description": []}),
                                BEAD) == BEAD
@@ -695,7 +695,7 @@ def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
     chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES` matches."""
     key = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
     r = readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
-                         "description": ["description:", "  │ " + "w" * 124 + " " + key]}, links=[])
+                         "description": ["description:", "  │ " + "w" * 100 + " " + key]}, links=[])
     whole = asks.approval_card(card_row(), r, 4000)
     assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
     assert asks.approval_card(card_row(), r, 200) == asks.REDACTED
@@ -889,7 +889,8 @@ def test_approve_happy_path(tmp_path: Path) -> None:
         assert attempts(h, ask_id) == [(mid, "approve", "op", ref, D, None, 0, "recorded")]
         assert ask_status(h, ask_id) == "approved" and current(h, ask_id) is None
         text = queued(h, mid)
-        assert text == (f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it.")
+        assert text == (f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it.\n"
+                        "No more asks in flight.")
         assert audited(h, kind="ask", action="deciding", ask_id=ask_id, decision="approve", operator="op")
         assert audited(h, kind="ask", action="decided", ask_id=ask_id, outcome="recorded", status="approved",
                        exit_status=0, gate_valid=True, latched_during=False)
@@ -903,7 +904,8 @@ def test_gate_rejects_is_reported(tmp_path: Path) -> None:
         ask_id, first = await card(h)
         text = await say(h, approve(), first)
         assert text == (f'Approved {BEAD} as op (digest {D12}, via Marmot), but btq\'s design gate rejects '
-                        'it: "design_review is stale". Check it on the host.\napprove-bead said: "Closed '
+                        'it: "design_review is stale". Check it on the host.\nNo more asks in flight.\n'
+                        'approve-bead said: "Closed '
                         f'{BEAD}, but btq approval_valid() rejects it: design_review is stale; second"')
         assert ask_status(h, ask_id) == "approved"
         assert audited(h, kind="ask", action="decided", ask_id=ask_id, gate_valid=False, exit_status=1)
@@ -1373,7 +1375,7 @@ def test_deny_with_reason(tmp_path: Path) -> None:
         assert decisions(h) == [[BEAD, "--as=op", "--yes", f"--expect-digest={D}", "--via=marmot",
                                  f"--via-ref=marmot:{ref_id(mid)}", "--deny",
                                  "--note=too broad; it leaks <redacted GitHub token>"]]
-        assert queued(h, mid) == f"Denied {BEAD} as op (via Marmot)."
+        assert queued(h, mid) == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
         assert ask_status(h, ask_id) == "denied" and TOKEN not in json.dumps(btq_log(tmp_path))
         assert bead_state(tmp_path)["denied_by"] == "op"
     go(tmp_path, scenario)
@@ -2043,7 +2045,8 @@ def test_failure_after_the_decision_launch_reads_back(tmp_path: Path,
         ask_id, first = await card(h)
         edit(tmp_path, decide="descendant")
         text = await say(h, approve(), first)
-        assert text == f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it."
+        assert text == (f"Approved {BEAD} as op (digest {D12}, via Marmot). btq's design gate accepts it.\n"
+                        "No more asks in flight.")
         assert ask_status(h, ask_id) == "approved" and attempts(h, ask_id)[0][-2:] == (None, "recorded")
         assert reads(h) == 3 and len(decisions(h)) == 1
         child, grandchild = pids(tmp_path)[2], int(pid_file.read_text())
@@ -2071,3 +2074,13 @@ def test_a_launch_that_may_have_happened_reads_back(tmp_path: Path, monkeypatch:
         assert text == f"Not recorded. {BEAD} is unchanged; you can decide again."
         assert attempts(h, ask_id)[0][-2:] == (None, "untouched") and reads(h) == 3 and decisions(h) == []
     go(tmp_path, scenario)
+
+
+def test_in_flight_counts_other_asks() -> None:
+    """The card and the decision reply say how many other asks are in flight."""
+    assert asks.in_flight(0) == "No more asks in flight."
+    assert asks.in_flight(1) == "1 other ask in flight."
+    assert asks.in_flight(3) == "3 other asks in flight."
+    card = asks.approval_card(card_row(), readout(), 4000, others=2)
+    assert isinstance(card, asks.ApprovalCard)
+    assert card.card_chunks[0].splitlines()[3] == "2 other asks in flight."
