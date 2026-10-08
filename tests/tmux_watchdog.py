@@ -22,6 +22,7 @@ that pytest knows), so whatever is in `dead` is ours to kill.
 """
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -47,6 +48,7 @@ REPLACED = "launch lock replaced"
 HELD = "held"
 LOCK_HELD = "launch lock held"
 APPEARED = "appeared after final unlink"
+RMDIR_FAILED = "final rmdir failed"
 TIMED_OUT = "deadline passed"
 
 
@@ -85,6 +87,7 @@ class Sweeper:
         self.note: str | None = None        # why launch.lock itself is still in `dead`
         self.held: set[str] = set()         # names whose last removal found SH held
         self.appeared: dict[str, dict[str, Any]] = {}   # entries found by a failed final rmdir
+        self.rmdir_failed: str | None = None    # RMDIR_FAILED and the errno name, however `dead` looks
 
     # --- probes ---
 
@@ -263,6 +266,7 @@ class Sweeper:
                 pass
             except OSError as exc:
                 self.log(f"rmdir {self.dead}: {exc}")
+                self.rmdir_failed = f"{RMDIR_FAILED}: {errno.errorcode.get(exc.errno or 0, exc.errno)}"
                 self.appeared = self.inventory()
                 return False
         finally:
@@ -497,8 +501,8 @@ class Sweeper:
 
     def summary(self, closed: bool) -> dict[str, Any]:
         """`survived` and `unresolved` describe the final state: entries still present in `dead`. When
-        `closed` is false, `reason` says why: the fault, an appeared entry, the held launch lock, or the
-        deadline."""
+        `closed` is false, `reason` says why: the fault, an appeared entry, a failed final rmdir, the
+        held launch lock, or the deadline."""
         present = {p.name for p in self.dead.iterdir()} if self.dead.exists() else set()
         out: dict[str, Any] = {"killed": list(self.killed), "stale": list(self.stale),
                                "survived": [], "unresolved": []}
@@ -525,7 +529,8 @@ class Sweeper:
         out["unresolved"].extend(self.orphans)
         out["closed"] = closed
         if not closed:                              # why closure failed, even with nothing left to list
-            out["reason"] = self.fault or (APPEARED if self.appeared else None) or self.note or TIMED_OUT
+            out["reason"] = (self.fault or (APPEARED if self.appeared else None) or self.rmdir_failed
+                             or self.note or TIMED_OUT)
         return out
 
 

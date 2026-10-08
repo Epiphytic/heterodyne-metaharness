@@ -297,6 +297,23 @@ def test_entries_left_at_the_deadline_name_the_reason(tmp_path: Path) -> None:
     assert not closed and s.summary(closed)["reason"] == TIMED_OUT
 
 
+def test_a_failed_final_rmdir_with_nothing_left_names_the_error(monkeypatch: pytest.MonkeyPatch,
+                                                                tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path)
+    real = Path.rmdir
+
+    def refused(path: Path) -> None:
+        if path == dead:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+        real(path)
+    monkeypatch.setattr(Path, "rmdir", refused)
+    s = FakeSweeper(dead, lock_free=None)
+    closed = s.run()
+    assert not closed and dead.exists() and list(dead.iterdir()) == [] and s.clock < 1.0
+    assert s.summary(closed) == {"killed": [], "stale": [], "survived": [], "unresolved": [],
+                                 "closed": False, "reason": "final rmdir failed: EACCES"}
+
+
 def test_a_closed_summary_has_no_reason(tmp_path: Path) -> None:
     s = FakeSweeper(_dead_with(tmp_path, "aa"), pid=None, lock_free=None)
     closed = s.run()
