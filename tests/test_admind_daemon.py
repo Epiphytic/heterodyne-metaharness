@@ -16,7 +16,7 @@ from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
 from tmux_guard import new_test_socket_path
 
-from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
+from heterodyne.admind.agent import SESSION, TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit, ref_id
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import (
@@ -896,6 +896,8 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     h = Harness(tmp_path)
     stub = StubWn(tmp_path / "wn.sock")
     monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: stub)
+    # Portable: no systemd scope (the launcher has its own tests); the server binds in the watched root.
+    monkeypatch.setattr(cli, "tmux_launcher", lambda _s: None)
     monkeypatch.setattr(cli, "Tmux", lambda name, launcher=None: Tmux(name, launcher=launcher,
                                                                       socket_path=h.tmux.socket_path))
 
@@ -904,6 +906,9 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
         task = asyncio.create_task(cli._serve(h.settings, h.store, h.audit, "b2" * 32, Services()))
         try:
             await h.fake.wait_subscribed(10)
+            await h.say("hello")
+            await h.until(lambda: "echo: hello" in h.texts(), 30)     # the agent really started and answers
+            assert h.tmux.has_session(SESSION)
             os.kill(os.getpid(), signal.SIGTERM)
             return await asyncio.wait_for(task, 10)
         finally:
@@ -915,6 +920,7 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     assert code == 0 and stub.stopped
     audit = audit_text(h)
     assert '"action": "stop"' in audit and "b2" * 32 not in audit and ACCOUNT not in audit
+    assert '"action": "start-failed"' not in audit
 
 
 @pytest.mark.parametrize("make", [
