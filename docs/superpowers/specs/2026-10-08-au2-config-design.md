@@ -1,6 +1,14 @@
-# btq-wnbdp: AU-2 config: accounts, profile accounts, failover and `[usage]` (design r1)
+# btq-wnbdp: AU-2 config: accounts, profile accounts, failover and `[usage]` (design r2)
 
-Base: main b136b30. `src/heterodyne/config/` (`layers.py`, `__init__.py`), `src/heterodyne/cli.py` (`config check`), `src/heterodyne/defaults/defaults.toml`.
+Base: main b136b30.
+
+**r2 changes** (review r1, `docs/reviews/au2-config-design-r1.md` is not committed; findings by number):
+- `config check` hides `login_dir` (1);
+- every canonicalization and alias step raises only a path-free `ConfigError` (2);
+- `usage` must be a table (3);
+- the three open questions are now decisions (4–6).
+
+ `src/heterodyne/config/` (`layers.py`, `__init__.py`), `src/heterodyne/cli.py` (`config check`), `src/heterodyne/defaults/defaults.toml`.
 
 **Sources:**
 - ADR 0001 revision 14 (approved, btq-k942c): §4.1 "Validation at startup and on reload", §4.4 D1, D6, D7 and D9, and §15.
@@ -96,7 +104,7 @@ def resolve_accounts(merged, env, capabilities=CAPABILITIES) -> dict[tuple[str, 
     Raises ConfigError on the first violation, in the order of the rules below."""
 ```
 
-- **The implicit default** of each known adapter has its login directory at `paths.expand(DEFAULT_LOGIN_DIRS[a], env)`.
+- **Expansion:** a named account's `login_dir` and each implicit default (`DEFAULT_LOGIN_DIRS[a]`) are both expanded with `paths.expand(value, env)`, so `~/` means the supplied environment's `HOME` in both cases.
 - **Identity:** the adapter plus the canonical login files. A login file is canonical when `Path(login_dir, f).resolve(strict=False)`, which resolves a symlinked file too.
 - **Key:**
   - `"ck1-" + sha256("\0".join([adapter, *map(str, login_files)])).hexdigest()[:32]`.
@@ -109,6 +117,11 @@ def resolve_accounts(merged, env, capabilities=CAPABILITIES) -> dict[tuple[str, 
   3. or both files exist and `os.stat` gives the same `(st_dev, st_ino)` (a hard link).
   - Missing files and directories are allowed (r14 §7: an absent login never refuses), so check 3 is skipped for them.
   - A `stat` error other than ENOENT (EACCES) is a `ConfigError`: "account <n>: login file can't be checked for aliases (<errno name>)". An identity that can't be verified fails closed.
+- **Path-free failures.** Every filesystem step (expanding, `resolve` of the directory and of each login file, `stat`, and the alias comparisons) runs inside one helper that catches `OSError`, `RuntimeError` and `ValueError`.
+  - `OSError` covers ELOOP, EACCES and ENAMETOOLONG. `RuntimeError` is Python 3.12's symlink-loop error from `resolve(strict=False)`. `ValueError` covers an embedded NUL.
+  - The helper re-raises as `ConfigError("account <n> (<a>): login directory can't be resolved (<errno name or exception type>)") from None`.
+  - The message never includes `str(exc)`, which contains the path. `from None` keeps the original out of a printed chain.
+  - So `config check` and wsd reload, which catch only `ConfigError`, never see an exception that carries a login path.
 
 ## Validation rules and error messages
 
@@ -132,19 +145,21 @@ All of these run in `load()` on the merged config, after `check_profiles`, throu
 | 10 | `profiles.<p>.accounts` is a list of strings | `profiles.<p>.accounts must be a list of account names` |
 | 11 | ...and not empty | `profiles.<p>.accounts is empty; omit it to use the adapter's default login` |
 | 12 | ...and has no duplicates | `profiles.<p>.accounts lists <n> more than once` |
-| 13 | ...and every name exists (`default` included, which can't be listed) | `profiles.<p>: unknown account <n>` |
+| 13 | ...and no name is `default` (decided: an explicit `default` is rejected; omit `accounts` instead) | `profiles.<p>: "default" can't be listed; omit accounts to use the adapter's default login` |
+| 13a | ...and every name is a configured `[accounts.*]` entry | `profiles.<p>: unknown account <n>` |
 | 14 | ...and every account has the profile's adapter | `profiles.<p>: account <n> is for adapter <a>, not <profile adapter>` |
 | 15 | (No separate check.) A profile can only list accounts that passed 9 and match its adapter (14), so its adapter has `login_binding` | none |
 | 16 | `failover` is `"none"` or `"next"` | `profiles.<p>.failover must be "none" or "next", not <v>` |
 | 17 | `"next"` needs `trusted_read` (D6) | `profiles.<p>: failover = "next" isn't supported on adapter <a>: S7 hasn't demonstrated a trusted usage read for it (ADR §4.4 D6, D9)` |
 | 18 | No two credential identities alias | `accounts <n1> (<a1>) and <n2> (<a2>) share a login: <their login directories nest or are equal \| a login file resolves to the same file \| a login file is hard-linked>` |
+| 18a | `usage` in the merged config is a table. A host leaf such as `usage = 1` would otherwise replace the defaults table | `usage must be a table` |
 | 19 | `[usage]` keys are only the six above | `usage: unknown keys [...]` |
 | 20 | `reserve_percent` is an `int` (not a `bool`), 0–50 | `usage.reserve_percent must be an integer from 0 to 50, not <v>` |
 | 21 | The other five are positive `int`s (not `bool`s) | `usage.<k> must be a positive integer, not <v>` |
 | 22 | `min_recheck_seconds ≤ 60 × min(stale_minutes, unknown_backoff_minutes, untrusted_max_defer_minutes)` | `usage.min_recheck_seconds (<v>) must be at most 60 × the smallest of stale_minutes, unknown_backoff_minutes and untrusted_max_defer_minutes (<bound>)` |
 | 23 | `untrusted_max_defer_minutes` and `unknown_backoff_minutes` are each ≤ 60 × `max_window_hours` | `usage.<k> (<v>) must be at most 60 × max_window_hours (<bound>)` |
 
-**Order of checks.** The `[accounts]` table runs first: 1–8, then 9. Then profiles, 10–14, 16 and 17; then aliases, 18; then usage, 19–23.
+**Order of checks.** The `[accounts]` table runs first: 1–8, then 9. Then profiles, 10–13a, 14, 16 and 17; then aliases, 18; then usage, 18a and 19–23.
 
 **Rule 9 fires now.** The table is empty, so any `[accounts.*]` entry fails at rule 9 today, which is D9's default ("`config check` rejects `accounts` on that adapter"). Rule 18 is reachable now in one case: the two implicit defaults alias each other, for example when `~/.codex` is a symlink to `~/.claude`.
 
@@ -162,8 +177,8 @@ All of these run in `load()` on the merged config, after `check_profiles`, throu
 ## `Config` and `config check`
 
 - `Config` gets the field `accounts: dict[tuple[str, str], Account]`, which the new keyword argument `load(..., capabilities=CAPABILITIES)` fills. Nothing else reads it in AU-2.
-- `config check` keeps printing every leaf with its source layer, so the new keys appear like any other: `usage.reserve_percent = 5 (defaults)`, `accounts.x.login_dir = ... (host:config.toml)`.
-  - `config check` is the operator's local command, and it already prints every value, so login paths appear there. They never appear in errors.
+- `config check` keeps printing every leaf with its source layer, so the new keys appear like any other: `usage.reserve_percent = 5 (defaults)`.
+  - The one exception is `accounts.<n>.login_dir`, which prints as `accounts.<n>.login_dir = <hidden>    (host:config.toml)`, so the key and its source still show (D10: no message shows a login path). `_flatten`'s caller matches on the key shape (`accounts`, any name, `login_dir`).
 - `config check` also prints warnings, after the values, from `accounts.warnings(cfg)`:
   - D6, more than one account with failover none: `warning: profiles.<p> lists <k> accounts with failover = "none"; only the first is used (ADR §4.4 D6)`.
   - Failover next without accounts: `warning: profiles.<p> has failover = "next" but no accounts; it only ever uses the default login`.
@@ -204,6 +219,7 @@ Integration tests go through `load(env=…)` with `HOME` set to `tmp_path`. Fake
 | `test_failover_none_accepted_everywhere` | `failover = "none"` and an absent key both load on the real table |
 | `test_account_name_rules` (parametrized) | rules 2–3: `a@b`, `a/b`, `a.b`, `default`, `Default`, `1abc` refused; `acct-a`, `acct_b` accepted |
 | `test_secret_word_account_name_refused_by_scan` | `codex-auth` is refused by the secret scan, not by rule 2 |
+| `test_usage_not_a_table` | `usage = 1` in the host config, through `load()`, gives rule 18a |
 | `test_account_shape_rules` (parametrized) | rules 1, 4–8: not a table, an unknown key, an unknown adapter, a reference `login_dir`, a non-string, empty, relative |
 | `test_profile_accounts_rules` (parametrized) | rules 10–14 and 16: not a list, empty, duplicate, unknown, `default`, wrong adapter, a bad `failover` value |
 | `test_alias_equal_and_nested_dirs` | rule 18: equal dirs; nested both ways; a named account nested in the implicit default (`~/.codex/team`); two accounts of different adapters on one dir; siblings `/x/login` and `/x/login-other` accepted |
@@ -212,7 +228,8 @@ Integration tests go through `load(env=…)` with `HOME` set to `tmp_path`. Fake
 | `test_implicit_defaults_alias` | `~/.codex` symlinked to `~/.claude` is refused on the real table |
 | `test_alias_stat_error_fails_closed` | an EACCES on `stat` (a 000-mode directory; skipped as root) gives the "can't be checked" error |
 | `test_credential_key` | `ck1-` plus 32 hex characters; deterministic; different for another adapter or path; equal through a symlinked spelling of the same dir; changes when the symlink is repointed |
-| `test_errors_never_show_login_paths` | for every rule 6–9 and 18 case, a marker in `login_dir` (`/x/MARKER-login`) is absent from the message |
+| `test_errors_never_show_login_paths` | a marker in `login_dir` (`/x/MARKER-login`) is absent from the message, and from `str(exc.__cause__)` and `exc.__context__`'s rendering, for: every rule 6–9 and 18 case; a symlink loop as the login dir; a symlink loop as a login file; a `resolve` that raises `OSError` naming the path (monkeypatched); and a NUL in `login_dir` |
+| `test_config_check_hides_login_dir` (cli) | with `ON` patched in, `config check` prints `accounts.acct-a.login_dir = <hidden>` with its source, and the marker path appears nowhere in stdout or stderr; a symlink-loop login dir gives exit 1 and a path-free `config error:` line, not a traceback |
 | `test_usage_rules` (parametrized) | rules 19–23: an unknown key; `reserve_percent` -1, 51, 5.0, `true`; each other key 0, -1, `"30"`, `true`; the boundaries (min_recheck = 60 × min passes, +1 fails; each defer key at 60 × max_window_hours passes, +1 fails); a host override is merged before checking |
 | `test_workstream_rejects_accounts_and_usage` | `[accounts.x]` and `[usage]` in a workstream file give the host-only message; `[profiles.p]` keeps the existing message |
 | `test_env_cannot_select_account` | `HETERODYNE_ACCOUNT=…` is refused by `ENV_KEYS`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` in `env` don't move the implicit defaults |
@@ -227,11 +244,12 @@ These are small, and each fails closed or only warns:
 - duplicate names in `profiles.<p>.accounts` (rule 12);
 - unknown keys in `[accounts.*]` and `[usage]` (rules 4 and 19);
 - `default` can't be listed in a profile (rule 13);
+- `usage` must be a table (rule 18a);
 - the "next without accounts" warning;
 - the stat-error fail-closed rule.
 
-## Open questions (proposed resolutions)
+## Decisions (open questions in r1; the r1 reviewer agreed with each)
 
-1. **Can a profile list `default`?** For example `accounts = ["team", "default"]` would fall back to the host's own login. r14 says only "every account a profile lists exists". **Proposed:** not in AU-2 (rule 13). Allowing it later is additive, and it would need the D2 adoption and D7 continuity rules checked against an explicit `default`.
-2. **The default login location.** **Proposed:** fixed at `~/.claude` and `~/.codex`, ignoring `CLAUDE_CONFIG_DIR` and `CODEX_HOME` (see Layers). The alternative is a host-config key `adapters.<a>.default_login_dir`, which is additive if needed later.
-3. **The credential key format.** **Proposed:** `ck1-` plus 32 hex characters, so it never trips the 64-hex redaction. AU-3 stores it in launch entries, so the format must be settled before AU-3.
+1. **A profile can't list `default`** (rule 13). Omitting `accounts` already gives the default login. Mixed lists of named accounts and `default` would add D2 adoption and D7 continuity cases, so they are left out of the PoC. Allowing them later is additive.
+2. **The default login location is fixed** at `~/.claude` and `~/.codex`, expanded with `paths.expand(value, env)`, the same as a named account's `~/`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are ignored (see Layers). A host-config key `adapters.<a>.default_login_dir` can be added later if needed.
+3. **The credential key is `ck1-` plus 32 hex characters**, by the formula under "Credential identity". `config/accounts.py` holds the one function that computes it (`credential_key(adapter, login_files)`). AU-3's launch-time recomputation calls that same function, so the formula is identical at config resolution and at launch.
