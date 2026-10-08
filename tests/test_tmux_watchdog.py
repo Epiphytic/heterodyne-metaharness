@@ -197,8 +197,9 @@ def test_a_pid_found_once_is_kept_for_later_passes(tmp_path: Path) -> None:
 
 
 class Replaced(FakeSweeper):
-    """After the first pass, socket A at `aa` is replaced by B: bound but not listening, its startup lock
-    held, its PID undiscoverable unless `b_pid` is given. `same_inode`: B reuses A's inode number."""
+    """After the first pass, socket A at `aa` is replaced by B: either bound but not listening, its
+    startup lock held and its PID undiscoverable, or (`b_pid`) a listening server that answers.
+    `same_inode`: B reuses A's inode number."""
 
     def __init__(self, dead: Path, *, a_running: bool, b_pid: int | None = None, a_dies: bool = False,
                  same_inode: bool = False) -> None:
@@ -219,7 +220,7 @@ class Replaced(FakeSweeper):
         if not self.replaced:
             self.replaced = True
             (self.dead / "aa").touch()
-            self.pid, self.lock_free = self.b_pid, False
+            self.pid, self.lock_free = self.b_pid, self.b_pid is not None
             if self.a_dies:
                 self.running = False
 
@@ -236,14 +237,91 @@ def test_a_killed_servers_proof_never_unlinks_its_replacement(tmp_path: Path, sa
     assert summary["stale"] == summary["survived"] == []
 
 
-def test_an_unproven_servers_later_death_never_unlinks_its_replacement(tmp_path: Path) -> None:
+@pytest.mark.parametrize("same_inode", [False, True], ids=["new-inode", "inode-reused"])
+def test_an_unproven_servers_later_death_never_unlinks_its_replacement(tmp_path: Path,
+                                                                        same_inode: bool) -> None:
     dead = _dead_with(tmp_path, "aa")
-    s = Replaced(dead, a_running=True, a_dies=True)       # A survives its kill, then dies once replaced
+    s = Replaced(dead, a_running=True, a_dies=True, same_inode=same_inode)   # A survives, dies once replaced
     closed = s.run()
     summary = s.summary(closed)
     assert not closed and (dead / "aa").exists()
-    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]
-    assert summary["killed"] == summary["stale"] == summary["survived"] == []
+    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]   # B: its lock is held
+    # A reused inode cannot tell B from A, so A's PID is used, and its death is proven: still B is kept.
+    assert summary["killed"] == ([{"path": str(dead / "aa"), "pid": 4242}] if same_inode else [])
+    assert summary["stale"] == summary["survived"] == []
+
+
+def test_retiring_a_replaced_pid_drops_its_outcome(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+
+    class DeadlineAfterRetire(Replaced):
+        def connect(self, path: Path) -> str:
+            if self.replaced:                       # B's first probe: the deadline has come
+                self.clock = self.end
+                self.budget()
+            return super().connect(path)
+
+    s = DeadlineAfterRetire(dead, a_running=True)
+    closed = s.run()
+    summary = s.summary(closed)
+    assert not closed and (dead / "aa").exists() and summary["survived"] == []    # A's outcome is not B's
+    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None},
+                                     {"path": str(dead / "aa"), "pid": 4242, "generation": [7, 1]}]
+
+
+@pytest.mark.parametrize(("b", "same_inode", "lock_free", "b_state"), [
+    ("starting", False, False, "refused"),     # bound, its startup holds the lock
+    ("crashed", False, True, "refused"),       # bound, never listened, lock released: stale, as B
+    ("listening", True, True, "accept"),       # reused A's inode and listens
+])
+def test_a_replacement_bound_during_the_death_wait_is_not_unlinked(
+        tmp_path: Path, b: str, same_inode: bool, lock_free: bool, b_state: str) -> None:
+    dead = _dead_with(tmp_path, "aa")
+
+    class MidWait(Replaced):
+        def pid_running(self, pid: int) -> bool:
+            if not self.replaced:                  # between A's death checks B binds, and A is dead
+                self.replaced, self.pid, self.lock_free, self.state = True, None, lock_free, b_state
+                return False
+            return super().pid_running(pid)
+
+    s = MidWait(dead, a_running=True, same_inode=same_inode)
+    closed = s.run()
+    summary = s.summary(closed)
+    assert summary["killed"] == [{"path": str(dead / "aa"), "pid": 4242}]     # A's death is proven
+    entry = [{"path": str(dead / "aa"), "pid": None}]
+    if b == "crashed":
+        assert closed and summary["stale"] == entry          # removed as B, on B's own evidence
+    else:
+        assert not closed and (dead / "aa").exists() and summary["stale"] == []
+        assert summary["unresolved" if b == "starting" else "survived"] == entry
+
+
+def test_a_startup_cannot_bind_between_validation_and_unlink(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    attempts: list[str] = []
+
+    class Gap(FakeSweeper):
+        try_lock = Sweeper.try_lock                 # the real flock on aa.lock
+
+        def unlinking(self, path: Path) -> None:
+            """A tmux startup for the same name runs now: it needs the lock to bind."""
+            fd = os.open(path.with_name("aa.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                attempts.append("blocked")
+                return
+            finally:
+                os.close(fd)
+            path.unlink()
+            path.touch()                            # B bound at the name
+            attempts.append("bound")
+
+    s = Gap(dead, pid=None)
+    closed = s.run()
+    assert attempts == ["blocked"]
+    assert closed and s.summary(closed)["stale"] == [{"path": str(dead / "aa"), "pid": None}]
 
 
 @pytest.mark.parametrize("a_dies", [False, True], ids=["a-lives", "a-dies"])
@@ -307,7 +385,29 @@ def test_a_wait_stops_at_its_own_end(tmp_path: Path) -> None:
         checked.append(s.clock)
         return False
     assert s.wait(never, seconds=0.011) is False
-    assert s.clock == pytest.approx(0.011, abs=1e-9) and checked[-1] == s.clock
+    assert s.clock == pytest.approx(0.011, abs=1e-9) and checked and checked[-1] < s.clock
+
+
+def test_a_slow_probe_gets_only_the_waits_time(tmp_path: Path) -> None:
+    s = FakeSweeper(tmp_path)
+    budgets: list[float] = []
+
+    def slow() -> bool:
+        budgets.append(s.budget())
+        s.clock += budgets[-1]                      # a probe that takes all the time it is given
+        return False
+    assert s.wait(slow, seconds=0.011) is False
+    assert budgets == [pytest.approx(0.011)] and s.clock == pytest.approx(0.011, abs=1e-9)
+
+
+def test_success_after_the_deadline_is_not_success(tmp_path: Path) -> None:
+    s = FakeSweeper(tmp_path, deadline=1.0)
+
+    def late() -> bool:
+        s.clock += s.budget()                       # answers yes, but only at the deadline
+        return True
+    with pytest.raises(tmux_watchdog.DeadlineReached):
+        s.wait(late)
 
 
 def test_a_wait_past_the_deadline_never_probes(tmp_path: Path) -> None:

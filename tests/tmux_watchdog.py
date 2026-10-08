@@ -42,6 +42,10 @@ class DeadlineReached(Exception):
     """The global deadline cut an operation short: the entry is kept and reported, never forced."""
 
 
+class WaitExpired(Exception):
+    """A probe inside `wait` ran out of the wait's own time."""
+
+
 Generation = tuple[int, int]     # (st_dev, st_ino) of one socket file: a replacement is another one
 
 
@@ -62,6 +66,7 @@ class Sweeper:
         # socket was replaced or went away first moves to `orphans`: still reported until proven dead.
         self.known: dict[str, tuple[Generation, int]] = {}
         self.orphans: list[dict[str, Any]] = []
+        self.limit: float | None = None     # the end of the current `wait`, which its probes respect
 
     # --- probes ---
 
@@ -72,10 +77,16 @@ class Sweeper:
         time.sleep(seconds)
 
     def budget(self) -> float:
-        """A timeout for one command: CMD_TIMEOUT, or less if the deadline is nearer."""
-        left = self.end - self.now()
+        """A timeout for one command: CMD_TIMEOUT, or less if the deadline (or the current wait's end)
+        is nearer."""
+        now = self.now()
+        left = self.end - now
         if left <= 0:
             raise DeadlineReached
+        if self.limit is not None:
+            if self.limit - now <= 0:
+                raise WaitExpired
+            left = min(left, self.limit - now)
         return min(CMD_TIMEOUT, left)
 
     def tmux(self, path: Path, *args: str) -> tuple[int, str]:
@@ -138,12 +149,10 @@ class Sweeper:
         return True
 
     def try_lock(self, lock: Path) -> tuple[bool, int | None]:
-        """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen). Returns
-        (taken, fd to close); a missing lock file means no startup holds it."""
+        """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen), creating it
+        as tmux does, so no startup can bind while we hold it. Returns (taken, fd to close)."""
         try:
-            fd = os.open(lock, os.O_RDONLY | os.O_CLOEXEC)
-        except FileNotFoundError:
-            return (True, None)
+            fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
         except OSError:
             return (False, None)
         for i in range(LOCK_TRIES):
@@ -195,9 +204,11 @@ class Sweeper:
                 return
 
     def retire(self, name: str) -> None:
-        """`name`'s socket was replaced or went away before its server was proven dead."""
+        """`name`'s socket was replaced or went away before its server was proven dead. What was found
+        about that generation (its pending outcome) goes with it."""
         entry = self.known.pop(name, None)
         if entry is not None:
+            self.pending.pop(name, None)
             gen, pid = entry
             self.orphans.append({"path": str(self.dead / name), "pid": pid, "generation": list(gen)})
 
@@ -265,31 +276,42 @@ class Sweeper:
 
     def refused_without_pid(self, path: Path, gen: Generation) -> None:
         """tmux binds before it listens, so a refusal proves nothing while a startup holds the lock."""
+        result = self.remove(path, gen)
+        if result == "removed":
+            self.log(f"stale {path}")
+            self.stale.append({"path": str(path), "pid": None})
+            self.pending.pop(path.name, None)
+        elif result == "gone":
+            self.pending.pop(path.name, None)
+        else:                                       # held, changed or now live: the next pass looks again
+            self.pending[path.name] = ("unresolved", None)
+
+    def remove(self, path: Path, gen: Generation) -> str:
+        """Unlink the socket and its lock, holding tmux's startup lock so nothing can bind in between,
+        and only if it is still generation `gen` and refuses connections. Returns `removed`, `held` (a
+        startup holds the lock), `gone`, `changed` (replaced) or `live` (it accepts, or connect failed)."""
         lock = path.with_name(path.name + ".lock")
         taken, fd = self.try_lock(lock)
         if not taken:
-            self.pending[path.name] = ("unresolved", None)
-            return
+            return "held"
         try:
-            state = self.connect(path)
-            if state == "accept":
-                pid = self.server_pid(path, gen)
-                if pid is not None:
-                    self.kill_known(path, gen, pid)
-                else:
-                    self.pending[path.name] = ("survived", None)
-                return
-            if state not in ("refused", "missing"):
-                self.pending[path.name] = ("unresolved", None)
-                return
-            self.log(f"stale {path}")
+            current = self.generation(path)
+            if current is None:
+                return "gone"
+            if current != gen:
+                return "changed"
+            if self.connect(path) not in ("refused", "missing"):
+                return "live"
+            self.unlinking(path)
             path.unlink(missing_ok=True)
             lock.unlink(missing_ok=True)
-            self.stale.append({"path": str(path), "pid": None})
-            self.pending.pop(path.name, None)
+            return "removed"
         finally:
             if fd is not None:
                 os.close(fd)
+
+    def unlinking(self, path: Path) -> None:
+        """Between validation and unlink (a seam for tests: the gap a replacement would need)."""
 
     def sweep_lock(self, lock: Path) -> None:
         taken, fd = self.try_lock(lock)
@@ -323,30 +345,42 @@ class Sweeper:
     def kill_known(self, path: Path, gen: Generation, pid: int) -> None:
         self.log(f"kill-server {path} pid {pid}")
         self.tmux(path, "kill-server")
-        if self.wait(lambda: self.connect(path) in ("refused", "missing") and not self.pid_running(pid)):
-            if self.generation(path) == gen:      # never unlink a replacement on this proof
-                path.unlink(missing_ok=True)
-            self.known.pop(path.name, None)
-            self.killed.append({"path": str(path), "pid": pid})
-            self.pending.pop(path.name, None)
-        else:
+        if not self.wait(lambda: self.connect(path) in ("refused", "missing") and not self.pid_running(pid)):
             self.pending[path.name] = ("survived", pid)
+            return
+        self.known.pop(path.name, None)             # proven dead: the PID is no evidence for anything else
+        self.killed.append({"path": str(path), "pid": pid})
+        self.pending.pop(path.name, None)
+        if self.remove(path, gen) != "removed":     # a replacement, or a startup holds the lock
+            self.pending[path.name] = ("unresolved", None)
 
     def wait(self, pred: Callable[[], bool], seconds: float = DEATH_WAIT) -> bool:
-        """False after `seconds`; DeadlineReached if the global deadline comes first. No sleep runs past
-        either."""
+        """False after `seconds`; DeadlineReached if the global deadline comes first. Probes get only the
+        time left (`budget`), no sleep runs past either end, and success after the deadline is no
+        success."""
         end = self.now() + seconds
-        while True:
-            if self.now() >= self.end:
-                raise DeadlineReached
-            if pred():
-                return True
-            now = self.now()
-            if now >= self.end:
-                raise DeadlineReached
-            if now >= end:
-                return False
-            self.sleep(min(WAIT_GAP, end - now, self.end - now))
+        self.limit = end
+        try:
+            while True:
+                now = self.now()
+                if now >= self.end:
+                    raise DeadlineReached
+                if now >= end:
+                    return False
+                try:
+                    ok = pred()
+                except WaitExpired:
+                    return False
+                now = self.now()
+                if now >= self.end:
+                    raise DeadlineReached
+                if ok:
+                    return True
+                if now >= end:
+                    return False
+                self.sleep(min(WAIT_GAP, end - now, self.end - now))
+        finally:
+            self.limit = None
 
     # --- the result ---
 
