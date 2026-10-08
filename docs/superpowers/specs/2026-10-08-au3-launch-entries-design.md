@@ -47,7 +47,7 @@ AU-3 creates the tables those items need. Until they land, every launch uses acc
 
 ### 2.1 Credential key (D1): AU-2's definition
 
-AU-3 doesn't define a credential key of its own. It uses AU-2's (`docs/superpowers/specs/2026-10-08-au2-config-design.md` on au2-config-design at 39f2b82, §"Credential identity", still under review).
+AU-3 doesn't define a credential key of its own. It uses AU-2's (`docs/superpowers/specs/2026-10-08-au2-config-design.md` on au2-config-design at 239897f, §"Credential identity", still under review).
 - **Identity:** the adapter plus its canonical login files, `Path(login_dir, f).resolve(strict=False)` for each `f` in `config/capabilities.LOGIN_FILES[adapter]`. From S7, those are `.credentials.json` for claude-code and `auth.json` for codex.
 - **Key:** `"ck1-" + sha256("\0".join([adapter, *login_files])).hexdigest()[:32]`. It is never 64 hex characters, so it never trips the redaction.
 - **The implicit `default`** lives at the fixed `~/.claude` and `~/.codex` (AU-2's open question 2). The environment never moves it.
