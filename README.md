@@ -47,7 +47,7 @@ export HETERODYNE_CONFIG_DIR=$(mktemp -d)   # a throwaway host config directory
 uv run heterodyne setup && uv run heterodyne config check
 ```
 
-- `heterodyne platform` prints the detected OS and the backends chosen for it, for example `{"os": "linux", "service_manager": "systemd", "sandbox": "bubblewrap"}`.
+- `heterodyne platform` prints the detected OS and the backends chosen for it, for example `{"os": "linux", "service_manager": "systemd", "sandbox": "bubblewrap"}`. `bubblewrap` is today's default; ADR revision 14's Linux runtime is OpenShell, gated on spike S5 (ADR 0001 §7).
 - `heterodyne setup` copies the example `config.toml` and `policy.toml` into the host config directory, fills in the platform backends, and never overwrites an existing file.
 - `heterodyne config check` validates the merged configuration and prints every value with the layer it came from.
 
