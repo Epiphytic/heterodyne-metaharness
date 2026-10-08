@@ -3,14 +3,18 @@
 import copy
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
+from heterodyne.config import accounts as account_rules
+from heterodyne.config import capabilities as capability_table
 from heterodyne.config import layers, paths
+from heterodyne.config.accounts import Account
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.config.errors import ConfigError
 from heterodyne.config.policy import Policy, build_policy
 
-__all__ = ["Config", "ConfigError", "Policy", "load"]
+__all__ = ["Account", "Capabilities", "Config", "ConfigError", "Policy", "load"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,7 @@ class Config:
     values: dict[str, Any]
     sources: dict[str, str]
     policy: Policy
+    accounts: dict[tuple[str, str], Account] = field(default_factory=dict[tuple[str, str], Account])
 
     def get(self, dotted: str, default: Any = None) -> Any:
         node: Any = self.values
@@ -29,7 +34,9 @@ class Config:
         return node
 
 
-def load(workstream: str | None = None, env: Mapping[str, str] = os.environ) -> Config:
+def load(workstream: str | None = None, env: Mapping[str, str] = os.environ,
+         capabilities: Mapping[str, Capabilities] | None = None) -> Config:
+    """`capabilities` defaults to the in-code table (§4.4 D9), read at call time."""
     config_dir = paths.config_dir(env)
     defaults = layers.read_defaults()
     layers.check_secrets(defaults, "defaults")
@@ -58,5 +65,7 @@ def load(workstream: str | None = None, env: Mapping[str, str] = os.environ) -> 
         values.setdefault(table, {}).update(entries)
     sources.update(env_labels)
     layers.check_profiles(values)
+    caps = capability_table.CAPABILITIES if capabilities is None else capabilities
+    found = account_rules.check(values, env, caps)
     policy = build_policy(policy_raw, defaults.get("tiers", {}), restrict)
-    return Config(values=values, sources=sources, policy=policy)
+    return Config(values=values, sources=sources, policy=policy, accounts=found)

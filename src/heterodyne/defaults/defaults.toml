@@ -53,3 +53,12 @@ launch_failures_before_human = 2
 park_attempts_before_human = 3
 inbox_attempts_before_human = 3
 coder_role = "coder"
+
+# Usage-aware scheduling (§4.4 D3-D5). Host only; accounts have no defaults.
+[usage]
+reserve_percent             = 5     # a trusted window blocks at >= 100 - reserve_percent used
+stale_minutes               = 30
+unknown_backoff_minutes     = 30
+untrusted_max_defer_minutes = 60    # the longest a session's own untrusted report can defer it
+min_recheck_seconds         = 60
+max_window_hours            = 192   # the longest reset horizon accepted

@@ -13,6 +13,7 @@ from heterodyne.config.secret_scan import show
 
 WORKSTREAM_KEYS = frozenset({"roles", "repos", "sandbox", "cron", "render", "timeouts", "restrict"})
 WORKSTREAM_SANDBOX_KEYS = frozenset({"extra_ro_mounts", "extra_egress"})
+HOST_ONLY_KEYS = frozenset({"accounts", "usage"})   # §4.4 D1: workstreams choose profiles, never accounts
 ENV_KEYS = {"HETERODYNE_CONFIG_DIR": ("paths", "config_dir"),
             "HETERODYNE_STATE_DIR": ("paths", "state_dir"),
             "HETERODYNE_LOG_LEVEL": ("debug", "log_level")}
@@ -70,6 +71,9 @@ def check_host(host: Mapping[str, Any]) -> None:
 
 
 def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str, Any]) -> None:
+    if set(ws) & HOST_ONLY_KEYS:
+        raise ConfigError(f"workstreams/{name}.toml: [accounts] and [usage] are host-only (config.toml); "
+                          "workstreams choose profiles, never accounts")
     bad = set(ws) - WORKSTREAM_KEYS
     if bad:
         raise ConfigError(f"workstreams/{name}.toml: {show(bad)} not allowed in a workstream "
