@@ -1,0 +1,25 @@
+## writes to the login files inside
+$HOME/.cache/s5/t1/home/.claude/.credentials.json write refused rc=2
+sh: 1: cannot create $HOME/.cache/s5/t1/home/.claude/.credentials.json: Read-only file system
+mv: cannot move '$HOME/.cache/s5/t1/home/.claude/.credentials.json' to '$HOME/.cache/s5/t1/home/.claude/.credentials.json.x': Device or resource busy
+rename refused
+$HOME/.cache/s5/t1/home/.claude/.credentials.json ro,relatime - ext4 /dev/nvme0n1p4 rw
+$HOME/.cache/s5/c2/home/.codex/auth.json write refused rc=2
+sh: 1: cannot create $HOME/.cache/s5/c2/home/.codex/auth.json: Read-only file system
+mv: cannot move '$HOME/.cache/s5/c2/home/.codex/auth.json' to '$HOME/.cache/s5/c2/home/.codex/auth.json.x': Device or resource busy
+rename refused
+## refresh endpoints from inside
+000
+platform.claude.com curl rc=7
+auth.openai.com curl rc=7
+Warning: log buffer contains only the last 156 lines; --since results may be incomplete.
+[1791490734.641] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.9:443 reason=endpoint platform.claude.com:443 is not allowed by any policy   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+NET:OPEN [MED] DENIED /usr/bin/curl(0) -> platform.claude.com:443 [reason:transparent_tcp_policy_denied]
+Warning: log buffer contains only the last 500 lines; --since results may be incomplete.
+[1791490734.681] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.11:443 reason=endpoint auth.openai.com:443 is not allowed by any policy   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+NET:OPEN [MED] DENIED /usr/bin/curl(0) -> auth.openai.com:443 [reason:transparent_tcp_policy_denied]
+## any attempt by the CLIs themselves to reach a refresh host over the session lifetime
+Warning: log buffer contains only the last 156 lines; --since results may be incomplete.
+s5-t1: 4 lines
+Warning: log buffer contains only the last 717 lines; --since results may be incomplete.
+s5-c2: 4 lines

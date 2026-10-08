@@ -1,0 +1,24 @@
+=== plain podman run --network=pasta (no OpenShell): probes must FAIL
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+FAIL non-allowlisted-host-blocked [example.org -> 104.20.26.136,172.66.157.237 (policy-DNS synthetic=False) connect -> not-tried; curl rc=0]
+FAIL direct-network-blocked [non-lo interfaces=['eno1'] routes=6 tcp 1.1.1.1:443 -> CONNECTED udp 1.1.1.1:53 -> SENT tcp6 -> ECONNREFUSED]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+FAIL control-op-rejected [reply=socket error ENOENT]
+PASS wsd-socket-absent [exists=False; /run/hz: absent]
+FAIL allowlisted-host-reachable [curl rc=0 http=421 issuer='C=US; O=Google Trust Services; CN=WE1']
+FAIL hook-event-accepted [reply=socket error ENOENT]
+FAIL host-env-not-inherited [unexpected vars: LC_CTYPE]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->ENOENT /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+FAIL other-accounts [canary:/nonexistent->ENOENT]
+rc=1
+=== plain podman run --network=none (no OpenShell): probes must FAIL
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+FAIL non-allowlisted-host-blocked [example.org -> resolve-error:[Errno -3] Temporary failure in name resolution (policy-DNS synthetic=False) connect -> not-tried; curl rc=6]
+PASS direct-network-blocked [non-lo interfaces=none routes=0 tcp 1.1.1.1:443 -> ENETUNREACH udp 1.1.1.1:53 -> ENETUNREACH tcp6 -> ENETUNREACH]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+FAIL control-op-rejected [reply=socket error ENOENT]
+PASS wsd-socket-absent [exists=False; /run/hz: absent]
+FAIL allowlisted-host-reachable [curl rc=6 http=000 issuer='']
+FAIL hook-event-accepted [reply=socket error ENOENT]
+FAIL host-env-not-inherited [unexpected vars: LC_CTYPE]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->ENOENT /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+FAIL other-accounts [canary:/nonexistent->ENOENT]
+rc=1

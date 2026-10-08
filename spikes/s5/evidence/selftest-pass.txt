@@ -1,0 +1,42 @@
+=== launch.py selftest claude t1  (agent running)
+PASS freshness-gate [access token 5.53 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [non-lo interfaces=none routes=0 tcp 1.1.1.1:443 -> EACCES udp 1.1.1.1:53 -> EDESTADDRREQ tcp6 -> EACCES]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS hook-event-accepted [reply={"ok": true}]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; canary:$HOME/.cache/s5/oa-canary-t1->ENOENT; chosen:$HOME/.cache/s5/t1/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+SELFTEST PASS
+rc=0
+=== launch.py selftest codex c2  (agent running)
+PASS freshness-gate [access token 170.66 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+INFO other-account b: present $HOME/.cache/s5/accounts/codex-b-link/auth.json $HOME/.cache/s5/accounts/codex-b/auth.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/codex-c/auth.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/codex-d/auth.json
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [non-lo interfaces=none routes=0 tcp 1.1.1.1:443 -> EACCES udp 1.1.1.1:53 -> EDESTADDRREQ tcp6 -> EACCES]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: deny.py hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS hook-event-accepted [reply={"ok": true}]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/codex-b-link/auth.json->ENOENT; b/present:$HOME/.cache/s5/accounts/codex-b/auth.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/codex-c/auth.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/codex-d/auth.json->ENOENT; canary:$HOME/.cache/s5/oa-canary-c2->ENOENT; chosen:$HOME/.cache/s5/c2/home/.codex/auth.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+SELFTEST PASS
+rc=0

@@ -76,7 +76,8 @@ try:
     addrs = sorted({a[4][0] for a in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)})
 except OSError as e:
     addrs = [f'resolve-error:{e}']
-marker = bool(addrs) and all(ipaddress.ip_address(a) in SYNTHETIC for a in addrs if ':' not in a and not a.startswith('resolve'))
+v4 = [a for a in addrs if not a.startswith('resolve') and ':' not in a]
+marker = bool(v4) and len(v4) == len(addrs) and all(ipaddress.ip_address(a) in SYNTHETIC for a in v4)
 c = connect((addrs[0], 443)) if marker else 'not-tried'
 cu = subprocess.run(['curl', '-sv', '-o', '/dev/null', '--max-time', '8', f'https://{host}/'],
                     capture_output=True, text=True)
@@ -105,7 +106,7 @@ check('control-op-rejected', r == '{"ok": false, "error": "forbidden"}', f'reply
 
 # 5. The wsd socket is not bound in.
 check('wsd-socket-absent', not os.path.exists('/run/hz/wsd.sock'),
-      f"exists={os.path.exists('/run/hz/wsd.sock')}; /run/hz: {' '.join(sorted(os.listdir('/run/hz')))}")
+      f"exists={os.path.exists('/run/hz/wsd.sock')}; /run/hz: {' '.join(sorted(os.listdir('/run/hz'))) if os.path.isdir('/run/hz') else 'absent'}")
 
 # 6. Allowlisted control: reachable, through OpenShell's TLS-terminating proxy (issuer is its CA).
 cu = subprocess.run(['curl', '-sv', '-o', '/dev/null', '--max-time', '10', '-w', 'http=%{http_code}',

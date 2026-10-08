@@ -74,8 +74,9 @@ class Session:
 
     # ---------- preparation ----------
     def prepare(self) -> None:
-        for d in (self.home, self.work, self.run, self.bridge, self.conf):
+        for d in (self.home, self.work, self.run, self.bridge, self.bridge / 'daemon', self.conf):
             d.mkdir(parents=True, exist_ok=True)
+        (self.bridge / 'daemon').chmod(0o700)   # codex refuses a socket dir that is not 0700
         token = secrets.token_hex(16)
         for f in ('session_stub.py', 'hook.py'):           # reused unchanged from S3
             shutil.copy(S3 / f, self.run / f)
@@ -106,7 +107,7 @@ class Session:
         (self.conf / 'config.toml').write_text(
             'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
             f'[projects."{self.work}"]\ntrust_level = "trusted"\n'
-            '[features]\nconnectors = false\napps = false\n')
+            '[features]\napps = false\n')   # §7: connectors (apps) off
 
     def start_socket(self, token: str) -> None:
         sock = self.run / 'session.sock'
@@ -135,6 +136,10 @@ class Session:
              {'type': 'bind', 'source': str(self.run), 'target': '/run/hz', 'read_only': True}]
         if self.adapter == 'codex':
             m.append({'type': 'bind', 'source': str(self.bridge), 'target': '/run/hz-bridge', 'read_only': False})
+            # codex 0.160 binds the real app-server socket in /tmp/codex-daemon-<uid>/ and leaves only a
+            # symlink at the --listen path, so that dir is bound from the bridge dir too.
+            m.append({'type': 'bind', 'source': str(self.bridge / 'daemon'), 'target': f'/tmp/codex-daemon-{os.getuid()}',
+                      'read_only': False})
         for name in ('claude', 'codex'):   # both CLIs' install dirs, read-only, at their host paths
             r = str(cli_root(name))
             m.append({'type': 'bind', 'source': r, 'target': r, 'read_only': True})
@@ -317,9 +322,12 @@ def agent(s: Session) -> int:
         s.exec(['sh', '-c', f'setsid {cli_binary("codex")} app-server --listen {sock} '
                 '</dev/null >/run/hz-bridge/app-server.log 2>&1 &'], check=True)
         for _ in range(100):
-            if (s.bridge / 'app.sock').exists():
+            if any(p.is_socket() for p in (s.bridge / 'daemon').iterdir()):
                 break
             time.sleep(0.2)
+        else:
+            print('REFUSED: codex app-server socket did not appear; see bridge/app-server.log')
+            return 2
         inner = base + ['--tty', '--', str(cli_binary('codex')), '--remote', sock,
                         '--dangerously-bypass-approvals-and-sandbox']
     subprocess.run(TMUX + ['new-session', '-d', '-s', s.sid, '-x', '200', '-y', '50', *inner], check=True)
