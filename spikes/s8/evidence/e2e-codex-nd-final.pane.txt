@@ -1,13 +1,13 @@
 › PICK a deploy target
 
-  Worked for 6s • 13:35
+  Worked for 6s • 13:41
 
-› [picker bb09, answered by bob by reply]
+› [picker 5027, answered by bob by reply]
   staging
 
 • ACK
 
-  Worked for <1s • 13:35
+  Worked for <1s • 13:41
 
 › PICK a deploy target
 
@@ -20,18 +20,18 @@
 › PICK a deploy target
 
 • Blocked by hook
-  └ Your question was sent to the operators as picker 3f02; end your turn now, and their answer will arrive as your next message.
+  └ Your question was sent to the operators as picker 18b4; end your turn now, and their answer will arrive as your next message.
 
 • Noted; ending my turn.
 
-  Worked for <1s • 13:36
+  Worked for <1s • 13:42
 
-› [picker 3f02, answered by alice by !answer]
+› [picker 18b4, answered by alice by !answer]
   staging
 
 • ACK
 
-  Worked for <1s • 13:36
+  Worked for <1s • 13:42
 
 › Ask Codex to do anything
 

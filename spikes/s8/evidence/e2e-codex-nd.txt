@@ -1,4 +1,4 @@
-PASS 1 picker became a card {"card": "Picker 4ccc from the admin agent: Which deploy target should I use?"}
+PASS 1 picker became a card {"card": "Picker b629 from the admin agent: Which deploy target should I use?"}
 PASS 1 Stop after the denied picker set the turn-ended mark
 PASS 1 answer delivered after Stop {"status": "delivered"}
 PASS 1 agent received the attributed answer exactly once {"hits": 1}

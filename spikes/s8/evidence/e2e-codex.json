@@ -4,7 +4,7 @@
   {
    "check": "1 picker became a card",
    "ok": true,
-   "card": "Picker 0dd3 from the admin agent: Which deploy target should I use?"
+   "card": "Picker d473 from the admin agent: Which deploy target should I use?"
   },
   {
    "check": "1 Stop after the denied picker set the turn-ended mark",
@@ -108,489 +108,489 @@
  ],
  "log": [
   {
-   "t": 1791491914.245,
+   "t": 1791492062.061,
    "kind": "launched",
-   "launch": "a7b3523ffaa0dc5a",
+   "launch": "c1fa8c07171c6bda",
    "resume": false
   },
   {
-   "t": 1791491922.624,
+   "t": 1791492070.45,
    "kind": "hook",
    "event": "SessionStart",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491922.646,
+   "t": 1791492070.469,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491922.68,
+   "t": 1791492070.5,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491922.68,
+   "t": 1791492070.5,
    "kind": "picker",
-   "picker": "0dd3"
+   "picker": "d473"
   },
   {
-   "t": 1791491922.681,
+   "t": 1791492070.501,
    "kind": "posted",
-   "text": "Picker 0dd3 from the admin agent: Which deploy target should I use?",
+   "text": "Picker d473 from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491922.712,
+   "t": 1791492070.533,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491922.766,
+   "t": 1791492070.578,
    "kind": "answered",
-   "picker": "0dd3",
+   "picker": "d473",
    "by": "alice",
    "route": "reply"
   },
   {
-   "t": 1791491922.766,
+   "t": 1791492070.578,
    "kind": "P",
-   "picker": "0dd3"
+   "picker": "d473"
   },
   {
-   "t": 1791491922.766,
+   "t": 1791492070.578,
    "kind": "reserved",
-   "picker": "0dd3"
+   "picker": "d473"
   },
   {
-   "t": 1791491923.073,
+   "t": 1791492070.885,
    "kind": "pasted",
-   "picker": "0dd3"
+   "picker": "d473"
   },
   {
-   "t": 1791491923.1,
+   "t": 1791492070.912,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491923.1,
+   "t": 1791492070.912,
    "kind": "delivered",
-   "picker": "0dd3"
+   "picker": "d473"
   },
   {
-   "t": 1791491923.13,
+   "t": 1791492070.942,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491926.172,
+   "t": 1791492073.983,
    "kind": "posted",
-   "text": "Picker 0dd3 was already answered by alice.",
+   "text": "Picker d473 was already answered by alice.",
    "reply_to": "<hex>"
   },
   {
-   "t": 1791491928.607,
+   "t": 1791492076.423,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491928.635,
+   "t": 1791492076.457,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491928.635,
+   "t": 1791492076.457,
    "kind": "picker",
-   "picker": "a8f5"
+   "picker": "1a9d"
   },
   {
-   "t": 1791491928.635,
+   "t": 1791492076.457,
    "kind": "posted",
-   "text": "Picker a8f5 from the admin agent: Which deploy target should I use?",
+   "text": "Picker 1a9d from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491928.662,
+   "t": 1791492076.497,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491928.683,
+   "t": 1791492076.595,
    "kind": "dropped",
    "why": "not an operator",
    "text": "1"
   },
   {
-   "t": 1791491928.684,
+   "t": 1791492076.595,
    "kind": "dropped",
    "why": "not an operator",
    "emoji": "1\ufe0f\u20e3"
   },
   {
-   "t": 1791491931.687,
+   "t": 1791492079.598,
    "kind": "answered",
-   "picker": "a8f5",
+   "picker": "1a9d",
    "by": "bob",
    "route": "reaction"
   },
   {
-   "t": 1791491931.687,
+   "t": 1791492079.598,
    "kind": "P",
-   "picker": "a8f5"
+   "picker": "1a9d"
   },
   {
-   "t": 1791491931.687,
+   "t": 1791492079.598,
    "kind": "reserved",
-   "picker": "a8f5"
+   "picker": "1a9d"
   },
   {
-   "t": 1791491931.996,
+   "t": 1791492079.906,
    "kind": "pasted",
-   "picker": "a8f5"
+   "picker": "1a9d"
   },
   {
-   "t": 1791491932.027,
+   "t": 1791492079.931,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491932.027,
+   "t": 1791492079.931,
    "kind": "delivered",
-   "picker": "a8f5"
+   "picker": "1a9d"
   },
   {
-   "t": 1791491932.059,
+   "t": 1791492079.963,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491934.428,
+   "t": 1791492082.335,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491934.455,
+   "t": 1791492082.362,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491934.455,
+   "t": 1791492082.363,
    "kind": "refused",
    "why": "redaction"
   },
   {
-   "t": 1791491934.483,
+   "t": 1791492082.395,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491937.838,
+   "t": 1791492085.746,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491937.869,
+   "t": 1791492085.78,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491937.869,
+   "t": 1791492085.781,
    "kind": "picker",
-   "picker": "e7de"
+   "picker": "a9dd"
   },
   {
-   "t": 1791491937.869,
+   "t": 1791492085.781,
    "kind": "posted",
-   "text": "Picker e7de from the admin agent: Which deploy target should I use?",
+   "text": "Picker a9dd from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491937.912,
+   "t": 1791492085.82,
    "kind": "answered",
-   "picker": "e7de",
+   "picker": "a9dd",
    "by": "alice",
    "route": "reply"
   },
   {
-   "t": 1791491943.912,
+   "t": 1791492091.815,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491943.912,
+   "t": 1791492091.815,
    "kind": "P",
-   "picker": "e7de"
+   "picker": "a9dd"
   },
   {
-   "t": 1791491943.912,
+   "t": 1791492091.815,
    "kind": "reserved",
-   "picker": "e7de"
+   "picker": "a9dd"
   },
   {
-   "t": 1791491944.219,
+   "t": 1791492092.122,
    "kind": "pasted",
-   "picker": "e7de"
+   "picker": "a9dd"
   },
   {
-   "t": 1791491944.281,
+   "t": 1791492092.174,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491944.281,
+   "t": 1791492092.174,
    "kind": "delivered",
-   "picker": "e7de"
+   "picker": "a9dd"
   },
   {
-   "t": 1791491944.315,
+   "t": 1791492092.203,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491946.664,
+   "t": 1791492094.576,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491946.695,
+   "t": 1791492094.606,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491946.695,
+   "t": 1791492094.607,
    "kind": "picker",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491946.695,
+   "t": 1791492094.607,
    "kind": "posted",
-   "text": "Picker d92b from the admin agent: Which deploy target should I use?",
+   "text": "Picker 1325 from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491946.739,
+   "t": 1791492094.649,
    "kind": "answered",
-   "picker": "d92b",
+   "picker": "1325",
    "by": "alice",
    "route": "reply"
   },
   {
-   "t": 1791491952.734,
+   "t": 1791492100.64,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491952.734,
+   "t": 1791492100.64,
    "kind": "P",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491952.734,
+   "t": 1791492100.64,
    "kind": "invalidated",
-   "picker": "d92b",
+   "picker": "1325",
    "by": "alice"
   },
   {
-   "t": 1791491953.755,
+   "t": 1791492101.663,
    "kind": "answered",
-   "picker": "d92b",
+   "picker": "1325",
    "by": "bob",
    "route": "reply"
   },
   {
-   "t": 1791491953.755,
+   "t": 1791492101.663,
    "kind": "P",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491953.755,
+   "t": 1791492101.663,
    "kind": "reserved",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491954.064,
+   "t": 1791492101.969,
    "kind": "pasted",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491954.09,
+   "t": 1791492101.996,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491954.09,
+   "t": 1791492101.996,
    "kind": "delivered",
-   "picker": "d92b"
+   "picker": "1325"
   },
   {
-   "t": 1791491954.124,
+   "t": 1791492102.023,
    "kind": "hook",
    "event": "Stop",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491956.494,
+   "t": 1791492104.398,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491956.527,
+   "t": 1791492104.426,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491956.527,
+   "t": 1791492104.426,
    "kind": "picker",
-   "picker": "e1c0"
+   "picker": "646c"
   },
   {
-   "t": 1791491956.528,
+   "t": 1791492104.427,
    "kind": "posted",
-   "text": "Picker e1c0 from the admin agent: Which deploy target should I use?",
+   "text": "Picker 646c from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491956.566,
+   "t": 1791492104.474,
    "kind": "answered",
-   "picker": "e1c0",
+   "picker": "646c",
    "by": "alice",
    "route": "reply"
   },
   {
-   "t": 1791491966.538,
+   "t": 1791492114.438,
    "kind": "posted",
-   "text": "Picker e1c0: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
+   "text": "Picker 646c: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
    "reply_to": "<hex>"
   },
   {
-   "t": 1791491969.573,
+   "t": 1791492117.484,
    "kind": "cancelled",
-   "picker": "e1c0",
+   "picker": "646c",
    "by": "alice"
   },
   {
-   "t": 1791491969.574,
+   "t": 1791492117.485,
    "kind": "posted",
-   "text": "Picker e1c0 cancelled.",
+   "text": "Picker 646c cancelled.",
    "reply_to": "<hex>"
   },
   {
-   "t": 1791491971.013,
+   "t": 1791492118.92,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": true,
    "tool": null
   },
   {
-   "t": 1791491971.037,
+   "t": 1791492118.952,
    "kind": "hook",
    "event": "PreToolUse",
    "current": true,
    "tool": "request_user_input"
   },
   {
-   "t": 1791491971.038,
+   "t": 1791492118.952,
    "kind": "picker",
-   "picker": "f74f"
+   "picker": "e8dc"
   },
   {
-   "t": 1791491971.038,
+   "t": 1791492118.953,
    "kind": "posted",
-   "text": "Picker f74f from the admin agent: Which deploy target should I use?",
+   "text": "Picker e8dc from the admin agent: Which deploy target should I use?",
    "reply_to": null
   },
   {
-   "t": 1791491971.088,
+   "t": 1791492118.996,
    "kind": "hook",
    "event": "Stop",
    "current": false,
    "tool": null
   },
   {
-   "t": 1791491971.088,
+   "t": 1791492118.996,
    "kind": "answered",
-   "picker": "f74f",
+   "picker": "e8dc",
    "by": "alice",
    "route": "reply"
   },
   {
-   "t": 1791491973.723,
+   "t": 1791492121.628,
    "kind": "launched",
-   "launch": "1e4f341dedbd855c",
+   "launch": "9108a1f935755b29",
    "resume": true
   },
   {
-   "t": 1791491973.724,
+   "t": 1791492121.629,
    "kind": "posted",
    "text": "This question came from a previous agent session; your answer was not delivered.",
    "reply_to": "<hex>"
   },
   {
-   "t": 1791492001.071,
+   "t": 1791492148.991,
    "kind": "hook",
    "event": "UserPromptSubmit",
    "current": false,
    "tool": null
   },
   {
-   "t": 1791492001.102,
+   "t": 1791492149.021,
    "kind": "hook",
    "event": "PreToolUse",
    "current": false,
    "tool": "request_user_input"
   },
   {
-   "t": 1791492001.14,
+   "t": 1791492149.061,
    "kind": "hook",
    "event": "Stop",
    "current": false,
@@ -599,39 +599,39 @@
  ],
  "sent": [
   {
-   "text": "Picker 0dd3 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker d473 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
-   "text": "Picker 0dd3 was already answered by alice.",
+   "text": "Picker d473 was already answered by alice.",
    "reply_to": "<hex>"
   },
   {
-   "text": "Picker a8f5 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker 1a9d from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
-   "text": "Picker e7de from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker a9dd from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
-   "text": "Picker d92b from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker 1325 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
-   "text": "Picker e1c0 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker 646c from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
-   "text": "Picker e1c0: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
+   "text": "Picker 646c: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
    "reply_to": "<hex>"
   },
   {
-   "text": "Picker e1c0 cancelled.",
+   "text": "Picker 646c cancelled.",
    "reply_to": "<hex>"
   },
   {
-   "text": "Picker f74f from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "text": "Picker e8dc from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
    "reply_to": null
   },
   {
