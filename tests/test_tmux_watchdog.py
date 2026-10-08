@@ -488,7 +488,7 @@ from test_tmux import tmux
 
 
 MAIN_SCRIPT = '''
-import json, os, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 import pytest
 import tmux_guard
@@ -500,7 +500,10 @@ end = time.monotonic() + float(sys.argv[2])
 while g.proc.returncode is None and time.monotonic() < end:     # set by wait(), here or in the reaper
     time.sleep(0.05)
 pid = g.proc.pid
-reaped = not Path(f"/proc/{pid}").exists() if Path("/proc/self").exists() else True
+if Path("/proc/self").exists():
+    reaped = not Path(f"/proc/{pid}").exists()
+else:     # a zombie still shows in ps until it is reaped
+    reaped = not subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True).stdout.strip()
 print("RESULT " + json.dumps({"code": int(code), "pid": pid, "returncode": g.proc.returncode,
                               "timed_out": g.timed_out, "run": str(g.run), "run_exists": g.run.exists(),
                               "reaped": reaped}))
