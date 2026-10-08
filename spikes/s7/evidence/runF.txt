@@ -1,0 +1,17 @@
+# runF: codex-cli 0.160.0, run-f.sh (valid token); dummy auth.json; network namespace with loopback only
+## auth.json sha256[:16] before / after
+12910f481e341656
+12910f481e341656
+## app-server reply (remoteControl notification dropped)
+account/rateLimits/read: {"id": 1, "result": {"ordinaryUsageAllowed": null, "rateLimits": {"limitId": "codex", "limitName": null, "normalModelSlug": null, "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791488313}, "secondary": {"usedPercent": 17, "windowDurationMins": 10080, "resetsAt": 1791916713}, "credits": {"hasCredits": false, "unlimited": false, "balance": null}, "individualLimit": null, "spendControlReached": null, "planType": "pro", "rateLimitReachedType": null}, "rateLimitsByLimitId": {"codex": {"limitId": "codex", "limitName": null, "normalModelSlug": null, "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791488313}, "secondary": {"usedPercent": 17, "windowDurationMins": 10080, "resetsAt": 1791916713}, "credits": {"hasCredits": false, "unlimited": false, "balance": null}, "individualLimit": null, "spendControlReached": null, "planType": "pro", "rateLimitReachedType": null}}, "rateLimitResetCredits": null, "accountId": null, "rateLimitUpsell": null}}
+## stub request log
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200&includeDownloadUrls=true", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/plugins/featured?platform=codex", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/list?scope=GLOBAL&limit=200", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/rate-limit-reset-credits", "auth_digest": "1e228037", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/usage", "auth_digest": "1e228037", "account_header": true}
+## app-server stderr, refresh and auth lines (ANSI stripped)

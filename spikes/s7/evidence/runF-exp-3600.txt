@@ -1,0 +1,26 @@
+# runF-exp-3600: codex-cli 0.160.0, EXPIRES_IN=-3600 run-f.sh (access token expired an hour before the run); dummy auth.json; network namespace with loopback only
+## auth.json sha256[:16] before / after
+157075fe1c9c4577
+157075fe1c9c4577
+## app-server reply (remoteControl notification dropped)
+account/rateLimits/read: {"id": 1, "result": {"ordinaryUsageAllowed": null, "rateLimits": {"limitId": "codex", "limitName": null, "normalModelSlug": null, "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791488319}, "secondary": {"usedPercent": 17, "windowDurationMins": 10080, "resetsAt": 1791916719}, "credits": {"hasCredits": false, "unlimited": false, "balance": null}, "individualLimit": null, "spendControlReached": null, "planType": "pro", "rateLimitReachedType": null}, "rateLimitsByLimitId": {"codex": {"limitId": "codex", "limitName": null, "normalModelSlug": null, "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1791488319}, "secondary": {"usedPercent": 17, "windowDurationMins": 10080, "resetsAt": 1791916719}, "credits": {"hasCredits": false, "unlimited": false, "balance": null}, "individualLimit": null, "spendControlReached": null, "planType": "pro", "rateLimitReachedType": null}}, "rateLimitResetCredits": null, "accountId": null, "rateLimitUpsell": null}}
+## stub request log
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/accounts/check", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/list?scope=GLOBAL&limit=200", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/suggested/codex?scope=GLOBAL", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200&includeDownloadUrls=true", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/ps/plugins/installed?limit=200", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/plugins/featured?platform=codex", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/usage", "auth_digest": "1af86fbd", "account_header": true}
+{"method": "GET", "path": "/backend-api/wham/rate-limit-reset-credits", "auth_digest": "1af86fbd", "account_header": true}
+## app-server stderr, refresh and auth lines (ANSI stripped)
+2026-10-08T18:38:54.968944Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:38:59.981141Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:39:05.007998Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:39:10.020068Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:39:15.029389Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:39:20.044915Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
+2026-10-08T18:39:25.048702Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-08T18:39:25.069626Z ERROR codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)
