@@ -14,6 +14,7 @@ from heterodyne.wsd.journal import (
     Journal,
     JournalBusy,
     JournalCorrupt,
+    JournalUnusable,
     OpConflict,
     OpKind,
     OpStatus,
@@ -304,10 +305,11 @@ def test_other_errors_after_open_pass_through(journal: Journal, monkeypatch: pyt
 
 
 class _FailOn:
-    """The journal's connection, passing every statement through except the `nth` one starting with
-    `prefix`, which fails with `exc` before it runs. `ran` lists what ran."""
+    """The journal's connection (or another _FailOn, to fail two statements), passing every statement
+    through except the `nth` one starting with `prefix`, which fails with `exc` before it runs. `seen`
+    counts the statements starting with `prefix`, the failing one included; `ran` lists what ran."""
 
-    def __init__(self, db: sqlite3.Connection, prefix: str, nth: int, exc: sqlite3.Error) -> None:
+    def __init__(self, db: "sqlite3.Connection | _FailOn", prefix: str, nth: int, exc: BaseException) -> None:
         self.db, self.prefix, self.nth, self.exc = db, prefix, nth, exc
         self.seen = 0
         self.ran: list[str] = []
@@ -323,6 +325,9 @@ class _FailOn:
     @property
     def in_transaction(self) -> bool:
         return self.db.in_transaction
+
+    def close(self) -> None:
+        self.db.close()
 
 
 def _write_then_write(j: Journal) -> None:
@@ -355,8 +360,9 @@ def test_contention_inside_a_transaction_rolls_it_all_back(journal: Journal, mon
     real = journal.db
     failing = _FailOn(real, prefix, nth, _error("SQLITE_BUSY"))
     monkeypatch.setattr(journal, "db", failing)
-    with pytest.raises(JournalBusy):
+    with pytest.raises(JournalBusy) as caught:
         body(journal)
+    assert not hasattr(caught.value, "__notes__")  # the rollback worked: no cleanup note, no poison
     assert failing.seen == nth
     assert failing.ran.count("ROLLBACK") == 1 and not real.in_transaction
     assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
@@ -374,6 +380,7 @@ def test_error_that_already_rolled_back_is_raised_as_it_is(journal: Journal) -> 
         journal.emit("alpha", None, "a")
         journal.set_state("alpha", "btq-1", BeadState.CLAIMING, detail="x" * 200_000)
     assert caught.value.sqlite_errorname == "SQLITE_FULL"
+    assert not hasattr(caught.value, "__notes__")  # SQLite rolled back itself: no cleanup note, no poison
     assert not journal.db.in_transaction and journal._depth == 0  # pyright: ignore[reportPrivateUsage]
     journal.db.execute("PRAGMA max_page_count=1073741823")
     assert journal.events_since(0, 10) == [] and journal.state("alpha", "btq-1") is None
@@ -631,6 +638,232 @@ def test_a_transaction_excludes_other_threads(journal: Journal, monkeypatch: pyt
     worker_sql = [i for i, (name, _) in enumerate(trace) if name == "worker"]
     assert worker_sql and min(worker_sql) > rollback
     assert [(e.seq, e.kind) for e in journal.events_since(0, 10)] == [(seqs[0], "worker")]
+
+
+# btq-ekktm (docs/superpowers/specs/2026-10-08-wsd-journal-cleanup-errors-design.md): when the cleanup of a
+# failed transaction fails too, the block's own error leaves with a note, and the journal refuses all use.
+
+CLEANUP_NOTE = "journal cleanup failed ({}); the journal is unusable; open a new Journal"
+
+
+def _cleanup_fails(journal: Journal, monkeypatch: pytest.MonkeyPatch, *, commit: BaseException | None = None,
+                   rollback: BaseException | None = None) -> tuple[sqlite3.Connection, _FailOn]:
+    """Fail the transaction's ROLLBACK (SQLITE_INTERRUPT unless `rollback` says otherwise) and, with
+    `commit`, its COMMIT first. Returns the real connection and the ROLLBACK proxy."""
+    real = journal.db
+    inner: sqlite3.Connection | _FailOn = real if commit is None else _FailOn(real, "COMMIT", 1, commit)
+    failing = _FailOn(inner, "ROLLBACK", 1, _error("SQLITE_INTERRUPT") if rollback is None else rollback)
+    monkeypatch.setattr(journal, "db", failing)
+    return real, failing
+
+
+def _enter(journal: Journal) -> None:
+    with journal.transaction():
+        pass
+
+
+def _assert_unusable(journal: Journal, cause: BaseException | type[BaseException]) -> None:
+    with pytest.raises(JournalUnusable) as refused:
+        journal.emit("alpha", None, "after")
+    if isinstance(cause, BaseException):
+        assert refused.value.__cause__ is cause
+    else:
+        assert isinstance(refused.value.__cause__, cause)
+
+
+def _kinds(path: Path) -> list[str]:
+    reopened = Journal(path)
+    try:
+        return [e.kind for e in reopened.events_since(0, 10)]
+    finally:
+        reopened.close()
+
+
+def test_a_failed_rollback_keeps_the_error_and_poisons_the_journal(tmp_path: Path, journal: Journal,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    real, failing = _cleanup_fails(journal, monkeypatch)
+    primary = ValueError("primary")
+    with pytest.raises(ValueError) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+        raise primary
+    assert caught.value is primary
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format("OperationalError: SQLITE_INTERRUPT")]
+    assert real.in_transaction and failing.seen == 1
+    assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
+    dest = tmp_path / "copy.db"
+    for call in (lambda: journal.emit("alpha", None, "b"), lambda: _enter(journal),
+                 lambda: journal.backup(dest)):
+        with pytest.raises(JournalUnusable) as refused:
+            call()
+        assert refused.value.__cause__ is failing.exc
+    assert not dest.exists()
+    journal.close()
+    journal.close()
+    _assert_unusable(journal, failing.exc)    # still poisoned after close: recovery is a new Journal
+    assert _kinds(tmp_path / "state" / "wsd.db") == []
+
+
+def test_a_failed_rollback_after_a_failed_commit_keeps_the_commit_error(
+        tmp_path: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = _error("SQLITE_IOERR_READ")
+    _, failing = _cleanup_fails(journal, monkeypatch, commit=commit)
+    with pytest.raises(sqlite3.OperationalError) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+    assert caught.value is commit
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format("OperationalError: SQLITE_INTERRUPT")]
+    _assert_unusable(journal, failing.exc)
+    journal.close()
+    assert _kinds(tmp_path / "state" / "wsd.db") == []
+
+
+def test_busy_at_commit_then_a_failed_rollback_keeps_the_note(journal: Journal,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    # r1 finding 2: the note is added to the raw SQLITE_BUSY, which _busy() then turns into JournalBusy.
+    _, failing = _cleanup_fails(journal, monkeypatch, commit=_error("SQLITE_BUSY"))
+    with pytest.raises(JournalBusy) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format("OperationalError: SQLITE_INTERRUPT")]
+    _assert_unusable(journal, failing.exc)
+    journal.close()
+
+
+def test_a_failed_rollback_keeps_the_errors_own_chain(journal: Journal,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    # r1 finding 3: E is re-raised with a bare raise; its cause, context and notes are its own.
+    _cleanup_fails(journal, monkeypatch)
+    cause, context = RuntimeError("cause"), KeyError("context")
+    primary = ValueError("primary")
+    primary.__cause__, primary.__context__ = cause, context
+    primary.__suppress_context__ = True
+    primary.add_note("prior")
+    with pytest.raises(ValueError) as caught, journal.transaction():
+        raise primary
+    assert caught.value is primary
+    assert primary.__cause__ is cause and primary.__context__ is context and primary.__suppress_context__
+    assert primary.__notes__ == ["prior", CLEANUP_NOTE.format("OperationalError: SQLITE_INTERRUPT")]
+    journal.close()
+
+
+def test_an_interrupted_rollback_in_sqlite_poisons_the_journal(tmp_path: Path, journal: Journal) -> None:
+    # Supplementary, on real SQLite: the injected tests above are the required coverage. A ROLLBACK the
+    # progress handler interrupts leaves the transaction open and the write lock held (r1 finding 6).
+    path = tmp_path / "state" / "wsd.db"
+    with pytest.raises(ValueError, match="primary"), journal.transaction():
+        journal.emit("alpha", None, "a")
+        journal.db.set_progress_handler(lambda: 1, 1)   # armed after the write: only the ROLLBACK runs
+        raise ValueError("primary")
+    journal.db.set_progress_handler(None, 1)
+    if journal._broken is None and not journal.db.in_transaction:  # pyright: ignore[reportPrivateUsage]
+        journal.close()
+        pytest.skip(f"SQLite {sqlite3.sqlite_version} did not interrupt the ROLLBACK")
+    assert journal.db.in_transaction
+    with pytest.raises(JournalUnusable) as refused:
+        journal.emit("alpha", None, "b")
+    cause = refused.value.__cause__
+    assert isinstance(cause, sqlite3.OperationalError) and cause.sqlite_errorname == "SQLITE_INTERRUPT"
+    other = sqlite3.connect(path, isolation_level=None, timeout=0)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as busy:
+            other.execute("BEGIN IMMEDIATE")
+        assert busy.value.sqlite_errorname == "SQLITE_BUSY"
+        journal.close()                                 # discards the open transaction, releases the lock
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+    assert _kinds(path) == []
+
+
+def test_a_journal_closed_inside_the_block_keeps_the_error(tmp_path: Path, journal: Journal) -> None:
+    primary = ValueError("primary")
+    with pytest.raises(ValueError) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+        journal.close()
+        raise primary
+    assert caught.value is primary
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format(
+        "ProgrammingError: Cannot operate on a closed database.")]
+    _assert_unusable(journal, sqlite3.ProgrammingError)
+    assert _kinds(tmp_path / "state" / "wsd.db") == []
+
+
+def test_a_journal_closed_inside_a_clean_block_notes_the_commit_error(journal: Journal) -> None:
+    with pytest.raises(sqlite3.ProgrammingError) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+        journal.close()
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format(
+        "ProgrammingError: Cannot operate on a closed database.")]
+    _assert_unusable(journal, sqlite3.ProgrammingError)
+
+
+@pytest.mark.parametrize("kind", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interrupt_during_cleanup_wins_and_poisons(journal: Journal, monkeypatch: pytest.MonkeyPatch,
+                                                      kind: type[BaseException]) -> None:
+    # Code review r1: every BaseException that is not an Exception wins over the primary, not only
+    # KeyboardInterrupt.
+    interrupt = kind()
+    real, _ = _cleanup_fails(journal, monkeypatch, rollback=interrupt)
+    primary = ValueError("primary")
+    with pytest.raises(kind) as caught, journal.transaction():
+        journal.emit("alpha", None, "a")
+        raise primary
+    assert caught.value is interrupt and interrupt.__context__ is primary
+    assert not hasattr(primary, "__notes__")
+    assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
+    _assert_unusable(journal, interrupt)
+    real.close()
+
+
+def test_a_failed_rollback_under_a_nested_block_cleans_up_once(journal: Journal,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    real = journal.db
+    insert = _error("SQLITE_IOERR_READ")
+    monkeypatch.setattr(journal, "db", _FailOn(real, "INSERT INTO events", 2, insert))
+    _, failing = _cleanup_fails(journal, monkeypatch)
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        _write_then_nested_method(journal)
+    assert caught.value is insert and failing.seen == 1
+    assert caught.value.__notes__ == [CLEANUP_NOTE.format("OperationalError: SQLITE_INTERRUPT")]
+    assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
+    _assert_unusable(journal, failing.exc)
+    real.close()
+
+
+def test_a_thread_queued_on_the_lock_is_refused_without_sql(journal: Journal,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    # r1 finding 4: the check runs after the lock is taken, so a worker queued behind the failing
+    # transaction is refused and runs no SQL on the connection still holding the open transaction.
+    lock = _SignalBeforeAcquire(journal.lock)
+    monkeypatch.setattr(journal, "lock", lock)
+    trace: list[tuple[str, str]] = []
+    real = journal.db
+    real.set_trace_callback(lambda sql: trace.append((threading.current_thread().name, sql)))
+    _, failing = _cleanup_fails(journal, monkeypatch)
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            journal.emit("alpha", "btq-w", "worker")
+        except BaseException as exc:  # noqa: BLE001  # checked in the test thread
+            errors.append(exc)
+
+    worker = threading.Thread(target=work, name="worker")
+    lock.watched = worker
+    try:
+        with pytest.raises(SimulatedCrash), journal.transaction():
+            journal.emit("alpha", "btq-o", "owner")
+            worker.start()
+            assert lock.reached.wait(5), "the worker never went through the journal lock"
+            raise SimulatedCrash("owner")
+    finally:
+        if worker.ident is not None:
+            worker.join(5)
+        real.set_trace_callback(None)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], JournalUnusable), errors
+    assert errors[0].__cause__ is failing.exc
+    assert not [sql for name, sql in trace if name == "worker"]
+    real.close()
 
 
 @settings(max_examples=60, deadline=None)
