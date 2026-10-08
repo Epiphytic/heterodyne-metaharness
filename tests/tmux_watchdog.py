@@ -34,11 +34,15 @@ DEATH_WAIT = 5.0     # after kill-server, for the server to be proven dead
 LOCK_TRIES = 20
 LOCK_GAP = 0.1
 PASS_GAP = 0.2
+WAIT_GAP = 0.05
 OUTCOMES = ("killed", "stale", "survived", "unresolved")
 
 
 class DeadlineReached(Exception):
     """The global deadline cut an operation short: the entry is kept and reported, never forced."""
+
+
+Generation = tuple[int, int]     # (st_dev, st_ino) of one socket file: a replacement is another one
 
 
 class Sweeper:
@@ -54,7 +58,10 @@ class Sweeper:
         self.killed: list[dict[str, Any]] = []
         self.stale: list[dict[str, Any]] = []
         self.pending: dict[str, tuple[str, int | None]] = {}   # name -> (survived | unresolved, pid)
-        self.known: dict[str, int] = {}     # name -> server PID once discovered; its death must be proven
+        # name -> (socket generation, server PID) from discovery until the death is proven. A PID whose
+        # socket was replaced or went away first moves to `orphans`: still reported until proven dead.
+        self.known: dict[str, tuple[Generation, int]] = {}
+        self.orphans: list[dict[str, Any]] = []
 
     # --- probes ---
 
@@ -96,6 +103,13 @@ class Sweeper:
             s.close()
         return "accept"
 
+    def generation(self, path: Path) -> Generation | None:
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            return None
+        return (st.st_dev, st.st_ino)
+
     def pid_running(self, pid: int) -> bool:
         """False only if `pid` is proven gone or a zombie; any doubt counts as running."""
         if Path("/proc/self/stat").exists():
@@ -110,17 +124,18 @@ class Sweeper:
         return self._ps_running(pid)
 
     def _ps_running(self, pid: int) -> bool:
-        """`ps` where there is no /proc. Only its ordinary "no such process" (exit 1, no output at all)
-        counts as gone; a failed inspection is doubt."""
+        """`ps` where there is no /proc. Gone only on its ordinary "no such process" (exit 1, both streams
+        empty) or a successful inspection showing a zombie; anything else is doubt."""
         try:
             proc = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdin=subprocess.DEVNULL,
                                   capture_output=True, timeout=self.budget(), check=False)
         except (OSError, subprocess.TimeoutExpired):
             return True
-        state = proc.stdout.decode("utf-8", "replace").strip()
-        if state:
-            return not state.startswith("Z")
-        return not (proc.returncode == 1 and not proc.stderr.strip())
+        if proc.returncode == 1 and proc.stdout == b"" and proc.stderr == b"":
+            return False
+        if proc.returncode == 0 and proc.stderr == b"":
+            return not proc.stdout.decode("utf-8", "replace").strip().startswith("Z")
+        return True
 
     def try_lock(self, lock: Path) -> tuple[bool, int | None]:
         """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen). Returns
@@ -152,8 +167,10 @@ class Sweeper:
             self.sweep()
             try:
                 self.dead.rmdir()
+                self.settle()
                 return True
             except FileNotFoundError:
+                self.settle()
                 return True
             except OSError as exc:
                 if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
@@ -163,7 +180,33 @@ class Sweeper:
                 return False
             self.sleep(min(PASS_GAP, left))
 
+    def settle(self) -> None:
+        """Retire PIDs whose socket is gone, and drop orphans now proven dead."""
+        with contextlib.suppress(OSError):
+            present = {p.name for p in self.dead.iterdir()} if self.dead.exists() else set()
+            for name in set(self.known) - present:
+                self.retire(name)
+        for orphan in list(self.orphans):
+            try:
+                if not self.pid_running(orphan["pid"]):
+                    self.log(f"orphan pid {orphan['pid']} of {orphan['path']} is gone")
+                    self.orphans.remove(orphan)
+            except DeadlineReached:
+                return
+
+    def retire(self, name: str) -> None:
+        """`name`'s socket was replaced or went away before its server was proven dead."""
+        entry = self.known.pop(name, None)
+        if entry is not None:
+            gen, pid = entry
+            self.orphans.append({"path": str(self.dead / name), "pid": pid, "generation": list(gen)})
+
+    def known_pid(self, name: str) -> int | None:
+        entry = self.known.get(name)
+        return entry[1] if entry else None
+
     def sweep(self) -> None:
+        self.settle()
         try:
             names = sorted(p.name for p in self.dead.iterdir())
         except OSError as exc:
@@ -181,38 +224,46 @@ class Sweeper:
                     self.sweep_socket(path)
             except DeadlineReached:
                 # Keep what an earlier pass found (survived); otherwise it is unresolved.
-                self.pending.setdefault(name, ("unresolved", self.known.get(name)))
+                self.pending.setdefault(name, ("unresolved", self.known_pid(name)))
                 return
             except Exception as exc:  # noqa: BLE001 - one entry's failure must not stop the others
                 self.log(f"{path}: {type(exc).__name__}: {exc}")
-                self.pending[name] = ("unresolved", self.known.get(name))
+                self.pending[name] = ("unresolved", self.known_pid(name))
 
     def sweep_socket(self, path: Path) -> None:
-        pid = self.server_pid(path)
+        gen = self.generation(path)
+        if gen is None:
+            self.gone(path)
+            return
+        pid = self.server_pid(path, gen)
         if pid is not None:
-            self.kill_known(path, pid)
+            self.kill_known(path, gen, pid)
             return
         state = self.connect(path)
         if state == "accept":
             self.log(f"kill-server {path} (pid unknown)")
             self.tmux(path, "kill-server")
             if not self.wait(lambda: self.connect(path) != "accept"):
-                pid = self.server_pid(path)
+                pid = self.server_pid(path, gen)
                 if pid is not None:
-                    self.kill_known(path, pid)
+                    self.kill_known(path, gen, pid)
                 else:
                     self.pending[path.name] = ("survived", None)
                 return
             state = self.connect(path)
         if state == "missing":
-            self.pending.pop(path.name, None)
+            self.gone(path)
             return
         if state != "refused":
             self.pending[path.name] = ("unresolved", None)
             return
-        self.refused_without_pid(path)
+        self.refused_without_pid(path, gen)
 
-    def refused_without_pid(self, path: Path) -> None:
+    def gone(self, path: Path) -> None:
+        self.retire(path.name)
+        self.pending.pop(path.name, None)
+
+    def refused_without_pid(self, path: Path, gen: Generation) -> None:
         """tmux binds before it listens, so a refusal proves nothing while a startup holds the lock."""
         lock = path.with_name(path.name + ".lock")
         taken, fd = self.try_lock(lock)
@@ -222,9 +273,9 @@ class Sweeper:
         try:
             state = self.connect(path)
             if state == "accept":
-                pid = self.server_pid(path)
+                pid = self.server_pid(path, gen)
                 if pid is not None:
-                    self.kill_known(path, pid)
+                    self.kill_known(path, gen, pid)
                 else:
                     self.pending[path.name] = ("survived", None)
                 return
@@ -254,35 +305,48 @@ class Sweeper:
             if fd is not None:
                 os.close(fd)
 
-    def server_pid(self, path: Path) -> int | None:
-        """The server's PID, or the one an earlier pass found: once known, only proven death removes
-        the socket (a later failed query is no proof)."""
+    def server_pid(self, path: Path, gen: Generation) -> int | None:
+        """The PID serving this generation of the socket, or the one an earlier pass found for it: once
+        known, only proven death removes the socket (a later failed query is no proof). A PID cached for
+        another generation is retired, never reused for a replacement."""
         code, out = self.tmux(path, "display-message", "-p", "#{pid}")
         text = out.strip()
-        if code == 0 and text.isdigit():
-            self.known[path.name] = int(text)
-        return self.known.get(path.name)
+        found = int(text) if code == 0 and text.isdigit() and self.generation(path) == gen else None
+        entry = self.known.get(path.name)
+        if entry is not None and (entry[0] != gen or found not in (None, entry[1])):
+            self.retire(path.name)
+            entry = None
+        if found is not None:
+            entry = self.known[path.name] = (gen, found)
+        return entry[1] if entry else None
 
-    def kill_known(self, path: Path, pid: int) -> None:
+    def kill_known(self, path: Path, gen: Generation, pid: int) -> None:
         self.log(f"kill-server {path} pid {pid}")
         self.tmux(path, "kill-server")
         if self.wait(lambda: self.connect(path) in ("refused", "missing") and not self.pid_running(pid)):
-            path.unlink(missing_ok=True)
+            if self.generation(path) == gen:      # never unlink a replacement on this proof
+                path.unlink(missing_ok=True)
+            self.known.pop(path.name, None)
             self.killed.append({"path": str(path), "pid": pid})
             self.pending.pop(path.name, None)
         else:
             self.pending[path.name] = ("survived", pid)
 
     def wait(self, pred: Callable[[], bool], seconds: float = DEATH_WAIT) -> bool:
-        """False after `seconds`; DeadlineReached if the global deadline comes first."""
+        """False after `seconds`; DeadlineReached if the global deadline comes first. No sleep runs past
+        either."""
         end = self.now() + seconds
-        while not pred():
+        while True:
             if self.now() >= self.end:
                 raise DeadlineReached
-            if self.now() >= end:
+            if pred():
+                return True
+            now = self.now()
+            if now >= self.end:
+                raise DeadlineReached
+            if now >= end:
                 return False
-            self.sleep(0.05)
-        return True
+            self.sleep(min(WAIT_GAP, end - now, self.end - now))
 
     # --- the result ---
 
@@ -294,8 +358,12 @@ class Sweeper:
         for name in sorted(present):
             if name.endswith(".lock") and name[:-5] in present:
                 continue                            # reported with its socket
-            outcome, pid = self.pending.get(name, ("unresolved", self.known.get(name)))
+            outcome, pid = self.pending.get(name, ("unresolved", self.known_pid(name)))
             out[outcome].append({"path": str(self.dead / name), "pid": pid})
+        for name in sorted(set(self.known) - present):
+            gen, pid = self.known[name]
+            out["unresolved"].append({"path": str(self.dead / name), "pid": pid, "generation": list(gen)})
+        out["unresolved"].extend(self.orphans)
         out["closed"] = closed
         return out
 

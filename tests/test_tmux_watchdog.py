@@ -196,11 +196,76 @@ def test_a_pid_found_once_is_kept_for_later_passes(tmp_path: Path) -> None:
     assert summary["survived"] == [{"path": str(dead / "aa"), "pid": 4242}]
 
 
+class Replaced(FakeSweeper):
+    """After the first pass, socket A at `aa` is replaced by B: bound but not listening, its startup lock
+    held, its PID undiscoverable unless `b_pid` is given. `same_inode`: B reuses A's inode number."""
+
+    def __init__(self, dead: Path, *, a_running: bool, b_pid: int | None = None, a_dies: bool = False,
+                 same_inode: bool = False) -> None:
+        super().__init__(dead, running=a_running)
+        self.b_pid, self.a_dies, self.same_inode = b_pid, a_dies, same_inode
+        self.replaced = False
+
+    def generation(self, path: Path) -> tuple[int, int] | None:
+        if not path.exists():
+            return None
+        return (7, 1 if not self.replaced or self.same_inode else 2)
+
+    def pid_running(self, pid: int) -> bool:
+        return pid == 4242 and self.running
+
+    def sweep(self) -> None:
+        super().sweep()
+        if not self.replaced:
+            self.replaced = True
+            (self.dead / "aa").touch()
+            self.pid, self.lock_free = self.b_pid, False
+            if self.a_dies:
+                self.running = False
+
+
+@pytest.mark.parametrize("same_inode", [False, True], ids=["new-inode", "inode-reused"])
+def test_a_killed_servers_proof_never_unlinks_its_replacement(tmp_path: Path, same_inode: bool) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    s = Replaced(dead, a_running=False, same_inode=same_inode)
+    closed = s.run()
+    summary = s.summary(closed)
+    assert not closed and (dead / "aa").exists()
+    assert summary["killed"] == [{"path": str(dead / "aa"), "pid": 4242}]
+    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]   # B: its lock is held
+    assert summary["stale"] == summary["survived"] == []
+
+
+def test_an_unproven_servers_later_death_never_unlinks_its_replacement(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    s = Replaced(dead, a_running=True, a_dies=True)       # A survives its kill, then dies once replaced
+    closed = s.run()
+    summary = s.summary(closed)
+    assert not closed and (dead / "aa").exists()
+    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]
+    assert summary["killed"] == summary["stale"] == summary["survived"] == []
+
+
+@pytest.mark.parametrize("a_dies", [False, True], ids=["a-lives", "a-dies"])
+def test_discovering_a_replacement_keeps_the_unproven_pid(tmp_path: Path, a_dies: bool) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    s = Replaced(dead, a_running=True, b_pid=5151, a_dies=a_dies)
+    closed = s.run()
+    summary = s.summary(closed)
+    assert closed and summary["killed"] == [{"path": str(dead / "aa"), "pid": 5151}]
+    orphan = [] if a_dies else [{"path": str(dead / "aa"), "pid": 4242, "generation": [7, 1]}]
+    assert summary["unresolved"] == orphan and summary["survived"] == []
+
+
 @pytest.mark.parametrize(("returncode", "stdout", "stderr", "running"), [
     (1, b"", b"ps: kvm_openfiles: bad thing\n", True),     # inspection failed: not proof of death
     (2, b"", b"", True),
     (1, b"", b"", False),                                    # the ordinary "no such process"
+    (1, b" \n", b"", True),                                  # whitespace is output
+    (1, b"", b"\n", True),
     (0, b"Z\n", b"", False),
+    (1, b"Z\n", b"", True),                                  # a zombie only from a clean inspection
+    (0, b"Z\n", b"ps: warning\n", True),
     (0, b"Ss\n", b"", True),
 ])
 def test_ps_failure_is_not_death(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode: int,
@@ -225,12 +290,31 @@ def test_a_failed_ps_keeps_the_socket(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert s.summary(closed)["survived"] == [{"path": str(dead / "aa"), "pid": 4242}]
 
 
-def test_the_death_wait_stops_at_the_deadline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("deadline", [0.011, 2.0])
+def test_the_death_wait_stops_at_the_deadline(tmp_path: Path, deadline: float) -> None:
     dead = _dead_with(tmp_path, "aa")
-    s = FakeSweeper(dead, running=True, deadline=2.0)
+    s = FakeSweeper(dead, running=True, deadline=deadline)
     closed = s.run()
-    assert s.clock <= 2.0 + 0.05 + 1e-9
+    assert s.clock == pytest.approx(deadline, abs=1e-9)       # a fake clock: no jitter, no overshoot
     assert not closed and s.summary(closed)["unresolved"] == [{"path": str(dead / "aa"), "pid": 4242}]
+
+
+def test_a_wait_stops_at_its_own_end(tmp_path: Path) -> None:
+    s = FakeSweeper(tmp_path)
+    checked: list[float] = []
+
+    def never() -> bool:
+        checked.append(s.clock)
+        return False
+    assert s.wait(never, seconds=0.011) is False
+    assert s.clock == pytest.approx(0.011, abs=1e-9) and checked[-1] == s.clock
+
+
+def test_a_wait_past_the_deadline_never_probes(tmp_path: Path) -> None:
+    s = FakeSweeper(tmp_path, deadline=1.0)
+    s.clock = 1.0
+    with pytest.raises(tmux_watchdog.DeadlineReached):
+        s.wait(lambda: pytest.fail("probed after the deadline"))
 
 
 def test_lock_retries_stop_at_the_deadline(tmp_path: Path) -> None:
@@ -343,19 +427,30 @@ class Child:
         self.hand_path = tmp_path / "hand.json"
         self.out = tmp_path / "child.out"
         self.mark = f"hz-mark-{uuid.uuid4().hex}"
-        self.base = short_base()        # like conftest's macOS basetemp, which a child does not load
+        self.tmp_path, self.env = tmp_path, env
+        self.base: Path | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
         self.pids: list[int] = []
         self.run: Path | None = None
+
+    def start(self) -> None:
+        """Run only once `cleanup` is registered: it removes the base whatever happens here."""
+        self.base = short_base()        # like conftest's macOS basetemp, which a child does not load
         base = {k: v for k, v in os.environ.items() if not k.startswith("HZ_TMUX_WATCHDOG_")}
         full = {**base, "PYTHONPATH": os.pathsep.join([str(TESTS), os.environ.get("PYTHONPATH", "")]),
-                "HZ_CHILD_DIR": str(tmp_path), "HZ_CHILD_MARK": self.mark, **(env or {})}
+                "HZ_CHILD_DIR": str(self.tmp_path), "HZ_CHILD_MARK": self.mark, **(self.env or {})}
         with self.out.open("wb") as out:
-            self.proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 [sys.executable, "-m", "pytest", "-q", "-p", "tmux_guard", "-p", "no:cacheprovider",
                  "-c", str(self.dir / "pytest.ini"), "--rootdir", str(self.dir), "--basetemp", str(self.base),
                  "test_child.py"],
                 cwd=self.dir, env=full, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                 start_new_session=True)
+
+    @property
+    def proc(self) -> subprocess.Popen[bytes]:
+        assert self._proc is not None, "not started"
+        return self._proc
 
     def output(self) -> str:
         return self.out.read_text(errors="replace")
@@ -381,35 +476,67 @@ class Child:
         return result
 
     def cleanup(self) -> None:
-        """Parent-side safety net: whatever a failed assertion left running."""
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(self.proc.pid, signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            self.proc.wait(10)
-        for pid in self.pids:
-            if running(pid):
+        """Parent-side safety net: whatever a failed assertion left running. The base goes regardless."""
+        try:
+            if self._proc is not None:
                 with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-        for line in matching(self.mark):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(line.split()[0]), signal.SIGKILL)
-        shutil.rmtree(self.base, ignore_errors=True)
-        if self.run is not None and self.run.exists():
-            until(lambda: not any("tmux_watchdog" in ln and str(self.run) in ln
-                                  for ln in matching(str(self.run))), "the watchdog to exit")
-            shutil.rmtree(self.run, ignore_errors=True)
+                    os.killpg(self._proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self._proc.wait(10)
+            for pid in self.pids:
+                if running(pid):
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGKILL)
+            for line in matching(self.mark):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(line.split()[0]), signal.SIGKILL)
+            if self.run is not None and self.run.exists():
+                until(lambda: not any("tmux_watchdog" in ln and str(self.run) in ln
+                                      for ln in matching(str(self.run))), "the watchdog to exit")
+                shutil.rmtree(self.run, ignore_errors=True)
+        finally:
+            if self.base is not None:
+                shutil.rmtree(self.base, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def children(tmp_path: Path) -> Iterator[Callable[..., Child]]:
+    """Each child's cleanup is registered before it starts, and runs even if another's fails."""
+    with contextlib.ExitStack() as stack:
+        def make(body: str, env: dict[str, str] | None = None) -> Child:
+            c = Child(tmp_path, body, env)
+            stack.callback(c.cleanup)
+            c.start()
+            return c
+        yield make
 
 
 @pytest.fixture
 def child(tmp_path: Path) -> Iterator[Callable[..., Child]]:
-    made: list[Child] = []
+    with children(tmp_path) as make:
+        yield make
 
-    def make(body: str, env: dict[str, str] | None = None) -> Child:
-        made.append(Child(tmp_path, body, env))
-        return made[-1]
-    yield make
-    for c in made:
-        c.cleanup()
+
+def test_a_child_that_fails_to_start_or_clean_up_leaves_no_base(monkeypatch: pytest.MonkeyPatch,
+                                                                 tmp_path: Path) -> None:
+    bases: list[Path] = []
+    real = short_base
+
+    def recorded() -> Path:
+        bases.append(real())
+        return bases[-1]
+
+    def no_exec(*_a: Any, **_kw: Any) -> None:
+        raise OSError("no exec")
+
+    def broken(_text: str) -> list[str]:
+        raise RuntimeError("ps failed")
+    monkeypatch.setattr(sys.modules[__name__], "short_base", recorded)
+    monkeypatch.setattr(sys.modules[__name__], "matching", broken)       # an earlier cleanup step fails
+    monkeypatch.setattr(subprocess, "Popen", no_exec)
+    with pytest.raises(RuntimeError, match="ps failed"), children(tmp_path) as make:
+        make("")
+    assert len(bases) == 1 and not bases[0].exists()
 
 
 def assert_cleaned(c: Child, data: dict[str, Any], outcome: str = "killed") -> dict[str, Any]:
@@ -605,9 +732,9 @@ print("RESULT " + json.dumps({"code": int(code), "pid": pid, "returncode": g.pro
 '''
 
 
-@needs_tmux
-@pytest.mark.parametrize("slow", [False, True], ids=["prompt", "slow-cleanup"])
-def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, slow: bool) -> None:
+def main_script(tmp_path: Path, slow: bool,
+                run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:
+    """Test 7's body. `run` is a seam for the timeout test; the short base goes whatever happens."""
     child_dir = tmp_path / "child"
     child_dir.mkdir()
     (child_dir / "pytest.ini").write_text("[pytest]\n")
@@ -622,11 +749,13 @@ def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, sl
     env.pop("HZ_TMUX_WATCHDOG_WAIT", None)
     if slow:
         env["HZ_TMUX_WATCHDOG_WAIT"] = "0"
+    stdout = ""
     base = short_base()
-    proc = subprocess.run([sys.executable, "-c", MAIN_SCRIPT, str(child_dir), str(BUDGET), str(base)],
-                          env=env, capture_output=True, text=True, timeout=BUDGET * 2, check=False)
     try:
-        line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT "))
+        proc = run([sys.executable, "-c", MAIN_SCRIPT, str(child_dir), str(BUDGET), str(base)],
+                   env=env, capture_output=True, text=True, timeout=BUDGET * 2, check=False)
+        stdout = proc.stdout
+        line = next(ln for ln in stdout.splitlines() if ln.startswith("RESULT "))
         result = json.loads(line.removeprefix("RESULT "))
         assert result["code"] == 0 and result["returncode"] == 0 and result["reaped"]
         assert gone(result["pid"]) and not matching(mark)
@@ -637,12 +766,32 @@ def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, sl
         else:
             assert not result["run_exists"] and "tmux_guard" not in proc.stderr
     finally:
-        for ln in matching(mark):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(ln.split()[0]), signal.SIGKILL)
-        for run in [Path(ln) for ln in re.findall(r'"run": "([^"]+)"', proc.stdout)]:
-            shutil.rmtree(run, ignore_errors=True)
-        shutil.rmtree(base, ignore_errors=True)
+        try:
+            for ln in matching(mark):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(ln.split()[0]), signal.SIGKILL)
+            for run_dir in [Path(ln) for ln in re.findall(r'"run": "([^"]+)"', stdout)]:
+                shutil.rmtree(run_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+
+@needs_tmux
+@pytest.mark.parametrize("slow", [False, True], ids=["prompt", "slow-cleanup"])
+def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, slow: bool) -> None:
+    main_script(tmp_path, slow)
+
+
+def test_a_main_script_that_times_out_leaves_no_base(tmp_path: Path) -> None:
+    bases: list[Path] = []
+
+    def times_out(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        bases.append(Path(argv[-1]))
+        assert bases[-1].is_dir()
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+    with pytest.raises(subprocess.TimeoutExpired):
+        main_script(tmp_path, slow=False, run=times_out)
+    assert len(bases) == 1 and not bases[0].exists()
 
 
 @needs_tmux
