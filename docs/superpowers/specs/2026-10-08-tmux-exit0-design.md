@@ -130,10 +130,21 @@ Change it to `return stdout.strip() != "0"`, so only an explicit `0` means a liv
 
 These need no live units. Real tmux only goes through `tests/tmux_guard.py`.
 
-**Fakes that need updating.** `Run` in `tests/test_tmux_exec.py` and `Recorder` in `tests/test_tmux_launcher.py` must answer a call containing `new-session` with the marker line. They build it from the argv: the nonce is taken from the `-F` value, the name from the argument after `-s`, and the id is `$0`. Every existing test keeps its assertions, including:
+**Fakes that need updating.** Three fakes must answer a successful call containing `new-session` with the marker line:
+- `Run` in `tests/test_tmux_exec.py`;
+- `Recorder` in `tests/test_tmux_launcher.py`;
+- `Calls` in `tests/test_tmux_watchdog.py`. Its `_drive()` calls `new_session`, so without the update both launcher variants of `test_socket_name_selects_with_dash_l` and `test_socket_path_selects_with_dash_s` would fail.
+
+Each fake builds the marker from the argv. They build it from the argv: the nonce is taken from the `-F` value, the name from the argument after `-s`, and the id is `$0`. Every existing test keeps its assertions, including:
 - `test_new_session_prefixes_only_the_server_start`;
 - `test_start_always_uses_the_launcher_and_never_probes` (no `list-sessions`, no extra call);
 - the exact-argv pins, which gain `-P -F <marker format>`; the pins check the format with the nonce masked.
+
+**The full seam inventory.** It comes from a grep of `tests/` for `tmux_mod.subprocess`, `_exec` and `_run` patches and for `new_session` calls. Besides the three fakes above, nothing reaches `new_session` through a fake subprocess:
+- the `no_run` fakes in `tests/test_tmux_launch_lock.py` (the late-launcher test and `test_a_prefix_other_than_the_gate_is_refused`) fail if anything runs, and still nothing runs;
+- the `recorded` wrapper in the launch-after-unlink test passes through to the real `_exec`; it is covered under "Existing test, tightened" below;
+- `scripted_tmux` in `tests/test_admind_r1.py` patches `_run` but only drives `paste`;
+- the `FakeTmux` classes (`tests/test_admind_r1.py`, `tests/test_admind_agent.py`, `tests/live/stub_admind.py`) replace `new_session` itself, as do the admind tests that wrap `u.tmux.new_session`. All of them are unaffected.
 
 **`GateLauncher` (`tests/tmux_guard.py`) must forward stdout.** Today its script redirects all of tmux's output into `launch.tmp`, so the caller's stdout is always empty and every successful gated start would fail the new check. The new script:
 
@@ -208,3 +219,4 @@ The real exit-0 path is already exercised by the next test: after the watchdog's
   - **Parser.** It strips the verified `hz-started <nonce> ` prefix before splitting. The rest is split once into id and name, which keeps spaces in names.
   - **Malformed markers.** Missing fields are spelled out as malformed: no cleanup, and an error.
   - **Tests.** New ones cover the literal F1 and F3 lines, a name with spaces, and the missing-field cases.
+- **r3 review (8241cb9):** the cycle cap was reached. Its single inventory finding is folded into this revision: `Calls` in `tests/test_tmux_watchdog.py` is added to the fakes to update, and the full seam inventory is listed in section 4.

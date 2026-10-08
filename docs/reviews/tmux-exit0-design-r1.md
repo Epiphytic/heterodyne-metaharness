@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: a3d8675. Verdict: REVISE.
+
+1. [BLOCKING] `docs/superpowers/specs/2026-10-08-tmux-exit0-design.md:114` — The test-update inventory misses `GateLauncher`. Its script redirects all tmux output into `launch.tmp` (`tests/tmux_guard.py:109`), leaving captured stdout empty even after a successful start. The new check therefore breaks `test_a_gated_start_hands_the_lock_to_the_server` (`tests/test_tmux_launch_lock.py:690`) and other successful gated launches. **Fix:** update `GateLauncher` to preserve stdout for the caller while retaining its diagnostic file, exit status, and launch-lock inheritance; include successful gated starts in validation.
+
+2. [BLOCKING] `docs/superpowers/specs/2026-10-08-tmux-exit0-design.md:92` — A different last stdout line does not prove that this invocation created that session. A prefix that forwards `admin\n` and then prints `other\n` makes the wrapper kill `other`, potentially an existing healthy session, while leaving `admin` running and reporting failure. The duplicate-session argument applies only to tmux’s actual creation output. **Fix:** distinguish confirmation from ordinary stdout using a unique marker, preferably including the created session ID. Never use an unverified output line as a cleanup target. Add trailing-noise and unrelated-session cleanup tests.
+
+REVISE
