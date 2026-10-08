@@ -278,7 +278,8 @@ def test_a_guarded_tmux_after_the_rename_raises_and_runs_nothing(monkeypatch: py
 def test_a_launcher_released_after_the_final_unlink_starts_nothing(tmp_path: Path) -> None:
     with children(tmp_path) as make:
         c = make('''
-import fcntl, tmux_guard
+import errno, fcntl, os, tmux_guard
+from heterodyne.tmux import TmuxError
 
 def test_child(tmp_path, monkeypatch):
     t = new_test_tmux()
@@ -303,10 +304,14 @@ def test_child(tmp_path, monkeypatch):
         results.append(real_exec(*a, **kw))
         return results[-1]
     monkeypatch.setattr(t, "_exec", recorded)
-    t.new_session("s", tmp_path, PANE)               # tmux 3.4 reports the failed bind but exits 0
-    [proc] = results
-    assert b"No such file or directory" in proc.stderr, proc
-''')
+    try:
+        t.new_session("s", tmp_path, PANE)
+    except TmuxError:                                # a tmux that exits non-zero on the failed bind
+        return
+    [proc] = results                                 # tmux 3.4 exits 0 and reports the cause on stderr
+    causes = {b"No such file or directory", os.strerror(errno.ENOENT).encode()}
+    assert any(cause in proc.stderr for cause in causes), proc
+''', env={"LC_ALL": "C"})
         data = c.hand()
         assert c.finished() == 0, c.output()
         assert c.run is not None and not c.run.exists()
