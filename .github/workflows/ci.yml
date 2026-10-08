@@ -7,8 +7,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]   # platform seam matrix (ADR 0001 §11)
-    runs-on: ${{ matrix.os }}
+        # Platform seam matrix (ADR 0001 §11). Never use GitHub-hosted macOS runners (operator
+        # decision 2026-10-08). macOS runs only on self-hosted runners labelled [self-hosted, macOS],
+        # and only when the repository variable MACOS_SELF_HOSTED is 'true'. Otherwise, Linux only.
+        runner: ${{ fromJSON(vars.MACOS_SELF_HOSTED == 'true' && '["ubuntu-latest", ["self-hosted", "macOS"]]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
