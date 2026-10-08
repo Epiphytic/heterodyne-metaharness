@@ -45,10 +45,14 @@ class Tmux:
             return ("-S", str(self.socket_path))
         return ("-L", self.socket_name)
 
+    def _exec(self, argv: list[str], *, input: bytes | None,
+              timeout: float) -> subprocess.CompletedProcess[bytes]:
+        """The one place tmux is run. Callers map its exceptions and exit status."""
+        return subprocess.run(argv, input=input, capture_output=True, timeout=timeout, check=False)
+
     def _run(self, *args: str, data: bytes | None = None,
              check: bool = True) -> subprocess.CompletedProcess[bytes]:
-        proc = subprocess.run([self.binary, *self._selector(), *args], input=data,
-                              capture_output=True, timeout=15, check=False)
+        proc = self._exec([self.binary, *self._selector(), *args], input=data, timeout=15)
         if check and proc.returncode != 0:
             detail = proc.stderr.decode("utf-8", "replace").strip()
             raise TmuxError(f"tmux {args[0]} failed: {detail}")
@@ -70,8 +74,8 @@ class Tmux:
         # is already running the wrapped client just asks it and its scope is collected on exit.
         # A failing launcher is an error: never fall back to starting the server unwrapped.
         try:
-            proc = subprocess.run([*self.launcher(), self.binary, *self._selector(), *args],
-                                  capture_output=True, timeout=30, check=False)
+            proc = self._exec([*self.launcher(), self.binary, *self._selector(), *args], input=None,
+                              timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             raise TmuxError(LAUNCHER_FAILED) from None
         if proc.returncode != 0:
