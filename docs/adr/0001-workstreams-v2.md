@@ -1,10 +1,22 @@
 # ADR 0001: heterodyne-metaharness (workstreams v2)
 
-- Status: Proposed, revision 13 (amends §2, §3, §3.4, §6.2, §7, §8, §11 and §13 for admind's operator decisions of 2026-10-01/02: several operators, summarized replies with `!details`, and an untruncated audit). The operator approved revision 12 (btq-freh). Cross-model review r17 approved revision 12 (rounds r12–r17) (`docs/reviews/`; responses in `0001-design-review-r1-response.md`). Revision 13 waits for its own cross-model review and operator approval (§5.9: an ADR change needs a new approval). The OpenShell sandbox runtime is deferred to revision 14 (§7).
+- Status: Proposed, revision 14 (draft, 2026-10-07; amends §3.2, §3.3, §4.1–§4.3, §5.2, §5.4, §5.7, §5.9, §6.2, §6.3, §7, §8, §10–§13 and §15; adds §4.4, §8.1, §8.2, §17 and Appendix A; see "Revision 14 changes" below). The operator approved revision 13 (btq-5ky39, design-repo commit `66b3aec`). Revision 14 is G1 of the accounts change plan: it needs its own cross-model review and operator approval (§5.9) before anything cites it. Revision 13 amended §2, §3, §3.4, §6.2, §7, §8, §11 and §13 for admind's operator decisions of 2026-10-01/02 (several operators, summarized replies with `!details`, an untruncated audit). The operator approved revision 12 (btq-freh); cross-model review r17 approved it (rounds r12–r17) (`docs/reviews/`; responses in `0001-design-review-r1-response.md`).
 - Review process (set by the operator, 2026-09-29; applies to every agent and harness): **every change is reviewed by a different LLM than its author whenever possible, otherwise by an adversarial fresh-context agent** (§11.1). The two-model brainstorm requirement is retired.
 - Date: 2026-09-29
 - Author: Claude Opus 5.5 (brainstorm with the operator)
 - Replaces: `hermes-workstream-harness` and its `harness-improvements` and `harness-dev` clones
+
+### Revision 14 changes
+
+Revision 14 (beads btq-2tu6a and btq-xv48a) folds in five things. Text it adds or changes is tagged "(revision 14)".
+
+1. **Accounts and usage-aware scheduling** (§4.4, with edits to §3.3, §4.1, §4.3, §5.2, §6.2, §6.3, §7, §8, §10–§13 and §15). Merged from the amendment proposal `docs/adr/proposals/0001-accounts-and-usage.md` (draft after its reviews r1–r6) and its change plan (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md`, items AU-0 to AU-17). The fixes for its review r6 are listed in Appendix A and were re-reviewed in G1 (review records r21–r24).
+2. **Marmot-only operation** (§8.1, with edits to §4.2, §6.3 and §10). Questions, permission prompts and dialogs reach operators on Marmot, and pickers become a new agent-bound ask kind with a defined delivery cycle; content that can't be shown safely goes back to its originator, and the remaining host exceptions are listed; every hold states its reason; tmux is break-glass only.
+3. **admind's interim Marmot relay, as built** (§8.2, §5.4, §5.9). Recorded as decisions by requirement ID: R1–R26 (2026-10-05), R27–R31 with revised R7, R8, R13 and R15 (2026-10-06), and B1–B14 (2026-10-07).
+4. **Two plan 3 decisions** (operator, 2026-10-04): a `v2:held` park needs no blocking edge (§4.3), and `/pause` stops new claims only (§6.3).
+5. **OpenShell as the sandbox runtime**, gated on spike S5 (§3.2, §7, §12, §13). If S5 fails, only the Linux runtime selection falls back to revision 13's bubblewrap; every other rule of this revision still applies.
+
+Decisions this revision leaves to the operator are in §17.
 
 ## 1. Context
 
@@ -93,7 +105,7 @@ A host is either Linux or macOS. A workstream's platform is its host's platform,
 | Concern | Linux | macOS |
 |---|---|---|
 | Service manager | systemd user units | launchd agents |
-| Sandbox backend | bubblewrap | Seatbelt (`sandbox-exec`, generated profile) |
+| Sandbox backend (revision 14, §7) | OpenShell, if spike S5 passes; otherwise bubblewrap | Seatbelt (`sandbox-exec`, generated profile), phase 2; whether OpenShell replaces it is decided with the phase 2 macOS work (§17) |
 | Boot ID | `/proc/sys/kernel/random/boot_id` | `sysctl kern.boottime` |
 
 `sys.platform` appears only in `platform.py`. The choices are saved in the host config at install time and not re-probed at runtime. Aggregating several hosts into one control group is out of scope (§12).
@@ -110,8 +122,14 @@ A host is either Linux or macOS. A workstream's platform is its host's platform,
 | Session registry | Derived: `uuid5(bead, role, profile)` plus the launched-session record on the bead (§4.1) | Recomputed |
 | Message ↔ bead map, outbox receipts, reminder state | SQLite journal | Lost. Open approval and question cards are re-posted with a "re-issued after recovery" note, and replies to old cards get a pointer to the new one. |
 | Hook spool (events observed while `wsd` was down) | Local spool files | Replayed as **untrusted observations** for the audit trail only; never treated as approvals or evidence. |
+| Account usage cache (revision 14): trusted windows and exhaustion marks per credential key; untrusted windows per launch, in a separate table | SQLite journal. Advisory; only trusted observations are shared between sessions (§4.4). | Lost. Every account is unknown, which is eligible, until the next observation. |
+| Launch entries (revision 14): session key, profile, generation, role, account, credential key, models, dispatch mark, native ID, outcome, adopted | SQLite journal, then the bead's `metadata.wsd_launches` before each launch | Rebuilt from the bead. |
+| Launch receipts (revision 14): session key, generation, the runtime's own spawn result (started or refused) | SQLite journal only, written by `wsd` on the host (§4.4 D2) | Lost. An entry with a dispatch mark and no outcome then has no receipt, so it holds for operator recovery; it is never inferred from spool events or transcripts. |
+| Deferral records (revision 14): session key, deferral number, role, profile, reason, `defer_until` or none | SQLite journal plus the `v2:deferred` label and a `wsd-defer` bead comment | Not rebuilt: a deferred bead with no journal row is escalated `journal_lost`, as any other bead. |
 
-The SQLite journal is backed up with the beads backups. The recovery order on startup is: journal integrity check, then read beads, then reconcile actions in `executing`/`uncertain`, then resume park journals, then reconcile sessions, and only then accept events.
+The SQLite journal is backed up with the beads backups. The recovery order on startup is: journal integrity check, then read beads, then reconcile actions in `executing`/`uncertain`, then resume park journals (including defer and undefer operations, revision 14), then reconcile sessions, and only then accept events.
+
+**Journal upgrades (revision 14).** A schema upgrade runs in one transaction, keeps every existing table and row, and on any failure leaves the file as it was and refuses to start. A journal is never discarded to recover from a failed upgrade. The upgrade that adds launch entries also adopts every session launched before they existed (§4.4, D2 legacy sessions): a verified one gets its adopted entry, and any other is marked for operator recovery, so nothing resumes on an unknown launch history.
 
 ### 3.4 Operator identity and ingress authentication
 
@@ -161,21 +179,45 @@ reviewer = "claude-opus"
 [review]
 mode_when_same_model = "adversarial"   # §11.1 backstop; "block" refuses instead
 fallback_reviewer    = "gpt-sol"       # used if the reviewer profile is unavailable
+
+# Accounts (revision 14, §4.4): a named login for one adapter (host config only, §15).
+[accounts.codex-main]
+adapter   = "codex"
+login_dir = "<directory holding this login>"
+
+[accounts.codex-team]
+adapter   = "codex"
+login_dir = "<directory holding this login>"
+
+# A profile may list accounts; this extends [profiles.gpt-sol] above.
+#   accounts = ["codex-main", "codex-team"]   # order is preference; omit for the default login
+#   failover = "next"                         # default "none": defer only (§4.3)
+
+[usage]
+reserve_percent             = 5     # a trusted window blocks at >= 100 - reserve_percent used
+stale_minutes               = 30
+unknown_backoff_minutes     = 30
+untrusted_max_defer_minutes = 60    # the longest a session's own untrusted report can defer it
+min_recheck_seconds         = 60
+max_window_hours            = 192   # the longest reset horizon accepted
 ```
 
 - **Review mode is derived, not declared.**
   - When `wsd` starts a review, it compares the coder's and reviewer's resolved `model`. If they differ, the review is `cross-model`. If they match, including after a fallback, it is an adversarial fresh session, or the review is refused if `mode_when_same_model = "block"`.
-  - **Evidence comes from what ran, not from config.** At launch, `wsd` records a launched-session record on the bead: profile, adapter, the exact model passed on the command line, the model reported in the session transcript or hook payload, and the session ID. For reviews it also records the reviewed `BASE..HEAD`, the findings, and their disposition.
-  - The `Code-Review:` line is generated from the reviewer's and author's **recorded** models. If the configured and reported models disagree, the review is invalid and is re-run.
+  - **Evidence comes from what ran, not from config.** At launch, `wsd` records a launched-session record on the bead: profile, adapter, the exact model passed on the command line, the model reported in the session transcript or hook payload, and the session ID. The models and native session ID are recorded per launch, in the launch entry (revision 14, §4.4). For reviews it also records the reviewed `BASE..HEAD`, the findings, and their disposition.
+  - The `Code-Review:` line is generated from the reviewer's and author's **recorded** models, read from their launch entries. If the configured and reported models disagree, the review is invalid and is re-run.
 - **Validation at startup and on reload:**
   - every role resolves to a profile, and every profile to a known adapter;
   - models the adapter can list are checked when possible;
   - an invalid config is rejected whole, and the last good config stays active.
+  - accounts and usage (revision 14): every account names a known adapter and a `login_dir`; account names are plain identifiers and not `default`; no two credential identities overlap; every account a profile lists exists and uses the profile's adapter; `accounts` is not empty; `failover` is `none` or `next`; accounts and `failover = "next"` are accepted only on adapters with the capabilities S7 demonstrated (§4.4, D7, D9). `reserve_percent` is an integer from 0 to 50. The other `[usage]` values are positive integers, with `min_recheck_seconds` no more than 60 × the smallest of `stale_minutes`, `unknown_backoff_minutes` and `untrusted_max_defer_minutes`, and `untrusted_max_defer_minutes` and `unknown_backoff_minutes` no more than 60 × `max_window_hours`.
   - `/workstreams` shows each workstream's resolved coder → reviewer pairing.
+- **Accounts (revision 14).** A profile may name an ordered list of accounts, each a login for the profile's adapter; without one it uses the adapter's default login. Accounts are host configuration only. The session key never includes the account. `metadata.wsd_session` is the session's immutable identity; each launch adds a launch entry (`metadata.wsd_launches`) with its session key, profile, generation (counted per session key), role, account, credential key and models (§4.4).
+- **Usage-aware launch (revision 14).** Every candidate at pickup, and every launch, resume and relaunch, goes through the headroom gate (§4.4, D4) on its own resolved profile. With `failover = "next"` it takes the first eligible account; with `"none"` it uses the first account or defers.
 - **Changing configuration:** role and profile changes are harness configuration, which is hard-deny for agents (§5.3). They are made by the operator, through `admind`, or through an approved policy bead.
 - Everything above `AgentRuntime` is agent-agnostic.
 - **Session identity** is `uuid5(NS, f"{bead}:{role}:{profile}")`, labelled `<short-bead> · <role> · <title>`. The label appears in the session name, the tmux window, the Marmot thread header and `/status`.
-  - The `uuid5` is the harness's logical session key. Claude Code is launched with it as its session ID. Codex assigns its own thread ID (§4.2), so for Codex, resume, steering and reconcile use the assigned thread ID recorded in the launched-session record, or a confirmed post-launch name.
+  - The `uuid5` is the harness's logical session key. Claude Code's first launch uses it as its session ID; a handoff relaunch on another account uses a generation-specific ID recorded in its launch entry (revision 14, §4.4 D7). Codex assigns its own thread ID (§4.2), so for Codex, resume, steering and reconcile use the assigned thread ID recorded in the launched-session record, or a confirmed post-launch name.
 - **Swapping agents** is done with a deterministic handoff built from the bead: description, acceptance criteria, comments and decisions, plus `git log` and diffstat on the bead branch. The new session starts from that. The old transcript is not needed, so a swap works even after a crash or context overflow.
 
 ### 4.2 Adapter capabilities (verified against the installed CLIs, 2026-09-29; Codex column per spike S1)
@@ -191,7 +233,7 @@ fallback_reviewer    = "gpt-sol"       # used if the reviewer profile is unavail
 | Lifecycle hooks | SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, Notification | session_start, user_prompt_submit, stop, pre/post_compact (in use today) |
 | Hook trust | Settings file | **Unsettled.** S1 saw `--dangerously-bypass-hook-trust` run `wsd`-generated hooks without a trust step, but the independent re-run could not reproduce it. Must be re-tested with the harness's actual `hooks.json` schema. |
 
-Both CLIs run interactively and unmodified, so subscription-plan auth is preserved. The operator can attach to a session with `tmux attach` and take over at any time.
+Both CLIs run interactively and unmodified, so subscription-plan auth is preserved. **`tmux attach` is break-glass only (revision 14, §8.1):** the operator can still attach to any session and take over, but no documented procedure, prompt or recovery step may require it. Steering goes through Marmot (§5.6), and anything a session would otherwise show only in its terminal reaches the operator as a Marmot card (§5.7, §8.1).
 
 ### 4.3 Session model
 
@@ -214,16 +256,121 @@ Both CLIs run interactively and unmodified, so subscription-plan auth is preserv
     - A direct `btq pause` on that worker sets the same flag, but it isn't lock-synchronised. It is honoured from the next claim check onward, so at most one already-started claim can complete after it. It is documented as best-effort, and `wsctl` is the command to use.
     - Per-bead workers have their own btq state directories, so their `ready()` doesn't see that flag. Instead, `wsd` performs every claim inside a per-workstream claim lock and re-checks the shared flag **immediately before** `claim()`.
     - `/pause` takes the same lock, so no claim can start after a pause has been acknowledged.
-    - Pausing stops new claims only. Running and parked beads continue, unless the operator uses `/stop`.
+    - Pausing stops new claims only. Running and parked beads continue, unless the operator uses `/stop`: a parked bead whose blockers close still resumes while the workstream is paused (§6.3 matches this, revision 14).
   - v2-managed beads carry `agent:wsd`. Which coding agent does the work is role configuration (§4.1), not a bead label.
   - Adding the `wsd` identity (a Dolt user plus a btq `AGENTS` entry) is an operator setup step.
   - Agent sessions are children of `wsd`, not btq identities. The claim belongs to `wsd`, not to an agent session, so it survives session crashes, swaps and parks.
 - **Worktrees use btq's convention** (`btq worktree`: `<repo>-btq-<id>` on branch `btq/<id>`), so there is only one convention. There is one session per (bead, role) in that worktree.
-- **Parking** leaves the bead **claimed by `wsd`** (`in_progress`), labelled `v2:parked`, with a blocking edge to what it waits on. `wsd` never unclaims, which respects PICKUP.md.
+- **Parking** leaves the bead **claimed by `wsd`** (`in_progress`), labelled `v2:parked`, with a blocking edge to what it waits on. `wsd` never unclaims (PICKUP.md's `agent:wsd` exception, plan 3 decision (c)).
   - The park sequence is journaled (§3.3): record intent, commit WIP (recording the SHA), apply the label, add a bead comment. Each step is idempotent and replayed after a crash.
   - A queue write with an uncertain outcome is read back before any retry.
-- **Resumable beads** are `wsd`'s own query: beads it has claimed that carry `v2:parked` and whose blocking edges are all closed. They are resumed as the same session (§4.1) in the same worktree.
+- **Held parks (revision 14; plan 3 decision (a), 2026-10-04).** `v2:held` is a park reason that **needs no blocking edge**. An operator `/stop` (§6.3) parks with `v2:held`, written first, plus `v2:parked`. Escalations that need operator recovery hold the same way. `v2:held` is checked before every launch, and a held bead is never resumable. **A journaled release (plan 3's `Parker.release`) is the only exit:** it removes `v2:held` and `needs-human`, then puts a parked bead back to waiting on its blockers, or hands an unparked one to a resume through the launch guard. Removing the labels by hand changes nothing in `wsd`.
+- **Deferring (revision 14)** is parking on time rather than on a bead (§4.4, D5).
+  - When the headroom gate gives a deadline or `account_changed` for a bead `wsd` holds (a due resume, or a session that reported a limit), the bead stays claimed by `wsd` (`in_progress`), is labelled `v2:deferred`, and gets no blocking edge.
+  - The defer sequence is journaled: intent (session key, deferral number, role, profile, reason, `defer_until` or none) → stop the bead's sessions → commit the WIP → label → a `wsd-defer` bead comment.
+  - A quota deferral is resumable once `defer_until` has passed. An `account_changed` deferral has no deadline: it is gated again at startup, on a configuration reload or on the operator's release, and is resumable once that gives an account. It is **never retried on a timer** (§17). Either way the bead must carry neither `v2:held` nor `needs-human`. Undeferring goes through the gate again, then removes the label, then launches through the launch guard.
+  - Only the bead's own session can defer it on untrusted evidence, and only for a bounded time (§7).
+- **Resumable beads** are `wsd`'s own query: beads it has claimed that carry `v2:parked` with all blocking edges closed, or `v2:deferred` whose deferral is over (its `defer_until` passed, or its `account_changed` wait gated to an account; both conditions when it carries both labels), and that carry neither `v2:held` nor `needs-human` (revision 14). They are resumed as the same session (§4.1) in the same worktree.
 - A workstream runs **at most one active session per role**. A reviewer can review bead A while the coder works on bead B. Running several coder sessions at once is out of scope for v1.
+
+### 4.4 Accounts and usage-aware scheduling (revision 14)
+
+**Why.** Each adapter had exactly one login, the operator's own, bound into every sandbox (§7). When that subscription reaches a usage limit, every session on the adapter fails, and the control plane learns of it only after the fact. An operator with more than one subscription for a harness had no way to use the second. The ideas below come from [t3code](https://github.com/pingdotgg/t3code) (MIT), as ideas, not code: several logins per harness, each its own config directory, and subscription usage windows read from the harness. Its transport (Agent SDK, headless app-server, ACP), its permission model and its task model are not taken; they conflict with §2, §5.3 and §7. Change-plan items AU-14 and AU-15 later borrow its driver-registry shape and its Codex app-server protocol schemas, as non-blocking tasks.
+
+- **D1. Accounts are host configuration.**
+  - An *account* is a named login for one adapter: `[accounts.<name>]` with `adapter` and `login_dir`, the directory that holds that login.
+  - A profile may list accounts in order: `profiles.<p>.accounts = [...]`. Each must use the profile's adapter. An empty list is rejected; leave the key out instead.
+  - A profile without `accounts` uses the adapter's default login, as before. That login is the **implicit account** `default` of its adapter. The name `default` is reserved, and account names are plain identifiers (no `@`, no path separators).
+  - Each account, the implicit one included, has a **credential identity**: its adapter plus the canonical (symlink-resolved) paths of its login files, the file set S7 establishes for the adapter (D7). Two accounts are rejected if their login directories are the same or contain one another, or if any login file of one resolves to the same file as any login file of the other, through a symlink or a hard link. Aliases are impossible, at directory and at file level.
+  - The **credential key** is a digest of the credential identity. Usage rows, exhaustion marks and refresh locks are keyed by it, never by the account's name, so the two adapters' `default` accounts never share a row, and pointing an account at another login starts from unknown usage. Rows whose key no configured account has are ignored.
+  - Accounts live only in the host layer (§15 layer 2). Workstream config, bead labels and the environment can't name or select an account.
+- **D2. An account is not part of session identity. Each launch gets its own entry.**
+  - The session key stays `uuid5(NS, f"{bead}:{role}:{profile}")` (§4.1). The account is never an input.
+  - `metadata.wsd_session` stays the immutable logical identity it is in plan 3 (role, profile, session key, repository, worktree). It never carries an account, and `wsd` never rewrites it.
+  - Every launch of a session (first launch, resume, relaunch, failover) gets a **launch entry**: the session key and profile, generation (1, 2, …), role, account name, credential key, the model passed on the command line, and, each set once later, the dispatch mark, the native session or thread ID, the reported model, and the outcome (`launched` or `abandoned`).
+  - **Generations are per logical session.** Entries are keyed by (session key, generation), so each (bead, role, profile) counts its own generations from 1. A reviewer that falls back from profile P to Q and later returns to P continues P's sequence; Q has its own. Entries carry the session key, so the sequences can be rebuilt from `metadata.wsd_launches` alone.
+  - **The account is pinned.** The gate chooses the account once, when the launch operation's intent is journaled, and the entry records it and its credential key. Replay launches exactly the journaled account and model, never a fresh choice. Immediately before the launch, the guard checks that the account's current credential key still equals the journaled one and that the account is still eligible. If either check fails, the entry's outcome is set to `abandoned`, and a new attempt with the next generation chooses again. A generation is never reused. A new generation whose credential key differs from the last launched entry's is an account switch (D7), whatever the account's name.
+  - **Dispatch and reconciliation.** The journal records a **dispatch mark** on the entry immediately before `AgentRuntime.launch` is called, and the runtime tags the launch with its session key and generation (the tmux session's options, the hook spool's launch tag, and, for Claude, the generation's native ID). An entry with no dispatch mark never reached the runtime and may be abandoned. An entry with a dispatch mark and no outcome is **unresolved**.
+  - **Launch receipts (revised after the G1 r1 review).** When `AgentRuntime.launch` returns, `wsd` itself, on the host, journals a **launch receipt** keyed by (session key, generation) before it does anything else with the result. The receipt records the runtime's own result of the spawn call: `started`, with what the runtime created (the tmux session and pane IDs on `wsd`'s own tmux server, and the pane's PID), or `refused`, with the runtime's error, when nothing was started. Only `wsd` writes receipts, into its journal, which no session can write (§7). The outcome is then set from the receipt, journal first and then on the bead with read-back.
+  - Before an unresolved entry is abandoned, and before the gate chooses an account for any later launch of that session, `wsd` reconciles it **against its receipt only**. A `started` receipt sets `launched`, whether the session is still running or has ended. A `refused` receipt sets `abandoned`. **No receipt** (a crash between the dispatch mark and the receipt, or a lost journal) holds the bead, escalated `unexpected_state` for operator recovery. Hook-spool events, transcripts under the native ID and the tmux session's tags stay **untrusted observations** (§3.3): they may be shown to the operator in the escalation, but they never set an outcome, because a session can forge any of them. An unresolved entry is never abandoned on a timer and never ignored by the continuity check (D4).
+  - **Legacy sessions.** Sessions launched before launch entries existed (plan 3, before AU-3) are adopted once, by the journal upgrade (§3.3), before anything resumes them. Adoption is **verified** only when the session's adapter has no configured accounts at upgrade time, so the session can only have run on the adapter's default login, and that login's credential identity resolves. A verified session gets one adopted entry: generation 1, account `default`, the default login's current credential key, the native ID it already uses, outcome `launched`, marked `adopted`. The bead copy is appended at startup, with read-back, before pickup. In every other case (accounts already configured for the adapter, an unresolvable default login, or journal and bead disagreeing) the bead holds, escalated `unexpected_state`, and is never resumed on a guessed account.
+  - Launch entries are journaled first, then appended to the bead's `metadata.wsd_launches` before the launch, with read-back. An entry is never removed or changed, except that an empty field may be set once. On replay: an identical entry is kept; a missing one is written; a different one under the same generation escalates `unexpected_state`.
+  - This is a new metadata key on a claimed bead, so it needs a PICKUP.md change (change-plan item AU-0).
+  - A relaunch on a different account is still the same logical session.
+- **D3. Usage is an advisory cache with two trust levels.**
+  - `wsd` keeps the latest usage windows per account: window ID, kind, percent used, reset time, when it was observed, the source and the trust level.
+  - **Ingestion.** Each observation gets a **receipt sequence**, a counter persisted in the journal, and `observed_at`, `wsd`'s own UTC clock at receipt; a timestamp in the payload is ignored. The account is the one on the launch entry of the channel that delivered the observation, never a value from the payload; a payload naming another account is dropped. `used_percent` must be a finite number in [0, 100], otherwise the observation is dropped. `resets_at` must lie after `observed_at` and no later than `observed_at + usage.max_window_hours`, otherwise the reset time is unknown.
+  - **Replacement.** Trusted and untrusted observations are stored in **separate tables**, each with its own replacement key: (credential key, window ID) for trusted rows, (session key, generation, window ID) for untrusted rows. Within a key, the observation with the higher receipt sequence replaces the other. A row in one table never replaces or hides a row in the other. Ordering never depends on the clock, so a newer read wins even after the clock jumps back. `observed_at` is used only for staleness.
+  - **Trusted** observations are made by `wsd` on the host, outside every sandbox, with that account's login (a host-side usage read, D9). **Untrusted** observations come from inside a sandbox: the in-session Codex app-server, a Claude status line, a transcript or a hook. This is the §3.3 hook-spool rule.
+  - **Scope.** Trusted observations enter the shared per-account cache and affect every launch on that account. Untrusted observations affect **only the launch that produced them**: they can defer that session's own bead (D5) and nothing else. Another session of the same bead (for example a reviewer on another profile) never reads them. They never mark an account exhausted, never move a launch to another account, and never make a reviewer unavailable.
+  - Usage only ever affects *scheduling*. It never affects policy, approvals, review evidence or any decision field.
+- **D4. The headroom gate is a deterministic pure function** of (resolved profile, previous launch, adapter capabilities, cache, now, settings). The previous launch is the credential key of the last entry with outcome `launched` and the same session key, or none for a first launch. The gate is never called while that session has an unresolved entry (D2): reconciliation comes first, so a launch that happened is never mistaken for a first launch.
+  - A trusted window **blocks** while all of these hold: `used_percent >= 100 - usage.reserve_percent`; `observed_at + usage.stale_minutes > now`; and its `resets_at` is unknown or later than `now`.
+  - A trusted **exhaustion mark** (from a trusted read confirming a reached limit) blocks while its `until` is later than `now`. `until` is the window's reset time, or `now + usage.unknown_backoff_minutes` when that is unknown.
+  - An account is *eligible* when nothing blocks it. Unknown, stale and expired data are eligible, so the gate never blocks on missing data.
+  - **Permitted accounts**, an ordered list, built in two steps:
+    1. The mode's list: with `failover = "none"`, the profile's first account; with `"next"`, all of its accounts, in order.
+    2. **Credential continuity**, for a later launch (a first launch skips this step):
+       - with `"none"`, whatever the adapter's capabilities: the list keeps the first account only if its current credential key equals the previous launch's; otherwise the list is empty;
+       - with `"next"` on an adapter with a demonstrated way to switch (D9 (b) or (f)): the account with the previous launch's credential key moves to the front (account affinity, D7), and the others follow in order;
+       - with `"next"` on an adapter that can't switch: the list keeps only the account with the previous launch's credential key, or is empty.
+  - So reordering, removing or repointing accounts never switches a session's login under `"none"`, nor on an adapter that can't switch. Only `"next"` on an adapter that can switch moves a session to another login.
+  - The same permitted list is used by pickup, the launch guard's check, the freshness-gate refusal path (D8, §7) and the wake time, so they never disagree.
+  - **Result:** the first eligible permitted account; `account_changed` when the permitted list is empty; or else a deadline. A window's clear time is the earlier of `resets_at` and `observed_at + stale_minutes`; a mark's is its `until`. An account's clear time is the latest of its conditions' clear times. The deadline is the earliest permitted account's clear time, and at least `now + usage.min_recheck_seconds`, so it is always in the future.
+  - **Clock.** Times are stored as UTC epoch seconds. After the clock jumps back, a window or mark whose `observed_at` is later than `now` is ignored (unknown) until a newer receipt replaces it or the clock catches up, and a stored deadline or `until` later than `now + max_window_hours` is rewritten once, in the journal, to that bound. A rewritten value is never moved again, so a deadline can't keep sliding while the clock is behind. A forward jump only releases work early, and the gate then checks again. Tests drive the gate, the defer cycle and replay with an injected clock.
+  - The gate runs **per candidate**: for new work, on the bead's resolved profile (a `role:` label override included); for a resume, on the profile of that role's own record (the coder's `wsd_session` record, or another role's deferral record, D5). It also runs at every launch, resume and relaunch. There is no role-wide precheck.
+- **D5. Deferred parking.**
+  - A bead `wsd` has already claimed is **deferred** when the gate gives a deadline or `account_changed` for it: a due resume or relaunch finds no eligible account, or its running session reports a limit (D7, D9). It stays claimed and `in_progress`, labelled `v2:deferred`, with no blocking edge (§4.3).
+  - Pickup never claims a bead only to defer it. A ready bead whose resolved profile has no eligible account is skipped (§5.2).
+  - **Deferral records** are keyed by (session key, deferral number). The deferral number counts that session's deferrals from 1, separately from launch generations. A record holds the role, the profile, the reason (`quota` or `account_changed`), `defer_until` (none for `account_changed`) and the trust of its evidence. A session's **current** deferral is its highest-numbered record; a lower-numbered one is superseded and is never due.
+  - **Defer** is a journaled operation: intent (the record) → stop every session of the bead, confirmed (unconfirmed: hold, as a park does) → WIP commit (SHA recorded) → label `v2:deferred` → a bead comment with a machine-readable line `wsd-defer session=<key> n=<number> role=<role> until=<UTC or none> reason=<reason>`. Each step is idempotent and replayed after a crash. A session deferred again gets the next deferral number and a new comment.
+  - A deferral on untrusted evidence only (the producing launch's own rows, D3) gets `defer_until` from the observation's reset hint, or `now + unknown_backoff_minutes` when it has none, clamped to between `now + min_recheck_seconds` and `now + usage.untrusted_max_defer_minutes`.
+  - **Undefer** is a journaled resume, taken when a quota deferral's `defer_until` has passed, or when an `account_changed` deferral is gated again (below): intent → the gate again (a deadline: a new quota deferral number, the label stays; `account_changed`: see the transition below, and the operation ends) → remove `v2:deferred` → launch through plan 3's launch guard, with all of its checks. A bead that also carries `v2:parked` doesn't launch: undefer ends with the bead parked, and the parked resume takes it once its blockers close.
+  - **`account_changed` deferral** (D4): the same operation with reason `account_changed` and no `defer_until`. It is outside every quota timer and wake time, and gets one comment and one alert. It is gated again at startup, on every configuration reload, and on the operator's release (`Parker.release`, which for a deferred bead only triggers this). If the gate then gives an account, the wait is marked over in the journal, and the next pickup undefers it like a due quota deferral, with all its checks (ownership, blockers, `v2:held`, `needs-human`, the launch guard). If it gives a deadline, the wait becomes a quota deferral (the next deferral number, a new comment). If it still gives `account_changed`, nothing is written. **It is never re-gated on a timer**; this is an operator decision point (§17).
+  - **Quota to `account_changed`.** When a due quota deferral, or a running session's limit, gates to `account_changed`, `wsd` journals one transition: a new deferral record with the next deferral number, reason `account_changed` and no `defer_until`, which supersedes the quota record. The quota record is then never due again, and no timer or backstop rechecks it. The transition writes its one comment and sends its one alert, each idempotent on the new deferral number, so a replay after a crash at any step finishes them once. Only a deferral whose current record is already `account_changed` stays unchanged when the gate gives `account_changed` again. The reverse transition is the deadline case above.
+  - **Deferral is per role.** Coder pickup resumes only coder deferrals. A reviewer deferral is a **review wait**: its record also holds the reviewed `BASE..HEAD`, and when it is due it re-enters review selection (§5.8, §11.1), never coder pickup. A review wait whose bead branch has moved past the recorded HEAD is dropped, and review selection starts afresh.
+  - **Precedence.** `v2:held`, `needs-human`, and a HELD or STUCK journal row win: such a bead is never undeferred. A bead carrying both `v2:parked` and `v2:deferred` launches only when its deferral is over **and** all its blockers are closed.
+  - **Lost journal.** Plan 3 D8 is unchanged: a deferred bead the journal has no row for is escalated `journal_lost`, never relaunched. The defer comment shows the operator the last reason and deadline, if any.
+- **D6. Failover is opt-in and needs trusted evidence.**
+  - `profiles.<p>.failover = "none" | "next"`, default `"none"`. With `"none"`, only the profile's first account is used, and usage only defers work. With `"next"`, a launch, resume or relaunch uses the first eligible permitted account, judged on the trusted cache.
+  - **After a reactive limit** (always untrusted): `wsd` runs the defer operation up to the WIP commit, then a trusted host-side read of that account (D9). If the read confirms the limit, the account is marked exhausted and the gate runs again: on an eligible permitted account the session relaunches at once, where D7 allows the switch (the same logical session, a new launch entry); with none, the defer completes. If the read doesn't confirm it, or the adapter has no trusted read, the bead defers on its own account. A forged signal can therefore never move a session onto another account.
+  - `failover = "next"` is rejected for an adapter with no demonstrated trusted host-side read (D9).
+  - Whether a provider's terms allow switching accounts automatically is the operator's call (change-plan gate G3). The docs say so; the code doesn't check.
+  - `config check` warns when a profile lists more than one account with `failover = "none"`.
+- **D7. Account binding reuses the §7 synthetic home.**
+  - An account only chooses *which* login files the sandbox can reach. The session's transcripts and state stay in its synthetic home whichever account it ran under.
+    - Claude: `CLAUDE_CONFIG_DIR` points at the synthetic home's config directory; `HOME` is never overridden for it (on macOS that moves the keychain lookup).
+    - Codex: `CODEX_HOME` points at the synthetic Codex home, with the account's `auth.json` the only login file reachable in it.
+  - Only the chosen account's login files are reachable. Before every launch, the compiled sandbox policy is checked: every credential-bearing source must be in the chosen account's login file set (by canonical path), and a source inside any other account's login directory, the implicit `default` included, refuses the launch. A self-test probe then checks the result inside the sandbox (§7).
+  - **Conditional on S7.** For each adapter, accounts ship only once S7 has shown that adapter's login file set and a working login through the synthetic home on Linux. Until then, `config check` rejects `accounts` on that adapter.
+  - **Switching a session's account.** A session keeps the account of its last launch entry while that account is eligible. It moves to another account only when that one is ineligible, `failover = "next"`, and S7 demonstrated a way to continue on another account for the adapter: (b) cross-account resume, or (f) a handoff relaunch, a fresh native session under the new account in the same synthetic home, started from the §4.1 deterministic handoff. Without (b) or (f), `"next"` only chooses the account of a session's first launch.
+  - **Native session IDs.** Generation 1 of a Claude session uses the session key as its native ID (§4.1). A handoff relaunch uses `uuid5(NS, f"{session_key}:{generation}")`, recorded in its launch entry. Resume, steering and reconcile use the native ID of the latest launched entry, as they already do for Codex thread IDs.
+- **D8. The freshness gate runs per credential identity.** The §7 launch freshness gate checks and refreshes the token of the account being launched. Refreshes are serialised by a host file lock keyed by the credential identity (D1). Every refresh the harness starts (the `wsd` launcher, the trusted usage read, `heterodyne setup`) takes the same lock and rereads the login files under it before deciding. Refreshes the CLIs make by themselves outside the harness (the `admind` agent, the operator's own use) aren't serialised, as before.
+- **D9. Usage sources and signals are capabilities that S7 must demonstrate.** Per adapter, on its pinned version and on Linux, each is enabled only once S7 has demonstrated it: (a) **login binding** (D7); (b) **cross-account resume**; (c) an **in-session usage source** (untrusted); (d) a **trusted host-side usage read**, made by `wsd` on the host under the D8 lock; (e) a structured **limit-reached signal** (a hook payload or a transcript entry); (f) a **handoff relaunch** under another account.
+  - Codex candidates: (c) `account/rateLimits/read` at launch and `account/rateLimits/updated` through the per-session app-server (§4.2); (d) the same read from a short-lived host-side app-server using the account's `CODEX_HOME`. Claude candidates: (c) the status-line JSON or structured transcript entries; (d) unknown (the Agent SDK's `get_usage` is ruled out by §2).
+  - Without (c) and (d), usage is unknown, which is eligible. Without (d) there is no shared exhaustion, no failover and no quota-based reviewer fallback for that adapter. Without (e) a limit isn't recognised as one, and the session's end is handled by the existing §10 rows.
+  - Screen scraping stays out of bounds (§2), so a signal that appears only in the terminal can't be used.
+- **D10. Visibility.**
+  - `/workstreams` and `/status` show each role's account and its headroom, marking untrusted data as such (§6.3).
+  - A workstream whose remaining work waits only on quota shows "deferred: quota until HH:MM". An `account_changed` wait shows "deferred: account changed", with its recovery condition (restore the account's login or order, then reload or release), and never a time.
+  - When every permitted account of a role is exhausted on trusted evidence, the control group gets one alert per episode. The daily digest lists accounts that hit a limit.
+  - No message shows a login path or an email.
+- **D11. `admind`.** Each `admind` process (the admin agent and the summarizer) resolves its own profile and adapter (§8). When that profile lists accounts, the process uses the first one, with `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set to that account's `login_dir`. `admind` isn't sandboxed, so there is no synthetic home. It ignores the headroom gate and never fails over: it is the recovery path, and a gate must never stop it from launching.
+
+**Gates.** G1 is this revision's review and approval. G2 is the S7 findings (§13). G3 is the operator's reading of each provider's terms before any `failover = "next"` is configured. The change plan's dependency graph is authoritative for the order of AU-0 to AU-17; plan 3 is unchanged, and the work runs as plans 3b and 4b after it.
+
+**Rejected alternatives (accounts):**
+
+| Option | Why rejected |
+|---|---|
+| Use t3code as the execution layer, or port its drivers | Its Claude driver uses the Agent SDK (rejected in §2). It runs every harness headless, which loses the interactive CLI and hook-derived state (§2). It is TypeScript (§16). |
+| Make the account part of the session key | A failover would become a new session, which loses resume and the session's recorded history. The account is an attribute of the launch, like the model. |
+| Put the account in `metadata.wsd_session` and update it on failover | Plan 3 keeps that record immutable, and one field can't describe several launches. Launch entries do both. |
+| Fail over automatically by default | The provider's terms may not allow it. Deferring is always safe. |
+| Let sandbox observations mark an account exhausted for everyone | One compromised session could then starve every workstream on that account, or push launches onto other accounts. |
+| A separate state-store home per account (t3code's Claude approach) | §7 already gives each session its own synthetic home. Binding only the login files avoids sharing or copying transcripts between accounts. |
+| Block a bead on an "account" bead instead of deferring | It would put a non-task bead into the queue and make btq ready logic carry quota state. A time-based defer stays inside `wsd`. |
+| A role-wide gate before pickup | A bead's `role:` override can select another profile, and one ineligible candidate would stop eligible ones behind it. |
 
 ## 5. Flows
 
@@ -241,13 +388,17 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 
 ### 5.2 Pickup (deterministic)
 
-- **Triggers:** a turn ends, a bead closes or parks, an approval resolves, or the 60s backstop timer fires.
+- **Triggers:** a turn ends, a bead closes or parks, an approval resolves, the next quota wake time passes (revision 14), or the 60s backstop timer fires.
 - When the coder role is idle, `wsd` takes the next bead from two sources, in priority order:
   1. its own resumable parked beads (§4.3);
   2. new work from `Queue('wsd', ws, uuid5(NS, ws)).ready()`, the btq library, equivalent to `btq --agent wsd --ws <ws> --session <uuid> ready`. Each chosen bead is then claimed with `Queue('wsd', ws, uuid5(NS, f"{ws}:{bead}")).claim(bead)` (§4.3).
 - Ties go to resumable beads. For new work, `wsd` runs `claim`, then `worktree`, then launches the session. The task card reacts ⏳.
 - A parked bead that becomes resumable never pre-empts the running task. It is picked up at the next task boundary.
-- A workstream is **idle only when** no bead is ready and none is in progress. `/workstreams` reports it as "all-blocked: N beads on M approvals".
+- **Usage (revision 14, §4.4):**
+  - Each candidate is gated on its own resolved profile (a resume on its recorded profile). A candidate with no eligible account is skipped, never claimed and never waited on, and pickup goes on to the next one. Claiming a bead only to defer it would churn the queue.
+  - Source 1 includes deferred beads whose deferral is over (a quota deferral past its `defer_until`, or an `account_changed` wait marked over), in the same order as parked ones.
+  - The **quota wake time** is computed at the end of every pickup that leaves the coder role idle. It is the earliest of: the `defer_until` of every coder quota deferral in the journal that is still ahead (whether or not pickup considered it); the current gate deadline of each due coder deferral that is still ineligible; and the gate deadline of each skipped ready bead. Held, stuck and blocked beads, and `account_changed` deferrals, don't count. A wake time that isn't after `now` is never armed. It is not stored: startup runs a pickup, which rescans the ready list and recomputes it.
+- A workstream is **idle only when** no bead is ready and none is in progress. `/workstreams` reports it as "all-blocked: N beads on M approvals". A workstream whose remaining work waits only on quota reports "deferred: quota until HH:MM", not idle (revision 14).
 
 ### 5.3 Permission request
 
@@ -323,6 +474,7 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 - On resume the task is told the decision and, for actions, the result: "Approved; `wsd` performed `<action>` → `<result>`. Proceed."
 - ❤️ also files a policy-rule proposal bead. The rule is never applied silently.
 - The existing Hermes `/approve`, `/deny` and reaction commands are kept as the interface.
+- **Interim Marmot surface (revision 14).** Until `wsd` ships, admind's interim relay (§8.2) is the Marmot surface for btq approvals. It records `via=marmot` through `approve-bead`, as a person at the terminal does, so it is not a writer inside this decision queue. Whether the relay is retired when the decision queue ships, or submits its decisions to it, is open (§17).
 
 ### 5.5 Approval resolution (GitHub or Radicle)
 
@@ -347,6 +499,7 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
 - **Progress** is measured deterministically: new commits on `btq/<id>`, or a change to the acceptance-criteria checklist.
 - The gatekeeper classifies the stop as a *question* (answered from the bead, repo docs and `workstream-recall`), *stalled* (it gives a concrete next step) or *done without evidence* (it asks for close evidence). Its reply is delivered through the steer path and posted in the thread.
 - After 3 nudges without progress, the bead is marked `needs-human`, a question card goes to the control group, and pickup continues.
+- **Pickers (revision 14, §8.1).** A question asked through a CLI's interactive question tool would show only in the terminal. Where the pre-tool hook runs (Claude Code; Codex once verified, §4.2), it denies that tool with "ask the question as plain text and end your turn", so the question arrives at a Stop and follows this flow, ending as a question card if the gatekeeper can't answer it. Sessions run with permission prompts bypassed (§5.3), so they raise no permission dialogs.
 
 ### 5.9 Approval ask requirements (context sufficiency and evidence chain)
 
@@ -385,6 +538,12 @@ Every flow has the same shape: **observe** (hook, Marmot or forge), then **decid
   - Every implementation bead carries `design_approval` and `adr_revision`. The gate requires a valid digest, and the task's `adr_revision` to equal the approval's pinned commit (btq already checks this equality). A bead that cites a revision without an approval fails.
   - **Any change to the ADR after approval needs a new approval** before a bead may cite the new revision. The old approval keeps authorizing only the old revision.
   - The code review brief (§5.8) includes the ADR **at `adr_revision`**. A reviewer finding that the implementation departs from it is blocking.
+- **Interim exception for admind's relay (revision 14; relay spec 2026-10-05 and its 2026-10-06 delta).** Until `wsd` and the gatekeeper ship, approval asks posted through admind's relay (§8.2) skip the gatekeeper's sufficiency judgement and enrichment. Instead:
+  - btq's deterministic lint (`approve-bead` gaps, `design_review` validity, a posted `context_digest`) gates posting (R4, R5);
+  - the whole hashed content is shown, never shortened, and a bead whose content admind would redact, or that is over the size limit, is not posted: it goes back to its originator for grooming, and is decided at the terminal only if it still can't be shown (R8, R21, §8.1 host exception 3);
+  - refs get pinned forge permalinks where the repo has a forge remote, and are otherwise marked "read on the host" (R25);
+  - an explicit approve action on admind's own card (an approve reaction, or a reply that is exactly an approve word) takes the place of the terminal's confirmation (R7, R27, R28). The full digest stays pinned: admind stores it when it renders the card and passes it to `approve-bead --expect-digest`, so an approval binds to exactly the content on the card.
+  - The operator accepts that a phone approval rests on their own reading, without a gatekeeper verdict, and that an accidental 👍 on an approval card records an approval (operator, 2026-10-06). The exception ends when `wsd` and the gatekeeper ship: from then on, the sufficiency judgement is **mandatory** for asks posted through the relay, as for every other card. Enforcement starts in the release that ships both `wsd` and the gatekeeper. Before that release, the gatekeeper may run in shadow on relayed asks: its verdicts are recorded and shown, but they decide nothing. From that release on, a relayed approval without a passing sufficiency judgement is refused. There is no interval of running both. A permanent exemption for the relay, or for any ask kind, would weaken the approval gate. It therefore needs its own security change, separately scoped and reviewed, and a new revision of this ADR; no implementation may decide it.
 
 ### 5.8 Review and close
 
@@ -410,8 +569,10 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
 - **No internal IDs** other than a short bead ID. No UUIDs, hex strings, pane dumps or instructions meant for agents. There are two exceptions, both on approval cards: the 12-character `context_digest` (§5.9), and short commit SHAs inside pinned permalinks.
 - **An approval card** renders the five required parts of §5.9: *what*, *exact effect* (in a code block), *why*, *context*, and *pinned links* as permalinks. It then adds *how to answer* ("👍 approve · 👎 deny · ❤️ always · reply to steer") and the short `context_digest`. If the context is too long for a card, the card shows a summary plus pinned links, and the full text lives on the approval bead, which the digest covers.
 - **Length:** at most about 8 lines per message. Detail goes in `/status <bead>`.
-- **Task-card reactions:** 👀 received, ⏳ running, 🔍 in review, ⏸️ parked, ❓ needs operator, ✅ closed, ❌ failed.
-- **Reminders:** one reminder after 4h, as a reply to the original card, without repeating its content. After that, only the daily digest.
+- **Task-card reactions:** 👀 received, ⏳ running, 🔍 in review, ⏸️ parked or deferred, ❓ needs operator, ✅ closed, ❌ failed.
+- **Deferred beads (revision 14):** the task card's state line gives the current deferral's reason. For "quota" it gives the resume time. For "account changed" it gives the recovery condition (restore the account's login or order, then a configuration reload or the operator's release) and no time.
+- **Held beads (revision 14):** the task card's state line says the bead is held and why (an operator `/stop`, or the escalation reason), and that only a release resumes it.
+- **Reminders:** one reminder after 4h, as a reply to the original card, without repeating its content. After that, only the daily digest. This rule is `wsd`'s; admind's interim relay has its own bumps (§8.2, B14).
 - **Delivery that can't be confirmed:**
   - If no surface has a confirmed delivery receipt for an approval or question card within 10 minutes, `wsd` raises a delivery alert in the control group.
   - If that also can't be confirmed, `wsd` writes a local alert file. `admind` watches the alert directory on its own and pushes it to its operators, ahead of any `!details` output (§8). This path doesn't depend on `wsd` or the gateway's Marmot connection.
@@ -420,13 +581,14 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
 
 | Command | Output |
 |---|---|
-| `/workstreams` | One line per workstream: state (running, idle, all-blocked or paused), current bead, and ready, parked and approval counts. |
-| `/status` | In a workstream group: the running bead and its duration, the ready queue, parked beads with reasons, open approvals. In the control group: `/workstreams` plus every open approval and `needs-human` item. |
-| `/status <bead>` | State, branch, session label, the last 5 events, decisions, the transcript path. |
+| `/workstreams` | One line per workstream: state (running, idle, all-blocked, deferred or paused), current bead, and ready, parked, held, deferred and approval counts. Each role's headroom (for example "coder 62% · reviewer unknown"), and "deferred until HH:MM" or "deferred: account changed" when relevant (revision 14). |
+| `/status` | In a workstream group: the running bead and its duration, the ready queue, parked, held and deferred beads with reasons, open approvals. In the control group: `/workstreams` plus every open approval and `needs-human` item. Revision 14 adds a section listing each account in use by name, its windows, their reset times, the age of each observation and whether it is trusted. |
+| `/status <bead>` | State, branch, session label, the last 5 events, decisions, the transcript path, and the account of each launch entry (revision 14). |
 | `/approvals` | Open approvals, oldest first. |
 | `/approve`, `/deny` (as a reply) | Resolves the targeted approval bead. |
-| `/pause`, `/resume` `[ws]` | Stops or restarts pickup. The running task finishes its turn and is then parked. |
-| `/stop <bead>` | Parks the bead immediately: interrupt, then commit the WIP. |
+| `/pause`, `/resume` `[ws]` | Stops or restarts **new claims** (revision 14; plan 3 decision (d), matching §4.3). The running task and parked beads continue; a parked bead whose blockers close still resumes. Use `/stop` to stop a running task. |
+| `/stop <bead>` | Parks the bead immediately as **held** (§4.3): interrupt, then commit the WIP. It needs no blocking edge, and only the operator's release resumes it. |
+| release `<bead>` (revision 14) | The operator's release (`Parker.release`, §4.3): ends a hold or an escalation, and re-gates an `account_changed` deferral. Plan 6 names the command (§17). |
 | `/queue [ws]` | The ready list in pickup order, with blockers. |
 
 - Commands are answered from the `wsd` cache, which is refreshed from beads if it is more than 30s old.
@@ -436,16 +598,17 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
 
 - **v1:**
   - A workstream-level, platform-neutral `sandbox.toml`: writable paths (worktree, tmp, package caches), read-only binds, and a network allowlist.
-  - It is compiled at launch to bubblewrap arguments on Linux or a Seatbelt profile on macOS, and wraps whichever agent CLI is launched.
+  - It is compiled at launch into the sandbox runtime's own policy, and wraps whichever agent CLI is launched. The runtime is OpenShell on Linux if spike S5 passes, otherwise bubblewrap; on macOS it is a Seatbelt profile (phase 2). See **Runtime** below (revision 14). The rules in this section say what a sandbox can reach; each runtime must enforce them, and the self-test proves it does.
   - Coder and reviewer share one profile; the reviewer's worktree bind is read-only.
   - Inside the sandbox both agents run fully permissive: Codex `--yolo`, Claude `bypassPermissions`. Neither agent's native sandbox is used, except `-s read-only` for a headless `codex exec` run (§5.3).
   - The sandbox is the only security boundary (§5.3). **The only credential inside is model auth.** There is no git push, forge, deploy, messaging or secret material.
   - **Environment:** the launcher clears the environment and sets only an explicit allowlist (locale, terminal, user, `HOME`, `PATH`, the session socket and the proxy settings). The host environment can carry tokens and socket paths, and it changes CLI behaviour. A self-test probe enforces this.
-  - **Home isolation:** the sandbox gets a synthetic `$HOME` containing only the agent's config and auth files. The **auth files are ro-bound**. The rest of the synthetic home is a **writable per-session copy**, because both CLIs write session state there. The real home (including SSH keys, forge CLI tokens and the queue client's credentials), other workstreams' worktrees, and the `wsd` journal are not mounted.
-  - **Shared refresh token and the launch freshness gate:** the auth files hold the operator's own login, including the refresh token that the host shares. A refresh inside the sandbox could rotate that token and break the host login, and the ro bind would stop the rotated token from being saved. So before every launch the launcher checks the access token's expiry. If it expires within the session's maximum lifetime plus a stop margin, the launcher refreshes on the host first, or refuses to launch. A session that reaches its maximum lifetime is stopped: at a turn boundary if one comes within the stop margin, otherwise by a hard interrupt, as `/stop` does (interrupt, then commit the WIP, §6.3). Either way it stops before the token expires. It is then relaunched at once as the same session (§4.1) through the gate. This is not §4.3's blocked parking: the bead stays claimed and in progress, with no blocking edge. If the gate refuses the relaunch, the bead becomes `needs-human`. Per-sandbox credentials are future work.
+  - **Home isolation:** the sandbox gets a synthetic `$HOME` containing only the agent's config and auth files. The **auth files are read-only**, and only those of the account chosen for this launch (revision 14, §4.4 D7). Before the launch, the compiled sandbox policy is checked: every credential-bearing source must be in the chosen account's login file set, and a source in any other account's login directory (the adapter's default login included) refuses the launch. Claude Code finds its config through `CLAUDE_CONFIG_DIR` and Codex through `CODEX_HOME`, both pointing inside the synthetic home, so a session's state stays in its synthetic home whichever account it runs under. The rest of the synthetic home is a **writable per-session copy**, because both CLIs write session state there. The real home (including SSH keys, forge CLI tokens and the queue client's credentials), other workstreams' worktrees, and the `wsd` journal are not reachable.
+  - **Shared refresh token and the launch freshness gate:** the auth files hold an operator login, including the refresh token that the host shares. A refresh inside the sandbox could rotate that token and break the host login, and the read-only files would stop the rotated token from being saved. So before every launch the launcher checks the chosen account's access token's expiry. Refreshes the harness starts are serialised by a host lock per credential identity, and each rereads the login files under the lock (revision 14, §4.4 D8). If it expires within the session's maximum lifetime plus a stop margin, the launcher refreshes on the host first, or refuses to launch. A session that reaches its maximum lifetime is stopped: at a turn boundary if one comes within the stop margin, otherwise by a hard interrupt, as `/stop` does (interrupt, then commit the WIP, §6.3). Either way it stops before the token expires. It is then relaunched at once as the same session (§4.1) through the gate. This is not §4.3's blocked parking: the bead stays claimed and in progress, with no blocking edge. If the gate refuses the relaunch, the bead becomes `needs-human`. Per-sandbox credentials are future work.
   - **Model credentials may reach account connectors:** the model OAuth token probably also reaches the account's MCP connectors (for Claude, through `mcp-proxy.anthropic.com`; for Codex, under `chatgpt.com`), which can include mail, chat and drive. S3 inferred this from the traffic; what each connector can do from the sandbox was not tested. The proxy denies `mcp-proxy.anthropic.com`, and the Claude adapter config disables claude.ai MCP servers. The Codex adapter config disables connectors, because the proxy can't filter paths on `chatgpt.com`.
   - **Network:** an allowlist enforced by a per-sandbox egress proxy, not just DNS. It names **exact hosts** per adapter (no suffix wildcards), and covers model endpoints, package registries and the git remote over read-only fetch.
     - The proxy checks only the host in the CONNECT request. It does not check TLS SNI or the authority inside the tunnel, and it can't see paths. It is a host-level boundary, not a TLS-peer or path boundary.
+  - **Usage observations (revision 14)** that reach `wsd` from inside the sandbox (the in-session Codex app-server, a Claude status line, a transcript or a hook) are untrusted. They are attributed to the launch that delivered them, and they can only defer that session's own bead, for at most `usage.untrusted_max_defer_minutes`. Marking an account exhausted for other sessions, moving a launch to another account, and treating a reviewer as unavailable all need a trusted read made on the host (§4.4 D3, D6).
   - **Session socket, not the `wsd` socket:** each session gets its own socket, bound in, authenticated by a per-launch token. It accepts only that session's hook events and `ws-request` calls, and exposes **no** control operations: no approve, no config, no other sessions.
   - **Codex app-server:** the per-session `codex app-server` that `codex queue` needs (§4.2) sets the session's working directory, and is inferred to execute the tool calls. So it runs **inside** the sandbox, not just the `--remote` TUI client. Its queue socket, which it binds from inside, is the Codex steering surface at the boundary, on a writable path of that session's own bridge directory. The launch self-test runs against this launch shape, not against a bare `codex` process.
   - **Residual risk, accepted and documented:**
@@ -459,10 +622,22 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
     - **Direct network:** namespace evidence shows no route: no interface except loopback, and a raw connect to a literal address fails as unreachable.
     - **Control op:** a control operation on the session socket gets the socket's explicit `forbidden` reply.
     - **Environment:** no variable outside the launcher's allowlist is present.
-    - S3's acceptance criteria are exactly these probes on both backends.
+    - **Other accounts (revision 14):** immediately before the launch, the launcher classifies every login file of every other account of the adapter (the default login included) on the host as *present* (readable), *absent* (its directory is readable and lists no such file) or *unknown* (anything else). Inside the sandbox, each present or unknown file, opened through both its configured path and its canonical path, must give ENOENT or EACCES; an absent file must give ENOENT. Absent files are never a reason to refuse, so a missing default login or an unused account doesn't stop a valid launch. So that the check can't pass vacuously, a **canary** file that the launcher writes on the host, outside every mount, just before the launch must be readable outside and give ENOENT or EACCES inside; and every login file's content inside the sandbox must match the chosen account's file on the host.
+    - S3's acceptance criteria were the probes above it on both backends (the Other accounts probe is new). S5's are all of them under OpenShell.
   - **Still to verify for v1 (implementation plan 4):** egress for package registries and read-only git fetch, the reviewer's read-only worktree bind, and the self-test and login against the managed Codex launch shape (app-server inside the sandbox). S3 tested Codex only as `codex exec`. Plan 4 also re-tests Codex `PreToolUse` deny and hook trust with the harness's actual `hooks.json` schema (§4.2).
 - **Why an outer sandbox:** a single boundary to review means swapping agents never changes the security posture. The agents' native sandboxes have different semantics.
-- **Runtime change deferred to revision 14:** the operator prefers NVIDIA OpenShell (Landlock, seccomp, network namespaces, per-binary egress policy, credential injection at the proxy) over bubblewrap, Seatbelt and CubeSandbox, because one policy model would cover Linux, macOS and later WSL. It has not yet run on the reference host: the first sandbox under OpenShell v0.1.2's VM driver failed inside the guest (2026-09-30). A spike, S5, must pass the §7 self-test probes on the reference host before revision 14 rewrites this section. Until then this section stands, and plan 4 (the sandbox runtime) waits for revision 14.
+- **Runtime (revision 14): OpenShell, gated on spike S5.**
+  - **Decision.** The v1 sandbox runtime on Linux is NVIDIA OpenShell (Landlock, seccomp, network namespaces, a per-binary egress policy, credential injection at its proxy), if S5 passes. The operator prefers it over bubblewrap, Seatbelt and CubeSandbox because one policy model could cover Linux, macOS and later WSL. Only Linux is decided here; macOS stays phase 2 (§12).
+  - **The rules above, in OpenShell's terms.** The `sandbox.toml` paths become its filesystem policy: the worktree, tmp, package caches and the per-session synthetic home writable; the chosen account's login files, and the reviewer's worktree, read-only; nothing else reachable. The network allowlist becomes its egress policy, with exact hosts per adapter, and no direct route. The session socket (and, for Codex, the app-server's bridge directory) is the only host socket reachable. Nothing is weakened by the translation: every rule above applies unchanged, and the self-test proves each one under OpenShell.
+  - **Credential injection is not used for model auth in v1.** The login files stay the only credential in the sandbox, read-only, under the freshness gate and the account rules (§4.4), because S7 and the refresh-token rules are written for file-bound logins. Moving model auth to proxy injection is open (§17).
+  - **The residual risks above stand** unless S5 shows that OpenShell's proxy checks more than the CONNECT host (for example the TLS SNI); if it does, a later revision narrows them.
+  - **S5 must demonstrate, on the reference host** (§13):
+    1. both CLIs in the managed launch shape under OpenShell: Claude Code interactive with its hooks; Codex interactive with its per-session `codex app-server` inside the sandbox and `codex queue` steering from outside; each started from a host tmux session (§4.2), so send-keys steering and break-glass attach still work;
+    2. every launch self-test probe above, the Other accounts probe included, each with its specific evidence, and a failing probe refusing the launch;
+    3. a working login with read-only login files and no refresh inside the sandbox;
+    4. hook events and `ws-request` reaching the per-session socket, and the control-op refusal;
+    5. a runtime driver that works on the reference host. The first attempt, OpenShell v0.1.2's VM driver, failed inside the guest (2026-09-30: `EACCES` reading `/proc/self/status`); its container driver needs a newer podman than the host has. Any host change this needs (for example a podman upgrade) is an operator decision (§17).
+  - **If S5 fails** (any item not demonstrated): only the Linux runtime selection falls back to revision 13. v1 on Linux uses bubblewrap, which must still enforce every rule of this section and every other rule of this revision that applies to the runtime: the synthetic home and its isolation, the read-only login files and freshness checks, the account rules of §4.4 (pinning, credential keys, the Other accounts probe among the launch self-test probes) and the per-session socket's control-op refusal. Nothing else in this revision changes. Plan 4 builds bubblewrap from the S3 prototype, and OpenShell is revisited in a later revision. S5's findings are recorded either way. Plan 4 (the sandbox runtime) starts only once S5 has either passed or been closed as failed.
 - **v2 (future):** a `CubeRuntime` (TencentCloud CubeSandbox microVMs, Linux/KVM only) behind the same interface, with credentials injected at the egress proxy and a snapshot on park.
 
 ## 8. Admin override channel (`admind`)
@@ -497,6 +672,7 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
     - the controlled membership and the latch above;
     - admind's own Marmot identity keys are readable only by the admind unit;
     - every message and action goes to the append-only log.
+  - **Accounts (revision 14, §4.4 D11):** the admin agent and the summarizer each run on the first account of their own profile, if it lists any (`CLAUDE_CONFIG_DIR` or `CODEX_HOME` set to that account's `login_dir`). They ignore the headroom gate and never fail over.
 - **Redaction (revision 13):** one redaction applies to everything admind posts (verbatim replies, summaries, batches and both `!details` modes), to the summarizer's input, and to the audit: secrets, npubs and 64-hex values are replaced by markers, and control characters are escaped. "Unabridged" and "verbatim" below mean nothing is omitted or reworded apart from those markers. The unredacted text stays in the agent transcript on the host.
 - **Replies (revision 13):** each reply is the agent's text for the turn (the `Stop` hook's `last_assistant_message`, or the assistant text blocks of the transcript as a fallback). Thinking and tool calls are never part of a reply. A reply is threaded to the operator message that started its turn.
   - **Short replies are sent verbatim:** up to `reply_verbatim_lines` lines (default 8) and `reply_verbatim_chars` characters (default 800).
@@ -516,11 +692,143 @@ These rules govern `wsd`'s messages. `admind`'s output follows §8.
   - `!interrupt` sends Esc
   - `!tail [n]` shows the pane tail
   - `!restart <unit>` restarts a unit from a fixed allowlist in admind's config: `wsd`, the Hermes gateway, and runner units
-  - `!ps` shows unit health
+  - `!ps` shows unit health, plus one line per active hold (revision 14, §8.1)
+  - `!status` shows the agent's state and every active hold with its reason (revision 14, §8.1)
   - `!details [full]` (above)
+  - `!asks [bump|repeat]`, `!answer <id> <text>`, `!approve`, `!deny` (interim relay, §8.2)
 - **Audit:** an append-only local JSONL log plus the agent transcript, kept separate from beads on purpose. Each operator message is logged **in full** (revision 13: no truncation), with the redaction above and control characters escaped, together with the timestamp, the sending operator and the action. Operator add and remove, latches, summarizer failures and backstop batches are logged too.
 - **Alert relay:** admind watches `wsd`'s local alert directory and pushes new alerts to the operators (§6.2).
 - **Build order:** `admind` is built early, right after the spikes, so every later step has a recovery path.
+
+### 8.1 Marmot-only operation (revision 14, btq-xv48a)
+
+**Rule.** In operation, Marmot is the operators' primary path. Everything the admin agent or a managed session waits on reaches them on Marmot, and they answer it there.
+
+**Recovery by originator grooming.** When something can't be shown safely on Marmot, the first recovery is grooming by whoever posted it, not the host. An ask that fails redaction (R21) or the size limit (R8, `TOO_LONG`), or a picker that would (below), is refused back to its originator with the reason. The originator rewrites it so that it passes: secrets replaced by refs, and refs pinned so that they survive redaction (forge permalinks at a fixed SHA, R25). Then they post it again; for an approval that means a changed bead and a new digest. Content is never trimmed, partly shown, or shown unredacted to make it fit. Redaction (R18, R21) and the rule that an approval shows its whole hashed content (§5.9, R8) are unchanged.
+
+**Host exceptions.** The host remains necessary for these, and only these, each deliberate (§17 asks the operator to confirm the list):
+
+1. **Install and setup**, including the startup-dialog preflight (below).
+2. **Trust changes:** `admind operators add|remove` and latch recovery (`admind rearm`). These change who is trusted, so the group itself must not be able to make them.
+3. **Terminal approvals.** An approval bead whose hashed content still fails redaction or the size limit after grooming is decided at the terminal with `approve-bead` (§5.9, §8.2). An approval must bind to its full content, and Marmot can't show it.
+4. **Host-only refs.** A ref in a repository with no forge remote is marked "read on the host" (R25), and reading it needs the host. Originators pin refs to a forge wherever one exists.
+5. **Startup break-glass.** An admin agent that can't start because of something only its terminal can clear (below, startup dialogs).
+6. **Blocked decisions (R12).** A relayed decision whose read-back shows a partial write, or decision fields that aren't the attempt's, settles as `blocked`. The relay takes no further decision on it, and the operator resolves the bead at the terminal with `approve-bead`. A partial or foreign write can't be repaired safely from a chat message. Blocked-decision handling and its notice are unchanged (§8.2).
+7. **Withheld sensitive alerts.** An alert whose text or timestamp holds a secret, an npub or a 64-hex identifier is not relayed. The operators get the fixed notice naming the file and the kind of thing found, and read the file on the host (`docs/admind.md`, alert contract). Withholding is unchanged. The writer should groom its alerts so that this stays rare.
+
+Nothing else may require the host.
+
+- **Questions in plain text.** A question the admin agent asks in its reply text reaches the operators as that reply, and they answer by passthrough, as today.
+- **Picker asks (new behaviour, revision 14; not part of the built relay).** A picker is the admin CLI's interactive question tool. It gets a new ask kind, `picker`, separate from the relay's `question` asks. The two differ:
+
+  | | `question` (as built, §8.2) | `picker` (new) |
+  |---|---|---|
+  | Posted by | A local process, over `ask.sock` | admind, from the admin agent's pre-tool hook |
+  | Answer goes to | The poster, who polls with `admind ask get` or `admind ask wait` (R2, R18) | The admin agent's launch that asked it, pasted as its next message |
+  | Answers kept | Several: a later answer is added and the poster sees all of them | Exactly one, selected atomically |
+
+  - **Bound to its launch.** A picker records the agent launch that asked it: the launch nonce of the agent pane (the one the built hook checks compare against), the native session ID from the hook, and the busy period (turn) in which it was denied. Its answer is delivered only into that launch. If the agent is relaunched (`!new`, stuck recovery, or a restart that relaunched it), the picker is settled by the settlement rule below, so it is never wrongly reported as undelivered: an answer that was never reserved is `abandoned`, and the card is marked so. An answer to an abandoned picker gets "this question came from a previous agent session; your answer was not delivered".
+  - **One answer, chosen atomically.** The first answer that passes the ingress checks below moves the picker from `open` to `answered` in one store transaction, a compare-and-set on its status. That transaction records the operator, the route (reply, `!answer` or reaction), the message or event ID and the text. A later answer gets "already answered by `<name>`" and is not kept as an answer. This is new behaviour. It is not R31, which governs approval decisions.
+  - **Operators only.** An operator answers by replying to any chunk of the card (free text or an option number), by `!answer <id> <text>`, or by an option's number-emoji reaction on the card. Each answer passes the §8 ingress guard: MLS-authenticated sender, admind's group, not replayed, not latched. The guard is applied again at delivery (below).
+  - **Redacted throughout.** The card (the question and its numbered options) and every confirmation are redacted like every post. A picker whose question or options would be redacted, or would exceed the card limit, is not posted in part. Instead, the hook's denial tells the agent to ask again in plain text without that content; this is originator grooming for pickers. The answer itself is pasted to the agent byte for byte, after one attribution line naming the operator, the picker and the route, as passthrough does. The audit records the answer redacted, with the operator, picker, route and time.
+  - Managed `wsd` sessions get a pre-tool hook too, routed to §5.7 instead (question cards).
+- **Picker cycle (new behaviour, revision 14).** This builds on the built dispatcher.
+  - **The dispatcher's gates.** The dispatcher pastes only when the agent is idle, nothing is in flight, no accepted hook is unapplied or waiting to be accepted, and a lost hook hasn't blocked dispatch. It reserves the message durably (`in_flight`, the inbound row `dispatched`, `busy`) in one transaction before pasting (`_flush` in the product's `admind/daemon.py`).
+  - **States.** A picker is in one of these states:
+    - `open`;
+    - `answered`;
+    - `reserved` (delivery reserved, paste may have happened);
+    - `delivered` (acknowledged);
+    - `uncertain`;
+    - a closed state: `abandoned`, `cancelled` or `superseded`.
+  - **Turn-end evidence.** Separately from the agent's `busy` state, a picker carries a **turn-ended mark**. It is set only through the built current-`Stop` path, and only by a `Stop` that passes all of that path's checks:
+    - its launch nonce matches the current launch (the built classification, which compares nonces in constant time), and it is not from another session;
+    - it was accepted above the turn floor;
+    - its turn identity (session, reservation, anchor, busy period, launch), captured under the turn lock, is still current when its effects apply.
+
+    The mark is stored with the launch nonce and the busy period of the turn it ended. It counts for P only if both equal the picker's own launch and its denial turn, or a later turn of the same launch. Nothing else sets the mark: not a quiet pane, not `!interrupt` (which clears `busy` without a `Stop`, because Claude Code runs no `Stop` hook for a user interrupt), not a stale or below-floor `Stop`, and not any other hook event.
+
+  **The progression rule.** One rule, P, decides when the answer moves. It is evaluated, in the same transaction, whenever either event happens:
+  - an answer is selected;
+  - the turn-ended mark is set.
+
+  P holds when **both** are true: the picker is `answered`, and its turn-ended mark is set. When P holds, the answer is queued at the head of the held queue, and the dispatcher is woken. When P doesn't hold, nothing moves. So an answer that arrives before the `Stop` waits for it, and a `Stop` that arrives before the answer waits for the answer.
+
+  **The cycle:**
+  1. **Denied, nonblocking.** The pre-tool hook fires on the question tool. In one transaction, admind persists the picker (`open`, bound to the launch) and enters the `asking` hold. The hook returns at once with a denial: "your question was sent to the operators as picker `<id>`; end your turn now, and their answer will arrive as your next message". The hook never waits for the answer, so the CLI's hook timeout is never at stake. The card is posted afterwards, from the outbox.
+  2. **Answer or `Stop`, in either order.** Each one is persisted when it arrives and then evaluates P. Nothing is pasted while P doesn't hold.
+  3. **Delivery checks and reservation.** The dispatcher takes the queued answer under its dispatch lock. In the transaction that makes the built reservation (`in_flight`, inbound `dispatched`, `busy`), it re-reads the picker and runs the checks below. If they pass, it compare-and-sets the picker from `answered` to `reserved`, recording the reservation's ID, and releases the `asking` hold. Only then does it paste. If the picker is no longer `answered` (it was cancelled, superseded or abandoned meanwhile), the queued entry is dropped and nothing is pasted.
+  4. **Acknowledged.** The agent's `UserPromptSubmit` that anchors the reservation moves the picker from `reserved` to `delivered`, in the same transaction as the anchor.
+
+  **Delivery checks.** Each failure has its own outcome, applied in the transaction of step 3. Notices go out only through the existing posting gates, so a latched admind stays silent.
+  - **Stale launch** (the agent was relaunched before reservation): the picker is `abandoned`, its queued answer and timers are dropped, its card is marked, and the answering operator is told the answer was not delivered. This is true here, because nothing was reserved or pasted.
+  - **Answerer revoked** (no longer an operator): that answer is invalidated (kept in the audit, marked invalid) and the picker returns to `open`. The `asking` hold is still in force, because it is released only in step 3 after the checks pass, so no passthrough message can overtake the reopened question. The turn-ended mark is kept, so the next valid answer satisfies P at once.
+  - **Latched, or group not verified:** delivery is frozen. Nothing changes: the picker stays `answered` with its answer queued and the hold in place. When the gate reopens (after `admind rearm`, or once the group is verified), the dispatcher runs step 3 again from the start.
+  - **`TmuxError`** (nothing reached the pane): in the built release transaction, the picker returns from `reserved` to `answered`, the `asking` hold is restored, and the answer goes back to the head of the queue.
+  - **`TmuxPasteUncertain`:** the settlement rule below makes the picker `uncertain`. It is never pasted again.
+
+  **Settlement rule.** Every path that abandons the dispatcher's reservation does so in the built `abandon_in_flight` transaction. The picker's settlement is written in that same transaction, so no path can leave a picker `reserved` without a reservation. Those paths are:
+  - `recover()` at startup;
+  - `!interrupt`;
+  - `!new`;
+  - a restarting `SessionStart`;
+  - the agent's death or readiness timeout and its relaunch;
+  - an uncertain paste;
+  - a prompt that started a new turn while an anchored one was still open.
+
+  The rule, by the picker's state:
+  - **`reserved`, never acknowledged → `uncertain`**, with a notice ("pasted; the agent may or may not have received it; check with `!tail`"). It is never replayed, even if a later hook shows the agent idle.
+  - **`delivered` stays `delivered`.** It was acknowledged by its `UserPromptSubmit`.
+  - **`open` or `answered`, never reserved → `abandoned`**, only when the path also ends the picker's launch (`!new`, a restarting `SessionStart`, death or readiness-timeout relaunch). The other paths leave such a picker as it is: `!interrupt` doesn't end the launch, and doesn't set the turn-ended mark.
+
+  The only exception is `TmuxError` (above). Nothing reached the pane, so non-delivery is proven, and the picker returns to `answered` for a retry.
+
+  **What `asking` blocks.** Only ordinary operator passthrough messages. They stay queued behind the picker's answer, so none overtakes it, and the agent takes no new instruction while its question is open. The hold never blocks:
+  - the picker's own answer;
+  - `!` commands;
+  - replies and reactions to cards.
+
+  **Cancel and supersede.** Both take the dispatcher's dispatch lock, so neither can interleave with step 3, and act in one transaction:
+  - **`!asks cancel <id>`** (new). If the picker is `open` or `answered`, it moves to `cancelled` (a compare-and-set). The same transaction drops the queued answer and the picker's timers and ends the `asking` hold, which lets the queued passthrough messages through.
+  - **Supersede.** A second picker from the same launch closes the first in the same way, as `superseded`. The hold passes to the new picker rather than ending.
+  - **Once delivery is reserved**, neither changes the delivery. The operator is told its actual state: `delivered` (acknowledged), `uncertain`, or `reserved` ("pasted; not yet acknowledged"). A `reserved` picker always settles, by acknowledgement or by the settlement rule, and they are told the result. "Not delivered" is said only of an answer that was never reserved.
+
+  **Recovery.**
+  - *Early answer* (before the denial completes, or before `Stop`): persisted, waiting for P. It is never pasted into a running turn.
+  - *`Stop` before the answer:* the mark is persisted, and the answer, when it is selected, satisfies P at once.
+  - *Missing `Stop`.* If the turn-ended mark isn't set within `[admind] picker_stop_seconds` (default 300) after the denial, admind posts one notice. The notice names the picker, says whether it has an answer, and gives the remedies:
+    - `!tail` to look;
+    - `!asks cancel <id>`, after which the answer can be sent again as an ordinary message, under the dispatcher's normal gates;
+    - `!new`, which abandons the picker.
+
+    Only a later authenticated `Stop` for the same launch can set the mark. `!interrupt`, or another hook event that leaves the agent idle, doesn't. The answer is never pasted without the mark.
+  - *admind restarts mid-cycle.* Pickers, their selected answers (with the answering operator's authenticated identity: the policy name and the MLS sender key) and their turn-ended marks are in admind's store, so they survive the restart.
+    - The built `recover()` drops ordinary held inbound rows (`received`) with a "resend it" notice. A picker answer is not an ordinary held row. Its inbound row is marked as a picker answer when it is selected, so `recover()` leaves it alone, and the picker row is the source of truth.
+    - The settlement rule runs in `recover()`'s abandonment transaction. A `reserved` picker becomes `uncertain`; this covers a crash before the paste, after the paste, and after the paste but before the `UserPromptSubmit`. A `delivered` one stays delivered.
+    - Then each `answered` picker that was never reserved is rebuilt once into the held queue, from its row, with the stored sender identity. Only after that is P evaluated. Step 3 still re-checks that sender, the latch, the group and the launch. The adopted agent's `adopted` hold must also have ended (an idle hook) before step 3.
+    - If the agent was relaunched, the settlement rule applies.
+- **Permission prompts.** The admin agent runs with permission prompts bypassed (§8), so none are expected. One that appears anyway, reported by the CLI's notification hook, puts the agent in a `prompt` hold and posts its text as a card. If S8 shows the CLI's hook can return the decision, the operator answers it with 👍 or 👎 (or a reply word, R28) and admind returns that decision through the hook. Otherwise the card offers `!interrupt` (Esc, which declines) and `!new`. admind never chooses a dialog option by reading the screen (§2).
+- **Startup dialogs** (first-run, workspace trust, bypass-mode acceptance) appear before any hook runs. `[admind] workdir` is a dedicated directory, never the home directory. Setup pre-accepts the dialogs through the CLI's own configuration, where S8 shows that's possible. Then, before enabling the agent, setup verifies on the host that one launch in that workdir reaches `SessionStart` with no terminal input (the preflight). An adapter for which S8 can't show pre-acceptance is not supported as the admin agent (§13 S8). The runbook step that accepts dialogs by `tmux attach` is replaced.
+  - **Failure path.** A restart reproduces the same dialog, so relaunching is not a remedy and admind never relaunches in a loop. If the agent shows no `SessionStart` within the readiness timeout, admind posts a `not-started` hold naming the likely causes (a startup dialog, a login problem) and offers `!tail` and one `!new`. If the relaunch also shows no `SessionStart`, admind marks the agent stuck and stops relaunching. The built `AgentStuck` stops after three launches; this stops after the first repeat. The one-relaunch budget is stored, and it survives `!new` and admind restarts; the built `new()` resets its counter, and that reset is removed. Only a `SessionStart`, or the host preflight (exception 1), restores the budget. While the agent is stuck, `!new` doesn't relaunch: it replies with the break-glass notice. It then posts that this is a startup break-glass case (host exception 5), naming the adapter and the likely dialog. admind never types into a dialog or chooses an option by reading the screen (§2).
+- **Every hold states its reason.** A hold is any state in which admind won't paste the next operator message, or the agent is waiting on an operator. The holds are: `busy` (a turn is running; messages queue), `asking` (a picker is open, or answered and not yet reserved for delivery; it blocks only passthrough, above), `prompt`, `not-started`, `adopted` (admind restarted and adopted a running agent whose state it can't know), `lost-hook` (a hook event was lost) and `break-glass` (below). On entering a hold, other than `busy`, admind posts one notice that names the hold, the agent's actual state as far as admind knows it (idle, in a turn since T, waiting on ask `<id>`, or unknown, never a guess), and what the operator can do. The adopted-pane notice says "unknown" rather than "until the agent finishes its current turn". Leaving a hold posts a one-line notice. `!status` lists the agent's state, every active hold with its reason and start time, the number of queued messages and the open asks. `!ps` adds one line per active hold to its unit health.
+- **tmux is break-glass.** No procedure, notice or runbook step may require `tmux attach`, for admind's agent or for a managed session (§4.2). Attaching stays possible. admind audits client attach and detach on its own tmux server and posts "an operator attached on the host". After a detach it treats the agent's state as unknown, in an `adopted`-style hold, until the next hook event shows it, because keystrokes typed on the host may have changed it.
+- **Reactions.** Inbound operator reactions are handled (R27). Picker answers by number emoji are new here (above). **Progress reactions** on an operator's message (👀 queued, ⏳ in a turn, ✅ replied, ⚠️ failed) are driven by the hooks admind already installs (`UserPromptSubmit`, `Stop`). They need admind to send reactions, and to remove the previous one, which no spike has shown (`remove_reaction` is untested; S4 tested sending only). How to ship them is open (§17).
+- **Latch visibility** is open (§17). Until decided, a latched admind stays silent, as in revision 13.
+- **Spike S8** (§13) sets the minimum capabilities each admin-agent adapter needs for this section, and demonstrates them end to end. An adapter that lacks one is not supported as the admin agent, unless S8 demonstrates an alternative. `!interrupt` and `!new` are recovery steps, not an alternative.
+
+### 8.2 Interim Marmot relay for asks and approvals (revision 14, as built)
+
+Built from the relay spec (2026-10-05, R1–R26), its replies and reactions delta (2026-10-06: R27–R31, revising R7, R8, R13 and R15) and the bump delta (2026-10-07, B1–B14), all in the product repository's `docs/superpowers/specs/`. The specs are authoritative for detail; the decisions are:
+
+- **Posting.** Local processes running as the service user post asks over a second host socket, `ask.sock` (0600; R1), with `admind ask post|get|wait|list|cancel` (`wait` polls, R2). Ask IDs are 4 easy-to-type characters (R3). The kinds are `question`, `merge` (a full PR URL and pinned head SHA; merging stays the operator's action) and `approval` (an open `kind:approval` btq bead). Every ask must carry its context, checked by a deterministic lint (R4). The poster's `--from` label is shown as unverified (R16). Limits (R15, revised), argument hygiene (R19) and bounded socket replies (R24) apply. Posting is serialised (R22) and refused while latched (R17). A new ask for the same bead supersedes the old one (R9).
+- **Approval content.** admind reads the bead through `approve-bead --json` and never writes bead metadata (R5). It needs `[admind] approve_bead`; without it approval asks are refused and everything else works. An approval card shows the whole hashed content, never shortened, split into message-sized chunks. `MAX_APPROVAL_CARD` (24,000 characters) caps the whole readout (title, ask lines and description together), not each chunk; a readout over it is refused as too long (`TOO_LONG`) and goes back to its originator (§8.1); a legacy shortened card keeps the `!details` rule (R8, revised). It must survive redaction unchanged, or it is not posted and the bead is decided at the terminal (R18, R21). Refs are pinned forge permalinks, or marked "read on the host" (R25). Card wording is fixed (R30).
+- **Deciding.** A decision is a reply or reaction to any chunk of the card (or of its `!details`); the bead and the full digest come from the card (R7, revised). Reactions get the same guard as messages and replay on `r:<event_id>`; 👍 ✅ ❤️ ♥️ approve, 👎 ❌ deny; removing a reaction is ignored, and a decision is final (R27). A reply approves only if it is exactly an approve word. It denies in two cases. The first is `no` or `n` as the whole reply; "no idea" is a note. The second is a reply whose first word is a deny word (`deny`, `denied`, `reject`, `rejected`) or a deny emoji, where the rest of the reply is the reason, which may be empty (R28); any other reply to an approval card is a note, and a plain reply to a question or merge card is its answer (R13, revised). Replies to cards never reach the agent (R14); the only exception is the answer to a `picker`, a new kind (§8.1), which goes to the launch that asked it. The approver's name is their `policy.toml` name and must be in btq's `approvers` (R10). With two operators the first decision wins (R31).
+- **Recording.** The attempt is persisted before the decision run (R23). admind runs `approve-bead --expect-digest`, which re-checks the digest under a per-bead lock (R6), inside the worker that holds `work_lock` (R11), and records `via=marmot` with a `via_ref` matching the audit (R20). The outcome is read back, not parsed, and settled as approved, denied, blocked or uncertain (R12); recovery after a restart is serialised with decisions (R26).
+- **Stale cards.** A card whose bead changed gets a fresh card in the same settlement. If the bead's pin no longer matches, its updated content is delivered in the stale card's thread, marked undecidable, and the poster sees `stale`; admind never renews a pin (R29).
+- **Bumps and repeats.** `!asks bump` replies to every open ask saying it is still outstanding (B1–B5). It threads to the original card's chunk 0 if that was sent; otherwise to chunk 0 of the earliest repeat whose chunks were all sent; otherwise that ask gets no bump (B13). A bump is not a card: a reply or reaction on it decides nothing and gets a hint (B6). It is idempotent, bounded and audited (B7–B9) and listed in HELP (B10). `!asks repeat` reposts every open ask's card as new top-level messages, which are cards; delivery (R8) is satisfied by the original or one full repeat (B11–B12). Open asks are bumped automatically after `[admind] ask_bump_hours` without activity (default 12, 0 disables, 0–720), checked every 5 minutes, never while latched (B14).
+- **Trust change, accepted by the operator.** Approval authority for btq beads extends from the terminal to an MLS-authenticated Marmot reply or reaction from an approver's key on admind's own card. Whoever controls an approver's Marmot key can approve designs. An accidental 👍 records an approval (operator, 2026-10-06). The admind group already had this power through the unsandboxed admin agent; the relay makes it explicit, pinned to a digest, attributed and audited. admind's own dependency on beads is limited to this relay. The §3.4 residual risk (a count-preserving member swap) now also covers reading approval context; a swapped-in key is not an operator, so it still cannot answer or approve.
+- **Rejected alternative, reversed.** The relay spec rejected reactions as decisions; the 2026-10-06 delta adopted them (R27) at the operator's request.
+- **Future.** When `wsd`'s §5.4 decision queue exists, the approval kind is either retired or submits to it (open, §17). The gatekeeper's sufficiency judgement becomes mandatory for relayed asks in the release that ships `wsd` and the gatekeeper; before that it may only run in shadow (§5.9).
 
 ## 9. Scheduling and cron
 
@@ -548,6 +856,14 @@ User jobs live in `schedules.toml`. Each job either runs a fixed command or file
 | Marmot relay down | The outbox retries with backoff, and work continues. |
 | Forge unreachable | Forge approvals are delayed. Marmot approvals still work. |
 | Everything wedged | `admind`. |
+| All permitted accounts of a role exhausted (trusted) (revision 14) | Beads already claimed defer (§4.3) until the gate's deadline; new candidates for that profile are skipped; other profiles, roles and workstreams continue. One alert per episode in the control group. |
+| A session reports a limit (untrusted) (revision 14) | Stop and commit the WIP, then a trusted read of the account. Confirmed: fail over (`"next"`) or defer. Not confirmed: the bead defers on its own account, for a bounded time. |
+| Usage source unavailable or stale (revision 14) | The account's usage is unknown, which is eligible. A mid-turn limit is still caught by the reactive signal where the adapter has one. |
+| A session's account is reordered, removed or repointed, and continuity forbids the switch (`failover = "none"`, or an adapter that can't switch) (revision 14) | The gate gives `account_changed`. The bead defers with that reason and no `defer_until`: it has no quota timer, gets one comment and one control-group alert, and isn't re-deferred while it waits. It is gated again at startup, on a configuration reload, or on the operator's release, never on a timer; it undefers once that gives an account. The operator restores the account's login or order. |
+| Account login invalid (the freshness gate refuses) (revision 14) | With `failover = "next"`, try the next eligible account; otherwise the bead becomes `needs-human`, as before. |
+| admin agent waiting on a question, prompt or dialog, or not started (revision 14) | A hold with its reason on Marmot, and a card where there is something to answer (§8.1). Never a silent wait that needs `tmux attach`. |
+| Picker answered but no `Stop` arrives, the paste is uncertain, admind crashed with the answer reserved, or the agent was relaunched (revision 14) | Hold and one notice; the answer is never pasted without an authenticated `Stop`, never replayed or resent, and launch replacement applies §8.1's settlement rule. |
+| Admin agent still not started after one relaunch (revision 14) | Stuck, no further relaunches, and a startup break-glass notice (§8.1). |
 
 ## 11. Testing
 
@@ -561,7 +877,19 @@ User jobs live in `schedules.toml`. Each job either runs a fixed command or file
   - sandbox profile compilation for both backends
 - **Golden:** every renderer event type has a fixture showing exactly what the operator sees. For `admind` this includes summaries, backstop batches (with skipped-line counts and collapsed runs) and `!details` chunking.
 - **admind (revision 13):** the guard with several operators and an expected member count; `admind operators add|remove` and the latch on every unexpected change; summarizer failure, timeout and empty output each falling back to the backstop; `!details` and `!details full` (redacted, no thinking); and delivery-lane ordering. The summarizer, Marmot and the agent are fakes.
-- **Integration:** a fake `claude` and `codex` that emit hook events, a fake gatekeeper, a mock Marmot, a fake forge, and a throwaway Dolt. They exercise flows 5.1–5.8 and every row in §10.
+- **Accounts and usage (revision 14):** all with an injected clock, including clock jumps:
+  - the headroom gate, as a pure function of (profile, previous launch, capabilities, cache, now, settings), with hypothesis properties: unknown, stale and expired data are eligible; `failover = "none"` never picks a later account and never changes a session's credential key, even on an adapter that can switch; a deadline is always after `now`; an untrusted observation never changes the result for another session, bead or account (a reviewer moving P → Q → P reads only each launch's own rows);
+  - ingestion: malformed percentages and out-of-range resets, replacement by receipt sequence (a newer low-usage read after the clock jumps back wins), payloads naming another account, rows keyed by credential key;
+  - account pinning: a crash after the launch entry is written, with usage changing before replay, launches the pinned account or abandons that generation, never another account under it;
+  - dispatch: a crash after the launch receipt and before the outcome is recorded, with the session still running and with it already ended, reconciles to `launched` from the receipt; a `refused` receipt reconciles to `abandoned`; a credential replacement under `"none"` afterwards gives `account_changed`, never a first launch; a crash after the dispatch mark and before the receipt holds the bead, even when forged or genuine hook-spool events, a transcript or a tagged tmux session for that generation exist;
+  - legacy adoption: upgrading a populated journal with sessions launched before launch entries, then changing the account configuration, keeps each session on the default login or gives `account_changed`; an upgrade with accounts already configured for the adapter holds those sessions;
+  - pickup: a quota-ineligible candidate is skipped and an eligible later one starts;
+  - a crash at each step of defer, undefer and failover, replayed to the same end state, and a lost journal escalating a deferred bead;
+  - `account_changed`: reordering or repointing under `"none"` with switching demonstrated gives it; startup, a reload and a release each re-gate it once, and no timer does; the undefer that follows keeps every check and survives a crash at each step; a due quota deferral that gates to `account_changed` journals one superseding record, one comment and one alert, and the reverse transition gives one quota record, each surviving a crash at every step;
+  - the journal upgrade: from a populated previous-version journal, and interrupted part-way;
+  - the session key staying the same when the account changes, and launch entries never rewritten.
+- **Marmot-only (revision 14):** the S8 end-to-end picker cases, with fakes: a picker becomes a `picker` card, and its first operator answer (reply, `!answer`, number reaction) reaches its own launch once, attributed, after `Stop`; a second answer gets "already answered"; a non-operator's answer is dropped, and one whose sender was revoked before delivery is not pasted; `asking` holds passthrough but not the answer or `!` commands; the progression rule fires on either order of answer and `Stop`, and never on `!interrupt`; a revoked answerer, a latch, a stale launch, a missing `Stop`, a crash before or after the paste or before its acknowledgement, `!interrupt`, `!new` and a restarting `SessionStart` between reservation and acknowledgement, an uncertain paste, and cancel or supersede racing the reservation each end as §8.1's settlement rule says; a stale or below-floor `Stop` never sets the turn-ended mark; a never-reserved answer survives a restart and is rebuilt once; the one-relaunch budget survives `!new`; a `not-started` agent is relaunched at most once; an ask that fails redaction or the size limit is refused to its originator and never posted in part; each hold posts its reason once and `!status`/`!ps` list it; the adopted-pane notice never claims a turn is running when admind doesn't know; a host attach and detach are audited and lead to the unknown-state hold. The relay's own tests are listed in its specs.
+- **Integration:** a fake `claude` and `codex` that emit hook events, a fake gatekeeper, a mock Marmot, a fake forge, and a throwaway Dolt. They exercise flows 5.1–5.8 and every row in §10. The fakes gain scripted usage windows and a limit-reached signal, and the fake host-side usage read can confirm or deny a limit (revision 14).
 - **Platform:** a CI matrix of Linux and macOS for the platform seam and the sandbox backends.
 - **Acceptance:** the migrated-bead corpus (§14) running through v1 end to end, starting with one workstream and adding others once it has run for 3 days without operator intervention beyond approvals.
 
@@ -587,7 +915,9 @@ This rule is the same for every agent and harness, and for v2's own development:
 ## 12. Scope
 
 **v1 minimum slice (the first thing to run the acceptance corpus):**
-- Linux host only: systemd and bubblewrap.
+- Linux host only: systemd and the §7 sandbox runtime (OpenShell if S5 passes, otherwise bubblewrap; revision 14).
+- Accounts with the headroom gate and deferred parking, on Linux, for each adapter whose capabilities S7 demonstrated (§4.4 D9; revision 14).
+- Marmot-only operation of `admind` (§8.1; revision 14).
 - Both adapters (`codex`, `claude-code`), because the reference install's role config uses both. Any deployment can configure just one (§11.1). Codex is steered with `codex queue`. The Claude reviewer is steered through the `send-keys` fallback; it is rarely steered, because it is read-only.
 - Marmot as the only approval surface.
 - `wsd`, `wsd-act`, `admind`, gatekeeper, cron and reconcile.
@@ -607,10 +937,12 @@ This rule is the same for every agent and harness, and for v2's own development:
 - A shared memory layer beyond bead notes and `workstream-recall`.
 - Paseo adapter.
 - Native Windows.
+- Accounts on macOS, with the phase 2 Seatbelt work (revision 14).
+- An ACP adapter; revisit with the Paseo adapter (change-plan item AU-16 is a design note; revision 14).
 
 ## 13. Spikes (before implementation beads)
 
-**Status: S1–S4 are done.** Their findings and evidence are in the product repository's `docs/spikes/`, one document per spike. Revision 12 folds the findings that contradicted this ADR into §3.4, §4.1, §4.2, §5.3, §5.6, §7 and §10. Remaining open items are noted per spike.
+**Status: S1–S4 are done.** Their findings and evidence are in the product repository's `docs/spikes/`, one document per spike. Revision 12 folds the findings that contradicted this ADR into §3.4, §4.1, §4.2, §5.3, §5.6, §7 and §10. Remaining open items are noted per spike. S5, S7 and S8 (revision 14) are open.
 
 - **S1, Codex parity:** done.
   - Does 0.157.0 have a pre-tool hook event that can deny with a reason under `--yolo`? **Unsettled.** S1 observed it in an interactive session; under `codex exec` it never fires (§5.3). Until it is re-tested with the harness's `hooks.json` schema, the fallback applies to every Codex session: catching the sandbox failure after the fact and parking the bead. That is acceptable, because the sandbox is still the boundary.
@@ -620,7 +952,36 @@ This rule is the same for every agent and harness, and for v2's own development:
 - **S2, Claude channels** (phase 2 gate): a custom hermes-channel MCP server under subscription auth. Done: the live push was not demonstrated within the timebox, so the gate is not passed. v1 uses `tmux send-keys` for the Claude reviewer, unchanged.
 - **S3, sandbox:** run both CLIs inside bubblewrap (v1) and Seatbelt (phase 2 gate) with synthetic home, egress proxy and session socket. Acceptance is exactly the §7 launch self-test probes plus a working login and hooks. If a backend can't pass, that platform doesn't ship. Done for bubblewrap: the shape it tested passes (both CLIs headless, plus the Claude hook). The managed Codex shape is a plan-4 item (§7). Seatbelt remains open with the phase 2 macOS work.
 - **S4, Marmot:** threads (reply-to) and reactions end-to-end on the current mdk bindings, for both a harness identity and a separate `admind` identity. Done: the harness identity through its `wn-agent` control socket, and the scratch `admind` identity through its own `wn` daemon, in both directions. The operator's real-client check is still pending.
-- **S5, OpenShell (for revision 14):** run both CLIs under OpenShell on the reference host and pass exactly the §7 self-test probes, plus a working login and hooks. Not started; the first attempt failed inside the VM guest (§7).
+- **S5, OpenShell (gates the §7 runtime; revision 14):** demonstrate the five items in §7 ("S5 must demonstrate") on the reference host: the managed launch shape of both CLIs from a host tmux session, every launch self-test probe (Other accounts included), a working read-only login, hooks and `ws-request` on the session socket, and a runtime driver that works on the host. Not started; the first attempt failed inside the VM guest (§7). If it fails, bubblewrap stays the v1 runtime (§7).
+- **S7, accounts and usage (Linux; revision 14):** for each adapter on its pinned version: (1) the login file set with `CLAUDE_CONFIG_DIR` or `CODEX_HOME` inside the synthetic home, and a working login; (2) whether a session resumes after its login files change to another account; (3) an in-session usage source (Codex `account/rateLimits/read` and `account/rateLimits/updated` through the per-session app-server; Claude status-line JSON or transcript entries); (4) a trusted host-side usage read, and whether it refreshes tokens; (5) a structured limit-reached signal; (6) the freshness gate with two accounts of one adapter; (7) a handoff relaunch: a fresh native session under another account, in the same synthetic home, with a generation-specific native ID for Claude. No screen scraping. Each finding is recorded as demonstrated, not demonstrated or unknown; only a demonstrated one enables its capability (§4.4 D9). macOS (keychain) is a phase 2 question. If an accepted finding changes a §4.4 decision, this ADR is revised and reviewed again before the affected work starts. S7 is change-plan gate G2. If S7 runs under OpenShell, it also covers OpenShell's filesystem policy for the login files.
+- **S8, Marmot-only capabilities (revision 14; gates §8.1):** for each admin-agent adapter on its pinned version, with each finding recorded as demonstrated, not demonstrated or unknown, as for S7.
+  - **Minimum capabilities.** An adapter is supported as the admin agent only if S8 demonstrates all four:
+    1. a pre-tool hook on the interactive question tool that receives the question and options and returns a denial with a reason at once (nonblocking);
+    2. `UserPromptSubmit` and `Stop` hooks that admind receives for every turn, including a turn ended right after a denied picker;
+    3. the startup dialogs pre-accepted through the CLI's configuration, with the setup preflight reaching `SessionStart` with no terminal input, in a fresh workdir and again after a restart;
+    4. no permission prompt in bypass mode, or a hook that reports one with its text. Whether that hook can return the decision is recorded but not required.
+
+    An adapter that falls short is excluded as the admin agent unless S8 demonstrates an alternative for the missing capability. `!interrupt` and `!new` are not alternatives.
+  - **End-to-end acceptance, host-free.** On a real CLI with a scripted Marmot group, a picker must go through the whole cycle (§8.1): picker, denial, card, operator answer, `Stop`, answer pasted. The agent must receive the attributed answer exactly once, with no host action at any step. The same harness must show each of these:
+    - a non-operator's answer, and an answer from a revoked operator, never reaching the agent;
+    - a second answer getting "already answered";
+    - a picker with redactable content not being posted, and its denial asking for plain text;
+    - an answer arriving before the denial completes and before `Stop`, and an answer arriving after `Stop`;
+    - `!interrupt` instead of `Stop`, not counting as turn completion;
+    - a missing `Stop`, giving the notice and no paste;
+    - an operator revoked between selection and delivery, reopening the picker with the hold still in force;
+    - a latch between selection and delivery, freezing delivery;
+    - an admind crash before the paste, after the paste, and after the paste but before `UserPromptSubmit`, the last two ending `uncertain` with no replay, and a never-reserved answer rebuilt once after restart with its sender;
+    - `!interrupt`, `!new` and a restarting `SessionStart`, each fired between reservation and acknowledgement, leaving the picker `uncertain` (never `reserved`, never replayed), and each fired after acknowledgement, leaving it `delivered`;
+    - a stale or below-floor `Stop`, or a `Stop` from another launch, not setting the turn-ended mark;
+    - an uncertain paste, giving `uncertain` and no resend;
+    - `!asks cancel` and a superseding picker racing the reservation, and each arriving after it, reporting the actual delivery state;
+    - a relaunch between answer and delivery, abandoning the picker.
+  - **Startup failure path.** With a dialog deliberately not pre-accepted: one `not-started` hold, one `!new`, then stuck with the break-glass notice, and no further relaunches.
+  - **Other findings**, which §8.1 uses only where demonstrated:
+    - `wn-agent` sending and removing a reaction on an operator's message in admind's group, the target of progress reactions;
+    - inbound number-emoji reactions on a picker card reaching admind;
+    - tmux client attach and detach events on admind's tmux server.
 
 ## 14. Migration
 
@@ -662,7 +1023,7 @@ This rule is the same for every agent and harness, and for v2's own development:
   | # | Layer | Location | In git? |
   |---|---|---|---|
   | 1 | Built-in defaults | `heterodyne/defaults/*.toml` in the package: tier rules, sandbox profile templates, timeouts, rendering. Adapters are defined, but no models are chosen. | Yes |
-  | 2 | Host config | `$HETERODYNE_CONFIG_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/heterodyne/` on both OSes: `config.toml` (host settings, profiles, default roles, platform backends, integrations) and `policy.toml` (approvers and identities) | **No** |
+  | 2 | Host config | `$HETERODYNE_CONFIG_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/heterodyne/` on both OSes: `config.toml` (host settings, profiles, default roles, platform backends, integrations, and, from revision 14, accounts and usage settings) and `policy.toml` (approvers and identities) | **No** |
   | 3 | Workstream config | `$HETERODYNE_CONFIG_DIR/workstreams/<ws>.toml` | **No** |
   | 4 | Bead override | a `role:<role>=<profile>` label (roles only) | n/a (in beads) |
   | 5 | Environment and CLI | `HETERODYNE_*` variables and flags, limited to locations and debugging; they can't change policy or roles | No |
@@ -674,7 +1035,8 @@ This rule is the same for every agent and harness, and for v2's own development:
       - `escalate` moves action classes from auto-approve to escalate.
     - The loader computes effective policy = host policy ∪ `[restrict]`. Rules can be added, never removed. Any `[restrict]` entry that would allow something host policy doesn't is rejected at startup.
     - Workstream and host config files are outside every sandbox (§7), so agents can't edit them. Changes go through the operator, `admind`, or an approved policy-rule bead (§5.3).
-  - **What workstream config may override:** role and profile choices, repositories, sandbox *additions* within the host's allowlists (extra read-only mounts, extra egress hosts from a host-approved list), cron jobs, rendering, and timeouts.
+  - **What workstream config may override:** role and profile choices, repositories, sandbox *additions* within the host's allowlists (extra read-only mounts, extra egress hosts from a host-approved list), cron jobs, rendering, and timeouts. Workstreams choose profiles, never accounts (revision 14, §4.4 D1).
+  - **Account login paths (revision 14):** the key is `login_dir`, not `auth_dir`, because the secret-name check (`docs/configuration.md`) flags any key with an `auth` segment. `login_dir` is a path, not a secret, and must not hold a secret reference.
   - `examples/` holds commented sample host and workstream configs, for example "Codex codes, Claude reviews". It is **not a layer**: nothing loads it, and `heterodyne setup` only copies from it.
 
   - **State** lives in `${XDG_STATE_HOME:-~/.local/state}/heterodyne/`: journal, spool, alerts and logs.
@@ -704,3 +1066,30 @@ This rule is the same for every agent and harness, and for v2's own development:
   - Go or Rust for `wsd`: it would re-implement the btq and Hermes client code for no v1 benefit.
   - TypeScript: it would add a second runtime without reuse.
   - `wsd-act` in Rust: its surface is small, so it can be revisited if it grows.
+
+## 17. Open decisions for the operator (revision 14)
+
+These are not decided by this revision. Each needs the operator's answer; where the text above assumes an answer, it says so. (Whether the gatekeeper becomes mandatory for relayed asks, and when, is decided in §5.9 and is no longer listed here.)
+
+1. **An `account_changed` wait is never retried on a timer** (§4.3, §4.4 D5, §10). It is re-gated only at startup, on a configuration reload or on a release. A bead can therefore wait indefinitely after an account is repointed until the operator acts; the alert and the card's recovery condition are the only prompts. The alternative is a slow periodic re-gate (for example hourly), which would also undefer it automatically once the login is restored. This revision is written for "never on a timer"; please confirm or choose the alternative.
+2. **S5 fallback and timebox** (§7). If S5 fails, this revision keeps bubblewrap for v1 on Linux and plan 4 builds it. Confirm the fallback, and set how long S5 may run before it is closed as failed.
+3. **Host changes for OpenShell** (§7 S5 item 5). OpenShell's container driver needs a newer podman than the reference host has. Upgrading host packages is your call.
+4. **OpenShell on macOS** (§3.2). Whether OpenShell replaces Seatbelt is left to the phase 2 macOS work; its macOS support is unverified.
+5. **Credential injection for model auth** (§7). v1 keeps read-only login files. Moving model auth to OpenShell's proxy injection would remove the token from the sandbox but changes the freshness and account rules; it needs its own revision.
+6. **Latch visibility** (§8.1). A latched admind is silent, so operators can't tell from Marmot that it is latched. Options: stay silent (revision 13); post one fixed, content-free notice when it latches ("admind is latched; recovery needs `admind rearm` on the host"), which also tells a swapped-in member they were noticed; or answer `!status` with that fixed line while latched.
+7. **Host exceptions** (§8.1). Marmot is primary, and content that can't be shown safely goes back to its originator for grooming, never trimmed. The host stays necessary for seven things: install and setup; trust changes (`admind operators add|remove`, `admind rearm`), because the group must not be able to re-trust itself; terminal approvals for content that still can't be shown after grooming; reading refs marked "read on the host"; startup break-glass; resolving `blocked` relay decisions (R12); and reading withheld sensitive alerts. Confirm the list, or name an exception you want removed (and accept its cost: for example, no terminal approvals means such a bead can't be approved at all).
+8. **Progress reactions** (§8.1). Ship them add-only (each state adds a reaction and none is removed) now, or wait until S8 shows `remove_reaction` works.
+9. **The interim relay's future** (§5.4, §8.2). When `wsd`'s decision queue ships, retire the relay's approval kind, or have admind submit its decisions to that queue.
+10. **The release command's name** (§6.3). Plan 6 names it; this revision only fixes what it does.
+
+## Appendix A. Accounts amendment: review r6 fixes (re-reviewed in G1)
+
+The amendment's review r6 (`docs/reviews/0001-accounts-amendment-r6.md` in the product repository) returned REVISE with three major and two minor findings. The fixes below were made after it and merged here. The G1 cross-model review of this revision re-reviewed them (`docs/reviews/0001-design-review-r21.md` to `r24.md`): round 1 found that fix 2 needed revising (below), and rounds 2–4 confirmed all five.
+
+1. **Quota to `account_changed`.** §4.4 D5 journals one superseding `account_changed` record with its one comment and one alert; a superseded record is never due. Crash tests in both directions (§11; change-plan AU-4).
+2. **Crash after dispatch.** §4.4 D2: a dispatch mark, and reconciliation against generation-specific runtime evidence; unresolved entries hold, and D4 never gates past them. Tests for a surviving and an ended session, and for a replacement under `"none"` (§11). **Revised after the G1 r1 review of this revision:** the r6 fix accepted tagged hook-spool events and transcripts as evidence, which §3.3 forbids. Reconciliation now trusts only a launch receipt that `wsd` journals on the host from the runtime's own spawn result; spool events, transcripts and tags stay advisory, and a missing receipt holds the bead.
+3. **Legacy sessions.** §4.4 D2 and §3.3 adopt sessions launched before AU-3 in the upgrade transaction, verified only on the default login; anything else holds for operator recovery.
+4. **Untrusted table.** §4.4 D3: separate tables with their own replacement keys; AU-3's upgrade names `account_usage_untrusted` and `deferrals`.
+5. **Deferred cards.** §6.2, §6.3 and §4.4 D10 render `account_changed` with its recovery condition and no time; AU-9's fixtures include its alert.
+
+Reviews r1–r5 of the amendment and the responses to them are in the proposal file (`docs/adr/proposals/0001-accounts-and-usage.md`, product repository), which this revision supersedes once approved.

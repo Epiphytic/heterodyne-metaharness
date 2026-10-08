@@ -56,7 +56,7 @@ The shipped defaults define the known adapters (`claude-code`, `codex`), the rev
 See `examples/config.toml` for a commented sample.
 
 - **No policy keys.** A top-level key that belongs in `policy.toml` (`approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor`, `policy`) is an error: "belong in policy.toml".
-- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `bubblewrap` on Linux, `launchd` and `seatbelt` on macOS (§3.2). They are recorded once, at setup, and not re-probed.
+- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `bubblewrap` on Linux, `launchd` and `seatbelt` on macOS (ADR 0001 §3.2). They are recorded once, at setup, and not re-probed. `bubblewrap` is the default that setup records today; ADR revision 14's Linux runtime is OpenShell, gated on spike S5, with bubblewrap only if S5 fails (ADR 0001 §7). No sandbox runs yet (plan 4).
 - **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string.
 - **`[roles]`:** role name to profile name.
 - **`[sandbox]`** must be a table, and holds two host allowlists:
@@ -203,6 +203,8 @@ paths.config_dir = '<config-dir>'    (env:HETERODYNE_CONFIG_DIR)
 policy: approvers=['<approver-name>']  (policy.toml)
 note: only one model configured; reviews will be adversarial (two LLMs recommended, §11.1)
 ```
+
+`platform.sandbox = 'bubblewrap'` is the default setup records today, not the revision 14 target (see `[platform]` above).
 
 - A reference is printed as the reference, never resolved.
 - The `tiers.*` lines are the built-in defaults as merged values, not the effective tiers.

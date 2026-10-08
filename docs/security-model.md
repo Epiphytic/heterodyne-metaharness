@@ -31,7 +31,7 @@ An approval is valid evidence only for content that was pinned and shown.
 
 ## Sandbox contents and the launch self-test (§7)
 
-- **Profile.** A platform-neutral, per-workstream sandbox profile (writable paths, read-only binds, network allowlist) is compiled at launch to bubblewrap arguments on Linux, or a Seatbelt profile on macOS. Coder and reviewer share it; the reviewer's worktree bind is read-only.
+- **Profile.** A platform-neutral, per-workstream sandbox profile (writable paths, read-only binds, network allowlist) is compiled at launch into the sandbox runtime's own policy. On Linux the target runtime is OpenShell, gated on spike S5; bubblewrap applies only if S5 is closed as failed (ADR 0001 §7, revision 14). On macOS it is a Seatbelt profile (phase 2). No runtime is built yet (plan 4). Coder and reviewer share it; the reviewer's worktree bind is read-only.
 - **Environment.** The launcher clears the environment and sets only an allowlist: locale, terminal, user, `HOME`, `PATH`, the session socket and the proxy settings.
 - **Home.** A synthetic `$HOME` holds only the agent's config and auth files. The auth files are bound read-only; the rest is a writable per-session copy. The real home (SSH keys, forge tokens, queue credentials), other workstreams' worktrees and the `wsd` journal are not mounted.
 - **Token freshness.** The auth files hold the operator's own login, whose refresh token the host shares. Before every launch the launcher refreshes on the host, or refuses, if the access token would expire within the session's maximum lifetime plus a stop margin. A session is stopped at its maximum lifetime and relaunched through the same gate.
