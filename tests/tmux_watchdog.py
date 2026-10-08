@@ -67,6 +67,7 @@ class Sweeper:
         self.known: dict[str, tuple[Generation, int]] = {}
         self.orphans: list[dict[str, Any]] = []
         self.limit: float | None = None     # the end of the current `wait`, which its probes respect
+        self.made: set[Path] = set()        # lock files this sweeper created; never left behind
 
     # --- probes ---
 
@@ -150,9 +151,18 @@ class Sweeper:
 
     def try_lock(self, lock: Path) -> tuple[bool, int | None]:
         """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen), creating it
-        as tmux does, so no startup can bind while we hold it. Returns (taken, fd to close)."""
+        as tmux does, so no startup can bind while we hold it. Returns (taken, fd to close); a lock file
+        created here is recorded in `made`."""
         try:
-            fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+            fd = os.open(lock, os.O_RDONLY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            try:
+                fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+                self.made.add(lock)
+            except FileExistsError:                 # a startup created it first: it is theirs
+                return self.try_lock(lock)
+            except OSError:
+                return (False, None)
         except OSError:
             return (False, None)
         for i in range(LOCK_TRIES):
@@ -287,9 +297,11 @@ class Sweeper:
             self.pending[path.name] = ("unresolved", None)
 
     def remove(self, path: Path, gen: Generation) -> str:
-        """Unlink the socket and its lock, holding tmux's startup lock so nothing can bind in between,
-        and only if it is still generation `gen` and refuses connections. Returns `removed`, `held` (a
-        startup holds the lock), `gone`, `changed` (replaced) or `live` (it accepts, or connect failed)."""
+        """The one path that unlinks a socket: holding tmux's startup lock so nothing can bind in between,
+        and only if it is still generation `gen` and refuses connections. A lock file this call created
+        is removed whatever the outcome. Returns `removed`, `held` (a startup holds the lock), `gone`,
+        `changed` (replaced) or `live` (it accepts, or connect failed). Lock-only entries are removed by
+        `sweep_lock`, under their own flock."""
         lock = path.with_name(path.name + ".lock")
         taken, fd = self.try_lock(lock)
         if not taken:
@@ -307,6 +319,9 @@ class Sweeper:
             lock.unlink(missing_ok=True)
             return "removed"
         finally:
+            if lock in self.made:                   # our own artifact: never what keeps `dead` open
+                self.made.discard(lock)
+                lock.unlink(missing_ok=True)
             if fd is not None:
                 os.close(fd)
 
@@ -374,10 +389,10 @@ class Sweeper:
                 now = self.now()
                 if now >= self.end:
                     raise DeadlineReached
+                if now >= end:                      # an answer at or after the wait's end is too late
+                    return False
                 if ok:
                     return True
-                if now >= end:
-                    return False
                 self.sleep(min(WAIT_GAP, end - now, self.end - now))
         finally:
             self.limit = None

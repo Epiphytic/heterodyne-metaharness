@@ -297,6 +297,21 @@ def test_a_replacement_bound_during_the_death_wait_is_not_unlinked(
         assert summary["unresolved" if b == "starting" else "survived"] == entry
 
 
+def test_a_lock_made_by_cleanup_never_keeps_the_dir_open(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+
+    class Vanishes(FakeSweeper):
+        def try_lock(self, lock: Path) -> tuple[bool, int | None]:
+            taken = Sweeper.try_lock(self, lock)    # creates aa.lock: there was none
+            (dead / "aa").unlink()                  # and the socket goes meanwhile
+            return taken
+
+    s = Vanishes(dead, pid=None, deadline=0.1)      # no time for a pass to sweep a leftover lock
+    closed = s.run()
+    assert closed and not dead.exists()
+    assert s.summary(closed)["stale"] == s.summary(closed)["unresolved"] == []
+
+
 def test_a_startup_cannot_bind_between_validation_and_unlink(tmp_path: Path) -> None:
     dead = _dead_with(tmp_path, "aa")
     attempts: list[str] = []
@@ -398,6 +413,16 @@ def test_a_slow_probe_gets_only_the_waits_time(tmp_path: Path) -> None:
         return False
     assert s.wait(slow, seconds=0.011) is False
     assert budgets == [pytest.approx(0.011)] and s.clock == pytest.approx(0.011, abs=1e-9)
+
+
+@pytest.mark.parametrize("late", [0.0, 0.001], ids=["at-the-end", "after-the-end"])
+def test_success_at_or_after_the_waits_end_is_not_success(tmp_path: Path, late: float) -> None:
+    s = FakeSweeper(tmp_path)
+
+    def slow_yes() -> bool:
+        s.clock += s.budget() + late                # answers yes, but only at (or past) the wait's end
+        return True
+    assert s.wait(slow_yes, seconds=0.011) is False
 
 
 def test_success_after_the_deadline_is_not_success(tmp_path: Path) -> None:
