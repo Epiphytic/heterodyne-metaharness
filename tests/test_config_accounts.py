@@ -1,6 +1,7 @@
 """AU-2: accounts, profile accounts, failover and [usage] (ADR 0001 §4.1, §4.4 D1, D6, D7, D9)."""
 
 import copy
+import hashlib
 import os
 import re
 import traceback
@@ -481,3 +482,34 @@ def test_config_check_warnings(cfg: Path, monkeypatch: pytest.MonkeyPatch,
     with_accounts(cfg, 'accounts = ["acct-a", "acct-b"]\nfailover = "next"')
     rc, out, _ = run_check(cfg, monkeypatch, capsys)
     assert rc == 0 and "warning:" not in out
+
+
+# Undecodable POSIX path bytes (surrogate-escaped in str paths).
+
+SURROGATE = "home-\udcff"
+
+
+def test_credential_key_bytes_are_the_filesystem_encoding() -> None:
+    plain = accounts.credential_key("codex", (Path("/x/a/auth.json"),))
+    assert plain == "ck1-" + hashlib.sha256(b"codex\0/x/a/auth.json").hexdigest()[:32]
+    odd = accounts.credential_key("codex", (Path(f"/x/{SURROGATE}/auth.json"),))
+    assert odd == "ck1-" + hashlib.sha256(b"codex\0/x/home-\xff/auth.json").hexdigest()[:32]
+
+
+def test_load_with_undecodable_home(cfg: Path) -> None:
+    home = cfg / SURROGATE
+    home.mkdir()
+    c = load(None, {**env(cfg), "HOME": str(home)})
+    assert c.accounts[("codex", "default")].login_dir == home / ".codex"
+
+
+def test_config_check_with_undecodable_home(cfg: Path, monkeypatch: pytest.MonkeyPatch,
+                                            capsys: pytest.CaptureFixture[str]) -> None:
+    (cfg / SURROGATE).mkdir()
+    monkeypatch.setattr(capabilities, "CAPABILITIES", ON)
+    for var in [v for v in os.environ if v.startswith("HETERODYNE_")]:
+        monkeypatch.delenv(var)
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("HOME", str(cfg / SURROGATE))
+    assert cli.main(["config", "check"]) == 0
+    assert "config error" not in capsys.readouterr().err

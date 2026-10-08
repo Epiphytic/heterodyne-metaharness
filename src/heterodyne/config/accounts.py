@@ -41,7 +41,7 @@ def credential_key(adapter: str, login_files: tuple[Path, ...]) -> str:
     """The credential key (D1): a digest of the adapter and the canonical login files. 32 hex characters,
     not 64, so it never trips the 64-hex identifier redaction. AU-3 recomputes it at launch with this."""
     identity = "\0".join([adapter, *map(str, login_files)])
-    return "ck1-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+    return "ck1-" + hashlib.sha256(identity.encode("utf-8", "surrogateescape")).hexdigest()[:32]
 
 
 def _reason(exc: BaseException) -> str:
