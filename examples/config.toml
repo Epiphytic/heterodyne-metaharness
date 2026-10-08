@@ -16,6 +16,16 @@ model = "<model-name>"
 adapter = "claude-code"
 model = "<model-name>"
 
+# Accounts (§4.4): a named login for one adapter. Host config only. Refused on every adapter until spike
+# S7 demonstrates login binding for it (§4.4 D9), so leave this commented for now.
+# [accounts.<account-name>]
+# adapter   = "codex"
+# login_dir = "<directory holding this login>"   # absolute or ~/...; never a secret reference
+#
+# Then, in a profile:
+#   accounts = ["<account-name>"]   # order is preference; omit for the adapter's default login
+#   failover = "none"               # or "next" (needs a trusted usage read, §4.4 D6)
+
 [roles]
 coder = "coder"
 reviewer = "reviewer"
