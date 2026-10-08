@@ -42,6 +42,7 @@ from heterodyne import tmux as tmux_mod
 LOCK = "launch.lock"
 REPLACED = "launch lock replaced"
 APPEARED = "appeared after final unlink"
+TIMED_OUT = "deadline passed"
 PANE = [sys.executable, "-c", "import time; time.sleep(600)"]
 
 # A helper process that takes the locks named in argv, says `ok`, and holds them until stdin closes:
@@ -152,7 +153,7 @@ def test_a_startup_holding_an_unlinked_tmux_lock_keeps_its_socket() -> None:
             dead = run / "dead"
             assert (dead / "ab").exists() and not (dead / "ab.lock").exists()
             summary = json.loads((run / "summary.json").read_text())
-        assert summary == {"killed": [], "stale": [], "survived": [], "closed": False,
+        assert summary == {"killed": [], "stale": [], "survived": [], "closed": False, "reason": TIMED_OUT,
                            "unresolved": [{"path": str(dead / "ab"), "pid": None, "reason": "held"}]}
     finally:
         shutil.rmtree(run, ignore_errors=True)
@@ -256,6 +257,50 @@ def test_a_missing_launch_lock_removes_nothing(tmp_path: Path) -> None:
     assert not closed and (dead / "aa").exists() and ("kill-server",) in s.commands
     assert summary["killed"] == [{"path": str(dead / "aa"), "pid": 4242}]
     assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None, "reason": "launch lock missing"}]
+
+
+# The summary's top-level reason: present exactly when closed is false (code review r5, finding 2).
+
+@pytest.mark.parametrize("lost", ["before-the-run", "mid-closure"])
+def test_a_launch_lock_lost_from_an_empty_dir_names_the_reason(tmp_path: Path, lost: str) -> None:
+    dead = _dead_with(tmp_path)
+    if lost == "before-the-run":
+        (dead / LOCK).unlink()
+
+    class Loses(FakeSweeper):
+        def take_ex(self) -> bool:
+            taken = super().take_ex()
+            (dead / LOCK).unlink(missing_ok=True)   # under EX, just before the final identity check
+            return taken
+
+    s = Loses(dead, lock_free=None)
+    closed = s.run()
+    assert not closed and dead.exists() and list(dead.iterdir()) == []
+    reason = "launch lock missing" if lost == "before-the-run" else REPLACED
+    assert s.summary(closed) == {"killed": [], "stale": [], "survived": [], "unresolved": [],
+                                 "closed": False, "reason": reason}
+
+
+def test_a_launch_lock_held_to_the_deadline_names_the_reason(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path)
+    s = FakeSweeper(dead, lock_free=False, deadline=1.0)
+    closed = s.run()
+    held = {"path": str(dead / LOCK), "pid": None, "reason": "launch lock held"}
+    assert s.summary(closed) == {"killed": [], "stale": [], "survived": [], "unresolved": [held],
+                                 "closed": False, "reason": "launch lock held"}
+
+
+def test_entries_left_at_the_deadline_name_the_reason(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    s = FakeSweeper(dead, pid=None, connect="live", deadline=1.0)
+    closed = s.run()
+    assert not closed and s.summary(closed)["reason"] == TIMED_OUT
+
+
+def test_a_closed_summary_has_no_reason(tmp_path: Path) -> None:
+    s = FakeSweeper(_dead_with(tmp_path, "aa"), pid=None, lock_free=None)
+    closed = s.run()
+    assert closed and "reason" not in s.summary(closed)
 
 
 # --- 3. a late launcher ---
@@ -527,10 +572,15 @@ def lsof_matches(text: str, pid: int) -> list[tuple[int, int, int]]:
     return out
 
 
+def has_proc_fds() -> bool:
+    """Linux lists fds under /proc; macOS needs lsof."""
+    return Path("/proc/self/fd").is_dir()
+
+
 def held_fds(pid: int, lock: Path) -> list[int]:
     """The fds of `pid` open on `lock`'s inode, matched on (st_dev, st_ino). Any inspection error fails."""
     want = identity(lock)
-    if Path("/proc/self/fd").is_dir():
+    if has_proc_fds():
         return sorted(int(p.name) for p in Path(f"/proc/{pid}/fd").iterdir() if identity_of(p) == want)
     proc = subprocess.run(["lsof", "-n", "-P", "-a", "-p", str(pid), "-F", "fDi"], capture_output=True,
                           text=True, check=False, timeout=30)
@@ -583,12 +633,29 @@ def test_the_inspection_matches_device_and_inode_not_inode_alone(monkeypatch: py
         return st
     with holder(f"at:77:{lock}") as proc:
         assert held_fds(proc.pid, lock) == [77]
-        if Path("/proc/self/fd").is_dir():
+        if has_proc_fds():
             monkeypatch.setattr(Path, "stat", other_device)
             assert held_fds(proc.pid, lock) == []
-        else:
-            text = f"p{proc.pid}\nf77\nD{hex(dev + 1)}\ni{ino}\n"
-            assert lsof_matches(text, proc.pid) == [(77, dev + 1, ino)]
+
+
+@pytest.mark.parametrize("device", ["same", "other"])
+def test_the_lsof_branch_matches_device_and_inode_not_inode_alone(monkeypatch: pytest.MonkeyPatch,
+                                                                  tmp_path: Path, device: str) -> None:
+    """The macOS branch, forced on any platform: lsof's record for the lock's inode on another device
+    is no match; the same record on the lock's own device is."""
+    lock = tmp_path / LOCK
+    lock.touch()
+    dev, ino = identity(lock)
+    listed = dev if device == "same" else dev + 1
+    calls: list[list[str]] = []
+
+    def lsof(argv: list[str], **_kw: Any) -> "subprocess.CompletedProcess[str]":
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"p42\nfcwd\nf77\nD{hex(listed)}\ni{ino}\n", "")
+    monkeypatch.setitem(globals(), "has_proc_fds", lambda: False)
+    monkeypatch.setattr(subprocess, "run", lsof)
+    assert held_fds(42, lock) == ([77] if device == "same" else [])
+    assert [argv[0] for argv in calls] == ["lsof"]
 
 
 def test_the_inspection_finds_a_lock_held_at_a_known_fd(quiet_root: Path) -> None:
@@ -784,6 +851,7 @@ def test_an_entry_that_appears_after_the_final_unlink_ends_closure(tmp_path: Pat
     st = (dead / name).lstat()
     assert contended == [errno.EWOULDBLOCK]
     assert not closed and dead.exists() and s.sweeps == 1 and late_unlinks == []
-    assert s.summary(closed)["unresolved"] == [{
+    summary = s.summary(closed)
+    assert summary["reason"] == APPEARED and summary["unresolved"] == [{
         "path": str(dead / name), "pid": None, "reason": APPEARED,
         "type": "socket" if stat.S_ISSOCK(st.st_mode) else "file", "generation": [st.st_dev, st.st_ino]}]

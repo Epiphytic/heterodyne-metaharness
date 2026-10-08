@@ -20,3 +20,15 @@ directory is already gone, so no server can bind.
 
 That production `Tmux.new_session` reports success when tmux exits 0 after failing is outside this
 task. It is tracked in a separate bead.
+
+## Additions after code review r5
+
+**Top-level `reason` in summary.json (finding 2).** The key is present exactly when `closed` is false.
+In order of precedence it is the fault (`launch lock missing` or `launch lock replaced`), then
+`appeared after final unlink`, then `launch lock held`, then `deadline passed`. Closed summaries are
+unchanged. The two exact-equality tests of `closed: false` summaries were updated on purpose to expect
+`deadline passed`: regression 1, and test 4 lock-held.
+
+**The lsof branch of `held_fds` (finding 1).** The platform check is now `has_proc_fds()`. A test
+forces the lsof branch by mocking it and `subprocess.run`, so it runs on Linux. The wrong-device record
+must be rejected, and the same record on the lock's own device must match.

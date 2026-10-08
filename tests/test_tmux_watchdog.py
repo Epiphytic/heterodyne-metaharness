@@ -772,7 +772,7 @@ def test_a_bound_but_not_listening_socket_needs_the_launch_lock(held: bool) -> N
         entry = [{"path": str(run / "dead" / "ab"), "pid": None}]
         if held:
             assert summary == {"killed": [], "stale": [], "survived": [], "closed": False,
-                               "unresolved": [_held(run / "dead" / "ab")]}
+                               "reason": "deadline passed", "unresolved": [_held(run / "dead" / "ab")]}
             assert (run / "dead" / "ab").exists() and not (run / "dead" / "ab.lock").exists()
         else:
             assert summary == {"killed": [], "stale": entry, "survived": [], "unresolved": [], "closed": True}

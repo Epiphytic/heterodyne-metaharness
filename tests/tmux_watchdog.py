@@ -47,6 +47,7 @@ REPLACED = "launch lock replaced"
 HELD = "held"
 LOCK_HELD = "launch lock held"
 APPEARED = "appeared after final unlink"
+TIMED_OUT = "deadline passed"
 
 
 class DeadlineReached(Exception):
@@ -495,7 +496,9 @@ class Sweeper:
     # --- the result ---
 
     def summary(self, closed: bool) -> dict[str, Any]:
-        """`survived` and `unresolved` describe the final state: entries still present in `dead`."""
+        """`survived` and `unresolved` describe the final state: entries still present in `dead`. When
+        `closed` is false, `reason` says why: the fault, an appeared entry, the held launch lock, or the
+        deadline."""
         present = {p.name for p in self.dead.iterdir()} if self.dead.exists() else set()
         out: dict[str, Any] = {"killed": list(self.killed), "stale": list(self.stale),
                                "survived": [], "unresolved": []}
@@ -521,6 +524,8 @@ class Sweeper:
             out["unresolved"].append({"path": str(self.dead / name), "pid": pid, "generation": list(gen)})
         out["unresolved"].extend(self.orphans)
         out["closed"] = closed
+        if not closed:                              # why closure failed, even with nothing left to list
+            out["reason"] = self.fault or (APPEARED if self.appeared else None) or self.note or TIMED_OUT
         return out
 
 
