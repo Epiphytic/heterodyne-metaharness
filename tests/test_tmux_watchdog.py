@@ -327,6 +327,11 @@ def matching(text: str) -> list[str]:
     return [ln for ln in lines if text in ln and int(ln.split()[0]) != os.getpid()]
 
 
+def short_base() -> Path:
+    """A child pytest's own --basetemp: short, so admind's sockets under tmp_path fit macOS's 104 bytes."""
+    return Path(tempfile.mkdtemp(prefix="hzc", dir="/tmp")).resolve()
+
+
 class Child:
     """A child pytest that loads only the tmux_guard plugin, in its own session and directory."""
 
@@ -338,6 +343,7 @@ class Child:
         self.hand_path = tmp_path / "hand.json"
         self.out = tmp_path / "child.out"
         self.mark = f"hz-mark-{uuid.uuid4().hex}"
+        self.base = short_base()        # like conftest's macOS basetemp, which a child does not load
         self.pids: list[int] = []
         self.run: Path | None = None
         base = {k: v for k, v in os.environ.items() if not k.startswith("HZ_TMUX_WATCHDOG_")}
@@ -346,7 +352,8 @@ class Child:
         with self.out.open("wb") as out:
             self.proc = subprocess.Popen(
                 [sys.executable, "-m", "pytest", "-q", "-p", "tmux_guard", "-p", "no:cacheprovider",
-                 "-c", str(self.dir / "pytest.ini"), "--rootdir", str(self.dir), "test_child.py"],
+                 "-c", str(self.dir / "pytest.ini"), "--rootdir", str(self.dir), "--basetemp", str(self.base),
+                 "test_child.py"],
                 cwd=self.dir, env=full, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                 start_new_session=True)
 
@@ -386,6 +393,7 @@ class Child:
         for line in matching(self.mark):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(int(line.split()[0]), signal.SIGKILL)
+        shutil.rmtree(self.base, ignore_errors=True)
         if self.run is not None and self.run.exists():
             until(lambda: not any("tmux_watchdog" in ln and str(self.run) in ln
                                   for ln in matching(str(self.run))), "the watchdog to exit")
@@ -425,7 +433,7 @@ def test_child(tmp_path):
     async def scenario(h):
         await h.say("hello")
         await h.until(lambda: "echo: hello" in h.texts(), 30)
-        hand(h.tmux.socket_path, pids(h.tmux.socket_path))
+        hand(h.tmux.socket_path, pids(h.tmux.socket_path), hook=str(h.settings.state_dir / "hook.sock"))
         await asyncio.sleep(600)
     run_with(tmp_path, scenario)
 '''
@@ -447,6 +455,8 @@ def test_sigkill_of_pytest_kills_its_servers_and_panes(child: Callable[..., Chil
     c = child(body)
     data = c.hand()
     assert len(c.pids) >= 2
+    if "hook" in data:                      # admind's own socket, under the child's tmp_path
+        assert data["hook"].startswith(f"{c.base}/") and len(data["hook"]) < 100
     os.kill(c.proc.pid, signal.SIGKILL)
     c.finished()
     assert_cleaned(c, data)
@@ -579,7 +589,7 @@ import pytest
 import tmux_guard
 child = Path(sys.argv[1])
 code = pytest.main(["-q", "-p", "tmux_guard", "-p", "no:cacheprovider", "-c", str(child / "pytest.ini"),
-                    "--rootdir", str(child), str(child / "test_child.py")])
+                    "--rootdir", str(child), "--basetemp", sys.argv[3], str(child / "test_child.py")])
 g = tmux_guard.last
 end = time.monotonic() + float(sys.argv[2])
 while g.proc.returncode is None and time.monotonic() < end:     # set by wait(), here or in the reaper
@@ -612,8 +622,9 @@ def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, sl
     env.pop("HZ_TMUX_WATCHDOG_WAIT", None)
     if slow:
         env["HZ_TMUX_WATCHDOG_WAIT"] = "0"
-    proc = subprocess.run([sys.executable, "-c", MAIN_SCRIPT, str(child_dir), str(BUDGET)], env=env,
-                          capture_output=True, text=True, timeout=BUDGET * 2, check=False)
+    base = short_base()
+    proc = subprocess.run([sys.executable, "-c", MAIN_SCRIPT, str(child_dir), str(BUDGET), str(base)],
+                          env=env, capture_output=True, text=True, timeout=BUDGET * 2, check=False)
     try:
         line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT "))
         result = json.loads(line.removeprefix("RESULT "))
@@ -631,6 +642,7 @@ def test_pytest_main_in_a_live_interpreter_reaps_its_watchdog(tmp_path: Path, sl
                 os.kill(int(ln.split()[0]), signal.SIGKILL)
         for run in [Path(ln) for ln in re.findall(r'"run": "([^"]+)"', proc.stdout)]:
             shutil.rmtree(run, ignore_errors=True)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 @needs_tmux
