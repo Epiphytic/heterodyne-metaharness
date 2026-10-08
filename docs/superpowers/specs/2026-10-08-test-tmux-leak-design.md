@@ -389,7 +389,16 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
     - the original lock fd was held through the rmdir attempt. Before the final unlink, the test opens a second descriptor on the original inode by path. This is its own `open()`, a separate open file description, not a `dup()`. In the hook, `flock(LOCK_EX|LOCK_NB)` on that descriptor must fail with EWOULDBLOCK. Reopening the path in the hook would fail, or would reach the replacement inode.
     - nothing more is unlinked: a recorder on the watchdog's unlink records no calls after the hook, and the loop ends without another pass.
 
-**Platforms.** The real-tmux lifetime tests run on both CI platforms, Linux and macOS, under `HZ_REQUIRE_TMUX=1`. They are regressions 3(b), 5, 9 and 10, plus test 3. This revision is design only; the runtime evidence for both platforms comes with the implementation.
+**Platforms.** GitHub-hosted macOS runners are banned (2026-10-08), so CI is Linux only.
+- **The tests stay portable.** The real-tmux lifetime tests are regressions 3(b), 5, 9 and 10, plus test 3. They keep their macOS branches: lsof in regression 9, `/dev/fd` in regression 10, and `ps` in place of `/proc`.
+  - When inspection is unavailable, they fail rather than skip: a missing lsof, `/dev/fd` that can't be listed, or a failing `ps`.
+  - Under `HZ_REQUIRE_TMUX=1`, a missing tmux still fails the session.
+- **Linux evidence** comes from CI, with the implementation.
+- **macOS evidence** must come from a non-hosted source, either Liam's self-hosted runner or a manual run on his laptop.
+  - The run is the full suite with `HZ_REQUIRE_TMUX=1`.
+  - Its result, the commit, and the macOS and tmux versions are recorded in the implementation's review record.
+  - Until such a run exists, macOS behaviour, notably the lsof `D`-to-`st_dev` mapping and `/dev/fd` enumeration, is **open evidence**, not established.
+- This also supersedes the macOS CI references in §3 (CI installs tmux "on both platforms") and §4 (the "90 s on macOS CI" budget). The 90 s budget still applies to macOS runs from those other sources.
 
 **Mutation targets** (`run5.py`/`results-r5.md`):
 - remove even though EX failed;
