@@ -138,8 +138,21 @@ This amendment replaces that lock with one that we own and whose path stays put.
   - Panes, hooks and jobs drop them.
 - **Which commands can start a server.** Only those with CMD_STARTSERVER do: `new-session`, `start-server`, `attach-session` and `list-keys`. The watchdog's `display-message` and `kill-server` never do.
 
-**How long SH is held.** The launcher opens `<socket_path.parent>/launch.lock` (O_RDONLY, close-on-exec) and takes a blocking LOCK_SH. It runs the command with `pass_fds=(fd,)`, and closes its own fd when the command returns.
-- That one open file description is shared by the launcher, any prefix (`sh -c ...`), the tmux client and the server it forks. So SH lasts until the last of them exits, which for a started server means its whole lifetime.
+**How long SH is held.** The launcher opens the lock in two steps, which are separate functions in `tmux_guard`:
+1. `_open_parent(socket_path)` opens `socket_path.parent` (O_RDONLY|O_DIRECTORY).
+2. `_open_lock_at(parent_fd)` opens `launch.lock` relative to it with `LOCK_FLAGS` (O_RDONLY|O_CLOEXEC, never O_CREAT), then closes the parent fd.
+
+This makes the kernel's split between resolving the parent and resolving the final component explicit, so a test can drive the gap (A6 regression 8).
+
+Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and closes its own fd when the command returns.
+- **It closes the fd; it never calls LOCK_UN.** The lock belongs to the open file description, which the client and the server share. LOCK_UN from any holder would release SH for all of them, including a server that is still starting. LOCK_UN is therefore forbidden on the launcher side; this is a mutation target.
+- That one open file description is shared by the launcher, the allowed prefix, the tmux client and the server it forks. So SH lasts until the last of them exits, which for a started server means its whole lifetime.
+- **Prefixes must keep the fd through the tmux exec.**
+  - `pass_fds` only covers the immediate exec. A prefix could close the fd, or run tmux through another process with `close_fds=True`, and the server would then start without SH.
+  - So GuardedTmux accepts exactly two launchers: `None` (tmux runs directly), and `GateLauncher`, the shell gate from test 3, built by `tmux_guard`.
+    - The gate's script runs `"$@"` from `sh`, which passes every open fd through to tmux.
+    - Any other launcher raises WatchdogError in the constructor, before anything runs.
+  - Production launchers (systemd-run) never reach a guarded start: the serve test stubs `cli.tmux_launcher` to `None`, and the launcher unit tests mock `subprocess.run` (see the exemption below).
 - The review's suggestion was to hold SH "until the command returns". That isn't enough: SIGKILL of pytest mid-launch is exactly the case this design is for.
   - If only pytest held SH, it would be released while a server is still bound but not listening. That reopens the r4 hole.
   - With the fd inherited, the server holds SH itself, whatever happens to pytest or the client.
@@ -150,17 +163,47 @@ This amendment replaces that lock with one that we own and whose path stays put.
 **The injection point: a test subclass on a no-behaviour-change seam.**
 - **The production seam.** In `src/heterodyne/tmux.py`, both `subprocess.run` call sites (`_run`, and the launcher branch of `new_session`) call one new private method, `_exec(argv, *, input, timeout)`.
   - `_exec` calls `subprocess.run(argv, input=input, capture_output=True, timeout=timeout, check=False)`.
-  - That is the same call as today, so behaviour, arguments and error mapping are unchanged. Production gains no parameter and no test-only path. A unit test pins the argv/timeout pairs that exist today.
+  - That is the same call as today, so behaviour and arguments are unchanged. Production gains no parameter and no test-only path.
+  - All exception handling stays in the callers, exactly as today:
+    - `_run` maps a non-zero exit with `check` to `TmuxError(f"tmux {args[0]} failed: <stderr>")`, and lets `TimeoutExpired` and `OSError` propagate (`paste` maps them itself);
+    - the launcher branch maps `OSError` and `TimeoutExpired` to `TmuxError(LAUNCHER_FAILED)`, and maps a non-zero exit to the same error.
+  - **Pinning tests, written before the extraction** and passing both before and after it. They patch `subprocess.run` and record:
+    - argv, `input`, `timeout` (15 for `_run`, 30 for the launcher branch), `capture_output=True` and `check=False`;
+    - each of the mappings above, for each caller, including `paste`'s `TmuxError` versus `TmuxPasteUncertain` split.
 - **The test side.** `tests/tmux_guard.py` adds `GuardedTmux(Tmux)`, which overrides only `_exec` to wrap the call as above. Its single public entry is `new_test_tmux(launcher=None) -> GuardedTmux`, with a fresh socket path in the root.
   - The `tmux` fixture, the Harness and the child-prelude bodies use it.
-  - The serve test's `cli.Tmux` monkeypatch returns `new_test_tmux(launcher=launcher)`.
+  - **The serve test.** Its `cli.Tmux` monkeypatch returns the Harness's own guarded `h.tmux`: `lambda name, launcher=None: h.tmux`, with an assertion that `launcher is None`.
+    - The test shares that server on purpose. It asserts `h.tmux.has_session(SESSION)`, and `drop_tmux(h)` tears it down.
+    - `cli.tmux_launcher` is already stubbed to `None` there, so no prefix is involved.
+    - A fresh socket would start a second server, which would fail the assertion and leave Harness cleanup aimed at the wrong server.
   - `new_test_socket_path()` becomes private (`_new_socket_path`). Tests that need the path read `t.socket_path`.
-  - The raw `tmux -S` queries in the child prelude (`tmux_out`) go through the same guarded helper.
+  - The raw `tmux -S` queries in the child prelude (`tmux_out`) go through a guarded helper, `guarded_tmux(sock, *args)`, which uses the same SH wrapping.
 - **Why not a keyword-only hook.**
   - A hook would add a constructor parameter that production never passes, which is test-only surface on a production class.
   - It would also have to carry `pass_fds` into both call sites. That is the same seam, plus a public API.
   - Overriding `_run` and `new_session` without a seam would copy the launcher branch into tests, and the copy would drift.
-- **Enforcement.** A source-scan test fails if any module under `tests/` other than `tmux_guard.py` (and excluding `tests/live/`) passes `socket_path=` to `Tmux` or calls the private path helper. An unguarded start in the root is the one way around this protocol (see A5).
+- **Enforcement: a source scan, which is a tripwire for mistakes, not a proof.**
+  - It parses (with `ast`) every module under `tests/` except `tmux_guard.py` and `tests/live/`. It also parses every string constant in those modules that is valid Python, so the generated child-pytest scripts are covered.
+  - It fails on:
+    - a call to `heterodyne.tmux.Tmux` under any name, including `import ... as` aliases, module attributes (`tmux.Tmux`) and simple assignments (`T = Tmux`), that passes `socket_path=` or `**kwargs`;
+    - a list or tuple literal, or a call argument, that starts with the constant `"tmux"` and contains `"-S"`, which is a raw tmux on an explicit path;
+    - any reference to `_new_socket_path` or `_open_lock_at`.
+  - **The exemption is narrow.** Only the fully mocked selector and launcher tests, which replace `subprocess.run` with a recorder so that no tmux runs, are allowed. They are named in an explicit list of (module, function) pairs.
+    - The scan fails if a listed function is missing, or no longer patches `subprocess.run`, so the list can't go stale.
+  - **What it can't see:**
+    - construction through `getattr`, `exec` or `eval`, or a string that isn't valid Python;
+    - a tmux command built at run time, for example `["tm" + "ux", ...]`, or a socket path passed in a variable to a list that doesn't start with `"tmux"`;
+    - tmux started from shell scripts or other non-Python files;
+    - any process that runs tmux on its own.
+
+    None of these exist today. An unguarded start that slips past the scan is the residual risk in A5.
+  - **Negative cases.** Each one must be flagged:
+    - a raw `subprocess.run(["tmux", "-S", str(t.socket_path), ...])`;
+    - `from heterodyne.tmux import Tmux as T; T("x", socket_path=p)`;
+    - `Tmux(**kw)`;
+    - the same three inside a child-script string.
+
+    One positive case must pass: an exempted mocked selector test.
 
 ### A3. Watchdog changes
 - **Opening the lock.** After the rename, the watchdog opens `dead/launch.lock` once (O_RDONLY, close-on-exec, so its tmux and ps children don't inherit it), and records `(st_dev, st_ino)` from `fstat`.
@@ -180,10 +223,20 @@ This amendment replaces that lock with one that we own and whose path stays put.
   - `try_lock`, the 20-try loop, and every create or flock of `<p>.lock`.
   - The PID-unknown/refused branch becomes: EX taken plus checks pass means `stale`; otherwise `held`.
 - **Final step.** When `dead` holds only `launch.lock`:
-  - take EX non-blocking (if busy, retry next pass);
-  - then unlink it, LOCK_UN, close, and `rmdir(dead)`.
+  1. If any earlier step recorded `replaced` or `launch lock missing`, stop: unlink nothing, keep `dead`, and set `closed: false`.
+  2. Take EX non-blocking. If it is busy, retry next pass; at the deadline it is `unresolved` (`launch lock held`).
+  3. Under EX, repeat the identity check: `lstat(dead/launch.lock)` must match the recorded `(st_dev, st_ino)`. If it doesn't, record `replaced`, LOCK_UN, and stop as in step 1. This way the watchdog can't lock the original inode and then unlink a replacement.
+  4. Unlink it, LOCK_UN, close, and `rmdir(dead)`. An ENOTEMPTY here means something was created after the unlink (A6 regression 8).
+     - The next pass sees it.
+     - A new `launch.lock` doesn't match the recorded identity, so it is `replaced`.
+     - Anything else goes through the normal sweep.
+     - It is never counted as closed.
 
-  This step isn't load-bearing for safety: after the rename no one can bind in `dead` (A4). It is there so that closure means "no guarded process remains", and a holder still present at the deadline is reported as `unresolved` (`launch lock held`).
+  **What this step does and doesn't establish.**
+  - EX excludes current SH holders, and guarded pending binds stay serialized against every removal.
+  - A guarded start that comes after closure can't resolve the original socket parent: `root` was renamed, and `dead` is gone or going.
+  - The process that holds the unlinked inode may still exist (A4 case 3). So closure does not mean that no guarded process remains.
+  - Only a successful `rmdir(dead)` establishes filesystem closure. That is what `closed: true` reports.
 - **Deadline.** EX is never taken blocking, so no step can outlast the deadline because of a lock. The r4 #7 ordering (check the local end before accepting success) is kept.
 
 ### A4. The late cases
@@ -224,6 +277,12 @@ This amendment replaces that lock with one that we own and whose path stays put.
 2. **Lock replacement during cleanup.**
    - (a) `launch.lock` keeps the same inode across every pass until the final step.
    - (b) If `launch.lock` is replaced or deleted mid-closure, nothing more is removed, and the entry is `unresolved` with reason `launch lock replaced`.
+   - (c) Replacement in a directory that holds only the lock. `dead` contains only `launch.lock`, and the test replaces it with a new inode just before the final step (through the `unlinking()`-style test hook). Then:
+     - the replacement is not unlinked;
+     - `dead` is kept;
+     - the reason is `launch lock replaced`;
+     - `closed` is false.
+   - (d) An earlier replacement is honoured. A replacement detected during a socket removal stops the final step even if the path has been restored by then.
 3. **Late launcher after the rename.**
    - (a) `new_test_tmux()` after the rename raises WatchdogError and runs no tmux.
    - (b) A real tmux in a child pytest: GuardedTmux gated between open and flock, released after the final unlink. The start fails with ENOENT and no server exists.
@@ -236,7 +295,41 @@ This amendment replaces that lock with one that we own and whose path stays put.
    - After `_exec` returns, EX non-blocking fails. It succeeds once that child is killed.
    - Real tmux in a child pytest: SIGKILL pytest after `new_session`, and EX stays unavailable until the watchdog has killed the server.
 6. **Cleanup creates no artifacts** (replaces r4 #2's regression). The last server is dead at the deadline: `closed` is true, and no `.lock` is left.
-7. **The seam.** `Tmux._exec` receives today's argv, input and timeouts. There is also the source scan from A2.
+7. **The seam and the scan.** These are the pinning tests and the source-scan cases from A2.
+8. **Delayed final-component create** (deterministic, in-process, real filesystem). This is the only gap between parent and final-component lookup that matters.
+   - The sequence:
+     - the test calls `_open_parent()` before the rename;
+     - the watchdog renames and runs closure;
+     - from a `before_rmdir` test hook, so after the final unlink and before `rmdir`, the test calls `_open_lock_at(parent_fd)`.
+   - Correct code: the open fails with ENOENT, so the launcher raises WatchdogError and runs nothing; `rmdir` succeeds and `closed` is true.
+   - With O_CREAT in `LOCK_FLAGS`: the open creates a new `launch.lock`, `rmdir` fails with ENOTEMPTY, and the test fails.
+   - A second case creates the file directly at that point. The watchdog must report it truthfully: `replaced`, `dead` kept, `closed: false`.
+9. **Prefixes.**
+   - A launcher outside the two allowed ones raises WatchdogError and runs nothing. The test's launcher is a prefix that closes inherited fds (`python -c` that re-execs tmux with `close_fds=True`).
+   - The allowed gate passes the fd through: after a gated real start, the server process itself holds the launch-lock inode.
+     - On Linux this is read from `/proc/<pid>/fd`; on macOS, from `lsof -p <pid> -Fi`.
+     - lsof ships with macOS. If it is missing, the test fails with a clear message; it doesn't skip.
+10. **Children release the fd** (real tmux). A guarded server runs four children:
+    - a pane;
+    - a `run-shell -b` job;
+    - a `pipe-pane` command;
+    - a `set-hook` hook (`run-shell`).
+
+    Each child runs a small Python probe. The probe `fstat`s each fd from 3 to `SC_OPEN_MAX` (or 1024, whichever is lower) and writes whether any of them is the launch-lock inode.
+    - All four must report none.
+    - The server itself must hold it (as in regression 9).
+11. **Mixed survivor and healthy server** (scripted, with real flocks: "servers" are helper processes that hold SH).
+    - A survives kill-server, so it keeps SH. B dies on its kill-server. C is first discovered on a later pass.
+    - Every pass still issues kill-server and the death wait to every live server, whatever happened to earlier removals:
+      - B's removal is `held` (A holds SH), yet C is killed and proven dead;
+      - B's and C's PIDs are dead at the end.
+    - At the deadline:
+      - A is `survived`;
+      - B and C are `unresolved` (`held`) with their sockets kept;
+      - `closed` is false.
+    - A mutant that skips the remaining kills once a removal is `held` must fail.
+
+**Platforms.** The real-tmux lifetime tests run on both CI platforms, Linux and macOS, under `HZ_REQUIRE_TMUX=1`. They are regressions 3(b), 5, 9 and 10, plus test 3.
 
 **Mutation targets** (`run5.py`/`results-r5.md`):
 - remove even though EX failed;
@@ -246,5 +339,14 @@ This amendment replaces that lock with one that we own and whose path stays put.
 - skip the identity check;
 - let the watchdog create `<p>.lock`;
 - let `sweep_lock` bypass `remove`;
-- open `launch.lock` with O_CREAT in the launcher (expected to survive, because the path doesn't resolve after the rename: recorded as equivalent);
+- skip the identity check at the final step;
+- ignore an earlier `replaced` at the final step;
+- O_CREAT in `LOCK_FLAGS` (killed by regression 8; no longer classed as equivalent);
+- an early LOCK_UN in the launcher after the command returns (killed by regression 5);
+- `GuardedTmux` accepting any launcher (killed by regression 9);
+- skip the remaining kills after a `held` removal (killed by regression 11);
+- each source-scan rule removed (each is killed by its negative case);
+- the serve factory returning a fresh server (killed by the serve test's `has_session` assertion);
 - `GuardedTmux` not overriding `_exec`.
+
+If a mutant can't be killed deterministically, it is recorded in `results-r5.md` as surviving open evidence, not as equivalent.
