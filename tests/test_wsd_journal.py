@@ -796,16 +796,20 @@ def test_a_journal_closed_inside_a_clean_block_notes_the_commit_error(journal: J
     _assert_unusable(journal, sqlite3.ProgrammingError)
 
 
-def test_an_interrupt_during_cleanup_wins_and_poisons(journal: Journal,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    interrupt = KeyboardInterrupt()
+@pytest.mark.parametrize("kind", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interrupt_during_cleanup_wins_and_poisons(journal: Journal, monkeypatch: pytest.MonkeyPatch,
+                                                      kind: type[BaseException]) -> None:
+    # Code review r1: every BaseException that is not an Exception wins over the primary, not only
+    # KeyboardInterrupt.
+    interrupt = kind()
     real, _ = _cleanup_fails(journal, monkeypatch, rollback=interrupt)
     primary = ValueError("primary")
-    with pytest.raises(KeyboardInterrupt) as caught, journal.transaction():
+    with pytest.raises(kind) as caught, journal.transaction():
         journal.emit("alpha", None, "a")
         raise primary
     assert caught.value is interrupt and interrupt.__context__ is primary
     assert not hasattr(primary, "__notes__")
+    assert journal._depth == 0  # pyright: ignore[reportPrivateUsage]
     _assert_unusable(journal, interrupt)
     real.close()
 
