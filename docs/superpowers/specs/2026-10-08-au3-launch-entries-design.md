@@ -1,4 +1,4 @@
-# btq-17a31 (AU-3): launch entries, launch receipts and the journal upgrade (design r2)
+# btq-17a31 (AU-3): launch entries, launch receipts and the journal upgrade (design r3)
 
 Base: main b136b30. Sources:
 - the accounts plan, §AU-3 (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at 66ad195);
@@ -18,6 +18,11 @@ Scope: plan 3b's launch entries only. Design only: nothing is implemented here.
 6. A missing record is no longer proof that nothing launched. Only beads proven never to have launched are exempt (§3, step 2).
 7. Launch entries and generation sequences rebuild from `wsd_launches`. Receipts stay journal-only (§4.2 step 1).
 
+**r3 changes** (review r2 on f054601):
+9. Release keeps the upgrade-time condition "no configured accounts at the upgrade". A hold for accounts that existed at the upgrade stays held, and resolving it is out of scope (§3.3).
+10. `current_key` and `login_resolves` resolve freshly from the configured or default path, with the supplied environment. They never rehash a stored canonical `Account` (§2.1).
+11. Release verifies and resolves an adoption before plan 3's parked/unparked branch, so a parked bead is covered too (§3.3).
+
 Item 8 (non-blocking) is kept: the interim `account_changed` escalation must be replaced by AU-4's deferral (§4.2 step 2).
 
 **Where the sources differ:**
@@ -30,7 +35,8 @@ Item 8 (non-blocking) is kept: the interim `account_changed` escalation must be 
 - deferrals (AU-4);
 - account binding, the freshness lock and handoff relaunches with their own native IDs (AU-6, AU-8);
 - the real runtime (plan 4);
-- a procedure that resolves a dispatched entry with no receipt (§4.3).
+- a procedure that resolves a dispatched entry with no receipt (§4.3);
+- a procedure that verifies the account history of a legacy session held because accounts were configured at the upgrade (§3.3).
 
 AU-3 creates the tables those items need. Until they land, every launch uses account `default`.
 
@@ -69,8 +75,15 @@ AU-3 doesn't define a credential identity or key of its own. It uses AU-2's §"C
 - **The key depends on paths only.** A token refresh keeps the key. Repointing a login, for example by re-symlinking `.credentials.json`, changes it. That is the "credential replacement" in the acceptance list.
 
 AU-3 adds two things on top:
-- **`current_key(adapter, account)`** recomputes the key at launch with AU-2's function, from the `Account` that `resolve_accounts` returned. It is not cached from config load, so a repoint between the entry and the dispatch is seen (D2's check before launch). Like AU-2, it accepts an absent login file: launch-time refusals for a missing login belong to the §7 freshness gate (AU-6).
-- **`login_resolves(adapter, account)`** is used **only for adoption** (D2: "that login's credential identity resolves"). Every login file must `resolve(strict=True)` to a regular file, because adoption needs the login the session actually ran on.
+- **`current_key(adapter, account)`** resolves the login afresh at every call, then hashes it with AU-2's single `credential_key(adapter, login_files)`.
+  - **Where it starts.** It starts from the account's **configured** path:
+    - a named account: the raw `login_dir` string from the loaded config;
+    - `default`: `DEFAULT_LOGIN_DIRS[adapter]`.
+  - **How it resolves.** It expands that path with `paths.expand(value, env)` and the supplied environment, then computes `Path(dir, f).resolve(strict=False)` for each `f` in `LOGIN_FILES[adapter]`.
+  - **It never rehashes the canonical `login_dir` or `login_files` stored in AU-2's `Account`.** Those were resolved at config load. Once `~/.codex` resolved to one login, repointing it to another would be invisible through them. Fresh resolution sees both a repointed directory symlink and a repointed file symlink, without a reload. This is D2's check before launch.
+  - AU-2 keeps the raw configured value next to the canonical one, for example as `Account.configured_dir`. This design asks AU-2 for that field.
+  - Like AU-2, it accepts an absent login file. Launch-time refusals for a missing login belong to the §7 freshness gate (AU-6).
+- **`login_resolves(adapter, account)`** is used **only for adoption** (D2: "that login's credential identity resolves"). It resolves freshly from the same configured path. Every login file must `resolve(strict=True)` to a regular file, because adoption needs the login the session actually ran on.
 
 **`Accounts` interface.** The guard reads accounts only through this, so tests can change eligibility and logins between steps:
 
@@ -264,20 +277,26 @@ The guard checks the adoption row before step 0 of §4.2:
 
 ### 3.3 Release of an adoption hold (the journaled exit)
 
-`Parker.release` is the only exit, as for every hold (ADR §4.3). For a bead whose adoption row is `held` with no `resolution`, the release adds one verification step. It does not run at release intent. It runs after `_record_for_release`, which may recreate a missing record, plan 3's operator-only path. It runs before the release opens its resume.
+`Parker.release` is the only exit, as for every hold (ADR §4.3). It handles a bead whose adoption row is `held` with no `resolution` as follows.
 
-- **Re-verify, with today's facts,** conditions (a) to (e) of §3, step 2:
-  - (c) becomes "the adapter has no configured accounts **now**";
-  - (e)'s "no op open" excludes the release op itself.
+- **At release intent, before anything is written.** If the row's upgrade-time `facts` show accounts configured for the session's adapter, `release` raises `NotReleasable("accounts were configured for <adapter> at the upgrade")`. The bead stays held.
+  - D2 and PICKUP.md make "no configured accounts **at the upgrade**" a condition of adoption. Today's configuration can't establish which login the session used then, so removing accounts later authorises nothing.
+  - Resolving such a hold needs an explicitly authorised account-history verification. That is out of scope for this PoC, like a dispatched entry with no receipt (§4.3).
+- **Otherwise, in `replay_release` after the `unlabelled` step, before plan 3's parked/unparked branch** (`park.py`, the `PARKED in shown.labels` early return):
+  1. **Recover the record if needed:** `_record_for_release(shown)`, plan 3's operator-only path. It recreates a missing or unreadable record from the current placement once every session under another key is confirmed stopped. It now runs for parked beads too, but only when an adoption is unresolved. A parked bead normally has no session, so the stop step is a no-op for it.
+  2. **Re-verify** conditions (a), (b), (d) and (e) of §3, step 2, with today's facts.
+     - (c) is taken from the stored upgrade-time `facts`, never re-evaluated. It passed, or the release would have been refused at intent.
+     - (d) is a fresh `login_resolves`.
+     - (e)'s "no op open" excludes the release op itself. Its claim and `wsd_launches` checks are read now.
+  3. **Pass.** One transaction does three things:
+     - writes the adopted entry: generation 1, `default`, a fresh `current_key`, `adopted = 1`, `outcome = 'launched'`;
+     - sets the `resolution` fields;
+     - emits `adoption_resolved` with the release op's ID.
 
-  A legacy session can only have run on its adapter's default login, because account binding (AU-6) postdates AU-3. With no accounts configured now, the default login is the only one wsd could pin. If the operator configured accounts for that adapter, they must remove them, reload, and release again.
-- **Pass.** One transaction does three things:
-  - writes the adopted entry: generation 1, `default`, the current key, `adopted = 1`, `outcome = 'launched'`;
-  - sets the `resolution` fields;
-  - emits `adoption_resolved` with the release op's ID.
-
-  cp `release.adopted`. Then `ensure_launch`, cp `release.adopted!`. Then the release goes on to its resume as in plan 3.
-- **Fail.** `escalate_from(release_op, UNEXPECTED_STATE, "adoption still unverified: <condition>")`. The bead is held again. The row's original `verdict`, `detail` and `facts` are kept, and the failed re-check goes into the escalation's event.
+     cp `release.adopted`. Then `ensure_launch`, cp `release.adopted!`.
+  4. **Fail.** `escalate_from(release_op, UNEXPECTED_STATE, "adoption still unverified: <condition>")`. The bead is held again. The row's original `verdict`, `detail` and `facts` are kept, and the failed re-check goes into the escalation's event.
+  5. **Then plan 3's branch runs unchanged.** A parked bead keeps `v2:parked` and its blockers, and goes back to waiting (PARKED, BLOCKED_ON_BEAD or WAITING_INPUT). Its later parked resume launches generation 2 through the guard. An unparked bead goes on to its resume.
+- **Replay.** A crash at `release.adopted` or `release.adopted!` replays the release from `unlabelled`. It finds the row resolved, re-runs `ensure_launch` (one entry), and takes the branch.
 - Unclaiming the bead is not a recovery mechanism, and does nothing to the row.
 
 ## 4. The launch guard with entries (`park.py`)
@@ -380,8 +399,9 @@ The plan 3 order is unchanged up to `verify_worktree` and the listed-but-not-liv
 | Crash during the upgrade | rollback; v1 intact; next start re-gathers |
 | Beads down during the upgrade | file untouched; exit 1; retried |
 | v1 schema with any extra or changed object | `JournalCorrupt`, never upgraded |
-| Legacy session, accounts configured for its adapter at upgrade | `held` → STUCK `unexpected_state` at startup; release re-verifies (§3.3) |
-| Legacy session, default login doesn't resolve, record missing, or journal and bead disagree | same |
+| Legacy session, accounts configured for its adapter at upgrade | `held` → STUCK `unexpected_state` at startup; release refused, out of scope (§3.3) |
+| Login directory or file symlink repointed after config load, no reload | fresh resolution gives a new key: the pin check abandons, or the gate gives `account_changed` |
+| Legacy session, default login doesn't resolve, record missing, or journal and bead disagree | `held` → STUCK `unexpected_state` at startup; release re-verifies (§3.3) |
 | Legacy bead with an open pickup or resume | `held`; startup hands that op off to the escalation (§3.2) |
 | Crash between journal entry and bead entry | replay re-runs `ensure_launch`: one entry |
 | Bead entry differs from the journal's under one generation | `unexpected_state` |
@@ -402,7 +422,12 @@ New files: `tests/test_wsd_launches.py` and `tests/test_wsd_journal_upgrade.py`.
 
 1. **Key independence.** `role_session(b, r, p)` is identical under two `Accounts` fakes with different accounts and keys. `wsd_session` is byte-identical after launches on both. The key equals AU-2's `credential_key` for the same files, with `HOME` from the supplied env.
 2. **Append crash, one entry.** For each point `entry`, `entry!`, `dispatched`, `dispatched!`, `outcome` and `outcome!`, crash then replay. The bead has exactly one entry per generation, and earlier entries are byte-identical. A hand-edited conflicting bead entry escalates `unexpected_state`.
-3. **Pinned account.** Crash at `entry!`, then, before replay, either repoint the default login (a symlink in a scratch HOME) or make the account ineligible. The replay never launches another key under that generation: it gets `abandoned` then generation 2 on the new key for a first launch, or `account_changed` when a launched entry exists. A third case, nothing changed, launches the pinned account and model exactly.
+3. **Pinned account.** Crash at `entry!`. Then, before replay and with no config reload, change one thing:
+   - repoint the default login's **directory** symlink (`~/.codex` from one scratch login dir to another);
+   - or repoint its **file** symlink (`.credentials.json`);
+   - or make the account ineligible.
+
+   Each repoint gives a new `current_key`. The replay never launches another key under that generation: it gets `abandoned` then generation 2 on the new key for a first launch, or `account_changed` when a launched entry exists. A third case, nothing changed, launches the pinned account and model exactly.
 4. **Upgrade keeps rows.** Build a populated v1 journal from the frozen `V1_SCHEMA`, with rows in every table, then upgrade. Every v1 row is equal, the version is `"2"`, and the v2 check passes.
 5. **Upgrade crash.** Inject a failure after each `CREATE` and after the inserts. The file still passes the v1 check, and its rows are unchanged. Non-v1/v2 shapes give `JournalCorrupt` with no write, for example a v1 schema with version `"2"`, or one extra table.
 6. **P→Q→P and rebuild.** A reviewer's session keys for P and Q get generations P1, Q1, P2. Then replace the journal with a fresh one (no `launches` rows), release the `JOURNAL_LOST` hold, and run the guard. It rebuilds P1, Q1 and P2 from `wsd_launches` with `rebuilt_at` set, creates no receipts, and pins P3. A rebuilt dispatched entry with no outcome holds `unexpected_state`.
@@ -424,10 +449,11 @@ New files: `tests/test_wsd_launches.py` and `tests/test_wsd_journal_upgrade.py`.
     A pickup at `placed` with no record is exempt and launches generation 1. No held case launches.
 11. **Startup handoff.** For a held bead with an open resume, step 4a ends the resume STUCK and opens one escalation, with `settled` in the same transaction: no `OpConflict`. Crash at `adopt.settled`: the replay finds the open escalation and opens no second one. A held bead that already has an open escalation is settled without opening another.
 12. **Adoption release.**
-    - With the codex accounts still configured, release re-escalates. `verdict`, `detail` and `facts` are unchanged.
-    - After the accounts are removed and the config reloaded, release adopts: one entry, `resolution` set, `resolved_by` = the release op. The resume then launches generation 2.
-    - A missing-record hold: release recreates the record, then adopts.
-    - A crash at `release.adopted` and at `release.adopted!` replays to one entry.
+    - **Held because codex accounts were configured at the upgrade:** release is refused with `NotReleasable`, both with the accounts still configured and after they are removed and the config reloaded. The row is unchanged, the bead stays held, and nothing launches.
+    - **Held because the default login didn't resolve:** after the login is restored, release adopts. That gives one entry, `resolution` set and `resolved_by` = the release op. The resume launches generation 2. If the login still doesn't resolve, release re-escalates, and `verdict`, `detail` and `facts` are unchanged.
+    - **A missing-record hold:** release recreates the record, then adopts.
+    - **A parked adoption hold** (`v2:parked` with an open blocker): release resolves the adoption, and the bead ends PARKED with its blocker and label kept. When the blocker closes, the parked resume launches generation 2. With a crash at `release.adopted` and at `release.adopted!`, the replay gives one entry, the same PARKED end state, and no launch.
+    - A crash at `release.adopted` and at `release.adopted!` for an unparked bead replays to one entry and one resume.
 13. **Plan 3 unchanged.** `test_ensure_record_never_rewrites_an_existing_record` passes unchanged. The existing park, pickup and recovery suites pass with the fake runtime returning `Started`. Tests asserting `LAUNCH_UNCERTAIN` after a raised launch now assert STUCK `unexpected_state`, and are listed in the PR.
 
 Install-agnostic: test homes are `tmp_path` scratch dirs passed as the env's `HOME`, and the keys are AU-2's `ck1-` 32-hex form.
