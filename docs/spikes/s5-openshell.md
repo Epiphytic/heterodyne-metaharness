@@ -251,7 +251,7 @@ Ownership and permission bits give no protection here. The real-home and Other a
 
 One side effect: podman creates the mount-point placeholder for a file bound inside the rw home, such as `.codex/auth.json`. On the host, that placeholder is owned by a subuid (165536), from container root.
 
-The image's base, ubuntu:24.04, ships a `ubuntu` user with uid 1000. The Containerfile adds the `agent` user (1001:1004) and `USER 1001:1004`, and the policy also sets `run_as_user`/`run_as_group` to the host ids. uid 1000 was never the workload's uid in this spike.
+The image's base, ubuntu:24.04, ships a `ubuntu` user with uid 1000. The Containerfile adds the `agent` user (1001:1004) and `USER 1001:1004`, and the policy also sets `run_as_user`/`run_as_group` to the host ids. In every verified workload run (`evidence/uid-mapping.txt` and the runs recorded here), the workload's uid was 1001, never 1000. That does not explain the earlier uid-1000 observation, which was not reproduced.
 
 Bind mounts need three settings:
 - `allow_driver_config = true`;
