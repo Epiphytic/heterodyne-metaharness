@@ -2,7 +2,7 @@
 
 Base: main b136b30.
 
-**r2 changes** (review r1, `docs/reviews/au2-config-design-r1.md` is not committed; findings by number):
+**r2 changes** (Codex review r1; the finding numbers are in parentheses):
 - `config check` hides `login_dir` (1);
 - every canonicalization and alias step raises only a path-free `ConfigError` (2);
 - `usage` must be a table (3);
