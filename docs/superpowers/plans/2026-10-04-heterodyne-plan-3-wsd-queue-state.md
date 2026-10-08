@@ -75,7 +75,7 @@ Six numbered entries (r1's count was wrong: entry 3 covers two decisions). Two c
 3. **`/stop` representation** (D3) and **waiting-on-input detection** (D4) are not in the ADR. They are plan-level choices that plans 6 and 7 will depend on.
 4. **btq state under `HOME`** (D14). btq's per-worker state (and so the shared pause flag) lives under the service user's home. That is fine for one host user, but plan 4's synthetic home for agents must not be the home wsd runs with.
 5. **Runtime availability.** Until plan 4 lands, a running `wsd` claims nothing (D9). That is intended, but it means no end-to-end run is possible between plans 3 and 4.
-6. **Sandbox backend.** The roadmap's plan 4 names bubblewrap; the operator has since chosen OpenShell (ADR revision 14, pending, not treated as approved here). Nothing in this plan depends on the backend: `AgentRuntime` is backend-neutral.
+6. **Sandbox backend.** The roadmap's plan 4 names bubblewrap; the operator has since chosen OpenShell (ADR revision 14, pending when this plan was written; see "ADR revision 14" below). Nothing in this plan depends on the backend: `AgentRuntime` is backend-neutral.
 
 Conflicts with btq's `$BTQ_REPO/docs/PICKUP.md`:
 
@@ -93,6 +93,16 @@ The four questions r1 and r2 left to the operator. Liam chose the recommended op
 **(c) btq protocol conflicts (`PICKUP.md` lines 81 and 119).** A narrow `agent:wsd` exception is added to `$BTQ_REPO/docs/PICKUP.md`: an `agent:wsd` per-bead worker never unclaims (the claim is how a parked bead keeps its place and its session), and its park adds blocking edges (and the `v2:parked`/`v2:held` labels, its own comment and metadata) to the bead it has claimed. All other rules stay unchanged. **Prerequisite of implementing this plan:** the exception is a btq docs change, reviewed and approved through btq's own queue in a separate bead, and Task 1 does not start until that bead is closed.
 
 **(d) `/pause` in §6.3 vs §4.3** (conflict 1). §6.3 is amended to match §4.3: `/pause` stops new claims only, and `/stop` stops the running task. This must land (ADR revision 14) before plan 6. It is what this plan implements and tests (`test_pause_does_not_stop_the_running_bead`).
+
+## ADR revision 14
+
+Added after this plan was written. ADR revision 14 ([ADR 0001](../../adr/0001-workstreams-v2.md), approved as `btq-k942c`) carries decisions (a) and (d) (§4.3 held parks, §6.3 `/pause`), so the last item under "Open before approval" is met. It also adds work for later plans that touches what this plan built. Section numbers here are revision 14's:
+
+- **Launch receipts and legacy sessions** (§4.4 D2, §3.3 journal upgrades, plan 4). Every launch gets a journaled entry with a dispatch mark and a launch receipt, and an unresolved entry is reconciled against its receipt only; no receipt holds the bead as `unexpected_state`. Sessions this plan's code launched have no entries, and the journal upgrade adopts them once before anything resumes them.
+- **Sandbox runtime** (§7, §13 S5, plan 4). OpenShell, gated on S5; only if S5 fails does the Linux runtime fall back to bubblewrap. `AgentRuntime` stays backend-neutral, as here.
+- **Admin-agent adapters** (§8.1, §13 S8). An adapter runs as admind's admin agent only if S8 demonstrates its four minimum capabilities.
+- **The gatekeeper** (§5.9, plan 7) is mandatory for relayed asks in the release that ships both `wsd` and the gatekeeper; before that it may run only in shadow.
+- **Open decisions** (§17). Revision 14 leaves 10 decisions to the operator; the roadmap notes how later plans handle them.
 
 ## Simplifications vs r1
 
