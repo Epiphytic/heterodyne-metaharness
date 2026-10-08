@@ -1,0 +1,19 @@
+# r1: 'launch.py up claude r1' just ended SELFTEST PASS; stored rc: 0
+$ S5_SELFTEST_INJECT=leak-env launch.py agent claude r1
+FAIL host-env-not-inherited [unexpected vars: LEAK]
+SELFTEST FAIL (launch refused)
+REFUSED: the launch self-test did not pass; deleting the sandbox
+rc=2
+stored rc after: 1
+tmux sessions: no server running on /tmp/tmux-1001/s5spike
+sandbox s5-r1 listed: 1   (deletion still in progress; down() now waits until the sandbox is gone, see r2)
+# r2: earlier PASS, then the canary goes missing at agent time
+$ S5_SELFTEST_INJECT=canary-missing launch.py agent claude r2
+PASS freshness-gate [access token 5.32 h left, need > 2.25 h; no refresh is attempted here]
+ABORT canary-precondition: $HOME/.s5-canary not readable outside (No such file or directory)
+SELFTEST FAIL (launch refused)
+REFUSED: the launch self-test did not pass; deleting the sandbox
+rc=2
+stored rc after: 3
+tmux sessions: no server running on /tmp/tmux-1001/s5spike
+sandbox s5-r2 listed: 0

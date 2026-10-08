@@ -1,0 +1,19 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 6089448. Verdict: REVISE.
+
+1. [NON-BLOCKING] **r1 #1 resolved.** `spikes/s5/launch.py:364` invalidates cached results and records failures, including exceptions; `agent()` reruns the complete gate. Cached-PASS negative controls demonstrate refusal. No further fix needed.
+
+2. [NON-BLOCKING] **r1 #2 resolved for execution-path demonstration.** `docs/spikes/s5-openshell.md:112` and both agent-path transcripts demonstrate probes through Claude’s tool and Codex’s sandboxed app-server. The contrasting curl policy logs support executable-ancestor authorization. Tools reaching the model host does not violate §7’s host allowlist or its accepted exfiltration risk. No runtime-policy fix required; document this semantic in the proposed ADR revision.
+
+3. [NON-BLOCKING] **r1 #3 resolved as an explicitly pending deviation.** `docs/spikes/s5-openshell.md:126` honestly distinguishes broker EACCES from kernel unreachable, with outside `NetworkMode=none`, namespace evidence and plain-podman controls. “PASS with one DEVIATION” is qualified adequately: it expressly does not satisfy r14 unchanged. The alternative proof needs the stated ADR amendment before runtime adoption; this is not a new blocker.
+
+4. [NON-BLOCKING] **r1 #4 resolved.** `spikes/s5/launch.py:253` checks directory membership before declaring absence. The non-default-account evidence checks the default through configured and canonical paths, alongside present/absent/unknown fixtures, canary and chosen-content checks. No further fix needed.
+
+5. [NON-BLOCKING] **r1 #5 resolved for the spike.** `docs/spikes/s5-openshell.md:159` demonstrates an enforced lifetime stop and explicitly defers graceful stopping and relaunch to plan 4. No further spike fix needed.
+
+6. [NON-BLOCKING] **r1 #6 resolved for the demonstrated workload.** `docs/spikes/s5-openshell.md:234` supplies UID/GID and namespace mappings plus bound/unbound mode-0600 controls. These establish UID 1001 for the recorded workload, although they do not reconstruct the earlier UID-1000 observation. Items 1, 3, 4 and 5 have supporting evidence. The TLS authority tests support the narrower proxy claim and plaintext bearer-token exposure; they justify revising the residual-risk description, without relaxing §7 enforcement. No committed tokens or npubs found, and no undocumented remaining host change established.
+
+7. [BLOCKING] **The agent-path gate trusts a result the agent can fabricate.** `spikes/s5/launch.py:423` acknowledges that the result file is untrusted, but line 447 accepts any text containing `probes-rc=0`. The outside checks establish only selected network operations and ancestry; they cannot establish that real-home, Other accounts, content-match or control-op probes ran successfully. An agent can perform those network operations and write the success marker while skipping or failing the remaining probes. **Fix:** collect completion and exit status through a supervisor-controlled channel tied to the actual probe process in the agent execution context. Add a negative control showing that forged success output following a failed probe refuses readiness.
+
+8. [BLOCKING] **The managed-path environment probe cannot fail.** `spikes/s5/probes.py:188` enforces the allowlist only on the separate exec path; line 190 downgrades every unexpected agent-tool variable to INFO. Consequently, a variable introduced only into the app-server or agent-tool environment can pass item 2 unchecked, contrary to §7’s mandatory environment probe. **Fix:** define explicit permitted CLI-added variables for the pinned versions and fail on unexpected variables in both paths. Demonstrate refusal with an environment leak injected specifically into the managed tool path.
+
+REVISE

@@ -1,0 +1,25 @@
+PASS 1 picker became a card {"card": "Picker d473 from the admin agent: Which deploy target should I use?"}
+PASS 1 Stop after the denied picker set the turn-ended mark
+PASS 1 answer delivered after Stop {"status": "delivered"}
+PASS 1 agent received the attributed answer exactly once {"hits": 1}
+PASS 2 second answer told 'already answered'
+PASS 2 second answer not pasted
+PASS 3 non-operator answer and reaction dropped
+PASS 3 operator's number reaction delivered {"answer": "staging", "route": "reaction"}
+PASS 4 redactable picker not posted
+PASS 4 denial asking for plain text reached the model
+PASS 5 early answer selected but not pasted before Stop
+PASS 5 early answer pasted only after Stop
+PASS 6 revoked answerer's answer invalidated, picker open again
+PASS 6 next valid answer delivered at once (mark kept) {"by": "bob"}
+PASS 7 interrupt fired no Stop and set no mark
+PASS 7 answer not pasted after interrupt
+PASS 7 missing-Stop notice posted once
+PASS 7 !asks cancel closes it
+PASS 8 stale-launch Stop ignored
+FAIL 9 no CLI process outlives its tmux session {"left": "2"}
+PASS 9 relaunch abandons the answered, never-reserved picker
+PASS 9 later answer told it came from a previous session
+PASS 9 abandoned answer never pasted
+FAIL 10 cycle works after relaunch (via !answer) {"why": "no picker from the new launch"}
+22/24 checks passed

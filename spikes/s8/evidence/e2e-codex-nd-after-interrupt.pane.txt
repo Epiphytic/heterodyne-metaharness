@@ -1,0 +1,41 @@
+› PICK a deploy target
+  └ Your question was sent to the operators as picker e1a1; end your turn now, and their answer will arrive as your next message.
+
+• Noted; ending my turn.
+
+  Worked for 6s • 13:41
+
+› [picker e1a1, answered by alice by reply]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:41
+
+› PICK a deploy target
+
+• Blocked by hook
+  └ Your question was sent to the operators as picker 5027; end your turn now, and their answer will arrive as your next message.
+
+• Noted; ending my turn.
+
+  Worked for 6s • 13:41
+
+› [picker 5027, answered by bob by reply]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:41
+
+› PICK a deploy target
+
+• Blocked by hook
+  └ Your question was sent to the operators as picker 160e; end your turn now, and their answer will arrive as your next message.
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+› Ask Codex to do anything
+
+  gpt-stub default · $R/work
+  ? for shortcuts                                                                                                                                                              ⚠ 1 warning · f2 to view

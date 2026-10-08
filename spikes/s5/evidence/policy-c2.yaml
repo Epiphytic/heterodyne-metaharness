@@ -1,0 +1,62 @@
+{
+ "version": 1,
+ "filesystem_policy": {
+  "include_workdir": false,
+  "read_only": [
+   "/usr",
+   "/lib",
+   "/lib64",
+   "/etc",
+   "/proc",
+   "/dev/urandom",
+   "/run/hz",
+   "$HOME/.nvm/versions/node/v22.22.0/lib/node_modules/@anthropic-ai/claude-code",
+   "$HOME/.codex/packages/standalone/releases/0.160.0-x86_64-unknown-linux-musl",
+   "$HOME/.cache/s5/c2/home/.codex/auth.json"
+  ],
+  "read_write": [
+   "/tmp",
+   "/dev/null",
+   "/dev/tty",
+   "/dev/pts",
+   "$HOME/.cache/s5/c2/home",
+   "$HOME/.cache/s5/c2/work",
+   "/run/hz-bridge"
+  ]
+ },
+ "landlock": {
+  "compatibility": "hard_requirement"
+ },
+ "process": {
+  "run_as_user": "1001",
+  "run_as_group": "1004"
+ },
+ "network_policies": {
+  "codex_model": {
+   "endpoints": [
+    {
+     "host": "chatgpt.com",
+     "port": 443
+    }
+   ],
+   "binaries": [
+    {
+     "path": "$HOME/.codex/packages/standalone/releases/0.160.0-x86_64-unknown-linux-musl/bin/codex"
+    }
+   ]
+  },
+  "probe_control": {
+   "endpoints": [
+    {
+     "host": "api.openai.com",
+     "port": 443
+    }
+   ],
+   "binaries": [
+    {
+     "path": "/usr/bin/curl"
+    }
+   ]
+  }
+ }
+}

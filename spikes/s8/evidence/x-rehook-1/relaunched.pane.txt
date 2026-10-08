@@ -1,0 +1,15 @@
+
+  >_ OpenAI Codex (v0.160.0)
+     $R/work
+  permissions: YOLO mode
+
+› hello one
+
+• ACK
+
+  Worked for <1s • 13:30
+
+› Ask Codex to do anything
+
+  gpt-stub default · $R/work
+  ← for agents · ? for shortcuts

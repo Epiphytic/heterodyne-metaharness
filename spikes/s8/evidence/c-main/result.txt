@@ -1,0 +1,10 @@
+SessionStart (first launch) with no terminal input: yes
+PreToolUse(AskUserQuestion) events: 1
+Stop events after the picker turn: 1
+UserPromptSubmit events: 2, Stop events: 2
+bash-ran exists (bypass, no input): yes
+written.txt exists (bypass, no input): yes
+Notification events: 0
+Stop events from the interrupted turn: 0
+SessionStart after restart (--resume), no input: yes
+turn after restart answered: 1

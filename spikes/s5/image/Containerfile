@@ -1,0 +1,11 @@
+# S5 sandbox workload image: the OpenShell default base plus the tools the
+# S3 probes and hooks need. The agent CLIs are not baked in; the launcher
+# ro-binds the host install dirs at their host paths.
+FROM nvcr.io/nvidia/base/ubuntu:24.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl python3 git iproute2 procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -g 1004 claws && useradd -u 1001 -g 1004 -M -d /sandbox -s /bin/bash agent
+USER 1001:1004
+WORKDIR /sandbox
