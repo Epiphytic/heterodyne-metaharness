@@ -37,9 +37,14 @@ PASS_GAP = 0.2
 OUTCOMES = ("killed", "stale", "survived", "unresolved")
 
 
+class DeadlineReached(Exception):
+    """The global deadline cut an operation short: the entry is kept and reported, never forced."""
+
+
 class Sweeper:
     """One watchdog's cleanup of `dead`. The probes (`tmux`, `connect`, `pid_running`, `try_lock`) and the
-    clock are methods so tests can script them."""
+    clock are methods so tests can script them. Every wait, retry and command timeout is bounded by the
+    time left before the global deadline."""
 
     def __init__(self, dead: Path, deadline: float = DEADLINE,
                  log: Callable[[str], None] = print) -> None:
@@ -49,6 +54,7 @@ class Sweeper:
         self.killed: list[dict[str, Any]] = []
         self.stale: list[dict[str, Any]] = []
         self.pending: dict[str, tuple[str, int | None]] = {}   # name -> (survived | unresolved, pid)
+        self.known: dict[str, int] = {}     # name -> server PID once discovered; its death must be proven
 
     # --- probes ---
 
@@ -58,18 +64,26 @@ class Sweeper:
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
+    def budget(self) -> float:
+        """A timeout for one command: CMD_TIMEOUT, or less if the deadline is nearer."""
+        left = self.end - self.now()
+        if left <= 0:
+            raise DeadlineReached
+        return min(CMD_TIMEOUT, left)
+
     def tmux(self, path: Path, *args: str) -> tuple[int, str]:
         try:
             proc = subprocess.run(["tmux", "-S", str(path), *args], stdin=subprocess.DEVNULL,
-                                  capture_output=True, timeout=CMD_TIMEOUT, check=False)
+                                  capture_output=True, timeout=self.budget(), check=False)
         except (OSError, subprocess.TimeoutExpired):
             return (-1, "")
         return (proc.returncode, proc.stdout.decode("utf-8", "replace"))
 
     def connect(self, path: Path) -> str:
         """`accept`, `refused`, `missing` or `error`."""
+        timeout = self.budget()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(CMD_TIMEOUT)
+        s.settimeout(timeout)
         try:
             s.connect(str(path))
         except FileNotFoundError:
@@ -84,19 +98,29 @@ class Sweeper:
 
     def pid_running(self, pid: int) -> bool:
         """False only if `pid` is proven gone or a zombie; any doubt counts as running."""
+        if Path("/proc/self/stat").exists():
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text()
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return True
+            fields = stat.rsplit(")", 1)[-1].split()
+            return not fields or fields[0] not in ("Z", "X")
+        return self._ps_running(pid)
+
+    def _ps_running(self, pid: int) -> bool:
+        """`ps` where there is no /proc. Only its ordinary "no such process" (exit 1, no output at all)
+        counts as gone; a failed inspection is doubt."""
         try:
-            if Path("/proc/self/stat").exists():
-                try:
-                    stat = Path(f"/proc/{pid}/stat").read_text()
-                except FileNotFoundError:
-                    return False
-                return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
             proc = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdin=subprocess.DEVNULL,
-                                  capture_output=True, timeout=CMD_TIMEOUT, check=False)
-            state = proc.stdout.decode().strip()
-            return bool(state) and not state.startswith("Z")
-        except (OSError, IndexError, subprocess.TimeoutExpired):
+                                  capture_output=True, timeout=self.budget(), check=False)
+        except (OSError, subprocess.TimeoutExpired):
             return True
+        state = proc.stdout.decode("utf-8", "replace").strip()
+        if state:
+            return not state.startswith("Z")
+        return not (proc.returncode == 1 and not proc.stderr.strip())
 
     def try_lock(self, lock: Path) -> tuple[bool, int | None]:
         """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen). Returns
@@ -112,8 +136,9 @@ class Sweeper:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return (True, fd)
             except BlockingIOError:
-                if i < LOCK_TRIES - 1:
-                    self.sleep(LOCK_GAP)
+                if i == LOCK_TRIES - 1 or self.end - self.now() <= LOCK_GAP:
+                    break
+                self.sleep(LOCK_GAP)
             except OSError:
                 break
         os.close(fd)
@@ -133,9 +158,10 @@ class Sweeper:
             except OSError as exc:
                 if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
                     self.log(f"rmdir {self.dead}: {exc}")
-            if self.now() >= self.end:
+            left = self.end - self.now()
+            if left <= 0:
                 return False
-            self.sleep(PASS_GAP)
+            self.sleep(min(PASS_GAP, left))
 
     def sweep(self) -> None:
         try:
@@ -153,9 +179,13 @@ class Sweeper:
                         self.sweep_lock(path)
                 else:
                     self.sweep_socket(path)
+            except DeadlineReached:
+                # Keep what an earlier pass found (survived); otherwise it is unresolved.
+                self.pending.setdefault(name, ("unresolved", self.known.get(name)))
+                return
             except Exception as exc:  # noqa: BLE001 - one entry's failure must not stop the others
                 self.log(f"{path}: {type(exc).__name__}: {exc}")
-                self.pending[name] = ("unresolved", self.pending.get(name, ("", None))[1])
+                self.pending[name] = ("unresolved", self.known.get(name))
 
     def sweep_socket(self, path: Path) -> None:
         pid = self.server_pid(path)
@@ -225,9 +255,13 @@ class Sweeper:
                 os.close(fd)
 
     def server_pid(self, path: Path) -> int | None:
+        """The server's PID, or the one an earlier pass found: once known, only proven death removes
+        the socket (a later failed query is no proof)."""
         code, out = self.tmux(path, "display-message", "-p", "#{pid}")
         text = out.strip()
-        return int(text) if code == 0 and text.isdigit() else None
+        if code == 0 and text.isdigit():
+            self.known[path.name] = int(text)
+        return self.known.get(path.name)
 
     def kill_known(self, path: Path, pid: int) -> None:
         self.log(f"kill-server {path} pid {pid}")
@@ -240,8 +274,11 @@ class Sweeper:
             self.pending[path.name] = ("survived", pid)
 
     def wait(self, pred: Callable[[], bool], seconds: float = DEATH_WAIT) -> bool:
+        """False after `seconds`; DeadlineReached if the global deadline comes first."""
         end = self.now() + seconds
         while not pred():
+            if self.now() >= self.end:
+                raise DeadlineReached
             if self.now() >= end:
                 return False
             self.sleep(0.05)
@@ -257,7 +294,7 @@ class Sweeper:
         for name in sorted(present):
             if name.endswith(".lock") and name[:-5] in present:
                 continue                            # reported with its socket
-            outcome, pid = self.pending.get(name, ("unresolved", None))
+            outcome, pid = self.pending.get(name, ("unresolved", self.known.get(name)))
             out[outcome].append({"path": str(self.dead / name), "pid": pid})
         out["closed"] = closed
         return out

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import tmux_watchdog
 from tmux_guard import start_watchdog
 from tmux_watchdog import Sweeper
 
@@ -176,6 +177,90 @@ def test_a_later_pass_resolves_an_earlier_survivor(tmp_path: Path) -> None:
     closed = s.run()
     summary = s.summary(closed)
     assert closed and summary["survived"] == [] and len(summary["killed"]) == 1
+
+
+def test_a_pid_found_once_is_kept_for_later_passes(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+
+    class FoundOnce(FakeSweeper):
+        def tmux(self, path: Path, *args: str) -> tuple[int, str]:
+            if args[0] == "display-message" and self.commands:
+                self.commands.append(args)
+                return (1, "")                     # discovery fails on every later pass
+            return super().tmux(path, *args)
+
+    s = FoundOnce(dead, connect="refused", running=True)
+    closed = s.run()
+    summary = s.summary(closed)
+    assert not closed and (dead / "aa").exists() and summary["stale"] == []
+    assert summary["survived"] == [{"path": str(dead / "aa"), "pid": 4242}]
+
+
+@pytest.mark.parametrize(("returncode", "stdout", "stderr", "running"), [
+    (1, b"", b"ps: kvm_openfiles: bad thing\n", True),     # inspection failed: not proof of death
+    (2, b"", b"", True),
+    (1, b"", b"", False),                                    # the ordinary "no such process"
+    (0, b"Z\n", b"", False),
+    (0, b"Ss\n", b"", True),
+])
+def test_ps_failure_is_not_death(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode: int,
+                                 stdout: bytes, stderr: bytes, running: bool) -> None:
+    monkeypatch.setattr(tmux_watchdog.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(
+        argv, returncode, stdout, stderr))
+    assert Sweeper(tmp_path)._ps_running(4242) is running
+
+
+def test_a_failed_ps_keeps_the_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    monkeypatch.setattr(tmux_watchdog.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(
+        argv, 1, b"", b"ps: failed"))
+
+    class PsFails(FakeSweeper):
+        def pid_running(self, pid: int) -> bool:
+            return self._ps_running(pid)
+
+    s = PsFails(dead)
+    closed = s.run()
+    assert not closed and (dead / "aa").exists()
+    assert s.summary(closed)["survived"] == [{"path": str(dead / "aa"), "pid": 4242}]
+
+
+def test_the_death_wait_stops_at_the_deadline(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    s = FakeSweeper(dead, running=True, deadline=2.0)
+    closed = s.run()
+    assert s.clock <= 2.0 + 0.05 + 1e-9
+    assert not closed and s.summary(closed)["unresolved"] == [{"path": str(dead / "aa"), "pid": 4242}]
+
+
+def test_lock_retries_stop_at_the_deadline(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa")
+    held = os.open(dead / "aa.lock", os.O_CREAT | os.O_RDWR, 0o600)
+
+    class RealLock(FakeSweeper):
+        try_lock = Sweeper.try_lock
+
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        s = RealLock(dead, pid=None, deadline=0.5)
+        closed = s.run()
+    finally:
+        os.close(held)
+    assert s.clock <= 0.5 + 1e-9
+    assert not closed and s.summary(closed)["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]
+
+
+def test_commands_get_only_the_time_left(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[float] = []
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append(kw["timeout"])
+        return subprocess.CompletedProcess(argv, 1, b"", b"")
+    monkeypatch.setattr(tmux_watchdog.subprocess, "run", run)
+    s = Sweeper(tmp_path, deadline=1.0)
+    s.tmux(tmp_path / "aa", "kill-server")
+    s._ps_running(4242)
+    assert len(seen) == 2 and all(0 < t <= 1.0 for t in seen)
 
 
 # --- the watchdog for real: child pytests killed mid-run (tests 1-8, 10, 11, 13) ---
