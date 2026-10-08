@@ -1,0 +1,23 @@
+
+  >_ OpenAI Codex (v0.160.0)
+     $R/work
+
+  Shall we make a little something out of nothing?
+
+› BASH please
+
+• Running touch $R/bash-ran
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: touch a file outside the workdir
+
+  $ touch $R/bash-ran
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch $R/bash-ran` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

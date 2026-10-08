@@ -1,0 +1,15 @@
+{"hook_event_name": "SessionStart", "source": "startup"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "PICK a deploy target for me", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Which deploy target should I use?", "header": "Target", "options": [{"label": "staging", "description": "the staging host"}, {"label": "production", "description": "the production host"}], "multiSelect": false}]}, "tool_use_id": "toolu_4e9db1089b7b4d38b3d5", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "[picker s8p1, answered by alice by reply] production", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "BASH please", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "EDITOUT please", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "PICK again", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Which deploy target should I use?", "header": "Target", "options": [{"label": "staging", "description": "the staging host"}, {"label": "production", "description": "the production host"}], "multiSelect": false}]}, "tool_use_id": "toolu_f9b4100ef7f548cebff1", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "SessionStart", "source": "resume"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "hello again", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}

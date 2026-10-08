@@ -1,0 +1,3 @@
+{"hook_event_name": "SessionStart", "source": "startup", "permission_mode": "default"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "BASH please", "permission_mode": "default"}
+{"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "touch $R/bash-ran", "description": "touch a file outside the workdir"}, "permission_mode": "default"}

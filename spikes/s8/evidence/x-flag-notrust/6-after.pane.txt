@@ -1,0 +1,39 @@
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+› PICK a deploy target for me
+
+• Noted; ending my turn.
+
+  Worked for <1s • 13:16
+
+› [picker s8p1, answered by alice by reply] production
+
+• ACK
+
+  Worked for <1s • 13:16
+
+› BASH please
+
+• Ran touch $R/bash-ran
+  └ (no output)
+
+• Noted; ending my turn.
+
+  Worked for <1s • 13:16
+
+› PICK again
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+› hello again
+
+• ACK
+
+  Worked for <1s • 13:17
+
+› Ask Codex to do anything
+
+  gpt-stub default · $R/work
+  ? for shortcuts                                                                                                                                                             ⚠ 3 warnings · f2 to view

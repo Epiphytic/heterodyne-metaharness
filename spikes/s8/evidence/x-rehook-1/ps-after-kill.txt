@@ -1,0 +1,7 @@
+    PID    PPID COMMAND
+      1       0 bwrap --die-with-parent --unshare-pid --unshare-ipc --unshare-net --unshare-uts --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /li
+      2       1 /bin/bash $REPO/spikes/s8/probe-codex-rehook.sh
+      9       2 /usr/bin/python3 $REPO/spikes/s8/cxstub.py 18996
+    224       1 $R/codex/packages/app-server-daemon/releases/0.160.0-x86_64-unknown-linux-musl/bin/codex app-server --listen unix:// --managed-
+    347       1 $R/codex/packages/app-server-daemon/releases/0.160.0-x86_64-unknown-linux-musl/bin/codex app-server daemon pid-update-loop
+    542       2 cut -c1-160
