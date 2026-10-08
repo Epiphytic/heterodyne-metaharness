@@ -4,10 +4,8 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +14,7 @@ import pytest
 from admind_waits import hold
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
+from tmux_guard import new_test_socket_path
 
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit, ref_id
@@ -69,7 +68,8 @@ class Harness:
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.fake = FakeWnAgent(tmp_path / "wn.sock")
-        self.tmux = Tmux(f"hz-test-{uuid.uuid4().hex[:8]}")
+        socket_path = new_test_socket_path()
+        self.tmux = Tmux(socket_path.name, socket_path=socket_path)
         self.agent = AdminAgent(self.tmux, self.store, self.settings, self.settings.state_dir / "hook.sock")
         runner = CommandRunner(self.agent, Services(), ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, ControlClient(tmp_path / "wn.sock", "test-token", timeout=5),
@@ -101,8 +101,8 @@ class Harness:
 def drop_tmux(h: Harness) -> None:
     """Kill the test's private tmux server and remove its socket."""
     h.tmux.kill_server()
-    tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
-    (tmpdir / h.tmux.socket_name).unlink(missing_ok=True)
+    assert h.tmux.socket_path is not None
+    h.tmux.socket_path.unlink(missing_ok=True)
 
 
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
@@ -110,8 +110,6 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
              settings_overrides: dict[str, Any] | None = None,
              before_store: Callable[[Harness], Any] | None = None) -> Harness:
     h = Harness(tmp_path, settings_overrides, before_store)
-    if before:
-        before(h)
 
     async def body() -> None:
         await h.fake.start()
@@ -125,6 +123,8 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
                 await task
             await h.fake.stop()
     try:
+        if before:
+            before(h)
         asyncio.run(body())
     finally:
         drop_tmux(h)
@@ -896,7 +896,8 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     h = Harness(tmp_path)
     stub = StubWn(tmp_path / "wn.sock")
     monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: stub)
-    monkeypatch.setattr(cli, "TMUX_SOCKET", h.tmux.socket_name)
+    monkeypatch.setattr(cli, "Tmux", lambda name, launcher=None: Tmux(name, launcher=launcher,
+                                                                      socket_path=h.tmux.socket_path))
 
     async def body() -> int:
         await h.fake.start()

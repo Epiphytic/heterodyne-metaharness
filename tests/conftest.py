@@ -9,6 +9,8 @@ import pytest
 
 from heterodyne import platform
 
+pytest_plugins = ("tmux_guard",)    # test tmux servers are cleaned up even if pytest is killed
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Keep tmp_path short on macOS.
