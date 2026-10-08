@@ -45,22 +45,19 @@ AU-3 creates the tables those items need. Until they land, every launch uses acc
 
 ## 2. Data shapes
 
-### 2.1 Credential key (D1, default login only)
+### 2.1 Credential key (D1): AU-2's definition
 
-New module `src/heterodyne/wsd/credentials.py`. AU-2 later extends it to named accounts.
+AU-3 doesn't define a credential key of its own. It uses AU-2's (`docs/superpowers/specs/2026-10-08-au2-config-design.md` on au2-config-design at 39f2b82, §"Credential identity", still under review).
+- **Identity:** the adapter plus its canonical login files, `Path(login_dir, f).resolve(strict=False)` for each `f` in `config/capabilities.LOGIN_FILES[adapter]`. From S7, those are `.credentials.json` for claude-code and `auth.json` for codex.
+- **Key:** `"ck1-" + sha256("\0".join([adapter, *login_files])).hexdigest()[:32]`. It is never 64 hex characters, so it never trips the redaction.
+- **The implicit `default`** lives at the fixed `~/.claude` and `~/.codex` (AU-2's open question 2). The environment never moves it.
+- **The key depends on paths only.** A token refresh keeps the key. Repointing a login, for example by re-symlinking `.credentials.json`, changes it. That is the "credential replacement" in the acceptance list.
 
-- **Login file set per adapter.** From S7:
-  - `claude-code` is `{<config dir>/.credentials.json}`;
-  - `codex` is `{<codex home>/auth.json}`.
-- **The default login's directories** are the CLI's own defaults: `~/.claude` and `~/.codex`, with `~` resolved from the passwd entry.
-  - The environment is never read (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), because D1 says the environment can't select an account.
-- **`identity(adapter) -> Identity | None`.** It resolves each login file with `Path.resolve(strict=True)`. It returns None (does not resolve) when any of these holds:
-  - a file is missing;
-  - the resolved path is not a regular file;
-  - the resolve raises.
-- **`key(identity) -> str`.** It is `"ck1-" + sha256(canonical JSON {"adapter", "files": sorted canonical paths}).hexdigest()[:32]`.
-  - It is truncated to 128 bits so no 64-hex value ever reaches a log, a bead or a test fixture.
-  - The key depends on paths only. A token refresh rewrites the file and keeps the key. Repointing the login, for example by re-symlinking `.credentials.json` to another file, changes the key. That is the "credential replacement" in the acceptance list.
+AU-3 adds two things on top:
+- **`current_key(adapter, account)`** recomputes the key at launch with AU-2's function, from the `Account` that `resolve_accounts` returned for the loaded config. It is not cached from config load, because a repoint between the entry and the dispatch must be seen (D2's check before launch).
+- **"The default login's credential identity resolves"** (D2 adoption) is stricter than AU-2's `strict=False` canonical form. Every login file of the implicit default must `resolve(strict=True)` to a regular file. AU-2 allows an absent login, but adoption needs the login the session actually ran on. `current_key` returns None when the login doesn't resolve this way.
+
+**Dependency.** Using AU-2's module makes AU-3 depend on AU-2's `config/accounts.py` and `config/capabilities.py`. The plan's graph doesn't have that edge (AU-3 → G1, AU-0, plan 3). Either add AU-2 as a blocker of AU-3, or land those two modules first.
 
 **`Accounts` interface.** The guard reads accounts only through this, so tests can change eligibility and logins between steps:
 
@@ -73,10 +70,10 @@ class Accounts(Protocol):
 ```
 
 AU-3 ships `DefaultOnly`:
-- `configured` returns `()`;
+- `configured` returns the adapter's named accounts from AU-2's `resolve_accounts`, minus `default`. That is `()` until AU-6 enables login binding;
 - `eligible` is true for `default`;
 - `choose` returns `Chosen("default", key)`, or `AccountChanged` when `previous_key` is set and differs from the default login's current key.
-  - A changed key is a switch (D7). With no switching capability demonstrated (the AU-2 table is empty), a switch is `account_changed`, never a fresh first launch.
+  - A changed key is a switch (D7). A switch is allowed only with `CAPABILITIES[adapter].can_switch` (AU-2), which is false while that table is empty. Without it, a switch is `account_changed`, never a fresh first launch.
   - An unresolvable default login is `AccountChanged` too, with detail "the default login does not resolve".
 
 AU-5 replaces `choose` with its `gate`, and the guard's call site stays the same.
@@ -330,4 +327,4 @@ New files: `tests/test_wsd_launches.py` and `tests/test_wsd_journal_upgrade.py`.
 11. **Plan 3 unchanged.** `test_ensure_record_never_rewrites_an_existing_record` passes unchanged. The existing park, pickup and recovery suites pass with the fake runtime returning `Started`. Tests asserting `LAUNCH_UNCERTAIN` after a raised launch now assert STUCK `unexpected_state` and are listed in the PR.
 12. **Release of a no-receipt hold.** It stops the session, sets `launched`, and the next resume gates with that key as the previous one.
 
-Install-agnostic: test homes are `tmp_path` scratch dirs, and the keys are the truncated 32-hex form.
+Install-agnostic: test homes are `tmp_path` scratch dirs, and the keys are AU-2's `ck1-` 32-hex form.
