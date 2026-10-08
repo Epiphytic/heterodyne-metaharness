@@ -44,7 +44,14 @@ from heterodyne.wsd.beads import (
     WorktreeConflict,
 )
 from heterodyne.wsd.journal import EntryConflict, Op, OpKind, OpStatus, now
-from heterodyne.wsd.launches import ABANDONED, LAUNCHED, LaunchEntry, LaunchesUnreadable, Receipt
+from heterodyne.wsd.launches import (
+    ABANDONED,
+    LAUNCHED,
+    MAX_GENERATION,
+    LaunchEntry,
+    LaunchesUnreadable,
+    Receipt,
+)
 from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, RuntimeUnavailable, Session
 from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.upgrade import (
@@ -791,7 +798,11 @@ class Parker:
         if isinstance(chosen, AccountChanged):
             self.escalate_from(op, Reason.ACCOUNT_CHANGED, chosen.detail)
             return Launch.ENDED
-        n = 1 + max((e.generation for e in entries), default=0)
+        last = max((e.generation for e in entries), default=0)
+        if last >= MAX_GENERATION:
+            self.escalate_from(op, Reason.UNEXPECTED_STATE, f"generations exhausted at {last}")
+            return Launch.ENDED
+        n = last + 1
         entry = LaunchEntry(rec.session_key, n, self.ws.name, op.bead, rec.role, rec.profile, chosen.account,
                             chosen.key, self.ws.models.get(rec.profile, ""), False, now())
         with j.transaction():

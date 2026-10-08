@@ -20,6 +20,7 @@ LAUNCHES_KEY = "wsd_launches"
 SET_ONCE = ("dispatched_at", "native_id", "model_reported", "outcome")
 LAUNCHED = "launched"
 ABANDONED = "abandoned"
+MAX_GENERATION = 2**63 - 1      # SQLite's largest INTEGER: no generation follows it
 Outcome = Literal["launched", "abandoned"]
 
 
@@ -27,7 +28,7 @@ class LaunchEntry(msgspec.Struct, frozen=True, omit_defaults=True, forbid_unknow
     """One launch, as journaled and as copied to the bead. In the bead copy the set-once fields are
     omitted while empty, never written as null."""
     session_key: str
-    generation: Annotated[int, msgspec.Meta(ge=1)]     # decoding a bead copy enforces it
+    generation: Annotated[int, msgspec.Meta(ge=1, le=MAX_GENERATION)]   # decoding a bead copy enforces it
     ws: str
     bead: str
     role: str

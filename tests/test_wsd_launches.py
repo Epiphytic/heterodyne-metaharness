@@ -22,6 +22,7 @@ from heterodyne.wsd.checkpoints import Checkpoint
 from heterodyne.wsd.journal import EntryConflict, Journal, OpKind
 from heterodyne.wsd.launches import (
     LAUNCHES_KEY,
+    MAX_GENERATION,
     LaunchEntry,
     LaunchesUnreadable,
     Receipt,
@@ -71,8 +72,8 @@ def test_an_unreadable_launch_array_is_never_guessed_at(value: object) -> None:
         decode_launches(value)
 
 
-@pytest.mark.parametrize("generation", [0, -3])
-def test_a_generation_below_1_is_unreadable(generation: int) -> None:
+@pytest.mark.parametrize("generation", [0, -3, MAX_GENERATION + 1])
+def test_a_generation_outside_sqlite_integers_is_unreadable(generation: int) -> None:
     with pytest.raises(LaunchesUnreadable):
         decode_launches("[" + msgspec.json.encode(entry(generation)).decode() + "]")
 
@@ -306,9 +307,23 @@ def test_an_entry_with_an_outcome_is_never_dispatched(tmp_path: Path) -> None:
     assert row_reason(rig) is Reason.UNEXPECTED_STATE and rig.runtime.calls == 1
 
 
-@pytest.mark.parametrize("generation", [0, -1])
+def test_the_last_generation_is_exhausted_never_overflowed(tmp_path: Path) -> None:
+    """r2 finding 5: generation 2**63-1 rebuilds, but no generation follows it: UNEXPECTED_STATE, nothing
+    launched."""
+    rig = resumable(tmp_path)
+    meta = rig.world.beads["btq-1"].metadata
+    meta[LAUNCHES_KEY] = meta[LAUNCHES_KEY].replace('"generation":1', f'"generation":{MAX_GENERATION}')
+    rig.pickup()
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.UNEXPECTED_STATE and "exhausted" in row.detail
+    assert rig.runtime.calls == 1 and [e.generation for e in rig.journal.launches_of(WS, "btq-1")] == [
+        1, MAX_GENERATION]
+
+
+@pytest.mark.parametrize("generation", [0, -1, MAX_GENERATION + 1])
 def test_a_bead_entry_with_no_valid_generation_holds(tmp_path: Path, generation: int) -> None:
-    """r1 finding 2: a generation below 1 is unreadable, never inserted: UNEXPECTED_STATE."""
+    """r1 finding 2, r2 finding 5: a generation below 1 or above SQLite's INTEGER range is unreadable,
+    never inserted: UNEXPECTED_STATE."""
     rig = resumable(tmp_path)
     meta = rig.world.beads["btq-1"].metadata
     meta[LAUNCHES_KEY] = meta[LAUNCHES_KEY].replace('"generation":1', f'"generation":{generation}')
