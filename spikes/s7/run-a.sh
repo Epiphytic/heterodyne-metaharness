@@ -2,6 +2,7 @@
 # Scenario A: claude -p against the local stub, no network, a dummy API key, a fresh config dir.
 set -u
 D=$(cd "$(dirname "$0")" && pwd); S7=${S7:-/tmp/s7}; PORT=${PORT:-18999}; CXPORT=${CXPORT:-18998}
+. "$D/isolate.sh"
 R=$S7/runA; rm -rf $R; mkdir -p $R/home $R/claude $R/work
 cat > $R/claude/settings.json <<J
 {"hooks":{

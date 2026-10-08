@@ -3,6 +3,7 @@
 # then a handoff relaunch under B with a generation-specific session ID. Stub in "ok" mode, no network.
 set -u
 D=$(cd "$(dirname "$0")" && pwd); S7=${S7:-/tmp/s7}; PORT=${PORT:-18999}; CXPORT=${CXPORT:-18998}
+. "$D/isolate.sh"
 R=$S7/runC; rm -rf $R; mkdir -p $R/home $R/claude $R/work
 STUB_MODE=ok STUB_LOG=$R/stub.jsonl python3 $D/stub.py $PORT & SP=$!
 sleep 0.5; cd $R/work

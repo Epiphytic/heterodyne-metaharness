@@ -4,6 +4,7 @@
 # plus A2: account A's file with an access token that has already expired. No network.
 set -u
 D=$(cd "$(dirname "$0")" && pwd); S7=${S7:-/tmp/s7}; PORT=${PORT:-18999}; CXPORT=${CXPORT:-18998}
+. "$D/isolate.sh"
 R=$S7/runD; rm -rf $R; mkdir -p $R
 STUB_MODE=ok STUB_LOG=$R/stub.jsonl python3 $D/stub.py $PORT & SP=$!
 sleep 0.5

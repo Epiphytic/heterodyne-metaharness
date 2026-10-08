@@ -3,6 +3,7 @@
 # AUTH=apikey or AUTH=oauth (a dummy token; the stub never checks it).
 set -u
 D=$(cd "$(dirname "$0")" && pwd); S7=${S7:-/tmp/s7}; PORT=${PORT:-18999}; CXPORT=${CXPORT:-18998}
+. "$D/isolate.sh"
 R=$S7/runB-$AUTH-${MODE:-429}; rm -rf $R; mkdir -p $R/home $R/claude $R/work
 cat > $R/claude/settings.json <<J
 {"statusLine":{"type":"command","command":"$D/dump.sh $R/statusline.jsonl"},
