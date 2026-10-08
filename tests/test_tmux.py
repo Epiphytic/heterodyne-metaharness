@@ -1,13 +1,11 @@
-import os
 import shutil
 import sys
-import tempfile
 import time
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from tmux_guard import new_test_tmux
 
 from heterodyne.tmux import Tmux
 
@@ -16,11 +14,11 @@ pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not i
 
 @pytest.fixture
 def tmux() -> Iterator[Tmux]:
-    t = Tmux(f"hz-test-{uuid.uuid4().hex[:8]}")
+    t = new_test_tmux()
     yield t
     t.kill_server()
-    tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
-    (tmpdir / t.socket_name).unlink(missing_ok=True)
+    assert t.socket_path is not None
+    t.socket_path.unlink(missing_ok=True)
 
 
 def wait_for(pred, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]

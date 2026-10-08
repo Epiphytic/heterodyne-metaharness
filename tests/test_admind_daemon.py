@@ -4,10 +4,8 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -16,8 +14,9 @@ import pytest
 from admind_waits import hold
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
+from tmux_guard import new_test_tmux
 
-from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent
+from heterodyne.admind.agent import SESSION, TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit, ref_id
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import (
@@ -69,7 +68,7 @@ class Harness:
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.fake = FakeWnAgent(tmp_path / "wn.sock")
-        self.tmux = Tmux(f"hz-test-{uuid.uuid4().hex[:8]}")
+        self.tmux = new_test_tmux()
         self.agent = AdminAgent(self.tmux, self.store, self.settings, self.settings.state_dir / "hook.sock")
         runner = CommandRunner(self.agent, Services(), ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, ControlClient(tmp_path / "wn.sock", "test-token", timeout=5),
@@ -101,8 +100,8 @@ class Harness:
 def drop_tmux(h: Harness) -> None:
     """Kill the test's private tmux server and remove its socket."""
     h.tmux.kill_server()
-    tmpdir = Path(os.environ.get("TMUX_TMPDIR") or tempfile.gettempdir()) / f"tmux-{os.getuid()}"
-    (tmpdir / h.tmux.socket_name).unlink(missing_ok=True)
+    assert h.tmux.socket_path is not None
+    h.tmux.socket_path.unlink(missing_ok=True)
 
 
 def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
@@ -110,8 +109,6 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
              settings_overrides: dict[str, Any] | None = None,
              before_store: Callable[[Harness], Any] | None = None) -> Harness:
     h = Harness(tmp_path, settings_overrides, before_store)
-    if before:
-        before(h)
 
     async def body() -> None:
         await h.fake.start()
@@ -125,6 +122,8 @@ def run_with(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
                 await task
             await h.fake.stop()
     try:
+        if before:
+            before(h)
         asyncio.run(body())
     finally:
         drop_tmux(h)
@@ -896,13 +895,22 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     h = Harness(tmp_path)
     stub = StubWn(tmp_path / "wn.sock")
     monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: stub)
-    monkeypatch.setattr(cli, "TMUX_SOCKET", h.tmux.socket_name)
+    # Portable: no systemd scope (the launcher has its own tests); the server binds in the watched root.
+    monkeypatch.setattr(cli, "tmux_launcher", lambda _s: None)
+
+    def harness_tmux(_name: str, launcher: object = None) -> Tmux:
+        assert launcher is None
+        return h.tmux                       # the Harness's own guarded server, which drop_tmux tears down
+    monkeypatch.setattr(cli, "Tmux", harness_tmux)
 
     async def body() -> int:
         await h.fake.start()
         task = asyncio.create_task(cli._serve(h.settings, h.store, h.audit, "b2" * 32, Services()))
         try:
             await h.fake.wait_subscribed(10)
+            await h.say("hello")
+            await h.until(lambda: "echo: hello" in h.texts(), 30)     # the agent really started and answers
+            assert h.tmux.has_session(SESSION)
             os.kill(os.getpid(), signal.SIGTERM)
             return await asyncio.wait_for(task, 10)
         finally:
@@ -914,6 +922,7 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     assert code == 0 and stub.stopped
     audit = audit_text(h)
     assert '"action": "stop"' in audit and "b2" * 32 not in audit and ACCOUNT not in audit
+    assert '"action": "start-failed"' not in audit
 
 
 @pytest.mark.parametrize("make", [

@@ -1,0 +1,138 @@
+# Specimens for the tmux source scan (tests/tmux_guard.py `scan`; spec 2026-10-08-test-tmux-leak-design.md,
+# Amendment 1, A2). Not a .py file, so pytest never imports or collects it, and the scan skips it by name.
+# Each block runs from its header to the next one. Header: `# specimen: <rule id> <flag|pass> <name>`,
+# where the rule id and flag|pass are what scanning the block as tests/test_x.py gives (`none` for pass).
+
+# specimen: alias-socket-path flag as-alias
+from heterodyne.tmux import Tmux as T
+T("x", socket_path=path)
+
+# specimen: alias-socket-path flag module-attribute
+from heterodyne import tmux
+tmux.Tmux("x", socket_path=path)
+
+# specimen: alias-socket-path flag assigned
+from heterodyne.tmux import Tmux
+T = Tmux
+U = T
+U("x", socket_path=path)
+
+# specimen: kwargs flag double-star
+from heterodyne.tmux import Tmux
+Tmux("x", **kw)
+
+# specimen: raw-tmux-S flag list
+subprocess.run(["tmux", "-S", str(path), "kill-server"], check=False)
+
+# specimen: raw-tmux-S flag tuple
+argv = ("tmux", "-S", str(path), "list-sessions")
+
+# specimen: raw-tmux-S flag call-args
+run_command("tmux", "-S", str(path), "kill-server")
+
+# specimen: private-ref flag new-socket-path
+from tmux_guard import _new_socket_path
+
+# specimen: private-ref flag open-parent
+fd = tmux_guard._open_parent(path)
+
+# specimen: private-ref flag open-lock-at
+fd = _open_lock_at(parent)
+
+# specimen: alias-socket-path flag child-as-alias
+BODY = '''
+from heterodyne.tmux import Tmux as T
+T("x", socket_path=path)
+'''
+
+# specimen: alias-socket-path flag child-module-attribute
+BODY = '''
+from heterodyne import tmux
+tmux.Tmux("x", socket_path=path)
+'''
+
+# specimen: alias-socket-path flag child-assigned
+BODY = '''
+T = Tmux
+T("x", socket_path=path)
+'''
+
+# specimen: kwargs flag child-double-star
+BODY = '''
+Tmux("x", **kw)
+'''
+
+# specimen: raw-tmux-S flag child-list
+BODY = '''
+def out(sock, *args):
+    return subprocess.run(["tmux", "-S", str(sock), *args], capture_output=True, text=True).stdout
+'''
+
+# specimen: raw-tmux-S flag child-tuple
+BODY = '''
+argv = ("tmux", "-S", str(path))
+'''
+
+# specimen: raw-tmux-S flag child-call-args
+BODY = '''
+run_command("tmux", "-S", str(path), "kill-server")
+'''
+
+# specimen: private-ref flag child-new-socket-path
+BODY = '''
+from tmux_guard import _new_socket_path
+'''
+
+# specimen: private-ref flag child-open-parent
+BODY = '''
+fd = tmux_guard._open_parent(path)
+'''
+
+# specimen: private-ref flag child-open-lock-at
+BODY = '''
+fd = _open_lock_at(parent)
+'''
+
+# specimen: private-ref flag grandchild
+OUTER = """
+INNER = '''
+from tmux_guard import _new_socket_path
+'''
+"""
+
+# specimen: none pass guarded
+from tmux_guard import guarded_tmux, new_test_tmux
+t = new_test_tmux()
+t.new_session("s", cwd, argv)
+guarded_tmux(t.socket_path, "display-message", "-p", "#{pid}")
+
+# specimen: none pass by-name
+from heterodyne.tmux import Tmux
+Tmux("hz-test-never-started").kill_server()
+subprocess.run(["tmux", "-L", "hz-test-x", "kill-server"], check=False)
+subprocess.run(["ps", "-S", "x"], check=False)
+
+# specimen: raw-tmux-S flag watchdog-kill
+def tmux(self, path, *args):
+    return subprocess.run(["tmux", "-S", str(path), *args], stdin=subprocess.DEVNULL, check=False)
+
+# specimen: private-ref flag guard-helper
+def begin_lock_open(socket_path):
+    parent = _open_parent(socket_path)
+    return lambda: _open_lock_at(parent)
+
+# specimen: alias-socket-path flag mocked-selector
+def test_socket_path_selects_with_dash_s(monkeypatch, tmp_path):
+    rec = Calls()
+    monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
+    Tmux("hz-test-x", socket_path=tmp_path / "sock").kill_server()
+
+# specimen: alias-socket-path flag mocked-selector-renamed
+def test_some_other_selector(monkeypatch, tmp_path):
+    rec = Calls()
+    monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
+    Tmux("hz-test-x", socket_path=tmp_path / "sock").kill_server()
+
+# specimen: alias-socket-path flag mocked-selector-unpatched
+def test_socket_path_selects_with_dash_s(monkeypatch, tmp_path):
+    Tmux("hz-test-x", socket_path=tmp_path / "sock").kill_server()
