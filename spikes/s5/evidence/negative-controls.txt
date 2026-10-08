@@ -1,0 +1,151 @@
+# Negative controls after review r1 (sids n1-n6). Each must end in launch refused with the sandbox deleted.
+# n4 (leak-env) also hit a hung host-side 'podman inspect' (it raced concurrent plain-podman runs); killing that
+# PID made outer-fence-network-none FAIL as well, so n4 doubles as a fence-failure control. outer_fence now has a
+# 30 s timeout. n6 is the clean leak-env rerun.
+=== S5_SELFTEST_INJECT=canary-missing launch.py up claude n1
+PASS freshness-gate [access token 5.20 h left, need > 2.25 h; no refresh is attempted here]
+ABORT canary-precondition: $HOME/.s5-canary not readable outside (No such file or directory)
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=3
+sandbox listed after down: 0
+=== S5_SELFTEST_INJECT=oa-canary-inside launch.py up claude n2
+PASS freshness-gate [access token 5.20 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+PASS outer-fence-network-none [workload container NetworkMode=none]
+INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+PASS hook-event-accepted [reply={"ok": true}]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+FAIL other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/n2/home/oa-canary-copy->READABLE; chosen:$HOME/.cache/s5/n2/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=1
+sandbox listed after down: 0
+=== S5_SELFTEST_INJECT=chosen-mismatch launch.py up claude n3
+PASS freshness-gate [access token 5.20 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+PASS outer-fence-network-none [workload container NetworkMode=none]
+INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+PASS hook-event-accepted [reply={"ok": true}]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+FAIL other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-n3->ENOENT; chosen:$HOME/.cache/s5/n3/home/.claude/.credentials.json sha256-match=False write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=1
+sandbox listed after down: 0
+=== S5_SELFTEST_INJECT=leak-env launch.py up claude n4
+PASS freshness-gate [access token 5.20 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+FAIL outer-fence-network-none [workload container NetworkMode=]
+INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+PASS hook-event-accepted [reply={"ok": true}]
+FAIL host-env-not-inherited [unexpected vars: LEAK]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-n4->ENOENT; chosen:$HOME/.cache/s5/n4/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=1
+sandbox listed after down: 0
+=== S5_SELFTEST_INJECT=leak-env launch.py up claude n6   (clean rerun of n4, see note)
+PASS freshness-gate [access token 5.10 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+PASS outer-fence-network-none [workload container NetworkMode=none]
+INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+PASS hook-event-accepted [reply={"ok": true}]
+FAIL host-env-not-inherited [unexpected vars: LEAK]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-n6->ENOENT; chosen:$HOME/.cache/s5/n6/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=1
+sandbox listed after down: 0
+=== S5_SELFTEST_INJECT=socket-dead launch.py up claude n5
+PASS freshness-gate [access token 5.11 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+PASS outer-fence-network-none [workload container NetworkMode=none]
+INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
+INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+FAIL control-op-rejected [reply=socket error ECONNREFUSED]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+FAIL hook-event-accepted [reply=socket error ECONNREFUSED]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-n5->ENOENT; chosen:$HOME/.cache/s5/n5/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST FAIL (launch refused)
+launch refused: deleting the sandbox
+rc=1
+sandbox listed after down: 0

@@ -1,0 +1,7 @@
+$ tmux -L s5spike list-sessions
+c2: 1 windows (created Thu Oct  8 13:13:31 2026)
+t1: 1 windows (created Thu Oct  8 13:08:50 2026)
+$ tmux -L s5spike list-clients -t t1   (while a read-only break-glass attach runs under script(1))
+/dev/pts/28 attached to t1 readonly=1
+$ tmux -L s5spike list-clients -t c2   (while a read-only break-glass attach runs under script(1))
+/dev/pts/29 attached to c2 readonly=1

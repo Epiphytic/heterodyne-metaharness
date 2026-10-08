@@ -1,0 +1,33 @@
+# Review r1 #3: why direct connects get EACCES inside OpenShell, and where the kernel fence is.
+$ openshell sandbox exec -n s5-a2 -- python3 - < netbattery.py   # socket battery + netns/routes/seccomp
+tcp4 connect: EACCES
+tcp6 connect: EACCES
+udp4 connect: EACCES
+udp4 connect then send: EACCES
+udp4 sendto: EDESTADDRREQ
+icmp4 dgram (ping socket): socket() -> EPROTONOSUPPORT
+raw4 icmp: socket() -> EPROTONOSUPPORT
+sctp4: socket() -> EPROTONOSUPPORT
+packet: socket() -> EPERM
+/proc/net/dev ifaces: ['lo']
+/proc/net/route entries: 0
+/proc/net/ipv6_route: ['lo', 'lo', 'lo']
+netns: net:[4026533105]
+CapEff:	0000000000000000
+CapBnd:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	2
+Seccomp_filters:	6
+
+$ podman inspect (host side) of the sandbox containers
+openshell-default--s5-a2-61e4dc10-7e57-47c5-b63e-5e019ef53b15 NetworkMode=none pid1=/opt/openshell/bin/openshell-sandbox launch-capability-free 1001 1004 /.openshell/channel/sandbox/bootstrap.json /sandbox
+openshell-supervisor-61e4dc10-7e57-47c5-b63e-5e019ef53b15 NetworkMode=host
+
+# Source (OpenShell 0.1.2, crates/openshell-sandbox/src/network_broker.rs): a seccomp user-notification
+# broker traps INET socket()/connect()/sendto(). create_socket admits only TCP/UDP (else EPROTONOSUPPORT);
+# a policy-denied TCP connect and a non-DNS UDP connect answer EACCES (tcp_denial_errno); a destination-bearing
+# non-DNS UDP sendto answers EDESTADDRREQ (classify_send). The broker answers before the kernel would, so
+# ENETUNREACH (shown by the plain --network=none control) is never observable inside OpenShell.
+# The workload netns has only lo (podman NetworkMode=none: the kernel fence). Egress exists only through the
+# supervisor container (NetworkMode=host), which runs the policy proxy: the broker holds each connect(2) until
+# the supervisor decides, then relays an allowed one to it (PendingTcpOpen). The 1.1.1.1 / 2606:4700:4700::1111 targets are public probe addresses.

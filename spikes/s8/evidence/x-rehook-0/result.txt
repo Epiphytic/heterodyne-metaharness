@@ -1,0 +1,5 @@
+codex processes left after kill-session: 2
+relaunch: fresh
+launch 2 prompt answered: 2
+L1 events in total: 3; L1 events naming 'hello two': 0
+L2 events in total: 3

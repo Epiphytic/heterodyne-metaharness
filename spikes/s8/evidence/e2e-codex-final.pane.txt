@@ -1,0 +1,38 @@
+› [picker a9dd, answered by alice by reply]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:41
+
+› PICK a deploy target
+
+• Noted; ending my turn.
+
+  Worked for 6s • 13:41
+
+› [picker 1325, answered by bob by reply]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:41
+
+› PICK a deploy target
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+› PICK a deploy target
+
+• Noted; ending my turn.
+
+› PICK a deploy target
+
+• Noted; ending my turn.
+
+  Worked for 30s • 13:42
+
+› Ask Codex to do anything
+
+  gpt-stub default · $R/work
+  ← for agents · ? for shortcuts

@@ -1,0 +1,14 @@
+{"hook_event_name": "SessionStart", "source": "startup", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "PICK a deploy target for me", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "PreToolUse", "tool_name": "request_user_input", "tool_input": {"questions": [{"id": "target", "header": "Target", "question": "Which deploy target should I use?", "options": [{"label": "staging", "description": "the staging host"}, {"label": "production", "description": "the production host"}]}]}, "tool_use_id": "call_1575b7df", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "[picker s8p1, answered by alice by reply] production", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "BASH please", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "PICK again", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "PreToolUse", "tool_name": "request_user_input", "tool_input": {"questions": [{"id": "target", "header": "Target", "question": "Which deploy target should I use?", "options": [{"label": "staging", "description": "the staging host"}, {"label": "production", "description": "the production host"}]}]}, "tool_use_id": "call_7c9d707b", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Interrupt", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "SessionStart", "source": "resume", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "hello again", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}

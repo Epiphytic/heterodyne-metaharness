@@ -1,0 +1,2 @@
+SessionStart (first launch) with no terminal input: yes
+bash-ran exists: no

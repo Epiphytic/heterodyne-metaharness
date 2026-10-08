@@ -11,7 +11,7 @@ from typing import Any
 
 from heterodyne import config as hconfig
 from heterodyne import platform
-from heterodyne.config import layers, paths
+from heterodyne.config import accounts, layers, paths
 
 
 def cmd_platform(_: argparse.Namespace) -> int:
@@ -38,11 +38,19 @@ def cmd_config_check(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 1
     for key, value in _flatten(cfg.values):
-        print(f"{key} = {value!r}    ({cfg.sources.get(key, '?')})")
+        shown = "<hidden>" if _is_login_dir(key) else repr(value)   # D10: no message shows a login path
+        print(f"{key} = {shown}    ({cfg.sources.get(key, '?')})")
     print(f"policy: approvers={list(cfg.policy.approvers)}  (policy.toml)")
     if len({p.get("model") for p in cfg.get("profiles", {}).values()}) < 2:
         print("note: only one model configured; reviews will be adversarial (two LLMs recommended, §11.1)")
+    for warning in accounts.warnings(cfg.values):
+        print(warning)
     return 0
+
+
+def _is_login_dir(key: str) -> bool:
+    parts = key.split(".")
+    return len(parts) == 3 and parts[0] == "accounts" and parts[2] == "login_dir"
 
 
 def _create_new(dest: Path, text: str) -> bool:

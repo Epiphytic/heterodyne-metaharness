@@ -1,0 +1,12 @@
+SessionStart (first launch) with no terminal input: NO (30 s)
+ready prompt on screen with no input: yes
+SessionStart events once the first prompt was sent: 1
+PreToolUse(request_user_input) events: 1
+Stop events after the picker turn: 1
+UserPromptSubmit events: 2, Stop events: 2
+bash-ran exists (bypass, no input): yes
+Stop events from the interrupted turn: 0
+Interrupt events: 1
+SessionStart after restart (codex resume --last), no input: NO
+SessionStart after restart, once a prompt was sent: 1
+turn after restart answered: 2

@@ -64,12 +64,23 @@ See `examples/config.toml` for a commented sample.
   - `ro_mounts_approved`: a list of **absolute** directory paths a workstream may add as extra read-only mounts. A missing or empty list allows none.
 - **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. `wsd` reads `[integrations.beads]` (see [wsd.md](wsd.md#1-configuration)); nothing reads `[integrations.marmot]` yet.
 - **`[wsd]`:** the workstream daemon's timers and limits; see [wsd.md](wsd.md#1-configuration).
+- **`[accounts.<name>]`** (ADR 0001 §4.4 D1): a named login for one adapter, with exactly two keys:
+  - `adapter`: one of `adapters.known`;
+  - `login_dir`: the directory that holds the login, an absolute path or `~/...` (expanded against `HOME`). It is a path, not a secret, so a `{ file }` or `{ command }` reference is refused. The key is `login_dir`, not `auth_dir`, because the secret-name check flags any key with an `auth` segment.
+  - Names are plain identifiers (`[A-Za-z][A-Za-z0-9_-]{0,63}`), and `default` is reserved for the adapter's own login. A name with a secret-like segment, such as `codex-auth`, is refused by the secret scan; pick another.
+  - Every adapter also has an implicit `default` account: `~/.claude` for `claude-code` and `~/.codex` for `codex`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are not read, because the environment can't select a login.
+  - No two accounts, the implicit defaults included, may share a login: their login directories can't be equal or nested, and no login file (`.credentials.json`, `auth.json`) may resolve, through a symlink or a hard link, to another account's file.
+  - **Currently refused on every adapter.** Accounts are accepted only on an adapter for which spike S7 demonstrated login binding (§4.4 D9), and it hasn't for either yet.
+- **`profiles.<p>.accounts`**: an optional, non-empty list of account names, in order of preference, each for the profile's adapter. Without it the profile uses the adapter's default login. `default` can't be listed.
+- **`profiles.<p>.failover`**: `"none"` (the default) uses only the first account, and usage only defers work. `"next"` moves to the next eligible account; it is refused unless S7 demonstrated a trusted usage read for the adapter (§4.4 D6), which it hasn't for either yet. Whether a provider's terms allow switching accounts is the operator's call.
+- **`[usage]`** (§4.4 D3–D5; defaults shown): `reserve_percent = 5` (an integer from 0 to 50), `stale_minutes = 30`, `unknown_backoff_minutes = 30`, `untrusted_max_defer_minutes = 60`, `min_recheck_seconds = 60`, `max_window_hours = 192`. The others are positive integers, with `min_recheck_seconds` at most 60 × the smallest of `stale_minutes`, `unknown_backoff_minutes` and `untrusted_max_defer_minutes`, and `untrusted_max_defer_minutes` and `unknown_backoff_minutes` each at most 60 × `max_window_hours`. Unknown keys are refused.
+- **No login path in errors.** No error names a login directory or file; a login that can't be resolved (a symlink loop, for example) is reported by account name and reason only.
 
 ### Workstream config (`workstreams/<ws>.toml`)
 
 See `examples/workstreams/example.toml` for a commented sample. The file is loaded only by `config check --workstream <ws>`; if it doesn't exist, the workstream layer is empty.
 
-- **Allowed top-level tables:** `roles`, `repos`, `sandbox`, `cron`, `render`, `timeouts` and `restrict`. Any other key is an error, so no policy key can be set here.
+- **Allowed top-level tables:** `roles`, `repos`, `sandbox`, `cron`, `render`, `timeouts` and `restrict`. Any other key is an error, so no policy key can be set here. `[accounts]` and `[usage]` get their own error: they are host-only, and workstreams choose profiles, never accounts.
 - **`[roles]`** must be a table of strings, and each value must name a profile that exists in the defaults or host config.
 - **`[repos]`** names the workstream's repositories for `wsd`: absolute or `~/` paths, one of them `default` (see [wsd.md](wsd.md#1-configuration)).
 - **`[sandbox]`** may contain only `extra_ro_mounts` and `extra_egress`, both lists of strings:
@@ -185,7 +196,7 @@ Error messages never echo a secret. A scan error names the layer, the indexed pa
 heterodyne config check [--workstream <ws>]
 ```
 
-It loads and validates every layer and the policy. On success it prints each merged value as `key = value    (source)`, then the approvers, then a note if fewer than two distinct models are configured, and exits 0. On any error it prints `config error: <message>` to stderr and exits 1.
+It loads and validates every layer and the policy. On success it prints each merged value as `key = value    (source)`, then the approvers, then a note if fewer than two distinct models are configured, then any account warnings, and exits 0. Each `accounts.<name>.login_dir` prints as `<hidden>`, with its source. The warnings, which don't change the exit code, are for a profile listing more than one account with `failover = "none"` (only the first is used) and for `failover = "next"` without accounts. On any error it prints `config error: <message>` to stderr and exits 1.
 
 Output after `heterodyne setup`, shortened:
 

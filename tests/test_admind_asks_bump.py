@@ -823,7 +823,8 @@ def test_a_deny_reply_on_a_repeat_denies(tmp_path: Path) -> None:
         command, _ = await repeated_card(h, ask_id)
         last = sent_mid(h, f"askr:{ask_id}:{command}:{len(repeat_rows(h, ask_id, command)) - 1}")
         assert last is not None
-        assert await say(h, "deny no", last) == f"Denied {BEAD} as op (via Marmot).\nNo more asks in flight."
+        assert await say(h, "deny no", last) == (f"Denied {BEAD} as op (via Marmot).\n"
+                                                 "No other asks outstanding or in flight.")
         assert ask_status(h, ask_id) == "denied" and decisions(h)[0][-2:] == ["--deny", "--note=no"]
     go(tmp_path, scenario)
 

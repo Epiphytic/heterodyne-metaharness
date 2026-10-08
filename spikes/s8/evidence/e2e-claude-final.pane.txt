@@ -1,0 +1,49 @@
+
+❯ [picker 9ea4, answered by alice by reply]
+  staging
+
+● ACK
+
+✻ Cogitated for 0s · done 1:41 PM
+
+❯ PICK a deploy target
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker 7aca; end your turn now, and their answer will arrive as your next message.
+
+● Noted; ending my turn.
+
+✻ Baked for 6s · done 1:41 PM
+
+❯ [picker 7aca, answered by bob by reply]
+  staging
+
+● ACK
+
+✻ Baked for 0s · done 1:41 PM
+
+❯ PICK a deploy target
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker 403c; end your turn now, and their answer will arrive as your next message.
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ PICK a deploy target
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker 4f4d; end your turn now, and their answer will arrive as your next message.
+
+● Session model stub-model could not be restored (not a model this version of Claude Code recognizes) — using the default model instead.
+
+❯ PICK a deploy target
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker 81ca; end your turn now, and their answer will arrive as your next message.
+
+● Noted; ending my turn.
+
+✻ Brewed for 0s · done 1:41 PM
+
+❯ [picker 81ca, answered by alice by !answer]
+  staging
+
+● ACK
+
+✻ Cooked for 0s · done 1:41 PM
+                                                                                                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── admin-agent ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

@@ -10,7 +10,7 @@ MAX_APPROVAL_CARD. The daemon does the I/O.
 import json
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -254,11 +254,21 @@ def approval_head(row: AskRow) -> str:
             "(a local process; unverified)")
 
 
-def in_flight(others: int) -> str:
-    """How many other asks are active (open, answered, deciding or uncertain), for the operator."""
-    if others == 0:
-        return "No more asks in flight."
-    return f"{others} other ask{'' if others == 1 else 's'} in flight."
+def in_flight(outstanding: int, processing: int = 0) -> str:
+    """How many other asks are active, for the operator: outstanding (open, no operator response
+    yet) first, then in flight (answered, deciding or uncertain, being processed by the harness)."""
+    if outstanding == 0 and processing == 0:
+        return "No other asks outstanding or in flight."
+    head = (f"{outstanding} other ask{'' if outstanding == 1 else 's'} outstanding" if outstanding
+            else "No other asks outstanding")
+    return f"{head}, {processing} in flight." if processing else f"{head}."
+
+
+def count_others(rows: Iterable[AskRow]) -> tuple[int, int]:
+    """(outstanding, in flight) among `rows`, which are active asks other than the one replied about."""
+    rows = list(rows)
+    outstanding = sum(1 for o in rows if o.status == "open")
+    return outstanding, len(rows) - outstanding
 
 
 def decision_lines(bead: str) -> list[str]:
@@ -310,14 +320,15 @@ def _checked(text: str, chunk_chars: int) -> list[str] | None:
     return parts if all(redact(p) == p for p in parts) else None
 
 
-def approval_card(row: AskRow, r: Readout, chunk_chars: int, others: int = 0) -> ApprovalCard | str:
+def approval_card(row: AskRow, r: Readout, chunk_chars: int,
+                  others: tuple[int, int] = (0, 0)) -> ApprovalCard | str:
     """The card for the readout `r`, whole, or why it is refused: REDACTED if it fails R21, then TOO_LONG if
     the readout is over MAX_APPROVAL_CARD characters (R8). The readout is the title, the ask (linked beads
-    and refs included) and the description, as approve-bead renders them. `others` is the count of other
-    asks in flight when it is posted."""
+    and refs included) and the description, as approve-bead renders them. `others` is (outstanding, in
+    flight) among the other asks when it is posted."""
     if row.bead is None or r.digest is None:
         return REDACTED         # not reached: postable() refuses a readout without a digest first
-    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}", in_flight(others)]
+    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}", in_flight(*others)]
     card = _whole(top, r, decision_lines(row.bead), chunk_chars)
     return card if isinstance(card, str) else ApprovalCard(card, card)
 

@@ -1,0 +1,1 @@
+SessionStart (first launch) with no terminal input: NO (30 s)
