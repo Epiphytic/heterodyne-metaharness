@@ -1,0 +1,3 @@
+SessionStart (first launch) with no terminal input: NO (30 s)
+ready prompt on screen with no input: yes
+bash-ran exists: yes

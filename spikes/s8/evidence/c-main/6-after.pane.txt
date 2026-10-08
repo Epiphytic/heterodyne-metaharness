@@ -1,0 +1,49 @@
+ ▝▝   ▝▝   $R/work
+
+❯ PICK a deploy target for me
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker s8p1; end your turn now, and their answer will arrive as your next message.
+
+● Noted; ending my turn.
+
+✻ Brewed for 0s · done 1:12 PM
+
+❯ [picker s8p1, answered by alice by reply] production
+
+● ACK
+
+✻ Brewed for 0s · done 1:12 PM
+
+❯ BASH please
+
+  Ran 1 shell command
+
+● Noted; ending my turn.
+
+✻ Sautéed for 0s · done 1:12 PM
+
+❯ EDITOUT please
+
+● Write($R/written.txt)
+  ⎿  Wrote 1 line to ../written.txt
+      1 s8
+
+● Noted; ending my turn.
+
+✻ Baked for 0s · done 1:12 PM
+
+❯ PICK again
+  ⎿  Error: PreToolUse:AskUserQuestion hook error: Your question was sent to the operators as picker s8p1; end your turn now, and their answer will arrive as your next message.
+  ⎿  Interrupted · What should Claude do instead?
+
+● Session model stub-model could not be restored (not a model this version of Claude Code recognizes) — using the default model instead.
+
+❯ hello again
+
+● ACK
+
+✻ Sautéed for 0s · done 1:13 PM
+                                                                                                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── admin-agent ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

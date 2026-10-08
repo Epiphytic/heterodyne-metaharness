@@ -1,0 +1,3 @@
+clients while attached: 1
+events: attached /dev/pts/1 N;detached;attached /dev/pts/1 N;detached;
+client-attached events: 2, client-detached events: 2

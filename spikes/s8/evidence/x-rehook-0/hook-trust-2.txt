@@ -1,0 +1,3 @@
+sessionStart untrusted user
+userPromptSubmit untrusted user
+stop untrusted user

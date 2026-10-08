@@ -1,0 +1,3 @@
+{"hook_event_name": "SessionStart", "source": "resume", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "hello two", "permission_mode": "bypassPermissions"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "bypassPermissions"}

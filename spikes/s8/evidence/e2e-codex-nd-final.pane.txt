@@ -1,0 +1,39 @@
+› PICK a deploy target
+
+  Worked for 6s • 13:35
+
+› [picker bb09, answered by bob by reply]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:35
+
+› PICK a deploy target
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+› PICK a deploy target
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+› PICK a deploy target
+
+• Blocked by hook
+  └ Your question was sent to the operators as picker 3f02; end your turn now, and their answer will arrive as your next message.
+
+• Noted; ending my turn.
+
+  Worked for <1s • 13:36
+
+› [picker 3f02, answered by alice by !answer]
+  staging
+
+• ACK
+
+  Worked for <1s • 13:36
+
+› Ask Codex to do anything
+
+  gpt-stub default · $R/work
+  ? for shortcuts                                                                                                                                                              ⚠ 1 warning · f2 to view

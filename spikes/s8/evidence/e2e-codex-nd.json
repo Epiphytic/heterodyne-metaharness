@@ -1,0 +1,705 @@
+{
+ "adapter": "codex",
+ "checks": [
+  {
+   "check": "1 picker became a card",
+   "ok": true,
+   "card": "Picker 4ccc from the admin agent: Which deploy target should I use?"
+  },
+  {
+   "check": "1 Stop after the denied picker set the turn-ended mark",
+   "ok": true
+  },
+  {
+   "check": "1 answer delivered after Stop",
+   "ok": true,
+   "status": "delivered"
+  },
+  {
+   "check": "1 agent received the attributed answer exactly once",
+   "ok": true,
+   "hits": 1
+  },
+  {
+   "check": "2 second answer told 'already answered'",
+   "ok": true
+  },
+  {
+   "check": "2 second answer not pasted",
+   "ok": true
+  },
+  {
+   "check": "3 non-operator answer and reaction dropped",
+   "ok": true
+  },
+  {
+   "check": "3 operator's number reaction delivered",
+   "ok": true,
+   "answer": "staging",
+   "route": "reaction"
+  },
+  {
+   "check": "4 redactable picker not posted",
+   "ok": true
+  },
+  {
+   "check": "4 denial asking for plain text reached the model",
+   "ok": true
+  },
+  {
+   "check": "5 early answer selected but not pasted before Stop",
+   "ok": true
+  },
+  {
+   "check": "5 early answer pasted only after Stop",
+   "ok": true
+  },
+  {
+   "check": "6 revoked answerer's answer invalidated, picker open again",
+   "ok": true
+  },
+  {
+   "check": "6 next valid answer delivered at once (mark kept)",
+   "ok": true,
+   "by": "bob"
+  },
+  {
+   "check": "7 interrupt fired no Stop and set no mark",
+   "ok": true
+  },
+  {
+   "check": "7 answer not pasted after interrupt",
+   "ok": true
+  },
+  {
+   "check": "7 missing-Stop notice posted once",
+   "ok": true
+  },
+  {
+   "check": "7 !asks cancel closes it",
+   "ok": true
+  },
+  {
+   "check": "8 stale-launch Stop ignored",
+   "ok": true
+  },
+  {
+   "check": "9 no CLI process outlives its tmux session",
+   "ok": true,
+   "left": "0"
+  },
+  {
+   "check": "9 relaunch abandons the answered, never-reserved picker",
+   "ok": true
+  },
+  {
+   "check": "9 later answer told it came from a previous session",
+   "ok": true
+  },
+  {
+   "check": "9 abandoned answer never pasted",
+   "ok": true
+  },
+  {
+   "check": "10 cycle works after relaunch (via !answer)",
+   "ok": true,
+   "route": "!answer"
+  }
+ ],
+ "log": [
+  {
+   "t": 1791491720.022,
+   "kind": "launched",
+   "launch": "ebb6b25e5697830d",
+   "resume": false
+  },
+  {
+   "t": 1791491728.427,
+   "kind": "hook",
+   "event": "SessionStart",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491728.444,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491728.474,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491728.474,
+   "kind": "picker",
+   "picker": "4ccc"
+  },
+  {
+   "t": 1791491728.474,
+   "kind": "posted",
+   "text": "Picker 4ccc from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491728.508,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491728.542,
+   "kind": "answered",
+   "picker": "4ccc",
+   "by": "alice",
+   "route": "reply"
+  },
+  {
+   "t": 1791491728.542,
+   "kind": "P",
+   "picker": "4ccc"
+  },
+  {
+   "t": 1791491728.542,
+   "kind": "reserved",
+   "picker": "4ccc"
+  },
+  {
+   "t": 1791491728.85,
+   "kind": "pasted",
+   "picker": "4ccc"
+  },
+  {
+   "t": 1791491728.874,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491728.874,
+   "kind": "delivered",
+   "picker": "4ccc"
+  },
+  {
+   "t": 1791491728.903,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491731.947,
+   "kind": "posted",
+   "text": "Picker 4ccc was already answered by alice.",
+   "reply_to": "<hex>"
+  },
+  {
+   "t": 1791491734.387,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491734.417,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491734.418,
+   "kind": "picker",
+   "picker": "da6d"
+  },
+  {
+   "t": 1791491734.418,
+   "kind": "posted",
+   "text": "Picker da6d from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491734.452,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491734.459,
+   "kind": "dropped",
+   "why": "not an operator",
+   "text": "1"
+  },
+  {
+   "t": 1791491734.459,
+   "kind": "dropped",
+   "why": "not an operator",
+   "emoji": "1\ufe0f\u20e3"
+  },
+  {
+   "t": 1791491737.462,
+   "kind": "answered",
+   "picker": "da6d",
+   "by": "bob",
+   "route": "reaction"
+  },
+  {
+   "t": 1791491737.462,
+   "kind": "P",
+   "picker": "da6d"
+  },
+  {
+   "t": 1791491737.462,
+   "kind": "reserved",
+   "picker": "da6d"
+  },
+  {
+   "t": 1791491737.769,
+   "kind": "pasted",
+   "picker": "da6d"
+  },
+  {
+   "t": 1791491737.793,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491737.793,
+   "kind": "delivered",
+   "picker": "da6d"
+  },
+  {
+   "t": 1791491737.821,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491740.2,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491740.23,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491740.23,
+   "kind": "refused",
+   "why": "redaction"
+  },
+  {
+   "t": 1791491740.258,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491743.609,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491743.638,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491743.638,
+   "kind": "picker",
+   "picker": "2c73"
+  },
+  {
+   "t": 1791491743.638,
+   "kind": "posted",
+   "text": "Picker 2c73 from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491743.685,
+   "kind": "answered",
+   "picker": "2c73",
+   "by": "alice",
+   "route": "reply"
+  },
+  {
+   "t": 1791491749.675,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491749.675,
+   "kind": "P",
+   "picker": "2c73"
+  },
+  {
+   "t": 1791491749.675,
+   "kind": "reserved",
+   "picker": "2c73"
+  },
+  {
+   "t": 1791491749.982,
+   "kind": "pasted",
+   "picker": "2c73"
+  },
+  {
+   "t": 1791491750.046,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491750.046,
+   "kind": "delivered",
+   "picker": "2c73"
+  },
+  {
+   "t": 1791491750.078,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491752.432,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491752.461,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491752.461,
+   "kind": "picker",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491752.461,
+   "kind": "posted",
+   "text": "Picker bb09 from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491752.509,
+   "kind": "answered",
+   "picker": "bb09",
+   "by": "alice",
+   "route": "reply"
+  },
+  {
+   "t": 1791491758.495,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491758.495,
+   "kind": "P",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491758.495,
+   "kind": "invalidated",
+   "picker": "bb09",
+   "by": "alice"
+  },
+  {
+   "t": 1791491759.523,
+   "kind": "answered",
+   "picker": "bb09",
+   "by": "bob",
+   "route": "reply"
+  },
+  {
+   "t": 1791491759.523,
+   "kind": "P",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491759.523,
+   "kind": "reserved",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491759.831,
+   "kind": "pasted",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491759.854,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491759.854,
+   "kind": "delivered",
+   "picker": "bb09"
+  },
+  {
+   "t": 1791491759.884,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491762.261,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491762.289,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491762.289,
+   "kind": "picker",
+   "picker": "a85d"
+  },
+  {
+   "t": 1791491762.29,
+   "kind": "posted",
+   "text": "Picker a85d from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491762.336,
+   "kind": "answered",
+   "picker": "a85d",
+   "by": "alice",
+   "route": "reply"
+  },
+  {
+   "t": 1791491772.299,
+   "kind": "posted",
+   "text": "Picker a85d: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
+   "reply_to": "<hex>"
+  },
+  {
+   "t": 1791491775.342,
+   "kind": "cancelled",
+   "picker": "a85d",
+   "by": "alice"
+  },
+  {
+   "t": 1791491775.342,
+   "kind": "posted",
+   "text": "Picker a85d cancelled.",
+   "reply_to": "<hex>"
+  },
+  {
+   "t": 1791491776.785,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491776.816,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491776.816,
+   "kind": "picker",
+   "picker": "98f0"
+  },
+  {
+   "t": 1791491776.817,
+   "kind": "posted",
+   "text": "Picker 98f0 from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491776.857,
+   "kind": "hook",
+   "event": "Stop",
+   "current": false,
+   "tool": null
+  },
+  {
+   "t": 1791491776.857,
+   "kind": "answered",
+   "picker": "98f0",
+   "by": "alice",
+   "route": "reply"
+  },
+  {
+   "t": 1791491779.497,
+   "kind": "launched",
+   "launch": "9d54dc1065be2f9b",
+   "resume": true
+  },
+  {
+   "t": 1791491779.497,
+   "kind": "posted",
+   "text": "This question came from a previous agent session; your answer was not delivered.",
+   "reply_to": "<hex>"
+  },
+  {
+   "t": 1791491782.938,
+   "kind": "hook",
+   "event": "SessionStart",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491782.953,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491782.979,
+   "kind": "hook",
+   "event": "PreToolUse",
+   "current": true,
+   "tool": "request_user_input"
+  },
+  {
+   "t": 1791491782.979,
+   "kind": "picker",
+   "picker": "3f02"
+  },
+  {
+   "t": 1791491782.98,
+   "kind": "posted",
+   "text": "Picker 3f02 from the admin agent: Which deploy target should I use?",
+   "reply_to": null
+  },
+  {
+   "t": 1791491783.007,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491783.011,
+   "kind": "answered",
+   "picker": "3f02",
+   "by": "alice",
+   "route": "!answer"
+  },
+  {
+   "t": 1791491783.011,
+   "kind": "P",
+   "picker": "3f02"
+  },
+  {
+   "t": 1791491783.011,
+   "kind": "reserved",
+   "picker": "3f02"
+  },
+  {
+   "t": 1791491783.318,
+   "kind": "pasted",
+   "picker": "3f02"
+  },
+  {
+   "t": 1791491783.344,
+   "kind": "hook",
+   "event": "UserPromptSubmit",
+   "current": true,
+   "tool": null
+  },
+  {
+   "t": 1791491783.344,
+   "kind": "delivered",
+   "picker": "3f02"
+  },
+  {
+   "t": 1791491783.371,
+   "kind": "hook",
+   "event": "Stop",
+   "current": true,
+   "tool": null
+  }
+ ],
+ "sent": [
+  {
+   "text": "Picker 4ccc from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "Picker 4ccc was already answered by alice.",
+   "reply_to": "<hex>"
+  },
+  {
+   "text": "Picker da6d from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "Picker 2c73 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "Picker bb09 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "Picker a85d from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "Picker a85d: the agent's turn hasn't ended (has answer). !tail to look, !asks cancel, or !new.",
+   "reply_to": "<hex>"
+  },
+  {
+   "text": "Picker a85d cancelled.",
+   "reply_to": "<hex>"
+  },
+  {
+   "text": "Picker 98f0 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  },
+  {
+   "text": "This question came from a previous agent session; your answer was not delivered.",
+   "reply_to": "<hex>"
+  },
+  {
+   "text": "Picker 3f02 from the admin agent: Which deploy target should I use?\n1. staging\n2. production\nReply with a number or your own answer, or react with the option's number.",
+   "reply_to": null
+  }
+ ]
+}

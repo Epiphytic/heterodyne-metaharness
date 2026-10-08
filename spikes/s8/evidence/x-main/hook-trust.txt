@@ -1,0 +1,6 @@
+preToolUse untrusted user
+permissionRequest untrusted user
+sessionStart untrusted user
+userPromptSubmit untrusted user
+stop untrusted user
+interrupt untrusted user

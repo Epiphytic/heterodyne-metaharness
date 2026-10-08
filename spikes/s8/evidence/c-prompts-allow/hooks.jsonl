@@ -1,0 +1,4 @@
+{"hook_event_name": "SessionStart", "source": "startup"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "BASH please", "permission_mode": "default"}
+{"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "touch $R/bash-ran", "description": "touch a file"}, "permission_suggestions": [{"type": "addDirectories", "directories": ["$R"], "destination": "session"}, {"type": "setMode", "mode": "acceptEdits", "destination": "session"}], "permission_mode": "default"}
+{"hook_event_name": "Stop", "stop_hook_active": false, "permission_mode": "default"}
