@@ -5,6 +5,8 @@ specific enforcement passes: a generic failure (missing canary, dead socket, tim
 Under OpenShell the egress refusal is a connect() EACCES from the supervisor's transparent
 interception (not a CONNECT 403), so the marker is the policy-DNS synthetic address, and the
 launcher checks the supervisor's own log afterwards (as S3 checked proxy.log).
+Run twice per launch: by a separate `sandbox exec` (path "exec") and by the agent itself through
+its own tool (path "agent"), so the agent's process tree is probed too.
 Usage: probes.py < JSON from launch.py
 """
 import errno
@@ -18,6 +20,7 @@ import sys
 
 cfg = json.load(sys.stdin)
 TOKEN = cfg['token']
+PATH = cfg.get('path', 'exec')
 SYNTHETIC = ipaddress.ip_network('198.18.0.0/15')   # OpenShell policy DNS answers from this range
 rc = 0
 
@@ -85,20 +88,59 @@ ok = marker and c == 'EACCES' and cu.returncode == 7 and 'Permission denied' in 
 check('non-allowlisted-host-blocked', ok,
       f'{host} -> {",".join(addrs)} (policy-DNS synthetic={marker}) connect -> {c}; curl rc={cu.returncode}')
 
-# 3. Direct network: only lo, no route, and a raw connect to a literal address is refused
-#    (EACCES by the interception; ENETUNREACH/EHOSTUNREACH would also be no-route). UDP and IPv6 too.
+# 3. Direct network. Under OpenShell this is two layers, and both must show:
+#    - the kernel fence: the workload's netns has only lo and no route (podman --network none,
+#      checked from outside as outer-fence-network-none);
+#    - OpenShell's seccomp user-notification broker (Seccomp: 2) answers every INET socket op
+#      before the kernel can: TCP and UDP connect() -> EACCES (TcpOpenDenial::PolicyDenied),
+#      a destination-bearing UDP send that is not DNS -> EDESTADDRREQ, any other INET socket type
+#      (raw, ICMP) -> EPROTONOSUPPORT at socket().
+#    So the literal-address connect fails with EACCES, never "unreachable": a deviation from r14's
+#    wording that needs an ADR amendment. Only these exact broker answers pass.
 with open('/proc/net/dev') as f:
     ifs = [ln.split(':')[0].strip() for ln in f.readlines()[2:]]
 non_lo = [i for i in ifs if i != 'lo']
 with open('/proc/net/route') as f:
     routes = len(f.readlines()) - 1
+with open('/proc/net/ipv6_route') as f:
+    routes6 = [ln.split()[-1] for ln in f if ln.split()[-1] != 'lo']
+status = dict(ln.split(':', 1) for ln in open('/proc/self/status') if ':' in ln)
+seccomp = status.get('Seccomp', '').strip()
+nnp = status.get('NoNewPrivs', '').strip()
+capeff = status.get('CapEff', '').strip()
+
+
+def sock_create(fam, kind, proto) -> str:
+    try:
+        socket.socket(fam, kind, proto).close()
+        return 'CREATED'
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+
+
 c4 = connect(('1.1.1.1', 443))            # install-agnostic: allow=ip-port (public anycast probe target)
-u4 = connect(('1.1.1.1', 53), kind=socket.SOCK_DGRAM)   # install-agnostic: allow=ip-port
 c6 = connect(('2606:4700:4700::1111', 443), family=socket.AF_INET6)
-refused = ('EACCES', 'ENETUNREACH', 'EHOSTUNREACH', 'EPERM', 'EAFNOSUPPORT', 'EADDRNOTAVAIL')
-ok = not non_lo and routes == 0 and c4 in refused[:3] and u4 in refused + ('EDESTADDRREQ',) and c6 in refused
+
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    u.connect(('1.1.1.1', 53))           # install-agnostic: allow=ip-port
+    uc = 'CONNECTED'
+except OSError as e:
+    uc = errno.errorcode.get(e.errno, str(e.errno))
+finally:
+    u.close()
+us = connect(('1.1.1.1', 53), kind=socket.SOCK_DGRAM)   # install-agnostic: allow=ip-port
+raw = sock_create(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+icmp = sock_create(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+ok = (not non_lo and routes == 0 and not routes6 and seccomp == '2' and nnp == '1' and int(capeff, 16) == 0
+      and c4 == 'EACCES' and c6 == 'EACCES' and uc == 'EACCES' and us == 'EDESTADDRREQ'
+      and raw == 'EPROTONOSUPPORT' and icmp == 'EPROTONOSUPPORT')
 check('direct-network-blocked', ok,
-      f"non-lo interfaces={non_lo or 'none'} routes={routes} tcp 1.1.1.1:443 -> {c4} udp 1.1.1.1:53 -> {u4} tcp6 -> {c6}")  # install-agnostic: allow=ip-port
+      f"DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): "
+      f"non-lo interfaces={non_lo or 'none'} ipv4 routes={routes} ipv6 non-lo routes={len(routes6)} "
+      f"Seccomp={seccomp} NoNewPrivs={nnp} CapEff={capeff} "
+      f"tcp4 connect -> {c4} tcp6 connect -> {c6} udp connect -> {uc} udp sendto -> {us} "
+      f"raw socket -> {raw} icmp socket -> {icmp}")
 
 # 4. Control op on the session socket, with a valid token, gets the explicit forbidden reply.
 r = sock({'token': TOKEN, 'type': 'approve', 'payload': {}})
@@ -115,6 +157,20 @@ issuer = next((ln.split('issuer:')[1].strip() for ln in cu.stderr.splitlines() i
 ok = cu.returncode == 0 and 'OpenShell Sandbox CA' in issuer and 'http=000' not in cu.stdout
 check('allowlisted-host-reachable', ok, f"curl rc={cu.returncode} {cu.stdout} issuer='{issuer}'")
 
+# 6b. The model host's policy names only the CLI binary, and OpenShell also authorizes a binary's
+#     executable ancestors. So curl reaches it only from inside the agent's own process tree: on
+#     the agent path it must be reachable (through the proxy), on the separate exec path refused.
+#     The launcher checks the supervisor log for the matching ALLOWED/DENIED line.
+cu = subprocess.run(['curl', '-sv', '-o', '/dev/null', '--max-time', '10', '-w', 'http=%{http_code}',
+                     f"https://{cfg['model_host']}/"], capture_output=True, text=True)
+issuer = next((ln.split('issuer:')[1].strip() for ln in cu.stderr.splitlines() if 'issuer:' in ln), '')
+if PATH == 'agent':
+    ok = cu.returncode == 0 and 'OpenShell Sandbox CA' in issuer
+else:
+    ok = cu.returncode == 7 and 'Permission denied' in cu.stderr
+check(f'model-host-{PATH}-path', ok, f"{cfg['model_host']}: curl rc={cu.returncode} {cu.stdout} issuer='{issuer}' "
+      f"(expect {'reachable via the CLI ancestor' if PATH == 'agent' else 'refused: no CLI ancestor'})")
+
 # 7. Hook event with the valid token is accepted.
 r = sock({'token': TOKEN, 'type': 'hook_event', 'payload': {}})
 check('hook-event-accepted', r == '{"ok": true}', f'reply={r}')
@@ -129,7 +185,10 @@ SHELL = {'PWD', 'SHLVL', '_', 'OLDPWD'}
 extra = sorted(set(os.environ) - LAUNCHER - OPENSHELL - SHELL)
 user_env = set(json.loads(os.environ.get('OPENSHELL_USER_ENVIRONMENT', '{}')))
 extra += sorted(f'USER_ENVIRONMENT:{k}' for k in user_env - LAUNCHER - OPENSHELL)
-check('host-env-not-inherited', not extra, f"unexpected vars: {' '.join(extra) or 'none'}")
+if PATH == 'exec':
+    check('host-env-not-inherited', not extra, f"unexpected vars: {' '.join(extra) or 'none'}")
+else:   # the agent's tool env carries the CLI's own variables; the launcher env is proven on the exec path
+    print(f"INFO agent-tool-env [vars beyond the launcher set: {' '.join(sorted(k.split(':')[-1] for k in extra))}]")
 
 # 9. (added) OpenShell's own control material is not readable by the workload.
 paths = ['/.openshell/channel/sandbox/bootstrap.json', '/.openshell/channel/sandbox/server.key',

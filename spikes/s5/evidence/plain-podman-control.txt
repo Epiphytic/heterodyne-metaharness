@@ -1,22 +1,27 @@
-=== plain podman run --network=pasta (no OpenShell): probes must FAIL
+# Review r1 #3 control: the same probes.py outside OpenShell. Under plain --network=none the kernel answers
+# ENETUNREACH (no route); the strict direct-network probe still FAILS there because it requires the
+# OpenShell broker's specific answers (EACCES/EDESTADDRREQ/EPROTONOSUPPORT, NoNewPrivs=1).
+=== plain podman run --network=pasta (no OpenShell, same probes.py): probes must FAIL
 PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
 FAIL non-allowlisted-host-blocked [example.org -> 104.20.26.136,172.66.157.237 (policy-DNS synthetic=False) connect -> not-tried; curl rc=0]
-FAIL direct-network-blocked [non-lo interfaces=['eno1'] routes=6 tcp 1.1.1.1:443 -> CONNECTED udp 1.1.1.1:53 -> SENT tcp6 -> ECONNREFUSED]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+FAIL direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=['eno1'] ipv4 routes=6 ipv6 non-lo routes=4 Seccomp=2 NoNewPrivs=0 CapEff=0000000000000000 tcp4 connect -> CONNECTED tcp6 connect -> ECONNREFUSED udp connect -> CONNECTED udp sendto -> SENT raw socket -> EPERM icmp socket -> EACCES]
 FAIL control-op-rejected [reply=socket error ENOENT]
 PASS wsd-socket-absent [exists=False; /run/hz: absent]
 FAIL allowlisted-host-reachable [curl rc=0 http=421 issuer='C=US; O=Google Trust Services; CN=WE1']
+FAIL model-host-exec-path [api.anthropic.com: curl rc=0 http=404 issuer='C=US; O=Google Trust Services; CN=WE1' (expect refused: no CLI ancestor)]
 FAIL hook-event-accepted [reply=socket error ENOENT]
 FAIL host-env-not-inherited [unexpected vars: LC_CTYPE]
 PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->ENOENT /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
 FAIL other-accounts [canary:/nonexistent->ENOENT]
 rc=1
-=== plain podman run --network=none (no OpenShell): probes must FAIL
+=== plain podman run --network=none (no OpenShell, same probes.py): probes must FAIL
 PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
 FAIL non-allowlisted-host-blocked [example.org -> resolve-error:[Errno -3] Temporary failure in name resolution (policy-DNS synthetic=False) connect -> not-tried; curl rc=6]
-PASS direct-network-blocked [non-lo interfaces=none routes=0 tcp 1.1.1.1:443 -> ENETUNREACH udp 1.1.1.1:53 -> ENETUNREACH tcp6 -> ENETUNREACH]   # install-agnostic: allow=ip-port (public probe target or OpenShell synthetic address in raw output)
+FAIL direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=0 CapEff=0000000000000000 tcp4 connect -> ENETUNREACH tcp6 connect -> ENETUNREACH udp connect -> ENETUNREACH udp sendto -> ENETUNREACH raw socket -> EPERM icmp socket -> EACCES]
 FAIL control-op-rejected [reply=socket error ENOENT]
 PASS wsd-socket-absent [exists=False; /run/hz: absent]
 FAIL allowlisted-host-reachable [curl rc=6 http=000 issuer='']
+FAIL model-host-exec-path [api.anthropic.com: curl rc=6 http=000 issuer='' (expect refused: no CLI ancestor)]
 FAIL hook-event-accepted [reply=socket error ENOENT]
 FAIL host-env-not-inherited [unexpected vars: LC_CTYPE]
 PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->ENOENT /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]

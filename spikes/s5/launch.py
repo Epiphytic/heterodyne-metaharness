@@ -2,13 +2,16 @@
 
 Usage:
   launch.py up <adapter> <sid>        prepare the session, create the sandbox, run the self-test
-  launch.py agent <adapter> <sid>     launch the agent in host tmux (-L s5spike), only after a PASS
+  launch.py agent <adapter> <sid>     re-run the complete self-test, then launch the agent in host tmux
+                                      (-L s5spike) with its lifetime reaper, then have the agent run the
+                                      probes through its own tool; any failure stops the session
   launch.py selftest <adapter> <sid>  re-run the self-test against an existing sandbox
-  launch.py down <sid>                delete the sandbox and stop the session socket
+  launch.py down <sid>                delete the sandbox, stop the session socket and the reaper
 
 <adapter> is claude or codex. The session lives in ~/.cache/s5/<sid>; the sandbox is s5-<sid>.
-Env knobs for negative controls: S5_SELFTEST_INJECT=<probe-name> makes the launcher
-sabotage one precondition so that probe must fail and the launch must be refused.
+Env knobs: S5_ACCOUNT=<name> chooses the account (default: the real login). For negative controls,
+S5_SELFTEST_INJECT=<name> sabotages one precondition so a probe must fail and the launch be refused.
+S5_MAX_LIFETIME_S / S5_STOP_MARGIN_S shorten the lifetime to demonstrate the reaper.
 """
 import base64
 import hashlib
@@ -28,19 +31,26 @@ ROOT = Path.home() / '.cache' / 's5'
 IMAGE = 'localhost/s5-agent:0'
 TMUX = ['tmux', '-L', 's5spike']
 REAL_HOME_CANARY = Path.home() / '.s5-canary'
-MAX_LIFETIME_S = 2 * 3600      # session maximum lifetime for the freshness gate
-STOP_MARGIN_S = 15 * 60
+# Session maximum lifetime and stop margin: the freshness gate requires the token to outlive both,
+# and the reaper (started with the agent) stops the session at the maximum. Env overrides exist only
+# so the reaper can be demonstrated with a short lifetime.
+MAX_LIFETIME_S = int(os.environ.get('S5_MAX_LIFETIME_S', 2 * 3600))
+STOP_MARGIN_S = int(os.environ.get('S5_STOP_MARGIN_S', 15 * 60))
 
 # Accounts per adapter: name -> login dir. 'default' is the adapter's default login (the operator's
-# real one, bound read-only). The others are spike-made dummy accounts, so the Other accounts probe
-# has a present, an absent and an unknown login file to check, and a configured path that is a
-# symlink (so the canonical path differs).
+# real one, bound read-only). The others are spike-made dummy accounts (setup_accounts), so the
+# Other accounts probe has every class to check:
+#   b         present: a dummy login file; its configured dir is a symlink, so the canonical path differs
+#   c         absent:  an empty dir
+#   d         unknown: a dir with mode 000 (cannot be listed)
+#   e         unknown: the login file is a dangling symlink (listed, but cannot be opened)
+#   alias     present: a symlink to the default login dir, so the default login is also checked through
+#             a configured path that differs from its canonical one when another account is chosen
 ACCTS = ROOT / 'accounts'
 ACCOUNTS = {
-    'claude': {'default': Path.home() / '.claude', 'b': ACCTS / 'claude-b-link',
-               'c': ACCTS / 'claude-c', 'd': ACCTS / 'claude-d'},
-    'codex': {'default': Path.home() / '.codex', 'b': ACCTS / 'codex-b-link',
-              'c': ACCTS / 'codex-c', 'd': ACCTS / 'codex-d'},
+    a: {'default': Path.home() / home_dir, 'b': ACCTS / f'{a}-b-link', 'c': ACCTS / f'{a}-c',
+        'd': ACCTS / f'{a}-d', 'e': ACCTS / f'{a}-e', 'alias': ACCTS / f'{a}-default-alias'}
+    for a, home_dir in (('claude', '.claude'), ('codex', '.codex'))
 }
 LOGIN_FILES = {'claude': ['.credentials.json'], 'codex': ['auth.json']}
 CONFIG_ENV = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME'}
@@ -50,6 +60,33 @@ CONFIG_DIR = {'claude': '.claude', 'codex': '.codex'}
 # hosts (platform.claude.com, auth.openai.com) are deliberately absent: no refresh from inside.
 EGRESS = {'claude': ['api.anthropic.com'], 'codex': ['chatgpt.com']}
 PROBE_ALLOWED, PROBE_DENIED = 'api.openai.com', 'example.org'
+
+
+def setup_accounts() -> None:
+    """Create the dummy accounts (idempotent). Dummy login files hold no credential: only a far expiry,
+    so that a dummy account can be the chosen one for a self-test (never for a model call)."""
+    exp = int(time.time() + 30 * 86400)
+    dummy = {'claude': json.dumps({'claudeAiOauth': {'expiresAt': exp * 1000, 'accessToken': 'dummy-not-a-token'}}),
+             'codex': json.dumps({'tokens': {'access_token': 'x.' + base64.urlsafe_b64encode(
+                 json.dumps({'exp': exp}).encode()).decode().rstrip('=') + '.x'}})}
+    ACCTS.mkdir(parents=True, exist_ok=True)
+    for a, (f,) in LOGIN_FILES.items():
+        b = ACCTS / f'{a}-b'
+        b.mkdir(exist_ok=True)
+        (b / f).write_text(dummy[a])
+        (b / f).chmod(0o600)
+        for link, target in ((ACCTS / f'{a}-b-link', b.name), (ACCTS / f'{a}-default-alias', ACCOUNTS[a]['default'])):
+            if not link.is_symlink():
+                link.symlink_to(target)
+        (ACCTS / f'{a}-c').mkdir(exist_ok=True)
+        d = ACCTS / f'{a}-d'
+        if not d.exists():
+            d.mkdir()
+        d.chmod(0o000)
+        e = ACCTS / f'{a}-e'
+        e.mkdir(exist_ok=True)
+        if not (e / f).is_symlink():
+            (e / f).symlink_to(ACCTS / 'nonexistent-target')
 
 
 def cli_binary(name: str) -> Path:
@@ -74,6 +111,7 @@ class Session:
 
     # ---------- preparation ----------
     def prepare(self) -> None:
+        setup_accounts()
         for d in (self.home, self.work, self.run, self.bridge, self.bridge / 'daemon', self.conf):
             d.mkdir(parents=True, exist_ok=True)
         (self.bridge / 'daemon').chmod(0o700)   # codex refuses a socket dir that is not 0700
@@ -213,20 +251,23 @@ def freshness_gate(s: Session) -> bool:
 
 # ---------- Other accounts (§7, revision 14) ----------
 def classify(path: Path) -> str:
+    """present: opens. absent: the dir lists and the name is not in it. unknown: anything else, such
+    as an unlistable dir, or a listed name that does not open (a dangling symlink, EACCES)."""
     try:
         path.open('rb').close()
         return 'present'
-    except FileNotFoundError:
-        try:
-            os.listdir(path.parent)
-            return 'absent'
-        except OSError:
-            return 'unknown'
+    except OSError:
+        pass
+    try:
+        return 'unknown' if path.name in os.listdir(path.parent) else 'absent'
     except OSError:
         return 'unknown'
 
 
 def other_accounts(s: Session) -> list[dict]:
+    """Every login file of every other account, by configured and canonical path. An account whose
+    canonical login file is the chosen one's (an alias of the chosen account) is not "other"."""
+    chosen = {os.path.realpath(src) for src, _ in s.login_binds()}
     out = []
     for name, d in ACCOUNTS[s.adapter].items():
         if name == s.account:
@@ -234,6 +275,9 @@ def other_accounts(s: Session) -> list[dict]:
         for f in LOGIN_FILES[s.adapter]:
             configured = d / f
             canonical = Path(os.path.realpath(configured))
+            if str(canonical) in chosen:
+                print(f'INFO other-account {name}: alias of the chosen account ({configured}), not other')
+                continue
             out.append({'account': name, 'class': classify(configured),
                         'paths': sorted({str(configured), str(canonical)})})
     return out
@@ -249,15 +293,50 @@ def logs_since(s: Session, since: str) -> str:
                           capture_output=True, text=True).stdout
 
 
-def selftest(s: Session) -> int:
-    """Fail closed: 0 only if every outside check and every in-sandbox probe passes."""
-    inject = os.environ.get('S5_SELFTEST_INJECT', '')
-    rc = 0
-    if not freshness_gate(s):
-        return 4
-    # Real-home canary: readable outside immediately before the probes, or abort.
+def log_lines(s: Session, t0: float) -> list[str]:
+    """This run's supervisor log lines (timestamp >= t0 - 2)."""
+    return [ln for ln in logs_since(s, '5m').splitlines()
+            if ln.startswith('[') and float(ln[1:ln.index(']')]) >= t0 - 2]
+
+
+def log_checks(s: Session, t0: float, checks: list[tuple[str, str]]) -> int:
+    lines, rc = log_lines(s, t0), 0
+    for name, needle in checks:
+        hit = [ln for ln in lines if needle in ln]
+        print(f"{'PASS' if hit else 'FAIL'} {name} [{hit[-1].split('[ocsf] ')[-1] if hit else 'missing: ' + needle}]")
+        rc = rc or (0 if hit else 1)
+    return rc
+
+
+def outer_fence(s: Session) -> int:
+    """Outside: the workload container itself has no network (podman --network none). This is the
+    kernel layer under OpenShell's seccomp broker, which answers every INET connect() first. A hung podman
+    call times out, and selftest() turns the exception into a FAIL (seen once with concurrent podman runs)."""
+    ps = subprocess.run(['podman', 'ps', '--filter', f'name=^openshell-default--{s.name}-', '--format', '{{.ID}}'],
+                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.split()
+    mode = (subprocess.run(['podman', 'inspect', '-f', '{{.HostConfig.NetworkMode}}', ps[0]],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.strip() if len(ps) == 1 else f'containers={ps}')
+    ok = mode == 'none'
+    print(f"{'PASS' if ok else 'FAIL'} outer-fence-network-none [workload container NetworkMode={mode}]")
+    return 0 if ok else 1
+
+
+def probe_config(s: Session, path: str) -> dict:
+    """Host-side preconditions (canaries, account classes, pinned hashes) and the probes' input."""
+    s.oa_canary.write_text(secrets.token_hex(8))
+    s.oa_canary.read_bytes()
+    oa = other_accounts(s)
+    for o in oa:
+        print(f"INFO other-account {o['account']}: {o['class']} {' '.join(o['paths'])}")
+    chosen = [{'path': str(dst), 'sha256': sha256(src)} for src, dst in s.login_binds()]
+    return {'path': path, 'real_home_canary': str(REAL_HOME_CANARY), 'oa_canary': str(s.oa_canary),
+            'other_accounts': oa, 'chosen': chosen, 'token': json.loads(s.state.read_text())['token'],
+            'allowed': PROBE_ALLOWED, 'denied': PROBE_DENIED, 'model_host': EGRESS[s.adapter][0]}
+
+
+def canary_precondition() -> int:
     REAL_HOME_CANARY.write_text(secrets.token_hex(8))
-    if inject == 'canary-missing':
+    if os.environ.get('S5_SELFTEST_INJECT') == 'canary-missing':
         REAL_HOME_CANARY.unlink()
     try:
         REAL_HOME_CANARY.read_bytes()
@@ -265,22 +344,51 @@ def selftest(s: Session) -> int:
         print(f'ABORT canary-precondition: {REAL_HOME_CANARY} not readable outside ({e.strerror})')
         return 3
     print(f'PASS canary-precondition [{REAL_HOME_CANARY} readable outside]')
-    # Other accounts: classify on the host, write the outside canary, pin the chosen login hashes.
-    s.oa_canary.write_text(secrets.token_hex(8))
-    s.oa_canary.read_bytes()
-    oa = other_accounts(s)
-    for o in oa:
-        print(f"INFO other-account {o['account']}: {o['class']} {' '.join(o['paths'])}")
-    chosen = [{'path': str(dst), 'sha256': sha256(src)} for src, dst in s.login_binds()]
-    probe_in = {'real_home_canary': str(REAL_HOME_CANARY), 'oa_canary': str(s.oa_canary),
-                'other_accounts': oa, 'chosen': chosen,
-                'token': json.loads(s.state.read_text())['token'],
-                'allowed': PROBE_ALLOWED, 'denied': PROBE_DENIED}
-    if inject == 'oa-canary-inside':     # bind the canary dir in: the probe must see it readable
+    return 0
+
+
+def egress_log_checks(adapter: str, path: str) -> list[tuple[str, str]]:
+    model = EGRESS[adapter][0]
+    # The model host's policy names only the CLI binary. OpenShell also authorizes a connection whose
+    # executable *ancestor* is listed, so curl reaches it only when run from the agent's own process
+    # tree: ALLOWED proves the agent path, DENIED proves the separate exec path is not the agent's.
+    ancestry = (('agent-ancestry-allowed', f'ALLOWED /usr/bin/curl(0) -> {model}:443 [policy:{adapter}_model')
+                if path == 'agent' else
+                ('exec-path-not-agent', f'DENIED /usr/bin/curl(0) -> {model}:443 [reason:transparent_tcp_policy_denied]'))
+    return [('proxy-logged-refusal', f'DENIED /usr/bin/curl(0) -> {PROBE_DENIED}:443 [reason:transparent_tcp_policy_denied]'),
+            ('proxy-logged-allow', f'ALLOWED /usr/bin/curl(0) -> {PROBE_ALLOWED}:443 [policy:probe_control'),
+            ('proxy-logged-direct-deny', '-> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]'),  # install-agnostic: allow=ip-port
+            ancestry]
+
+
+def selftest(s: Session) -> int:
+    """Fail closed. Any earlier result is invalidated first, and the result is written on every exit,
+    so a cached PASS can never stand in for this run."""
+    rcfile = s.dir / 'selftest.rc'
+    rcfile.unlink(missing_ok=True)
+    try:
+        rc = _selftest(s)
+    except Exception as e:   # noqa: BLE001 - any error is a failed self-test
+        print(f'FAIL selftest-error [{type(e).__name__}: {e}]')
+        rc = 1
+    print('SELFTEST', 'PASS' if rc == 0 else 'FAIL (launch refused)', flush=True)
+    rcfile.write_text(str(rc))
+    return rc
+
+
+def _selftest(s: Session) -> int:
+    inject = os.environ.get('S5_SELFTEST_INJECT', '')
+    if not freshness_gate(s):
+        return 4
+    if canary_precondition():
+        return 3
+    rc = outer_fence(s)
+    probe_in = probe_config(s, 'exec')
+    if inject == 'oa-canary-inside':     # point the canary into the bound home: the probe must see it readable
         probe_in['oa_canary'] = str(s.home / 'oa-canary-copy')
         (s.home / 'oa-canary-copy').write_text('x')
     if inject == 'chosen-mismatch':
-        chosen[0]['sha256'] = '0' * 64
+        probe_in['chosen'][0]['sha256'] = '0' * 64
     t0 = time.time()
     cmd = ['sh', '/run/hz/probes.sh']   # config (with the session token) on stdin, not argv
     if inject == 'leak-env':
@@ -291,27 +399,63 @@ def selftest(s: Session) -> int:
     except subprocess.TimeoutExpired:
         print('FAIL probes-timeout [in-sandbox probes did not finish in 180 s]')
         rc = 1
-    # Outside: the OpenShell supervisor's own log must show this run's refusals and allow.
-    time.sleep(3)
-    log = logs_since(s, '2m')
-    checks = [('proxy-logged-refusal', f'DENIED /usr/bin/curl(0) -> {PROBE_DENIED}:443 [reason:transparent_tcp_policy_denied]'),
-              ('proxy-logged-allow', f'ALLOWED /usr/bin/curl(0) -> {PROBE_ALLOWED}:443 [policy:probe_control'),
-              ('proxy-logged-direct-deny', '-> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]')]  # install-agnostic: allow=ip-port
-    lines = [ln for ln in log.splitlines() if ln.startswith('[') and float(ln[1:ln.index(']')]) >= t0 - 2]
-    for name, needle in checks:
-        hit = [ln for ln in lines if needle in ln]
-        ok = bool(hit)
-        print(f"{'PASS' if ok else 'FAIL'} {name} [{hit[-1].split('[ocsf] ')[-1] if ok else 'missing: ' + needle}]")
-        rc = rc or (0 if ok else 1)
-    print('SELFTEST', 'PASS' if rc == 0 else 'FAIL (launch refused)', flush=True)
-    (s.dir / 'selftest.rc').write_text(str(rc))
-    return rc
+    time.sleep(3)   # outside: the supervisor's own log must show this run's refusals and allows
+    return log_checks(s, t0, egress_log_checks(s.adapter, 'exec')) or rc
 
 
 # ---------- agent launch in host tmux ----------
+def tmux(*a: str, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(TMUX + list(a), capture_output=True, text=True, **kw)
+
+
+def wait_pane(sid: str, marker: str, timeout: float) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if marker in tmux('capture-pane', '-p', '-t', sid).stdout:
+            return True
+        time.sleep(1)
+    return False
+
+
+def agent_path_probes(s: Session) -> int:
+    """The probes again, this time run by the agent itself through its own tool (Claude's Bash tool,
+    a command run by the Codex app-server), with the host-side preconditions and log checks. The
+    result file is written by the agent and so is untrusted; the PASS rests on the outside checks
+    too. Normal work (operator steering) starts only after this passes."""
+    if canary_precondition():
+        return 3
+    cfg = probe_config(s, 'agent')
+    (s.run / 'agent-probe.json').write_text(json.dumps(cfg))   # ro at /run/hz; the agent already holds its token
+    out = s.home / '.s5-agent-probe.out'
+    out.unlink(missing_ok=True)
+    marker = '❯' if s.adapter == 'claude' else '›'
+    if not wait_pane(s.sid, marker, 90):
+        print('FAIL agent-path-probes [agent prompt did not appear]')
+        return 1
+    time.sleep(2)
+    t0 = time.time()
+    cmd = ('python3 /run/hz/probes.py < /run/hz/agent-probe.json > "$HOME/.s5-agent-probe.out" 2>&1; '
+           'echo "probes-rc=$?" >> "$HOME/.s5-agent-probe.out"')
+    tmux('send-keys', '-t', s.sid, '-l', f'Run exactly this shell command, then reply with only its exit status: {cmd}')
+    time.sleep(1)
+    tmux('send-keys', '-t', s.sid, 'Enter')
+    end = time.time() + 240
+    while time.time() < end and 'probes-rc=' not in (out.read_text() if out.exists() else ''):
+        time.sleep(2)
+    text = out.read_text() if out.exists() else ''
+    print('\n'.join(f'  agent: {ln}' for ln in text.splitlines()))
+    rc = 0 if 'probes-rc=0' in text else 1
+    if not text:
+        print('FAIL agent-path-probes [no result from the agent in 240 s]')
+    time.sleep(3)
+    return log_checks(s, t0, egress_log_checks(s.adapter, 'agent')) or rc
+
+
 def agent(s: Session) -> int:
-    if (s.dir / 'selftest.rc').read_text().strip() != '0':
-        print('REFUSED: no passing self-test for this sandbox')
+    # The complete gate runs immediately before every launch; an earlier PASS counts for nothing.
+    if selftest(s) != 0:
+        print('REFUSED: the launch self-test did not pass; deleting the sandbox')
+        down(s.sid)
         return 2
     base = ['openshell', 'sandbox', 'exec', '-n', s.name, '--no-login-shell', '--workdir', str(s.work)]
     if s.adapter == 'claude':
@@ -327,25 +471,68 @@ def agent(s: Session) -> int:
             time.sleep(0.2)
         else:
             print('REFUSED: codex app-server socket did not appear; see bridge/app-server.log')
+            down(s.sid)
             return 2
         inner = base + ['--tty', '--', str(cli_binary('codex')), '--remote', sock,
                         '--dangerously-bypass-approvals-and-sandbox']
-    subprocess.run(TMUX + ['new-session', '-d', '-s', s.sid, '-x', '200', '-y', '50', *inner], check=True)
-    print(f'launched in tmux -L s5spike session {s.sid}')
+    tmux('new-session', '-d', '-s', s.sid, '-x', '200', '-y', '50', *inner, check=True)
+    start_reaper(s)
+    print(f'launched in tmux -L s5spike session {s.sid}; running the probes through the agent')
+    if agent_path_probes(s) != 0:
+        print('AGENT-PATH SELFTEST FAIL: stopping the session (no work was given to it)')
+        down(s.sid)
+        return 2
+    print('AGENT-PATH SELFTEST PASS: session ready for work')
     return 0
+
+
+# ---------- maximum lifetime (§7 freshness, §6.3 stop) ----------
+def start_reaper(s: Session) -> None:
+    deadline = time.time() + MAX_LIFETIME_S
+    p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'reap', s.adapter, s.sid,
+                          str(deadline), str(STOP_MARGIN_S)], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=open(s.dir / 'lifetime.log', 'a'), stderr=subprocess.STDOUT)
+    (s.dir / 'reaper.pid').write_text(str(p.pid))
+    print(f'INFO reaper pid {p.pid}: session stops at {time.strftime("%H:%M:%S", time.localtime(deadline))} '
+          f'(max lifetime {MAX_LIFETIME_S} s, stop margin {STOP_MARGIN_S} s)')
+
+
+def reap(s: Session, deadline: float, margin: int) -> None:
+    """Stop the session at its maximum lifetime. The stop window opens `margin` before it; a turn
+    boundary in that window (a Stop hook, plan 4) would end it gracefully. The spike has no turn
+    tracking, so it always takes the hard path at the deadline: interrupt, then delete the sandbox."""
+    sys.stdout.reconfigure(line_buffering=True)
+    stamp = lambda: time.strftime('%H:%M:%S')   # noqa: E731
+    print(f'{stamp()} reaper up: deadline {time.strftime("%H:%M:%S", time.localtime(deadline))}')
+    time.sleep(max(0, deadline - margin - time.time()))
+    print(f'{stamp()} stop window open ({margin} s before the maximum lifetime)')
+    time.sleep(max(0, deadline - time.time()))
+    print(f'{stamp()} maximum lifetime reached: interrupting the agent')
+    tmux('send-keys', '-t', s.sid, 'Escape')
+    time.sleep(2)
+    (s.dir / 'reaper.pid').unlink(missing_ok=True)
+    down(s.sid)
+    print(f'{stamp()} session stopped: tmux session and sandbox {s.name} removed')
 
 
 def down(sid: str) -> None:
     s = Session('claude', sid)
     subprocess.run(['openshell', 'sandbox', 'delete', s.name], capture_output=True)
-    pid = s.dir / 'stub.pid'
-    if pid.exists():
-        try:
-            os.kill(int(pid.read_text()), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        pid.unlink()
-    subprocess.run(TMUX + ['kill-session', '-t', sid], capture_output=True)
+    for f in ('stub.pid', 'reaper.pid'):
+        pid = s.dir / f
+        if pid.exists():
+            try:
+                if int(pid.read_text()) != os.getpid():
+                    os.kill(int(pid.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            pid.unlink()
+    tmux('kill-session', '-t', sid)
+    for _ in range(30):   # sandbox delete is asynchronous: wait until it is really gone
+        if s.name not in subprocess.run(['openshell', 'sandbox', 'list'], capture_output=True, text=True).stdout.split():
+            return
+        time.sleep(1)
+    print(f'WARN sandbox {s.name} still listed 30 s after delete')
 
 
 def main() -> int:
@@ -356,6 +543,9 @@ def main() -> int:
         return 0
     adapter, sid = sys.argv[2], sys.argv[3]
     s = Session(adapter, sid, os.environ.get('S5_ACCOUNT', 'default'))
+    if op == 'reap':
+        reap(s, float(sys.argv[4]), int(sys.argv[5]))
+        return 0
     if op == 'up':
         s.prepare()
         if os.environ.get('S5_SELFTEST_INJECT') == 'socket-dead':
