@@ -741,7 +741,9 @@ class Admind:
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), "approval", poster,
                      asks.approval_title(r, bead), "", None, None, bead, r.digest, False, 0, "open", None,
                      None, at, at, None if retiring is None else retiring[0])
-        card = asks.approval_card(row, r, self.s.chunk_chars)
+        others = sum(1 for o in self.store.asks_with_status(*asks.ACTIVE)
+                     if o.bead != bead and (retiring is None or o.ask_id != retiring[0]))
+        card = asks.approval_card(row, r, self.s.chunk_chars, others)
         if isinstance(card, str):
             return card, "redaction" if card == ASK_REDACTED else "too long"
         refusal = self.approval_post_refusal(bead, retiring)
@@ -1281,6 +1283,8 @@ class Admind:
             return "blocked", BLOCKED.format(bead=bead, quoted=f' ("{line}")' if line else "")
         said = f'\napprove-bead said: "{line}"' if line else ""
         if settled == "recorded" and back is not None:
+            said = "\n" + asks.in_flight(sum(1 for o in self.store.asks_with_status(*asks.ACTIVE)
+                                             if o.ask_id != a.ask_id)) + said
             if a.action == "deny":
                 return "denied", DENIED.format(bead=bead, name=a.operator) + said
             if back.gate_valid:

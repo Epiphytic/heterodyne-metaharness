@@ -254,6 +254,13 @@ def approval_head(row: AskRow) -> str:
             "(a local process; unverified)")
 
 
+def in_flight(others: int) -> str:
+    """How many other asks are active (open, answered, deciding or uncertain), for the operator."""
+    if others == 0:
+        return "No more asks in flight."
+    return f"{others} other ask{'' if others == 1 else 's'} in flight."
+
+
 def decision_lines(bead: str) -> list[str]:
     """The fixed closing lines (R30)."""
     return ["", f"Approving records your approval of {bead} in btq, as you, via Marmot. Any other reply is a "
@@ -303,13 +310,14 @@ def _checked(text: str, chunk_chars: int) -> list[str] | None:
     return parts if all(redact(p) == p for p in parts) else None
 
 
-def approval_card(row: AskRow, r: Readout, chunk_chars: int) -> ApprovalCard | str:
+def approval_card(row: AskRow, r: Readout, chunk_chars: int, others: int = 0) -> ApprovalCard | str:
     """The card for the readout `r`, whole, or why it is refused: REDACTED if it fails R21, then TOO_LONG if
     the readout is over MAX_APPROVAL_CARD characters (R8). The readout is the title, the ask (linked beads
-    and refs included) and the description, as approve-bead renders them."""
+    and refs included) and the description, as approve-bead renders them. `others` is the count of other
+    asks in flight when it is posted."""
     if row.bead is None or r.digest is None:
         return REDACTED         # not reached: postable() refuses a readout without a digest first
-    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}"]
+    top = [approval_head(row), APPROVAL_ACTIONS, f"digest {r.digest[:12]}", in_flight(others)]
     card = _whole(top, r, decision_lines(row.bead), chunk_chars)
     return card if isinstance(card, str) else ApprovalCard(card, card)
 
