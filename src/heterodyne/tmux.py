@@ -1,4 +1,4 @@
-"""A small tmux wrapper on a private server socket (`tmux -L <name>`).
+"""A small tmux wrapper on a private server socket (`tmux -L <name>`, or `tmux -S <path>` if given).
 
 Targets use exact matching: `=name` for sessions and `=name:` for the window or pane (tmux 3.4 rejects
 `=name` as a window target). Text is passed to tmux as UTF-8 bytes, so a C locale under a service
@@ -28,17 +28,26 @@ class TmuxPasteUncertain(TmuxError):
 
 class Tmux:
     def __init__(self, socket_name: str, binary: str = "tmux",
-                 launcher: Callable[[], Sequence[str]] | None = None) -> None:
+                 launcher: Callable[[], Sequence[str]] | None = None, *,
+                 socket_path: Path | None = None) -> None:
         """`launcher` returns a command prefix (called afresh for each start, so it can carry a unique
         name) used only for the invocation that starts the server (see `new_session`), for example a
-        service manager's way to run it in a cgroup of its own. Every other call runs tmux directly."""
+        service manager's way to run it in a cgroup of its own. Every other call runs tmux directly.
+        `socket_path` pins the server to that exact socket (`-S`) instead of `socket_name` in tmux's
+        own directory (`-L`)."""
         self.socket_name = socket_name
         self.binary = binary
         self.launcher = launcher
+        self.socket_path = socket_path
+
+    def _selector(self) -> tuple[str, str]:
+        if self.socket_path is not None:
+            return ("-S", str(self.socket_path))
+        return ("-L", self.socket_name)
 
     def _run(self, *args: str, data: bytes | None = None,
              check: bool = True) -> subprocess.CompletedProcess[bytes]:
-        proc = subprocess.run([self.binary, "-L", self.socket_name, *args], input=data,
+        proc = subprocess.run([self.binary, *self._selector(), *args], input=data,
                               capture_output=True, timeout=15, check=False)
         if check and proc.returncode != 0:
             detail = proc.stderr.decode("utf-8", "replace").strip()
@@ -61,7 +70,7 @@ class Tmux:
         # is already running the wrapped client just asks it and its scope is collected on exit.
         # A failing launcher is an error: never fall back to starting the server unwrapped.
         try:
-            proc = subprocess.run([*self.launcher(), self.binary, "-L", self.socket_name, *args],
+            proc = subprocess.run([*self.launcher(), self.binary, *self._selector(), *args],
                                   capture_output=True, timeout=30, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise TmuxError(LAUNCHER_FAILED) from None
