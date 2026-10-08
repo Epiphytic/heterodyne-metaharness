@@ -25,7 +25,9 @@ task. It is tracked in a separate bead.
 
 **Top-level `reason` in summary.json (finding 2).** The key is present exactly when `closed` is false.
 In order of precedence it is the fault (`launch lock missing` or `launch lock replaced`), then
-`appeared after final unlink`, then `launch lock held`, then `deadline passed`. Closed summaries are
+`appeared after final unlink`, then `final rmdir failed: <errno name>` (added after code review r6,
+finding 3: the failure is recorded even when the inventory is empty), then `launch lock held`, then
+`deadline passed`. Closed summaries are
 unchanged. The two exact-equality tests of `closed: false` summaries were updated on purpose to expect
 `deadline passed`: regression 1, and test 4 lock-held.
 
