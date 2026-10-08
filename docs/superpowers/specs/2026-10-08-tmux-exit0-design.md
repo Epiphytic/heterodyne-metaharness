@@ -99,10 +99,16 @@ Why this approach and not the alternatives:
 3. **Exit status not 0.** No change:
    - on the direct path, `_run` raises `TmuxError(f"tmux start-server failed: {stderr}")` (the first argument is still `start-server`);
    - on the launcher path, the error is `TmuxError(LAUNCHER_FAILED)`.
-4. **Exit status 0.** Decode stdout as `utf-8` with `replace`. Find the lines that start with `f"hz-started {nonce} "` and split each one at most twice into `marker, sid, reported`; `reported` may itself contain spaces.
-   - Exactly one marker line with `sid` matching `\$[0-9]+` and `reported == name`: return.
+4. **Exit status 0.** Parse stdout as follows:
+   - Decode it as `utf-8` with `replace` and split it with `splitlines()`. Lines are not otherwise stripped, so a name's own spaces survive.
+   - Let `prefix = f"hz-started {nonce} "`. The marker lines are those with `line.startswith(prefix)`; any other line is ignored.
+   - For each marker line, strip the prefix first: `rest = line[len(prefix):]`. Then split the rest once, at its first space: `sid, sep, reported = rest.partition(" ")`. tmux ids never contain a space, so a name with spaces stays whole in `reported`.
+   - A marker line is **well-formed** if all three hold: `sep == " "`, `re.fullmatch(r"\$[0-9]+", sid)`, and `reported != ""`. A missing field fails one of them: no space after the id, an empty or non-`$N` id, or an empty name. Such a line is malformed.
+
+   Then:
+   - Exactly one marker line, well-formed, with `reported == name`: return.
    - Exactly one well-formed marker line but `reported != name` (tmux renamed it): first run `kill-session -t <sid>` with `check=False`. The session with that id was created by this invocation, so nothing else can be removed. Then raise.
-   - No marker line, more than one, or a malformed `sid`: clean nothing up, and raise. An unverified line is never a cleanup target.
+   - No marker line, more than one, or a malformed one: clean nothing up, and raise. An unverified line is never a cleanup target.
    - The error raised:
      - direct path: `TmuxError(f"tmux new-session did not create {name!r}: {detail}")`. `detail` is `renamed to {reported!r}` in the rename case. Otherwise it is the stripped stderr, or `no session reported` when stderr is empty. This matches `_run`'s style;
      - launcher path: a new constant, `TmuxError(NO_SESSION)`, with `NO_SESSION = "tmux reported a start through the launcher, but no session exists"`. It carries no detail, like `LAUNCHER_FAILED`, for the same reason: the combined output belongs to the launcher.
@@ -156,9 +162,15 @@ The one difference is ordering inside `launch`: stdout now comes before stderr. 
    - launcher path: `str(exc) == NO_SESSION`, with no stderr in it ("secret detail" style);
    - in both cases, exactly one `subprocess.run` call, so nothing is cleaned up.
 2. The marker reports `$3 a_b` for name `a:b`: `TmuxError`, and the next call is exactly `kill-session -t $3` with check off. Both paths.
-3. Trailing and leading noise around a valid marker (`noise\n<marker $0 admin>\nother\n`): success, with no further call.
+3. **The literal probe line.** The fake answers exactly `b"hz-started 0123abcd $0 admin\n"`, as F1 printed it, with the nonce pinned to `0123abcd` by patching `uuid.uuid4` in `heterodyne.tmux`. `new_session("admin", ...)` returns, with no further call. The same pinned nonce with `hz-started 0123abcd $1 a_b` for `a:b` must lead to `kill-session -t $1`.
+3a. **Spaces in a name.** `hz-started <nonce> $0 my admin` for name `my admin` succeeds; the name stays whole.
+3b. **Noise.** Leading and trailing noise around a valid marker (`noise\n<marker $0 admin>\nother\n`) still succeeds, with no further call.
 4. **No unrelated cleanup.** Stdout `admin\nother\n`, with no marker, and stdout carrying a marker line with a different nonce, `hz-started <wrong> $5 other`: both raise `TmuxError` and make no further `subprocess.run` call. In particular, there is no `kill-session` for `other` or `$5`.
-5. Two marker lines, or a marker with a malformed id (`hz-started <nonce> 5 admin`): `TmuxError`, no cleanup.
+5. **Malformed or ambiguous markers.** Each of these raises `TmuxError` and makes no cleanup call:
+   - two marker lines;
+   - an id that isn't `$N` (`hz-started <nonce> 5 admin`);
+   - no name (`hz-started <nonce> $0`, and `hz-started <nonce> $0 ` with a trailing space);
+   - no id (`hz-started <nonce> ` alone).
 6. A missing `cwd`: `TmuxError`, and **no** `subprocess.run` call.
 7. `pane_dead` with stdout `b"0\n"` returns False; with `b"1\n"`, `b""` or `b"x"` it returns True.
 
@@ -192,3 +204,7 @@ The real exit-0 path is already exercised by the next test: after the watchdog's
   - **Cleanup.** A rename is cleaned up only by that id. Unverified lines are never cleanup targets. New tests cover noise, missing markers and wrong nonces.
   - **GateLauncher.** It forwards stdout and keeps its diagnostic file, exit status and descriptor inheritance. Successful gated starts are now part of validation.
   - **Probe.** Section F was rerun with the marker, adding F9 to F11.
+- **r3, from the r2 review:**
+  - **Parser.** It strips the verified `hz-started <nonce> ` prefix before splitting. The rest is split once into id and name, which keeps spaces in names.
+  - **Malformed markers.** Missing fields are spelled out as malformed: no cleanup, and an error.
+  - **Tests.** New ones cover the literal F1 and F3 lines, a name with spaces, and the missing-field cases.
