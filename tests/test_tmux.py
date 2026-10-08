@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from tmux_guard import new_test_socket_path
+from tmux_guard import new_test_tmux
 
 from heterodyne.tmux import Tmux
 
@@ -14,11 +14,11 @@ pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not i
 
 @pytest.fixture
 def tmux() -> Iterator[Tmux]:
-    path = new_test_socket_path()
-    t = Tmux(path.name, socket_path=path)
+    t = new_test_tmux()
     yield t
     t.kill_server()
-    path.unlink(missing_ok=True)
+    assert t.socket_path is not None
+    t.socket_path.unlink(missing_ok=True)
 
 
 def wait_for(pred, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]

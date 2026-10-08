@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import tmux_guard
 import tmux_watchdog
 from tmux_guard import start_watchdog
 from tmux_watchdog import Sweeper
@@ -72,10 +73,11 @@ def test_socket_path_selects_with_dash_s(monkeypatch: pytest.MonkeyPatch, tmp_pa
 # --- the sweep, with fake probes (test 9 and the closure loop) ---
 
 class FakeSweeper(Sweeper):
-    """kill-server always "succeeds"; connect, PID and lock answers are scripted; time is fake."""
+    """kill-server always "succeeds"; connect, PID and launch-lock answers are scripted; time is fake.
+    `lock_free=None` takes the real flock on `dead/launch.lock` instead of a scripted answer."""
 
     def __init__(self, dead: Path, *, pid: int | None = 4242, connect: str = "refused",
-                 running: bool = False, lock_free: bool = True, deadline: float = 30.0) -> None:
+                 running: bool = False, lock_free: bool | None = True, deadline: float = 30.0) -> None:
         self.clock = 0.0
         super().__init__(dead, deadline=deadline, log=lambda _line: None)
         self.pid, self.state, self.running, self.lock_free = pid, connect, running, lock_free
@@ -99,16 +101,26 @@ class FakeSweeper(Sweeper):
     def pid_running(self, pid: int) -> bool:
         return self.running
 
-    def try_lock(self, lock: Path) -> tuple[bool, int | None]:
-        return self.lock_free, None
+    def take_ex(self) -> bool:
+        return super().take_ex() if self.lock_free is None else self.lock_free
+
+    def drop_ex(self) -> None:
+        if self.lock_free is None:
+            super().drop_ex()
 
 
 def _dead_with(tmp_path: Path, *names: str) -> Path:
+    """A renamed root: its launch lock (as the plugin creates it) and `names`."""
     dead = tmp_path / "dead"
     dead.mkdir()
+    (dead / "launch.lock").touch(mode=0o600)
     for n in names:
         (dead / n).touch()
     return dead
+
+
+def _held(path: Path) -> dict[str, Any]:
+    return {"path": str(path), "pid": None, "reason": "held"}
 
 
 @pytest.mark.parametrize(("connect", "running"), [("refused", True), ("accept", False)])
@@ -132,15 +144,18 @@ def test_a_proven_kill_is_unlinked_and_closes(tmp_path: Path) -> None:
                                  "survived": [], "unresolved": [], "closed": True}
 
 
-@pytest.mark.parametrize(("lock_free", "outcome"), [(True, "stale"), (False, "unresolved")])
-def test_unknown_pid_and_refused_needs_the_startup_lock(tmp_path: Path, lock_free: bool,
-                                                        outcome: str) -> None:
+@pytest.mark.parametrize("lock_free", [True, False])
+def test_unknown_pid_and_refused_needs_the_launch_lock(tmp_path: Path, lock_free: bool) -> None:
     dead = _dead_with(tmp_path, "aa", "aa.lock")
     s = FakeSweeper(dead, pid=None, lock_free=lock_free, deadline=2.0)
     closed = s.run()
     summary = s.summary(closed)
-    assert summary[outcome] == [{"path": str(dead / "aa"), "pid": None}]
+    if lock_free:
+        assert summary["stale"] == [{"path": str(dead / "aa"), "pid": None}]
+    else:
+        assert summary["unresolved"] == [_held(dead / "aa")]
     assert closed == lock_free and (dead / "aa").exists() != lock_free
+    assert (dead / "aa.lock").exists() != lock_free           # tmux's lock goes with its socket
     assert ("kill-server",) not in s.commands
 
 
@@ -148,7 +163,15 @@ def test_a_held_lock_with_no_socket_is_unresolved_at_the_deadline(tmp_path: Path
     dead = _dead_with(tmp_path, "aa.lock")
     s = FakeSweeper(dead, lock_free=False, deadline=2.0)
     closed = s.run()
-    assert not closed and s.summary(closed)["unresolved"] == [{"path": str(dead / "aa.lock"), "pid": None}]
+    assert not closed and s.summary(closed)["unresolved"] == [_held(dead / "aa.lock")]
+
+
+def test_a_stray_tmux_lock_is_removed_under_the_launch_lock(tmp_path: Path) -> None:
+    dead = _dead_with(tmp_path, "aa.lock")
+    s = FakeSweeper(dead, lock_free=None)
+    closed = s.run()
+    assert closed and not dead.exists()
+    assert s.summary(closed)["stale"] == [{"path": str(dead / "aa.lock"), "pid": None}]
 
 
 def test_an_entry_bound_after_the_first_sweep_is_still_swept(tmp_path: Path) -> None:
@@ -198,7 +221,7 @@ def test_a_pid_found_once_is_kept_for_later_passes(tmp_path: Path) -> None:
 
 class Replaced(FakeSweeper):
     """After the first pass, socket A at `aa` is replaced by B: either bound but not listening, its
-    startup lock held and its PID undiscoverable, or (`b_pid`) a listening server that answers.
+    launcher holding SH and its PID undiscoverable, or (`b_pid`) a listening server that answers.
     `same_inode`: B reuses A's inode number."""
 
     def __init__(self, dead: Path, *, a_running: bool, b_pid: int | None = None, a_dies: bool = False,
@@ -233,7 +256,7 @@ def test_a_killed_servers_proof_never_unlinks_its_replacement(tmp_path: Path, sa
     summary = s.summary(closed)
     assert not closed and (dead / "aa").exists()
     assert summary["killed"] == [{"path": str(dead / "aa"), "pid": 4242}]
-    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]   # B: its lock is held
+    assert summary["unresolved"] == [_held(dead / "aa")]                     # B: its launcher holds SH
     assert summary["stale"] == summary["survived"] == []
 
 
@@ -245,7 +268,7 @@ def test_an_unproven_servers_later_death_never_unlinks_its_replacement(tmp_path:
     closed = s.run()
     summary = s.summary(closed)
     assert not closed and (dead / "aa").exists()
-    assert summary["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]   # B: its lock is held
+    assert summary["unresolved"] == [_held(dead / "aa")]                     # B: its launcher holds SH
     # A reused inode cannot tell B from A, so A's PID is used, and its death is proven: still B is kept.
     assert summary["killed"] == ([{"path": str(dead / "aa"), "pid": 4242}] if same_inode else [])
     assert summary["stale"] == summary["survived"] == []
@@ -270,8 +293,8 @@ def test_retiring_a_replaced_pid_drops_its_outcome(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("b", "same_inode", "lock_free", "b_state"), [
-    ("starting", False, False, "refused"),     # bound, its startup holds the lock
-    ("crashed", False, True, "refused"),       # bound, never listened, lock released: stale, as B
+    ("starting", False, False, "refused"),     # bound, its launcher holds SH
+    ("crashed", False, True, "refused"),       # bound, never listened, SH released: stale, as B
     ("listening", True, True, "accept"),       # reused A's inode and listens
 ])
 def test_a_replacement_bound_during_the_death_wait_is_not_unlinked(
@@ -292,38 +315,24 @@ def test_a_replacement_bound_during_the_death_wait_is_not_unlinked(
     entry = [{"path": str(dead / "aa"), "pid": None}]
     if b == "crashed":
         assert closed and summary["stale"] == entry          # removed as B, on B's own evidence
+    elif b == "starting":
+        assert not closed and (dead / "aa").exists() and summary["stale"] == []
+        assert summary["unresolved"] == [_held(dead / "aa")]
     else:
         assert not closed and (dead / "aa").exists() and summary["stale"] == []
-        assert summary["unresolved" if b == "starting" else "survived"] == entry
+        assert summary["survived"] == entry
 
 
-def test_a_lock_made_by_cleanup_never_keeps_the_dir_open(tmp_path: Path) -> None:
-    dead = _dead_with(tmp_path, "aa")
-
-    class Vanishes(FakeSweeper):
-        def try_lock(self, lock: Path) -> tuple[bool, int | None]:
-            taken = Sweeper.try_lock(self, lock)    # creates aa.lock: there was none
-            (dead / "aa").unlink()                  # and the socket goes meanwhile
-            return taken
-
-    s = Vanishes(dead, pid=None, deadline=0.1)      # no time for a pass to sweep a leftover lock
-    closed = s.run()
-    assert closed and not dead.exists()
-    assert s.summary(closed)["stale"] == s.summary(closed)["unresolved"] == []
-
-
-def test_a_startup_cannot_bind_between_validation_and_unlink(tmp_path: Path) -> None:
+def test_a_guarded_launch_cannot_start_between_validation_and_unlink(tmp_path: Path) -> None:
     dead = _dead_with(tmp_path, "aa")
     attempts: list[str] = []
 
     class Gap(FakeSweeper):
-        try_lock = Sweeper.try_lock                 # the real flock on aa.lock
-
         def unlinking(self, path: Path) -> None:
-            """A tmux startup for the same name runs now: it needs the lock to bind."""
-            fd = os.open(path.with_name("aa.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            """A guarded launch for the same name runs now: it needs SH before tmux can bind."""
+            fd = os.open(dead / "launch.lock", os.O_RDONLY)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
                 attempts.append("blocked")
                 return
@@ -333,7 +342,7 @@ def test_a_startup_cannot_bind_between_validation_and_unlink(tmp_path: Path) -> 
             path.touch()                            # B bound at the name
             attempts.append("bound")
 
-    s = Gap(dead, pid=None)
+    s = Gap(dead, pid=None, lock_free=None)
     closed = s.run()
     assert attempts == ["blocked"]
     assert closed and s.summary(closed)["stale"] == [{"path": str(dead / "aa"), "pid": None}]
@@ -442,21 +451,17 @@ def test_a_wait_past_the_deadline_never_probes(tmp_path: Path) -> None:
         s.wait(lambda: pytest.fail("probed after the deadline"))
 
 
-def test_lock_retries_stop_at_the_deadline(tmp_path: Path) -> None:
+def test_a_held_launch_lock_never_blocks_past_the_deadline(tmp_path: Path) -> None:
     dead = _dead_with(tmp_path, "aa")
-    held = os.open(dead / "aa.lock", os.O_CREAT | os.O_RDWR, 0o600)
-
-    class RealLock(FakeSweeper):
-        try_lock = Sweeper.try_lock
-
+    held = os.open(dead / "launch.lock", os.O_RDONLY)
     try:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        s = RealLock(dead, pid=None, deadline=0.5)
+        fcntl.flock(held, fcntl.LOCK_SH)            # a guarded launcher: EX is never taken blocking
+        s = FakeSweeper(dead, pid=None, lock_free=None, deadline=0.5)
         closed = s.run()
     finally:
         os.close(held)
     assert s.clock <= 0.5 + 1e-9
-    assert not closed and s.summary(closed)["unresolved"] == [{"path": str(dead / "aa"), "pid": None}]
+    assert not closed and s.summary(closed)["unresolved"] == [_held(dead / "aa")]
 
 
 def test_commands_get_only_the_time_left(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -482,21 +487,17 @@ CHILD_PRELUDE = '''
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
 import pytest
-from tmux_guard import new_test_socket_path
-from heterodyne.tmux import Tmux
+from tmux_guard import GateLauncher, guarded_tmux, new_test_tmux
+from heterodyne.tmux import TmuxError
 
 HAND = Path(os.environ["HZ_CHILD_DIR"]) / "hand.json"
 MARK = os.environ["HZ_CHILD_MARK"]
 PANE = [sys.executable, "-c", "import time; time.sleep(600)", MARK]
 
 
-def tmux_out(sock, *args):
-    return subprocess.run(["tmux", "-S", str(sock), *args], capture_output=True, text=True).stdout
-
-
 def pids(sock):
-    server = int(tmux_out(sock, "display-message", "-p", "#{pid}").strip())
-    return [server, *(int(p) for p in tmux_out(sock, "list-panes", "-a", "-F", "#{pane_pid}").split())]
+    server = int(guarded_tmux(sock, "display-message", "-p", "#{pid}").strip())
+    return [server, *(int(p) for p in guarded_tmux(sock, "list-panes", "-a", "-F", "#{pane_pid}").split())]
 
 
 def hand(sock, ps, **extra):
@@ -729,13 +730,8 @@ def test_a_launch_released_after_the_rename_starts_nothing(child: Callable[..., 
     gate = tmp_path / "gate"
     c = child('''
 def test_child(tmp_path):
-    sock = new_test_socket_path()
-    gate = os.environ["HZ_CHILD_DIR"]
-    script = ('echo $$ > "$0/started.tmp"; mv "$0/started.tmp" "$0/started"; '
-              'while [ ! -e "$0/gate" ]; do sleep 0.05; done; '
-              '"$@" > "$0/launch.tmp" 2>&1; mv "$0/launch.tmp" "$0/launch"')
-    hand(sock, [])
-    t = Tmux("x", launcher=lambda: ("sh", "-c", script, gate), socket_path=sock)
+    t = new_test_tmux(GateLauncher(Path(os.environ["HZ_CHILD_DIR"])))
+    hand(t.socket_path, [])
     t.new_session("s", tmp_path, PANE)
 ''')
     data = c.hand()
@@ -746,6 +742,9 @@ def test_child(tmp_path):
     os.kill(c.proc.pid, signal.SIGKILL)
     c.finished()
     until(lambda: not (run / "s").exists(), "the rename")
+    # The gated launcher holds SH, so closure can't finish (regression 3(c)).
+    until(lambda: "launch lock held" in (run / "watchdog.log").read_text(), "closure to report the hold")
+    assert (run / "dead").exists()
     gate.touch()
     until((tmp_path / "launch").exists, "the late launch to finish")
     assert "No such file or directory" in (tmp_path / "launch").read_text()
@@ -754,14 +753,14 @@ def test_child(tmp_path):
 
 
 @pytest.mark.parametrize("held", [True, False], ids=["lock-held", "lock-released"])
-def test_a_bound_but_not_listening_socket_needs_the_startup_lock(held: bool) -> None:
+def test_a_bound_but_not_listening_socket_needs_the_launch_lock(held: bool) -> None:
     run = Path(tempfile.mkdtemp(prefix="hzt", dir="/tmp")).resolve()
-    (run / "s").mkdir(mode=0o700)
+    root = tmux_guard.make_root(run)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    lock = os.open(run / "s" / "ab.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    lock = os.open(root / "launch.lock", os.O_RDONLY)
     try:
-        sock.bind(str(run / "s" / "ab"))                   # bound, never listening: connect is refused
-        fcntl.flock(lock, fcntl.LOCK_EX)                   # as a tmux startup holds it until listen
+        sock.bind(str(root / "ab"))                        # bound, never listening: connect is refused
+        fcntl.flock(lock, fcntl.LOCK_SH)                   # as a guarded launcher (and its server) holds it
         proc = start_watchdog(run, extra=("--deadline", "3"))
         if not held:
             os.close(lock)
@@ -772,9 +771,9 @@ def test_a_bound_but_not_listening_socket_needs_the_startup_lock(held: bool) -> 
         summary = json.loads((run / "summary.json").read_text())
         entry = [{"path": str(run / "dead" / "ab"), "pid": None}]
         if held:
-            assert summary == {"killed": [], "stale": [], "survived": [], "unresolved": entry,
-                               "closed": False}
-            assert (run / "dead" / "ab").exists()
+            assert summary == {"killed": [], "stale": [], "survived": [], "closed": False,
+                               "unresolved": [_held(run / "dead" / "ab")]}
+            assert (run / "dead" / "ab").exists() and not (run / "dead" / "ab.lock").exists()
         else:
             assert summary == {"killed": [], "stale": entry, "survived": [], "unresolved": [], "closed": True}
             assert not (run / "dead").exists()
@@ -789,8 +788,8 @@ def test_a_bound_but_not_listening_socket_needs_the_startup_lock(held: bool) -> 
 def test_sigkill_after_kill_server_but_before_unlink_is_stale(child: Callable[..., Child]) -> None:
     c = child('''
 def test_child(tmp_path):
-    sock = new_test_socket_path()
-    t = Tmux("x", socket_path=sock)
+    t = new_test_tmux()
+    sock = t.socket_path
     t.new_session("s", tmp_path, PANE)
     ps = pids(sock)
     t.kill_server()                                  # drop_tmux, stopped before its unlink
@@ -864,7 +863,7 @@ def main_script(tmp_path: Path, slow: bool,
     child_dir.mkdir()
     (child_dir / "pytest.ini").write_text("[pytest]\n")
     mark = f"hz-mark-{uuid.uuid4().hex}"
-    leak = "    Tmux('x', socket_path=new_test_socket_path()).new_session('l', tmp_path, PANE)\n"
+    leak = "    new_test_tmux().new_session('l', tmp_path, PANE)\n"
     leak = leak if slow else ""
     (child_dir / "test_child.py").write_text(CHILD_PRELUDE + "from test_tmux import tmux\n\n"
                                              "def test_child(tmux, tmp_path):\n"
@@ -923,9 +922,9 @@ def test_a_main_script_that_times_out_leaves_no_base(tmp_path: Path) -> None:
 def test_a_test_that_skips_its_teardown_is_reported(child: Callable[..., Child]) -> None:
     c = child('''
 def test_child(tmp_path):
-    sock = new_test_socket_path()
-    Tmux("x", socket_path=sock).new_session("s", tmp_path, PANE)
-    hand(sock, pids(sock))
+    t = new_test_tmux()
+    t.new_session("s", tmp_path, PANE)
+    hand(t.socket_path, pids(t.socket_path))
 ''')
     data = c.hand()
     assert c.finished() == 0
@@ -956,7 +955,7 @@ def zombies():
 def test_reaped_and_refused():
     import tmux_guard
     with pytest.raises(tmux_guard.WatchdogError):
-        new_test_socket_path()
+        new_test_tmux()
     assert not zombies()
     pid_file = Path(os.environ["HZ_CHILD_DIR"]) / "wd.pid"
     if pid_file.exists():
@@ -980,7 +979,7 @@ def test_the_socket_root_ignores_tmpdir_and_tmux_tmpdir(child: Callable[..., Chi
     (tmp_path / "tmuxdir").mkdir()
     c = child('''
 def test_child(tmux, tmp_path):
-    sock = new_test_socket_path()
+    sock = new_test_tmux().socket_path
     assert str(sock).startswith(str(Path("/tmp").resolve()) + "/hzt") and len(str(sock)) < 40
     assert tmux.socket_path.parent == sock.parent
     tmux.new_session("s", tmp_path, PANE)

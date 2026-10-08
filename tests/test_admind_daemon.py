@@ -14,7 +14,7 @@ import pytest
 from admind_waits import hold
 from fakes.fake_wn_agent import ACCOUNT, FakeWnAgent
 from fakes.settings import OPERATOR_HEX, make_settings
-from tmux_guard import new_test_socket_path
+from tmux_guard import new_test_tmux
 
 from heterodyne.admind.agent import SESSION, TMUX_SOCKET, AdminAgent
 from heterodyne.admind.audit import Audit, ref_id
@@ -68,8 +68,7 @@ class Harness:
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.fake = FakeWnAgent(tmp_path / "wn.sock")
-        socket_path = new_test_socket_path()
-        self.tmux = Tmux(socket_path.name, socket_path=socket_path)
+        self.tmux = new_test_tmux()
         self.agent = AdminAgent(self.tmux, self.store, self.settings, self.settings.state_dir / "hook.sock")
         runner = CommandRunner(self.agent, Services(), ("fake.service",), lambda: True)
         self.daemon = Admind(self.settings, ControlClient(tmp_path / "wn.sock", "test-token", timeout=5),
@@ -898,8 +897,11 @@ def test_serve_runs_until_sigterm_then_stops_cleanly(tmp_path: Path, monkeypatch
     monkeypatch.setattr(cli, "WnAgent", lambda *_a, **_k: stub)
     # Portable: no systemd scope (the launcher has its own tests); the server binds in the watched root.
     monkeypatch.setattr(cli, "tmux_launcher", lambda _s: None)
-    monkeypatch.setattr(cli, "Tmux", lambda name, launcher=None: Tmux(name, launcher=launcher,
-                                                                      socket_path=h.tmux.socket_path))
+
+    def harness_tmux(_name: str, launcher: object = None) -> Tmux:
+        assert launcher is None
+        return h.tmux                       # the Harness's own guarded server, which drop_tmux tears down
+    monkeypatch.setattr(cli, "Tmux", harness_tmux)
 
     async def body() -> int:
         await h.fake.start()

@@ -1,4 +1,5 @@
-"""The tmux watchdog for offline tests (spec 2026-10-08-test-tmux-leak-design.md §2, btq-q1r4p).
+"""The tmux watchdog for offline tests (spec 2026-10-08-test-tmux-leak-design.md §2 and Amendment 1,
+btq-q1r4p).
 
 Run as `python tmux_watchdog.py <run dir> <ack fd> [--deadline S]` by the `tmux_guard` plugin, in a
 session of its own. It writes `ready` on the ack fd, then blocks until its stdin (whose only writer is
@@ -6,7 +7,13 @@ the pytest that started it) reaches EOF: pytest exited, by any signal, or closed
 
 - Barrier: `rename(run/s, run/dead)`. A launch that starts afterwards gets ENOENT; a bind that resolved
   the root before the rename can still land in `dead`, so closure is a successful `rmdir(dead)`.
-- Closure loop: sweep every entry of `dead`, then `rmdir`. On ENOTEMPTY sweep again until the deadline.
+- Closure loop: sweep every entry of `dead` until only `launch.lock` is left, then the final step: under
+  LOCK_EX on the original lock inode, unlink it and `rmdir(dead)`. If anything appeared meanwhile the rmdir
+  fails, and that ends closure: nothing more is removed.
+- Removal: every unlink of a socket or a stray `<p>.lock` happens under LOCK_EX (never blocking) on
+  `dead/launch.lock`, after checking the lock is still the inode opened at the start (A3). Every guarded
+  tmux client and server holds LOCK_SH on it, so under EX none of them is between bind and listen. tmux's
+  own `<p>.lock` is never created, opened or flocked here.
 - Finish: remove `run` only if closure succeeded and every outcome list is empty; otherwise keep it with
   `run/summary.json`.
 
@@ -15,12 +22,12 @@ that pytest knows), so whatever is in `dead` is ours to kill.
 """
 
 import contextlib
-import errno
 import fcntl
 import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -31,11 +38,15 @@ from typing import Any
 DEADLINE = 30.0      # seconds for the whole closure loop
 CMD_TIMEOUT = 5.0    # any one tmux command, connect or ps
 DEATH_WAIT = 5.0     # after kill-server, for the server to be proven dead
-LOCK_TRIES = 20
-LOCK_GAP = 0.1
 PASS_GAP = 0.2
 WAIT_GAP = 0.05
 OUTCOMES = ("killed", "stale", "survived", "unresolved")
+LOCK_NAME = "launch.lock"
+MISSING = "launch lock missing"
+REPLACED = "launch lock replaced"
+HELD = "held"
+LOCK_HELD = "launch lock held"
+APPEARED = "appeared after final unlink"
 
 
 class DeadlineReached(Exception):
@@ -50,7 +61,7 @@ Generation = tuple[int, int]     # (st_dev, st_ino) of one socket file: a replac
 
 
 class Sweeper:
-    """One watchdog's cleanup of `dead`. The probes (`tmux`, `connect`, `pid_running`, `try_lock`) and the
+    """One watchdog's cleanup of `dead`. The probes (`tmux`, `connect`, `pid_running`, `take_ex`) and the
     clock are methods so tests can script them. Every wait, retry and command timeout is bounded by the
     time left before the global deadline."""
 
@@ -67,7 +78,12 @@ class Sweeper:
         self.known: dict[str, tuple[Generation, int]] = {}
         self.orphans: list[dict[str, Any]] = []
         self.limit: float | None = None     # the end of the current `wait`, which its probes respect
-        self.made: set[Path] = set()        # lock files this sweeper created; never left behind
+        self.lock_fd: int | None = None     # dead/launch.lock, opened once; EX is only ever taken on it
+        self.lock_id: Generation | None = None
+        self.fault: str | None = None       # MISSING or REPLACED: nothing more is removed
+        self.note: str | None = None        # why launch.lock itself is still in `dead`
+        self.held: set[str] = set()         # names whose last removal found SH held
+        self.appeared: dict[str, dict[str, Any]] = {}   # entries found by a failed final rmdir
 
     # --- probes ---
 
@@ -149,55 +165,125 @@ class Sweeper:
             return not proc.stdout.decode("utf-8", "replace").strip().startswith("Z")
         return True
 
-    def try_lock(self, lock: Path) -> tuple[bool, int | None]:
-        """Take tmux's startup lock (`<socket>.lock`, held from before bind until listen), creating it
-        as tmux does, so no startup can bind while we hold it. Returns (taken, fd to close); a lock file
-        created here is recorded in `made`."""
+    def open_lock(self) -> bool:
+        """Open `dead/launch.lock` once (close-on-exec, so tmux and ps never inherit it) and record its
+        identity. Without it nothing may be removed."""
         try:
-            fd = os.open(lock, os.O_RDONLY | os.O_CLOEXEC)
-        except FileNotFoundError:
-            try:
-                fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-                self.made.add(lock)
-            except FileExistsError:                 # a startup created it first: it is theirs
-                return self.try_lock(lock)
-            except OSError:
-                return (False, None)
+            fd = os.open(self.dead / LOCK_NAME, os.O_RDONLY | os.O_CLOEXEC)
+        except OSError as exc:
+            self.log(f"open {self.dead / LOCK_NAME}: {exc}")
+            self.fault = MISSING
+            return False
+        st = os.fstat(fd)
+        self.lock_fd, self.lock_id = fd, (st.st_dev, st.st_ino)
+        return True
+
+    def take_ex(self) -> bool:
+        """LOCK_EX, never blocking: False while any guarded tmux process holds SH."""
+        assert self.lock_fd is not None
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            return (False, None)
-        for i in range(LOCK_TRIES):
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return (True, fd)
-            except BlockingIOError:
-                if i == LOCK_TRIES - 1 or self.end - self.now() <= LOCK_GAP:
-                    break
-                self.sleep(LOCK_GAP)
-            except OSError:
-                break
-        os.close(fd)
-        return (False, None)
+            return False
+        return True
+
+    def drop_ex(self) -> None:
+        assert self.lock_fd is not None
+        fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+
+    def lock_intact(self) -> bool:
+        """`dead/launch.lock` is still the inode we hold (checked under EX)."""
+        try:
+            st = os.lstat(self.dead / LOCK_NAME)
+        except OSError:
+            return False
+        return (st.st_dev, st.st_ino) == self.lock_id
+
+    def unlink(self, path: Path) -> None:
+        """Every unlink the sweeper makes."""
+        path.unlink(missing_ok=True)
+
+    def before_rmdir(self) -> None:
+        """After the final unlink, before `rmdir(dead)` (a seam for tests, like `unlinking`)."""
 
     # --- the sweep ---
 
     def run(self) -> bool:
-        """Sweep and rmdir until `dead` is gone (True) or the deadline passes (False)."""
-        while True:
-            self.sweep()
+        """Sweep until only the launch lock is left and the final step closes `dead` (True), or the
+        deadline passes or closure is stopped (False)."""
+        if not self.open_lock():
+            self.sweep()                            # kills only: every removal is refused
+            return False
+        try:
+            while True:
+                self.sweep()
+                try:
+                    names = {p.name for p in self.dead.iterdir()}
+                except FileNotFoundError:
+                    self.settle()
+                    return True
+                except OSError as exc:
+                    self.log(f"listdir {self.dead}: {exc}")
+                    names = None
+                if names is not None and names <= {LOCK_NAME}:
+                    closed = self.close_dir()
+                    if closed is not None:
+                        return closed
+                elif self.fault is not None:
+                    return False
+                left = self.end - self.now()
+                if left <= 0:
+                    return False
+                self.sleep(min(PASS_GAP, left))
+        finally:
+            if self.lock_fd is not None:
+                os.close(self.lock_fd)
+                self.lock_fd = None
+
+    def close_dir(self) -> bool | None:
+        """The final step: True once `dead` is gone, False if closure must stop, None to retry (held)."""
+        if self.fault is not None:
+            return False
+        if not self.take_ex():
+            if self.note != LOCK_HELD:
+                self.log(f"{LOCK_HELD}: {self.dead / LOCK_NAME}")
+            self.note = LOCK_HELD
+            return None
+        try:
+            if not self.lock_intact():
+                self.lock_replaced()
+                return False
+            self.note = None
+            self.unlink(self.dead / LOCK_NAME)
+            self.before_rmdir()
             try:
                 self.dead.rmdir()
-                self.settle()
-                return True
             except FileNotFoundError:
-                self.settle()
-                return True
+                pass
             except OSError as exc:
-                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                    self.log(f"rmdir {self.dead}: {exc}")
-            left = self.end - self.now()
-            if left <= 0:
+                self.log(f"rmdir {self.dead}: {exc}")
+                self.appeared = self.inventory()
                 return False
-            self.sleep(min(PASS_GAP, left))
+        finally:
+            self.drop_ex()                          # only after the rmdir attempt
+        self.settle()
+        return True
+
+    def lock_replaced(self) -> None:
+        self.log(f"{REPLACED}: {self.dead / LOCK_NAME}")
+        self.fault = REPLACED
+
+    def inventory(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        with contextlib.suppress(OSError):
+            for p in sorted(self.dead.iterdir()):
+                try:
+                    st = p.lstat()
+                except OSError:
+                    continue
+                out[p.name] = {"path": str(p), "pid": None, "reason": APPEARED, "type": kind(st.st_mode),
+                               "generation": [st.st_dev, st.st_ino]}
+        return out
 
     def settle(self) -> None:
         """Retire PIDs whose socket is gone, and drop orphans now proven dead."""
@@ -236,6 +322,8 @@ class Sweeper:
         for name in names:
             if self.now() >= self.end:
                 return
+            if name == LOCK_NAME:
+                continue
             path = self.dead / name
             try:
                 if name.endswith(".lock"):
@@ -285,62 +373,71 @@ class Sweeper:
         self.pending.pop(path.name, None)
 
     def refused_without_pid(self, path: Path, gen: Generation) -> None:
-        """tmux binds before it listens, so a refusal proves nothing while a startup holds the lock."""
+        """tmux binds before it listens, so a refusal proves nothing while a guarded process holds SH."""
         result = self.remove(path, gen)
         if result == "removed":
             self.log(f"stale {path}")
             self.stale.append({"path": str(path), "pid": None})
-            self.pending.pop(path.name, None)
-        elif result == "gone":
-            self.pending.pop(path.name, None)
-        else:                                       # held, changed or now live: the next pass looks again
-            self.pending[path.name] = ("unresolved", None)
+        self.record(path.name, result)
 
-    def remove(self, path: Path, gen: Generation) -> str:
-        """The one path that unlinks a socket: holding tmux's startup lock so nothing can bind in between,
-        and only if it is still generation `gen` and refuses connections. A lock file this call created
-        is removed whatever the outcome. Returns `removed`, `held` (a startup holds the lock), `gone`,
-        `changed` (replaced) or `live` (it accepts, or connect failed). Lock-only entries are removed by
-        `sweep_lock`, under their own flock."""
-        lock = path.with_name(path.name + ".lock")
-        taken, fd = self.try_lock(lock)
-        if not taken:
-            return "held"
+    def record(self, name: str, result: str) -> None:
+        """What one removal attempt leaves for the summary: anything but removed or gone is looked at
+        again next pass, and is unresolved at the deadline."""
+        if result == HELD:
+            self.held.add(name)
+        else:
+            self.held.discard(name)
+        if result in ("removed", "gone"):
+            self.pending.pop(name, None)
+        else:
+            self.pending[name] = ("unresolved", None)
+
+    def remove(self, path: Path, gen: Generation, pid: int | None = None) -> str:
+        """The one path that unlinks an entry: under EX on the launch lock (so no guarded tmux process
+        is alive), only while that lock is still the original inode, and only if the entry is still
+        generation `gen`, refuses connections (sockets) and `pid` (if given) is dead. A socket's
+        `<p>.lock` goes with it. Returns `removed`, `held` (SH is held), `fault` (the launch lock is
+        missing or was replaced: nothing more is removed), `gone`, `changed` (replaced) or `live`."""
+        if self.fault is not None:
+            return "fault"
+        if not self.take_ex():
+            return HELD
         try:
+            if not self.lock_intact():
+                self.lock_replaced()
+                return "fault"
             current = self.generation(path)
             if current is None:
                 return "gone"
             if current != gen:
                 return "changed"
-            if self.connect(path) not in ("refused", "missing"):
+            is_lock = path.name.endswith(".lock")
+            if not is_lock and self.connect(path) not in ("refused", "missing"):
+                return "live"
+            if pid is not None and self.pid_running(pid):
                 return "live"
             self.unlinking(path)
-            path.unlink(missing_ok=True)
-            lock.unlink(missing_ok=True)
+            self.unlink(path)
+            if not is_lock:
+                self.unlink(path.with_name(path.name + ".lock"))
             return "removed"
         finally:
-            if lock in self.made:                   # our own artifact: never what keeps `dead` open
-                self.made.discard(lock)
-                lock.unlink(missing_ok=True)
-            if fd is not None:
-                os.close(fd)
+            self.drop_ex()
 
     def unlinking(self, path: Path) -> None:
         """Between validation and unlink (a seam for tests: the gap a replacement would need)."""
 
     def sweep_lock(self, lock: Path) -> None:
-        taken, fd = self.try_lock(lock)
-        if not taken:
-            self.pending[lock.name] = ("unresolved", None)
+        """A `<p>.lock` without its socket: just an entry, removed under EX like any other."""
+        gen = self.generation(lock)
+        if gen is None:
+            self.record(lock.name, "gone")
             return
-        try:
+        result = self.remove(lock, gen)
+        if result == "removed":
             self.log(f"stale {lock}")
-            lock.unlink(missing_ok=True)
             self.stale.append({"path": str(lock), "pid": None})
-            self.pending.pop(lock.name, None)
-        finally:
-            if fd is not None:
-                os.close(fd)
+        self.record(lock.name, result)
 
     def server_pid(self, path: Path, gen: Generation) -> int | None:
         """The PID serving this generation of the socket, or the one an earlier pass found for it: once
@@ -365,9 +462,7 @@ class Sweeper:
             return
         self.known.pop(path.name, None)             # proven dead: the PID is no evidence for anything else
         self.killed.append({"path": str(path), "pid": pid})
-        self.pending.pop(path.name, None)
-        if self.remove(path, gen) != "removed":     # a replacement, or a startup holds the lock
-            self.pending[path.name] = ("unresolved", None)
+        self.record(path.name, self.remove(path, gen, pid))   # held while any guarded process holds SH
 
     def wait(self, pred: Callable[[], bool], seconds: float = DEATH_WAIT) -> bool:
         """False after `seconds`; DeadlineReached if the global deadline comes first. Probes get only the
@@ -405,16 +500,36 @@ class Sweeper:
         out: dict[str, Any] = {"killed": list(self.killed), "stale": list(self.stale),
                                "survived": [], "unresolved": []}
         for name in sorted(present):
+            path = str(self.dead / name)
+            if name in self.appeared:
+                out["unresolved"].append(dict(self.appeared[name]))
+                continue
+            if name == LOCK_NAME:
+                if self.note or self.fault:
+                    out["unresolved"].append({"path": path, "pid": None, "reason": self.note or self.fault})
+                continue
             if name.endswith(".lock") and name[:-5] in present:
                 continue                            # reported with its socket
             outcome, pid = self.pending.get(name, ("unresolved", self.known_pid(name)))
-            out[outcome].append({"path": str(self.dead / name), "pid": pid})
+            entry: dict[str, Any] = {"path": path, "pid": pid}
+            reason = self.fault or (HELD if name in self.held else None)
+            if outcome == "unresolved" and reason is not None:
+                entry["reason"] = reason
+            out[outcome].append(entry)
         for name in sorted(set(self.known) - present):
             gen, pid = self.known[name]
             out["unresolved"].append({"path": str(self.dead / name), "pid": pid, "generation": list(gen)})
         out["unresolved"].extend(self.orphans)
         out["closed"] = closed
         return out
+
+
+def kind(mode: int) -> str:
+    for test, name in ((stat.S_ISSOCK, "socket"), (stat.S_ISREG, "file"), (stat.S_ISDIR, "dir"),
+                       (stat.S_ISLNK, "symlink")):
+        if test(mode):
+            return name
+    return "other"
 
 
 def finish(run: Path, summary: dict[str, Any]) -> None:
