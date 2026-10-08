@@ -97,6 +97,13 @@ class JournalBusy(Exception):
     method's half included (a bead row without its event), so never catch it inside a block."""
 
 
+class JournalUnusable(Exception):
+    """A transaction's cleanup failed (its ROLLBACK, or reading the connection's state), so the connection
+    may still hold an open write transaction and SQLite's write lock. The file is not suspect. Every public
+    operation except close() raises this, before and after close, with the cleanup error as its cause;
+    open a new Journal (restart wsd)."""
+
+
 class OpConflict(Exception):
     """An operation is already open for this bead: finish or replay it first."""
 
@@ -222,12 +229,26 @@ def _busy() -> Generator[None]:
         yield
     except sqlite3.OperationalError as exc:
         if _transient(exc):
-            raise JournalBusy(exc.sqlite_errorname) from None
+            busy = JournalBusy(exc.sqlite_errorname)
+            for note in getattr(exc, "__notes__", ()):  # a failed cleanup's note survives the conversion
+                busy.add_note(note)
+            raise busy from None
         raise
 
 
 def _locked[**P, R](method: Callable[P, R]) -> Callable[P, R]:
-    """Serialize a Journal method: wsd calls it from the event loop and from worker threads."""
+    """Serialize a Journal method: wsd calls it from the event loop and from worker threads. A poisoned
+    journal refuses it once the lock is taken, so a thread queued behind the failing transaction is too."""
+    @functools.wraps(method)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        with args[0].lock, _busy():  # type: ignore[attr-defined]  # args[0] is the Journal
+            args[0]._usable()  # type: ignore[attr-defined]
+            return method(*args, **kwargs)
+    return wrapper
+
+
+def _serialized[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """`_locked` without the poison check, for close()."""
     @functools.wraps(method)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         with args[0].lock, _busy():  # type: ignore[attr-defined]  # args[0] is the Journal
@@ -348,15 +369,23 @@ class Journal:
                 raise JournalCorrupt("the journal path is not a regular file")
         self.lock = threading.RLock()
         self._depth = 0
+        self._broken: BaseException | None = None   # a transaction's failed cleanup; see JournalUnusable
         try:
             _validate(path)
             self.db = _connect(path)
         except sqlite3.DatabaseError as exc:
             raise _refusal(exc) from None
 
-    @_locked
+    @_serialized
     def close(self) -> None:
+        """Close the connection, discarding any transaction a failed cleanup left open. A poisoned journal
+        stays poisoned."""
         self.db.close()
+
+    def _usable(self) -> None:
+        if self._broken is not None:
+            raise JournalUnusable(f"the journal is unusable: a transaction's cleanup failed "
+                                  f"({type(self._broken).__name__}); open a new Journal") from self._broken
 
     @_locked
     def backup(self, dest: Path) -> None:
@@ -384,8 +413,11 @@ class Journal:
         """All the block's journal writes commit, or (on any exception that leaves the block, a simulated
         crash included) none do. Re-entrant: a nested block joins the outer one. An exception caught inside
         the block does not roll anything back (see JournalBusy). When SQLite has already rolled the
-        transaction back itself (SQLITE_FULL, for one), the original error is raised as it is."""
+        transaction back itself (SQLITE_FULL, for one), the original error is raised as it is. When the
+        cleanup itself fails, the original error still leaves the block, with a note naming the cleanup
+        error, and the journal is poisoned (JournalUnusable)."""
         with self.lock:
+            self._usable()
             if self._depth:
                 self._depth += 1
                 try:
@@ -399,10 +431,20 @@ class Journal:
                 try:
                     yield
                     self.db.execute("COMMIT")
-                except BaseException:
-                    if self.db.in_transaction:
-                        self.db.execute("ROLLBACK")
-                    raise
+                except BaseException as exc:
+                    failed: BaseException | None = None
+                    try:
+                        if self.db.in_transaction:
+                            self.db.execute("ROLLBACK")
+                    except BaseException as cleanup:
+                        self._broken = cleanup
+                        if not isinstance(cleanup, Exception):
+                            raise       # an interrupt wins; Python makes `exc` its context
+                        failed = cleanup
+                    if failed is not None:
+                        exc.add_note(f"journal cleanup failed ({type(failed).__name__}: {failed}); "
+                                     "the journal is unusable; open a new Journal")
+                    raise               # bare: `exc` keeps its own cause, context and notes
                 finally:
                     self._depth = 0
 
@@ -468,6 +510,8 @@ class Journal:
         return self._op(op_id)
 
     def _op(self, op_id: str) -> Op:
+        """Unlocked and unchecked: the caller holds `self.lock` (a `_locked` method, or inside
+        `transaction()`), so the poison check has already run."""
         row = self.db.execute(f"SELECT {_OP} FROM ops WHERE op_id = ?", (op_id,)).fetchone()  # noqa: S608
         if row is None:
             raise KeyError(op_id)
@@ -536,6 +580,8 @@ class Journal:
 
     def _put(self, ws: str, bead: str, current: BeadRow | None, state: BeadState, reason: Reason | None,
              detail: str, ref: str | None) -> None:
+        """Unlocked and unchecked: the caller holds `self.lock` (a `_locked` method, or inside
+        `transaction()`), so the poison check has already run."""
         if current is not None and (current.state, current.reason, current.detail) == (state, reason, detail):
             return
         self.db.execute(
