@@ -152,7 +152,8 @@ class _Recovery:
                         self.d.cp("adopt.settled")
                         continue
                     except (LaunchConflict, LaunchesUnreadable) as exc:
-                        detail = f"the adopted entry can't go on the bead: {exc}"
+                        # §3.2: recovery fails and pickup never runs; the row stays unsettled
+                        raise BeadsUnavailable(f"the adopted entry can't go on the bead: {exc}") from None
                     else:
                         self.d.cp("adopt.appended!")
                         j.adoption_settle(name, adoption.bead)

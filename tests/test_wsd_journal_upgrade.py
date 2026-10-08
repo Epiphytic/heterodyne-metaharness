@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+import msgspec
 import pytest
 from fakes.checkpoints import CrashAt, SimulatedCrash
 from fakes.fake_btq import World, factory
@@ -18,7 +19,7 @@ from heterodyne.wsd.accounts import DefaultOnly
 from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.journal import V1_SCHEMA, V2_TABLES, Adoption, Journal, JournalCorrupt, check_v1
-from heterodyne.wsd.launches import LAUNCHES_KEY, LaunchEntry
+from heterodyne.wsd.launches import LAUNCHES_KEY, LaunchEntry, encode_entry
 from heterodyne.wsd.park import NotReleasable
 from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.scheduler import Outcome
@@ -277,6 +278,28 @@ def test_a_crash_settling_an_adoption_gives_one_entry(tmp_path: Path, point: str
     rig.restart()
     assert recover(rig.sched).ok and adoption(rig).settled
     assert len(bead_entries(rig)) == 1
+
+
+@pytest.mark.parametrize("value", ["not json", "[]"])
+def test_an_adopted_entry_that_cant_go_on_the_bead_fails_recovery(tmp_path: Path, value: str) -> None:
+    """r1 finding 3 (§3.2): an unreadable or conflicting `wsd_launches` fails recovery, so pickup never
+    runs, and the adoption stays unsettled for the next recovery."""
+    rig = legacy_running(tmp_path)
+    upgraded(rig)
+    meta = rig.world.beads["btq-1"].metadata
+    if value == "[]":     # a conflicting generation 1 under the adopted session key
+        conflict = msgspec.structs.replace(rig.journal.launches_of(WS, "btq-1")[0], account="edited")
+        value = "[" + encode_entry(conflict).decode() + "]"
+    meta[LAUNCHES_KEY] = value
+    calls = rig.runtime.calls
+    result = recover(rig.sched)
+    assert not result.ok and not adoption(rig).settled
+    assert Reason.BEADS_UNREACHABLE in rig.journal.holds(WS)    # the daemon starts no pickup on it
+    rig.runtime.end(rig.key("btq-1"))
+    rig.pickup()                                     # and if one ran, the guard waits for 4a
+    assert rig.runtime.calls == calls and not adoption(rig).settled
+    meta.pop(LAUNCHES_KEY)
+    assert recover(rig.sched).ok and adoption(rig).settled and len(bead_entries(rig)) == 1
 
 
 # --- test 10: held adoptions ---

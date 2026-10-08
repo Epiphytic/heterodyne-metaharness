@@ -594,9 +594,7 @@ class Parker:
             if any(s.liveness is not Liveness.LIVE or s.key != rec.session_key for s in own):
                 return self._uncertain(op, "a session of this bead is listed but not confirmed live")
             if own:
-                self._abandon_pinned(op, rec)
-                self._finish(op, OpStatus.DONE, BeadState.RUNNING)
-                self.d.cp(f"{kind}.done")
+                self._finish_live(op, rec)
                 return Launch.LIVE
             return self._pin_and_dispatch(op, rec, shown, worktree, accounts)    # steps 2 to 6
         except (LaunchConflict, LaunchesUnreadable, EntryConflict) as exc:
@@ -700,15 +698,21 @@ class Parker:
                 self._bead_write(entry, f"{kind}.reconciled!")
         return None
 
-    def _abandon_pinned(self, op: Op, rec: SessionRecord) -> None:
-        """The op's pinned generation never reached the runtime: abandoned, journal then bead."""
-        generation = op.data.get("generation")
-        if not generation:
-            return
+    def _finish_live(self, op: Op, rec: SessionRecord) -> None:
+        """The bead's own session is live: the op's pinned generation, if any, never reached the runtime.
+        It is abandoned in the transaction that ends the op, so no replay can find the op open with an
+        abandoned generation to dispatch; then the bead copy."""
         j, kind = self.d.journal, op.kind.value
-        entry = j.launch_set(rec.session_key, int(generation), "outcome", ABANDONED)
+        generation = op.data.get("generation")
+        entry = None
+        with j.transaction():
+            if generation:
+                entry = j.launch_set(rec.session_key, int(generation), "outcome", ABANDONED)
+            self._finish(op, OpStatus.DONE, BeadState.RUNNING)
         self.d.cp(f"{kind}.abandoned")
-        self._bead_write(entry, f"{kind}.abandoned!")
+        if entry is not None:
+            self._bead_write(entry, f"{kind}.abandoned!")
+        self.d.cp(f"{kind}.done")
 
     def _pin_and_dispatch(self, op: Op, rec: SessionRecord, shown: Bead, worktree: Path,
                           accounts: Accounts) -> Launch:
@@ -737,7 +741,9 @@ class Parker:
                 return Launch.WAIT              # a second failure in one call: the next pickup tries again
         else:
             return Launch.WAIT
-        # step 4: dispatch
+        # step 4: dispatch, only ever of an entry with no outcome
+        if entry.outcome is not None or entry.dispatched_at is not None:
+            raise EntryConflict(f"generation {entry.generation} already has an outcome or a dispatch")
         with j.transaction():
             entry = j.launch_set(*entry.ident, "dispatched_at", now())
             op = j.op_step(op.op_id, "dispatched")

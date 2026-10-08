@@ -12,7 +12,7 @@ rebuilds one. Only a receipt sets the outcome of a dispatched entry; tags, hooks
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Literal
 
 import msgspec
 
@@ -27,7 +27,7 @@ class LaunchEntry(msgspec.Struct, frozen=True, omit_defaults=True, forbid_unknow
     """One launch, as journaled and as copied to the bead. In the bead copy the set-once fields are
     omitted while empty, never written as null."""
     session_key: str
-    generation: int
+    generation: Annotated[int, msgspec.Meta(ge=1)]     # decoding a bead copy enforces it
     ws: str
     bead: str
     role: str

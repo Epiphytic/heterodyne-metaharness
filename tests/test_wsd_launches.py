@@ -14,6 +14,7 @@ from fakes.fake_btq import World, factory
 from wsd_env import WS, Rig, make_rig
 
 from heterodyne.config.accounts import credential_key
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import AccountChanged, Chosen, DefaultOnly
 from heterodyne.wsd.beads import RECORD_KEY, BeadsAdapter, BeadsUnavailable, LaunchConflict
@@ -68,6 +69,12 @@ def test_bead_copy_omits_empty_set_once_fields_and_sorts_keys() -> None:
 def test_an_unreadable_launch_array_is_never_guessed_at(value: object) -> None:
     with pytest.raises(LaunchesUnreadable):
         decode_launches(value)
+
+
+@pytest.mark.parametrize("generation", [0, -3])
+def test_a_generation_below_1_is_unreadable(generation: int) -> None:
+    with pytest.raises(LaunchesUnreadable):
+        decode_launches("[" + msgspec.json.encode(entry(generation)).decode() + "]")
 
 
 def test_two_entries_for_one_generation_are_unreadable() -> None:
@@ -208,14 +215,6 @@ def test_login_resolves_is_strict(tmp_path: Path) -> None:
     assert accounts.configured("codex") == ()
 
 
-def test_the_session_key_never_depends_on_the_account(tmp_path: Path, world: World) -> None:
-    """Test 1: two accounts views with different keys give one session key and one `wsd_session`."""
-    a = DefaultOnly(PROFILES, {"HOME": str(login_home(tmp_path, "a"))})
-    b = DefaultOnly(PROFILES, {"HOME": str(login_home(tmp_path, "b"))})
-    assert a.current_key("claude-code", "default") != b.current_key("claude-code", "default")
-    assert ids.role_session("btq-1", "coder", "p-one") == KEY
-
-
 # --- the guard, end to end (tests 1, 2, 3, 6, 7, 8) ---
 
 @pytest.fixture(autouse=True)
@@ -261,17 +260,60 @@ def row_reason(rig: Rig) -> Reason | None:
     return None if row is None else row.reason
 
 
-def test_wsd_session_never_records_the_account(tmp_path: Path) -> None:
-    """Test 1: the session record is the same whichever login launched it, and a later launch on another
-    login (here refused as account_changed) leaves it byte-identical."""
+def test_the_session_identity_never_depends_on_the_account(tmp_path: Path) -> None:
+    """Test 1: generation 1 launches under one accounts view and generation 2 under another, whose
+    default login has a different key (the adapter may switch). Both launch the same session key, and
+    `wsd_session` stays byte-identical; only the entries record the keys."""
     rig = resumable(tmp_path)
-    before = rig.world.beads["btq-1"].metadata[RECORD_KEY]
-    assert "ck1-" not in before and "default" not in before
-    rig.ws = replace(rig.ws, accounts=DefaultOnly(PROFILES, {"HOME": str(login_home(tmp_path, "b"))}))
+    view_a = rig.ws.accounts
+    assert view_a is not None
+    record = rig.world.beads["btq-1"].metadata[RECORD_KEY]
+    view_b = DefaultOnly(PROFILES, {"HOME": str(login_home(tmp_path, "b"))},
+                         capabilities={"claude-code": Capabilities(handoff_relaunch=True)})
+    rig.ws = replace(rig.ws, accounts=view_b)
     rig.restart()
     rig.pickup()
-    assert row_reason(rig) is Reason.ACCOUNT_CHANGED
-    assert rig.world.beads["btq-1"].metadata[RECORD_KEY] == before
+    one, two = rig.runtime.launches
+    assert one.session_key == two.session_key == ids.role_session("btq-1", "coder", "p-one")
+    keys = [e.credential_key for e in rig.journal.launches_of(WS, "btq-1")]
+    assert keys == [view.current_key("claude-code", "default") for view in (view_a, view_b)]
+    assert keys[0] != keys[1] and rig.world.beads["btq-1"].metadata[RECORD_KEY] == record
+
+
+@pytest.mark.parametrize("point", ["resume.abandoned", "resume.abandoned!"])
+def test_a_pin_abandoned_for_a_live_session_is_never_dispatched(tmp_path: Path, point: str) -> None:
+    """r1 finding 1: the pinned generation is abandoned because the bead's session turned out to be live.
+    A crash there, then the session ending, never dispatches the abandoned generation."""
+    rig = resumable(tmp_path)
+    crash(rig, "resume.entry!")
+    rig.runtime.adopt(rig.runtime.launches[0])          # listed live again before the replay
+    crash(rig, point)
+    rig.runtime.end(rig.key("btq-1"))
+    rig.replay_open()
+    rig.pickup()
+    one, two, *rest = rig.journal.launches_of(WS, "btq-1")
+    assert (two.outcome, two.dispatched_at) == ("abandoned", None)
+    assert all(e.generation != 2 for e in rig.runtime.launches)
+    assert [e.generation for e in rest] == [3] and rest[0].outcome == "launched"
+
+
+def test_an_entry_with_an_outcome_is_never_dispatched(tmp_path: Path) -> None:
+    """r1 finding 1, defence in depth: an op naming a generation that already has an outcome holds."""
+    rig = resumable(tmp_path)
+    crash(rig, "resume.entry!")
+    rig.journal.launch_set(rig.key("btq-1"), 2, "outcome", "abandoned")
+    rig.pickup()
+    assert row_reason(rig) is Reason.UNEXPECTED_STATE and rig.runtime.calls == 1
+
+
+@pytest.mark.parametrize("generation", [0, -1])
+def test_a_bead_entry_with_no_valid_generation_holds(tmp_path: Path, generation: int) -> None:
+    """r1 finding 2: a generation below 1 is unreadable, never inserted: UNEXPECTED_STATE."""
+    rig = resumable(tmp_path)
+    meta = rig.world.beads["btq-1"].metadata
+    meta[LAUNCHES_KEY] = meta[LAUNCHES_KEY].replace('"generation":1', f'"generation":{generation}')
+    rig.pickup()
+    assert row_reason(rig) is Reason.UNEXPECTED_STATE and rig.runtime.calls == 1
 
 
 @pytest.mark.parametrize("step", ["entry", "entry!", "dispatched", "dispatched!", "outcome", "outcome!"])
