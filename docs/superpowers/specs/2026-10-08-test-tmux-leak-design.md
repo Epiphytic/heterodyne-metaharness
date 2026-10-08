@@ -216,6 +216,7 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
       - the watchdog's raw `tmux -S ... kill-server` passes under `tests/tmux_watchdog.py`, and the same source is flagged under `tests/test_x.py`;
       - a private-helper reference passes under `tests/tmux_guard.py`, and is flagged elsewhere;
       - the specimen file is skipped in the tree scan, but each `flag` specimen in it, scanned under `tests/test_x.py`, gives exactly its declared rule id;
+      - a flagged specimen scanned under `tests/data/untrusted.py` is still flagged. This catches widening the specimen skip from the exact file to `tests/data/`;
       - an exempted mocked selector test passes. The same body in an unlisted function is flagged, and a listed function that has stopped patching `subprocess.run` fails the scan.
     - The tree scan of the real repository passes.
 
@@ -316,9 +317,11 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
 7. **The seam and the scan.** These are the pinning tests and the source-scan cases from A2.
 8. **Delayed final-component create** (deterministic, in-process, real filesystem). This is the only gap between parent and final-component lookup that matters.
    - The sequence:
-     - the test calls `_open_parent()` before the rename;
+     - before the rename, the test calls `finish = begin_lock_open(socket_path)`;
      - the watchdog renames and runs closure;
-     - from a `before_rmdir` test hook, so after the final unlink and before `rmdir`, the test calls `_open_lock_at(parent_fd)`.
+     - from a `before_rmdir` test hook, so after the final unlink and before `rmdir`, the test calls `finish()`.
+
+     The test makes no direct calls to the private helpers.
    - Correct code: the open fails with ENOENT, so the launcher raises WatchdogError and runs nothing; `rmdir` succeeds and `closed` is true.
    - With O_CREAT in `LOCK_FLAGS`: the open creates a new `launch.lock`, `rmdir` fails with ENOTEMPTY, and the test fails.
    - A second case creates `launch.lock` directly at that point, as the delayed `O_CREAT` would. Regression 12(a) gives the expected result.
@@ -328,9 +331,20 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
      - The check compares `(st_dev, st_ino)` with `os.stat(launch.lock)`, never the inode alone.
        - **Linux:** `os.stat` each `/proc/<pid>/fd/<n>` for every `n` in `/proc/<pid>/fd`.
        - **macOS:** `lsof -n -P -a -p <pid> -F fDi`.
-         - Only records whose `f` field is a numeric fd count.
-         - `D` (hex device) and `i` (inode) are both required and parsed as integers.
-         - lsof must exit 0, and it must produce a record for the pid.
+         - **Parsing.** The parser reads lsof's `-F` output line by line, as field records.
+           - A `p` line starts a process, and an `f` line starts a file record. Both reset the per-file state, so `D` and `i` count only when they belong to the same `f` record.
+           - A candidate is a record whose `f` is a numeric fd and which carries both `D` and `i`.
+           - A record that lacks `D` or `i`, or whose `f` isn't numeric (`cwd`, `txt` and so on), is a non-candidate, not malformed output. lsof legitimately omits fields for some files.
+         - **Failures:**
+           - a value that is present but malformed, such as a non-hex `D`, a non-decimal `i`, or an `f` that isn't numeric yet looks like a number;
+           - a non-zero lsof exit;
+           - no `p` record for the pid;
+           - no candidate matching the expected `(st_dev, st_ino)`.
+         - The parser has unit tests on synthetic output:
+           - `D` and `i` split across two `f` records, which must not match;
+           - records with missing fields, which are skipped;
+           - each malformed value, which fails;
+           - the wrong-device case.
        - A positive control proves the mapping on that platform, notably that lsof's `D` equals `st_dev`. The test opens `launch.lock` at a known fd in a helper process it controls and requires the same inspection to find exactly that `(fd, dev, ino)`.
      - An inspection error fails the test explicitly; it doesn't count as "not held" and doesn't skip. Errors include a missing lsof, a non-zero exit, an unparsable record, a missing `/proc` entry, and a `stat` error.
      - The server stays alive throughout: its pane sleeps, and the test kills it only in a `finally` after the inspection. The test also checks that the PID is still alive after the inspection, so a PID that died part-way through can't pass as empty.
@@ -346,7 +360,11 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
     - writes the `(fd, st_dev, st_ino)` of any match with the launch lock;
     - also checks the known inherited fd number (the guard's fd number, passed in the environment) directly.
 
-    An enumeration or `fstat` error, other than EBADF for the listing's own directory fd, makes the probe exit non-zero, and the test fails. An error never reads as "none".
+    EBADF is accepted in exactly two places:
+    - from the direct check of the known fd, where it is the expected sign that the child closed it;
+    - for the listing's own directory fd.
+
+    Any other enumeration or `fstat` error, including any other errno from the direct check, makes the probe exit non-zero, and the test fails. An error never reads as "none".
     - All four must report none.
     - The server itself must hold it (as in regression 9).
     - **Negative controls.** The same probe runs in a helper process that holds the launch lock at fd 1500 (`dup2`), and again at the known fd number. Both must report the match. A probe with a bound below 1500 fails the first control.
@@ -368,7 +386,7 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
     - rmdir fails;
     - the entry is left in place and listed in `unresolved` with reason `appeared after final unlink`;
     - `closed` is false and `dead` is kept;
-    - the original lock fd was held through the rmdir attempt (the hook asserts that EX is still unavailable to a fresh open file description);
+    - the original lock fd was held through the rmdir attempt. Before the final unlink, the test opens a second descriptor on the original inode by path. This is its own `open()`, a separate open file description, not a `dup()`. In the hook, `flock(LOCK_EX|LOCK_NB)` on that descriptor must fail with EWOULDBLOCK. Reopening the path in the hook would fail, or would reach the replacement inode.
     - nothing more is unlinked: a recorder on the watchdog's unlink records no calls after the hook, and the loop ends without another pass.
 
 **Platforms.** The real-tmux lifetime tests run on both CI platforms, Linux and macOS, under `HZ_REQUIRE_TMUX=1`. They are regressions 3(b), 5, 9 and 10, plus test 3. This revision is design only; the runtime evidence for both platforms comes with the implementation.
