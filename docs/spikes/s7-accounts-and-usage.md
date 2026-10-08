@@ -49,7 +49,7 @@ Under D9 only **demonstrated** enables a capability. A client-side result is the
 | **(1) / (a) login binding.** Login file set with `CODEX_HOME`, and a working login. | **Client side shown.** Real login: **needs Liam** (L1). | A fresh `CODEX_HOME` gives `codex login status` → `Not logged in` (rc 1). The login file is `$CODEX_HOME/auth.json` (a real `~/.codex` has it; names listed only). Scenarios F and G: with a dummy ChatGPT `auth.json` (`auth_mode: "chatgpt"`, fake JWTs), every backend request carried that file's bearer (one digest) and a `chatgpt-account-id` header. `auth.json` kept its sha256 while its access token was valid. The app-server writes `state_5`, `logs_2`, `goals_1`, `memories_1` and `queue_1` sqlite files, `installation_id`, `skills/` and `.tmp/` into `CODEX_HOME`. Codex refuses to create its helper binaries under `/tmp` (a warning only). | D7's Codex binding works on the client side: the login file set is `{auth.json}`, and everything else in `CODEX_HOME` is per-home state that the synthetic home owns. |
 | **(2) / (b) cross-account resume.** | **Unknown. Needs Liam** (L3). | S1 showed `codex resume <id>` within one home. Swapping `auth.json` under a dummy login gets nowhere offline: scenario G fails at `workspace routing discovery failed` before any model request. | Not testable offline. |
 | **(3) / (c) in-session usage (untrusted).** | **Client side shown** (the read). `account/rateLimits/updated` and the real backend: **needs Liam** (L2). | Scenario F, `account/rateLimits/read` → `{"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": <epoch s>}, "secondary": {"usedPercent": 17, "windowDurationMins": 10080, …}, "planType": "pro", "rateLimitReachedType": null, …}, "rateLimitsByLimitId": {…}}`. Its backend calls: `GET /backend-api/wham/usage` and `GET /backend-api/wham/rate-limit-reset-credits`. Scenario E, no login: error `-32600` "codex account authentication required to read rate limits". Schema (`codex app-server generate-json-schema`, offline): `AccountRateLimitsUpdatedNotification {rateLimits: RateLimitSnapshot}`; `RateLimitReachedType` = `rate_limit_reached`, `workspace_{owner,member}_credits_depleted`, `workspace_{owner,member}_usage_limit_reached`. | The D9 Codex candidate is real and well-shaped: percent, window and reset time. The per-session app-server can serve it (an untrusted row, §3.3). Whether `updated` fires mid-turn, and how often, is for L2. |
-| **(4) / (d) trusted host-side read; does it refresh?** | **Client side shown: the read works and, with an expired token, attempts a refresh.** Whether a refresh succeeds, rotates the token or writes `auth.json`: **unknown**, needs Liam (L6). | The same read from a short-lived host-side app-server works (scenario F, [`evidence/runF.txt`](../../spikes/s7/evidence/runF.txt)). With an **expired** dummy access token (`EXPIRES_IN=-3600 run-f.sh`, [`evidence/runF-exp-3600.txt`](../../spikes/s7/evidence/runF-exp-3600.txt)), the app-server logged `codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)` seven times, about every 5 s. The namespace blocked each attempt, so none of them reached the endpoint. It still sent the expired bearer to `/wham/usage` and returned the stub's numbers. `auth.json` kept its sha256, which is expected, since no refresh completed. `account/read` takes `{"refreshToken": bool}` ("When true, requests a proactive token refresh"). Starting the app-server also calls plugin and `wham/accounts/check` endpoints. | A host-side Codex read **attempts a token refresh by itself when the access token is expired**, so it must run under the D8 lock, as D8 already requires. The run sent no `account/read`, so the attempt doesn't depend on that call's `refreshToken` flag. Whether a successful refresh rotates the refresh token, writes `auth.json`, or fails on a read-only file is unknown until L6. Until then, run the freshness gate first, so the read normally sees a valid token. The read also contacts more than the usage endpoint (plugin and `wham/accounts/check` calls), which the egress policy must allow. |
+| **(4) / (d) trusted host-side read; does it refresh?** | **Client side shown: the read works and, with an expired token, attempts a refresh.** Whether a refresh succeeds, rotates the token or writes `auth.json`: **unknown**, needs Liam (L6). The trusted path itself: **needs Liam** (L7). | The same read from a short-lived host-side app-server works (scenario F, [`evidence/runF.txt`](../../spikes/s7/evidence/runF.txt)). With an **expired** dummy access token (`EXPIRES_IN=-3600 run-f.sh`, [`evidence/runF-exp-3600.txt`](../../spikes/s7/evidence/runF-exp-3600.txt)), the app-server logged `codex_login::auth::manager: Failed to refresh token: error sending request for url (https://auth.openai.com/oauth/token)` seven times, about every 5 s. The namespace blocked each attempt, so none of them reached the endpoint. It still sent the expired bearer to `/wham/usage` and returned the stub's numbers. `auth.json` kept its sha256, which is expected, since no refresh completed. `account/read` takes `{"refreshToken": bool}` ("When true, requests a proactive token refresh"). Starting the app-server also calls plugin and `wham/accounts/check` endpoints. | A host-side Codex read **attempts a token refresh by itself when the access token is expired**, so it must run under the D8 lock, as D8 already requires. The run sent no `account/read`, so the attempt doesn't depend on that call's `refreshToken` flag. Whether a successful refresh rotates the refresh token, writes `auth.json`, or fails on a read-only file is unknown until L6. Until then, run the freshness gate first, so the read normally sees a valid token. The read also contacts more than the usage endpoint (plugin and `wham/accounts/check` calls), which the egress policy must allow. |
 | **(5) / (e) structured limit-reached signal.** | **Unknown.** Schema only. **Needs Liam** (L5, opportunistic). | No `StopFailure`-like hook: Codex hooks are `SessionStart`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd` and `Notification`. App-server: `ErrorNotification {error, threadId, turnId, willRetry}` and `TurnCompleted` carry `codexErrorInfo` with `usageLimitExceeded` / `rateLimitExceeded`. `RateLimitSnapshot.rateLimitReachedType` (see (3)). Scenario G, `codex exec --json` with the stub answering 429 `usage_limit_reached`, never reached the model request (`turn.failed: workspace routing discovery failed`). | Candidates are the app-server's `codexErrorInfo` (in-session, untrusted) and the trusted read's `rateLimitReachedType`. A hook-only design can't see a Codex limit. |
 | **(6) freshness gate with two accounts.** | **Unknown. Needs Liam** (L6). | Per-home `auth.json` means two accounts never share a file. Where a completed refresh writes, if anywhere, is not observed (see (4)). | Same D8 question as Claude, and more pressing: Codex attempts a refresh by itself, without being asked (4). |
 | **(7) / (f) handoff relaunch.** | **Unknown. Needs Liam** (L4). | A fresh `codex exec` in the same `CODEX_HOME` always gets a new server-assigned thread ID (S1: no launch-time ID flag). | Any fresh launch is a new native session. `wsd` records the assigned ID in the launch entry, as for every Codex launch. |
@@ -95,7 +95,7 @@ ls -A "$L/cc-a/claude"                                               # expect .c
 "$S/sandbox.sh" codex - "$L/cx-a" -- codex login status; ls -A "$L/cx-a/codex"   # expect auth.json
 ```
 
-**L2. A working login through the synthetic home, in-session usage (c), and the host-side read (d).** `cc-s` and `cx-s` are the synthetic homes, and they see only account A's login file, read-only.
+**L2. A working login through the synthetic home, and in-session usage (c).** These are isolated client tests: everything runs inside `sandbox.sh`, so nothing here is the trusted path (L7 is). `cc-s` and `cx-s` are the synthetic homes, and they see only account A's login file, read-only.
 
 ```sh
 mkdir -p "$L/cc-s/claude"
@@ -111,7 +111,7 @@ jq -c '.rate_limits' "$L/cc-s/statusline.jsonl" | tail -1          # real five_h
 "$S/sandbox.sh" codex "$XA" "$L/cx-s" -- env AS_ERR="$L/cx-s/as-err.txt" python3 "$S/appserver.py" account/rateLimits/read \
   | grep -o '"primary": {[^}]*}\|"rateLimitReachedType": [^,]*'      # (c): real usedPercent / resetsAt?
 "$S/sandbox.sh" codex - "$L/cx-a" -- env AS_ERR="$L/cx-a/as-err.txt" python3 "$S/appserver.py" account/rateLimits/read \
-  | grep -o '"primary": {[^}]*}'                                    # (d): the same read on the account's own home
+  | grep -o '"primary": {[^}]*}'                                    # the (d) read's shape on the account's own home, still sandboxed
 snap | diff "$L/before.txt" -
 ```
 
@@ -143,7 +143,7 @@ jq -c '{hook_event_name, error}' "$L/cc-s/stopfailure.jsonl"
   | jq -c 'select(.type=="error" or .type=="turn.failed")'
 ```
 
-**L6. Refresh behaviour (the trusted read, and the freshness gate with two accounts).** This uses only the scratch logins from L1, so a rotated refresh token costs nothing.
+**L6. Refresh behaviour (isolated client tests for the trusted read and the freshness gate with two accounts).** This uses only the scratch logins from L1, so a rotated refresh token costs nothing.
 
 For Claude, `expiresAt` is a plain field, so it can be set to the past. For Codex, the access token's expiry is inside the signed JWT and can't be edited. `last_refresh` is set to an old date instead. That this triggers a refresh is an assumption: if the stderr count is 0, record "no refresh attempted".
 
@@ -175,6 +175,17 @@ What to record for each step:
 - whether `.credentials.lock` appeared;
 - the refresh line counts.
 
+**L7. The trusted host-side read (d), Codex only (Claude has no source).** This is the only step that runs outside every sandbox, as D3 and D9 require. It still uses `env -i` with only the dedicated scratch login from L1, and it runs under a file lock that stands in for D8. The lock is keyed, as in D1, by a digest of the canonical login-file path. The real lock path is fixed by the AU task that implements D8.
+
+```sh
+LOCK=$L/locks/$(readlink -f "$XA" | sha256sum | cut -c1-16).lock; mkdir -p "$L/locks"
+snap > "$L/before.txt"
+flock -w 30 "$LOCK" env -i PATH="$(dirname "$(readlink -f "$(command -v codex)")"):/usr/bin:/bin" HOME="$L/cx-a/home" \
+  CODEX_HOME="$L/cx-a/codex" AS_ERR="$L/cx-a/l7.txt" python3 "$S/appserver.py" account/rateLimits/read \
+  | grep -o '"primary": {[^}]*}\|"rateLimitReachedType": [^,]*'      # real usedPercent / resetsAt?
+snap | diff "$L/before.txt" -; grep -c "refresh token" "$L/cx-a/l7.txt"
+```
+
 ## Recommended D9 defaults
 
 Until the real-account runs are recorded here:
@@ -184,7 +195,7 @@ Until the real-account runs are recorded here:
 | (a) login binding; `accounts` accepted by `config check` | off | off | L1 and L2 pass for that adapter. This is the first gate: no other capability matters without it. |
 | (b) cross-account resume | off | off | L3 passes (the answer recalls the earlier turn). |
 | (c) in-session usage (untrusted) | off (status line) | off (`account/rateLimits/read` and `updated`) | L2 shows real numbers. Good early candidates on both: a cheap source with a known shape. |
-| (d) trusted host-side read | **off, no source** | off | Codex: L2's host-side read plus L6 (refresh outcome, file writes, read-only behaviour recorded), with the read under the D8 lock. Claude: only by an operator decision on `get_usage` (§2) or a new CLI version. |
+| (d) trusted host-side read | **off, no source** | off | Codex: L7 returns real numbers, from the host outside every sandbox and under the lock. L6's refresh outcome must also be recorded. Claude: only by an operator decision on `get_usage` (§2) or a new CLI version. |
 | (e) limit-reached signal | off (`StopFailure` with `error == "rate_limit"`, transcript `isApiErrorMessage`) | off (app-server `codexErrorInfo`) | L5 sees the signal on a real limit. |
 | (f) handoff relaunch | off | off | L4 passes **and** a continuation from a real §4.1 deterministic handoff works. L4 covers only the relaunch mechanics (a fresh native session under account B with the right ID). Testing continuation needs the handoff generator, so it is deferred to the AU task that builds it. |
 | `failover` | `none` | `none` | Claude can't have `next` without (d). Codex gets `next` only once (d) and either (b) or (f) are on. |
