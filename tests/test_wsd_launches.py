@@ -28,6 +28,7 @@ from heterodyne.wsd.launches import (
     encode_entry,
 )
 from heterodyne.wsd.park import UNRECEIPTED
+from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import Reason
@@ -432,3 +433,56 @@ def test_an_unavailable_receipt_replays_to_wait(tmp_path: Path, monkeypatch: pyt
         assert rig.parker.replay_resume(op).value == "wait"
     [op] = rig.journal.ops_open()
     assert op.attempts == 0 and Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS)
+
+
+def lose_journal(rig: Rig) -> None:
+    rig.journal.close()
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{rig.root / 'state' / 'wsd.db'}{suffix}").unlink(missing_ok=True)
+    rig.restart()
+
+
+def p_q_p(tmp_path: Path) -> tuple[Rig, str]:
+    """Generations P1, Q1, P2 on btq-1: P is the coder's session key, Q another role's (written as the
+    guard would, journal then bead). P2 ended; returns Q's key."""
+    rig = resumable(tmp_path)
+    q = ids.role_session("btq-1", "reviewer", "p-two")
+    q1 = entry(1, q, role="reviewer", profile="p-two", dispatched_at="t", outcome="launched")
+    rig.journal.launch_insert(q1)
+    rig.beads.ensure_launch(WS, "btq-1", q1)
+    rig.pickup()
+    rig.runtime.end(rig.key("btq-1"))
+    return rig, q
+
+
+def test_entries_rebuild_from_the_bead_after_the_journal_is_lost(tmp_path: Path) -> None:
+    """Test 6: P1, Q1, P2 rebuild from `wsd_launches` with `rebuilt_at` and no receipts; P3 is pinned."""
+    rig, q = p_q_p(tmp_path)
+    before = rig.beads.show(WS, "btq-1").launches().entries
+    p = rig.key("btq-1")
+    assert [(e.session_key, e.generation) for e in before] == [(p, 1), (q, 1), (p, 2)]
+    lose_journal(rig)
+    assert recover(rig.sched).ok and row_reason(rig) is Reason.JOURNAL_LOST
+    rig.parker.release("btq-1")
+    rig.pickup()
+    assert rig.journal.receipts() == 1                               # P3's own, nothing rebuilt
+    assert rig.journal.launches(q) == [before[1]] and rig.journal.rebuilt_at(q, 1) is not None
+    assert [e.generation for e in rig.journal.launches(p)] == [1, 2, 3]
+    assert rig.journal.rebuilt_at(p, 2) is not None and rig.journal.rebuilt_at(p, 3) is None
+    assert rig.runtime.launches[-1].generation == 3 and rig.state("btq-1") == "running"
+
+
+def test_a_rebuilt_dispatched_entry_with_no_outcome_holds(tmp_path: Path) -> None:
+    rig, _ = p_q_p(tmp_path)
+    meta = rig.world.beads["btq-1"].metadata
+    p2 = rig.beads.show(WS, "btq-1").launches().raw[2].decode()
+    meta[LAUNCHES_KEY] = meta[LAUNCHES_KEY].replace(p2, p2.replace(',"outcome":"launched"', ""))
+    assert rig.beads.show(WS, "btq-1").launches().entries[2].outcome is None
+    lose_journal(rig)
+    assert recover(rig.sched).ok
+    calls = rig.runtime.calls
+    rig.parker.release("btq-1")
+    rig.pickup()
+    assert rig.runtime.calls == calls and row_reason(rig) is Reason.UNEXPECTED_STATE
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and "generation 2 was dispatched with no launch receipt" in row.detail
