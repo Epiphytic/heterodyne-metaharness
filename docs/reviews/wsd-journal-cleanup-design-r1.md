@@ -1,0 +1,17 @@
+# Codex review r1: wsd journal cleanup errors design (btq-ekktm)
+
+Reviewed draft r1 of docs/superpowers/specs/2026-10-08-wsd-journal-cleanup-errors-design.md (then at /tmp/design-ekktm.md). Home paths are scrubbed.
+
+1. **[BLOCKING]** [/tmp/design-ekktm.md:46](/tmp/design-ekktm.md:46) — Changing only `_FailOn.exc` is insufficient. The proxy has no `close()`, so test 1’s close assertions raise `AttributeError`. Stacking proxies also conflicts with its `sqlite3.Connection` constructor annotation. Additionally, `ran` excludes failed statements, so it cannot count failed ROLLBACK attempts. See [tests/test_wsd_journal.py:310](tests/test_wsd_journal.py:310). **Fix:** Forward `close()` or restore the real connection before testing close, allow stacked proxies in the annotation, and count rollback attempts using `seen`.
+
+2. **[BLOCKING]** [/tmp/design-ekktm.md:55](/tmp/design-ekktm.md:55) — Test 3 does **not** kill the “`_busy` does not copy notes” mutant. `emit()` converts the INSERT’s `OperationalError` into `JournalBusy` through `_locked` before the outer transaction receives it. Cleanup then adds the note directly to that `JournalBusy`; no subsequent conversion occurs. **Fix:** Inject SQLITE_BUSY at COMMIT, followed by a ROLLBACK failure. Assert the resulting `JournalBusy` contains the cleanup note, and map the mutant to that test.
+
+3. **[NON-BLOCKING]** [/tmp/design-ekktm.md:20](/tmp/design-ekktm.md:20) — The note on E and later refusals raised `from C` are sound, provided E is re-raised with a bare `raise` **after** leaving C’s handler. The proposed identity assertions do not verify the promised preservation of E’s existing chain. **Fix:** Give one primary exception an existing cause/context and note; assert those remain intact, including `__suppress_context__`, with exactly one additional cleanup note.
+
+4. **[NON-BLOCKING]** [/tmp/design-ekktm.md:32](/tmp/design-ekktm.md:32) — Checking poison inside the RLock is correct, but the tests would miss moving the check before lock acquisition. Exempting `close()` also needs an explicit implementation choice: removing `_locked` must retain serialization. **Fix:** Keep close under `self.lock`. Reuse [_SignalBeforeAcquire](tests/test_wsd_journal.py:581) to queue a worker before cleanup fails, then assert it receives `JournalUnusable` without executing SQL. Avoid sleeps.
+
+5. **[NON-BLOCKING]** [/tmp/design-ekktm.md:30](/tmp/design-ekktm.md:30) — “Every call” overstates coverage. `_op()` and `_put()` bypass `_locked`, as does direct access through `db`. Their current internal callers are guarded, so the proposed checks cover the public methods, with the stated close exemption. **Fix:** Specify “every public Journal operation except close”; document the private helpers’ lock assumption. Keep the instance poisoned after close—recovery requires a new Journal, without adding decorators to internal helpers.
+
+6. **[NON-BLOCKING]** [/tmp/design-ekktm.md:59](/tmp/design-ekktm.md:59) — The proxy tests provide deterministic coverage, but the real-SQLite test has evidence only for SQLite 3.45.1. SQLite documents the progress interval as approximate, so cross-platform behavior still needs verification. [SQLite progress-handler documentation](https://www.sqlite.org/c3ref/progress_handler.html). **Fix:** Run test 5 on both CI platforms, arm the handler only after the write, and explicitly release/close the second writer before reopening the Journal. Keep the injected tests as the required deterministic coverage.
+
+REVISE
