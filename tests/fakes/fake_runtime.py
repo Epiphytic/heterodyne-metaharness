@@ -1,5 +1,7 @@
 """A recording AgentRuntime (plan 4 provides the real one). Sessions survive a simulated wsd restart,
-like real agent processes do. A session stays listed until it is stopped or `end`s on its own."""
+like real agent processes do. A session stays listed until it is stopped or `end`s on its own. A launch
+returns a `Started` with synthetic tmux IDs; its native ID is the spec's, or a synthetic thread ID when the
+spec has none (Codex before its thread is known)."""
 
 from heterodyne.wsd.runtime import (
     LaunchFailed,
@@ -8,6 +10,7 @@ from heterodyne.wsd.runtime import (
     Liveness,
     RuntimeUnavailable,
     Session,
+    Started,
 )
 
 
@@ -23,6 +26,8 @@ class FakeRuntime:
         self.uncertain_beads: set[str] = set()   # the first launch for each of these beads is uncertain
         self.stop_failures = 0
         self.list_failures = 0
+        self.calls = 0                # every launch() call, whatever it did
+        self.raise_after_start: BaseException | None = None    # raised once, after the session started
 
     def available(self) -> bool:
         return self.up
@@ -33,12 +38,13 @@ class FakeRuntime:
             raise RuntimeUnavailable("can't list sessions")
         return [s for s in self.listed.values() if s.ws == ws]
 
-    def launch(self, spec: LaunchSpec) -> None:
+    def launch(self, spec: LaunchSpec) -> Started:
+        self.calls += 1
         if not self.up:
             raise RuntimeUnavailable("down")
         current = self.listed.get(spec.session_key)
         if current is not None and current.liveness is Liveness.LIVE:
-            return
+            return self._started(spec)
         if self.launch_failures or spec.bead in self.failing_beads:
             self.launch_failures = max(0, self.launch_failures - 1)
             raise LaunchFailed("launch failed")
@@ -52,6 +58,14 @@ class FakeRuntime:
             else:
                 self.launch_uncertain -= 1
             raise LaunchUncertain("no answer from the backend")
+        if self.raise_after_start is not None:
+            exc, self.raise_after_start = self.raise_after_start, None
+            raise exc
+        return self._started(spec)
+
+    def _started(self, spec: LaunchSpec) -> Started:
+        native = spec.native_id if spec.native_id is not None else f"thread-{spec.generation}"
+        return Started(f"wsd-{spec.session_key[:8]}", f"%{self.calls}", 4000 + self.calls, native)
 
     def stop(self, session_key: str) -> None:
         if not self.up:

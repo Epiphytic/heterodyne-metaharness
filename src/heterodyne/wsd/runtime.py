@@ -46,6 +46,23 @@ class LaunchSpec:
     worktree: Path
     resume: bool            # a resume operation: the record names the key, not a session that ran (launch)
     ref: str | None = None  # the message or event that caused the launch, for progress reactions
+    # The launch entry (AU-3 §2.4). The runtime tags the launch with (session key, generation): its tmux
+    # options, the hook-spool launch tag and Claude's native ID. `native_id` is the session key for a
+    # first Claude launch, the latest launched entry's native ID for a resume, and None for Codex before
+    # its thread ID is known. `account` and `model` are the entry's pinned values, never re-read.
+    generation: int = 1
+    native_id: str | None = None
+    account: str = "default"
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class Started:
+    """What `launch` created on wsd's own tmux server. Journaled as the generation's `started` receipt."""
+    tmux_session: str
+    tmux_pane: str
+    pane_pid: int
+    native_id: str | None       # the session's native ID, when the runtime knows it
 
 
 class RuntimeUnavailable(Exception):
@@ -74,10 +91,11 @@ class AgentRuntime(Protocol):
         them; a partial list is never returned."""
         ...
 
-    def launch(self, spec: LaunchSpec) -> None:
+    def launch(self, spec: LaunchSpec) -> Started:
         """Start (or, with `spec.resume`, resume) the session. Idempotent on `spec.session_key`: a live
-        session is left alone. Returns once the session is live. Raises LaunchFailed when nothing
-        started, RuntimeUnavailable when nothing was attempted, and LaunchUncertain otherwise.
+        session is left alone. Returns once the session is live, with what it created. Raises
+        LaunchFailed when nothing started and RuntimeUnavailable when nothing was attempted; any other
+        exception, LaunchUncertain included, means the runtime can't say.
 
         `spec.resume` is prepared identity, not launch evidence: the bead's record names this key, but a
         first pickup shelved after writing the record never launched. The runtime resumes the session
@@ -101,7 +119,7 @@ class NoRuntime:
     def sessions(self, ws: str) -> list[Session]:
         raise RuntimeUnavailable("no agent runtime is configured")
 
-    def launch(self, spec: LaunchSpec) -> None:
+    def launch(self, spec: LaunchSpec) -> Started:
         raise RuntimeUnavailable("no agent runtime is configured")
 
     def stop(self, session_key: str) -> None:

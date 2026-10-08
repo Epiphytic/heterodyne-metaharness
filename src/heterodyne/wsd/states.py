@@ -47,6 +47,9 @@ class Reason(StrEnum):
     ACTIONS_UNRECONCILED = "actions_unreconciled"
     CONFIG_INVALID = "config_invalid"
     UNEXPECTED_STATE = "unexpected_state"
+    # A launched session's account would change, and the adapter can't switch (D7). Interim: AU-4
+    # replaces this escalation with its `account_changed` deferral.
+    ACCOUNT_CHANGED = "account_changed"
 
 
 class WsState(StrEnum):
