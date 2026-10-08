@@ -1,5 +1,6 @@
-$ S5_MAX_LIFETIME_S=240 S5_STOP_MARGIN_S=60 launch.py agent claude a1
-PASS freshness-gate [access token 5.32 h left, need > 0.08 h; no refresh is attempted here]
+$ S5_AGENT_INJECT= launch.py agent claude p3   (after: launch.py up claude p3 -> SELFTEST PASS)
+PASS cli-version-pinned [claude 2.1.286 codex 0.160.0]
+PASS freshness-gate [access token 4.57 h left, need > 2.25 h; no refresh is attempted here]
 PASS canary-precondition [$HOME/.s5-canary readable outside]
 PASS outer-fence-network-none [workload container NetworkMode=none]
 INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
@@ -15,16 +16,16 @@ PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh sessi
 PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
 PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
 PASS hook-event-accepted [reply={"ok": true}]
-PASS host-env-not-inherited [unexpected vars: none]
+PASS host-env-not-inherited [exec path, unexpected vars: none]
 PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
-PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-a1->ENOENT; chosen:$HOME
+PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-p3->ENOENT; chosen:$HOME/.cache/s5/p3/home/.claude/.credentials.json sha256-match=True write->EROFS]
 PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
 PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
 PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
 PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
 SELFTEST PASS
-INFO reaper pid 2317818: session stops at 13:36:34 (max lifetime 240 s, stop margin 60 s)
-launched in tmux -L s5spike session a1; running the probes through the agent
+INFO reaper pid 2409256: session stops at 16:17:07 (max lifetime 7200 s, stop margin 900 s)
+launched in tmux -L s5spike session p3; running the probes through the agent
 PASS canary-precondition [$HOME/.s5-canary readable outside]
 INFO other-account alias: alias of the chosen account ($HOME/.cache/s5/accounts/claude-default-alias/.credentials.json), not other
 INFO other-account b: present $HOME/.cache/s5/accounts/claude-b-link/.credentials.json $HOME/.cache/s5/accounts/claude-b/.credentials.json
@@ -35,38 +36,18 @@ INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.jso
   agent: PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
   agent: PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
   agent: PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
-  agent: PASS wsd-socket-absent [exists=False; /run/hz: agent-probe.json hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+  agent: PASS wsd-socket-absent [exists=False; /run/hz: agent-probe.json hook.py probe.sock probes.py probes.sh session.sock session_stub.py ws-request]
   agent: PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
   agent: PASS model-host-agent-path [api.anthropic.com: curl rc=0 http=404 issuer='CN=OpenShell Sandbox CA; O=OpenShell' (expect reachable via the CLI ancestor)]
   agent: PASS hook-event-accepted [reply={"ok": true}]
-  agent: INFO agent-tool-env [vars beyond the launcher set: AI_AGENT CLAUDECODE CLAUDE_CODE_AUTO_COMPACT_WINDOW CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT CLAUDE_PID COREPACK_ENABLE_AUTO_PIN GIT_EDITOR NoDefaultCurrentDirectoryInExePath]
+  agent: PASS host-env-not-inherited [agent path, unexpected vars: none]
   agent: PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
-  agent: PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-a1->ENOENT; cho
-  agent: probes-rc=0
+  agent: PASS other-accounts [b/present:$HOME/.cache/s5/accounts/claude-b-link/.credentials.json->ENOENT; b/present:$HOME/.cache/s5/accounts/claude-b/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; canary:$HOME/.cache/s5/oa-canary-p3->ENOENT; chosen:$HOME/.cache/s5/p3/home/.claude/.credentials.json sha256-match=True write->EROFS]
+INFO agent-written result file (untrusted, not used): probes-rc=0
+PASS agent-path-channel [verified probe runs=1 (exe /usr/bin/python3.12, argv python3 -I /run/hz/probes.py --agent, untraced, workload netns net:[4026532840], claude CLI ancestor, env allowlisted) pid 2409674, done=0, checks 11/11 PASS, failed: none, missing: none, rejected peers: none]
 PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
 PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
 PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
 PASS agent-ancestry-allowed [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.anthropic.com:443 [policy:claude_model engine:opa]]
 AGENT-PATH SELFTEST PASS: session ready for work
 rc=0
-== pane (tmux -L s5spike a1)
- ▐▛███▛█   Claude Code v2.1.286
-▝▜██████▀  Opus 5.5 · Claude Enterprise
- ▝▝   ▝▝   $HOME/.cache/s5/a1/work
-❯ Run exactly this shell command, then reply with only its exit status: python3 /run/hz/probes.py < /run/hz/agent-probe.json > "$HOME/.s5-agent-probe.out" 2>&1; echo "probes-rc=$?" >>
-  "$HOME/.s5-agent-probe.out"
-  Ran 1 shell command
-● 0
-✻ Cogitated for 12s · done 8:32 PM
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ cat ~/.s5-agent-probe.out
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
-== session socket events from the agent path
-approve    -> {"ok": false, "error": "forbidden"}
-hook_event    -> {"ok": true}
-approve    -> {"ok": false, "error": "forbidden"}
-hook_event    -> {"ok": true}
-hook_event PreToolUse Bash {"command": "python3 /run/hz/probes.py < /run/hz/agent-probe.json > \"$HOME/.s5-agent-prob -> {"ok": true}
-approve    -> {"ok": false, "error": "forbidden"}
-hook_event    -> {"ok": true}

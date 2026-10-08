@@ -6,8 +6,11 @@ Under OpenShell the egress refusal is a connect() EACCES from the supervisor's t
 interception (not a CONNECT 403), so the marker is the policy-DNS synthetic address, and the
 launcher checks the supervisor's own log afterwards (as S3 checked proxy.log).
 Run twice per launch: by a separate `sandbox exec` (path "exec") and by the agent itself through
-its own tool (path "agent"), so the agent's process tree is probed too.
-Usage: probes.py < JSON from launch.py
+its own tool (path "agent"), so the agent's process tree is probed too. On the agent path the config
+comes from the read-only /run/hz/agent-probe.json, and every result also goes to the host over
+/run/hz/probe.sock, where the launcher verifies this process before counting anything it sends.
+Usage: probes.py < JSON from launch.py          (exec path)
+       python3 -I /run/hz/probes.py --agent       (agent path)
 """
 import errno
 import hashlib
@@ -18,16 +21,29 @@ import socket
 import subprocess
 import sys
 
-cfg = json.load(sys.stdin)
+AGENT = sys.argv[1:] == ['--agent']
+if AGENT:
+    with open('/run/hz/agent-probe.json') as f:
+        cfg = json.load(f)
+    channel = socket.socket(socket.AF_UNIX)
+    channel.connect('/run/hz/probe.sock')
+else:
+    cfg = json.load(sys.stdin)
 TOKEN = cfg['token']
 PATH = cfg.get('path', 'exec')
 SYNTHETIC = ipaddress.ip_network('198.18.0.0/15')   # OpenShell policy DNS answers from this range
 rc = 0
 
 
+def report(msg: dict) -> None:
+    if AGENT:
+        channel.sendall((json.dumps(msg) + '\n').encode())
+
+
 def check(name: str, ok: bool, evidence: str) -> None:
     global rc
     print(f"{'PASS' if ok else 'FAIL'} {name} [{evidence}]", flush=True)
+    report({'check': name, 'ok': ok, 'evidence': evidence})
     rc = rc or (0 if ok else 1)
 
 
@@ -175,20 +191,12 @@ check(f'model-host-{PATH}-path', ok, f"{cfg['model_host']}: curl rc={cu.returnco
 r = sock({'token': TOKEN, 'type': 'hook_event', 'payload': {}})
 check('hook-event-accepted', r == '{"ok": true}', f'reply={r}')
 
-# 8. Environment: only the launcher's allowlist plus OpenShell's fixed, secret-free set.
-LAUNCHER = {'HOME', 'PATH', 'LANG', 'TERM', 'USER', 'HZ_SESSION_SOCKET', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
-            'ENABLE_CLAUDEAI_MCP_SERVERS'}
-OPENSHELL = {'OPENSHELL_SANDBOX', 'OPENSHELL_USER_ENVIRONMENT', 'SSL_CERT_FILE', 'CURL_CA_BUNDLE',
-             'REQUESTS_CA_BUNDLE', 'GIT_SSL_CAINFO', 'NODE_EXTRA_CA_CERTS', 'DENO_CERT', 'container',
-             'HOSTNAME', 'DEBIAN_FRONTEND', 'SHELL'}
-SHELL = {'PWD', 'SHLVL', '_', 'OLDPWD'}
-extra = sorted(set(os.environ) - LAUNCHER - OPENSHELL - SHELL)
+# 8. Environment: only the launcher's allowlist, OpenShell's fixed secret-free set and the shell's own;
+#    on the agent path also the pinned CLI's tool variables (all from launch.py, by name).
+extra = sorted(set(os.environ) - set(cfg['env_allowed']))
 user_env = set(json.loads(os.environ.get('OPENSHELL_USER_ENVIRONMENT', '{}')))
-extra += sorted(f'USER_ENVIRONMENT:{k}' for k in user_env - LAUNCHER - OPENSHELL)
-if PATH == 'exec':
-    check('host-env-not-inherited', not extra, f"unexpected vars: {' '.join(extra) or 'none'}")
-else:   # the agent's tool env carries the CLI's own variables; the launcher env is proven on the exec path
-    print(f"INFO agent-tool-env [vars beyond the launcher set: {' '.join(sorted(k.split(':')[-1] for k in extra))}]")
+extra += sorted(f'USER_ENVIRONMENT:{k}' for k in user_env - set(cfg['env_user']))
+check('host-env-not-inherited', not extra, f"{PATH} path, unexpected vars: {' '.join(extra) or 'none'}")
 
 # 9. (added) OpenShell's own control material is not readable by the workload.
 paths = ['/.openshell/channel/sandbox/bootstrap.json', '/.openshell/channel/sandbox/server.key',
@@ -220,4 +228,5 @@ for c in cfg['chosen']:
     ok &= same is True and w in ('EROFS', 'EACCES', 'EPERM')
     ev.append(f"chosen:{c['path']} sha256-match={same} write->{w}")
 check('other-accounts', ok and bool(cfg['other_accounts']), '; '.join(ev))
+report({'done': rc})
 sys.exit(rc)

@@ -42,12 +42,13 @@ Bead: btq-le4mq. Code: `spikes/s5/` (`launch.py`, `probes.py`, `probes.sh`, `net
 3. **Runs the self-test** and deletes the sandbox on any failure ("launch refused").
 
 `launch.py agent <adapter> <sid>` launches the agent. It never trusts an earlier result:
+0. **CLI version pin.** The host's `claude` and `codex` must be the pinned versions (2.1.286, 0.160.0), because the agent-path env allowlist is defined for them. Otherwise `REFUSED`.
 1. **Fresh gate.** It deletes `selftest.rc` and reruns the complete self-test (freshness gate, canary, outer fence, every probe, the log checks) immediately before the launch. Any exception counts as a FAIL. On anything but PASS it prints `REFUSED`, deletes the sandbox and exits 2.
 2. **Launch.** It starts the agent in `tmux -L s5spike new-session -d -s <sid>` as `openshell sandbox exec -n s5-<sid> --tty -- <cli> ...`:
    - **Claude:** `--permission-mode bypassPermissions`.
    - **Codex:** first a detached `codex app-server --listen unix:///run/hz-bridge/app.sock` inside the sandbox. The launcher waits for its socket (refusing if it does not appear), then runs the TUI as `codex --remote unix:///run/hz-bridge/app.sock --dangerously-bypass-approvals-and-sandbox`.
 3. **Lifetime reaper.** It starts a detached `launch.py reap` process (below).
-4. **Agent-path self-test.** The session's first input is a scripted prompt that makes the agent run the probes through its own tool (Claude's Bash tool, the Codex app-server's exec). The session is stopped unless they all pass (below). Only then does it print `session ready for work`.
+4. **Agent-path self-test.** The session's first input is a scripted prompt that makes the agent run the probes through its own tool (Claude's Bash tool, the Codex app-server's exec). The results come back over a launcher-owned socket that admits only the verified probe process, not through anything the agent writes. The session is stopped unless all of them pass (below). Only then does it print `session ready for work`.
 
 ## Item 1: managed launch shape (PASS)
 
@@ -80,7 +81,7 @@ The self-test runs twice per launch, through two different execution paths:
 - **exec path:** before the agent starts, the probes run in a fresh `openshell sandbox exec` process. This is the gate in `up` and the first step of `agent`.
 - **agent path:** the same probes then run as a tool call inside the live agent, so they execute in the process tree that will do the work (next subsection).
 
-Every probe prints its own evidence, and only the specific enforcement passes. Current runs: `evidence/agent-path-claude.txt` (session a1) and `evidence/agent-path-codex.txt` (a2) hold both paths, and both end `AGENT-PATH SELFTEST PASS`. `evidence/selftest-pass.txt` is the pre-review run.
+Every probe prints its own evidence, and only the specific enforcement passes. Current runs: `evidence/agent-path-claude.txt` (session p3) and `evidence/agent-path-codex.txt` (x1) hold both paths, and both end `AGENT-PATH SELFTEST PASS`. `evidence/selftest-pass.txt` is the pre-review run.
 
 | Probe | What must hold under OpenShell | Evidence (Codex a2; the Claude run is the same apart from paths and hosts) |
 |---|---|---|
@@ -95,7 +96,7 @@ Every probe prints its own evidence, and only the specific enforcement passes. C
 | allowlisted-host-reachable | curl rc 0 **and** the issuer is the OpenShell sandbox CA, which proves it went through the proxy | `curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell'` |
 | model-host-exec-path / model-host-agent-path (**added**) | curl to the CLI's model host. exec path: refused (rc 7), because curl has no CLI ancestor. agent path: reachable through the proxy (rc 0, OpenShell CA), because the CLI is curl's ancestor | exec: `chatgpt.com: curl rc=7`; agent: `chatgpt.com: curl rc=0 http=403 issuer='CN=OpenShell Sandbox CA; O=OpenShell'` |
 | hook-event-accepted | `hook_event` with a valid token gets `{"ok": true}` | PASS |
-| host-env-not-inherited | exec path: no variable outside the launcher allowlist plus OpenShell's fixed, secret-free set; `OPENSHELL_USER_ENVIRONMENT` keys checked too. agent path: names only, as INFO, because each CLI adds its own variables to its tools | exec: `unexpected vars: none`; agent: `INFO agent-tool-env [CODEX_CI CODEX_SESSION_ID CODEX_THREAD_ID ...]` |
+| host-env-not-inherited | Both paths FAIL on any variable outside the allowlist: the launcher's set, OpenShell's fixed, secret-free set, and the shell's (`PWD SHLVL _ OLDPWD`). On the agent path the allowlist also holds the variables the pinned CLI adds to its tools (`CLI_TOOL_ENV` in `launch.py`: 15 for Claude 2.1.286, 11 for Codex 0.160.0). `OPENSHELL_USER_ENVIRONMENT` keys are checked too. The launcher also reads the probe's `/proc/<pid>/environ` from the host against the same list (below) | exec: `exec path, unexpected vars: none`; agent: `agent path, unexpected vars: none` |
 | openshell-control-material-unreadable (**added**) | The supervisor's channel, TLS key and JWT are not readable by the workload | `/.openshell/channel/... -> ENOENT`, `/run/secrets -> EACCES`, `/etc/openshell/... -> ENOENT` |
 | other-accounts | Each other account's login file, at both its configured path and its canonical path: present → ENOENT/EACCES; unknown → ENOENT/EACCES; absent → ENOENT. The outside canary gives ENOENT. The chosen file's sha256 matches the host's, and writing to it fails | b (present, configured path is a symlink): both paths → ENOENT; c (absent) → ENOENT; d (unknown: dir mode 000) → ENOENT; e (unknown: dangling symlink) and its target → ENOENT; canary → ENOENT; chosen `sha256-match=True write->EROFS` |
 | proxy-logged-refusal (outside) | The supervisor log has this run's `DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]` | PASS |
@@ -112,14 +113,21 @@ Every probe prints its own evidence, and only the specific enforcement passes. C
 ### Probes through the agent's own tool path (review r1 #2)
 
 OpenShell authorizes a connection by the executable that owns the socket **or any of its executable ancestors** (OpenShell `docs/security/best-practices.mdx`). So a `sandbox exec` probe does not show what a tool started by the agent can reach. The agent path closes that gap:
-1. The launcher writes the probe input to `run/agent-probe.json` (it appears read-only at `/run/hz`).
-2. Once the CLI shows its prompt, it types one scripted prompt: run `python3 /run/hz/probes.py < /run/hz/agent-probe.json > "$HOME/.s5-agent-probe.out" 2>&1; echo "probes-rc=$?" >> ...`, then reply with only the exit status.
-3. It waits for `probes-rc=` in the synthetic home, prints each line prefixed `agent:`, and runs the log checks for this path.
-4. If any probe fails, or the run times out, it prints `AGENT-PATH SELFTEST FAIL: stopping the session` and deletes the sandbox.
+1. The launcher writes the probe input to `run/agent-probe.json` (it appears read-only at `/run/hz`) and listens on `run/probe.sock` (`/run/hz/probe.sock` inside).
+2. Once the CLI shows its prompt, it types one scripted prompt: run `python3 -I /run/hz/probes.py --agent > "$HOME/.s5-agent-probe.out" 2>&1; echo "probes-rc=$?" >> ...`, then reply with only the exit status.
+3. In `--agent` mode the probe reads its config from the read-only file and sends each check result, then `{"done": rc}`, over the socket.
+4. **The launcher verifies the peer, not the message (review r2 #7).** For each connection it takes the host pid from `SO_PEERCRED` and checks, from the host's `/proc`: exe `/usr/bin/python3.12` and argv exactly `python3 -I /run/hz/probes.py --agent`; `TracerPid` 0; network namespace equal to the workload container's (`podman inspect` State.Pid); an environment within the agent-path allowlist; and, walking `PPid` while still in that namespace, an ancestor whose exe is the adapter's CLI binary. The netns tie matters: the host's own Claude session has the same CLI binary path. It checks the peer again on `done`.
+5. **Verdict.** `agent-path-channel` passes only with exactly one verified probe run, no rejected peer, `done=0`, and all 11 agent checks present and PASS. The agent-written result file is printed as untrusted INFO and never used. A failure or a 240 s timeout prints `AGENT-PATH SELFTEST FAIL: stopping the session` and deletes the sandbox.
 
-Both CLIs passed: the Claude Bash tool (session a1) and the Codex app-server exec (session a2). Real-home canary, egress, direct network, control-op, socket and Other accounts probes all pass on the agent path.
+Both CLIs passed: the Claude Bash tool (session p3) and the Codex app-server exec (session x1), each with `PASS agent-path-channel [verified probe runs=1 ... <adapter> CLI ancestor, env allowlisted ..., done=0, checks 11/11 PASS ...]`. Real-home canary, egress, direct network, control-op, socket and Other accounts probes all pass on the agent path.
 
 **Proof that the probes ran inside the agent.** It comes from the host side: the supervisor logged `ALLOWED /usr/bin/curl(0) -> api.anthropic.com:443 [policy:claude_model engine:opa]` (Codex: `chatgpt.com` under `codex_model`). The policy admits that host only for the CLI binary, so curl got through only because the CLI was its ancestor. The same curl on the exec path is `DENIED`. For Claude, the session socket also logged the hook event for that very tool call: `hook_event PreToolUse Bash {"command": "python3 /run/hz/probes.py ..."} -> ok`.
+
+**Controls** (`evidence/agent-path-controls.txt`, `S5_AGENT_INJECT=`; both end AGENT-PATH FAIL, rc 2, with no tmux session or sandbox left):
+- `forge` (session f3): the launcher zeroes the chosen account's pinned hash, so the real probe reports `FAIL other-accounts`. It then plays the adversary itself: `sandbox exec python3 /run/hz/forge.py` sends an all-PASS result plus `done=0` over the socket, and the result file is overwritten with `probes-rc=0`. Outcome: `channel: REJECTED peer pid ...: not the probe: exe=/usr/bin/python3.12 argv=['python3', '/run/hz/forge.py']`, `INFO agent-written result file (untrusted, not used): probes-rc=0`, `FAIL agent-path-channel [... done=1, checks 10/11 PASS, failed: other-accounts ... rejected peers: ...]`. The forger is scripted rather than prompted: when asked to run a "forge" script, Claude's safeguard declined the prompt, so the model never ran it.
+- `leak-tool-env` (session l1): `/usr/bin/env S5_TOOL_LEAK=1` is inserted before the CLI (before `codex app-server` for Codex), so only the managed tool path gets the variable; the exec-path probe still passes. Outcome: `channel: REJECTED peer pid ...: environment beyond the allowlist: S5_TOOL_LEAK`, `FAIL agent-path-channel [verified probe runs=0 ...]`.
+
+**Residual risk.** The checks identify the process, not what it executes. `probes.py`, its config and the interpreter are read-only or root-owned, `-I` drops the environment and user site, any `LD_*` variable fails the environ check, and `TracerPid` is checked at connect and at `done`. Not covered: a ptrace attach and detach between those checks, or a mount-namespace overlay of `/run/hz` if the sandbox allows unprivileged user namespaces. A production launcher should also check the probe's `/proc/<pid>/maps` or mountinfo, or run the probe from the supervisor. For the PoC, the gate shows that a result the agent only writes or sends is refused.
 
 **Finding (ADR impact 9):** a tool the agent runs can reach the agent's model host. Per-binary policy does not separate the CLI from its child processes.
 
@@ -299,6 +307,7 @@ So under OpenShell, the §7 residual risk "a client can present a different SNI 
    - The reviewer's read-only worktree bind.
    - macOS.
    - The cause of Codex's non-fatal warning "couldn't save diagnostic logs to its local database".
+11. **Agent-path self-test results need a supervisor-owned channel.** Anything the agent can write is untrusted. The launcher should accept probe results only from a peer it verifies from the host (SO_PEERCRED, exe, argv, untraced, workload netns, CLI ancestor, environ), and the env allowlist for tools must be pinned per CLI version, with a version check before launch (ADR §7 item 2 env probe).
 
 ## Reproduce
 
@@ -325,6 +334,9 @@ S5_ACCOUNT=b python3 spikes/s5/launch.py up claude nb
 S5_MAX_LIFETIME_S=240 S5_STOP_MARGIN_S=60 python3 spikes/s5/launch.py agent claude a1; cat ~/.cache/s5/a1/lifetime.log
 # direct-network mechanism battery inside a live sandbox
 openshell sandbox exec -n s5-c2 --no-tty -- python3 - < spikes/s5/netbattery.py
+# agent-path controls: forged result after a failed probe; env leak only on the tool path (each ends AGENT-PATH FAIL, rc 2)
+python3 spikes/s5/launch.py up claude f3 && S5_AGENT_INJECT=forge python3 spikes/s5/launch.py agent claude f3
+python3 spikes/s5/launch.py up claude l1 && S5_AGENT_INJECT=leak-tool-env python3 spikes/s5/launch.py agent claude l1
 # teardown
 python3 spikes/s5/launch.py down t1; python3 spikes/s5/launch.py down c2; tmux -L s5spike kill-server
 ```

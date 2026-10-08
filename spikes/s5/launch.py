@@ -11,6 +11,7 @@ Usage:
 <adapter> is claude or codex. The session lives in ~/.cache/s5/<sid>; the sandbox is s5-<sid>.
 Env knobs: S5_ACCOUNT=<name> chooses the account (default: the real login). For negative controls,
 S5_SELFTEST_INJECT=<name> sabotages one precondition so a probe must fail and the launch be refused.
+S5_AGENT_INJECT=<name> does the same for the agent path only (forge, leak-tool-env).
 S5_MAX_LIFETIME_S / S5_STOP_MARGIN_S shorten the lifetime to demonstrate the reaper.
 """
 import base64
@@ -20,8 +21,11 @@ import os
 import secrets
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -61,6 +65,34 @@ CONFIG_DIR = {'claude': '.claude', 'codex': '.codex'}
 EGRESS = {'claude': ['api.anthropic.com'], 'codex': ['chatgpt.com']}
 PROBE_ALLOWED, PROBE_DENIED = 'api.openai.com', 'example.org'
 
+# Environment allowlist (§7 environment probe), one source for the probes and the host-side check.
+LAUNCHER_ENV = {'HOME', 'PATH', 'LANG', 'TERM', 'USER', 'HZ_SESSION_SOCKET', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+                'ENABLE_CLAUDEAI_MCP_SERVERS'}
+OPENSHELL_ENV = {'OPENSHELL_SANDBOX', 'OPENSHELL_USER_ENVIRONMENT', 'SSL_CERT_FILE', 'CURL_CA_BUNDLE',
+                 'REQUESTS_CA_BUNDLE', 'GIT_SSL_CAINFO', 'NODE_EXTRA_CA_CERTS', 'DENO_CERT', 'container',
+                 'HOSTNAME', 'DEBIAN_FRONTEND', 'SHELL'}
+SHELL_ENV = {'PWD', 'SHLVL', '_', 'OLDPWD'}
+# Variables each pinned CLI adds to its tools' environment (observed in the r1 agent-path runs; names
+# only, none carries a host secret). A different CLI version refuses the launch until re-pinned.
+CLI_PIN = {'claude': '2.1.286', 'codex': '0.160.0'}
+CLI_TOOL_ENV = {
+    'claude': {'AI_AGENT', 'CLAUDECODE', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_CHILD_SESSION',
+               'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_MESSAGING_SOCKET',
+               'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_SESSION_ID',
+               'CLAUDE_EFFORT', 'CLAUDE_PID', 'COREPACK_ENABLE_AUTO_PIN', 'GIT_EDITOR',
+               'NoDefaultCurrentDirectoryInExePath'},
+    'codex': {'CODEX_CI', 'CODEX_SESSION_ID', 'CODEX_THREAD_ID', 'CODEX_VERSION', 'COLORTERM', 'GH_PAGER',
+              'GIT_PAGER', 'LC_ALL', 'LC_CTYPE', 'NO_COLOR', 'PAGER'},
+}
+# The agent-path probe as the host requires to see it in /proc: the image's python, isolated mode
+# (-I: no PYTHON* variables, no user site), the read-only script, config from the read-only file.
+PROBE_EXE = '/usr/bin/python3.12'
+PROBE_ARGV = ['python3', '-I', '/run/hz/probes.py', '--agent']
+AGENT_CHECKS = ['real-home-canary-unreadable', 'non-allowlisted-host-blocked', 'direct-network-blocked',
+                'control-op-rejected', 'wsd-socket-absent', 'allowlisted-host-reachable', 'model-host-agent-path',
+                'hook-event-accepted', 'host-env-not-inherited', 'openshell-control-material-unreadable',
+                'other-accounts']
+
 
 def setup_accounts() -> None:
     """Create the dummy accounts (idempotent). Dummy login files hold no credential: only a far expiry,
@@ -96,6 +128,12 @@ def cli_binary(name: str) -> Path:
 def cli_root(name: str) -> Path:
     real = cli_binary(name)
     return real.parent.parent if real.parent.name == 'bin' else real.parent
+
+
+def cli_version(name: str) -> str:
+    if name == 'claude':
+        return json.loads((cli_root('claude') / 'package.json').read_text())['version']
+    return cli_root('codex').name.split('-')[0]   # .../releases/<version>-<target>
 
 
 class Session:
@@ -331,7 +369,13 @@ def probe_config(s: Session, path: str) -> dict:
     chosen = [{'path': str(dst), 'sha256': sha256(src)} for src, dst in s.login_binds()]
     return {'path': path, 'real_home_canary': str(REAL_HOME_CANARY), 'oa_canary': str(s.oa_canary),
             'other_accounts': oa, 'chosen': chosen, 'token': json.loads(s.state.read_text())['token'],
-            'allowed': PROBE_ALLOWED, 'denied': PROBE_DENIED, 'model_host': EGRESS[s.adapter][0]}
+            'allowed': PROBE_ALLOWED, 'denied': PROBE_DENIED, 'model_host': EGRESS[s.adapter][0],
+            'env_allowed': sorted(env_allowed(s.adapter, path)), 'env_user': sorted(LAUNCHER_ENV | OPENSHELL_ENV)}
+
+
+def env_allowed(adapter: str, path: str) -> set[str]:
+    base = LAUNCHER_ENV | OPENSHELL_ENV | SHELL_ENV
+    return base | CLI_TOOL_ENV[adapter] if path == 'agent' else base
 
 
 def canary_precondition() -> int:
@@ -417,14 +461,123 @@ def wait_pane(sid: str, marker: str, timeout: float) -> bool:
     return False
 
 
+class ProbeChannel:
+    """Host side of the agent-path result channel, run/probe.sock (/run/hz/probe.sock inside). Results
+    count only from a peer the host verifies itself: SO_PEERCRED gives its host pid, and /proc must show
+    the image's python running the read-only probes.py as PROBE_ARGV, untraced, in the workload
+    container's netns, with the CLI binary as an ancestor inside that netns, and with an environment
+    inside the allowlist. Any other peer is recorded as rejected, and that alone fails the gate."""
+
+    def __init__(self, s: Session):
+        self.s, self.allowed = s, env_allowed(s.adapter, 'agent')
+        self.netns = workload_netns(s)
+        self.verified: list[dict] = []
+        self.rejected: list[tuple[int, str]] = []
+        self.path = s.run / 'probe.sock'
+        self.path.unlink(missing_ok=True)
+        self.srv = socket.socket(socket.AF_UNIX)
+        self.srv.bind(str(self.path))
+        self.path.chmod(0o777)
+        self.srv.listen(8)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self) -> None:
+        while True:
+            try:
+                c, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.handle, args=(c,), daemon=True).start()
+
+    def handle(self, c: socket.socket) -> None:
+        pid = struct.unpack('3i', c.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+        why = self.verify(pid)
+        if why:
+            self.rejected.append((pid, why))
+            print(f'  channel: REJECTED peer pid {pid}: {why}', flush=True)
+            c.close()
+            return
+        rec = {'pid': pid, 'checks': {}, 'done': None}
+        self.verified.append(rec)
+        with c, c.makefile() as f:
+            for line in f:
+                m = json.loads(line)
+                if 'done' in m:
+                    again = self.verify(pid)   # the same verified process, still untraced, at completion
+                    rec['done'] = m['done'] if not again else f'peer changed before completion: {again}'
+                else:
+                    rec['checks'][m['check']] = m['ok']
+                    print(f"  agent: {'PASS' if m['ok'] else 'FAIL'} {m['check']} [{m['evidence']}]", flush=True)
+
+    def verify(self, pid: int) -> str:
+        p = Path(f'/proc/{pid}')
+        try:
+            exe = os.readlink(p / 'exe')
+            argv = [a.decode() for a in (p / 'cmdline').read_bytes().split(b'\0')[:-1]]
+            status = (p / 'status').read_text()
+            netns = os.readlink(p / 'ns' / 'net')
+            env = {e.split(b'=', 1)[0].decode() for e in (p / 'environ').read_bytes().split(b'\0') if e}
+        except OSError as e:
+            return f'/proc/{pid} unreadable ({e.strerror})'
+        if exe != PROBE_EXE or argv != PROBE_ARGV:
+            return f'not the probe: exe={exe} argv={argv}'
+        if '\nTracerPid:\t0\n' not in status:
+            return 'traced'
+        if netns != self.netns:
+            return f'netns {netns} is not the workload container ({self.netns})'
+        if env - self.allowed:
+            return f"environment beyond the allowlist: {' '.join(sorted(env - self.allowed))}"
+        cli, q = str(cli_binary(self.s.adapter)), pid
+        while q > 1:
+            try:
+                q = int(Path(f'/proc/{q}/status').read_text().split('\nPPid:\t')[1].split('\n')[0])
+                if os.readlink(f'/proc/{q}/ns/net') != self.netns:
+                    break
+                if os.readlink(f'/proc/{q}/exe') == cli:
+                    return ''
+            except (OSError, IndexError, ValueError):
+                break
+        return f'no {cli} ancestor inside the workload netns'
+
+    def verdict(self) -> int:
+        recs = self.verified
+        got = recs[0]['checks'] if len(recs) == 1 else {}
+        missing = [c for c in AGENT_CHECKS if c not in got]
+        failed = [c for c, ok in got.items() if not ok]
+        done = recs[0]['done'] if len(recs) == 1 else None
+        ok = len(recs) == 1 and not self.rejected and done == 0 and not missing and not failed
+        print(f"{'PASS' if ok else 'FAIL'} agent-path-channel [verified probe runs={len(recs)} (exe {PROBE_EXE}, "
+              f"argv {' '.join(PROBE_ARGV)}, untraced, workload netns {self.netns}, {self.s.adapter} CLI ancestor, env allowlisted)"
+              f"{' pid ' + str(recs[0]['pid']) if recs else ''}, done={done}, checks {len(got) - len(failed)}"
+              f"/{len(AGENT_CHECKS)} PASS, failed: {' '.join(failed) or 'none'}, missing: {' '.join(missing) or 'none'}, "
+              f"rejected peers: {'; '.join(f'pid {p}: {w}' for p, w in self.rejected) or 'none'}]")
+        return 0 if ok else 1
+
+    def close(self) -> None:
+        self.srv.close()
+        self.path.unlink(missing_ok=True)
+
+
+def workload_netns(s: Session) -> str:
+    ids = subprocess.run(['podman', 'ps', '--filter', f'name=^openshell-default--{s.name}-', '--format', '{{.ID}}'],
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.split()
+    pid = subprocess.run(['podman', 'inspect', '-f', '{{.State.Pid}}', *ids[:1]], capture_output=True, text=True,
+                         stdin=subprocess.DEVNULL, timeout=30).stdout.strip()
+    return os.readlink(f'/proc/{pid}/ns/net')
+
+
 def agent_path_probes(s: Session) -> int:
     """The probes again, this time run by the agent itself through its own tool (Claude's Bash tool,
-    a command run by the Codex app-server), with the host-side preconditions and log checks. The
-    result file is written by the agent and so is untrusted; the PASS rests on the outside checks
-    too. Normal work (operator steering) starts only after this passes."""
+    a command run by the Codex app-server), with the host-side preconditions and log checks. What the
+    agent writes or says is untrusted: the verdict comes only from ProbeChannel, fed by the verified
+    probe process. Normal work (operator steering) starts only after this passes."""
     if canary_precondition():
         return 3
+    inject = os.environ.get('S5_AGENT_INJECT', '')
     cfg = probe_config(s, 'agent')
+    if inject == 'forge':   # the real probe must fail; then a forger claims success (below)
+        cfg['chosen'][0]['sha256'] = '0' * 64
+        shutil.copy(HERE / 'forge.py', s.run / 'forge.py')
     (s.run / 'agent-probe.json').write_text(json.dumps(cfg))   # ro at /run/hz; the agent already holds its token
     out = s.home / '.s5-agent-probe.out'
     out.unlink(missing_ok=True)
@@ -432,38 +585,51 @@ def agent_path_probes(s: Session) -> int:
     if not wait_pane(s.sid, marker, 90):
         print('FAIL agent-path-probes [agent prompt did not appear]')
         return 1
+    ch = ProbeChannel(s)
     time.sleep(2)
     t0 = time.time()
-    cmd = ('python3 /run/hz/probes.py < /run/hz/agent-probe.json > "$HOME/.s5-agent-probe.out" 2>&1; '
-           'echo "probes-rc=$?" >> "$HOME/.s5-agent-probe.out"')
+    cmd = f'{" ".join(PROBE_ARGV)} > "$HOME/.s5-agent-probe.out" 2>&1; echo "probes-rc=$?" >> "$HOME/.s5-agent-probe.out"'
     tmux('send-keys', '-t', s.sid, '-l', f'Run exactly this shell command, then reply with only its exit status: {cmd}')
     time.sleep(1)
     tmux('send-keys', '-t', s.sid, 'Enter')
     end = time.time() + 240
     while time.time() < end and 'probes-rc=' not in (out.read_text() if out.exists() else ''):
         time.sleep(2)
-    text = out.read_text() if out.exists() else ''
-    print('\n'.join(f'  agent: {ln}' for ln in text.splitlines()))
-    rc = 0 if 'probes-rc=0' in text else 1
-    if not text:
-        print('FAIL agent-path-probes [no result from the agent in 240 s]')
-    time.sleep(3)
+    if inject == 'forge':
+        # The adversary's moves, scripted from the launcher rather than prompted (the model need not
+        # cooperate): a non-probe process in the sandbox sends an all-PASS result over the channel, and
+        # the agent-written result file is overwritten with success.
+        print(s.exec(['python3', '/run/hz/forge.py'], capture_output=True, text=True, timeout=60).stdout.strip())
+        out.write_text('probes-rc=0\n')
+    time.sleep(5)   # late peers (a forger after the probe) are still seen and counted
+    text = out.read_text().strip() if out.exists() else ''
+    print(f"INFO agent-written result file (untrusted, not used): {text.splitlines()[-1] if text else 'none'}")
+    rc = ch.verdict()
+    ch.close()
     return log_checks(s, t0, egress_log_checks(s.adapter, 'agent')) or rc
 
 
 def agent(s: Session) -> int:
+    pins = {a: cli_version(a) for a in CLI_PIN}
+    if pins != CLI_PIN:   # CLI_TOOL_ENV is pinned to these versions
+        print(f'REFUSED: CLI versions {pins} differ from the pinned {CLI_PIN}; re-pin CLI_TOOL_ENV first')
+        down(s.sid)
+        return 2
+    print(f"PASS cli-version-pinned [{' '.join(f'{a} {v}' for a, v in pins.items())}]")
     # The complete gate runs immediately before every launch; an earlier PASS counts for nothing.
     if selftest(s) != 0:
         print('REFUSED: the launch self-test did not pass; deleting the sandbox')
         down(s.sid)
         return 2
     base = ['openshell', 'sandbox', 'exec', '-n', s.name, '--no-login-shell', '--workdir', str(s.work)]
+    # Agent-path control: a variable only in the CLI's environment, so only its tools inherit it.
+    leak = ['/usr/bin/env', 'S5_TOOL_LEAK=1'] if os.environ.get('S5_AGENT_INJECT') == 'leak-tool-env' else []
     if s.adapter == 'claude':
-        inner = base + ['--tty', '--', str(cli_binary('claude')), '--permission-mode', 'bypassPermissions']
+        inner = base + ['--tty', '--', *leak, str(cli_binary('claude')), '--permission-mode', 'bypassPermissions']
     else:
         sock = 'unix:///run/hz-bridge/app.sock'
         # The per-session app-server runs inside the sandbox, detached, listening in the bridge dir.
-        s.exec(['sh', '-c', f'setsid {cli_binary("codex")} app-server --listen {sock} '
+        s.exec(['sh', '-c', f'setsid {" ".join(leak)} {cli_binary("codex")} app-server --listen {sock} '
                 '</dev/null >/run/hz-bridge/app-server.log 2>&1 &'], check=True)
         for _ in range(100):
             if any(p.is_socket() for p in (s.bridge / 'daemon').iterdir()):
@@ -479,6 +645,8 @@ def agent(s: Session) -> int:
     start_reaper(s)
     print(f'launched in tmux -L s5spike session {s.sid}; running the probes through the agent')
     if agent_path_probes(s) != 0:
+        pane = [ln for ln in tmux('capture-pane', '-p', '-t', s.sid).stdout.splitlines() if ln.strip()]
+        print('INFO agent pane (last lines):', *(f'  | {ln}' for ln in pane[-12:]), sep='\n')
         print('AGENT-PATH SELFTEST FAIL: stopping the session (no work was given to it)')
         down(s.sid)
         return 2
