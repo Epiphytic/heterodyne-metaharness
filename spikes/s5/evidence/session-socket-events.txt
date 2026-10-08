@@ -1,0 +1,19 @@
+== ~/.cache/s5/t1/session.log (host-side session socket stub), summarised
+approve    -> {"ok": false, "error": "forbidden"}
+hook_event    -> {"ok": true}
+approve    -> {"ok": false, "error": "forbidden"}
+hook_event    -> {"ok": true}
+hook_event PreToolUse Bash {"command": "/run/hz/ws-request <TOKEN> hello -> {"ok": true}
+ws_request   hello-from-claude -> {"ok": true}
+approve    -> {"ok": false, "error": "forbidden"}
+hook_event    -> {"ok": true}
+== ~/.cache/s5/c2/session.log (host-side session socket stub), summarised
+approve    -> {"ok": false, "error": "forbidden"}
+hook_event    -> {"ok": true}
+ws_request   hello-from-codex -> {"ok": true}
+hook_event UserPromptSubmit   -> {"ok": true}
+hook_event PreToolUse Bash {"command": "echo hook-probe-codex-2"} -> {"ok": true}
+hook_event UserPromptSubmit   -> {"ok": true}
+hook_event PreToolUse Bash {"command": "echo DENYME-probe"} -> {"ok": true}
+approve    -> {"ok": false, "error": "forbidden"}
+hook_event    -> {"ok": true}

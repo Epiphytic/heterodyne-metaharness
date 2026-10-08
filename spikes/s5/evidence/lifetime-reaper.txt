@@ -1,0 +1,9 @@
+== ~/.cache/s5/a1/lifetime.log (reaper, S5_MAX_LIFETIME_S=240 S5_STOP_MARGIN_S=60)
+13:32:34 reaper up: deadline 13:36:34
+13:35:34 stop window open (60 s before the maximum lifetime)
+13:36:34 maximum lifetime reached: interrupting the agent
+13:36:37 session stopped: tmux session and sandbox s5-a1 removed
+== checked at 13:37:05, after the deadline
+tmux sessions: a2 
+sandboxes: s5-a2 
+reaper pid 2317818 alive: no

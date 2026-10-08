@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Inside the sandbox: send a ws_request to the per-session socket. Usage: ws-request <token> <text>"""
+import json
+import os
+import socket
+import sys
+
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.environ.get('HZ_SESSION_SOCKET', '/run/hz/session.sock'))
+s.sendall((json.dumps({'token': sys.argv[1], 'type': 'ws_request', 'payload': {'text': ' '.join(sys.argv[2:])}}) + '\n').encode())
+reply = s.makefile().readline().strip()
+print(reply)
+sys.exit(0 if json.loads(reply).get('ok') else 1)

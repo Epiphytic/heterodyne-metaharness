@@ -1,0 +1,36 @@
+# Review r1 #4: chosen account is NOT the default (S5_ACCOUNT=b), self-test only, no model call.
+# Account b is configured as $HOME/.cache/s5/accounts/claude-b-link, a symlink to claude-b holding a
+# dummy login file (far expiry, no token). The default login is checked through its configured path
+# ($HOME/.claude/.credentials.json) and through a second configured alias
+# (accounts/claude-default-alias -> $HOME/.claude) whose canonical path is the default's.
+# Dummies: c = empty dir (absent), d = mode 000 dir (unknown: listing fails),
+# e = login file is a dangling symlink (listed but unopenable: unknown, plus its target).
+$ S5_ACCOUNT=b python3 launch.py up claude nb
+PASS freshness-gate [access token 719.99 h left, need > 2.25 h; no refresh is attempted here]
+PASS canary-precondition [$HOME/.s5-canary readable outside]
+PASS outer-fence-network-none [workload container NetworkMode=none]
+INFO other-account default: present $HOME/.claude/.credentials.json
+INFO other-account c: absent $HOME/.cache/s5/accounts/claude-c/.credentials.json
+INFO other-account d: unknown $HOME/.cache/s5/accounts/claude-d/.credentials.json
+INFO other-account e: unknown $HOME/.cache/s5/accounts/claude-e/.credentials.json $HOME/.cache/s5/accounts/nonexistent-target
+INFO other-account alias: present $HOME/.cache/s5/accounts/claude-default-alias/.credentials.json $HOME/.claude/.credentials.json
+PASS real-home-canary-unreadable [open($HOME/.s5-canary) -> ENOENT]
+PASS non-allowlisted-host-blocked [example.org -> 198.18.0.2 (policy-DNS synthetic=True) connect -> EACCES; curl rc=7]
+PASS direct-network-blocked [DEVIATION (EACCES by the OpenShell broker, not unreachable; ADR amendment needed): non-lo interfaces=none ipv4 routes=0 ipv6 non-lo routes=0 Seccomp=2 NoNewPrivs=1 CapEff=0000000000000000 tcp4 connect -> EACCES tcp6 connect -> EACCES udp connect -> EACCES udp sendto -> EDESTADDRREQ raw socket -> EPROTONOSUPPORT icmp socket -> EPROTONOSUPPORT]
+PASS control-op-rejected [reply={"ok": false, "error": "forbidden"}]
+PASS wsd-socket-absent [exists=False; /run/hz: hook.py probes.py probes.sh session.sock session_stub.py ws-request]
+PASS allowlisted-host-reachable [curl rc=0 http=421 issuer='CN=OpenShell Sandbox CA; O=OpenShell']
+PASS model-host-exec-path [api.anthropic.com: curl rc=7 http=000 issuer='' (expect refused: no CLI ancestor)]
+PASS hook-event-accepted [reply={"ok": true}]
+PASS host-env-not-inherited [unexpected vars: none]
+PASS openshell-control-material-unreadable [/.openshell/channel/sandbox/bootstrap.json->ENOENT /.openshell/channel/sandbox/server.key->ENOENT /run/secrets->EACCES /etc/openshell/auth/sandbox.jwt->ENOENT /etc/openshell/tls/client/tls.key->ENOENT]
+PASS other-accounts [default/present:$HOME/.claude/.credentials.json->ENOENT; c/absent:$HOME/.cache/s5/accounts/claude-c/.credentials.json->ENOENT; d/unknown:$HOME/.cache/s5/accounts/claude-d/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/claude-e/.credentials.json->ENOENT; e/unknown:$HOME/.cache/s5/accounts/nonexistent-target->ENOENT; alias/present:$HOME/.cache/s5/accounts/claude-default-alias/.credentials.json->ENOENT; alias/present:$HOME/.claude/.credentials.json->ENOENT; canary:$HOME/.cache/s5/oa-canary-nb->ENOENT; chosen:$HOME/.cache/s5/nb/home/.claude/.credentials.json sha256-match=True write->EROFS]
+PASS proxy-logged-refusal [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> example.org:443 [reason:transparent_tcp_policy_denied]]
+PASS proxy-logged-allow [NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> api.openai.com:443 [policy:probe_control engine:opa]]
+PASS proxy-logged-direct-deny [NET:OPEN [MED] DENIED /usr/bin/python3.12(0) -> 1.1.1.1:443 [reason:transparent_tcp_policy_denied]]   # install-agnostic: allow=ip-port (public probe target in raw output)
+PASS exec-path-not-agent [NET:OPEN [MED] DENIED /usr/bin/curl(0) -> api.anthropic.com:443 [reason:transparent_tcp_policy_denied]]
+SELFTEST PASS
+rc=0
+$ # last mount in driver-config.json: the only login bind
+{"type": "bind", "source": "$HOME/.cache/s5/accounts/claude-b/.credentials.json", "target": "$HOME/.cache/s5/nb/home/.claude/.credentials.json", "read_only": true}
+$ python3 launch.py down nb

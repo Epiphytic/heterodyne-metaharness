@@ -1,0 +1,12 @@
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Opus 5.5 · Claude Enterprise
+ ▝▝   ▝▝   $HOME/.cache/s5/t1/work
+❯ Run this exact shell command and then reply with only its output:
+  /run/hz/ws-request <TOKEN> hello-from-claude
+  Ran 1 shell command
+● {"ok": true}
+✻ Crunched for 6s · done 8:09 PM
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

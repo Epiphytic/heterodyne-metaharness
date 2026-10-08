@@ -1,0 +1,12 @@
+# From the host, outside the sandbox (session c2). The app-server socket is the bind-mounted
+# ~/.cache/s5/c2/bridge/daemon/<hash> (codex binds /tmp/codex-daemon-1001/<hash> inside).
+$ CODEX_HOME=/tmp/s5-cxq codex queue --remote unix://$HOME/.cache/s5/c2/bridge/daemon/<hash> \
+    --thread 01a11d26-4d0c-7492-bd01-401f1328ed41 \
+    --message "Queued from the host via codex queue: reply with exactly QUEUE-OK-S5 and nothing else." </dev/null
+WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp" (codex_home: AbsolutePathBuf("/tmp/s5-cxq"))
+Queued message 01a11d27-4f54-7d10-9b58-18281e267e0d for thread 01a11d26-4d0c-7492-bd01-401f1328ed41.
+rc=0
+# Pane of tmux -L s5spike session c2, 25 s later:
+› Queued from the host via codex queue: reply with exactly QUEUE-OK-S5 and nothing else.
+• QUEUE-OK-S5
+  Worked for 1s • 20:14
