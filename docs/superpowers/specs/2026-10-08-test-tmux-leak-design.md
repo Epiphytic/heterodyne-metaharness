@@ -183,12 +183,20 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
   - It would also have to carry `pass_fds` into both call sites. That is the same seam, plus a public API.
   - Overriding `_run` and `new_session` without a seam would copy the launcher branch into tests, and the copy would drift.
 - **Enforcement: a source scan, which is a tripwire for mistakes, not a proof.**
-  - It parses (with `ast`) every module under `tests/` except `tmux_guard.py` and `tests/live/`. It also parses every string constant in those modules that is valid Python, so the generated child-pytest scripts are covered.
-  - It fails on:
-    - a call to `heterodyne.tmux.Tmux` under any name, including `import ... as` aliases, module attributes (`tmux.Tmux`) and simple assignments (`T = Tmux`), that passes `socket_path=` or `**kwargs`;
-    - a list or tuple literal, or a call argument, that starts with the constant `"tmux"` and contains `"-S"`, which is a raw tmux on an explicit path;
-    - any reference to `_new_socket_path` or `_open_lock_at`.
-  - **The exemption is narrow.** Only the fully mocked selector and launcher tests, which replace `subprocess.run` with a recorder so that no tmux runs, are allowed. They are named in an explicit list of (module, function) pairs.
+  - **What it parses.** It parses (with `ast`) every `*.py` module under `tests/`, except for the trusted paths below. It also parses every string constant in those modules that is valid Python, so the generated child-pytest scripts are covered.
+  - **Trusted paths**, an exact list of three, skipped by name:
+    - `tests/tmux_watchdog.py`, the watchdog's command plumbing. Its raw `tmux -S <path> display-message/kill-server` must stay outside SH, so that it can kill servers that hold SH.
+    - `tests/tmux_guard.py`, the guard itself, which defines and uses the private helpers.
+    - `tests/data/tmux_scan_specimens.txt`, the scanner's specimens. Each one is a block headed `# specimen: <rule id> <expect: flag|pass>`. It isn't a `.py` file, so pytest never imports or collects it, and it is still named explicitly so that the skip can't widen.
+
+    `tests/live/` is also out of scope; another worker owns it.
+  - **Rules.** Each rule has an id, and it fails on:
+    - `alias-socket-path`: a call to `heterodyne.tmux.Tmux` under any name that passes `socket_path=`. "Any name" includes `import ... as` aliases, module attributes (`tmux.Tmux`) and simple assignments (`T = Tmux`).
+    - `kwargs`: the same call with `**kwargs`.
+    - `raw-tmux-S`: a list or tuple literal, or call arguments, that start with the constant `"tmux"` and contain `"-S"`.
+    - `private-ref`: any reference to `_new_socket_path`, `_open_parent` or `_open_lock_at`.
+  - **Regression 8's plumbing lives in the guard.** `tmux_guard.begin_lock_open(socket_path)` runs `_open_parent` and returns a `finish()` callable, which runs `_open_lock_at` with `LOCK_FLAGS`. That gives regression 8 a public, non-starting entry point and leaves `private-ref` without exceptions.
+  - **The exemption is narrow.** The fully mocked selector and launcher tests replace `subprocess.run` with a recorder, so no tmux runs; they are listed as exact (module, function) pairs. Findings inside those function bodies are ignored.
     - The scan fails if a listed function is missing, or no longer patches `subprocess.run`, so the list can't go stale.
   - **What it can't see:**
     - construction through `getattr`, `exec` or `eval`, or a string that isn't valid Python;
@@ -197,13 +205,19 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
     - any process that runs tmux on its own.
 
     None of these exist today. An unguarded start that slips past the scan is the residual risk in A5.
-  - **Negative cases.** Each one must be flagged:
-    - a raw `subprocess.run(["tmux", "-S", str(t.socket_path), ...])`;
-    - `from heterodyne.tmux import Tmux as T; T("x", socket_path=p)`;
-    - `Tmux(**kw)`;
-    - the same three inside a child-script string.
-
-    One positive case must pass: an exempted mocked selector test.
+  - **Scan tests.** The scanner is a function, `scan(relpath, source) -> findings`, so each case is a (path, source) pair.
+    - **Negative cases**, at least one per rule, each flagged under an ordinary path such as `tests/test_x.py`:
+      - `alias-socket-path`, in three forms: an `as` alias, `tmux.Tmux`, and `T = Tmux`;
+      - `kwargs`: `Tmux(**kw)`;
+      - `raw-tmux-S`, in three forms: a list in `subprocess.run`, a tuple, and positional call arguments;
+      - `private-ref`, once for each of the three names;
+      - every one of the above inside a child-script string constant.
+    - **Positive cases**, one per exception:
+      - the watchdog's raw `tmux -S ... kill-server` passes under `tests/tmux_watchdog.py`, and the same source is flagged under `tests/test_x.py`;
+      - a private-helper reference passes under `tests/tmux_guard.py`, and is flagged elsewhere;
+      - the specimen file is skipped in the tree scan, but each `flag` specimen in it, scanned under `tests/test_x.py`, gives exactly its declared rule id;
+      - an exempted mocked selector test passes. The same body in an unlisted function is flagged, and a listed function that has stopped patching `subprocess.run` fails the scan.
+    - The tree scan of the real repository passes.
 
 ### A3. Watchdog changes
 - **Opening the lock.** After the rename, the watchdog opens `dead/launch.lock` once (O_RDONLY, close-on-exec, so its tmux and ps children don't inherit it), and records `(st_dev, st_ino)` from `fstat`.
@@ -226,11 +240,15 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
   1. If any earlier step recorded `replaced` or `launch lock missing`, stop: unlink nothing, keep `dead`, and set `closed: false`.
   2. Take EX non-blocking. If it is busy, retry next pass; at the deadline it is `unresolved` (`launch lock held`).
   3. Under EX, repeat the identity check: `lstat(dead/launch.lock)` must match the recorded `(st_dev, st_ino)`. If it doesn't, record `replaced`, LOCK_UN, and stop as in step 1. This way the watchdog can't lock the original inode and then unlink a replacement.
-  4. Unlink it, LOCK_UN, close, and `rmdir(dead)`. An ENOTEMPTY here means something was created after the unlink (A6 regression 8).
-     - The next pass sees it.
-     - A new `launch.lock` doesn't match the recorded identity, so it is `replaced`.
-     - Anything else goes through the normal sweep.
-     - It is never counted as closed.
+  4. Still holding EX on the original fd, unlink `launch.lock`, then `rmdir(dead)`. Only after the rmdir attempt does it LOCK_UN and close.
+     - Keeping that fd open through the rmdir also stops the recorded inode number from being reused while it is still being compared against.
+  5. If the rmdir fails for any reason (ENOTEMPTY means something appeared after the unlink; see A6 regressions 8 and 12), that is terminal:
+     - leave every entry where it is;
+     - list each one (name, type, `(st_dev, st_ino)`) in `unresolved` with reason `appeared after final unlink`;
+     - set `closed: false`;
+     - remove nothing more, and end the closure loop.
+
+     There is no recovery sweep. Any further removal would need EX, which is only available on the original inode, and that inode no longer has a path. Reopening a replacement would break the original-inode invariant, and removing without EX would add an unserialized path.
 
   **What this step does and doesn't establish.**
   - EX excludes current SH holders, and guarded pending binds stay serialized against every removal.
@@ -303,21 +321,35 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
      - from a `before_rmdir` test hook, so after the final unlink and before `rmdir`, the test calls `_open_lock_at(parent_fd)`.
    - Correct code: the open fails with ENOENT, so the launcher raises WatchdogError and runs nothing; `rmdir` succeeds and `closed` is true.
    - With O_CREAT in `LOCK_FLAGS`: the open creates a new `launch.lock`, `rmdir` fails with ENOTEMPTY, and the test fails.
-   - A second case creates the file directly at that point. The watchdog must report it truthfully: `replaced`, `dead` kept, `closed: false`.
+   - A second case creates `launch.lock` directly at that point, as the delayed `O_CREAT` would. Regression 12(a) gives the expected result.
 9. **Prefixes.**
    - A launcher outside the two allowed ones raises WatchdogError and runs nothing. The test's launcher is a prefix that closes inherited fds (`python -c` that re-execs tmux with `close_fds=True`).
    - The allowed gate passes the fd through: after a gated real start, the server process itself holds the launch-lock inode.
-     - On Linux this is read from `/proc/<pid>/fd`; on macOS, from `lsof -p <pid> -Fi`.
-     - lsof ships with macOS. If it is missing, the test fails with a clear message; it doesn't skip.
+     - The check compares `(st_dev, st_ino)` with `os.stat(launch.lock)`, never the inode alone.
+       - **Linux:** `os.stat` each `/proc/<pid>/fd/<n>` for every `n` in `/proc/<pid>/fd`.
+       - **macOS:** `lsof -n -P -a -p <pid> -F fDi`.
+         - Only records whose `f` field is a numeric fd count.
+         - `D` (hex device) and `i` (inode) are both required and parsed as integers.
+         - lsof must exit 0, and it must produce a record for the pid.
+       - A positive control proves the mapping on that platform, notably that lsof's `D` equals `st_dev`. The test opens `launch.lock` at a known fd in a helper process it controls and requires the same inspection to find exactly that `(fd, dev, ino)`.
+     - An inspection error fails the test explicitly; it doesn't count as "not held" and doesn't skip. Errors include a missing lsof, a non-zero exit, an unparsable record, a missing `/proc` entry, and a `stat` error.
+     - The server stays alive throughout: its pane sleeps, and the test kills it only in a `finally` after the inspection. The test also checks that the PID is still alive after the inspection, so a PID that died part-way through can't pass as empty.
 10. **Children release the fd** (real tmux). A guarded server runs four children:
     - a pane;
     - a `run-shell -b` job;
     - a `pipe-pane` command;
     - a `set-hook` hook (`run-shell`).
 
-    Each child runs a small Python probe. The probe `fstat`s each fd from 3 to `SC_OPEN_MAX` (or 1024, whichever is lower) and writes whether any of them is the launch-lock inode.
+    Each child runs a small Python probe. The probe:
+    - enumerates its actually open fds by listing `/proc/self/fd` on Linux and `/dev/fd` on macOS, with no numeric bound;
+    - `fstat`s each one;
+    - writes the `(fd, st_dev, st_ino)` of any match with the launch lock;
+    - also checks the known inherited fd number (the guard's fd number, passed in the environment) directly.
+
+    An enumeration or `fstat` error, other than EBADF for the listing's own directory fd, makes the probe exit non-zero, and the test fails. An error never reads as "none".
     - All four must report none.
     - The server itself must hold it (as in regression 9).
+    - **Negative controls.** The same probe runs in a helper process that holds the launch lock at fd 1500 (`dup2`), and again at the known fd number. Both must report the match. A probe with a bound below 1500 fails the first control.
 11. **Mixed survivor and healthy server** (scripted, with real flocks: "servers" are helper processes that hold SH).
     - A survives kill-server, so it keeps SH. B dies on its kill-server. C is first discovered on a later pass.
     - Every pass still issues kill-server and the death wait to every live server, whatever happened to earlier removals:
@@ -328,8 +360,18 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
       - B and C are `unresolved` (`held`) with their sockets kept;
       - `closed` is false.
     - A mutant that skips the remaining kills once a removal is `held` must fail.
+12. **Something appears after the final unlink** (deterministic, real filesystem, through the `before_rmdir` hook).
+    - (a) `launch.lock` is recreated at that point.
+    - (b) Another entry is created at that point: a stale socket that would otherwise be removable, so that any later removal would be visible.
 
-**Platforms.** The real-tmux lifetime tests run on both CI platforms, Linux and macOS, under `HZ_REQUIRE_TMUX=1`. They are regressions 3(b), 5, 9 and 10, plus test 3.
+    In both cases:
+    - rmdir fails;
+    - the entry is left in place and listed in `unresolved` with reason `appeared after final unlink`;
+    - `closed` is false and `dead` is kept;
+    - the original lock fd was held through the rmdir attempt (the hook asserts that EX is still unavailable to a fresh open file description);
+    - nothing more is unlinked: a recorder on the watchdog's unlink records no calls after the hook, and the loop ends without another pass.
+
+**Platforms.** The real-tmux lifetime tests run on both CI platforms, Linux and macOS, under `HZ_REQUIRE_TMUX=1`. They are regressions 3(b), 5, 9 and 10, plus test 3. This revision is design only; the runtime evidence for both platforms comes with the implementation.
 
 **Mutation targets** (`run5.py`/`results-r5.md`):
 - remove even though EX failed;
@@ -345,6 +387,11 @@ Then it takes a blocking LOCK_SH, runs the command with `pass_fds=(fd,)`, and cl
 - an early LOCK_UN in the launcher after the command returns (killed by regression 5);
 - `GuardedTmux` accepting any launcher (killed by regression 9);
 - skip the remaining kills after a `held` removal (killed by regression 11);
+- release EX before the rmdir (killed by regression 12's held-lock assertion);
+- a recovery sweep after a failed final rmdir (killed by regression 12(b));
+- a bounded probe loop, `range(3, 1024)`, in place of enumeration (killed by regression 10's fd-1500 control);
+- comparing the inode alone in regression 9's inspection (killed by a unit test of the matcher that feeds it synthetic `/proc` stats and lsof records with the right inode on the wrong device, which must not match);
+- each trusted-path or exemption entry widened to a directory (killed by the positive and negative case pairs);
 - each source-scan rule removed (each is killed by its negative case);
 - the serve factory returning a fresh server (killed by the serve test's `has_session` assertion);
 - `GuardedTmux` not overriding `_exec`.
