@@ -14,8 +14,11 @@ row() { local name=$1; shift; local out err rc
   out=$("$@" 2> "$B/err"); rc=$?; err=$(tr '\n' '|' < "$B/err"); out=$(printf %s "$out" | tr '\n' '|')
   printf '%s\t%s\t[%s]\t%s\n' "$name" "$rc" "${out:0:40}" "${err:0:100}" | sed -e "s#$B#\$B#g" -e "s#$HOME#~#g"; }
 remember() { local p; p=$(tmux "$@" display-message -p '#{pid}' 2>/dev/null) && pids+=("$p"); }
-# the production start chain (Tmux.new_session) into the array CHAIN; -P -F (the proposed check) when P=1
-chain() { local name=$1 cwd=$2; shift 2; local fmt=(); [ -n "${P:-}" ] && fmt=(-P -F '#{session_name}')
+# the production start chain (Tmux.new_session) into the array CHAIN; with P=1, the proposed check:
+# -P -F prints a marker line carrying a per-call nonce, the new session's id and its name
+NONCE=0123abcd
+chain() { local name=$1 cwd=$2; shift 2; local fmt=()
+  [ -n "${P:-}" ] && fmt=(-P -F "hz-started $NONCE #{session_id} #{session_name}")
   CHAIN=(start-server \; set-option -g remain-on-exit on \; new-session -d "${fmt[@]}" \
     -s "$name" -x 200 -y 50 -c "$cwd" -- "$@"); }
 start() { local sel=$1 arg=$2; shift 2; chain "$@"; tmux "$sel" "$arg" "${CHAIN[@]}"; }
@@ -66,7 +69,7 @@ row "E16 send-keys, unknown key name" tmux $S send-keys -t =badargv: NoSuchKeyNa
 row "E17 capture-pane, missing session" tmux $S capture-pane -p -J -S -10 -t =ghost:
 row "E18 delete-buffer, missing" tmux $S delete-buffer -b hz-missing
 row "E19 kill-session, missing" tmux $S kill-session -t =ghost
-echo "== F. the proposed check: new-session -P -F '#{session_name}'"
+echo "== F. the proposed check: new-session -P -F 'hz-started NONCE #{session_id} #{session_name}'"
 export P=1
 row "F1 ok"                     start -S "$B/p.sock" admin "$B/work" sleep 600; remember -S "$B/p.sock"
 row "F2 duplicate"              start -S "$B/p.sock" admin "$B/work" sleep 600
@@ -76,6 +79,10 @@ row "F5 socket directory missing" start -S "$B/nodir/sock" admin "$B/work" sleep
 row "F6 socket directory not writable" start -S "$B/ro/sock" admin "$B/work" sleep 600
 row "F7 via a launcher prefix (env), ok" launch -S "$B/l.sock" admin "$B/work" sleep 600; remember -S "$B/l.sock"
 row "F8 via a launcher prefix (env), directory missing" launch -S "$B/nodir/l.sock" admin "$B/work" sleep 600
+id=$(tmux -S "$B/p.sock" list-sessions -F '#{session_id} #{session_name}' | awk '$2=="a_b"{print $1}')
+row "F9 kill-session by the reported id (a_b)" tmux -S "$B/p.sock" kill-session -t "$id"
+row "F10 sessions left"         tmux -S "$B/p.sock" list-sessions -F '#{session_name}'
+row "F11 a stale id is refused" tmux -S "$B/p.sock" kill-session -t "$id"
 unset P
 echo "== cleanup"
 for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; sleep 0.5; chmod 700 "$B/ro"
