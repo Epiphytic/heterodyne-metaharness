@@ -144,6 +144,20 @@ Evidence is in `evidence/session-socket-events.txt`, a summary of the host stub'
 
 The gateway was switched from the `vm` compute driver to `podman` (rootless podman 5.8.8, user socket, pasta, cgroup v2). It uses `userns = "keep-id"`, so the workload's uid is the host uid and bind-mounted files keep their ownership. The config is `spikes/s5/gateway.toml`, installed at `~/.config/openshell/gateway.toml`.
 
+**uid mapping** (`evidence/uid-mapping.txt`). The workload runs as uid 1001, gid 1004: the host uid and gid. `id` and `/proc/self/status` both show 1001 for every uid field, real through filesystem. `/proc/self/uid_map` shows the mapping in two hops:
+- keep-id maps inside 1001 to parent-namespace 0;
+- rootless podman's parent namespace maps 0 to host uid 1001, and the other ids to subuids. Inside 0 maps to parent 1, which is a subuid.
+
+So a host file owned 1001 with mode 0600 is readable inside by uid, and **only the mount table keeps it out**. This is what the two kinds of file showed:
+- **Bound files are readable:** the ro-bound login file and a 0600 file in the rw-bound synthetic home were both readable.
+- **Unbound files are absent:** a 0600 file in the real home gave ENOENT, because nothing from the real home is mounted.
+
+Ownership and permission bits give no protection here. The real-home and Other accounts probes, which accept ENOENT/EACCES, are what check this.
+
+One side effect: podman creates the mount-point placeholder for a file bound inside the rw home, such as `.codex/auth.json`. On the host, that placeholder is owned by a subuid (165536), from container root.
+
+The image's base, ubuntu:24.04, ships a `ubuntu` user with uid 1000. The Containerfile adds the `agent` user (1001:1004) and `USER 1001:1004`, and the policy also sets `run_as_user`/`run_as_group` to the host ids. uid 1000 was never the workload's uid in this spike.
+
 Bind mounts need three settings:
 - `allow_driver_config = true`;
 - `enable_bind_mounts = true`;
