@@ -13,6 +13,8 @@ leaves every launch to pickup's launch guard.
    CLAIM_UNCERTAIN hold whose bead has no open operation left (a journal restored from a backup, or
    edited by hand: an operation that ends settles its own) is settled: the sweep reads that bead's claim
    and sessions from beads and the runtime, and holds whatever disagrees;
+   4a. settle adoptions (AU-3 §3.2): an adopted legacy session's entry goes on its bead, and a held one's
+   bead is escalated UNEXPECTED_STATE, taking over its open pickup or resume;
 5. reconcile sessions (`sweep`, which every pickup also runs): a session whose bead is not ours
    (closed, claimed by another worker, gone) is stopped; a recorded running bead whose session is gone
    gets a resume operation that pickup will carry through the guard; anything beads and the journal
@@ -32,8 +34,9 @@ runtime can't confirm. Rows that are STUCK or HELD stay so until the operator's 
 
 from dataclasses import dataclass
 
-from heterodyne.wsd.beads import BeadsUnavailable
+from heterodyne.wsd.beads import BeadsUnavailable, LaunchConflict, NotOurs
 from heterodyne.wsd.journal import Op, OpKind
+from heterodyne.wsd.launches import LaunchesUnreadable
 from heterodyne.wsd.runtime import RuntimeUnavailable
 from heterodyne.wsd.scheduler import Scheduler
 from heterodyne.wsd.states import Reason
@@ -92,7 +95,10 @@ class _Recovery:
         d.cp("recovery.actions")
         # 4. journals that never launch
         replayed = 0
+        held = {a.bead for a in j.adoptions_unsettled(name) if a.verdict == "held"}
         for op in j.ops_open(name):
+            if op.kind is OpKind.ESCALATE and op.bead in held:
+                continue            # 4a settles the held adoption and replays this escalation itself
             if op.kind is OpKind.PICKUP and op.step == "intent":
                 if self.s.resolve_claim(op) is None and self._still_open(op):
                     raise BeadsUnavailable("the claim could not be read back")    # held CLAIM_UNCERTAIN
@@ -104,6 +110,7 @@ class _Recovery:
                 continue            # a pickup past its claim, or a resume: pickup's guard carries it on
             replayed += 1
         self._settle_orphans()
+        self._settle_adoptions()
         d.cp("recovery.journals")
         # 5. sessions, read again: the replays changed both
         swept = sweep(self.s.parker, defer=True)
@@ -125,6 +132,37 @@ class _Recovery:
             return False
         row = self.j.state(self.name, op.bead)
         return row is None or row.reason is Reason.STOP_UNCONFIRMED
+
+    def _settle_adoptions(self) -> None:
+        """4a (AU-3 §3.2): each adopted entry goes on its bead, and each held bead is escalated, before
+        the sweep can open a resume for it. A bead write that fails raises BeadsUnavailable, so no legacy
+        session resumes before its entry is on the bead."""
+        j, name = self.j, self.name
+        for adoption in j.adoptions_unsettled(name):
+            detail = adoption.detail
+            if adoption.verdict == "adopted":
+                entry = j.launch(adoption.session_key or "", 1)
+                if entry is None:
+                    detail = "the adopted entry is missing from the journal"
+                else:
+                    try:
+                        self.d.beads.ensure_launch(name, adoption.bead, entry)
+                    except NotOurs:
+                        j.adoption_settle(name, adoption.bead)    # not ours: the sweep stops its session
+                        self.d.cp("adopt.settled")
+                        continue
+                    except (LaunchConflict, LaunchesUnreadable) as exc:
+                        detail = f"the adopted entry can't go on the bead: {exc}"
+                    else:
+                        self.d.cp("adopt.appended!")
+                        j.adoption_settle(name, adoption.bead)
+                        self.d.cp("adopt.settled")
+                        continue
+            with j.transaction():
+                esc = self.s.parker.escalation_for(adoption.bead, Reason.UNEXPECTED_STATE, detail)
+                j.adoption_settle(name, adoption.bead)
+            self.d.cp("adopt.settled")
+            self.s.parker.replay_escalate(esc)
 
     def _settle_orphans(self) -> None:
         """End each uncertainty hold whose bead has no open operation left. Its operation would have

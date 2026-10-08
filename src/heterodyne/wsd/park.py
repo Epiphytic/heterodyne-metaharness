@@ -217,6 +217,22 @@ class Parker:
         self.d.cp("escalate.intent")
         self.replay_escalate(esc)
 
+    def escalation_for(self, bead: str, reason: Reason, detail: str) -> Op:
+        """The journal half of escalating `bead` whatever is open on it, inside the caller's transaction
+        (AU-3 §3.2): its open operation ends STUCK and hands off to a new escalation, an open escalation
+        is kept as it is, and with nothing open one is opened. Never a second open operation."""
+        j, ws = self.d.journal, self.ws.name
+        with j.transaction():
+            op = j.op_for(ws, bead)
+            if op is None:
+                esc = j.op_open(OpKind.ESCALATE, ws, bead, {"reason": reason.value})
+                j.adopt(ws, bead, BeadState.STUCK, reason, detail)
+            elif op.kind is OpKind.ESCALATE:
+                esc = op
+            else:
+                esc = self._stuck(op, reason, detail)
+        return esc
+
     def replay_escalate(self, op: Op) -> None:
         try:
             self.d.beads.ensure_label(self.ws.name, op.bead, NEEDS_HUMAN)
