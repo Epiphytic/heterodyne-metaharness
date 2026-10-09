@@ -6,9 +6,10 @@ run without a crash: the deferral records, labels, `wsd-defer` comments, row, al
 commits. The uncertainty oracle covers the guard's UNRECEIPTED points, where the replay escalates instead.
 """
 
+import gc
 import json
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from wsd_env import WS, Rig, block, make_rig, on_profile, profile_key, repoint_c
 
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import DEFERRED, HELD, NEEDS_HUMAN, PARKED
-from heterodyne.wsd.journal import DeferralRow
+from heterodyne.wsd.journal import DeferralRow, Journal
 from heterodyne.wsd.park import (
     ACCOUNT_CHANGED,
     ACCOUNT_CHANGED_EVENT,
@@ -43,6 +44,26 @@ from heterodyne.wsd.sweep import sweep
 B = "btq-1"
 HOUR = 3600
 DIRTY = "wip.txt"
+
+
+@pytest.fixture(autouse=True)
+def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close every journal a test opened (a rig keeps its last one open), so their descriptors don't
+    close later inside another test's count of open descriptors (test_wsd_gate checks that a refusal
+    leaks none)."""
+    opened: list[Journal] = []
+    real = Journal.__init__
+
+    def tracked(self: Journal, *args: Any, **kwargs: Any) -> None:
+        opened.append(self)
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Journal, "__init__", tracked)
+    yield
+    for each in opened:
+        if hasattr(each, "db"):
+            each.close()
+    gc.collect()
 
 
 class PeakRuntime(FakeRuntime):
