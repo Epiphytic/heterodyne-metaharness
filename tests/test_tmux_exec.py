@@ -2,19 +2,22 @@
 call's argv and keyword arguments and every exception mapping, so extracting `_exec` provably changes
 nothing. No tmux runs: `subprocess.run` is replaced by a recorder."""
 
+import re
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fakes.tmux_marker import started
 
 from heterodyne import tmux as tmux_mod
-from heterodyne.tmux import LAUNCHER_FAILED, Tmux, TmuxError, TmuxPasteUncertain
+from heterodyne.tmux import LAUNCHER_FAILED, NO_SESSION, Tmux, TmuxError, TmuxPasteUncertain
 
 
 class Run:
     """Fake subprocess.run: records (argv, kwargs); the subcommand named `fail_on` answers `result`
-    (a return code) or raises it (an exception); everything else exits 0."""
+    (a return code) or raises it (an exception); everything else exits 0, a start with its marker."""
 
     def __init__(self, fail_on: str | None = None, result: int | BaseException = 0) -> None:
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
@@ -28,7 +31,8 @@ class Run:
             if isinstance(self.result, BaseException):
                 raise self.result
             code = self.result
-        return subprocess.CompletedProcess(argv, code, b"out", b" why \n")
+        out = started(argv) if code == 0 else b""
+        return subprocess.CompletedProcess(argv, code, out or b"out", b" why \n")
 
 
 RUN_KW = {"capture_output": True, "timeout": 15, "check": False}
@@ -57,6 +61,9 @@ def test_new_session_without_a_launcher_goes_through_run(run: Run, tmp_path: Pat
     Tmux("hz-test-pin").new_session("s", tmp_path, ["true"])
     [(argv, kw)] = run.calls
     assert argv[:4] == ["tmux", "-L", "hz-test-pin", "start-server"] and argv[-2:] == ["--", "true"]
+    new = argv.index("new-session")
+    assert argv[new:new + 4] == ["new-session", "-d", "-P", "-F"]
+    assert re.fullmatch(r"hz-started [0-9a-f]{32} #\{session_id\} #\{session_name\}", argv[new + 4])
     assert kw == {"input": None, **RUN_KW}
 
 
@@ -115,3 +122,127 @@ def test_a_failure_from_paste_buffer_on_is_uncertain(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(tmux_mod.time, "sleep", lambda _s: None)
     with pytest.raises(TmuxPasteUncertain):
         Tmux("hz-test-pin").paste("s", "hi")
+
+
+# --- a start is confirmed by its own marker line (btq-n27uo) ---
+
+NONCE = "0123abcd"
+
+
+class Start:
+    """Fake subprocess.run: `new-session` exits 0 with `stdout` and `stderr`; everything else exits 0."""
+
+    def __init__(self, stdout: str, stderr: str = "") -> None:
+        self.calls: list[list[str]] = []
+        self.stdout = stdout.encode()
+        self.stderr = stderr.encode()
+
+    def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
+        self.calls.append(list(argv))
+        if "new-session" in argv:
+            return subprocess.CompletedProcess(argv, 0, self.stdout, self.stderr)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rec: Start, name: str = "admin",
+          launcher: bool = False) -> None:
+    monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
+    monkeypatch.setattr(tmux_mod.uuid, "uuid4", lambda: SimpleNamespace(hex=NONCE))
+    t = Tmux("hz-test-pin", launcher=(lambda: ("pre",)) if launcher else None)
+    t.new_session(name, tmp_path, ["true"])
+
+
+@pytest.mark.parametrize("launcher", [False, True], ids=["direct", "launcher"])
+def test_the_literal_probe_line_confirms_the_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                   launcher: bool) -> None:
+    rec = Start("hz-started 0123abcd $0 admin\n")              # F1, as tmux 3.4 printed it
+    start(monkeypatch, tmp_path, rec, launcher=launcher)
+    assert len(rec.calls) == 1
+
+
+@pytest.mark.parametrize("stdout", ["noise\nhz-started 0123abcd $0 admin\nother\n",
+                                    "hz-started 0123abcd $7 admin"], ids=["noise", "no-newline"])
+def test_other_output_around_the_marker_is_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                   stdout: str) -> None:
+    rec = Start(stdout)
+    start(monkeypatch, tmp_path, rec)
+    assert len(rec.calls) == 1
+
+
+def test_a_name_with_spaces_stays_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rec = Start("hz-started 0123abcd $0 my admin\n")
+    start(monkeypatch, tmp_path, rec, name="my admin")
+    assert len(rec.calls) == 1
+
+
+def test_a_start_that_exits_0_without_a_session_is_an_error(monkeypatch: pytest.MonkeyPatch,
+                                                           tmp_path: Path) -> None:
+    rec = Start("", "error creating /tmp/x/nodir/sock (No such file or directory)\n")   # A1
+    with pytest.raises(TmuxError) as info:
+        start(monkeypatch, tmp_path, rec)
+    assert type(info.value) is TmuxError
+    assert str(info.value) == ("tmux new-session did not create 'admin': "
+                               "error creating /tmp/x/nodir/sock (No such file or directory)")
+    assert len(rec.calls) == 1
+
+
+def test_the_launcher_path_reports_a_missing_session_without_detail(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    rec = Start("", "secret detail")
+    with pytest.raises(TmuxError) as info:
+        start(monkeypatch, tmp_path, rec, launcher=True)
+    assert type(info.value) is TmuxError and str(info.value) == NO_SESSION
+    assert len(rec.calls) == 1
+
+
+def test_no_detail_says_no_session_was_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with pytest.raises(TmuxError, match=r"^tmux new-session did not create 'admin': no session reported$"):
+        start(monkeypatch, tmp_path, Start(""))
+
+
+@pytest.mark.parametrize("launcher", [False, True], ids=["direct", "launcher"])
+def test_a_renamed_session_is_killed_by_its_reported_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                         launcher: bool) -> None:
+    rec = Start("hz-started 0123abcd $3 a_b\n")                # F3: tmux renamed a:b
+    with pytest.raises(TmuxError) as info:
+        start(monkeypatch, tmp_path, rec, name="a:b", launcher=launcher)
+    assert str(info.value) == (NO_SESSION if launcher else "tmux new-session did not create 'a:b': "
+                                                             "renamed to 'a_b'")
+    assert len(rec.calls) == 2 and rec.calls[1] == ["tmux", "-L", "hz-test-pin", "kill-session", "-t", "$3"]
+
+
+@pytest.mark.parametrize("stdout", [
+    "admin\nother\n",                                          # no marker at all
+    "hz-started wrong $5 other\n",                              # another call's marker
+    "hz-started 0123abcd $0 admin\nhz-started 0123abcd $1 admin\n",  # two markers
+    "hz-started 0123abcd 5 admin\n",                            # an id that is not $N
+    "hz-started 0123abcd $0\n",                                 # no name
+    "hz-started 0123abcd $0 \n",                                # an empty name
+    "hz-started 0123abcd \n",                                   # no id
+    "hz-started 0123abcd $0 a_b\nhz-started 0123abcd $1 a_b\n",  # two renames: neither is certain
+], ids=["no-marker", "wrong-nonce", "two", "bad-id", "no-name", "empty-name", "no-id", "two-renames"])
+def test_an_unverified_line_is_never_a_cleanup_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                      stdout: str) -> None:
+    rec = Start(stdout)
+    with pytest.raises(TmuxError):
+        start(monkeypatch, tmp_path, rec)
+    assert len(rec.calls) == 1                                  # in particular, no kill-session
+
+
+@pytest.mark.parametrize("launcher", [False, True], ids=["direct", "launcher"])
+def test_a_missing_working_directory_runs_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                  launcher: bool) -> None:
+    rec = Start("hz-started 0123abcd $0 admin\n")
+    monkeypatch.setattr(tmux_mod.subprocess, "run", rec)
+    t = Tmux("hz-test-pin", launcher=(lambda: ("pre",)) if launcher else None)
+    with pytest.raises(TmuxError, match=r"^tmux session directory is missing: "):
+        t.new_session("admin", tmp_path / "missing", ["true"])
+    assert rec.calls == []
+
+
+@pytest.mark.parametrize(("stdout", "dead"), [(b"0\n", False), (b"1\n", True), (b"", True), (b"x\n", True)])
+def test_only_an_explicit_0_is_a_live_pane(monkeypatch: pytest.MonkeyPatch, stdout: bytes,
+                                           dead: bool) -> None:
+    monkeypatch.setattr(tmux_mod.subprocess, "run",
+                        lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, stdout, b""))
+    assert Tmux("hz-test-pin").pane_dead("s") is dead

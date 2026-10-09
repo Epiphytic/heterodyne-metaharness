@@ -368,11 +368,14 @@ def test_child(tmp_path, monkeypatch):
     monkeypatch.setattr(t, "_exec", recorded)
     try:
         t.new_session("s", tmp_path, PANE)
-    except TmuxError:                                # a tmux that exits non-zero on the failed bind
-        return
-    [proc] = results                                 # tmux 3.4 exits 0 and reports the cause on stderr
-    causes = {b"No such file or directory", os.strerror(errno.ENOENT).encode()}
-    assert any(cause in proc.stderr for cause in causes), proc
+    except TmuxError:                                # however tmux exits, the start must not succeed
+        pass
+    else:
+        raise AssertionError("a start with no socket directory reported success")
+    [proc] = results
+    if proc.returncode == 0:                         # tmux 3.4: exit 0, the cause on stderr
+        causes = {b"No such file or directory", os.strerror(errno.ENOENT).encode()}
+        assert any(cause in proc.stderr for cause in causes), proc
 ''', env={"LC_ALL": "C"})
         data = c.hand()
         assert c.finished() == 0, c.output()

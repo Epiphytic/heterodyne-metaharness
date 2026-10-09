@@ -5,9 +5,13 @@ Targets use exact matching: `=name` for sessions and `=name:` for the window or 
 manager can't mangle it. Pastes use bracketed paste (`paste-buffer -p`), so newlines inside the text do
 not submit it early. The pane is kept after its process exits (`remain-on-exit`) so its last screen
 can still be read.
+
+tmux 3.4 exits 0 when a start can't create its socket (only stderr says so), so a start is confirmed by
+the marker line `new-session -P -F` prints for the session it created, never by the exit status alone.
 """
 
 import contextlib
+import re
 import subprocess
 import time
 import uuid
@@ -15,6 +19,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 LAUNCHER_FAILED = "tmux server could not be started through the launcher"
+NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 
 
 class TmuxError(RuntimeError):
@@ -62,28 +67,54 @@ class Tmux:
         return self._run("has-session", "-t", f"={name}", check=False).returncode == 0
 
     def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
+        """Start `name` running `argv` in `cwd`. It returns only once tmux has confirmed that this call
+        created exactly that session; anything else raises TmuxError."""
+        if not cwd.is_dir():    # tmux would exit 0 and run the pane in the home directory instead
+            raise TmuxError(f"tmux session directory is missing: {cwd}")
         # One invocation, so retention is set before the process can start (and exit): a separate
-        # set-option afterwards races an immediately-exiting process.
+        # set-option afterwards races an immediately-exiting process. The marker carries a nonce, so no
+        # other output can pass for it, and the new session's id, the only safe target for a cleanup.
+        prefix = f"hz-started {uuid.uuid4().hex} "
         args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
-                "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
+                "new-session", "-d", "-P", "-F", prefix + "#{session_id} #{session_name}",
+                "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
         if self.launcher is None:
-            self._run(*args)
-            return
-        # The server is forked by this invocation and stays wherever it starts, so only this call is
-        # wrapped, always (no probe, so no race with a server dying between probe and start). If a server
-        # is already running the wrapped client just asks it and its scope is collected on exit.
-        # A failing launcher is an error: never fall back to starting the server unwrapped.
-        try:
-            proc = self._exec([*self.launcher(), self.binary, *self._selector(), *args], input=None,
-                              timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            raise TmuxError(LAUNCHER_FAILED) from None
-        if proc.returncode != 0:
-            raise TmuxError(LAUNCHER_FAILED)
+            proc = self._run(*args)
+        else:
+            # The server is forked by this invocation and stays wherever it starts, so only this call is
+            # wrapped, always (no probe, so no race with a server dying between probe and start). If a
+            # server is already running the wrapped client just asks it and its scope is collected on exit.
+            # A failing launcher is an error: never fall back to starting the server unwrapped.
+            try:
+                proc = self._exec([*self.launcher(), self.binary, *self._selector(), *args], input=None,
+                                  timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                raise TmuxError(LAUNCHER_FAILED) from None
+            if proc.returncode != 0:
+                raise TmuxError(LAUNCHER_FAILED)
+        self._confirm(name, prefix, proc)
+
+    def _confirm(self, name: str, prefix: str, proc: subprocess.CompletedProcess[bytes]) -> None:
+        """Exactly one well-formed marker line naming `name` confirms the start. A renamed session (tmux
+        rewrites `:` and `.`) is removed by the id in its marker; no other line is ever a cleanup target."""
+        lines = proc.stdout.decode("utf-8", "replace").splitlines()
+        markers = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
+        sid, sep, reported = markers[0].partition(" ") if len(markers) == 1 else ("", "", "")
+        if sep and re.fullmatch(r"\$[0-9]+", sid) and reported:
+            if reported == name:
+                return
+            self._run("kill-session", "-t", sid, check=False)
+            detail = f"renamed to {reported!r}"
+        else:
+            detail = proc.stderr.decode("utf-8", "replace").strip() or "no session reported"
+        if self.launcher is not None:
+            raise TmuxError(NO_SESSION)
+        raise TmuxError(f"tmux new-session did not create {name!r}: {detail}")
 
     def pane_dead(self, name: str) -> bool:
+        # Only an explicit 0 is a live pane: tmux prints nothing, and exits 0, for a session that is gone.
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")
-        return proc.stdout.decode().strip() == "1"
+        return proc.stdout.decode().strip() != "0"
 
     def paste(self, name: str, text: str) -> None:
         """Paste `text` and submit it. Only a failure of the `load-buffer` step, strictly before anything
