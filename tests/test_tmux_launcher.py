@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from fakes.settings import make_settings
+from fakes.tmux_marker import started
 
 from heterodyne import tmux as tmux_mod
 from heterodyne.admind.agent import TMUX_SCOPE, tmux_launcher
@@ -15,7 +16,8 @@ from heterodyne.tmux import LAUNCHER_FAILED, Tmux, TmuxError
 
 class Recorder:
     """Fake subprocess.run. The list-sessions probe answers `probe` (returncode, stderr) or raises
-    `probe_exc`; every other call answers `returncode` or raises `exc`."""
+    `probe_exc`; every other call answers `returncode` or raises `exc`, a successful start with its
+    marker."""
 
     def __init__(self, returncode: int = 0, exc: BaseException | None = None,
                  probe: tuple[int, bytes] = (1, b"no server running on /tmp/x"),
@@ -34,7 +36,8 @@ class Recorder:
             return subprocess.CompletedProcess(argv, self.probe[0], b"", self.probe[1])
         if self.exc:
             raise self.exc
-        return subprocess.CompletedProcess(argv, self.returncode, b"", b"secret detail")
+        out = started(argv) if self.returncode == 0 else b""
+        return subprocess.CompletedProcess(argv, self.returncode, out, b"secret detail")
 
     @property
     def starts(self) -> list[list[str]]:

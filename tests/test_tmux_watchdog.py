@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 import tmux_guard
 import tmux_watchdog
+from fakes.tmux_marker import started
 from tmux_guard import start_watchdog
 from tmux_watchdog import Sweeper
 
@@ -28,14 +29,14 @@ from heterodyne.tmux import Tmux
 
 
 class Calls:
-    """Fake subprocess.run that records argv and always succeeds."""
+    """Fake subprocess.run that records argv and always succeeds, a start with its marker."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return subprocess.CompletedProcess(argv, 0, started(argv), b"")
 
 
 def _drive(t: Tmux, tmp_path: Path) -> None:

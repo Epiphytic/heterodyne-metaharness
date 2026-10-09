@@ -102,11 +102,14 @@ def begin_lock_open(socket_path: Path) -> Callable[[], int]:
 class GateLauncher:
     """The one allowed launcher prefix: `sh` waits for `<directory>/gate`, then runs tmux with `"$@"`, which
     keeps every open descriptor (the launch lock's included). It writes its PID to `started` first and
-    tmux's output to `launch` after."""
+    tmux's output to `launch` after; tmux's stdout (the start's marker) is also passed on to the caller.
+    tmux itself writes only to files, so a server can never hold the caller's pipe open."""
 
     SCRIPT = ('echo $$ > "$0/started.tmp"; mv "$0/started.tmp" "$0/started"; '
               'while [ ! -e "$0/gate" ]; do sleep 0.05; done; '
-              '"$@" > "$0/launch.tmp" 2>&1; status=$?; mv "$0/launch.tmp" "$0/launch"; exit $status')
+              '"$@" > "$0/out.tmp" 2> "$0/err.tmp"; status=$?; cat "$0/out.tmp"; '
+              'cat "$0/out.tmp" "$0/err.tmp" > "$0/launch.tmp"; rm -f "$0/out.tmp" "$0/err.tmp"; '
+              'mv "$0/launch.tmp" "$0/launch"; exit $status')
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
