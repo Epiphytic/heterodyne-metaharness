@@ -43,6 +43,7 @@ from heterodyne.wsd.beads import (
     SessionRecord,
     WorktreeConflict,
 )
+from heterodyne.wsd.headroom import Deadline, quota_detail
 from heterodyne.wsd.journal import EntryConflict, Op, OpKind, OpStatus, now
 from heterodyne.wsd.launches import (
     ABANDONED,
@@ -61,6 +62,7 @@ from heterodyne.wsd.upgrade import (
     check_agreement,
     configured_at_upgrade,
 )
+from heterodyne.wsd.usage import admitted, decide
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
 
 PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
@@ -71,6 +73,8 @@ PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "
 GUARD_STEPS = ("entry", "entry!", "dispatched", "dispatched!", "launched!", "receipt", "outcome", "outcome!",
                "done")
 UNRECEIPTED = ("dispatched", "dispatched!", "launched!")
+# The interim quota shelve's points (AU-5 §3.4), as `<kind>.<step>`: only a Deadline at step 2 reaches them.
+QUOTA_STEPS = ("quota", "quota!")
 RESUME_POINTS = ("resume.intent", "resume.unlabelled!", "resume.unlabelled",
                  *(f"resume.{step}" for step in GUARD_STEPS))
 RELEASE_POINTS = ("lock.waiting", "release.intent", "release.unlabelled!", "release.unlabelled",
@@ -346,6 +350,8 @@ class Parker:
 
     def replay_resume(self, op: Op) -> Launch:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
+        if op.step == "quota":
+            return self.finish_quota(op)
         if op.step == "intent":
             shown = self.d.beads.show(ws, bead)
             # `v2:parked` already gone is this operation's own unlabel, done before a crash: go on. The
@@ -737,7 +743,7 @@ class Parker:
                 if isinstance(pinned, Launch):
                     return pinned
                 op, entry = pinned
-            if self._pin_holds(accounts, adapter, rec.profile, entry):  # step 3
+            if self._pin_holds(accounts, rec, entry):           # step 3
                 break
             with j.transaction():
                 entry = j.launch_set(*entry.ident, "outcome", ABANDONED)
@@ -785,19 +791,27 @@ class Parker:
         self.d.cp(f"{kind}.receipt")
         return self._outcome(op, entry)                        # step 6
 
+    def _previous_key(self, session_key: str) -> str | None:
+        """The key of the session's highest launched generation, read after step 1's reconciliation."""
+        launched = [e for e in self.d.journal.launches(session_key) if e.outcome == LAUNCHED]
+        return launched[-1].credential_key if launched else None
+
     def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts) -> tuple[Op, LaunchEntry] | Launch:
-        """Step 2: choose the account and journal generation n+1 with the op's step, then the bead copy."""
+        """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
+        copy. A Deadline quota-shelves the bead; AccountChanged is AU-3's interim escalation."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
-        launched = [e for e in entries if e.outcome == LAUNCHED]
         try:
-            chosen = accounts.choose(rec.profile, launched[-1].credential_key if launched else None)
+            chosen = decide(accounts, j, rec.profile, self._previous_key(rec.session_key), self.d.clock(),
+                            self.ws.usage)
         except ConfigError as exc:
             self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
             return Launch.ENDED
         if isinstance(chosen, AccountChanged):
             self.escalate_from(op, Reason.ACCOUNT_CHANGED, chosen.detail)
             return Launch.ENDED
+        if isinstance(chosen, Deadline):
+            return self._quota_shelve(op, chosen)
         last = max((e.generation for e in entries), default=0)
         if last >= MAX_GENERATION:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"generations exhausted at {last}")
@@ -812,15 +826,12 @@ class Parker:
         self._bead_write(entry, f"{kind}.entry!")
         return op, entry
 
-    @staticmethod
-    def _pin_holds(accounts: Accounts, adapter: str, profile: str, entry: LaunchEntry) -> bool:
-        """Step 3, immediately before dispatch: the pinned account's key is unchanged and it is still
-        eligible. A key that can't be resolved has changed."""
-        try:
-            same = accounts.current_key(adapter, entry.account) == entry.credential_key
-        except ConfigError:
-            same = False
-        return same and accounts.eligible(profile, entry.account)
+    def _pin_holds(self, accounts: Accounts, rec: SessionRecord, entry: LaunchEntry) -> bool:
+        """Step 3, immediately before dispatch: the pinned account is still permitted under its pinned key,
+        and nothing blocks it (`admits`, through the same view and cache as step 2). A key that can't be
+        resolved has changed."""
+        return admitted(accounts, self.d.journal, self._previous_key(rec.session_key), entry, self.d.clock(),
+                        self.ws.usage)
 
     def _uncertain(self, op: Op, detail: str) -> Launch:
         """The role stays taken and the workstream holds; the next pickup's replay settles it from the
@@ -840,6 +851,40 @@ class Parker:
         shown = self.d.beads.show(self.ws.name, op.bead)
         final = parked_state(shown)
         self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
+        return Launch.ENDED
+
+    def _quota_shelve(self, op: Op, deadline: Deadline) -> Launch:
+        """AU-5 §3.4, the interim for a guard Deadline (O1; AU-4 replaces it with its deferral). Intent first:
+        the `quota` step with its `until` and the PARKED/QUOTA row, in one transaction, so a replay finishes
+        it as a quota shelve, never as an ordinary shelve or a launch."""
+        j, kind = self.d.journal, op.kind.value
+        with j.transaction():
+            op = j.op_step(op.op_id, "quota", {"until": str(deadline.at)})
+            j.set_state(self.ws.name, op.bead, BeadState.PARKED, Reason.QUOTA, quota_detail(deadline.at),
+                        op.data.get("ref") or None)
+        self.d.cp(f"{kind}.quota")
+        return self.finish_quota(op)
+
+    def finish_quota(self, op: Op) -> Launch:
+        """The quota shelve's steps 2 and 3, and its replay from step `quota`: label `v2:parked`, then read
+        the bead again. What was added meanwhile wins: `needs-human`, a hold or a blocker. The operation
+        ends ABANDONED in every case."""
+        ws, bead = self.ws.name, op.bead
+        try:
+            self.d.beads.ensure_label(ws, bead, PARKED)
+        except NotOurs:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return Launch.ENDED
+        self.d.cp(f"{op.kind.value}.quota!")
+        shown = self.d.beads.show(ws, bead)
+        if NEEDS_HUMAN in shown.labels:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.NEEDS_HUMAN)
+        elif HELD in shown.labels or shown.open_blockers():
+            final = parked_state(shown)
+            self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
+        else:
+            self._finish(op, OpStatus.ABANDONED, BeadState.PARKED, Reason.QUOTA,
+                         quota_detail(int(op.data["until"])))
         return Launch.ENDED
 
     # --- dispatch ---

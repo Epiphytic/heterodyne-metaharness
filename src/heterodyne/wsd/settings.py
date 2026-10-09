@@ -16,7 +16,8 @@ from heterodyne.config import Config, ConfigError, load, paths, secret_scan
 from heterodyne.config.layers import table_at
 from heterodyne.config.secret_scan import show
 from heterodyne.wsd import ids
-from heterodyne.wsd.accounts import Accounts, DefaultOnly
+from heterodyne.wsd.accounts import Accounts, ConfiguredAccounts
+from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.workstream import DEFAULT_REPO, Limits, WorkstreamSettings
 
 WSD_KEYS = frozenset({"backstop_seconds", "reconcile_seconds", "launch_failures_before_human",
@@ -81,7 +82,8 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
     coder_role = wsd.get("coder_role")
     if not isinstance(coder_role, str) or not ids.SLUG.fullmatch(coder_role):
         raise ConfigError("[wsd] coder_role must be a role name")
-    streams = tuple(_workstream(name, load(name, env), coder_role, limits, env)
+    usage = UsageSettings.from_table(table_at(host.values, "usage", "config"))
+    streams = tuple(_workstream(name, load(name, env), coder_role, limits, usage, env)
                     for name in workstream_names(paths.config_dir(env)))
     return WsdSettings(
         state_dir=paths.state_dir(env) / "wsd",
@@ -91,10 +93,10 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
         btq_checkout=_path(btq.get("btq"), env, f"{BEADS} btq"),
         btq_locations=_locations(btq, env),
         workstreams=streams,
-        accounts=DefaultOnly.from_config(host, env))
+        accounts=ConfiguredAccounts.from_config(host, env))
 
 
-def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits,
+def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits, usage: UsageSettings,
                 env: Mapping[str, str]) -> WorkstreamSettings:
     where = f"workstreams/{name}.toml"
     repos: dict[str, Path] = {}
@@ -111,7 +113,7 @@ def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits,
     models = {p: str(cast(Mapping[str, Any], v).get("model") or "")
               for p, v in table_at(cfg.values, "profiles", "config.toml").items()}
     return WorkstreamSettings(name, repos, coder_role, coder_profile, profiles, limits, models,
-                              DefaultOnly.from_config(cfg, env))
+                              ConfiguredAccounts.from_config(cfg, env), usage)
 
 
 def _locations(btq: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, str]:

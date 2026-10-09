@@ -16,9 +16,18 @@ from wsd_env import WS, Rig, make_rig
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.wsd import ids
-from heterodyne.wsd.accounts import AccountChanged, Chosen, DefaultOnly
-from heterodyne.wsd.beads import RECORD_KEY, BeadsAdapter, BeadsUnavailable, LaunchConflict
+from heterodyne.wsd.accounts import AccountChanged, Candidate, Chosen, ConfiguredAccounts, ProfileAccounts
+from heterodyne.wsd.beads import (
+    HELD,
+    NEEDS_HUMAN,
+    PARKED,
+    RECORD_KEY,
+    BeadsAdapter,
+    BeadsUnavailable,
+    LaunchConflict,
+)
 from heterodyne.wsd.checkpoints import Checkpoint
+from heterodyne.wsd.headroom import Mark, UsageCache, UsageSettings, Window, gate, quota_detail
 from heterodyne.wsd.journal import EntryConflict, Journal, OpKind
 from heterodyne.wsd.launches import (
     LAUNCHES_KEY,
@@ -33,7 +42,7 @@ from heterodyne.wsd.park import UNRECEIPTED
 from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
-from heterodyne.wsd.states import Reason
+from heterodyne.wsd.states import BeadState, Reason
 
 KEY = ids.role_session("btq-1", "coder", "p-one")
 
@@ -182,10 +191,13 @@ def test_ensure_launch_needs_read_back(world: World, monkeypatch: pytest.MonkeyP
 
 def test_keys_are_au2s_resolved_freshly_from_the_supplied_home(tmp_path: Path) -> None:
     home = login_home(tmp_path)
-    accounts = DefaultOnly(PROFILES, {"HOME": str(home)})
+    accounts = ConfiguredAccounts(PROFILES, {"HOME": str(home)})
     assert accounts.current_key("claude-code", "default") == credential_key(
         "claude-code", ((home / ".claude" / ".credentials.json").resolve(),))
-    assert accounts.choose("p-one", None) == Chosen("default", accounts.current_key("claude-code", "default"))
+    key = accounts.current_key("claude-code", "default")
+    view = accounts.view("p-one")
+    assert view.accounts == (Candidate("default", key),)
+    assert gate(view, None, UsageCache(), 0, UsageSettings()) == Chosen("default", key)
     other = login_home(tmp_path, "other")
     (home / ".codex" / "auth.json").unlink()
     (home / ".codex" / "auth.json").symlink_to(other / ".codex" / "auth.json")
@@ -196,15 +208,16 @@ def test_keys_are_au2s_resolved_freshly_from_the_supplied_home(tmp_path: Path) -
 
 def test_a_changed_key_is_account_changed_without_switch_capability(tmp_path: Path) -> None:
     home = login_home(tmp_path)
-    accounts = DefaultOnly(PROFILES, {"HOME": str(home)})
-    assert isinstance(accounts.choose("p-two", "ck1-" + "0" * 32), AccountChanged)
+    accounts = ConfiguredAccounts(PROFILES, {"HOME": str(home)})
+    view = accounts.view("p-two")
+    assert isinstance(gate(view, "ck1-" + "0" * 32, UsageCache(), 0, UsageSettings()), AccountChanged)
     key = accounts.current_key("codex", "default")
-    assert accounts.choose("p-two", key) == Chosen("default", key)
+    assert gate(view, key, UsageCache(), 0, UsageSettings()) == Chosen("default", key)
 
 
 def test_login_resolves_is_strict(tmp_path: Path) -> None:
     home = login_home(tmp_path)
-    accounts = DefaultOnly(PROFILES, {"HOME": str(home)})
+    accounts = ConfiguredAccounts(PROFILES, {"HOME": str(home)})
     assert accounts.login_resolves("codex", "default")
     (home / ".codex" / "auth.json").unlink()
     (home / ".codex" / "auth.json").symlink_to(home / "nowhere")
@@ -212,7 +225,7 @@ def test_login_resolves_is_strict(tmp_path: Path) -> None:
     (home / ".claude" / ".credentials.json").unlink()
     (home / ".claude" / ".credentials.json").mkdir()
     assert not accounts.login_resolves("claude-code", "default")
-    assert accounts.eligible("p-one", "default") and not accounts.eligible("p-one", "named")
+    assert not accounts.login_resolves("codex", "named")
     assert accounts.configured("codex") == ()
 
 
@@ -264,13 +277,15 @@ def row_reason(rig: Rig) -> Reason | None:
 def test_the_session_identity_never_depends_on_the_account(tmp_path: Path) -> None:
     """Test 1: generation 1 launches under one accounts view and generation 2 under another, whose
     default login has a different key (the adapter may switch). Both launch the same session key, and
-    `wsd_session` stays byte-identical; only the entries record the keys."""
+    `wsd_session` stays byte-identical; only the entries record the keys. Under AU-5's D4 a changed key
+    needs `failover = "next"` as well as the capability: `"none"` never moves a session to another key."""
     rig = resumable(tmp_path)
     view_a = rig.ws.accounts
     assert view_a is not None
     record = rig.world.beads["btq-1"].metadata[RECORD_KEY]
-    view_b = DefaultOnly(PROFILES, {"HOME": str(login_home(tmp_path, "b"))},
-                         capabilities={"claude-code": Capabilities(handoff_relaunch=True)})
+    view_b = ConfiguredAccounts({**PROFILES, "p-one": ProfileAccounts("claude-code", failover="next")},
+                                {"HOME": str(login_home(tmp_path, "b"))},
+                                capabilities={"claude-code": Capabilities(handoff_relaunch=True)})
     rig.ws = replace(rig.ws, accounts=view_b)
     rig.restart()
     rig.pickup()
@@ -398,20 +413,67 @@ def test_a_resume_never_dispatches_a_repointed_pin(tmp_path: Path) -> None:
     assert [e.outcome for e in rig.journal.launches_of(WS, "btq-1")] == ["launched", "abandoned"]
 
 
-class Ineligible(DefaultOnly):
-    def eligible(self, profile: str, account: str) -> bool:
-        return False
-
-
-def test_an_ineligible_pin_is_abandoned_and_waits(tmp_path: Path) -> None:
+def test_a_blocked_pin_is_abandoned_and_quota_shelved(tmp_path: Path) -> None:
+    """AU-5: the pinned account is blocked before dispatch (a trusted full window), so the pin is
+    abandoned and the bead quota-shelved, with no dispatch."""
     rig = started(tmp_path)
     crash(rig, "pickup.entry!")
-    rig.ws = replace(rig.ws, accounts=Ineligible(PROFILES, {"HOME": str(tmp_path / "home")}))
-    rig.restart()
+    [pinned] = rig.journal.launches_of(WS, "btq-1")
+    now = rig.clock()
+    full = Window("w5h", "5h", 100.0, now + 3600, now, 0, "codex.host-read")
+    rig.journal.usage_put_trusted(pinned.credential_key, full, rig.journal.usage_seq_next())
     rig.pickup()
-    [op] = rig.journal.ops_open()
-    assert rig.runtime.calls == 0 and "generation" not in op.data      # the next pickup pins again
+    assert rig.runtime.calls == 0 and rig.journal.ops_open() == []
     assert {e.outcome for e in rig.journal.launches_of(WS, "btq-1")} == {"abandoned"}
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.reason is Reason.QUOTA
+
+
+def pinned_then_blocked(tmp_path: Path, kind: str) -> tuple[Rig, int]:
+    """A pickup (or a resume) that crashed after journaling its pin, whose pinned key is then blocked by
+    a trusted mark. Returns the mark's until."""
+    rig = started(tmp_path) if kind == "pickup" else resumable(tmp_path)
+    crash(rig, f"{kind}.entry!")
+    pinned = rig.journal.launches_of(WS, "btq-1")[-1]
+    until = rig.clock() + 3600
+    seq = rig.journal.usage_seq_next()
+    rig.journal.exhausted_put(pinned.credential_key, Mark(until, rig.clock(), seq), seq)
+    return rig, until
+
+
+@pytest.mark.parametrize("kind", ["pickup", "resume"])
+@pytest.mark.parametrize("step", ["abandoned", "abandoned!", "quota", "quota!"])
+def test_a_crash_in_a_quota_shelve_replays_to_parked_quota(tmp_path: Path, kind: str, step: str) -> None:
+    rig, until = pinned_then_blocked(tmp_path, kind)
+    launched = len(rig.runtime.launches)
+    crash(rig, f"{kind}.{step}")
+    rig.pickup()
+    assert len(rig.runtime.launches) == launched and rig.journal.ops_open() == []
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (row.state, row.reason) == (BeadState.PARKED, Reason.QUOTA)
+    assert row.detail == quota_detail(until) and PARKED in rig.world.beads["btq-1"].labels
+    assert rig.sched.wake_at == until
+    rig.clock.advance(3600)
+    assert rig.pickup() is Outcome.RESUMED and len(rig.runtime.launches) == launched + 1
+
+
+@pytest.mark.parametrize("kind", ["pickup", "resume"])
+@pytest.mark.parametrize("added", ["held", "needs_human", "blocker"])
+def test_a_stop_added_before_the_quota_replay_wins(tmp_path: Path, kind: str, added: str) -> None:
+    rig, _ = pinned_then_blocked(tmp_path, kind)
+    crash(rig, f"{kind}.quota")
+    if added == "blocker":
+        rig.world.add("btq-3")
+        rig.world.beads["btq-3"].labels.remove("agent:wsd")
+        rig.world.beads["btq-1"].deps.append(("btq-3", "blocks"))
+    else:
+        rig.world.beads["btq-1"].labels.append(HELD if added == "held" else NEEDS_HUMAN)
+    rig.pickup()
+    row = rig.journal.state(WS, "btq-1")
+    expected = {"held": (BeadState.HELD, Reason.HELD_BY_OPERATOR), "needs_human": (BeadState.STUCK,
+                Reason.NEEDS_HUMAN), "blocker": (BeadState.PARKED, Reason.BLOCKED_ON_BEAD)}[added]
+    assert row is not None and (row.state, row.reason) == expected
+    assert rig.journal.ops_open() == [] and rig.sched.wake_at is None
 
 
 @pytest.mark.parametrize("point", ["pickup.abandoned", "pickup.abandoned!"])

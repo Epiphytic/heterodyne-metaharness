@@ -26,7 +26,7 @@ import sqlite3
 import stat
 import threading
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -36,6 +36,7 @@ from typing import Any, Literal, cast
 import msgspec
 
 from heterodyne.fsutil import private_dir
+from heterodyne.wsd.headroom import Mark, UsageCache, Window, epoch
 from heterodyne.wsd.launches import SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
@@ -249,6 +250,20 @@ class Snapshot:
 
 
 @dataclass(frozen=True)
+class DeferralRow:
+    """A deferral record (D5; AU-4 writes them, AU-5 reads them for the wake time). `defer_until` is the
+    stored text: decimal epoch seconds, or None."""
+    session_key: str
+    number: int
+    bead: str
+    role: str
+    profile: str
+    reason: str
+    defer_until: str | None
+    trust: str
+
+
+@dataclass(frozen=True)
 class Adoption:
     """A legacy bead's adoption verdict (AU-3 §2.5): the upgrade-time evidence, never changed, plus
     `settled` and the release's `resolution`, each set once."""
@@ -293,6 +308,33 @@ def _launch(r: tuple[object, ...]) -> LaunchEntry:
 def _adoption(r: tuple[object, ...]) -> Adoption:
     return Adoption(str(r[0]), str(r[1]), _opt(r[2]), str(r[3]), str(r[4]), str(r[5]), bool(r[6]),
                     _opt(r[7]), _opt(r[8]), _opt(r[9]))
+
+
+_WINDOW = "window_id, kind, used_percent, resets_at, observed_at, receipt_seq, source"
+_DEFERRAL = "d.session_key, d.number, d.bead, d.role, d.profile, d.reason, d.defer_until, d.trust"
+# Each session's highest-numbered deferral record: the current one.
+_CURRENT_DEFERRALS = (f"SELECT {_DEFERRAL} FROM deferrals d WHERE d.number = "  # noqa: S608
+                      "(SELECT MAX(number) FROM deferrals e WHERE e.session_key = d.session_key)")
+CLAMP_EXHAUSTED = "clamp:exhausted:"
+CLAMP_DEFERRAL = "clamp:deferral:"
+
+
+def _window(r: tuple[object, ...]) -> Window | None:
+    """A stored usage row, or None if a value it needs doesn't parse (unknown, which never blocks)."""
+    observed, seq = epoch(r[4]), epoch(r[5])
+    if observed is None or seq is None or not isinstance(r[2], int | float):
+        return None
+    return Window(str(r[0]), str(r[1]), float(r[2]), epoch(r[3]), observed, seq, str(r[6]))
+
+
+def _window_row(w: Window, seq: int) -> tuple[object, ...]:
+    return (w.window_id, w.kind, w.used_percent, None if w.resets_at is None else str(int(w.resets_at)),
+            str(int(w.observed_at)), seq, w.source)
+
+
+def _deferral(r: tuple[object, ...]) -> DeferralRow:
+    return DeferralRow(str(r[0]), int(cast(int, r[1])), str(r[2]), str(r[3]), str(r[4]), str(r[5]),
+                       _opt(r[6]), str(r[7]))
 
 
 def state_detail(reason: Reason | None, detail: str) -> str:
@@ -891,6 +933,132 @@ class Journal:
                             "updated_at = excluded.updated_at",
                             (ws, state.value, now()))
             self.emit(ws, None, f"ws:{state.value}")
+
+    # --- usage (AU-5 §2.5) ---
+
+    @_locked
+    def usage_seq_next(self) -> int:
+        """The next receipt sequence. Call it inside the transaction that writes the row it orders."""
+        self.db.execute("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'usage_receipt_seq'")
+        row = self.db.execute("SELECT value FROM meta WHERE key = 'usage_receipt_seq'").fetchone()
+        return int(str(row[0]))
+
+    @_locked
+    def usage_put_trusted(self, key: str, window: Window, seq: int) -> None:
+        """A trusted window; within (key, window_id) the higher receipt sequence wins."""
+        self.db.execute(
+            f"INSERT INTO account_usage (credential_key, {_WINDOW}) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "  # noqa: S608
+            "ON CONFLICT (credential_key, window_id) DO UPDATE SET kind = excluded.kind, "
+            "used_percent = excluded.used_percent, resets_at = excluded.resets_at, "
+            "observed_at = excluded.observed_at, receipt_seq = excluded.receipt_seq, "
+            "source = excluded.source WHERE excluded.receipt_seq > account_usage.receipt_seq",
+            (key, *_window_row(window, seq)))
+
+    @_locked
+    def usage_put_untrusted(self, session_key: str, generation: int, window: Window, seq: int) -> None:
+        """A launch's own reported window; within (session, generation, window_id) the higher receipt
+        sequence wins."""
+        self.db.execute(
+            f"INSERT INTO account_usage_untrusted (session_key, generation, {_WINDOW}) "  # noqa: S608
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (session_key, generation, window_id) DO UPDATE SET kind = excluded.kind, "
+            "used_percent = excluded.used_percent, resets_at = excluded.resets_at, "
+            "observed_at = excluded.observed_at, receipt_seq = excluded.receipt_seq, "
+            "source = excluded.source WHERE excluded.receipt_seq > account_usage_untrusted.receipt_seq",
+            (session_key, generation, *_window_row(window, seq)))
+
+    @_locked
+    def exhausted_put(self, key: str, mark: Mark, seq: int) -> None:
+        """A trusted exhaustion mark; the higher receipt sequence wins. The replaced mark's clamp marker
+        goes in the same transaction."""
+        with self.transaction():
+            old = self.db.execute("SELECT receipt_seq FROM account_exhausted WHERE credential_key = ?",
+                                  (key,)).fetchone()
+            cur = self.db.execute(
+                "INSERT INTO account_exhausted (credential_key, until, observed_at, receipt_seq) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (credential_key) DO UPDATE SET until = excluded.until, "
+                "observed_at = excluded.observed_at, receipt_seq = excluded.receipt_seq "
+                "WHERE excluded.receipt_seq > account_exhausted.receipt_seq",
+                (key, str(int(mark.until)), str(int(mark.observed_at)), seq))
+            if old is not None and cur.rowcount:
+                self.db.execute("DELETE FROM meta WHERE key = ?", (f"{CLAMP_EXHAUSTED}{key}:{old[0]}",))
+
+    @_locked
+    def usage_cache(self, keys: Iterable[str]) -> UsageCache:
+        """The trusted windows and marks of exactly `keys`: rows of any other key are never read (D1)."""
+        wanted = sorted(set(keys))
+        marks = ", ".join("?" * len(wanted))
+        windows: dict[str, list[Window]] = {}
+        found: dict[str, Mark] = {}
+        with self.transaction():
+            for r in self.db.execute(f"SELECT credential_key, {_WINDOW} FROM account_usage "  # noqa: S608
+                                     f"WHERE credential_key IN ({marks}) ORDER BY credential_key, window_id",
+                                     wanted).fetchall():
+                w = _window(r[1:])
+                if w is not None:
+                    windows.setdefault(str(r[0]), []).append(w)
+            for r in self.db.execute("SELECT credential_key, until, observed_at, receipt_seq "  # noqa: S608
+                                     f"FROM account_exhausted WHERE credential_key IN ({marks})",
+                                     wanted).fetchall():
+                until, observed = epoch(r[1]), epoch(r[2])
+                if until is not None and observed is not None:
+                    found[str(r[0])] = Mark(until, observed, int(cast(int, r[3])))
+        return UsageCache({k: tuple(v) for k, v in windows.items()}, found)
+
+    @_locked
+    def usage_untrusted(self, session_key: str, generation: int) -> tuple[Window, ...]:
+        """One launch's own reported rows."""
+        rows = self.db.execute(f"SELECT {_WINDOW} FROM account_usage_untrusted "  # noqa: S608
+                               "WHERE session_key = ? AND generation = ? ORDER BY window_id",
+                               (session_key, generation)).fetchall()
+        return tuple(w for w in map(_window, rows) if w is not None)
+
+    @_locked
+    def deferrals_current(self, ws: str, role: str) -> list[DeferralRow]:
+        """Each session's current deferral record for `role`, for beads the journal has in `ws`."""
+        rows = self.db.execute(f"{_CURRENT_DEFERRALS} AND d.role = ? AND d.bead IN "  # noqa: S608
+                               "(SELECT bead FROM beads WHERE ws = ?) ORDER BY d.bead, d.session_key",
+                               (role, ws)).fetchall()
+        return [_deferral(r) for r in rows]
+
+    @_locked
+    def clamp_deadlines(self, bound: int) -> int:
+        """§3.5, in one transaction: every unmarked exhaustion `until` and current `defer_until` later than
+        `bound` is rewritten to `bound` and marked, so it is never moved again. A value is marked while its
+        marker (keyed by the value's own identity) exists and equals it. Markers of values that no longer
+        exist are pruned. Returns how many values changed."""
+        changed = 0
+        with self.transaction():
+            markers = {str(k): str(v) for k, v in self.db.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'clamp:%'").fetchall()}
+            live: set[str] = set()
+            for key, until, seq in self.db.execute(
+                    "SELECT credential_key, until, receipt_seq FROM account_exhausted").fetchall():
+                marker = f"{CLAMP_EXHAUSTED}{key}:{seq}"
+                live.add(marker)
+                if self._clamp(marker, _opt(until), bound, markers):
+                    self.db.execute("UPDATE account_exhausted SET until = ? WHERE credential_key = ?",
+                                    (str(bound), key))
+                    changed += 1
+            for d in map(_deferral, self.db.execute(_CURRENT_DEFERRALS).fetchall()):
+                marker = f"{CLAMP_DEFERRAL}{d.session_key}:{d.number}"
+                live.add(marker)
+                if self._clamp(marker, d.defer_until, bound, markers):
+                    self.db.execute("UPDATE deferrals SET defer_until = ? WHERE session_key = ? "
+                                    "AND number = ?", (str(bound), d.session_key, d.number))
+                    changed += 1
+            for marker in set(markers) - live:
+                self.db.execute("DELETE FROM meta WHERE key = ?", (marker,))
+        return changed
+
+    def _clamp(self, marker: str, value: str | None, bound: int, markers: dict[str, str]) -> bool:
+        """Whether to rewrite `value`; if so, its marker is written. Unlocked: inside `clamp_deadlines`."""
+        at = epoch(value)
+        if at is None or at <= bound or markers.get(marker) == value:
+            return False
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET "
+                        "value = excluded.value", (marker, str(bound)))
+        return True
 
     @_locked
     def emit(self, ws: str, bead: str | None, kind: str, detail: str = "", ref: str | None = None) -> int:

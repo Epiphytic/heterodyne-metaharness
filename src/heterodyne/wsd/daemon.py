@@ -32,6 +32,13 @@ a stop that arrives while the socket starts. A socket that fails to start shuts 
 raises. Jobs still running after the drain raise Undrained, and `cli.run` then ends the process at once
 (a crash, which the journal is built to replay).
 
+Quota wakes (AU-5 §3.6): after each job on a workstream's lane, its pending wake is cancelled and, if the
+scheduler's last pickup left a `wake_at`, a one-shot callback is armed for it on the event loop. When it
+fires, it submits a `QUOTA_WAKE` pickup through the same lane, so it serialises with every other job.
+Nothing is armed once wsd is stopping, and shutdown cancels the armed wakes and any wake pickup awaiting
+its lane along with the timers. A wake that is lost (a restart) only delays: the backstop and startup
+pickups compute it again.
+
 A workstream that is `stuck` (or a pickup whose outcome is `stuck`) is not idle: beads are ready or
 claimed that only a human can move on. Status and tick replies say so.
 """
@@ -183,6 +190,8 @@ class Wsd:
         self.shutdown = threading.Lock()        # held while every lane closes; see Lane
         self.lanes = {name: Lane(name, self.shutdown) for name in [STATUS_LANE, *parts.schedulers]}
         self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
+        self.wakes: dict[str, asyncio.TimerHandle] = {}     # the armed quota wake, per workstream
+        self.waking: set[asyncio.Task[None]] = set()        # wake pickups not yet finished
 
     # --- blocking work (worker threads) ---
 
@@ -294,12 +303,60 @@ class Wsd:
         if self.stopping:
             raise Stopping
         fut = self.lanes[lane].submit(key, fn)
+        if lane != STATUS_LANE:
+            self._arm_on(lane, fut)
         try:
             return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
         except asyncio.CancelledError:
             if fut.cancelled():
                 raise Stopping from None
             raise
+
+    # --- quota wakes (AU-5 §3.6) ---
+
+    def _arm_on(self, name: str, fut: cf.Future[Any]) -> None:
+        """Arm the workstream's wake when its job finishes, whether or not anyone still awaits it. Added
+        before the caller's own callback, so the wake is armed before the caller resumes."""
+        loop = asyncio.get_running_loop()
+
+        def done(f: cf.Future[Any]) -> None:
+            if not f.cancelled():
+                with contextlib.suppress(RuntimeError):     # the loop has closed: nothing to wake
+                    loop.call_soon_threadsafe(self._arm, name)
+
+        fut.add_done_callback(done)
+
+    def _arm(self, name: str) -> None:
+        """Replace the workstream's pending wake with its scheduler's `wake_at`, if any."""
+        pending = self.wakes.pop(name, None)
+        if pending is not None:
+            pending.cancel()
+        sched = self.parts.schedulers[name]
+        if self.stopping or sched.wake_at is None:
+            return
+        loop = asyncio.get_running_loop()
+        self.wakes[name] = loop.call_later(max(0, sched.wake_at - sched.d.clock()), self._wake, name)
+
+    def _wake(self, name: str) -> None:
+        self.wakes.pop(name, None)
+        if self.stopping:
+            return
+        task = asyncio.get_running_loop().create_task(self._wake_pickup(name))
+        self.waking.add(task)
+        task.add_done_callback(self.waking.discard)
+
+    async def _wake_pickup(self, name: str) -> None:
+        with contextlib.suppress(JobFailed, Stopping):      # recorded, or shutting down
+            await self.pickup(name, Trigger(TriggerKind.QUOTA_WAKE))
+
+    async def _cancel_wakes(self) -> None:
+        for handle in self.wakes.values():
+            handle.cancel()
+        self.wakes.clear()
+        tasks = list(self.waking)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle(self, req: CtlRequest) -> CtlReply:
         why = refusal(req)
@@ -413,6 +470,7 @@ class Wsd:
             await asyncio.gather(starting, stopped, return_exceptions=True)
         failed = None if starting.cancelled() else starting.exception()
         if starting.cancelled() or failed is not None or stop.is_set():
+            await self._cancel_wakes()
             await self._drain()
             if failed is not None:
                 raise failed
@@ -438,6 +496,7 @@ class Wsd:
             for task in (stopping, *timers):
                 task.cancel()
             await asyncio.gather(stopping, *timers, return_exceptions=True)
+            await self._cancel_wakes()
             try:
                 await self._drain()
             finally:

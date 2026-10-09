@@ -15,7 +15,7 @@ from fakes.fake_runtime import FakeRuntime
 from wsd_env import ADAPTERS, PROFILES, WS, Rig, accounts_at, git_repo, login_home, make_rig
 
 from heterodyne.wsd import cli, ids, upgrade
-from heterodyne.wsd.accounts import DefaultOnly
+from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.journal import V1_SCHEMA, V2_TABLES, Adoption, Journal, JournalCorrupt, check_v1
@@ -38,7 +38,7 @@ def _no_queue_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
 
 
-class Configured(DefaultOnly):
+class Configured(ConfiguredAccounts):
     """Accounts with a named account configured for codex (its login is never read here)."""
 
     def configured(self, adapter: str) -> tuple[str, ...]:
@@ -65,7 +65,7 @@ def to_v1(rig: Rig) -> None:
         bead.metadata.pop(LAUNCHES_KEY, None)
 
 
-def upgraded(rig: Rig, accounts: DefaultOnly | None = None, cp: Checkpoint = nothing) -> None:
+def upgraded(rig: Rig, accounts: ConfiguredAccounts | None = None, cp: Checkpoint = nothing) -> None:
     upgrade.run(rig.beads, accounts or rig.ws.accounts, db_path(rig), cp)   # type: ignore[arg-type]
     rig.restart()
 
@@ -142,7 +142,7 @@ def v1(tmp_path: Path) -> Path:
     return path
 
 
-def no_beads(tmp_path: Path) -> tuple[BeadsAdapter, DefaultOnly]:
+def no_beads(tmp_path: Path) -> tuple[BeadsAdapter, ConfiguredAccounts]:
     """A queue and accounts for a journal with no legacy beads: neither is ever asked anything."""
     return BeadsAdapter(factory(World(tmp_path / "btq-state"))), accounts_at(login_home(tmp_path / "home"))
 

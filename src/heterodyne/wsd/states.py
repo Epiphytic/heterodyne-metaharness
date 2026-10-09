@@ -50,6 +50,12 @@ class Reason(StrEnum):
     # A launched session's account would change, and the adapter can't switch (D7). Interim: AU-4
     # replaces this escalation with its `account_changed` deferral.
     ACCOUNT_CHANGED = "account_changed"
+    # AU-5's interim quota shelve: claimed and parked until the headroom gate gives an account. AU-4
+    # replaces it with its `v2:deferred` quota deferral.
+    QUOTA = "quota"
+    # Only on the unclaimed row of a ready bead whose gate gives `account_changed` (never claimed): the
+    # claimed escalation keeps ACCOUNT_CHANGED, so cleanup never confuses the two.
+    ACCOUNT_REPOINTED = "account_repointed"
 
 
 class WsState(StrEnum):
@@ -59,6 +65,7 @@ class WsState(StrEnum):
     PAUSED = "paused"
     HELD = "held"      # pickup is held for a workstream-level reason (see `holds`)
     STUCK = "stuck"    # nothing runs and at least one bead needs a human
+    DEFERRED = "deferred"      # waiting only on quota, with a wake time armed (§5.2): never idle
 
 
 TERMINAL = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -104,9 +111,12 @@ def check(src: BeadState | None, dst: BeadState) -> None:
         raise IllegalTransition(f"{src} -> {dst}")
 
 
-def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState]) -> WsState:
+def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState], wake: bool = False,
+             all_quota: bool = False) -> WsState:
     """The one-word workstream state for /workstreams (§6.3). Pickup has already run, so "idle" really
-    means nothing is ready and nothing is in progress (§5.2)."""
+    means nothing is ready and nothing is in progress (§5.2). `wake`: pickup armed a quota wake time;
+    `all_quota`: every non-terminal row is PARKED with reason QUOTA. Either makes a workstream that would
+    otherwise be idle or all-blocked DEFERRED (AU-5 §3.6)."""
     states = set(beads) - TERMINAL
     if set(holds):
         return WsState.HELD
@@ -117,5 +127,5 @@ def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState]) 
     if BeadState.STUCK in states:
         return WsState.STUCK
     if states:
-        return WsState.ALL_BLOCKED
-    return WsState.IDLE
+        return WsState.DEFERRED if all_quota else WsState.ALL_BLOCKED
+    return WsState.DEFERRED if wake else WsState.IDLE
