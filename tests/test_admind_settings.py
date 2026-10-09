@@ -336,11 +336,7 @@ def test_a_selector_is_refused_whatever_account_either_process_is_on(tmp_path: P
         assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
 
 
-def test_codex_home_is_refused_for_a_codex_process_on_a_named_account(tmp_path: Path,
-                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-    """§3.2 for the other adapter: the summarizer runs Codex on account x, and CODEX_HOME is inherited."""
-    monkeypatch.setattr(admind_settings, "ADMIN_ADAPTERS", ("claude-code", "codex"))
-    config = with_summarizer(WITH_ACCOUNTS, "cx") + """
+CODEX_X = """
 [profiles.cx]
 adapter = "codex"
 accounts = ["x"]
@@ -348,7 +344,24 @@ accounts = ["x"]
 adapter = "codex"
 login_dir = "~/.codex-x"
 """
+
+
+@pytest.mark.parametrize("codex", ["summarizer", "agent"])
+def test_codex_home_is_refused_for_a_codex_process_on_a_named_account(tmp_path: Path, codex: str,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 for the other adapter, for each process in turn: one process runs Codex on account x, the
+    other runs Claude on a named account, and CODEX_HOME is inherited. Only the Codex process's check can
+    refuse it: the Claude one passes, as the same config without CODEX_HOME shows."""
+    monkeypatch.setattr(admind_settings, "ADMIN_ADAPTERS", ("claude-code", "codex"))
+    config = with_summarizer(WITH_ACCOUNTS, "cx" if codex == "summarizer" else "sum") + CODEX_X
+    if codex == "agent":
+        config = config.replace('profile = "admin"', 'profile = "cx"', 1)
     env = write(tmp_path, config)
+    s = resolve(load(None, env, capabilities=ACCOUNTS_ON), env)        # the Claude process's check passes
+    codex_account = s.summarizer_account if codex == "summarizer" else s.agent_account
+    claude_account = s.agent_account if codex == "summarizer" else s.summarizer_account
+    assert codex_account is not None and codex_account.name == "x" and "CODEX_HOME" in codex_account.set
+    assert claude_account is not None and "CLAUDE_CONFIG_DIR" in claude_account.set
     with pytest.raises(ConfigError, match="sets CODEX_HOME") as exc:
         resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CODEX_HOME": str(tmp_path / "x-MARKER")})
     assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
