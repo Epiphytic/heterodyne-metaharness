@@ -1860,7 +1860,7 @@ def exhaust_p_two(wsd: Wsd) -> None:
     j.exhausted_put(candidate.key, Mark(clock() + HOUR, clock(), seq), seq)
 
 
-def test_startup_regates_once_per_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def regates_once_per_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wsd, world, _ = account_changed_wsd(tmp_path)
     asked, regates = decide_calls(monkeypatch), counted_regates(monkeypatch)
     real = daemon.recover
@@ -1880,8 +1880,7 @@ def test_startup_regates_once_per_process(tmp_path: Path, monkeypatch: pytest.Mo
     assert again.recover_one(WS).ok and regates == [WS, WS] and asked == ["p-two", "p-two"]
 
 
-def test_a_crash_in_the_startup_regate_replays_and_the_next_start_regates_again(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def a_crash_in_the_regate_replays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wsd, world, _ = account_changed_wsd(tmp_path)
     repoint_codex_at(tmp_path / "home", "")
     exhaust_p_two(wsd)
@@ -1899,6 +1898,16 @@ def test_a_crash_in_the_startup_regate_replays_and_the_next_start_regates_again(
     assert row_of(again) == (BeadState.DEFERRED, Reason.QUOTA) and again.parts.journal.ops_open(WS) == []
     comments = defer_comments(world)
     assert len(comments) == 2 and " n=2 " in comments[1]
+
+
+@pytest.mark.parametrize("case", [regates_once_per_process, a_crash_in_the_regate_replays],
+                         ids=["once_per_process", "a_crash_replays"])
+def test_startup_regates_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                              case: Callable[[Path, pytest.MonkeyPatch], None]) -> None:
+    """A new wsd re-gates once per workstream, even after a failed first recovery, and writes nothing
+    while the wait is still `account_changed`; a crash in the re-gate replays, and the next start
+    re-gates again."""
+    case(tmp_path, monkeypatch)
 
 
 def test_account_changed_has_no_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
