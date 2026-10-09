@@ -1739,3 +1739,31 @@ def test_no_wake_is_armed_once_stopping(tmp_path: Path) -> None:
         assert wsd.waking == set()
 
     asyncio.run(scenario())
+
+
+def test_a_cancelled_caller_still_arms_the_wake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 finding 1: the job finishes on its lane after its caller was cancelled; its wake is still armed."""
+    wsd, _, _ = deferred_wsd(tmp_path)
+    sched = wsd.parts.schedulers[WS]
+    inside, release = threading.Event(), threading.Event()
+    real = sched.pickup
+
+    def held(trigger: Trigger) -> Outcome:
+        inside.set()
+        release.wait(10)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", held)
+
+    async def scenario() -> None:
+        caller = asyncio.create_task(wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP)))
+        await until(inside.is_set)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert WS not in wsd.wakes
+        release.set()                                      # the job finishes with no one awaiting it
+        await until(lambda: WS in wsd.wakes)
+        await wsd._cancel_wakes()  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(scenario())

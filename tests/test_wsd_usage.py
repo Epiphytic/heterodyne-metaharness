@@ -61,7 +61,8 @@ def trusted(j: Journal, key: str = KEY_A) -> tuple[Window, ...]:
 
 # --- ingestion: validation ---
 
-@pytest.mark.parametrize("pct", [math.nan, math.inf, -math.inf, True, False, "50", -1, 100.5, None])
+@pytest.mark.parametrize("pct", [math.nan, math.inf, -math.inf, True, False, "50", -1, 100.5, None,
+                                 10**400, -(10**400), 101, 1j])
 def test_bad_percentages_are_dropped_and_nothing_is_written(j: Journal, pct: object) -> None:
     assert ingest_trusted(j, KEY_A, obs(pct), NOW, S) == Dropped("bad_percent")
     assert trusted(j) == () and j.usage_seq_next() == 1         # not even the counter moved

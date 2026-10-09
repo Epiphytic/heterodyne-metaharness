@@ -670,8 +670,7 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
             if outcome is Outcome.NOTHING:
                 assert left == [] and waiters == [] and rig.sched.wake_at is None
             elif outcome is Outcome.DEFERRED:
-                # as for NOTHING, only an unreceipted (STUCK) session may still be listed (AU-3)
-                assert set(coders) <= set(unreceipted)
+                assert coders == []                        # a listed session is BUSY, never DEFERRED
                 assert stuck_left == [] and sorted(quota_left) == sorted(left)
                 assert rig.sched.wake_at is not None and rig.sched.wake_at > rig.clock()
                 assert quota_left or waiters
@@ -874,6 +873,26 @@ def test_uncertain_resume_is_stuck_until_its_bead_closes(tmp_path: Path) -> None
     rig.world.close("btq-1")
     assert rig.pickup() is Outcome.NOTHING
     assert rig.runtime.coders() == [] and rig.state("btq-1") == "closed"
+
+
+def test_an_uncertain_resume_before_a_quota_skip_is_busy_not_deferred(tmp_path: Path) -> None:
+    """AU-5 r1 finding 3: the uncertain resume leaves its session listed, so the role is taken. The quota
+    skip after it still sets the wake, but pickup reports BUSY until the session is gone."""
+    rig = parked_rig(tmp_path)
+    key = own_profile(rig, "q-1")
+    rig.world.add("btq-3")
+    on_profile(rig, "btq-3", "q-1")
+    until = block(rig, key, HOUR)
+    rig.world.close("btq-2")
+    rig.runtime.launch_uncertain = 1
+    assert rig.pickup() is Outcome.BUSY                    # btq-1's uncertain resume, then btq-3 skipped
+    assert rig.state("btq-1") == "stuck" and rig.runtime.coders() == ["btq-1"]
+    assert rig.sched.wake_at == until and "btq-3" not in rig.world.claims
+    rig.world.close("btq-1")
+    assert rig.pickup() is Outcome.DEFERRED                # the sweep ended it: now only the quota waits
+    assert rig.runtime.coders() == [] and rig.sched.wake_at == until
+    rig.clock.now = until
+    assert rig.pickup() is Outcome.STARTED and rig.runtime.coders() == ["btq-3"]
 
 
 # --- Task 6 notes and the sweep's guards (deviations: tests the plan does not have) ---

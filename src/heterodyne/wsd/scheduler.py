@@ -188,7 +188,15 @@ class Scheduler:
         if outcome not in (Outcome.NOTHING, Outcome.STUCK):
             return outcome
         self.wake_at = wake_time([*scan.deadlines, *self._waiters(now), *self._deferrals(now)], now)
-        return Outcome.DEFERRED if outcome is Outcome.NOTHING and self.wake_at is not None else outcome
+        if outcome is Outcome.STUCK or self.wake_at is None:
+            return outcome
+        try:            # an uncertain launch above may have left its session listed: the role is taken
+            if self.d.runtime.sessions(name):
+                return self._stalled()
+        except RuntimeUnavailable:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE)
+            return Outcome.HELD
+        return Outcome.DEFERRED
 
     def _candidates(self, trigger: Trigger, scan: _Scan) -> Outcome:
         """§5.2 step 7, each candidate gated on its own profile (AU-5 §3.6): resumable parked beads, then

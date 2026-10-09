@@ -12,7 +12,6 @@ then the pure gate. Pickup, the guard's step 2 and its step 3 (`admitted`) all u
 """
 
 import logging
-import math
 import re
 from dataclasses import dataclass
 
@@ -74,9 +73,8 @@ def _check(obs: Observation, key: str, now: int, s: UsageSettings) -> Window | D
     if obs.claimed_key is not None and obs.claimed_key != key:
         return _drop("other_account")
     pct = obs.used_percent
-    if isinstance(pct, bool) or not isinstance(pct, int | float) or not math.isfinite(pct):
-        return _drop("bad_percent")
-    if not 0 <= pct <= 100:
+    # compared, never converted: an int too large for a float can't overflow, and NaN fails the bounds
+    if isinstance(pct, bool) or not isinstance(pct, int | float) or not 0 <= pct <= 100:
         return _drop("bad_percent")
     if not all(LABEL.fullmatch(v) for v in (obs.window_id, obs.kind, obs.source)):
         return _drop("bad_label")

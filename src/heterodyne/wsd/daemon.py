@@ -303,17 +303,28 @@ class Wsd:
         if self.stopping:
             raise Stopping
         fut = self.lanes[lane].submit(key, fn)
+        if lane != STATUS_LANE:
+            self._arm_on(lane, fut)
         try:
             return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
         except asyncio.CancelledError:
             if fut.cancelled():
                 raise Stopping from None
             raise
-        finally:
-            if lane != STATUS_LANE and fut.done():
-                self._arm(lane)
 
     # --- quota wakes (AU-5 §3.6) ---
+
+    def _arm_on(self, name: str, fut: cf.Future[Any]) -> None:
+        """Arm the workstream's wake when its job finishes, whether or not anyone still awaits it. Added
+        before the caller's own callback, so the wake is armed before the caller resumes."""
+        loop = asyncio.get_running_loop()
+
+        def done(f: cf.Future[Any]) -> None:
+            if not f.cancelled():
+                with contextlib.suppress(RuntimeError):     # the loop has closed: nothing to wake
+                    loop.call_soon_threadsafe(self._arm, name)
+
+        fut.add_done_callback(done)
 
     def _arm(self, name: str) -> None:
         """Replace the workstream's pending wake with its scheduler's `wake_at`, if any."""
