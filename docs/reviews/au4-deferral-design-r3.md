@@ -1,0 +1,5 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 2dfd8fa. Verdict: REVISE (1 blocking; fixed post-cap in 62ea4b7, verified by the controller against park.py, not re-reviewed).
+
+1. [BLOCKING] `docs/superpowers/specs/2026-10-09-au4-deferral-design.md:348` — The uncertainty oracle still contradicts the preserved launch guard. Missing receipts call `_no_receipt` (`src/heterodyne/wsd/park.py:626`), which ends the original operation as STUCK, clears its `launch_uncertain` hold, and adds `needs-human` through escalation (`park.py:182–195`). Replay therefore cannot leave the operation open with unchanged labels. Also, `dispatched` and `dispatched!` precede the runtime call, so those crashes have zero dispatches; confirming session absence cannot produce the completed run’s one dispatch or substitute for a receipt. **Fix:** make the oracle assert the existing STUCK/UNEXPECTED_STATE escalation, unresolved generation, and no redispatch. Remove automatic convergence after receipt injection or session absence; test receipt-backed completion separately at the existing receipt crash point. The release-transition and reload-equality blockers are resolved.
+
+REVISE
