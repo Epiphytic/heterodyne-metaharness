@@ -1,4 +1,4 @@
-# btq-yk7ns (AU-5): usage cache, headroom gate and per-candidate pickup (design r2)
+# btq-yk7ns (AU-5): usage cache, headroom gate and per-candidate pickup (design r3)
 
 Base: main 1ff70c1 (AU-2 and AU-3 merged). Sources:
 - the accounts plan, §AU-5 and the dependency graph (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at 66ad195);
@@ -12,9 +12,13 @@ Scope: plan 3b's usage cache, the pure headroom gate, ingestion, and per-candida
 1. Clamped values carry a persisted marker, keyed by the value's own identity, so a rewritten value is never moved again, even after another backward jump. A genuinely new value has a new identity and so starts unmarked (§2.5, §3.5).
 2. The interim quota shelve is its own journaled step (`quota`), replayed explicitly. A crash at any point ends `PARKED/QUOTA`, unless a hold, `needs-human` or a blocker appeared meanwhile, which wins (§3.4).
 3. The wake time also counts every runnable `PARKED/QUOTA` waiter, so a bead the guard shelved in a race always has a wake (§3.6).
-4. A ready candidate whose gate gives `account_changed` is skipped without claiming, arms no timer, and is recorded `STUCK/ACCOUNT_CHANGED` like an unclaimable bead. Only claimed resumes go to the guard's escalation (§3.6).
+4. A ready candidate whose gate gives `account_changed` is skipped without claiming, arms no timer, and is recorded `STUCK/ACCOUNT_REPOINTED` (reason renamed in r3) like an unclaimable bead. Only claimed resumes go to the guard's escalation (§3.6).
 5. O4 is now an explicit plan amendment, moving the whole `account_changed` lifecycle bullet to AU-4, with its tests and the reload trigger named (§8).
 6. Times are stored as UTC epoch seconds, as D4 says (in AU-3's `TEXT` columns, as decimal integers). O2 is dropped (§2.2).
+
+**r3 changes** (review r2 on 5504c3c):
+1. AU-3's sweep keeps a completed quota shelve: `_Sweep._ours` gains a branch that leaves a `PARKED/QUOTA` row alone while the bead is still quota-parked, and lets `needs-human`, a hold or a blocker replace it as today (§3.4).
+2. The unclaimed diagnostic row for a ready bead gets its own reason, `ACCOUNT_REPOINTED`, distinct from the claimed escalation's `ACCOUNT_CHANGED`. Pickup clears it as soon as that bead's gate result is anything else, before handling a `Deadline` (§3.6).
 
 Items that need Liam's sign-off: **O1** (the interim quota shelve as a temporary stand-in for D5's deferral, until AU-4) and **the §8 plan amendment** (O4).
 
@@ -226,9 +230,11 @@ The guard's steps keep AU-3's order. Only the account calls change:
   **Replay.** An open pickup or resume operation at step `quota` goes straight to `_quota_shelve`'s steps 2–3, from `Scheduler._start` and `Parker.replay_resume` respectively, before any other check. So a crash at `<kind>.quota` or `<kind>.quota!` always ends as step 3 says, never as an ordinary shelve and never as a launch.
 
   **What happens next.** The bead is claimed, labelled `v2:parked` with no blockers and journaled `PARKED/QUOTA`, so plan 3's resumable path picks it up. Pickup's source 1 gates it on each pickup, skips it while the gate gives a deadline, counts it in the wake time (§3.6, including a bead the guard shelved in a race), and resumes it once the gate gives an account.
-  - New crash points: `<kind>.quota` and `<kind>.quota!` for `pickup` and `resume`. New `Reason.QUOTA`. There is no new state or label.
+  - New crash points: `<kind>.quota` and `<kind>.quota!` for `pickup` and `resume`. New `Reason.QUOTA` and `Reason.ACCOUNT_REPOINTED` (§3.6). There is no new state or label.
   - This path is reachable only in a race between pickup's gate and the guard's, or on a sweep resume of a bead whose session ended. Neither can happen in production before AU-7, because nothing writes usage rows.
   - AU-4 replaces it with the `v2:deferred` defer operation, and its upgrade note must convert any open `PARKED/QUOTA` rows into deferrals, or let them resume through this path first.
+
+**The sweep keeps it (r3).** AU-3's `_Sweep._ours` rebuilds a `WAITING` row from the labels on every pickup and in startup recovery: it compares `(row.state, row.detail)` with `(parked_state(bead), blocker_detail(bead))` and would overwrite `PARKED/QUOTA` with `PARKED/BLOCKED_ON_BEAD`. It gains one branch before that comparison: when `row.state is PARKED`, `row.reason is QUOTA`, `parked_state(bead) is PARKED` and the bead has no open blockers and no `needs-human`, the row is left exactly as it is (reason and `no headroom until …` detail). Everything else is unchanged: `needs-human` still gives `STUCK/NEEDS_HUMAN` (checked first, as today), `v2:held` gives `HELD`, a waiting-on-operator blocker gives `WAITING_INPUT`, and any open blocker gives `PARKED/BLOCKED_ON_BEAD` with its detail. Those replacements are one-way: once a blocker has replaced the quota row, the bead resumes through plan 3's path when the blocker closes, gated as every resume is, and is quota-shelved again only if the gate gives a `Deadline`. The sweep never writes `QUOTA` itself.
 
 ### 3.5 The clock rule
 
@@ -250,7 +256,8 @@ After the replay of open operations, and only when the coder role is free:
 2. **Source 2: new ready beads.**
    - Before claiming, pickup computes the bead's placement with `place()`, which applies a `role:` override, and its session key with `record()`. It then gates on that profile. `previous_key` comes from the journal's entries for that session key, if the bead was launched before and handed back.
    - `Deadline`: skip the bead, which is never claimed, and keep the deadline.
-   - `AccountChanged` (only possible for a bead that was launched before and handed back to the queue): skip the bead, which is **never claimed** (§5.2), and arm no timer for it. Like a ready bead btq can't claim, it gets the journal row `STUCK/ACCOUNT_CHANGED`, so the workstream reports it and is not idle. `_forget_unlisted` drops that row once the bead is no longer listed, and a later pickup whose gate gives an account claims it as usual, because `start_new` replaces the row. The scan continues with the next candidate.
+   - `AccountChanged` (only possible for a bead that was launched before and handed back to the queue): skip the bead, which is **never claimed** (§5.2), and arm no timer for it. Like a ready bead btq can't claim, it gets the journal row `STUCK/ACCOUNT_REPOINTED`, a **new reason used only for this unclaimed diagnostic row**, so the workstream reports it and is not idle. The guard's escalation of a claimed bead keeps `ACCOUNT_CHANGED`, so cleanup never confuses the two. The scan continues with the next candidate.
+   - **Clearing the diagnostic row (r3).** For a ready bead whose row is `STUCK/ACCOUNT_REPOINTED` with no open operation, pickup checks the gate result **first**: anything other than `AccountChanged` (a `Deadline` or a `Chosen`) adopts the row to `DROPPED/CLAIM_ABANDONED` with detail `account restored`, before the `Deadline` skip or the claim. So `AccountChanged → Deadline` leaves only the quota skip and its wake time, and `→ Chosen` claims it as usual (`start_new` replaces the row). `_forget_unlisted` also drops `ACCOUNT_REPOINTED` rows of beads no longer listed, exactly as it does `UNCLAIMABLE` ones. Neither path touches a `STUCK/ACCOUNT_CHANGED` row, which only the operator's release moves on.
    - If `place()` raises `ConfigInvalid`, the bead isn't gated: it goes to `start_new`, which escalates as today.
 3. **Unresolved entries.** A candidate whose session has an unresolved entry (dispatched, no outcome) or an unsettled adoption is not gated, because D4 forbids gating it. It goes to the guard, which reconciles first (AU-3 steps 0–1) and gates at step 2.
 4. **Wake time** (§5.2). It is computed when the pickup leaves the coder role idle: outcome `NOTHING`, `STUCK` or `DEFERRED`. It is the minimum of:
@@ -259,7 +266,7 @@ After the replay of open operations, and only when the coder role is free:
    - the `defer_until` of every current coder `quota` deferral that is still after `now`, whether or not pickup considered it. This excludes beads whose journal row is `HELD` or `STUCK`, beads labelled `v2:held` or `needs-human`, and beads with open blockers.
 
    `account_changed` deferrals never count. A minimum that isn't after `now` is never armed. The result is kept on the `Scheduler` as `wake_at` and never journaled.
-5. **Outcome `DEFERRED`.** No candidate started, and the wake time is set: a candidate was skipped for quota, the guard quota-shelved one, or a runnable `PARKED/QUOTA` waiter exists. `STUCK` still wins over `DEFERRED`, because a human is needed, and the wake time is armed either way. An `account_changed` skip alone gives `STUCK`, never `DEFERRED`.
+5. **Outcome `DEFERRED`.** No candidate started, and the wake time is set: a candidate was skipped for quota, the guard quota-shelved one, or a runnable `PARKED/QUOTA` waiter exists. `STUCK` still wins over `DEFERRED`, because a human is needed, and the wake time is armed either way. An `account_changed` skip alone gives `STUCK`, never `DEFERRED`; pickup reports `STUCK` for any listed bead whose row is `STUCK/ACCOUNT_REPOINTED` after the scan, as it does for `UNCLAIMABLE`.
 
 **Daemon.**
 - `TriggerKind.QUOTA_WAKE`.
@@ -284,7 +291,8 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
 | A wake timer fires late or never (a daemon restart) | The backstop pickup and startup's pickup recompute it. Waking late only delays. |
 | `Deadline` at the guard | The interim quota shelve (§3.4, O1). |
 | A crash during the quota shelve | The `quota` step is journaled before the label, so replay finishes `PARKED/QUOTA` with the journaled `until`, or the state a hold, blocker or `needs-human` added meanwhile gives. It never becomes an ordinary shelve or a launch (§3.4). |
-| A ready bead gating to `AccountChanged` | Not claimed, no timer; journal row `STUCK/ACCOUNT_CHANGED`, so the workstream isn't idle. The scan continues (§3.6). |
+| A ready bead gating to `AccountChanged` | Not claimed, no timer; journal row `STUCK/ACCOUNT_REPOINTED`, so the workstream isn't idle, cleared as soon as its gate result changes or it leaves the ready list. The scan continues (§3.6). |
+| The sweep meets a completed quota shelve | It keeps `PARKED/QUOTA` while the bead is still quota-parked; `needs-human`, a hold or a blocker replace it (§3.4). |
 | The guard shelves a bead pickup had admitted (a race) | The `PARKED/QUOTA` waiter counts toward the wake time, so pickup ends `DEFERRED` with a timer (§3.6). |
 | Usage tables lost | Unknown, so eligible (§3.7). |
 
@@ -327,8 +335,10 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
   - includes a future coder quota deferral that pickup didn't consider, using a deferral row inserted directly;
   - ignores a held, stuck, blocked or `needs-human` bead's deferral and an `account_changed` deferral.
 - `DEFERRED` is returned when only quota-skipped candidates remain.
-- **A ready bead gating to `AccountChanged`** (launched before, handed back, its account repointed under `"none"`): `claim` is called **zero** times for it, which the fake queue's claim counter asserts. Its row is `STUCK/ACCOUNT_CHANGED`, no wake time comes from it, and an eligible bead after it in the list starts. Once the account is restored, it is claimed and started, and its row is replaced.
+- **A ready bead gating to `AccountChanged`** (launched before, handed back, its account repointed under `"none"`): `claim` is called **zero** times for it, which the fake queue's claim counter asserts. Its row is `STUCK/ACCOUNT_REPOINTED`, no wake time comes from it, and an eligible bead after it in the list starts. Once the account is restored, it is claimed and started, and its row is replaced.
 - **The guard race, with no other candidate:** pickup's gate admits the only bead, then a blocking trusted row is written at the checkpoint `gate.checked`, so the guard's step 2 gives a `Deadline`. The pickup ends `DEFERRED` with `wake_at` set to that deadline, never `NOTHING` without a timer. With a crash at `pickup.quota` and at `pickup.quota!`, the replayed pickup ends `PARKED/QUOTA` with the same wake. The same holds for a resume operation (`resume.quota`, `resume.quota!`). After the clock passes the deadline, the wake pickup resumes it.
+- **Ready `AccountChanged → Deadline → Chosen`:** with the account repointed, the row is `STUCK/ACCOUNT_REPOINTED` and the outcome `STUCK`. With the account restored while a trusted row still blocks it, the same pickup adopts the row to `DROPPED` before the skip; the outcome is `DEFERRED` with the deadline as the wake, and nothing reports it stuck. After the clock passes the deadline, it is claimed once and started. A claimed bead's `STUCK/ACCOUNT_CHANGED` row in the same journal is untouched by every step.
+- A ready bead with a `STUCK/ACCOUNT_REPOINTED` row that drops off the ready list is adopted to `DROPPED` by `_forget_unlisted`, and is never claimed.
 - A `PARKED/QUOTA` waiter that gains a blocker, `v2:held` or `needs-human` between its crash and the replay ends in that state, and drops out of the wake time.
 - The wake time counts a runnable `PARKED/QUOTA` waiter at its current gate deadline, and at `now + min_recheck_seconds` when it now gates to an account or to `account_changed`.
 - The never-idle oracle gains the kinds `quota_blocked` (a trusted blocking window on the bead's profile), `quota_clears`, `quota_race` (a blocking row written at `gate.checked`) and `account_repointed`. The oracle checks that `DEFERRED` means no coder session is listed, every claimable or resumable bead and every runnable `PARKED/QUOTA` waiter gates to a `Deadline`, and `wake_at > now`; that a pickup with a quota waiter never ends `NOTHING`; and that an `account_repointed` ready bead is never claimed.
@@ -337,6 +347,10 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
 - A pinned account that is blocked before dispatch is abandoned, and the bead is quota-shelved `PARKED/QUOTA` with no dispatch.
 - A crash at `<kind>.abandoned`, `<kind>.abandoned!`, `<kind>.quota` and `<kind>.quota!`, for both pickup and resume, replays to `PARKED/QUOTA` with the journaled `until`, never to an ordinary shelve and never to a launch. With a hold, a blocker or `needs-human` added before the replay, it ends in that state instead.
 - A shelved bead resumes once the clock passes the deadline.
+
+**`tests/test_wsd_sweep.py`** (r3):
+- A completed quota shelve followed by another pickup, and by full startup recovery (reopened journal, recovery, startup pickup): the row is still `PARKED/QUOTA` with the same detail, and the wake time is still its gate deadline.
+- The same, with `needs-human`, `v2:held`, a waiting-on-operator blocker, or an ordinary open blocker added before the sweep: the row becomes `STUCK/NEEDS_HUMAN`, `HELD`, `WAITING_INPUT` or `PARKED/BLOCKED_ON_BEAD`, and leaves the wake time. When the blocker closes, the bead resumes gated, and a `Deadline` quota-shelves it again.
 
 **`tests/test_wsd_daemon.py`:**
 - A pickup that returns `DEFERRED` arms one wake, and the next pickup replaces it.
@@ -377,7 +391,7 @@ Existing tests:
 
 **Settled in r2:**
 - **O2** is dropped: times are epoch seconds, as D4 says (§2.2).
-- **O6** is narrowed: `AccountChanged` goes to the guard's escalation only for claimed resumes. Ready work is skipped without a claim (§3.6).
+- **O6** is narrowed: `AccountChanged` goes to the guard's escalation only for claimed resumes. Ready work is skipped without a claim, under its own reason `ACCOUNT_REPOINTED`, cleared as soon as the gate result changes (§3.6).
 
 ## 8. Plan amendment (O4; needs Liam's sign-off)
 
