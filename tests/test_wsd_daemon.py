@@ -16,18 +16,20 @@ from typing import Any
 
 import msgspec
 import pytest
+from fakes.checkpoints import CrashAt, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at
 
-from heterodyne.wsd import cli, ctl, daemon, ids, journal
+from heterodyne.config import ConfigError
+from heterodyne.wsd import cli, ctl, daemon, ids, journal, park, scheduler
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import Session
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
-from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings
+from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.workstream import WorkstreamSettings
 
@@ -532,7 +534,8 @@ def test_idle_status_has_no_attention(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("req", [ctl.CtlRequest("pause"), ctl.CtlRequest("resume"), ctl.CtlRequest("tick"),
                                  ctl.CtlRequest("status", job="pickup"),
-                                 ctl.CtlRequest("tick", job="pickup", all=True)])
+                                 ctl.CtlRequest("tick", job="pickup", all=True),
+                                 ctl.CtlRequest("reload", ws=WS), ctl.CtlRequest("reload", job="pickup")])
 def test_handler_refuses_what_the_socket_refuses(tmp_path: Path, req: ctl.CtlRequest) -> None:
     """Called directly (plan 6 may), a pause or resume without a workstream, or a tick without a job, is
     refused rather than read as a pickup of every workstream."""
@@ -1767,3 +1770,367 @@ def test_a_cancelled_caller_still_arms_the_wake(tmp_path: Path, monkeypatch: pyt
         await wsd._cancel_wakes()  # pyright: ignore[reportPrivateUsage]
 
     asyncio.run(scenario())
+
+
+# --- AU-4: the process-start re-gate and `wsctl reload` (design §5) ---
+
+def counts(j: Journal) -> dict[str, int]:
+    """What a re-gate could write; workstream-state events are recovery's publishing, not the re-gate's."""
+    found = {t: j.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]  # noqa: S608 - fixed names
+             for t in ("ops", "deferrals", "meta")}
+    found["events"] = j.db.execute("SELECT COUNT(*) FROM events WHERE kind NOT LIKE 'ws:%'").fetchone()[0]
+    return found
+
+
+def decide_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every headroom gate asked (a re-gate, an undefer, a guard or a pickup), by profile."""
+    asked: list[str] = []
+    real = park.decide
+
+    def counted(accounts: Any, journal: Any, profile: str, *rest: Any) -> Any:
+        asked.append(profile)
+        return real(accounts, journal, profile, *rest)
+
+    monkeypatch.setattr(park, "decide", counted)
+    monkeypatch.setattr(scheduler, "decide", counted)
+    return asked
+
+
+def counted_regates(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    regates: list[str] = []
+    real = scheduler.Scheduler.regate_all
+
+    def counted(self: scheduler.Scheduler) -> park.RegateCounts:
+        regates.append(self.ws.name)
+        return real(self)
+
+    monkeypatch.setattr(scheduler.Scheduler, "regate_all", counted)
+    return regates
+
+
+def on_clock(wsd: Wsd, clock: Clock) -> None:
+    sched = wsd.parts.schedulers[WS]
+    sched.d = replace(sched.d, clock=clock)
+    sched.parker.d = sched.d
+
+
+def account_changed_wsd(tmp_path: Path) -> tuple[Wsd, World, Clock]:
+    """btq-1 launched on p-two and deferred `account_changed` by one wsd process, its codex login since
+    repointed; returns a second process over the same journal, on an injected clock, not yet recovered."""
+    s = settings(tmp_path)
+    world, runtime = World(tmp_path / "btq-state"), FakeRuntime()
+    world.add("btq-1")
+    world.beads["btq-1"].labels.append("role:coder=p-two")
+    first = Wsd(s, assemble(s, Journal(s.journal), factory(world), runtime))
+    assert first.pickup_one(WS, Trigger(TriggerKind.STARTUP)) is Outcome.STARTED
+    assert first.parts.schedulers[WS].parker.defer("btq-1", "account_changed", None) is BeadState.DEFERRED
+    first.parts.journal.close()
+    repoint_codex_at(tmp_path / "home", "other")
+    clock = Clock()
+    return new_process(first, world, clock), world, clock
+
+
+def new_process(old: Wsd, world: World, clock: Clock | None = None) -> Wsd:
+    """Another wsd process over `old`'s journal, queue and runtime (`old`'s journal must be closed), on
+    a fresh injected clock."""
+    sched = old.parts.schedulers[WS]
+    parts = assemble(old.s, Journal(old.s.journal), factory(world), sched.d.runtime)
+    wsd = Wsd(old.s, parts, lambda: old.s)
+    on_clock(wsd, clock or Clock())
+    return wsd
+
+
+def row_of(wsd: Wsd, bead: str = "btq-1") -> tuple[BeadState, Reason | None]:
+    row = wsd.parts.journal.state(WS, bead)
+    assert row is not None
+    return row.state, row.reason
+
+
+def defer_comments(world: World) -> list[str]:
+    return [c for c in world.beads["btq-1"].comments if c.startswith("wsd-defer ")]
+
+
+def exhaust_p_two(wsd: Wsd) -> None:
+    """p-two's only account is out for an hour: a re-gate's verdict is a Deadline."""
+    j, clock = wsd.parts.journal, wsd.parts.schedulers[WS].d.clock
+    accounts = wsd.parts.schedulers[WS].ws.accounts
+    assert accounts is not None
+    [candidate] = accounts.view("p-two").accounts
+    seq = j.usage_seq_next()
+    j.exhausted_put(candidate.key, Mark(clock() + HOUR, clock(), seq), seq)
+
+
+def test_startup_regates_once_per_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, world, _ = account_changed_wsd(tmp_path)
+    asked, regates = decide_calls(monkeypatch), counted_regates(monkeypatch)
+    real = daemon.recover
+    failures = [daemon.Recovered(WS, ok=False)]
+    monkeypatch.setattr(daemon, "recover", lambda sched: failures.pop() if failures else real(sched))
+    before = counts(wsd.parts.journal)
+    assert not wsd.recover_one(WS).ok and regates == [] and WS not in wsd.regated    # the first one fails
+    assert wsd.recover_one(WS).ok and regates == [WS] and asked == ["p-two"] and WS in wsd.regated
+    assert counts(wsd.parts.journal) == before            # still `account_changed`: nothing written
+    wsd.recover_one(WS)
+    wsd.reconcile_one(WS)
+    wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP))
+    assert regates == [WS] and asked == ["p-two"] and row_of(wsd) == (BeadState.DEFERRED,
+                                                                      Reason.ACCOUNT_CHANGED)
+    wsd.parts.journal.close()
+    again = new_process(wsd, world)                     # the next process start re-gates again
+    assert again.recover_one(WS).ok and regates == [WS, WS] and asked == ["p-two", "p-two"]
+
+
+def test_a_crash_in_the_startup_regate_replays_and_the_next_start_regates_again(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, world, _ = account_changed_wsd(tmp_path)
+    repoint_codex_at(tmp_path / "home", "")
+    exhaust_p_two(wsd)
+    sched = wsd.parts.schedulers[WS]
+    sched.d = replace(sched.d, cp=CrashAt("park.defer.labelled"))
+    sched.parker.d = sched.d
+    regates = counted_regates(monkeypatch)
+    with pytest.raises(SimulatedCrash):
+        wsd.recover_one(WS)
+    assert WS not in wsd.regated and WS not in wsd.recovered and regates == [WS]
+    wsd.parts.journal.close()
+    again = new_process(wsd, world)
+    exhaust_p_two(again)                            # the new process's clock: the mark is still in force
+    assert again.recover_one(WS).ok and regates == [WS, WS] and WS in again.regated
+    assert row_of(again) == (BeadState.DEFERRED, Reason.QUOTA) and again.parts.journal.ops_open(WS) == []
+    comments = defer_comments(world)
+    assert len(comments) == 2 and " n=2 " in comments[1]
+
+
+def test_account_changed_has_no_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Through Wsd: after the process-start re-gate, nothing re-gates an `account_changed` wait, however
+    long it waits: reconciles, a recovery retry after a pickup that raised, and every pickup trigger."""
+    wsd, _, clock = account_changed_wsd(tmp_path)
+    asked = decide_calls(monkeypatch)
+    wsd.startup()
+    assert asked == ["p-two"]
+    sched = wsd.parts.schedulers[WS]
+    clock.advance((sched.ws.usage.max_window_hours + 1) * HOUR)
+    outcomes = [wsd.reconcile_one(WS) for _ in range(3)]
+    real = sched.pickup
+    monkeypatch.setattr(sched, "pickup", lambda trigger: (_ for _ in ()).throw(JournalBusy("SQLITE_BUSY")))
+    with pytest.raises(JournalBusy):
+        wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP))
+    assert WS not in wsd.recovered
+    monkeypatch.setattr(sched, "pickup", real)
+    for kind in (TriggerKind.BACKSTOP, TriggerKind.QUOTA_WAKE, TriggerKind.OPERATOR):
+        outcomes.append(wsd.pickup_one(WS, Trigger(kind)))
+        assert sched.wake_at is None
+    outcomes.append(asyncio.run(wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP))))
+    tick = asyncio.run(wsd.handle(ctl.CtlRequest("tick", job="pickup")))
+    assert tick.data is not None
+    outcomes.append(Outcome(tick.data[WS]["outcome"]))
+    assert WS in wsd.recovered and asked == ["p-two"] and sched.wake_at is None and WS not in wsd.wakes
+    assert Outcome.DEFERRED not in outcomes and row_of(wsd) == ("deferred", Reason.ACCOUNT_CHANGED)
+
+
+@pytest.mark.parametrize("gate", ["restored", "deadline", "still"])
+def test_reload_regates_each_account_changed_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  gate: str) -> None:
+    wsd, world, _ = account_changed_wsd(tmp_path)
+    wsd.startup()
+    assert row_of(wsd) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED)
+    j = wsd.parts.journal
+    if gate != "still":
+        repoint_codex_at(tmp_path / "home", "")
+    if gate == "deadline":
+        exhaust_p_two(wsd)
+    before = counts(j)
+    asked = decide_calls(monkeypatch)
+    reply = asyncio.run(wsd.handle(ctl.CtlRequest("reload")))
+    want = {"restored": ("1", "0", "0"), "deadline": ("0", "1", "0"), "still": ("0", "0", "1")}[gate]
+    assert reply.result == "ok"
+    assert reply.data == {WS: dict(zip(("over", "requota", "unchanged"), want, strict=True))}
+    assert asked == ["p-two"]
+    if gate == "still":
+        assert counts(j) == before and len(defer_comments(world)) == 1
+    if gate == "deadline":
+        assert row_of(wsd) == (BeadState.DEFERRED, Reason.QUOTA) and len(defer_comments(world)) == 2
+        assert [(d.number, d.reason) for d in j.deferrals_current(WS, "coder")] == [(2, "quota")]
+    after = counts(j)
+    for _ in range(2):                                  # nothing is `account_changed` now, or still is
+        assert asyncio.run(wsd.handle(ctl.CtlRequest("reload"))).result == "ok"
+    assert counts(j) == after and asked == ["p-two"] * (1 if gate != "still" else 3)
+    if gate == "restored":
+        assert wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.RESUMED
+        assert row_of(wsd) == (BeadState.RUNNING, None) and "v2:deferred" not in world.beads["btq-1"].labels
+
+
+def reload_wsd(tmp_path: Path, s: WsdSettings, loaded: list[WsdSettings | ConfigError]) -> Wsd:
+    """A started daemon on `s` whose `wsctl reload` loads each of `loaded` in turn (an error is raised)."""
+    world = World(tmp_path / "btq-state")
+
+    def load() -> WsdSettings:
+        found = loaded.pop(0)
+        if isinstance(found, ConfigError):
+            raise found
+        return found
+
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), FakeRuntime()), load)
+    wsd.startup()
+    return wsd
+
+
+def test_wsctl_reload_goes_through_wsd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
+    s = replace(settings(tmp_path), backstop_seconds=3600)
+    monkeypatch.setattr(cli, "_settings", lambda: s)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()),
+              lambda: s)
+
+    async def scenario() -> int:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(s.socket.exists)
+        code = await asyncio.to_thread(cli.wsctl_main, ["reload"])
+        stop.set()
+        await task
+        return code
+
+    assert asyncio.run(scenario()) == 0
+    out = capsys.readouterr().out
+    assert "reload done" in out and "unchanged=0" in out
+
+
+def reload(wsd: Wsd) -> ctl.CtlReply:
+    return asyncio.run(wsd.handle(ctl.CtlRequest("reload")))
+
+
+def test_an_invalid_config_is_refused_and_the_old_settings_stay(tmp_path: Path) -> None:
+    wsd = reload_wsd(tmp_path, settings(tmp_path), [ConfigError("config.toml: bad value")])
+    s, ws = wsd.s, wsd.parts.schedulers[WS].ws
+    reply = reload(wsd)
+    assert reply.result == "refused" and "config.toml: bad value" in reply.message
+    assert "nothing was changed" in reply.message
+    assert wsd.s is s and wsd.parts.schedulers[WS].ws is ws and wsd.parts.schedulers[WS].parker.ws is ws
+
+
+def restart_only(s: WsdSettings, change: str, tmp_path: Path) -> WsdSettings:
+    """A change outside `accounts`, `usage` and `models`."""
+    [ws] = s.workstreams
+    return {
+        "coder_role": lambda: replace(s, workstreams=(replace(ws, coder_role="other"),)),
+        "repo": lambda: replace(s, workstreams=(replace(ws, repos={**ws.repos, "docs": tmp_path}),)),
+        "coder_profile": lambda: replace(s, workstreams=(replace(ws, coder_profile="p-two"),)),
+        "btq_locations": lambda: replace(s, btq_locations={"dolt_port": "3307"}),
+        "backstop": lambda: replace(s, backstop_seconds=s.backstop_seconds + 1),
+        "reconcile": lambda: replace(s, reconcile_seconds=s.reconcile_seconds + 1),
+        "added": lambda: replace(s, workstreams=(ws, replace(ws, name="beta"))),
+        "removed": lambda: replace(s, workstreams=()),
+    }[change]()
+
+
+@pytest.mark.parametrize(("change", "field"), [
+    ("coder_role", f"{WS}.coder_role"), ("repo", f"{WS}.repos"), ("coder_profile", f"{WS}.coder_profile"),
+    ("btq_locations", "btq_locations"), ("backstop", "backstop_seconds"),
+    ("reconcile", "reconcile_seconds"), ("added", "workstreams"), ("removed", "workstreams")])
+def test_a_change_outside_the_supported_set_needs_a_restart(tmp_path: Path, change: str, field: str) -> None:
+    s = settings(tmp_path)
+    wsd = reload_wsd(tmp_path, s, [restart_only(s, change, tmp_path)])
+    running, ws, before = wsd.s, wsd.parts.schedulers[WS].ws, counts(wsd.parts.journal)
+    reply = reload(wsd)
+    assert reply.result == "refused" and reply.message == f"restart required: {field}; nothing was changed"
+    assert str(tmp_path) not in reply.message
+    assert wsd.s is running and wsd.parts.schedulers[WS].ws is ws and counts(wsd.parts.journal) == before
+
+
+def test_each_supported_field_is_applied_before_a_queued_pickup(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    [ws] = s.workstreams
+    other = login_home(tmp_path / "other-home")
+    new = replace(ws, accounts=accounts_at(other), usage=replace(ws.usage, reserve_percent=9),
+                  models={**ws.models, "p-one": "another-model"})
+    wsd = reload_wsd(tmp_path, s, [replace(s, workstreams=(new,))])
+    sched = wsd.parts.schedulers[WS]
+    seen: list[WorkstreamSettings] = []
+    real = sched.pickup
+
+    def counted(trigger: Trigger) -> Outcome:
+        seen.append(sched.ws)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", counted)
+    inside, release, hold = held_lane(wsd, WS)
+    submitted = counted_submits(wsd.lanes[WS], monkeypatch)
+
+    async def scenario() -> ctl.CtlReply:
+        holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await until(inside.is_set)
+            reloading = asyncio.create_task(wsd.handle(ctl.CtlRequest("reload")))
+            await until(lambda: daemon.RELOAD in submitted)
+            picking = asyncio.create_task(wsd.pickup(WS, Trigger(TriggerKind.OPERATOR)))
+            await until(lambda: len(submitted) == 2)
+        finally:
+            release.set()
+        await asyncio.wait_for(holder, 10)
+        await asyncio.wait_for(picking, 10)
+        return await asyncio.wait_for(reloading, 10)
+
+    assert asyncio.run(scenario()).result == "ok"
+    assert sched.ws is new and sched.parker.ws is new and seen == [new] and wsd.s.workstreams == (new,)
+
+
+# --- the reload request through the real loader ---
+
+def config_dir(tmp_path: Path) -> Path:
+    """Config files for one workstream `alpha` (as in test_wsd_settings), with a default login per
+    adapter in the same HOME."""
+    d = login_home(tmp_path / "cfg")
+    (d / "workstreams").mkdir()
+    git_repo(d / "repos" / "proj")
+    (d / "config.toml").write_text(f"""
+[profiles.a]
+adapter = "codex"
+model = "m1"
+[profiles.b]
+adapter = "claude-code"
+model = "m2"
+[integrations.beads]
+btq = "{d}/btq"
+dolt_port = 3307
+""")
+    (d / "workstreams" / "alpha.toml").write_text(
+        f'[roles]\ncoder = "b"\n[repos]\ndefault = "{d}/repos/proj"\n')
+    return d
+
+
+def edit(path: Path, old: str, new: str) -> None:
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+
+
+def test_reload_through_the_real_loader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    d = config_dir(tmp_path)
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(d))
+    monkeypatch.setenv("HOME", str(d))
+    s = resolve(os.environ)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    wsd.startup()
+    sched, j = wsd.parts.schedulers["alpha"], wsd.parts.journal
+    before = counts(j)
+    zero = {"alpha": {"over": "0", "requota": "0", "unchanged": "0"}}
+    unchanged = reload(wsd)                                        # unchanged: accepted, writes nothing
+    assert (unchanged.result, unchanged.data) == ("ok", zero) and counts(j) == before
+    assert (sched.ws.usage, sched.ws.models) == (s.workstreams[0].usage, s.workstreams[0].models)
+    config = d / "config.toml"
+    edit(config, "[integrations.beads]", "[usage]\nreserve_percent = 9\n[integrations.beads]")
+    assert reload(wsd).result == "ok" and sched.ws.usage.reserve_percent == 9
+    assert wsd.s.workstreams[0].usage.reserve_percent == 9
+    edit(config, 'model = "m2"', 'model = "m3"')                    # compared against what usage applied
+    assert reload(wsd).result == "ok" and sched.ws.models["b"] == "m3" and sched.ws.usage.reserve_percent == 9
+    assert counts(j) == before
+    edit(config, "dolt_port = 3307", "dolt_port = 3308")            # restart-only, after applied reloads
+    refused = reload(wsd)
+    assert (refused.result, refused.message) == ("refused", "restart required: btq_locations; nothing was "
+                                                            "changed")
+    edit(config, "[usage]", "[usage")                               # a broken file: path-free refusal
+    broken = reload(wsd)
+    assert broken.result == "refused" and "config.toml" in broken.message and str(d) not in broken.message
+    assert sched.ws.models["b"] == "m3" and wsd.s.btq_locations["dolt_port"] == "3307"

@@ -1,4 +1,4 @@
-"""`wsd` (run, tick) and `wsctl` (pause, resume, status) command lines (ADR 0001 §4.3, §9, §16).
+"""`wsd` (run, tick) and `wsctl` (pause, resume, status, reload) command lines (ADR 0001 §4.3, §9, §16).
 
 Every command except `wsd run` asks the running wsd over its control socket. `wsctl pause` goes through
 wsd as §4.3 requires: wsd sets btq's shared pause flag under the workstream's claim lock, so a pause is
@@ -159,11 +159,15 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
     status = sub.add_parser("status", help="show what wsd is doing")
     status.add_argument("ws", nargs="?")
     status.add_argument("--all", action="store_true", help="list closed and dropped beads too")
+    sub.add_parser("reload", help="reload accounts, usage and models, then re-gate account changes")
     args = parser.parse_args(argv)
     try:
         s = _settings()
         if args.cmd == "status":
             reply = _ask(s, ctl.CtlRequest("status", ws=args.ws, all=args.all))
+            return 1 if reply is None else _print(reply)
+        if args.cmd == "reload":
+            reply = _ask(s, ctl.CtlRequest("reload"))
             return 1 if reply is None else _print(reply)
         reply = _ask(s, ctl.CtlRequest(args.cmd, ws=args.ws))
         return 1 if reply is None else _print(reply)

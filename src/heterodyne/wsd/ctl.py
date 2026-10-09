@@ -1,5 +1,5 @@
 """wsd's host control socket (ADR 0001 §4.3, §9): `wsd tick <job>` from the timers, and `wsctl pause`,
-`resume` and `status`.
+`resume`, `status` and `reload` (AU-4 §5.2).
 
 One JSON request per connection, one JSON reply, each a single newline-terminated line. A request is at
 most MAX_REQUEST bytes and a reply at most MAX_REPLY bytes; the client reads up to MAX_REPLY, and a reply
@@ -38,9 +38,10 @@ def _no_data() -> dict[str, dict[str, str]]:
 
 
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume"]
+    op: Literal["tick", "status", "pause", "resume", "reload"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
-    ws: str | None = None       # None: every workstream (tick and status); pause and resume need one
+    ws: str | None = None       # None: every workstream (tick and status); pause and resume need one,
+    #                             and reload takes none
     all: bool = False           # status only: list closed and dropped beads too
 
 
@@ -64,6 +65,8 @@ def refusal(req: CtlRequest) -> str:
         return "tick needs a job; nothing else takes one"
     if req.op in ("pause", "resume") and req.ws is None:
         return f"{req.op} needs a workstream"
+    if req.op == "reload" and req.ws is not None:
+        return "reload takes no workstream; it reloads them all"
     if req.all and req.op != "status":
         return "only status takes all"
     return ""
