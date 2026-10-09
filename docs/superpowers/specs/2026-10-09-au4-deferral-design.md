@@ -1,4 +1,4 @@
-# btq-q34bv (AU-4): deferred parking: quota and account_changed deferrals, undefer (design r2)
+# btq-q34bv (AU-4): deferred parking: quota and account_changed deferrals, undefer (design r3)
 
 Base: main 25c7b2a (AU-5 merged as PR #33). Sources:
 - the accounts plan, §AU-4 and the dependency graph (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at 66ad195);
@@ -8,6 +8,12 @@ Base: main 25c7b2a (AU-5 merged as PR #33). Sources:
 - PICKUP.md's AU-0 rules for bead writes (beads-task-queue at 72a5fa6): defer adds `v2:deferred` and no blocking edge, then the comment; each new number gets one new comment and the label stays; undefer removes only `v2:deferred`; release of a deferred bead re-checks `account_changed` and never removes `v2:deferred`.
 
 Scope: plan 3b's defer and undefer operations, the `DEFERRED` bead state, deferral records and numbering, the quota and `account_changed` transitions, the re-gate (process start, `wsctl reload`, release), pickup and wake-time changes, sweep and recovery, and the retirement of AU-5's interim shelve and AU-3's interim `account_changed` escalation. Design only: nothing is implemented here. PoC-scoped: no usage producer (AU-7), no session-reported limit channel beyond a test entry point, no rendering or delivery of the alert or of the status wording (AU-9), no review-wait selection or storage (AU-13, by the §10 amendment).
+
+**r3 changes** (review r2 on 13a6058):
+1. A release of a HELD or STUCK deferred bead moves the row to DEFERRED in the same transaction that journals its `regate` step. A deadline's defer intent then takes the allowed DEFERRED → PARKING, so release adds no transition of its own (§3.5). The tests cover HELD and STUCK, each with all three gate outcomes, with `check` enforced and crashes on both sides of that transaction.
+2. Reload compares a semantic `restart_view` of plain immutable values, never the settings objects (`ConfiguredAccounts` has no value equality). It compares against each lane's current settings, including what earlier reloads set (§5.2). The tests cover an unchanged reload and two consecutive supported changes through the real loader.
+3. Two oracles replace the single one. The completed-run oracle covers the defer, re-gate, release and completed-launch points. A new uncertainty oracle covers the guard's `dispatched`, `dispatched!` and `launched!` points: the op stays open, `launch_uncertain` holds, and nothing is re-dispatched and no new generation appears, until an authoritative receipt settles it (§8). No crash point is dropped.
+4. O1, O2, O3 and O5 each have a slot for Liam's dated decision (§9).
 
 **r2 changes** (review r1 on e65f816):
 1. The process-start re-gate is no longer a step of recovery, which also runs on the 5-minute reconcile and after failed jobs. It runs once per process from the daemon, after the workstream's first successful recovery (§3.4, §5.1). The no-timer test drives the periodic reconcile and the recovery-retry path.
@@ -187,7 +193,7 @@ The third trigger is `Parker.release`, for one bead (§3.5). Recovery, the recon
 
 ### 3.5 Release
 
-- **A HELD or STUCK row whose bead carries `v2:deferred`:** the RELEASE op runs as today up to `unlabelled` (removing `v2:held` and `needs-human`), then sets its step to `regate`. If the current deferral is `quota`, `regate` finishes DONE with DEFERRED/QUOTA instead of a parked state or a resume.
+- **A HELD or STUCK row whose bead carries `v2:deferred`:** the RELEASE op runs as today up to `unlabelled` (removing `v2:held` and `needs-human`). One transaction then sets its step to `regate` and moves the row to DEFERRED, with the current record's reason (HELD → DEFERRED and STUCK → DEFERRED, both in §2.2). Every later outcome starts from DEFERRED, so a deadline's defer intent takes the allowed DEFERRED → PARKING, and release needs no transition of its own. If the current deferral is `quota`, `regate` finishes DONE with the row as it is: DEFERRED/QUOTA, not a parked state or a resume.
 - **A DEFERRED/ACCOUNT_CHANGED row:** `Parker.release` opens a RELEASE op directly at `regate`, with nothing to unlabel. A DEFERRED/QUOTA row is `NotReleasable`: a quota wait has nothing for the operator to release.
 - **The `regate` step** runs `regate(bead, within=op)` and settles in exactly one of three ways, never by launching:
   - **An account:** one transaction writes `mark_over` and finishes the op DONE with DEFERRED/ACCOUNT_CHANGED.
@@ -197,7 +203,7 @@ The third trigger is `Parker.release`, for one bead (§3.5). Recovery, the recon
   A crash anywhere before that finish leaves the RELEASE op open at `regate` or at a `defer.*` step, and recovery's step 4 replays RELEASE ops. So the obligation is never lost, and the gate is simply asked again.
 - **What stays the same:** `v2:deferred` is never removed by a release. RELEASABLE becomes {HELD, STUCK, DEFERRED}, with the quota exclusion above.
 
-Crash points: `release.regate`, `release.regate.over!`, and the `release.defer.*` points.
+Crash points: `release.unlabelled`, `release.regate` (after the step and the DEFERRED row are committed), `release.regate.over!`, and the `release.defer.*` points.
 
 ### 3.6 Replay dispatch
 
@@ -264,8 +270,12 @@ If the re-gate raises, `_locked` already clears `recovered`, and the name isn't 
   - `accounts`: the accounts, their bindings to profiles, and failover;
   - `usage`: the host's `[usage]` gate settings;
   - `models`: each profile's model.
-- Every other field must be unchanged, compared with the running settings after those three are copied across: every other `WorkstreamSettings` field (name, repos, `coder_role`, `coder_profile`, profiles, limits) and every `WsdSettings` field. That covers state_dir, backstop and reconcile intervals, inbox attempts, btq checkout and locations, the set of workstreams, and the host `accounts` (which only the journal upgrade reads).
-- Otherwise the reload is refused with "restart required: <field names>". Field names carry no paths.
+- Everything else must be unchanged. The comparison is semantic, between two immutable values, never `==` on the settings objects: `ConfiguredAccounts` is rebuilt by every `resolve()` and has no value equality, and it is not compared at all.
+  - `restart_view(s: WsdSettings) -> RestartView` is a pure function. It builds a frozen value of plain fields only: `state_dir`, `backstop_seconds`, `reconcile_seconds`, `inbox_attempts_before_human`, `btq_checkout`, `btq_locations` as sorted pairs, and the workstreams as a tuple sorted by name.
+  - Each workstream entry holds `name`, `repos` as sorted pairs, `coder_role`, `coder_profile`, `profiles` as a sorted tuple, and `limits`, a frozen dataclass with value equality.
+  - It leaves out the three supported fields and the host `accounts`, which only the journal upgrade reads; a new host value is taken into `Wsd.s` and has no other effect.
+  - The running side is built from `Wsd.s`, with each workstream taken from its lane's **current** `Scheduler.ws`. After every applied reload, `Wsd.s` is replaced by the new settings, so a later reload compares against what earlier reloads set.
+- If the two views differ, the reload is refused with "restart required: <field names>", naming the fields that differ. Field names carry no paths.
 - So a role change never strands deferrals, and nothing the queue factory or `Wsd.s` captured ever changes live.
 
 **The swap.** One `reload` job is queued per lane. Each runs in that lane's thread under `parker.entry()`, its operation lock. It swaps `Scheduler.ws` and `Parker.ws` for the new `WorkstreamSettings` (which differs only in the three fields), then runs `regate_all`.
@@ -321,7 +331,9 @@ Recovery never re-gates (§5.1).
 
 ## 8. Tests (TDD, offline, injected `deps.clock`, the existing crash-point harness)
 
-**The shared oracle.** Every crash-replay test in this section checks the end state against an uncrashed run of the same scenario:
+There are two oracles. Every crash point is checked by exactly one of them, chosen by the point; none is skipped.
+
+**The completed-run oracle** covers every defer, re-gate and release point, and every undefer and guard point outside the three uncertain ones below. The replayed end state must equal an uncrashed run of the same scenario:
 - the deferral records and the current number;
 - the labels;
 - the `wsd-defer` comments, one per number;
@@ -332,6 +344,14 @@ It also checks against the fake runtime and git:
 - **Launches:** the number of runtime dispatches, and the most coder sessions listed at once (never above 1).
 - **Generations:** each launched generation has one launch entry and one receipt, and none is re-dispatched with a new generation for the same op.
 - **WIP:** the WIP commit carries the mark for (key, n), its tree holds the files that were dirty before the defer (checked by content), and its SHA equals the one journaled in `defer.stopped`'s data.
+
+**The uncertainty oracle** covers the guard's `dispatched`, `dispatched!` and `launched!` points, wherever an undefer, or a resume after one, reaches them. Those crashes come after the dispatch mark and before any receipt, so per ADR §11 the run can't match the completed one. After replay:
+- the op is still open;
+- the workstream holds `launch_uncertain` for the bead;
+- no second dispatch has happened, and no new generation exists, even while the session is listed;
+- the deferral records, labels and comments are unchanged from the crash.
+
+Then the test delivers the authoritative receipt from the fake runtime (or confirms the session absent) and runs one more pickup. That settles the op through the guard's existing reconciliation, and only then does the end state equal the completed-run oracle, with exactly one dispatch. A test that delivers no receipt checks that further pickups keep the hold and never dispatch.
 
 **Defer and undefer:**
 - A hypothesis crash at every defer point, for each of the five entry points. Entry 2 runs through public `Scheduler.pickup`, from a PARKED row with `check` enforced (no `adopt`).
@@ -362,7 +382,10 @@ It also checks against the fake runtime and git:
   - an account: over-marked, and the next pickup undefers and launches once;
   - a deadline: the quota record n+1 and one comment;
   - still `account_changed`: nothing is written beyond the finished RELEASE op.
-- A HELD deferred bead and a STUCK deferred bead, each released with a crash at every release point (`release.intent` to `release.regate`, the over-mark transaction, and the `release.defer.*` points). Each replays to the same end state, and `v2:deferred` stays.
+- A HELD deferred bead and a STUCK deferred bead, each over a quota record and over an `account_changed` record, each released with each of the three gate outcomes (an account, a deadline, still `account_changed`):
+  - `check` is enforced throughout, with no `adopt`;
+  - a crash at every release point, including either side of the `regate` transaction that moves the row to DEFERRED, the over-mark transaction and the `release.defer.*` points;
+  - each replays to the completed-run end state, and `v2:deferred` stays.
 - Release → re-gate (account) → pickup while another coder session is running: BUSY, no undefer and no launch. When that session ends, the next pickup undefers and launches once.
 - A DEFERRED/QUOTA release is refused.
 
@@ -386,6 +409,11 @@ It also checks against the fake runtime and git:
 - An invalid config is refused with a path-free message, and the old settings stay in use.
 - Each field outside the supported set is refused with "restart required": `coder_role`, a repository, btq locations, the timers, and an added or removed workstream.
 - Each supported field (`accounts`, `usage`, `models`) is applied, and a pickup queued behind the job sees it.
+- Through the real loader, with config files in a temporary directory:
+  - an unchanged reload is accepted, swaps nothing that matters and writes nothing;
+  - two consecutive supported changes are accepted (first `usage`, then `accounts` or `models`), and the second is compared against the settings the first applied;
+  - a restart-only change after an applied reload is still refused.
+- `restart_view` is equal for two independent `resolve()` calls over the same files.
 
 **Retirement:**
 - A PICKUP op and a RESUME op at step `quota` each replay into a deferral.
@@ -399,13 +427,17 @@ It also checks against the fake runtime and git:
 - **O1 [Liam]: `account_changed` is never retried on a timer.** This is ADR §17 open decision 1, which the AU-5 §8 amendment assumed.
   - With it, a wait clears only on a process start, a `wsctl reload` or a release.
   - The alternative is a slow periodic re-gate, for example every `max_window_hours`. That would put back the timer that test 2 forbids.
-  - Recommendation: never on a timer, as designed. Liam's decision is to be recorded here, with the date.
-- **O2 [Liam]: the §10 plan amendment.** The `BASE..HEAD` storage for review waits moves from AU-4 to AU-13, with AU-13's obligation and tests named there.
+  - Recommendation: never on a timer, as designed.
+  - **Liam's decision:** _pending (date: —)_
+- **O2 [Liam]: the §10 plan amendment.** The `BASE..HEAD` storage for review waits moves from AU-4 to AU-13, with AU-13's obligation and tests named there. On approval, team-lead carries the amendment into the plan.
+  - **Liam's decision:** _pending (date: —)_
 - **O3 [Liam]: reload's supported set** is exactly `accounts`, `usage` and `models` (§5.2). Any other difference is refused with "restart required". That includes the workstream set, `coder_role`, repositories, btq locations and the daemon timers.
+  - **Liam's decision:** _pending (date: —)_
 - **O4 (accepted by review r1): no new op kinds.** Defer and undefer reuse the existing kinds, and the tail is found by its `defer.*` step names (§3.6). The over-mark is a `meta` row.
 - **O5 [Liam]: the alert is a journal event until AU-9.** Liam accepts a temporary notification gap: until AU-9 delivers it, no message reaches the operator, and only `wsctl status` shows the DEFERRED/ACCOUNT_CHANGED row.
   - The event keeps its per-deferral identity: kind `deferral_account_changed`, ref `<session_key>:<n>`, one row per `account_changed` number, written with the op's finish.
   - AU-9 delivers each (kind, ref) once, including events written before AU-9 existed.
+  - **Liam's decision, including acceptance of the notification gap:** _pending (date: —)_
 - **O6 (accepted by review r1): a due resume defers rather than being skipped**, through PARKED → PARKING.
 - **O7 (accepted by review r1): the PARKED/QUOTA conversion re-gates**, before the sweep (§6).
 
