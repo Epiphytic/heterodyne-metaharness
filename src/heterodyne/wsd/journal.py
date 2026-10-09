@@ -317,6 +317,7 @@ _CURRENT_DEFERRALS = (f"SELECT {_DEFERRAL} FROM deferrals d WHERE d.number = "  
                       "(SELECT MAX(number) FROM deferrals e WHERE e.session_key = d.session_key)")
 CLAMP_EXHAUSTED = "clamp:exhausted:"
 CLAMP_DEFERRAL = "clamp:deferral:"
+DEFERRAL_OVER = "deferral_over:"     # AU-4 §2.1: a re-gate marked an `account_changed` wait over
 
 
 def _window(r: tuple[object, ...]) -> Window | None:
@@ -1020,6 +1021,47 @@ class Journal:
                                "(SELECT bead FROM beads WHERE ws = ?) ORDER BY d.bead, d.session_key",
                                (role, ws)).fetchall()
         return [_deferral(r) for r in rows]
+
+    # --- deferrals (AU-4 §2.1) ---
+
+    @_locked
+    def deferral_insert(self, row: DeferralRow) -> None:
+        """A new deferral record. Call it inside the transaction that journals its defer intent."""
+        self.db.execute(f"INSERT INTO deferrals ({_DEFERRAL.replace('d.', '')}) "  # noqa: S608
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (row.session_key, row.number, row.bead, row.role, row.profile, row.reason,
+                         row.defer_until, row.trust))
+
+    @_locked
+    def deferral_current(self, session_key: str) -> DeferralRow | None:
+        """The session's highest-numbered record: lower numbers are superseded and never due."""
+        row = self.db.execute(f"SELECT {_DEFERRAL} FROM deferrals d WHERE d.session_key = ? "  # noqa: S608
+                              "ORDER BY d.number DESC LIMIT 1", (session_key,)).fetchone()
+        return None if row is None else _deferral(row)
+
+    @_locked
+    def deferral_next(self, session_key: str) -> int:
+        row = self.db.execute("SELECT MAX(number) FROM deferrals WHERE session_key = ?",
+                              (session_key,)).fetchone()
+        return 1 if row[0] is None else int(cast(int, row[0])) + 1
+
+    @_locked
+    def mark_over(self, session_key: str, number: int) -> bool:
+        """The re-gate found an account for this `account_changed` wait (§3.4): True if newly marked. The
+        value is the epoch it was marked; the mark is dropped when its deferral stops being current."""
+        marked = str(int(datetime.now(UTC).timestamp()))
+        cur = self.db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                              (f"{DEFERRAL_OVER}{session_key}:{number}", marked))
+        return bool(cur.rowcount)
+
+    @_locked
+    def is_over(self, session_key: str, number: int) -> bool:
+        return self.db.execute("SELECT 1 FROM meta WHERE key = ?",
+                               (f"{DEFERRAL_OVER}{session_key}:{number}",)).fetchone() is not None
+
+    @_locked
+    def drop_over(self, session_key: str, number: int) -> None:
+        self.db.execute("DELETE FROM meta WHERE key = ?", (f"{DEFERRAL_OVER}{session_key}:{number}",))
 
     @_locked
     def clamp_deadlines(self, bound: int) -> int:

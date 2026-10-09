@@ -146,9 +146,8 @@ class Scheduler:
         except BeadsUnavailable:
             paused = True        # can't read the flag: show the workstream as stopped, never as running
         rows = [b for b in j.states(name) if b.state not in TERMINAL]
-        all_quota = bool(rows) and all((b.state, b.reason) == (BeadState.PARKED, Reason.QUOTA) for b in rows)
         j.set_ws_state(name, ws_state(paused, j.holds(name), (b.state for b in rows),
-                                      self.wake_at is not None, all_quota))
+                                      self.wake_at is not None))
 
     def _pickup(self, trigger: Trigger) -> Outcome:
         j, name = self.d.journal, self.ws.name

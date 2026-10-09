@@ -884,3 +884,57 @@ def test_journal_only_records_legal_transitions(tmp_path_factory: pytest.TempPat
     kinds = [e.kind for e in journal.events_since(0, 1000)]
     assert len(kinds) == len([k for k in kinds if k.startswith("state:")])
     journal.close()
+
+
+# --- AU-4 §2.1: deferral records and over-marks ---
+
+def _record(number: int, reason: str = "quota", until: str | None = "1800000600",
+            session: str = "sk-fake") -> journal_mod.DeferralRow:
+    return journal_mod.DeferralRow(session, number, "btq-1", "coder", "p-one", reason, until, "trusted")
+
+
+def test_deferral_numbers_start_at_one_and_the_highest_is_current(journal: Journal) -> None:
+    assert journal.deferral_next("sk-fake") == 1
+    assert journal.deferral_current("sk-fake") is None
+    with journal.transaction():
+        journal.deferral_insert(_record(1))
+    with journal.transaction():
+        journal.deferral_insert(_record(2, "account_changed", None))
+    assert journal.deferral_next("sk-fake") == 3
+    assert journal.deferral_current("sk-fake") == _record(2, "account_changed", None)
+    assert journal.deferral_current("sk-other") is None and journal.deferral_next("sk-other") == 1
+
+
+def test_a_deferral_insert_rolls_back_with_its_transaction(journal: Journal) -> None:
+    with pytest.raises(SimulatedCrash), journal.transaction():
+        journal.deferral_insert(_record(1))
+        raise SimulatedCrash("x")
+    assert journal.deferral_current("sk-fake") is None
+
+
+def test_a_deferral_number_is_never_written_twice(journal: Journal) -> None:
+    with journal.transaction():
+        journal.deferral_insert(_record(1))
+    with pytest.raises(sqlite3.IntegrityError):
+        journal.deferral_insert(_record(1, "account_changed", None))
+    assert journal.deferral_current("sk-fake") == _record(1)
+
+
+def test_an_over_mark_is_written_once_and_dropped(journal: Journal) -> None:
+    assert not journal.is_over("sk-fake", 1)
+    assert journal.mark_over("sk-fake", 1) is True
+    assert journal.mark_over("sk-fake", 1) is False          # INSERT OR IGNORE: the first epoch stays
+    assert journal.is_over("sk-fake", 1) and not journal.is_over("sk-fake", 2)
+    marks = journal.db.execute("SELECT key FROM meta WHERE key LIKE 'deferral_over:%'").fetchall()
+    assert [str(m[0]) for m in marks] == ["deferral_over:sk-fake:1"]
+    journal.drop_over("sk-fake", 1)
+    assert not journal.is_over("sk-fake", 1)
+    journal.drop_over("sk-fake", 1)                          # idempotent
+
+
+def test_the_clamp_never_prunes_an_over_mark(journal: Journal) -> None:
+    with journal.transaction():
+        journal.deferral_insert(_record(1, "account_changed", None))
+    journal.mark_over("sk-fake", 1)
+    journal.clamp_deadlines(1_800_000_000)
+    assert journal.is_over("sk-fake", 1)

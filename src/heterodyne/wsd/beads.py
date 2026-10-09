@@ -37,6 +37,7 @@ from heterodyne.wsd.launches import LAUNCHES_KEY, BeadLaunches, LaunchEntry, dec
 
 PARKED = "v2:parked"
 HELD = "v2:held"
+DEFERRED = "v2:deferred"         # AU-4 (D5): no blocking edge; the comment and the journal hold the rest
 NEEDS_HUMAN = "needs-human"
 # A blocker carrying one of these labels is an operator ask (an approval, question, picker or permission
 # prompt), so a bead parked on it is waiting on input rather than on other work (plans 5 to 7 create them).
