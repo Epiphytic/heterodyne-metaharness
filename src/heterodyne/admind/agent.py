@@ -5,7 +5,9 @@ recorded in the store:
 - `ensure_running` adopts a live session, but only one that has a current launch nonce and no unfinished
   replacement (the store's `replace_pending`, written in the same transaction that abandoned the old
   turn and cleared only once the replacement pane is started);
-- it resumes the recorded ID (with `--resume`) once that ID has been seen to start;
+- it resumes the recorded ID (with `--resume`) once that ID has been seen to start, and only on the login
+  it was launched on (the store's `agent_account`, the credential key written with each launch nonce):
+  Claude keeps transcripts in its login directory, so a resume elsewhere can't succeed;
 - otherwise it launches with a fresh ID;
 - every launch gets a fresh nonce, carried by its hook command, so events of an earlier launch are
   recognised as stale;
@@ -17,7 +19,7 @@ decision (§8).
 import os
 import shutil
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -52,7 +54,8 @@ class AgentStuck(RuntimeError):
 
 class TmuxLike(Protocol):
     def has_session(self, name: str) -> bool: ...
-    def new_session(self, name: str, cwd: Path, argv: list[str]) -> None: ...
+    def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
+                    unset: Sequence[str] = ()) -> None: ...
     def pane_dead(self, name: str) -> bool: ...
     def paste(self, name: str, text: str) -> None: ...
     def send_key(self, name: str, key: str) -> None: ...
@@ -92,6 +95,11 @@ class AdminAgent:
             fh.write(settings_json(hook_command(self.hook_socket, self.launch_nonce or "")))
         tmp.replace(self.settings_file)
 
+    def login_matches(self) -> bool:
+        """Whether the current pane's launch ran on the configured login. A store from before AU-11 has no
+        key: that is unknown, never assumed to be the default."""
+        return self.store.get("agent_account") == self.settings.agent_account.key
+
     def replace_pending(self) -> str | None:
         """Why an earlier run began replacing the pane without finishing (a fixed word), or None."""
         return self.store.get("replace_pending")
@@ -117,18 +125,25 @@ class AdminAgent:
             raise AgentStuck(f"the admin agent did not start after {launches} launches; use !tail, then !new")
         self.tmux.kill(SESSION)  # a dead pane kept for !tail, or a session admind has no record of
         sid = self.session_id
-        resume = sid is not None and self.store.get("session_started") == sid
+        started = sid is not None and self.store.get("session_started") == sid
+        login_changed = not self.login_matches() and (started or pending == "login-changed")
+        resume = started and not login_changed
         if sid is None or not resume:
             sid = str(uuid.uuid4())
             self.store.set("agent_session", sid)
         self.store.set("launches_without_start", str(launches + 1))
-        self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
+        account = self.settings.agent_account
+        with self.store.transaction():
+            self.store.set("launch_nonce", new_launch_nonce())   # before the settings: hooks carry it
+            self.store.set("agent_account", account.key)
         self._write_settings()
         argv = interactive_argv(self.settings.adapter_binary, self.settings.profile, session_id=sid,
                                 resume=resume, settings_file=self.settings_file, name=SESSION)
-        self.tmux.new_session(SESSION, self.settings.workdir, argv)
+        self.tmux.new_session(SESSION, self.settings.workdir, argv, set=account.set, unset=account.unset)
         self.store.delete("replace_pending")     # established: nonce installed, pane started
-        return "resumed" if resume else "launched"
+        if resume:
+            return "resumed"
+        return "launched-login-changed" if login_changed else "launched"
 
     def started(self, session_id: str) -> None:
         self.store.set("session_started", session_id)

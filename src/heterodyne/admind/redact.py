@@ -1,21 +1,21 @@
 """One redaction for everything admind posts, summarizes or audits (ADR 0001 §8, revision 13; B1).
 
-Each match is replaced by a marker and the rest of the text is kept: secrets (the patterns of
-`config.secret_scan`, with a PEM block hidden to its END line), npubs, and runs of 64 or more hex
-digits. Newline and tab are kept (they are layout); every other C0, DEL and C1 character is escaped as
-`\\xNN`.
+Each match is replaced by a marker and the rest of the text is kept: the literal forms of every configured
+account's login directory (`set_login_dirs`, ADR §4.4 D10), secrets (the patterns of `config.secret_scan`,
+with a PEM block hidden to its END line), npubs, and runs of 64 or more hex digits. Newline and tab are
+kept (they are layout); every other C0, DEL and C1 character is escaped as `\\xNN`.
 
-One pass matches secrets and npubs on the text, then escapes controls, then replaces hex runs, so hex
-digits an escape adds next to a run are caught in the same pass. A pass can still make a new match: a
-marker is a boundary, and a secret pattern that refused to start right after a hex digit starts right
+One pass matches login directories, then secrets and npubs on the text, then escapes controls, then replaces
+hex runs, so hex digits an escape adds next to a run are caught in the same pass. A pass can still make a new
+match: a marker is a boundary, and a secret pattern that refused to start right after a hex digit starts right
 after `>`. So `redact` repeats the pass until the text stops changing, which makes it idempotent by
-construction. Each pass that changes the text replaces at least one match by a marker, and markers
-match nothing, so this ends quickly; `MAX_PASSES` is a backstop, and text that is still changing after
-it becomes `UNSTABLE` whole (fail closed).
+construction. Each pass that changes the text replaces at least one match by a marker, and markers match
+nothing, so this ends quickly; `MAX_PASSES` is a backstop, and text that is still changing after it becomes
+`UNSTABLE` whole (fail closed).
 """
 
 import re
-from collections.abc import Container, Iterator
+from collections.abc import Container, Iterable, Iterator
 
 from heterodyne.config.secret_scan import IDENTIFIER_VALUES, SECRET_VALUES
 
@@ -27,10 +27,29 @@ _HEX_RUN = re.compile(r"[0-9A-Fa-f]{64,}")
 _CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 FRAGMENT = "<redacted fragment>"
 UNSTABLE = "<redacted text>"
+LOGIN_DIR = "<redacted login dir>"
 MAX_PASSES = 10
+# A form never matches inside a longer name: the next character is not a name character, nor a dot that
+# starts a suffix (`/x/.claude-b.bak`). A dot that ends a sentence is no part of the name.
+_AFTER = r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
+_login_dirs: re.Pattern[str] | None = None
+
+
+def set_login_dirs(paths: Iterable[str]) -> None:
+    """Install the login directory forms to hide, once at startup (`()` clears them). Matching is literal,
+    longest form first, and never inside a longer name: `/x/.claude-b` doesn't match in `/x/.claude-bb`."""
+    global _login_dirs
+    forms = sorted({p for p in paths if p}, key=lambda p: (-len(p), p))
+    _login_dirs = re.compile(f"(?:{'|'.join(map(re.escape, forms))}){_AFTER}") if forms else None
+
+
+def _patterns() -> tuple[re.Pattern[str], ...]:
+    return () if _login_dirs is None else (_login_dirs,)
 
 
 def _pass(text: str) -> str:
+    for pattern in _patterns():
+        text = pattern.sub(LOGIN_DIR, text)
     text = _PEM.sub("<redacted PEM private key>", text)
     for kind, pattern in _SECRETS:
         text = pattern.sub(f"<redacted {kind}>", text)
@@ -75,7 +94,7 @@ def _spans(text: str) -> Iterator[tuple[int, int]]:
     """Every span `redact` would hide, in offsets of `text`. Like `redact`, it follows `_pass` (secrets and
     npubs on the raw text, then hex runs on the escaped text) and repeats: found spans are masked with `<`
     (a boundary, as a marker is) at the same length, and the text is scanned again."""
-    patterns = (_PEM, *(p for _, p in _SECRETS), _NPUB)
+    patterns = (*_patterns(), _PEM, *(p for _, p in _SECRETS), _NPUB)
     for _ in range(MAX_PASSES):
         found = [(m.start(), m.end()) for p in patterns for m in p.finditer(text)]
         masked = text

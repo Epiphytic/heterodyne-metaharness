@@ -1,9 +1,13 @@
+import functools
 from pathlib import Path
 
 import pytest
 
+from heterodyne.admind import cli
+from heterodyne.admind import settings as admind_settings
 from heterodyne.admind.settings import resolve
 from heterodyne.config import ConfigError, load
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.nip19 import hex_to_npub
 
@@ -222,3 +226,154 @@ def test_approve_bead_is_optional_and_must_be_an_absolute_executable(tmp_path: P
             resolve(load(None, env), env)
         assert "approve_bead must be an absolute path to an executable" in str(err.value)
         assert "tool" not in str(err.value) and (not bad or bad not in str(err.value))
+
+
+# --- AU-11: each admind process on its profile's first account (ADR §4.4 D11) ---
+
+ACCOUNTS_ON = {"claude-code": Capabilities(login_binding=True), "codex": Capabilities(login_binding=True)}
+CLAUDE_OVERRIDES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+WITH_ACCOUNTS = BASE_CONFIG.replace('model = "m1"\n', 'model = "m1"\naccounts = ["b", "c"]\n') + """
+[profiles.sum]
+adapter = "claude-code"
+accounts = ["c"]
+[accounts.b]
+adapter = "claude-code"
+login_dir = "~/.claude-b"
+[accounts.c]
+adapter = "claude-code"
+login_dir = "~/.claude-c"
+"""
+
+
+def with_summarizer(config: str, profile: str) -> str:
+    return config.replace('restart_units =', f'summarizer = "{profile}"\nrestart_units =', 1)
+
+
+def linked_accounts(tmp_path: Path) -> None:
+    """~/.claude-b is a symlink, so its configured, expanded and canonical forms all differ."""
+    (tmp_path / "real-b").mkdir()
+    (tmp_path / ".claude-b").symlink_to(tmp_path / "real-b")
+
+
+def test_no_accounts_runs_on_the_default_login(tmp_path: Path) -> None:
+    env = write(tmp_path)
+    cfg = load(None, env, capabilities=ACCOUNTS_ON)
+    s = resolve(cfg, env)
+    assert s.agent_account.name == "default"
+    assert s.agent_account.set == {} and s.agent_account.unset == ("CLAUDE_CONFIG_DIR",)
+    assert s.agent_account.key == cfg.accounts[("claude-code", "default")].key
+    assert s.summarizer_account is None and s.login_dirs == ()
+
+
+def test_the_agent_runs_on_its_profiles_first_account(tmp_path: Path) -> None:
+    linked_accounts(tmp_path)
+    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "sum"))
+    cfg = load(None, env, capabilities=ACCOUNTS_ON)
+    s = resolve(cfg, env)
+    b, c = cfg.accounts[("claude-code", "b")], cfg.accounts[("claude-code", "c")]
+    assert s.agent_account.name == "b" and s.agent_account.key == b.key
+    assert s.agent_account.set == {"CLAUDE_CONFIG_DIR": str(tmp_path / "real-b")}    # canonical
+    assert s.agent_account.unset == CLAUDE_OVERRIDES
+    assert s.summarizer_account is not None and s.summarizer_account.name == "c"
+    assert s.summarizer_account.set == {"CLAUDE_CONFIG_DIR": str(c.login_dir)}
+    assert s.summarizer_account.key == c.key != b.key
+    # every named account's three literal forms, longest first; never a default directory
+    assert set(s.login_dirs) == {"~/.claude-b", str(tmp_path / ".claude-b"), str(tmp_path / "real-b"),
+                                 "~/.claude-c", str(tmp_path / ".claude-c")}
+    assert [len(f) for f in s.login_dirs] == sorted((len(f) for f in s.login_dirs), reverse=True)
+    assert not any(f.endswith("/.claude") for f in s.login_dirs)
+
+
+def test_a_default_summarizer_has_its_own_default_login(tmp_path: Path) -> None:
+    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "admin").replace(
+        'summarizer = "admin"', 'summarizer = "plain"') + '[profiles.plain]\nadapter = "claude-code"\n')
+    s = resolve(load(None, env, capabilities=ACCOUNTS_ON), env)
+    assert s.agent_account.name == "b"
+    assert s.summarizer_account is not None and s.summarizer_account.name == "default"
+    assert s.summarizer_account.unset == ("CLAUDE_CONFIG_DIR",)
+
+
+def test_a_codex_profile_maps_to_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cross-adapter mapping, at the settings level only (acceptance amendment, design §4)."""
+    monkeypatch.setattr(admind_settings, "ADMIN_ADAPTERS", ("claude-code", "codex"))
+    config = with_summarizer(WITH_ACCOUNTS, "cx") + """
+[profiles.cx]
+adapter = "codex"
+accounts = ["x"]
+[accounts.x]
+adapter = "codex"
+login_dir = "~/.codex-x"
+"""
+    env = write(tmp_path, config)
+    cfg = load(None, env, capabilities=ACCOUNTS_ON)
+    s = resolve(cfg, env)
+    assert s.summarizer_account is not None
+    assert s.summarizer_account.set == {"CODEX_HOME": str(cfg.accounts[("codex", "x")].login_dir)}
+    assert s.summarizer_account.unset == ("OPENAI_API_KEY", "CODEX_API_KEY")
+    assert s.agent_account.set == {"CLAUDE_CONFIG_DIR": str(cfg.accounts[("claude-code", "b")].login_dir)}
+
+
+def test_a_login_selector_in_adminds_environment_is_refused(tmp_path: Path) -> None:
+    env = write(tmp_path)
+    secret_dir = str(tmp_path / "elsewhere-MARKER")
+    with pytest.raises(ConfigError) as exc:
+        resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CLAUDE_CONFIG_DIR": secret_dir})
+    assert str(exc.value) == ("admind's environment sets CLAUDE_CONFIG_DIR; logins are chosen by [accounts] "
+                              "in config.toml (ADR §4.4 D1). Unset it, or configure an account")
+    assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+    # Codex's selector is no concern of a Claude-only admind
+    resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CODEX_HOME": secret_dir})
+
+
+def test_a_selector_is_refused_whatever_account_either_process_is_on(tmp_path: Path) -> None:
+    """§3.2: named accounts set the selector themselves, but an inherited one is still refused."""
+    selected = {"CLAUDE_CONFIG_DIR": str(tmp_path / "x-MARKER")}
+    plain = '[profiles.plain]\nadapter = "claude-code"\n'
+    for summarizer in ("sum", "plain"):     # both on named accounts; the summarizer on default
+        env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, summarizer) + plain)
+        with pytest.raises(ConfigError, match="sets CLAUDE_CONFIG_DIR") as exc:
+            resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, **selected})
+        assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+
+
+CODEX_X = """
+[profiles.cx]
+adapter = "codex"
+accounts = ["x"]
+[accounts.x]
+adapter = "codex"
+login_dir = "~/.codex-x"
+"""
+
+
+@pytest.mark.parametrize("codex", ["summarizer", "agent"])
+def test_codex_home_is_refused_for_a_codex_process_on_a_named_account(tmp_path: Path, codex: str,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 for the other adapter, for each process in turn: one process runs Codex on account x, the
+    other runs Claude on a named account, and CODEX_HOME is inherited. Only the Codex process's check can
+    refuse it: the Claude one passes, as the same config without CODEX_HOME shows."""
+    monkeypatch.setattr(admind_settings, "ADMIN_ADAPTERS", ("claude-code", "codex"))
+    config = with_summarizer(WITH_ACCOUNTS, "cx" if codex == "summarizer" else "sum") + CODEX_X
+    if codex == "agent":
+        config = config.replace('profile = "admin"', 'profile = "cx"', 1)
+    env = write(tmp_path, config)
+    s = resolve(load(None, env, capabilities=ACCOUNTS_ON), env)        # the Claude process's check passes
+    codex_account = s.summarizer_account if codex == "summarizer" else s.agent_account
+    claude_account = s.agent_account if codex == "summarizer" else s.summarizer_account
+    assert codex_account is not None and codex_account.name == "x" and "CODEX_HOME" in codex_account.set
+    assert claude_account is not None and "CLAUDE_CONFIG_DIR" in claude_account.set
+    with pytest.raises(ConfigError, match="sets CODEX_HOME") as exc:
+        resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CODEX_HOME": str(tmp_path / "x-MARKER")})
+    assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+
+
+def test_admind_exits_78_on_an_inherited_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "sum"))
+    for k, v in {**env, "CLAUDE_CONFIG_DIR": str(tmp_path / "x-MARKER")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli.hconfig, "load", functools.partial(load, capabilities=ACCOUNTS_ON))
+    assert cli.main(["run"]) == cli.EX_CONFIG
+    err = capsys.readouterr().err
+    assert "sets CLAUDE_CONFIG_DIR" in err
+    assert "MARKER" not in err and str(tmp_path) not in err

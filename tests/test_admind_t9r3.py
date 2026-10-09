@@ -102,11 +102,11 @@ def relaunch_rig(u: Unit, gate_on: str, loop: asyncio.AbstractEventLoop,
     real = getattr(u.tmux, gate_on)
     kill, new_session = u.tmux.kill, u.tmux.new_session
 
-    def wrapped(*a: Any) -> None:
+    def wrapped(*a: Any, **kw: Any) -> None:
         if armed[0]:
             armed[0] = False
             gate.wait()
-        real(*a)
+        real(*a, **kw)
 
     def kill_and_revive(name: str) -> None:
         dead.discard(name)
@@ -115,11 +115,11 @@ def relaunch_rig(u: Unit, gate_on: str, loop: asyncio.AbstractEventLoop,
         else:
             kill(name)
 
-    def new_session_gated(name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session_gated(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         if gate_on == "new_session":
-            wrapped(name, cwd, argv)
+            wrapped(name, cwd, argv, **env)
         else:
-            new_session(name, cwd, argv)
+            new_session(name, cwd, argv, **env)
     u.tmux.kill = kill_and_revive                       # type: ignore[method-assign]
     u.tmux.new_session = new_session_gated              # type: ignore[method-assign]
     return gate, dead

@@ -19,7 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import IO
 
@@ -92,9 +92,11 @@ class Child:
 Wait = Callable[[Child], Awaitable[object]]
 
 
-def spawn(argv: list[str], *, cwd: Path | None = None, feed: bool = False, stderr: bool = True) -> Child:
+def spawn(argv: list[str], *, cwd: Path | None = None, feed: bool = False, stderr: bool = True,
+          env: Mapping[str, str] | None = None) -> Child:
     """Launch `argv` in a new session (its own process group): stdin a pipe if `feed`, else /dev/null;
-    stdout a pipe; stderr a pipe, or /dev/null. Synchronous; OSError means there is no child.
+    stdout a pipe; stderr a pipe, or /dev/null; `env` its whole environment, or admind's if None.
+    Synchronous; OSError means there is no child.
 
     The launch runs before any run timeout starts and blocks the event loop until the exec has completed
     (Popen waits for it), so an executable on a stalled filesystem can stall admind here. That is accepted:
@@ -102,7 +104,7 @@ def spawn(argv: list[str], *, cwd: Path | None = None, feed: bool = False, stder
     launch is what keeps any await from coming between the last check and the launch (R11)."""
     pipe, null = subprocess.PIPE, subprocess.DEVNULL
     return Child(subprocess.Popen(argv, cwd=cwd, start_new_session=True, stdin=pipe if feed else null,
-                                  stdout=pipe, stderr=pipe if stderr else null))
+                                  stdout=pipe, stderr=pipe if stderr else null, env=env))
 
 
 def kill(child: Child) -> None:

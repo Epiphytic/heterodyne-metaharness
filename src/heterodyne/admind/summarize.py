@@ -9,10 +9,12 @@ the summarizer's process group is killed before `summarize` returns.
 
 import asyncio
 import contextlib
+import os
 from pathlib import Path
 
 from heterodyne.admind import reap
 from heterodyne.admind.redact import redact
+from heterodyne.admind.settings import AdmindAccount
 from heterodyne.admind.store import private_dir
 
 SUMMARY_TIMEOUT = 60.0
@@ -86,13 +88,24 @@ async def _collect(proc: reap.Child, data: bytes) -> bytes:
     return bytes(out)
 
 
-async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: float = SUMMARY_TIMEOUT) -> str:
+def child_env(account: AdmindAccount | None) -> dict[str, str] | None:
+    """The summarizer's whole environment: admind's, without the variables its login clears and with the
+    ones it sets (ADR §4.4 D11). None (inherit admind's) when no account is given."""
+    if account is None:
+        return None
+    env = {k: v for k, v in os.environ.items() if k not in account.unset}
+    env.update(account.set)
+    return env
+
+
+async def summarize(argv: list[str] | None, cwd: Path, reply: str, timeout: float = SUMMARY_TIMEOUT,
+                    account: AdmindAccount | None = None) -> str:
     if argv is None:
         raise SummaryFailed("not-configured")
     private_dir(cwd)
     payload = await asyncio.to_thread(lambda: PROMPT.format(reply=redact(reply)).encode())   # off the loop
     try:
-        child = reap.spawn(argv, cwd=cwd, feed=True, stderr=False)     # owned from here: reaped below
+        child = reap.spawn(argv, cwd=cwd, feed=True, stderr=False, env=child_env(account))   # owned from here
     except OSError:
         raise SummaryFailed("not-run") from None
     try:

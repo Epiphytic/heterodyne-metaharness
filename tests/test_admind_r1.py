@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -66,7 +66,8 @@ class FakeTmux:
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
-    def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
+                    unset: Sequence[str] = ()) -> None:
         self.sessions.add(name)
 
     def pane_dead(self, name: str) -> bool:
@@ -156,6 +157,7 @@ class Unit:
         self.agent.started("S1")
         self.store.set("operator_seen_at", now())
         self.store.set("launch_nonce", "ab" * 16)       # a pane without a current nonce is never adopted
+        self.store.set("agent_account", self.settings.agent_account.key)    # nor one on another login
         self.daemon.ready_nonce = "ab" * 16
         self.daemon.ready.set()
         self.seq = 0

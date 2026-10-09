@@ -15,7 +15,7 @@ import re
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 LAUNCHER_FAILED = "tmux server could not be started through the launcher"
@@ -66,18 +66,25 @@ class Tmux:
     def has_session(self, name: str) -> bool:
         return self._run("has-session", "-t", f"={name}", check=False).returncode == 0
 
-    def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
+                    unset: Sequence[str] = ()) -> None:
         """Start `name` running `argv` in `cwd`. It returns only once tmux has confirmed that this call
-        created exactly that session; anything else raises TmuxError."""
+        created exactly that session; anything else raises TmuxError.
+
+        The pane's environment is the server's global one, which outlives the client that started the
+        server: each name in `unset` is removed from it, and each `set` entry is given to the new pane
+        only (`new-session -e`), in the same invocation."""
         if not cwd.is_dir():    # tmux would exit 0 and run the pane in the home directory instead
             raise TmuxError(f"tmux session directory is missing: {cwd}")
+        clear = [arg for var in unset for arg in ("set-environment", "-g", "-u", var, ";")]
+        pane_env = [arg for var, value in (set or {}).items() for arg in ("-e", f"{var}={value}")]
         # One invocation, so retention is set before the process can start (and exit): a separate
         # set-option afterwards races an immediately-exiting process. The marker carries a nonce, so no
         # other output can pass for it, and the new session's id, the only safe target for a cleanup.
         prefix = f"hz-started {uuid.uuid4().hex} "
-        args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";",
+        args = ("start-server", ";", "set-option", "-g", "remain-on-exit", "on", ";", *clear,
                 "new-session", "-d", "-P", "-F", prefix + "#{session_id} #{session_name}",
-                "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), "--", *argv)
+                "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), *pane_env, "--", *argv)
         if self.launcher is None:
             proc = self._run(*args)
         else:

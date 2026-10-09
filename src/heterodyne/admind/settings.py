@@ -11,10 +11,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
-from heterodyne.config import Config, ConfigError, paths
+from heterodyne.config import Account, Config, ConfigError, paths
 from heterodyne.config.layers import as_table, string_list, table_at
 from heterodyne.config.secret_scan import show
 from heterodyne.marmot.nip19 import Nip19Error, npub_to_hex
@@ -29,6 +29,12 @@ ADMIN_ADAPTERS = ("claude-code",)
 MAX_NAME = 128
 NAME_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 MAX_SOCKET_PATH = 100  # bytes; sun_path is 108 on Linux and 104 on macOS
+# The variable that selects each adapter's login directory (ADR §4.4 D11).
+SELECTOR = {"claude-code": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+# Variables that log the CLI in without its login files (S7 §17 #5). Codex's list is provisional until S7's
+# real-account run; Codex is not an admin adapter yet.
+LOGIN_OVERRIDES = {"claude-code": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+                   "codex": ("OPENAI_API_KEY", "CODEX_API_KEY")}
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,15 @@ class Operator:
     name: str
     npub: str
     hex: str
+
+
+@dataclass(frozen=True)
+class AdmindAccount:
+    """The login one admind process runs on (ADR §4.4 D11): its profile's first account, or `default`."""
+    name: str                       # "default" when the profile lists no accounts
+    key: str                        # AU-2 credential key (ck1-..., 32 hex: never trips the 64-hex redaction)
+    set: Mapping[str, str]          # {} for default; else {SELECTOR[adapter]: canonical login_dir}
+    unset: tuple[str, ...]          # SELECTOR[adapter] for default; LOGIN_OVERRIDES[adapter] for an account
 
 
 @dataclass(frozen=True)
@@ -61,6 +76,9 @@ class AdmindSettings:
     state_dir: Path
     alerts_dir: Path
     service_manager: str
+    agent_account: AdmindAccount
+    summarizer_account: AdmindAccount | None = None
+    login_dirs: tuple[str, ...] = ()    # every named account's login directory, as redact matches it
     approve_bead: Path | None = None    # approval asks are refused without it (relay spec R5)
     ask_bump_hours: int = 12            # open asks are bumped after this many quiet hours; 0 never (B14)
 
@@ -74,10 +92,13 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
     profile_name = admind.get("profile")
     if not isinstance(profile_name, str) or not profile_name:
         raise ConfigError("[admind] profile must name a profile from [profiles]")
-    profile, binary = _profile(cfg, profile_name, "profile")
+    profile, binary, agent_account = _profile(cfg, profile_name, "profile")
     summarizer_name = admind.get("summarizer")
-    summarizer, summarizer_binary = (None, None) if summarizer_name is None else \
+    summarizer, summarizer_binary, summarizer_account = (None, None, None) if summarizer_name is None else \
         _profile(cfg, summarizer_name, "summarizer")
+    for p in (profile, summarizer):
+        if p is not None:
+            _check_selector(p["adapter"], env)
 
     units = tuple(string_list(admind.get("restart_units", []), "[admind] restart_units"))
     for unit in units:
@@ -118,13 +139,16 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
         operators=operators(cfg),
         state_dir=state / "admind", alerts_dir=state / "alerts",
         service_manager=service_manager,
+        agent_account=agent_account, summarizer_account=summarizer_account,
+        login_dirs=login_dirs(cfg, env),
         approve_bead=_executable(admind.get("approve_bead")),
         ask_bump_hours=_int(admind, "ask_bump_hours", 0, 720),
     )
 
 
-def _profile(cfg: Config, name: Any, key: str) -> tuple[Mapping[str, Any], str]:
-    """The profile `[admind] {key}` names, and its adapter's binary (Claude Code only, so far)."""
+def _profile(cfg: Config, name: Any, key: str) -> tuple[Mapping[str, Any], str, AdmindAccount]:
+    """The profile `[admind] {key}` names, its adapter's binary (Claude Code only, so far) and the login it
+    runs on: its first account, or the adapter's `default` (D11: no headroom gate, no failover)."""
     if not isinstance(name, str) or not name:
         raise ConfigError(f"[admind] {key} must name a profile from [profiles]")
     profile = as_table(table_at(cfg.values, "profiles", "config").get(name))
@@ -137,7 +161,44 @@ def _profile(cfg: Config, name: Any, key: str) -> tuple[Mapping[str, Any], str]:
     binary = cfg.get(f"adapters.{adapter}.binary")
     if not isinstance(binary, str) or not binary:
         raise ConfigError(f"adapters.{adapter}.binary must be a non-empty string")
-    return profile, binary
+    listed = profile.get("accounts")
+    first: object = cast(list[Any], listed)[0] if isinstance(listed, list) and listed else "default"
+    if not isinstance(first, str):      # config.load already refuses this
+        raise ConfigError(f"[admind] {key} {show(name)}: its accounts must be names")
+    account = cfg.accounts.get((adapter, first))
+    if account is None:     # config.load resolves every listed account and each adapter's default
+        raise ConfigError(f"[admind] {key} {show(name)}: its login was not resolved")
+    return profile, binary, admind_account(account)
+
+
+def admind_account(account: Account) -> AdmindAccount:
+    selector = SELECTOR[account.adapter]
+    if account.name == "default":
+        return AdmindAccount(account.name, account.key, {}, (selector,))
+    return AdmindAccount(account.name, account.key, {selector: str(account.login_dir)},
+                         LOGIN_OVERRIDES[account.adapter])
+
+
+def _check_selector(adapter: str, env: Mapping[str, str]) -> None:
+    """Logins are chosen by [accounts] only, so admind's own environment may not select one for either
+    process's adapter, whatever account it runs on (§3.2, §4.4 D1). The message names the variable, never
+    its value."""
+    selector = SELECTOR[adapter]
+    if selector in env:
+        raise ConfigError(f"admind's environment sets {selector}; logins are chosen by [accounts] in "
+                          "config.toml (ADR §4.4 D1). Unset it, or configure an account")
+
+
+def login_dirs(cfg: Config, env: Mapping[str, str]) -> tuple[str, ...]:
+    """The literal forms of every named account's login directory (configured, `~`-expanded, canonical),
+    longest first, for `redact`. Every account, not only admind's: the agent can read the whole config.
+    The `default` directories are not included (a D10 exception, approved with the design)."""
+    forms: set[str] = set()
+    for account in cfg.accounts.values():
+        if account.name != "default":
+            forms |= {account.configured_dir, str(paths.expand(account.configured_dir, env)),
+                      str(account.login_dir)}
+    return tuple(sorted(forms, key=lambda f: (-len(f), f)))
 
 
 def _relay_ok(r: str) -> bool:

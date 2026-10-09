@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import socket
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from fakes.settings import make_settings
@@ -18,6 +19,7 @@ from heterodyne.admind.hook import (
     reply_text,
     settings_json,
 )
+from heterodyne.admind.settings import AdmindAccount
 from heterodyne.admind.store import Store
 from heterodyne.agents.claude_code import interactive_argv
 
@@ -25,6 +27,7 @@ from heterodyne.agents.claude_code import interactive_argv
 class FakeTmux:
     def __init__(self) -> None:
         self.sessions: dict[str, list[str]] = {}
+        self.env: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {}    # name -> (set, unset)
         self.dead: set[str] = set()
         self.pasted: list[str] = []
         self.keys: list[str] = []
@@ -32,8 +35,10 @@ class FakeTmux:
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
-    def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
+                    unset: Sequence[str] = ()) -> None:
         self.sessions[name] = argv
+        self.env[name] = (dict(set or {}), tuple(unset))
 
     def pane_dead(self, name: str) -> bool:
         return name in self.dead
@@ -84,6 +89,65 @@ def test_launch_resume_adopt_and_new(tmp_path: Path) -> None:
     assert tmux.sessions["admin"][1:3] == ["--resume", sid]
     assert agent.new() == "launched"
     assert agent.session_id != sid
+
+
+# --- AU-11: the agent's login (ADR §4.4 D11) ---
+
+ACCOUNT_B = AdmindAccount("b", "ck1-" + "b" * 32, {"CLAUDE_CONFIG_DIR": "/accounts/b"},
+                          ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"))
+
+
+def agent_on(tmp_path: Path, store: Store, tmux: FakeTmux, account: AdmindAccount | None) -> AdminAgent:
+    s = make_settings(tmp_path) if account is None else make_settings(tmp_path, agent_account=account)
+    return AdminAgent(tmux, store, s, s.state_dir / "hook.sock")  # type: ignore[arg-type]
+
+
+def test_no_account_keeps_the_argv_and_clears_only_the_selector(tmp_path: Path) -> None:
+    agent, tmux, store = make_agent(tmp_path)
+    assert agent.ensure_running() == "launched"
+    sid = agent.session_id
+    assert sid is not None
+    assert tmux.sessions["admin"] == interactive_argv("claude", agent.settings.profile, session_id=sid,
+                                                      resume=False, settings_file=agent.settings_file,
+                                                      name="admin")
+    assert tmux.env["admin"] == ({}, ("CLAUDE_CONFIG_DIR",))
+    assert store.get("agent_account") == agent.settings.agent_account.key
+
+
+def test_an_account_sets_its_directory_and_clears_the_overrides(tmp_path: Path) -> None:
+    _, tmux, store = make_agent(tmp_path)
+    agent = agent_on(tmp_path, store, tmux, ACCOUNT_B)
+    assert agent.ensure_running() == "launched"
+    assert tmux.env["admin"] == ({"CLAUDE_CONFIG_DIR": "/accounts/b"}, ACCOUNT_B.unset)
+    assert store.get("agent_account") == ACCOUNT_B.key and agent.login_matches()
+
+
+def test_a_session_started_on_another_login_is_not_resumed(tmp_path: Path) -> None:
+    old, tmux, store = make_agent(tmp_path)
+    old.ensure_running()
+    sid = old.session_id
+    assert sid is not None
+    old.started(sid)
+    tmux.dead.add("admin")
+    agent = agent_on(tmp_path, store, tmux, ACCOUNT_B)       # config now names account b
+    assert not agent.login_matches()
+    assert agent.ensure_running() == "launched-login-changed"
+    assert agent.session_id != sid
+    assert tmux.sessions["admin"][1:3] == ["--session-id", agent.session_id]
+    tmux.dead.add("admin")                                   # the next relaunch resumes, on b
+    assert agent.session_id is not None
+    agent.started(agent.session_id)
+    assert agent.ensure_running() == "resumed"
+
+
+def test_a_store_from_before_au11_never_resumes(tmp_path: Path) -> None:
+    agent, tmux, store = make_agent(tmp_path)
+    store.set("agent_session", "S1")
+    agent.started("S1")                         # no agent_account: unknown, not assumed default
+    assert not agent.login_matches()
+    assert agent.ensure_running() == "launched-login-changed"
+    assert agent.session_id != "S1"
+    assert tmux.sessions["admin"][1:3] == ["--session-id", agent.session_id]
 
 
 def test_crash_loop_stops_after_three_launches(tmp_path: Path) -> None:
