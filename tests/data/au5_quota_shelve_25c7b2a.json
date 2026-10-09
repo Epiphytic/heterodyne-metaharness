@@ -1,0 +1,36 @@
+{
+  "clock": 1800000000,
+  "comments": [],
+  "deferrals": 0,
+  "labels": [
+    "agent:wsd",
+    "kind:task",
+    "v2:parked",
+    "ws:alpha"
+  ],
+  "ops": [
+    {
+      "data": {
+        "profile": "p-one",
+        "ref": "",
+        "repo": "{root}/repos/proj",
+        "role": "coder",
+        "session_key": "{session_key}",
+        "until": "1800003600",
+        "worktree": "{root}/repos/proj-btq-btq-1"
+      },
+      "kind": "pickup",
+      "status": "abandoned",
+      "step": "quota"
+    }
+  ],
+  "paths": "{root} stands for the recording's temporary directory, {session_key} for the bead's session key",
+  "recorded_from": "main 25c7b2a (AU-5), a pickup's guard race: gate.checked then a trusted mark",
+  "row": {
+    "detail": "no headroom until 2027-01-15T09:00:00+00:00",
+    "reason": "quota",
+    "state": "parked"
+  },
+  "status": "in_progress",
+  "wake_at": 1800003600
+}
