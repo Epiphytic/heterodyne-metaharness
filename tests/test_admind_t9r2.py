@@ -186,9 +186,9 @@ def test_a_delayed_stop_from_a_crashed_launch_cannot_hijack_the_resumed_turn(tmp
     u.tmux.pane_dead = lambda name: name in dead        # type: ignore[method-assign]
     original = u.tmux.new_session
 
-    def relaunch(name: str, cwd: Path, argv: list[str]) -> None:
+    def relaunch(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         dead.discard(name)
-        original(name, cwd, argv)
+        original(name, cwd, argv, **env)
     u.tmux.new_session = relaunch                       # type: ignore[method-assign]
     flushed = asyncio.Event()
     real_flush = u.daemon.flush
