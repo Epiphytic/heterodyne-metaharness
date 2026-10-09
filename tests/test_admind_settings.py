@@ -336,6 +336,24 @@ def test_a_selector_is_refused_whatever_account_either_process_is_on(tmp_path: P
         assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
 
 
+def test_codex_home_is_refused_for_a_codex_process_on_a_named_account(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 for the other adapter: the summarizer runs Codex on account x, and CODEX_HOME is inherited."""
+    monkeypatch.setattr(admind_settings, "ADMIN_ADAPTERS", ("claude-code", "codex"))
+    config = with_summarizer(WITH_ACCOUNTS, "cx") + """
+[profiles.cx]
+adapter = "codex"
+accounts = ["x"]
+[accounts.x]
+adapter = "codex"
+login_dir = "~/.codex-x"
+"""
+    env = write(tmp_path, config)
+    with pytest.raises(ConfigError, match="sets CODEX_HOME") as exc:
+        resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CODEX_HOME": str(tmp_path / "x-MARKER")})
+    assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+
+
 def test_admind_exits_78_on_an_inherited_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                   capsys: pytest.CaptureFixture[str]) -> None:
     env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "sum"))
