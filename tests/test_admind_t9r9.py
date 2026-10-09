@@ -8,6 +8,7 @@ SQLite file, with a fake tmux and agent; no real wn-agent, claude, systemctl, ne
 import asyncio
 import contextlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from admind_waits import wait_until
@@ -32,9 +33,9 @@ def instrument(u: Unit) -> tuple[list[str], list[str]]:
         kills.append(name)
         kill(name)
 
-    def n(name: str, cwd: Path, argv: list[str]) -> None:
+    def n(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         launches.append(name)
-        new_session(name, cwd, argv)
+        new_session(name, cwd, argv, **env)
     u.tmux.kill = k                     # type: ignore[method-assign]
     u.tmux.new_session = n              # type: ignore[method-assign]
     return kills, launches
@@ -136,7 +137,7 @@ def test_a_crash_after_the_kill_and_before_the_launch_repeats_the_replacement(tm
     assert old_nonce is not None
     real = u.tmux.new_session
 
-    def crash(name: str, cwd: Path, argv: list[str]) -> None:
+    def crash(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         raise Crash
     u.tmux.new_session = crash                              # type: ignore[method-assign]
 

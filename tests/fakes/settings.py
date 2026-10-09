@@ -4,11 +4,12 @@ import dataclasses
 from pathlib import Path
 from typing import Any
 
-from heterodyne.admind.settings import AdmindSettings, Operator
+from heterodyne.admind.settings import AdmindAccount, AdmindSettings, Operator
 from heterodyne.marmot.nip19 import hex_to_npub
 
 OPERATOR_HEX = "c3" * 32
 SECOND_HEX = "d4" * 32
+DEFAULT_ACCOUNT = AdmindAccount("default", "ck1-" + "0" * 32, {}, ("CLAUDE_CONFIG_DIR",))
 
 
 def operator(name: str, key: str) -> Operator:
@@ -25,5 +26,5 @@ def make_settings(tmp_path: Path, **overrides: Any) -> AdmindSettings:
         marmot_home=tmp_path / "marmot",
         relays=("wss://relay.example.org",), operators=(operator("op", OPERATOR_HEX),),
         state_dir=tmp_path / "state" / "admind",
-        alerts_dir=tmp_path / "state" / "alerts", service_manager="systemd")
+        alerts_dir=tmp_path / "state" / "alerts", service_manager="systemd", agent_account=DEFAULT_ACCOUNT)
     return dataclasses.replace(base, **overrides)

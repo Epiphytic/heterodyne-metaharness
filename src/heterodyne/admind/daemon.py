@@ -167,6 +167,10 @@ HOOK_LOST_NOTICE = ("admind lost an agent hook event; new messages are held. "
                     "When the agent is idle, send !interrupt (or !new) to resume.")
 ADOPT_HOLD_NOTICE = ("admind restarted and adopted the running agent; new messages are held until the agent "
                      "finishes its current turn or you send !interrupt (or !new).")
+LOGIN_CHANGED_WHY = "the admin agent was restarted on a new session because its login changed"
+# Fixed: it names no account and no path (D10).
+LOGIN_CHANGED_NOTICE = ("The admin agent was restarted on a new session because its login changed. "
+                        "Resend anything unanswered.")
 SESSION_SOURCES = frozenset({"startup", "resume", "clear", "compact"})   # Claude Code's SessionStart sources
 
 
@@ -1370,6 +1374,13 @@ class Admind:
     async def start_agent(self, relaunch: bool = False, startup: bool = False) -> None:
         self.ready.clear()
         self.ready_nonce = None
+        if startup and not self.agent.login_matches() and await asyncio.to_thread(self.agent.alive):
+            # A live pane launched on another login (or on an unknown one: a store from before AU-11) is
+            # never adopted. Its replacement intent and the notice's outbox key are committed with the
+            # abandonment, so a crash at any later point neither adopts it nor loses or repeats the notice.
+            # An unfinished replacement already pending (a !new, say) keeps its own word.
+            replace = "login-changed" if self.agent.replace_pending() is None else None
+            self.abandon_in_flight(LOGIN_CHANGED_WHY, idle=True, replace=replace, notice=True)
         if relaunch or self.agent.replace_pending() is not None:
             # The departing launch stops validating now, before this coroutine yields: ensure_running
             # (in a thread) gives the replacement its own nonce before it starts the pane.
@@ -1381,7 +1392,9 @@ class Admind:
         except Exception as exc:  # noqa: BLE001 - AgentStuck, tmux or filesystem failure; reported by type
             self.stuck = reason(exc)
             self.audit.write("agent", action="start-failed", error=type(exc).__name__)
+            self.contained("login-notice-failed", self.flush_pending_notice)
             return
+        self.contained("login-notice-failed", self.flush_pending_notice)
         self.stuck = None
         self.audit_quietly("agent", action=mode, session=self.agent.session_id)
         if mode == "adopted":
@@ -1390,6 +1403,16 @@ class Admind:
             self.mark_ready()
         else:
             self.is_ready()     # an event from a launch that has since been replaced is not readiness
+
+    def flush_pending_notice(self) -> None:
+        """Post the login-change notice an earlier replacement allocated, and forget it, in one transaction.
+        Run after every start, whatever its outcome: the key is fixed and the outbox ignores a repeat, so it
+        is posted exactly once even if the pane it was about has since been replaced and adopted."""
+        with self.store.transaction():
+            key = self.store.get("pending_notice")
+            if key is not None:
+                self.post(key, LOGIN_CHANGED_NOTICE, None)
+                self.store.delete("pending_notice")
 
     def hold_adopted(self) -> None:
         """Startup adopted a live pane (not a fresh launch). Whether it is mid-turn cannot be known: a
@@ -2217,7 +2240,7 @@ class Admind:
             self.audit_quietly("agent", action="send-uncertain", error=type(exc).__name__, message_id=mid)
 
     def abandon_in_flight(self, why: str, floor: int | None = None, idle: bool = False,
-                          replace: str | None = None) -> None:
+                          replace: str | None = None, notice: bool = False) -> None:
         """Release the reservation and its anchor. Hooks accepted so far (a hook releasing the turn passes
         its own index instead: what was accepted behind it is newer) can no longer start or end it.
         Three steps, in this order. (a) One transaction holds only the safety and state change: the anchor
@@ -2225,7 +2248,9 @@ class Admind:
         any transaction a later fallible step could roll back. (b) The operator's notice is queued in its
         own transaction; a failure there is contained and undoes nothing from (a). (c) A quiet audit.
         `replace` (a fixed word) is the caller's intent to replace the pane: it is stored in (a), so no
-        restart can see the turn idle without also seeing that the old pane must not be adopted."""
+        restart can see the turn idle without also seeing that the old pane must not be adopted. `notice`
+        also allocates the login-change notice's outbox key in (a), as `pending_notice` (one per replacement:
+        an unposted one is kept); `flush_pending_notice` posts it."""
         self.raise_floor(floor)
         with self.store.transaction():
             mid = self.store.get("in_flight")
@@ -2236,6 +2261,8 @@ class Admind:
                 self.store.delete("in_flight")
             if replace is not None:
                 self.store.set("replace_pending", replace)
+            if notice and self.store.get("pending_notice") is None:
+                self.store.set("pending_notice", f"login-changed:{self.next_seq('login_seq')}")
             if idle:
                 self.set_idle()
         if mid is None:
@@ -2719,7 +2746,7 @@ class Admind:
         backstop's fails, the exception reaches summary_loop and the row is tried again."""
         try:
             text = await summarize.summarize(self.summarizer_argv, self.s.state_dir / "summarizer", row.text,
-                                             self.summary_timeout)
+                                             self.summary_timeout, account=self.s.summarizer_account)
             with self.store.transaction():
                 for i, part in enumerate(chunk.split(text, self.s.chunk_chars)):
                     self.post(f"{row.key}:s{i}", part, row.reply_to)

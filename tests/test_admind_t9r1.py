@@ -8,6 +8,7 @@ import contextlib
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_admind_r1 import Unit, run
@@ -73,9 +74,9 @@ def supervised_unit(tmp_path: Path) -> tuple[Unit, Clock, list[str]]:
     launches: list[str] = []
     original = u.tmux.new_session
 
-    def new_session(name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         launches.append(name)
-        original(name, cwd, argv)
+        original(name, cwd, argv, **env)
     u.tmux.new_session = new_session                    # type: ignore[method-assign]
     return u, clock, launches
 
@@ -127,9 +128,9 @@ def test_an_agent_that_dies_mid_turn_abandons_the_turn_and_releases_the_queue(tm
     u.tmux.pane_dead = lambda name: name in dead        # type: ignore[method-assign]
     original = u.tmux.new_session
 
-    def relaunch(name: str, cwd: Path, argv: list[str]) -> None:
+    def relaunch(name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         dead.discard(name)
-        original(name, cwd, argv)
+        original(name, cwd, argv, **env)
     u.tmux.new_session = relaunch                       # type: ignore[method-assign]
 
     async def scenario() -> None:

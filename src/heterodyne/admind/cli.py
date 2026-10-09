@@ -20,6 +20,7 @@ from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import Admind, supervised
+from heterodyne.admind.redact import set_login_dirs
 from heterodyne.admind.settings import AdmindSettings, resolve
 from heterodyne.admind.store import Store
 from heterodyne.admind.wnagent import WnAgent, WnAgentError
@@ -44,8 +45,16 @@ class StateDirError(Exception):
     """The state directory could not be prepared; the message is built here and holds no path."""
 
 
-def _load() -> tuple[AdmindSettings, Store, Audit]:
+def _resolve() -> AdmindSettings:
+    """The settings, with redaction of configured login directories installed before anything is posted,
+    audited or summarized."""
     s = resolve(hconfig.load(), os.environ)
+    set_login_dirs(s.login_dirs)
+    return s
+
+
+def _load() -> tuple[AdmindSettings, Store, Audit]:
+    s = _resolve()
     try:
         return s, Store(s.state_dir / "admind.db"), Audit(s.state_dir / "audit.jsonl")
     except (OSError, sqlite3.Error) as exc:  # the path may hold an npub; name only the kind of failure
@@ -230,7 +239,7 @@ def _ask_wait(s: AdmindSettings, req: asks.AskRequest, timeout: float, as_json: 
 
 
 def _settings_only() -> AdmindSettings:
-    return resolve(hconfig.load(), os.environ)
+    return _resolve()
 
 
 def _with_settings(args: argparse.Namespace) -> int:

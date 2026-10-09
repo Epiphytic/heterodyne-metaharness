@@ -16,6 +16,7 @@ import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from heterodyne.admind import cli
 from heterodyne.services import UnitStatus
@@ -32,7 +33,7 @@ class StubTmux:
     def has_session(self, name: str) -> bool:
         return name in self.sessions
 
-    def new_session(self, name: str, cwd: Path, argv: list[str]) -> None:
+    def new_session(self, name: str, cwd: Path, argv: list[str], **env: Any) -> None:
         self.sessions.add(name)
 
     def pane_dead(self, name: str) -> bool:
