@@ -19,6 +19,7 @@ class BeadState(StrEnum):
     HELD = "held"                    # parked by the operator (/stop); resumes only when they release it
     STUCK = "stuck"                  # needs a human; the reason says why
     RESUMING = "resuming"            # the resume journal is in progress
+    DEFERRED = "deferred"            # claimed, `v2:deferred`, no session: waits on quota or an account (D5)
     CLOSED = "closed"
     DROPPED = "dropped"              # not ours: the claim was lost or abandoned
 
@@ -47,14 +48,14 @@ class Reason(StrEnum):
     ACTIONS_UNRECONCILED = "actions_unreconciled"
     CONFIG_INVALID = "config_invalid"
     UNEXPECTED_STATE = "unexpected_state"
-    # A launched session's account would change, and the adapter can't switch (D7). Interim: AU-4
-    # replaces this escalation with its `account_changed` deferral.
+    # A DEFERRED bead's `account_changed` deferral: its session's account would change, and the adapter
+    # can't switch (D7). It waits for a re-gate (process start, `wsctl reload` or release), never a timer.
     ACCOUNT_CHANGED = "account_changed"
-    # AU-5's interim quota shelve: claimed and parked until the headroom gate gives an account. AU-4
-    # replaces it with its `v2:deferred` quota deferral.
+    # A DEFERRED bead's quota deferral: no eligible account until its `defer_until`. A PARKED/QUOTA row
+    # is only AU-5's interim shelve, which recovery converts (AU-4 §6).
     QUOTA = "quota"
     # Only on the unclaimed row of a ready bead whose gate gives `account_changed` (never claimed): the
-    # claimed escalation keeps ACCOUNT_CHANGED, so cleanup never confuses the two.
+    # claimed deferral keeps ACCOUNT_CHANGED, so cleanup never confuses the two.
     ACCOUNT_REPOINTED = "account_repointed"
 
 
@@ -65,7 +66,7 @@ class WsState(StrEnum):
     PAUSED = "paused"
     HELD = "held"      # pickup is held for a workstream-level reason (see `holds`)
     STUCK = "stuck"    # nothing runs and at least one bead needs a human
-    DEFERRED = "deferred"      # waiting only on quota, with a wake time armed (§5.2): never idle
+    DEFERRED = "deferred"      # waiting only on deferrals, or with a quota wake armed (§5.2): never idle
 
 
 TERMINAL = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -80,18 +81,26 @@ _PARKED_LIKE = WAITING | {BeadState.STUCK}
 ALLOWED: dict[BeadState | None, frozenset[BeadState]] = {
     None: frozenset({BeadState.CLAIMING}),      # wsd's own operations start every bead with a claim
     BeadState.CLAIMING: frozenset({BeadState.STARTING, BeadState.DROPPED, BeadState.STUCK, BeadState.CLOSED}),
-    BeadState.STARTING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.STUCK, BeadState.CLOSED}
+    BeadState.STARTING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.STUCK, BeadState.CLOSED,
+                                   BeadState.DEFERRED}   # DEFERRED: a guard defer (AU-4)
                                   | WAITING),    # WAITING: shelved, not runnable when its launch came
     BeadState.RUNNING: frozenset({BeadState.PARKING, BeadState.RESUMING, BeadState.STUCK, BeadState.CLOSED}),
     BeadState.PARKING: frozenset({BeadState.PARKED, BeadState.WAITING_INPUT, BeadState.HELD,
-                                  BeadState.STUCK, BeadState.CLOSED}),
-    BeadState.PARKED: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},
+                                  BeadState.STUCK, BeadState.CLOSED,
+                                  BeadState.DEFERRED}),   # the end of every defer tail (AU-4)
+    # PARKING: a due resume, or a PARKED/QUOTA row's conversion, defers (AU-4)
+    BeadState.PARKED: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED, BeadState.PARKING},
     BeadState.WAITING_INPUT: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},
-    BeadState.HELD: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},   # RESUMING: only by release
+    # RESUMING: only by release; DEFERRED: the release of a bead that still carries `v2:deferred` (AU-4)
+    BeadState.HELD: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED, BeadState.DEFERRED},
     BeadState.RESUMING: frozenset({BeadState.RUNNING, BeadState.PARKING, BeadState.PARKED,
                                    BeadState.WAITING_INPUT, BeadState.HELD, BeadState.STUCK,
+                                   BeadState.CLOSED,
+                                   BeadState.DEFERRED}),  # a guard defer or an abandoned undefer (AU-4)
+    BeadState.STUCK: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED, BeadState.DEFERRED},  # as HELD
+    # PARKING: a re-gate gives a deadline; RESUMING: undefer; the rest: precedence and escalation (AU-4)
+    BeadState.DEFERRED: frozenset({BeadState.PARKING, BeadState.RESUMING, BeadState.HELD, BeadState.STUCK,
                                    BeadState.CLOSED}),
-    BeadState.STUCK: _PARKED_LIKE | {BeadState.RESUMING, BeadState.CLOSED},  # RESUMING: only by release
     BeadState.CLOSED: frozenset({BeadState.CLAIMING}),   # a reopened bead can be claimed again
     BeadState.DROPPED: frozenset({BeadState.CLAIMING}),
 }
@@ -111,12 +120,12 @@ def check(src: BeadState | None, dst: BeadState) -> None:
         raise IllegalTransition(f"{src} -> {dst}")
 
 
-def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState], wake: bool = False,
-             all_quota: bool = False) -> WsState:
+def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState],
+             wake: bool = False) -> WsState:
     """The one-word workstream state for /workstreams (§6.3). Pickup has already run, so "idle" really
-    means nothing is ready and nothing is in progress (§5.2). `wake`: pickup armed a quota wake time;
-    `all_quota`: every non-terminal row is PARKED with reason QUOTA. Either makes a workstream that would
-    otherwise be idle or all-blocked DEFERRED (AU-5 §3.6)."""
+    means nothing is ready and nothing is in progress (§5.2). An armed quota wake (`wake`), or every
+    non-terminal row being DEFERRED whatever the reason, makes a workstream that would otherwise be idle or
+    all-blocked DEFERRED (AU-5 §3.6, AU-4 §2.2)."""
     states = set(beads) - TERMINAL
     if set(holds):
         return WsState.HELD
@@ -127,5 +136,5 @@ def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState], 
     if BeadState.STUCK in states:
         return WsState.STUCK
     if states:
-        return WsState.DEFERRED if all_quota else WsState.ALL_BLOCKED
+        return WsState.DEFERRED if wake or states == {BeadState.DEFERRED} else WsState.ALL_BLOCKED
     return WsState.DEFERRED if wake else WsState.IDLE

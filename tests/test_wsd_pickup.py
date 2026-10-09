@@ -21,17 +21,18 @@ from wsd_env import (
     own_profile,
     probe_lock,
     profile_key,
+    repoint_codex,
 )
 
 from heterodyne.wsd import ids
-from heterodyne.wsd.accounts import Chosen, ConfiguredAccounts
-from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
-from heterodyne.wsd.headroom import Deadline, quota_detail
+from heterodyne.wsd.accounts import Chosen
+from heterodyne.wsd.beads import DEFERRED, HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
+from heterodyne.wsd.headroom import Deadline, epoch, quota_detail
 from heterodyne.wsd.journal import JournalBusy
 from heterodyne.wsd.launches import LaunchEntry
-from heterodyne.wsd.park import UNRECEIPTED
+from heterodyne.wsd.park import DEFER_STEPS, UNRECEIPTED
 from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started
-from heterodyne.wsd.scheduler import POINTS, Outcome, TriggerKind
+from heterodyne.wsd.scheduler import POINTS, Outcome, TriggerKind, undeferrable
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.sweep import Swept, sweep
 from heterodyne.wsd.usage import decide
@@ -545,9 +546,19 @@ def verdict(rig: Rig, bead: str, resume: bool = False) -> object:
 
 
 def quota_waiters(rig: Rig) -> list[str]:
-    """Runnable PARKED/QUOTA waiters: the row, a bead of ours that is resumable, and no open operation."""
-    rows = {r.bead for r in rig.journal.states(WS) if (r.state, r.reason) == (BeadState.PARKED, Reason.QUOTA)}
-    return [b for b in resumable_now(rig) if b in rows and rig.journal.op_for(WS, b) is None]
+    """Undeferrable DEFERRED/QUOTA waiters (AU-4): the row, a bead of ours that only its deferral stops,
+    and no open operation."""
+    rows = {r.bead for r in rig.journal.states(WS)
+            if (r.state, r.reason) == (BeadState.DEFERRED, Reason.QUOTA)}
+    return sorted(b for b in rows
+                  if undeferrable(rig.beads.show(WS, b)) and rig.journal.op_for(WS, b) is None)
+
+
+def deferred_until(rig: Rig, bead: str) -> int:
+    [current] = [d for d in rig.journal.deferrals_current(WS, "coder") if d.bead == bead]
+    at = epoch(current.defer_until)
+    assert at is not None
+    return at
 
 
 class Racer(Recorder):
@@ -592,7 +603,8 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
     HELD means a hold names why; NOTHING means no bead is ready, none is resumable, no quota waiter is left
     and no coder runs; STUCK means the same except that ready beads btq's claim can't take are left, each
     recorded as UNCLAIMABLE (or, AU-5, ACCOUNT_REPOINTED), or skipped for quota; DEFERRED means no coder
-    runs, every ready, resumable or quota-waiting bead gates to a Deadline, and the wake is after now.
+    runs, every ready or resumable bead gates to a Deadline, every deferred one (AU-4) waits on a record
+    not yet due, and the wake is after now.
     AU-5's kinds: "quota_blocked" (its profile's key stays blocked), "quota_clears" (blocked for 30
     minutes), "quota_race" (blocked at `gate.checked`, after pickup's gate admitted it) and
     "account_repointed" (launched before on another key, under failover "none": never claimed). On
@@ -662,7 +674,7 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
             assert [b for b in claimable_now(rig) if b not in gated] == [] or unreceipted
             assert all(isinstance(verdict(rig, b, resume=True), Deadline) for b in resumable_now(rig))
             waiters = quota_waiters(rig)
-            assert all(isinstance(verdict(rig, b, resume=True), Deadline) for b in waiters)
+            assert all(deferred_until(rig, b) > rig.clock() for b in waiters)     # none left due
             left = [b.id for b in rig.world.ready_for(WS)]
             stuck_left = [b for b in left if reason_of(rig, b) in (("stuck", Reason.UNCLAIMABLE),
                                                                     ("stuck", Reason.ACCOUNT_REPOINTED))]
@@ -1415,21 +1427,6 @@ def test_unreadable_pause_flag_is_paused_not_unreachable(tmp_path: Path) -> None
 HOUR = 3600
 
 
-def repoint_codex(rig: Rig, to: str) -> None:
-    """Repoint the default codex login (`~/.codex/auth.json`) to another file, or back (`to` = "")."""
-    accounts = rig.ws.accounts
-    assert isinstance(accounts, ConfiguredAccounts)
-    link = Path(accounts.env["HOME"]) / ".codex" / "auth.json"
-    link.unlink()
-    if to:
-        other = link.parent.parent / f".codex-{to}" / "auth.json"
-        other.parent.mkdir(exist_ok=True)
-        other.write_text("{}")
-        link.symlink_to(other)
-    else:
-        link.write_text("{}")
-
-
 def handed_back(rig: Rig, bead: str) -> None:
     """The bead's session ended and its claim went back to the queue: ready again, launched before."""
     rig.runtime.end(rig.key(bead))
@@ -1474,8 +1471,11 @@ def test_a_resumable_bead_is_gated_on_its_recorded_profile(tmp_path: Path) -> No
     block(rig, profile_key(rig, "p-two"), 2 * HOUR)
     assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
     assert len(rig.runtime.launches) == 1
+    assert reason(rig) == ("deferred", Reason.QUOTA)      # AU-4 §3.2 entry 2: deferred, not skipped
     rig.clock.advance(HOUR)
-    assert rig.pickup() is Outcome.RESUMED                 # p-one clears; p-two still blocks
+    assert rig.pickup() is Outcome.NOTHING                 # p-one clears: undeferred, parked again (§3.3)
+    assert reason(rig) == ("parked", Reason.BLOCKED_ON_BEAD) and rig.journal.ops_open() == []
+    assert rig.pickup() is Outcome.RESUMED                 # p-two still blocks
     assert rig.runtime.launches[-1].profile == "p-one"
 
 
@@ -1587,29 +1587,32 @@ def raced(tmp_path: Path) -> tuple[Rig, int]:
 def test_the_guard_race_is_deferred_with_a_wake(tmp_path: Path) -> None:
     rig, until = raced(tmp_path)
     assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
-    assert reason(rig) == ("parked", Reason.QUOTA) and rig.runtime.launches == []
-    assert PARKED in rig.world.beads["btq-1"].labels and rig.journal.ops_open() == []
+    assert reason(rig) == ("deferred", Reason.QUOTA) and rig.runtime.launches == []
+    labels = rig.world.beads["btq-1"].labels
+    assert DEFERRED in labels and PARKED not in labels and rig.journal.ops_open() == []
     rig.clock.advance(HOUR)
     assert rig.pickup(TriggerKind.QUOTA_WAKE) is Outcome.RESUMED
     assert len(rig.runtime.launches) == 1 and rig.state("btq-1") == "running"
+    assert DEFERRED not in rig.world.beads["btq-1"].labels
 
 
-@pytest.mark.parametrize("point", ["pickup.quota", "pickup.quota!"])
-def test_a_crash_in_the_quota_shelve_replays_to_parked_quota(tmp_path: Path, point: str) -> None:
+@pytest.mark.parametrize("step", DEFER_STEPS)
+def test_a_crash_in_the_guard_defer_replays_to_the_deferral(tmp_path: Path, step: str) -> None:
     rig, until = raced(tmp_path)
     assert isinstance(rig.cp, At)
     block_now = rig.cp.fn
-    rig.restart(Both(At("gate.checked", block_now), CrashAt(point)))
+    rig.restart(Both(At("gate.checked", block_now), CrashAt(f"pickup.{step}")))
     with pytest.raises(SimulatedCrash):
         rig.pickup()
     rig.restart()
     assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
-    assert reason(rig) == ("parked", Reason.QUOTA) and rig.runtime.launches == []
+    assert reason(rig) == ("deferred", Reason.QUOTA) and rig.runtime.launches == []
     row = rig.journal.state(WS, "btq-1")
     assert row is not None and row.detail == quota_detail(until)
+    assert [d.number for d in rig.journal.deferrals_current(WS, "coder")] == [1]
 
 
-@pytest.mark.parametrize("point", ["resume.quota", "resume.quota!", None])
+@pytest.mark.parametrize("point", ["resume.defer.recorded", "resume.defer.labelled!", None])
 def test_the_resume_race_is_deferred_and_replays(tmp_path: Path, point: str | None) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
@@ -1629,17 +1632,17 @@ def test_the_resume_race_is_deferred_and_replays(tmp_path: Path, point: str | No
             rig.pickup()
         rig.restart()
         assert rig.pickup() is Outcome.DEFERRED
-    assert rig.sched.wake_at == until and reason(rig) == ("parked", Reason.QUOTA)
+    assert rig.sched.wake_at == until and reason(rig) == ("deferred", Reason.QUOTA)
     assert len(rig.runtime.launches) == 1
     rig.clock.advance(HOUR)
     assert rig.pickup() is Outcome.RESUMED and len(rig.runtime.launches) == 2
 
 
 @pytest.mark.parametrize("added", ["blocker", "held", "needs_human"])
-def test_a_quota_waiter_that_gains_a_stop_before_the_replay_ends_in_it(tmp_path: Path, added: str) -> None:
-    rig, _ = raced(tmp_path)
+def test_a_guard_defer_that_gains_a_stop_before_the_replay_ends_in_it(tmp_path: Path, added: str) -> None:
+    rig, until = raced(tmp_path)
     assert isinstance(rig.cp, At)
-    rig.restart(Both(At("gate.checked", rig.cp.fn), CrashAt("pickup.quota")))
+    rig.restart(Both(At("gate.checked", rig.cp.fn), CrashAt("pickup.defer.recorded")))
     with pytest.raises(SimulatedCrash):
         rig.pickup()
     if added == "blocker":
@@ -1650,19 +1653,26 @@ def test_a_quota_waiter_that_gains_a_stop_before_the_replay_ends_in_it(tmp_path:
         rig.world.beads["btq-1"].labels.append(HELD if added == "held" else NEEDS_HUMAN)
     rig.restart()
     outcome = rig.pickup()
-    expected = {"blocker": ("parked", Reason.BLOCKED_ON_BEAD), "held": ("held", Reason.HELD_BY_OPERATOR),
+    expected = {"blocker": ("deferred", Reason.QUOTA), "held": ("held", Reason.HELD_BY_OPERATOR),
                 "needs_human": ("stuck", Reason.NEEDS_HUMAN)}[added]
     assert reason(rig) == expected and rig.sched.wake_at is None
     assert outcome is not Outcome.DEFERRED
+    assert DEFERRED in rig.world.beads["btq-1"].labels
+    rig.clock.advance(HOUR)
+    rig.pickup()
+    assert rig.runtime.launches == [] and rig.clock() >= until
 
 
-def test_a_runnable_waiter_counts_at_its_deadline_or_the_recheck(tmp_path: Path) -> None:
+def test_a_deferral_counts_at_its_records_until_whatever_the_marks_say(tmp_path: Path) -> None:
+    """AU-4 §4: the wake time is the current record's `defer_until`; the gate is read again only when the
+    record is due, inside the undefer."""
     rig, until = raced(tmp_path)
     assert rig.pickup() is Outcome.DEFERRED
     now = rig.clock()
-    assert rig.sched._waiters(now) == [until]  # pyright: ignore[reportPrivateUsage]
+    assert rig.sched._deferrals(now) == [until]  # pyright: ignore[reportPrivateUsage]
     rig.journal.db.execute("DELETE FROM account_exhausted")
-    assert rig.sched._waiters(now) == [now + rig.ws.usage.min_recheck_seconds]  # pyright: ignore[reportPrivateUsage]
+    assert rig.sched._deferrals(now) == [until]  # pyright: ignore[reportPrivateUsage]
+    assert rig.pickup() is Outcome.DEFERRED and rig.runtime.launches == []
 
 
 class Both(Recorder):

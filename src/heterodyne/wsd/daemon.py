@@ -39,6 +39,12 @@ Nothing is armed once wsd is stopping, and shutdown cancels the armed wakes and 
 its lane along with the timers. A wake that is lost (a restart) only delays: the backstop and startup
 pickups compute it again.
 
+Re-gates (AU-4 §5): the first successful recovery of each workstream in this process re-gates its
+`account_changed` waits, under the same lock (`regated`, in memory only); nothing else re-gates except
+`wsctl reload`. A reload loads the settings again and refuses any change outside each workstream's
+`accounts`, `usage` and `models` ("restart required"); otherwise one job per lane swaps that workstream's
+settings under its operation lock and re-gates it, and `s` becomes the loaded settings.
+
 A workstream that is `stuck` (or a pickup whose outcome is `stuck`) is not idle: beads are ready or
 claimed that only a human can move on. Status and tick replies say so.
 """
@@ -46,12 +52,15 @@ claimed that only a human can move on. Status and tick replies say so.
 import asyncio
 import concurrent.futures as cf
 import contextlib
+import dataclasses
+import os
 import threading
 from collections import deque
 from collections.abc import Callable, Coroutine, Hashable
 from dataclasses import dataclass
 from typing import Any
 
+from heterodyne.config import ConfigError
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -61,9 +70,9 @@ from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime, HoldingReconciler
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
-from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
-from heterodyne.wsd.workstream import Deps
+from heterodyne.wsd.workstream import Deps, WorkstreamSettings
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -85,6 +94,11 @@ class JobFailed(Exception):
 
 STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
 PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last one asked is applied
+RELOAD = "reload"
+
+
+def _resolve() -> WsdSettings:
+    return resolve(os.environ)
 
 
 class Lane:
@@ -182,10 +196,14 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
 
 
 class Wsd:
-    def __init__(self, s: WsdSettings, parts: Parts) -> None:
+    def __init__(self, s: WsdSettings, parts: Parts, load: Callable[[], WsdSettings] = _resolve) -> None:
         self.s = s
         self.parts = parts
+        self.load = load            # `wsctl reload`'s settings: plan 1's loader
         self.recovered: set[str] = set()
+        self.regated: set[str] = set()      # re-gated since this process started (AU-4 §5.1); memory only
+        self.reloads = 0                    # reload requests so far: each one's jobs get their own key
+        self.reloading: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self.stopping = False
         self.shutdown = threading.Lock()        # held while every lane closes; see Lane
         self.lanes = {name: Lane(name, self.shutdown) for name in [STATUS_LANE, *parts.schedulers]}
@@ -207,9 +225,14 @@ class Wsd:
                 raise
 
     def _recover(self, name: str) -> Recovered:
+        """A recovery, then, after the process's first successful one, the startup re-gate (AU-4 §5.1). A
+        re-gate that raises leaves the workstream unrecovered and not re-gated: the next trigger does both."""
         self.recovered.discard(name)
         result = recover(self.parts.schedulers[name])
         if result.ok:
+            if name not in self.regated:
+                self.parts.schedulers[name].regate_all()
+                self.regated.add(name)
             self.recovered.add(name)
         return result
 
@@ -242,6 +265,19 @@ class Wsd:
         for name in self.parts.schedulers:
             self.recover_one(name)
         return {name: self.pickup_one(name, Trigger(TriggerKind.STARTUP)) for name in self.parts.schedulers}
+
+    def reload_one(self, name: str, ws: WorkstreamSettings) -> dict[str, str]:
+        """`wsctl reload` on one workstream's lane (AU-4 §5.2): swap its settings, then re-gate its
+        `account_changed` waits, after a recovery if its last one did not succeed."""
+        def work() -> dict[str, str]:
+            sched = self.parts.schedulers[name]
+            sched.reconfigure(ws)
+            if name not in self.recovered and not self._recover(name).ok:
+                return {"outcome": Outcome.HELD.value}
+            counts = sched.regate_all()
+            return {"over": str(counts.over), "requota": str(counts.requota),
+                    "unchanged": str(counts.unchanged)}
+        return self._locked(name, work)
 
     def set_pause(self, name: str, paused: bool) -> CtlReply:
         """§4.3: the flag is set under the claim lock, so once this returns no claim can start. A flag that
@@ -376,6 +412,8 @@ class Wsd:
                                                             lambda: self.status(ws, everything)))
         if req.op in ("pause", "resume") and req.ws is not None:
             return await self._pause_state(req.ws, req.op == "pause")
+        if req.op == RELOAD:
+            return await self._reload()
         job = self.reconcile_one if req.job == "reconcile" else self._operator_pickup
         kind = req.job or "pickup"
         names = self._names(req.ws)
@@ -394,6 +432,59 @@ class Wsd:
             return CtlReply("failed", f"{req.job} failed ({'; '.join(failed)}); recovered again before the "
                                       "next pickup", results)
         return CtlReply("ok", f"{req.job} done", results)
+
+    def _reload_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self.reloading is None or self.reloading[0] is not loop:
+            self.reloading = (loop, asyncio.Lock())
+        return self.reloading[1]
+
+    async def _reload(self) -> CtlReply:
+        """One reload at a time, start to finish: a second one loads and compares only after the first
+        has swapped every lane and set `self.s`, and its jobs never join the first one's (each reload's
+        jobs have their own key), so every acknowledged snapshot is the one applied."""
+        async with self._reload_lock():
+            return await self._reload_once()
+
+    async def _reload_once(self) -> CtlReply:
+        """Load the settings again, refuse anything but `accounts`, `usage` and `models` changing (O3), then
+        swap and re-gate on every lane, each under its operation lock. `self.s` becomes the new settings
+        once every lane has swapped, so the next reload compares against them. A lane whose recovery
+        failed swapped but did not re-gate: the reply is `failed`, and the operator reloads again once it
+        recovers (nothing else re-gates it; AU-4 §5.1)."""
+        try:
+            loaded = self.load()
+        except ConfigError as exc:
+            return CtlReply("refused", f"reload refused: {exc}; nothing was changed")
+        running = dataclasses.replace(self.s, workstreams=tuple(
+            sched.ws for sched in self.parts.schedulers.values()))
+        changed = restart_fields(restart_view(running), restart_view(loaded))
+        if changed:
+            return CtlReply("refused", f"restart required: {', '.join(changed)}; nothing was changed")
+        streams = {w.name: w for w in loaded.workstreams}
+        names = list(self.parts.schedulers)
+        self.reloads += 1
+        key = (RELOAD, self.reloads)
+        done = await asyncio.gather(*(self._run(name, key, lambda n=name: self.reload_one(n, streams[n]))
+                                      for name in names), return_exceptions=True)
+        self.s = loaded
+        results: dict[str, dict[str, str]] = {}
+        failed: list[str] = []
+        for name, counts in zip(names, done, strict=True):
+            if isinstance(counts, Stopping) or (isinstance(counts, BaseException)
+                                                and not isinstance(counts, Exception)):
+                raise counts
+            if isinstance(counts, Exception):
+                failed.append(f"{name}: {type(counts).__name__}")
+                results[name] = {"outcome": "failed", "error": type(counts).__name__}
+            else:
+                if counts.get("outcome") == Outcome.HELD.value:
+                    failed.append(f"{name}: recovery failed")
+                results[name] = counts
+        if failed:
+            return CtlReply("failed", f"reload applied, but re-gating did not finish ({'; '.join(failed)}); "
+                                      "run wsctl reload again once recovered", results)
+        return CtlReply("ok", "reload done", results)
 
     async def _pause_state(self, name: str, paused: bool) -> CtlReply:
         """Ask for a pause or a resume. Asked before the lane's pause-state job starts, it joins that job,

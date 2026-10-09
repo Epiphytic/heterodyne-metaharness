@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from heterodyne.config import ConfigError
-from heterodyne.wsd.settings import resolve
+from heterodyne.wsd.settings import resolve, restart_fields, restart_view
 
 
 @pytest.fixture(autouse=True)
@@ -121,3 +121,11 @@ def test_integrations_marmot_is_left_alone(cfg: Path) -> None:
     write(cfg, "config.toml", (cfg / "config.toml").read_text()
           + '[integrations.marmot]\nsocket = "/run/x.sock"\n')
     assert resolve(env(cfg)).btq_checkout == cfg / "btq"
+
+
+def test_restart_view_is_equal_for_two_resolves_of_the_same_files(cfg: Path) -> None:
+    """AU-4 §5.2: `ConfiguredAccounts` has no value equality, so reload compares these plain values."""
+    first, second = resolve(env(cfg)), resolve(env(cfg))
+    assert first != second                         # the settings objects themselves never compare equal
+    assert restart_view(first) == restart_view(second)
+    assert restart_fields(restart_view(first), restart_view(second)) == []

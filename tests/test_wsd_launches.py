@@ -18,6 +18,7 @@ from heterodyne.config.capabilities import Capabilities
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import AccountChanged, Candidate, Chosen, ConfiguredAccounts, ProfileAccounts
 from heterodyne.wsd.beads import (
+    DEFERRED,
     HELD,
     NEEDS_HUMAN,
     PARKED,
@@ -38,7 +39,7 @@ from heterodyne.wsd.launches import (
     decode_launches,
     encode_entry,
 )
-from heterodyne.wsd.park import UNRECEIPTED
+from heterodyne.wsd.park import DEFER_STEPS, UNRECEIPTED
 from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
@@ -410,12 +411,13 @@ def test_a_resume_never_dispatches_a_repointed_pin(tmp_path: Path) -> None:
     repoint_file(tmp_path)
     rig.pickup()
     assert row_reason(rig) is Reason.ACCOUNT_CHANGED and rig.runtime.calls == 1
+    assert rig.state("btq-1") == "deferred" and DEFERRED in rig.world.beads["btq-1"].labels   # AU-4
     assert [e.outcome for e in rig.journal.launches_of(WS, "btq-1")] == ["launched", "abandoned"]
 
 
-def test_a_blocked_pin_is_abandoned_and_quota_shelved(tmp_path: Path) -> None:
-    """AU-5: the pinned account is blocked before dispatch (a trusted full window), so the pin is
-    abandoned and the bead quota-shelved, with no dispatch."""
+def test_a_blocked_pin_is_abandoned_and_deferred(tmp_path: Path) -> None:
+    """AU-5, then AU-4: the pinned account is blocked before dispatch (a trusted full window), so the pin
+    is abandoned and the bead deferred, with no dispatch."""
     rig = started(tmp_path)
     crash(rig, "pickup.entry!")
     [pinned] = rig.journal.launches_of(WS, "btq-1")
@@ -426,7 +428,7 @@ def test_a_blocked_pin_is_abandoned_and_quota_shelved(tmp_path: Path) -> None:
     assert rig.runtime.calls == 0 and rig.journal.ops_open() == []
     assert {e.outcome for e in rig.journal.launches_of(WS, "btq-1")} == {"abandoned"}
     row = rig.journal.state(WS, "btq-1")
-    assert row is not None and row.reason is Reason.QUOTA
+    assert row is not None and (row.state, row.reason) == (BeadState.DEFERRED, Reason.QUOTA)
 
 
 def pinned_then_blocked(tmp_path: Path, kind: str) -> tuple[Rig, int]:
@@ -442,16 +444,17 @@ def pinned_then_blocked(tmp_path: Path, kind: str) -> tuple[Rig, int]:
 
 
 @pytest.mark.parametrize("kind", ["pickup", "resume"])
-@pytest.mark.parametrize("step", ["abandoned", "abandoned!", "quota", "quota!"])
-def test_a_crash_in_a_quota_shelve_replays_to_parked_quota(tmp_path: Path, kind: str, step: str) -> None:
+@pytest.mark.parametrize("step", ["abandoned", "abandoned!", *DEFER_STEPS])
+def test_a_crash_in_a_guard_defer_replays_to_the_deferral(tmp_path: Path, kind: str, step: str) -> None:
     rig, until = pinned_then_blocked(tmp_path, kind)
     launched = len(rig.runtime.launches)
     crash(rig, f"{kind}.{step}")
     rig.pickup()
     assert len(rig.runtime.launches) == launched and rig.journal.ops_open() == []
     row = rig.journal.state(WS, "btq-1")
-    assert row is not None and (row.state, row.reason) == (BeadState.PARKED, Reason.QUOTA)
-    assert row.detail == quota_detail(until) and PARKED in rig.world.beads["btq-1"].labels
+    assert row is not None and (row.state, row.reason) == (BeadState.DEFERRED, Reason.QUOTA)
+    labels = rig.world.beads["btq-1"].labels
+    assert row.detail == quota_detail(until) and DEFERRED in labels and PARKED not in labels
     assert rig.sched.wake_at == until
     rig.clock.advance(3600)
     assert rig.pickup() is Outcome.RESUMED and len(rig.runtime.launches) == launched + 1
@@ -459,9 +462,9 @@ def test_a_crash_in_a_quota_shelve_replays_to_parked_quota(tmp_path: Path, kind:
 
 @pytest.mark.parametrize("kind", ["pickup", "resume"])
 @pytest.mark.parametrize("added", ["held", "needs_human", "blocker"])
-def test_a_stop_added_before_the_quota_replay_wins(tmp_path: Path, kind: str, added: str) -> None:
+def test_a_stop_added_before_the_defer_replay_wins(tmp_path: Path, kind: str, added: str) -> None:
     rig, _ = pinned_then_blocked(tmp_path, kind)
-    crash(rig, f"{kind}.quota")
+    crash(rig, f"{kind}.defer.recorded")
     if added == "blocker":
         rig.world.add("btq-3")
         rig.world.beads["btq-3"].labels.remove("agent:wsd")
@@ -471,7 +474,7 @@ def test_a_stop_added_before_the_quota_replay_wins(tmp_path: Path, kind: str, ad
     rig.pickup()
     row = rig.journal.state(WS, "btq-1")
     expected = {"held": (BeadState.HELD, Reason.HELD_BY_OPERATOR), "needs_human": (BeadState.STUCK,
-                Reason.NEEDS_HUMAN), "blocker": (BeadState.PARKED, Reason.BLOCKED_ON_BEAD)}[added]
+                Reason.NEEDS_HUMAN), "blocker": (BeadState.DEFERRED, Reason.QUOTA)}[added]
     assert row is not None and (row.state, row.reason) == expected
     assert rig.journal.ops_open() == [] and rig.sched.wake_at is None
 
@@ -524,6 +527,7 @@ def test_after_a_receipt_a_repointed_login_is_account_changed(tmp_path: Path) ->
     rig.world.close("btq-3")
     rig.pickup()
     assert row_reason(rig) is Reason.ACCOUNT_CHANGED and rig.runtime.calls == 2
+    assert rig.state("btq-1") == "deferred"
 
 
 def test_a_failed_receipt_replays_to_one_spend(tmp_path: Path) -> None:

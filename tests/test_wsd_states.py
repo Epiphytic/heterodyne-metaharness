@@ -28,17 +28,27 @@ EXPECTED: dict[BeadState | None, set[BeadState]] = {
                  S.DROPPED,                                  # lost or abandoned
                  S.STUCK, S.CLOSED},
     S.STARTING: {S.RUNNING,                                  # the launch guard launched it
-                 S.PARKING, S.STUCK, S.CLOSED}
+                 S.PARKING, S.STUCK, S.CLOSED,
+                 S.DEFERRED}                                 # AU-4: a guard defer
                 | _SHELVED,                                  # shelved: not runnable when its launch came
     S.RUNNING: {S.PARKING,
                 S.RESUMING,                                  # the sweep: its session ended (D23)
                 S.STUCK, S.CLOSED},
-    S.PARKING: _SHELVED | {S.STUCK, S.CLOSED},
-    S.PARKED: _SHELVED | {S.STUCK, S.RESUMING, S.CLOSED},
+    S.PARKING: _SHELVED | {S.STUCK, S.CLOSED,
+                           S.DEFERRED},                      # AU-4: the end of every defer tail
+    S.PARKED: _SHELVED | {S.STUCK, S.RESUMING, S.CLOSED,
+                          S.PARKING},                        # AU-4: a due resume defers
     S.WAITING_INPUT: _SHELVED | {S.STUCK, S.RESUMING, S.CLOSED},
-    S.HELD: _SHELVED | {S.STUCK, S.RESUMING, S.CLOSED},       # RESUMING only by release (D19)
-    S.RESUMING: {S.RUNNING, S.PARKING, S.STUCK, S.CLOSED} | _SHELVED,
-    S.STUCK: _SHELVED | {S.RESUMING, S.CLOSED},              # release: back to waiting or a resume (D19)
+    S.HELD: _SHELVED | {S.STUCK, S.RESUMING, S.CLOSED,       # RESUMING only by release (D19)
+                        S.DEFERRED},                         # AU-4: release of a deferred bead
+    S.RESUMING: {S.RUNNING, S.PARKING, S.STUCK, S.CLOSED,
+                 S.DEFERRED}                                 # AU-4: a guard defer, an abandoned undefer
+                | _SHELVED,
+    S.STUCK: _SHELVED | {S.RESUMING, S.CLOSED,               # release: back to waiting or a resume (D19)
+                         S.DEFERRED},                        # AU-4: release of a deferred bead
+    S.DEFERRED: {S.PARKING,                                  # AU-4: a re-gate gives a deadline
+                 S.RESUMING,                                 # undefer
+                 S.HELD, S.STUCK, S.CLOSED},                 # precedence, escalation, closed by anyone
     S.CLOSED: {S.CLAIMING},                                  # a reopened bead can be claimed again
     S.DROPPED: {S.CLAIMING},
 }
@@ -133,10 +143,30 @@ def test_stuck_runs_again_only_through_a_resume() -> None:
     (False, [], [BeadState.HELD], WsState.ALL_BLOCKED),
     (False, [], [BeadState.PARKED, BeadState.WAITING_INPUT, BeadState.HELD], WsState.ALL_BLOCKED),
     (False, [], [BeadState.HELD, BeadState.STUCK], WsState.STUCK),
+    # AU-4: every non-terminal row DEFERRED, whatever the reason, is deferred; mixed with a parked one it
+    # is all-blocked, unless a wake is armed (below).
+    (False, [], [BeadState.DEFERRED], WsState.DEFERRED),
+    (False, [], [BeadState.DEFERRED, BeadState.CLOSED], WsState.DEFERRED),
+    (False, [], [BeadState.DEFERRED, BeadState.PARKED], WsState.ALL_BLOCKED),
+    (False, [], [BeadState.DEFERRED, BeadState.STUCK], WsState.STUCK),
+    (False, [], [BeadState.PARKED], WsState.ALL_BLOCKED),
 ])
 def test_ws_state_priority(paused: bool, holds: list[Reason], beads: list[BeadState],
                            expected: WsState) -> None:
     assert ws_state(paused, holds, beads) is expected
+
+
+def test_an_armed_wake_defers_an_idle_or_all_blocked_workstream() -> None:
+    # AU-4 §2.2: the wake applies where the workstream would otherwise be idle or all-blocked; the states
+    # above those (held, paused, running, stuck) still win.
+    assert ws_state(False, [], [BeadState.PARKED], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [BeadState.PARKED, BeadState.DEFERRED], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [BeadState.WAITING_INPUT, BeadState.HELD], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [BeadState.STUCK], wake=True) is WsState.STUCK
+    assert ws_state(False, [], [BeadState.RUNNING, BeadState.PARKED], wake=True) is WsState.RUNNING
+    assert ws_state(True, [], [BeadState.PARKED], wake=True) is WsState.PAUSED
+    assert ws_state(False, [Reason.JOURNAL_LOST], [BeadState.PARKED], wake=True) is WsState.HELD
 
 
 @given(st.booleans(), st.lists(st.sampled_from(list(BeadState))))

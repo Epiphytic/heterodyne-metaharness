@@ -260,3 +260,22 @@ class LockAt(Recorder):
         if name == self.point and self.other is None:
             self.other = sqlite3.connect(self.db, isolation_level=None)
             self.other.execute("BEGIN IMMEDIATE")
+
+
+def repoint_codex(rig: Rig, to: str) -> None:
+    """Repoint the default codex login (`~/.codex/auth.json`) to another file, or back (`to` = "")."""
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    repoint_codex_at(Path(accounts.env["HOME"]), to)
+
+
+def repoint_codex_at(home: Path, to: str) -> None:
+    link = home / ".codex" / "auth.json"
+    link.unlink()
+    if to:
+        other = home / f".codex-{to}" / "auth.json"
+        other.parent.mkdir(exist_ok=True)
+        other.write_text("{}")
+        link.symlink_to(other)
+    else:
+        link.write_text("{}")

@@ -8,7 +8,7 @@ paths, one of them `default`) and `roles.coder` its coder profile.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,6 +58,52 @@ class WsdSettings:
     @property
     def socket(self) -> Path:
         return self.state_dir / CTL_SOCKET
+
+
+@dataclass(frozen=True)
+class WorkstreamView:
+    """A workstream's settings that only a restart may change: everything but `accounts`, `usage` and
+    `models` (AU-4 §5.2, O3), as plain values with value equality."""
+    name: str
+    repos: tuple[tuple[str, str], ...]
+    coder_role: str
+    coder_profile: str
+    profiles: tuple[str, ...]
+    limits: Limits
+
+
+@dataclass(frozen=True)
+class RestartView:
+    """The settings `wsctl reload` must find unchanged. The host `accounts` are left out: only the journal
+    upgrade reads them."""
+    state_dir: Path
+    backstop_seconds: float
+    reconcile_seconds: float
+    inbox_attempts_before_human: int
+    btq_checkout: Path
+    btq_locations: tuple[tuple[str, str], ...]
+    workstreams: tuple[WorkstreamView, ...]
+
+
+def restart_view(s: WsdSettings) -> RestartView:
+    streams = tuple(WorkstreamView(w.name, tuple(sorted((k, str(v)) for k, v in w.repos.items())),
+                                   w.coder_role, w.coder_profile, tuple(sorted(w.profiles)), w.limits)
+                    for w in sorted(s.workstreams, key=lambda w: w.name))
+    return RestartView(s.state_dir, s.backstop_seconds, s.reconcile_seconds, s.inbox_attempts_before_human,
+                       s.btq_checkout, tuple(sorted(s.btq_locations.items())), streams)
+
+
+def restart_fields(running: RestartView, loaded: RestartView) -> list[str]:
+    """The names of the fields that differ (never their values, which may be paths): a host field by its
+    name, a workstream's as `<workstream>.<field>`, and `workstreams` when the set of names differs."""
+    found = [f.name for f in fields(RestartView)
+             if f.name != "workstreams" and getattr(running, f.name) != getattr(loaded, f.name)]
+    if [w.name for w in running.workstreams] != [w.name for w in loaded.workstreams]:
+        return [*found, "workstreams"]
+    for old, new in zip(running.workstreams, loaded.workstreams, strict=True):
+        found += [f"{old.name}.{f.name}" for f in fields(WorkstreamView)
+                  if getattr(old, f.name) != getattr(new, f.name)]
+    return found
 
 
 def workstream_names(config_dir: Path) -> list[str]:

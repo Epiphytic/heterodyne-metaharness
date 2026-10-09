@@ -12,9 +12,10 @@ the workstream's operation lock (`Parker.entry`):
 5. any hold left: pickup reports HELD;
 6. the coder role is taken if the runtime lists any session of the workstream, live or unknown, under
    whatever role name it was launched (wsd launches one role per workstream);
-7. otherwise resumable parked beads first, then new ready work, trying each candidate in turn until one
-   starts. A refused claim, a lost claim or a confirmed launch failure moves on to the next candidate
-   (the "never idle while an unblocked bead exists" rule); an uncertain launch keeps the role and holds.
+7. otherwise resumable parked beads and over deferred beads first (one list, by bead id), then new
+   ready work, trying each candidate in turn until one starts. A refused claim, a lost claim or a
+   confirmed launch failure moves on to the next candidate (the "never idle while an unblocked bead
+   exists" rule); an uncertain launch keeps the role and holds.
 
 Discovery and claiming agree: btq's claim refuses whatever its per-bead worker's own `ready()` would not
 list, so a listed bead that worker can't claim (a `session:` pin on the workstream session), or one still
@@ -47,6 +48,7 @@ from pathlib import Path
 from heterodyne.config import ConfigError
 from heterodyne.wsd.accounts import AccountChanged, Chosen
 from heterodyne.wsd.beads import (
+    DEFERRED,
     HELD,
     NEEDS_HUMAN,
     PARKED,
@@ -65,7 +67,20 @@ from heterodyne.wsd.gate import Paused
 from heterodyne.wsd.headroom import Deadline, clamp_bound, epoch, wake_time
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
 from heterodyne.wsd.launches import LAUNCHED
-from heterodyne.wsd.park import GUARD_STEPS, Launch, Parker, resumable
+from heterodyne.wsd.park import (
+    ACCOUNT_CHANGED,
+    GUARD_STEPS,
+    QUOTA,
+    REASONS,
+    Launch,
+    NotDeferrable,
+    Parker,
+    RegateCounts,
+    Regated,
+    blocker_detail,
+    parked_state,
+    resumable,
+)
 from heterodyne.wsd.runtime import RuntimeUnavailable
 from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
@@ -128,6 +143,13 @@ class Scheduler:
 
     # --- entry point ---
 
+    def reconfigure(self, ws: WorkstreamSettings) -> None:
+        """`wsctl reload`'s swap (AU-4 §5.2), under the operation lock: `ws` differs from the running
+        settings only in `accounts`, `usage` and `models`, so nothing captured from them goes stale."""
+        with self.parker.entry():
+            self.ws = ws
+            self.parker.ws = ws
+
     def pickup(self, trigger: Trigger) -> Outcome:
         with self.parker.entry():
             self.wake_at = None
@@ -146,9 +168,8 @@ class Scheduler:
         except BeadsUnavailable:
             paused = True        # can't read the flag: show the workstream as stopped, never as running
         rows = [b for b in j.states(name) if b.state not in TERMINAL]
-        all_quota = bool(rows) and all((b.state, b.reason) == (BeadState.PARKED, Reason.QUOTA) for b in rows)
         j.set_ws_state(name, ws_state(paused, j.holds(name), (b.state for b in rows),
-                                      self.wake_at is not None, all_quota))
+                                      self.wake_at is not None))
 
     def _pickup(self, trigger: Trigger) -> Outcome:
         j, name = self.d.journal, self.ws.name
@@ -187,7 +208,7 @@ class Scheduler:
         outcome = self._candidates(trigger, scan)
         if outcome not in (Outcome.NOTHING, Outcome.STUCK):
             return outcome
-        self.wake_at = wake_time([*scan.deadlines, *self._waiters(now), *self._deferrals(now)], now)
+        self.wake_at = wake_time([*scan.deadlines, *self._deferrals(now)], now)
         if outcome is Outcome.STUCK or self.wake_at is None:
             return outcome
         try:            # an uncertain launch above may have left its session listed: the role is taken
@@ -199,15 +220,29 @@ class Scheduler:
         return Outcome.DEFERRED
 
     def _candidates(self, trigger: Trigger, scan: _Scan) -> Outcome:
-        """§5.2 step 7, each candidate gated on its own profile (AU-5 §3.6): resumable parked beads, then
-        new ready work, until one starts. A candidate with no headroom is skipped, never claimed."""
+        """§5.2 step 7, each candidate gated on its own profile (AU-5 §3.6): Source 1 (resumable parked
+        beads and over deferred ones, by bead id), then new ready work, until one starts. A new candidate
+        with no headroom is skipped, never claimed; a parked one with none is deferred (AU-4 §3.2 entry 2);
+        a deferred one is gated inside its undefer."""
         j, name = self.d.journal, self.ws.name
-        for bead in self._resumable():
-            verdict = self._gate_resume(bead, scan.now)
-            if isinstance(verdict, Deadline):
-                scan.deadlines.append(verdict.at)
-                continue
-            result = self.parker.resume(bead, trigger.ref)
+        for bead in self._source_one(scan.now):
+            row = j.state(name, bead.id)
+            if row is not None and row.state is BeadState.DEFERRED:
+                result = self.parker.undefer(bead.id, trigger.ref)
+            else:
+                verdict = self._gate_resume(bead, scan.now)
+                if row is not None and row.state is BeadState.PARKED and verdict is not None:
+                    until = verdict.at if isinstance(verdict, Deadline) else None
+                    try:
+                        self.parker.open_defer(bead.id, ACCOUNT_CHANGED if until is None else QUOTA, until,
+                                               ref=trigger.ref)
+                        continue
+                    except NotDeferrable:
+                        pass                # the guard below finds what is missing and escalates it
+                elif isinstance(verdict, Deadline):     # WAITING_INPUT: skipped, as before AU-4
+                    scan.deadlines.append(verdict.at)
+                    continue
+                result = self.parker.resume(bead, trigger.ref)
             if result in (Launch.STARTED, Launch.LIVE):
                 return Outcome.RESUMED
             if result in (Launch.WAIT, Launch.UNCERTAIN):
@@ -264,14 +299,15 @@ class Scheduler:
         except ConfigError:
             return None
 
-    def _gate_resume(self, bead: Bead, now: int) -> Verdict | Chosen:
-        """A resumable bead, gated on its recorded session's profile. AccountChanged goes on: the guard
-        escalates a claimed bead (O6)."""
+    def _gate_resume(self, bead: Bead, now: int) -> Verdict:
+        """A resumable bead, gated on its recorded session's profile: a Deadline or AccountChanged, or None
+        to resume (an account, or not gated here)."""
         try:
             rec = bead.record()
         except RecordUnreadable:
             return None
-        return None if rec is None else self._gate(bead.id, rec.profile, rec.session_key, now)
+        verdict = None if rec is None else self._gate(bead.id, rec.profile, rec.session_key, now)
+        return verdict if isinstance(verdict, Deadline | AccountChanged) else None
 
     def _gate_new(self, bead: Bead, now: int) -> Verdict:
         """A ready bead, gated on the profile and session its placement gives. Its STUCK/ACCOUNT_REPOINTED
@@ -288,29 +324,17 @@ class Scheduler:
             j.adopt(name, bead.id, BeadState.DROPPED, Reason.CLAIM_ABANDONED, "account restored")
         return verdict if isinstance(verdict, Deadline | AccountChanged) else None
 
-    def _waiters(self, now: int) -> list[int]:
-        """Each runnable PARKED/QUOTA waiter's current gate deadline, or `now + min_recheck_seconds` if it
-        gates to an account or to `account_changed`, so the next pickup resumes or escalates it."""
-        j, name = self.d.journal, self.ws.name
-        rows = {r.bead for r in j.states(name) if (r.state, r.reason) == (BeadState.PARKED, Reason.QUOTA)}
-        found: list[int] = []
-        for bead in self.d.beads.ours(name):
-            if bead.id in rows and resumable(bead) and j.op_for(name, bead.id) is None:
-                verdict = self._gate_resume(bead, now)
-                found.append(verdict.at if isinstance(verdict, Deadline)
-                             else now + self.ws.usage.min_recheck_seconds)
-        return found
-
     def _deferrals(self, now: int) -> list[int]:
-        """The `defer_until` of each current coder quota deferral still after `now` (AU-4 writes them),
-        except for beads the journal has HELD or STUCK, beads labelled `v2:held` or `needs-human`, and
-        beads with open blockers."""
+        """The `defer_until` of each current coder quota deferral still after `now`, except for beads the
+        journal has HELD or STUCK, beads with an open op, beads labelled `v2:held` or `needs-human`, and
+        beads with open blockers. `account_changed` waits never count: no timer re-gates them."""
         j, name = self.d.journal, self.ws.name
         rows = {r.bead: r.state for r in j.states(name)}
         found: list[int] = []
         for d in j.deferrals_current(name, self.ws.coder_role):
             at = epoch(d.defer_until)
-            if d.reason != "quota" or at is None or at <= now or rows.get(d.bead) in KEPT:
+            if (d.reason != QUOTA or at is None or at <= now or rows.get(d.bead) in KEPT
+                    or j.op_for(name, d.bead) is not None):
                 continue
             bead = self.d.beads.show(name, d.bead)
             if HELD not in bead.labels and NEEDS_HUMAN not in bead.labels and not bead.open_blockers():
@@ -337,15 +361,64 @@ class Scheduler:
     def _stalled(self) -> Outcome:
         return Outcome.HELD if self.d.journal.holds(self.ws.name) else Outcome.BUSY
 
-    def _resumable(self) -> list[Bead]:
-        """Parked beads of ours that are resumable now and that the journal has as waiting on blockers
-        or input. A bead the journal has as HELD or STUCK is never resumed here, whatever its labels say:
-        only the operator's release moves it on."""
+    def _source_one(self, now: int) -> list[Bead]:
+        """Source 1, by bead id: parked beads of ours that are resumable now and that the journal has as
+        waiting on blockers or input, and DEFERRED beads whose coder deferral is over. A bead the journal
+        has as HELD or STUCK is never resumed here, whatever its labels say: only the operator's release
+        moves it on."""
         j, name = self.d.journal, self.ws.name
         rows = {r.bead: r.state for r in j.states(name)}
-        return sorted((b for b in self.d.beads.ours(name)
-                       if rows.get(b.id) in RESUMABLE_ROWS and resumable(b) and j.op_for(name, b.id) is None),
+        over = self._over(now)
+        return sorted((b for b in self.d.beads.ours(name) if j.op_for(name, b.id) is None and (
+                           (rows.get(b.id) in RESUMABLE_ROWS and resumable(b))
+                           or (rows.get(b.id) is BeadState.DEFERRED and b.id in over and undeferrable(b)))),
                       key=lambda b: b.id)
+
+    def _over(self, now: int) -> set[str]:
+        """Beads whose current coder deferral is over: quota with `defer_until <= now`, or `account_changed`
+        with a re-gate's over-mark (AU-4 §4). Reviewer deferrals are never read here."""
+        j = self.d.journal
+        found: set[str] = set()
+        for d in j.deferrals_current(self.ws.name, self.ws.coder_role):
+            at = epoch(d.defer_until)
+            if ((d.reason == QUOTA and at is not None and at <= now)
+                    or (d.reason == ACCOUNT_CHANGED and j.is_over(d.session_key, d.number))):
+                found.add(d.bead)
+        return found
+
+    def regate_all(self) -> RegateCounts:
+        """Re-gate every DEFERRED/ACCOUNT_CHANGED row of the workstream (AU-4 §3.4). Its only callers are
+        the daemon's process start and `wsctl reload`: no pickup trigger, timer or recovery re-gates."""
+        with self.parker.entry():
+            counts = {r: 0 for r in Regated}
+            for row in self.d.journal.states(self.ws.name):
+                if (row.state, row.reason) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED):
+                    counts[self.parker.regate(row.bead)] += 1
+            return RegateCounts(counts[Regated.OVER], counts[Regated.REQUOTA], counts[Regated.UNCHANGED])
+
+    def convert_quota_rows(self) -> int:
+        """Recovery step 4b (AU-4 §6): each AU-5 PARKED/QUOTA row with no open op, gated fresh. An account
+        (or no gate here) makes it the ordinary parked row the resume takes; a Deadline or AccountChanged
+        defers it in a PARK op. A bead needing a human, held or blocked is left to the sweep."""
+        j, name = self.d.journal, self.ws.name
+        now, converted = self.d.clock(), 0
+        for bead in sorted(self.d.beads.ours(name), key=lambda b: b.id):
+            row = j.state(name, bead.id)
+            if (row is None or (row.state, row.reason) != (BeadState.PARKED, Reason.QUOTA)
+                    or j.op_for(name, bead.id) is not None or not resumable(bead)):
+                continue
+            verdict = self._gate_resume(bead, now)
+            if verdict is None:
+                state = parked_state(bead)
+                j.adopt(name, bead.id, state, REASONS[state], blocker_detail(bead))
+            else:
+                until = verdict.at if isinstance(verdict, Deadline) else None
+                try:
+                    self.parker.open_defer(bead.id, QUOTA if until is not None else ACCOUNT_CHANGED, until)
+                except NotDeferrable:
+                    continue        # the sweep's migration-only branch keeps the row
+            converted += 1
+        return converted
 
     # --- new work ---
 
@@ -451,6 +524,11 @@ class Scheduler:
             j.adopt(name, op.bead, BeadState.DROPPED, Reason.CLAIM_LOST, "the bead no longer exists")
 
     def replay_pickup(self, op: Op) -> Launch:
+        if op.step.startswith("defer."):            # a guard defer: the tail, before any other check
+            self.parker.defer_tail(op)
+            return Launch.ENDED
+        if op.step == "quota":                      # AU-5's shelve, converted (AU-4 §6)
+            return self.parker.convert_quota(op)
         if op.step == "intent":
             resolved = self.resolve_claim(op)
             if resolved is None:
@@ -461,8 +539,6 @@ class Scheduler:
 
     def _start(self, op: Op) -> Launch:
         j, name = self.d.journal, self.ws.name
-        if op.step == "quota":
-            return self.parker.finish_quota(op)     # a quota shelve's replay, before any other check
         if op.step == "claimed":
             if op.data.get("role") != self.ws.coder_role:
                 self.parker.escalate_from(op, Reason.CONFIG_INVALID,
@@ -493,6 +569,13 @@ class Scheduler:
             self.d.cp("pickup.worktree")
         # The guard verifies the recorded worktree itself before launching into it.
         return self.parker.launch(op, record_from(op))
+
+
+def undeferrable(bead: Bead) -> bool:
+    """A deferred bead's labels allow its undefer: `v2:deferred`, neither held nor needing a human, and
+    no open blocker unless it is also `v2:parked` (then the undefer ends it PARKED)."""
+    return (DEFERRED in bead.labels and HELD not in bead.labels and NEEDS_HUMAN not in bead.labels
+            and (PARKED in bead.labels or not bead.open_blockers()))
 
 
 def record_from(op: Op) -> SessionRecord:
