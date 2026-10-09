@@ -1,4 +1,4 @@
-# btq-yk7ns (AU-5): usage cache, headroom gate and per-candidate pickup (design r1)
+# btq-yk7ns (AU-5): usage cache, headroom gate and per-candidate pickup (design r2)
 
 Base: main 1ff70c1 (AU-2 and AU-3 merged). Sources:
 - the accounts plan, §AU-5 and the dependency graph (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at 66ad195);
@@ -7,6 +7,16 @@ Base: main 1ff70c1 (AU-2 and AU-3 merged). Sources:
 - spike S7 (`docs/spikes/s7-accounts-and-usage.md`) for the shapes of the usage sources.
 
 Scope: plan 3b's usage cache, the pure headroom gate, ingestion, and per-candidate gating in pickup, with the quota wake time. Design only: nothing is implemented here. PoC-scoped: no usage producer, no deferral writer and no rendering (AU-7, AU-4 and AU-9).
+
+**r2 changes** (review r1 on c30465c):
+1. Clamped values carry a persisted marker, keyed by the value's own identity, so a rewritten value is never moved again, even after another backward jump. A genuinely new value has a new identity and so starts unmarked (§2.5, §3.5).
+2. The interim quota shelve is its own journaled step (`quota`), replayed explicitly. A crash at any point ends `PARKED/QUOTA`, unless a hold, `needs-human` or a blocker appeared meanwhile, which wins (§3.4).
+3. The wake time also counts every runnable `PARKED/QUOTA` waiter, so a bead the guard shelved in a race always has a wake (§3.6).
+4. A ready candidate whose gate gives `account_changed` is skipped without claiming, arms no timer, and is recorded `STUCK/ACCOUNT_CHANGED` like an unclaimable bead. Only claimed resumes go to the guard's escalation (§3.6).
+5. O4 is now an explicit plan amendment, moving the whole `account_changed` lifecycle bullet to AU-4, with its tests and the reload trigger named (§8).
+6. Times are stored as UTC epoch seconds, as D4 says (in AU-3's `TEXT` columns, as decimal integers). O2 is dropped (§2.2).
+
+Items that need Liam's sign-off: **O1** (the interim quota shelve as a temporary stand-in for D5's deferral, until AU-4) and **the §8 plan amendment** (O4).
 
 ## 0. What AU-5 changes in production, and what it doesn't
 
@@ -40,11 +50,11 @@ class UsageSettings:              # [usage], host only; AU-2 already validates e
     max_window_hours: int
 ```
 
-`settings.resolve` reads `[usage]` from the host config (the defaults come from `defaults.toml`) and puts one `UsageSettings` on every `WorkstreamSettings` as `usage`. `Deps` gains `clock: Callable[[], datetime]`, which defaults to UTC now truncated to whole seconds. Every scheduling decision in AU-5 takes `now` from `deps.clock`, so the tests drive one injected clock, jumps included. The journal's own `journaled_at`/`since` stamps are bookkeeping and keep using `journal.now()`.
+`settings.resolve` reads `[usage]` from the host config (the defaults come from `defaults.toml`) and puts one `UsageSettings` on every `WorkstreamSettings` as `usage`. `Deps` gains `clock: Callable[[], int]`, which defaults to UTC now in whole epoch seconds. Every scheduling decision in AU-5 takes `now` from `deps.clock`, so the tests drive one injected clock, jumps included. The journal's own `journaled_at`/`since` stamps are bookkeeping and keep using `journal.now()`.
 
 ### 2.2 Times
 
-ADR D4 says "times are stored as UTC epoch seconds". AU-3's frozen schema made the usage columns `TEXT`, like every other journal time. AU-5 stores them as ISO-8601 UTC with whole seconds (`journal.now()`'s format) and compares them as aware `datetime`s. That is the same instant and resolution, timezone-free. Open decision **O2**.
+ADR D4 says "times are stored as UTC epoch seconds". AU-5 does exactly that. AU-3's columns are `TEXT`, which doesn't force a format, so every usage and deadline time (`resets_at`, `observed_at`, `until`, and AU-4's `defer_until`) is stored as a decimal integer string of UTC epoch seconds, `str(int(t))`. It is read back with `int()`, and a value that doesn't parse is treated as unknown, which is eligible. In memory, times are `int` epoch seconds, and `deps.clock` returns one. No schema change.
 
 ### 2.3 Observations and rows
 
@@ -54,18 +64,18 @@ class Observation:               # what a producer (AU-7) hands to ingestion, al
     window_id: str               # stable per window, chosen by the producer (§2.4)
     kind: str                    # a short display label, e.g. "5h" or "7d" (§2.4)
     used_percent: object         # validated here: a finite int/float in [0, 100], never a bool
-    resets_at: datetime | None   # the payload's reset hint, if any
+    resets_at: int | None        # the payload's reset hint, if any
     source: str                  # e.g. "codex.app-server", "claude.statusline", "codex.host-read"
     claimed_key: str | None = None   # a credential key the payload claims, if the producer can derive one
 
 @dataclass(frozen=True)
 class Window:                    # a stored row, either table
     window_id: str; kind: str; used_percent: float
-    resets_at: datetime | None; observed_at: datetime; receipt_seq: int; source: str
+    resets_at: int | None; observed_at: int; receipt_seq: int; source: str
 
 @dataclass(frozen=True)
 class Mark:                      # account_exhausted
-    until: datetime; observed_at: datetime; receipt_seq: int
+    until: int; observed_at: int; receipt_seq: int
 
 @dataclass(frozen=True)
 class UsageCache:                # the gate's whole view: trusted rows only (§3.4)
@@ -91,16 +101,21 @@ So **`window_id` is the producer's stable identity of a window, never a slot nam
 - `usage_cache(keys) -> UsageCache`: the trusted windows and marks for exactly those keys. Rows of keys outside `keys` are never read, which implements D1's "rows whose key no configured account has are ignored" without deleting them.
 - `usage_untrusted(session_key, generation) -> tuple[Window, ...]`: one launch's own rows.
 - `deferrals_current(ws, role) -> list[DeferralRow]`: each session's highest-numbered record for beads the journal has in `ws`, joined through `beads`, because `deferrals` has no `ws` column. AU-5 only reads deferrals, for the wake time; AU-4 writes them.
-- `clamp_deadlines(bound) -> int`: in one transaction, it rewrites to `bound` every `account_exhausted.until` and every current `deferrals.defer_until` later than `bound`, and returns how many it changed (§3.5).
+- `clamp_deadlines(bound) -> int`: in one transaction, it rewrites to `bound` every **unmarked** `account_exhausted.until` and every unmarked current `deferrals.defer_until` later than `bound`, marks each value it rewrites, and returns how many it changed (§3.5).
+- **Clamp markers** live in the existing `meta` table, so there is no schema change. Each marker's key is the identity of the value it marks, and its value is the rewritten time:
+  - `clamp:exhausted:<credential_key>:<receipt_seq>` for a mark;
+  - `clamp:deferral:<session_key>:<number>` for a deferral record.
+
+  A genuinely new value always has a new identity: a new mark gets a new receipt sequence, and a new deferral gets the next number. So it starts unmarked, and nothing has to reset a marker. `exhausted_put` deletes the replaced mark's marker in its own transaction. `clamp_deadlines` deletes markers whose identity no longer exists. A value counts as marked only while its marker exists **and** equals the stored value, so a marker can never freeze a value it didn't write.
 
 ## 3. Behaviour
 
 ### 3.1 Ingestion (`usage.py`)
 
 ```python
-def ingest_untrusted(j, launch: tuple[str, int], obs: Observation, now: datetime, s: UsageSettings) -> Ingested
-def ingest_trusted(j, credential_key: str, obs: Observation, now: datetime, s: UsageSettings) -> Ingested
-def mark_exhausted(j, credential_key: str, reset_hint: datetime | None, now: datetime, s: UsageSettings) -> Ingested
+def ingest_untrusted(j, launch: tuple[str, int], obs: Observation, now: int, s: UsageSettings) -> Ingested
+def ingest_trusted(j, credential_key: str, obs: Observation, now: int, s: UsageSettings) -> Ingested
+def mark_exhausted(j, credential_key: str, reset_hint: int | None, now: int, s: UsageSettings) -> Ingested
 ```
 
 `Ingested` is `Stored(seq)` or `Dropped(reason)`. A dropped observation writes nothing, not even the counter.
@@ -149,12 +164,12 @@ class Accounts(Protocol):
 ```python
 @dataclass(frozen=True)
 class Deadline:
-    at: datetime
+    at: int
     accounts: tuple[str, ...]      # the permitted accounts, for the escalation and AU-9's text
 
 def permitted(p: ProfileView, previous_key: str | None) -> tuple[Candidate, ...]
-def blocking(key: str, cache: UsageCache, now: datetime, s: UsageSettings) -> tuple[datetime, ...]   # clear times
-def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: datetime,
+def blocking(key: str, cache: UsageCache, now: int, s: UsageSettings) -> tuple[int, ...]   # clear times
+def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: int,
          s: UsageSettings) -> Chosen | AccountChanged | Deadline
 ```
 
@@ -203,32 +218,48 @@ The guard's steps keep AU-3's order. Only the account calls change:
   - `AccountChanged`: AU-3's interim `ACCOUNT_CHANGED` escalation, unchanged (AU-4 replaces it).
   - `Deadline`: the interim below.
 - **Step 3 (`_pin_holds`).** `accounts.eligible` becomes `admits`. A pinned account that is now blocked is abandoned, as today, and the next generation chooses again through `decide`.
-- **The interim for `Deadline` on a claimed bead (before AU-4).** The guard shelves the bead with plan 3's existing `_shelve`: it labels it `v2:parked` with no blockers and finishes the operation. The bead's row becomes `PARKED` with the new reason `QUOTA` and the detail `no headroom until <UTC>`. A parked bead with every blocker closed is already resumable. So pickup's source 1 gates it on each pickup, skips it while it is ineligible, counts its deadline in the wake time, and resumes it once the gate gives an account.
-  - This needs no new state, label, operation or crash point (`<kind>.shelved!` exists).
-  - It is reachable only in a race between pickup's gate and the guard's, or on a sweep resume of a bead whose session ended. Neither can happen in production before AU-7, because nothing writes usage rows.
-  - AU-4 replaces it with the `v2:deferred` defer operation.
-  - Open decision **O1**; the alternative is an escalation.
+- **The interim for `Deadline` on a claimed bead (before AU-4): the quota shelve.** This is a temporary stand-in for D5's deferral and **needs Liam's sign-off (O1)**. Plan 3's `_shelve` is not reused: it labels the bead before anything is journaled, so a crash at `shelved!` replays as an ordinary shelve and loses the quota reason. Instead, `Parker._quota_shelve(op, deadline)` journals its intent first:
+  1. **Intent.** In one transaction: `op_step(op, "quota", {"until": "<epoch s>"})`, then the bead row `PARKED`, reason `QUOTA`, detail `no headroom until <UTC>`. Checkpoint `<kind>.quota`.
+  2. **Label.** `ensure_label(v2:parked)`, which is idempotent. Checkpoint `<kind>.quota!`.
+  3. **Finish.** `show` the bead again. If it now carries `needs-human`, the operation finishes `STUCK/NEEDS_HUMAN`. If it carries `v2:held` or has open blockers, it finishes `parked_state(shown)` with plan 3's reason and blocker detail, because what was added meanwhile wins. Otherwise it finishes `PARKED/QUOTA` with the journaled `until`. The operation status is `ABANDONED` in every case, as for `_shelve`.
+
+  **Replay.** An open pickup or resume operation at step `quota` goes straight to `_quota_shelve`'s steps 2–3, from `Scheduler._start` and `Parker.replay_resume` respectively, before any other check. So a crash at `<kind>.quota` or `<kind>.quota!` always ends as step 3 says, never as an ordinary shelve and never as a launch.
+
+  **What happens next.** The bead is claimed, labelled `v2:parked` with no blockers and journaled `PARKED/QUOTA`, so plan 3's resumable path picks it up. Pickup's source 1 gates it on each pickup, skips it while the gate gives a deadline, counts it in the wake time (§3.6, including a bead the guard shelved in a race), and resumes it once the gate gives an account.
+  - New crash points: `<kind>.quota` and `<kind>.quota!` for `pickup` and `resume`. New `Reason.QUOTA`. There is no new state or label.
+  - This path is reachable only in a race between pickup's gate and the guard's, or on a sweep resume of a bead whose session ended. Neither can happen in production before AU-7, because nothing writes usage rows.
+  - AU-4 replaces it with the `v2:deferred` defer operation, and its upgrade note must convert any open `PARKED/QUOTA` rows into deferrals, or let them resume through this path first.
 
 ### 3.5 The clock rule
 
-`clamp_deadlines(now + max_window_hours)` runs at the start of every pickup, inside the pickup's entry lock, before any gate call. It only ever moves a value earlier. After a rewrite to `now0 + max`, every later `now >= now0` gives a bound at least as large, so the value doesn't move again. Only a further jump back can lower it again, and that is a new rollback. This satisfies "rewritten once, never moved again" without a marker column. Windows never need rewriting: ingestion caps `resets_at` at `observed_at + max_window_hours`, and a window observed after `now` is ignored.
+`clamp_deadlines(now + max_window_hours)` runs at the start of every pickup, inside the pickup's entry lock, before any gate call, as one transaction followed by the checkpoint `usage.clamped`.
+- It rewrites an unmarked value later than the bound to the bound and marks it, in the same transaction.
+- A marked value is never moved again, whatever the clock does next: a second or third backward jump, a restart (the marker is in the journal), or a replay after a crash (the transaction either landed, marker included, or didn't).
+- A genuinely new value replacing it starts unmarked (§2.5), and is clamped at most once in its turn.
+
+Windows are never clamped. Ingestion caps `resets_at` at `observed_at + max_window_hours`, and a window observed after `now` is ignored, so a window that counts can't reach past the bound. Marks are clamped too, for safety, even though the same argument normally keeps them in range.
 
 ### 3.6 Pickup (`scheduler.py`)
 
 After the replay of open operations, and only when the coder role is free:
 
-1. **Source 1: resumable parked beads, in plan 3's order.** For each one, the gate runs on its recorded session's profile, `bead.record().profile`, with that session's `previous_key`. A `Deadline` skips it and keeps the deadline. `Chosen` resumes it as today. `AccountChanged` doesn't skip: it goes to the guard, which escalates it as AU-3 does (O6), so a repointed account is never a silent, permanent skip.
+1. **Source 1: resumable parked beads, in plan 3's order.** These beads are already claimed. For each one, the gate runs on its recorded session's profile, `bead.record().profile`, with that session's `previous_key`.
+   - `Deadline`: skip it and keep the deadline.
+   - `Chosen`: resume it as today.
+   - `AccountChanged`: don't skip. It goes to the guard, which escalates it as AU-3 does (O6), so a repointed account on a claimed bead is never a silent, permanent skip.
 2. **Source 2: new ready beads.**
    - Before claiming, pickup computes the bead's placement with `place()`, which applies a `role:` override, and its session key with `record()`. It then gates on that profile. `previous_key` comes from the journal's entries for that session key, if the bead was launched before and handed back.
-   - A `Deadline` skips the bead (it is never claimed) and keeps the deadline.
+   - `Deadline`: skip the bead, which is never claimed, and keep the deadline.
+   - `AccountChanged` (only possible for a bead that was launched before and handed back to the queue): skip the bead, which is **never claimed** (§5.2), and arm no timer for it. Like a ready bead btq can't claim, it gets the journal row `STUCK/ACCOUNT_CHANGED`, so the workstream reports it and is not idle. `_forget_unlisted` drops that row once the bead is no longer listed, and a later pickup whose gate gives an account claims it as usual, because `start_new` replaces the row. The scan continues with the next candidate.
    - If `place()` raises `ConfigInvalid`, the bead isn't gated: it goes to `start_new`, which escalates as today.
 3. **Unresolved entries.** A candidate whose session has an unresolved entry (dispatched, no outcome) or an unsettled adoption is not gated, because D4 forbids gating it. It goes to the guard, which reconciles first (AU-3 steps 0–1) and gates at step 2.
 4. **Wake time** (§5.2). It is computed when the pickup leaves the coder role idle: outcome `NOTHING`, `STUCK` or `DEFERRED`. It is the minimum of:
    - the deadline of every candidate skipped in this pickup;
+   - for every **runnable `PARKED/QUOTA` waiter**, its current gate deadline, or `now + min_recheck_seconds` if it now gates to an account or to `account_changed`, so the next pickup resumes or escalates it. A runnable waiter is a bead of ours with that journal row, labelled `v2:parked`, with no `v2:held` or `needs-human`, no open blockers and no open operation. This covers a bead the guard shelved in a race after pickup admitted it, and one shelved by a replay;
    - the `defer_until` of every current coder `quota` deferral that is still after `now`, whether or not pickup considered it. This excludes beads whose journal row is `HELD` or `STUCK`, beads labelled `v2:held` or `needs-human`, and beads with open blockers.
 
    `account_changed` deferrals never count. A minimum that isn't after `now` is never armed. The result is kept on the `Scheduler` as `wake_at` and never journaled.
-5. **Outcome `DEFERRED`.** No candidate started, and at least one was skipped for quota. `STUCK` still wins over `DEFERRED`, because a human is needed, and the wake time is armed either way.
+5. **Outcome `DEFERRED`.** No candidate started, and the wake time is set: a candidate was skipped for quota, the guard quota-shelved one, or a runnable `PARKED/QUOTA` waiter exists. `STUCK` still wins over `DEFERRED`, because a human is needed, and the wake time is armed either way. An `account_changed` skip alone gives `STUCK`, never `DEFERRED`.
 
 **Daemon.**
 - `TriggerKind.QUOTA_WAKE`.
@@ -251,7 +282,10 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
 | The clock jumps back | Future-dated rows are ignored. Stored deadlines are clamped once (§3.5). Ordering is by receipt sequence, so a newer low read replaces an older blocking one. |
 | The clock jumps forward | Rows expire or go stale, and work is released early. The gate checks again at the next launch. |
 | A wake timer fires late or never (a daemon restart) | The backstop pickup and startup's pickup recompute it. Waking late only delays. |
-| `Deadline` at the guard | The interim shelve (§3.4, O1). |
+| `Deadline` at the guard | The interim quota shelve (§3.4, O1). |
+| A crash during the quota shelve | The `quota` step is journaled before the label, so replay finishes `PARKED/QUOTA` with the journaled `until`, or the state a hold, blocker or `needs-human` added meanwhile gives. It never becomes an ordinary shelve or a launch (§3.4). |
+| A ready bead gating to `AccountChanged` | Not claimed, no timer; journal row `STUCK/ACCOUNT_CHANGED`, so the workstream isn't idle. The scan continues (§3.6). |
+| The guard shelves a bead pickup had admitted (a race) | The `PARKED/QUOTA` waiter counts toward the wake time, so pickup ends `DEFERRED` with a timer (§3.6). |
 | Usage tables lost | Unknown, so eligible (§3.7). |
 
 ## 5. Tests (TDD; offline; injected clock; no sleeps)
@@ -277,7 +311,12 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
 - Replacement by receipt sequence: after the clock jumps back, a newer low read replaces an older blocking row and the gate becomes eligible. The two tables never replace each other.
 - A reviewer moving P → Q → P: `usage_untrusted` for each `(session_key, generation)` returns only that launch's rows.
 - `untrusted_defer_until` clamps both ways.
-- `clamp_deadlines`: after a rollback larger than `max_window_hours`, repeated clamps and gates at later times move nothing.
+- `clamp_deadlines`:
+  - after a rollback larger than `max_window_hours`, repeated clamps and gates at later times move nothing;
+  - **several backward jumps in a row** (each larger than `max_window_hours`) leave a clamped value at its first rewrite;
+  - the same holds after reopening the journal (a restart), and after a crash at `usage.clamped` with replay;
+  - a new mark (a new receipt sequence) or a new deferral number replacing a clamped value is clamped once in its turn;
+  - a stale marker whose value was replaced never freezes the new value.
 - Losing the usage tables gives the first account.
 
 **`tests/test_wsd_pickup.py`:**
@@ -288,11 +327,15 @@ The cache is advisory. Missing rows mean unknown, which is eligible. A journal r
   - includes a future coder quota deferral that pickup didn't consider, using a deferral row inserted directly;
   - ignores a held, stuck, blocked or `needs-human` bead's deferral and an `account_changed` deferral.
 - `DEFERRED` is returned when only quota-skipped candidates remain.
-- The never-idle oracle gains the kinds `quota_blocked` (a trusted blocking window on the bead's profile) and `quota_clears`, so a case ends `DEFERRED`. The oracle checks that `DEFERRED` means no coder session is listed, every claimable or resumable bead gates to a `Deadline`, and `wake_at > now`.
+- **A ready bead gating to `AccountChanged`** (launched before, handed back, its account repointed under `"none"`): `claim` is called **zero** times for it, which the fake queue's claim counter asserts. Its row is `STUCK/ACCOUNT_CHANGED`, no wake time comes from it, and an eligible bead after it in the list starts. Once the account is restored, it is claimed and started, and its row is replaced.
+- **The guard race, with no other candidate:** pickup's gate admits the only bead, then a blocking trusted row is written at the checkpoint `gate.checked`, so the guard's step 2 gives a `Deadline`. The pickup ends `DEFERRED` with `wake_at` set to that deadline, never `NOTHING` without a timer. With a crash at `pickup.quota` and at `pickup.quota!`, the replayed pickup ends `PARKED/QUOTA` with the same wake. The same holds for a resume operation (`resume.quota`, `resume.quota!`). After the clock passes the deadline, the wake pickup resumes it.
+- A `PARKED/QUOTA` waiter that gains a blocker, `v2:held` or `needs-human` between its crash and the replay ends in that state, and drops out of the wake time.
+- The wake time counts a runnable `PARKED/QUOTA` waiter at its current gate deadline, and at `now + min_recheck_seconds` when it now gates to an account or to `account_changed`.
+- The never-idle oracle gains the kinds `quota_blocked` (a trusted blocking window on the bead's profile), `quota_clears`, `quota_race` (a blocking row written at `gate.checked`) and `account_repointed`. The oracle checks that `DEFERRED` means no coder session is listed, every claimable or resumable bead and every runnable `PARKED/QUOTA` waiter gates to a `Deadline`, and `wake_at > now`; that a pickup with a quota waiter never ends `NOTHING`; and that an `account_repointed` ready bead is never claimed.
 
 **`tests/test_wsd_launches.py`** (the guard):
-- A pinned account that is blocked before dispatch is abandoned, and the bead is shelved `PARKED/QUOTA` with no dispatch.
-- A crash at `<kind>.abandoned`, `<kind>.abandoned!` and `<kind>.shelved!` replays to the same end.
+- A pinned account that is blocked before dispatch is abandoned, and the bead is quota-shelved `PARKED/QUOTA` with no dispatch.
+- A crash at `<kind>.abandoned`, `<kind>.abandoned!`, `<kind>.quota` and `<kind>.quota!`, for both pickup and resume, replays to `PARKED/QUOTA` with the journaled `until`, never to an ordinary shelve and never to a launch. With a hold, a blocker or `needs-human` added before the replay, it ends in that state instead.
 - A shelved bead resumes once the clock passes the deadline.
 
 **`tests/test_wsd_daemon.py`:**
@@ -318,15 +361,41 @@ Existing tests:
 | rollback > `max_window_hours`: deadlines don't move again | §5 usage (`clamp_deadlines`) |
 | account affinity on B; B blocked without switching gives a deadline, not A | §5 headroom |
 | wake time never past; includes an unconsidered future coder deferral; held, blocked and `account_changed` excluded | §5 pickup |
-| an `account_changed` deferral writes one comment, has no timer, survives startup and replay, and is re-gated on a reload | **Partly AU-4** (O4). AU-5 tests that `account_changed` never sets a wake time and that the gate gives it again after a restart. The comment, the deferral record and the re-gate on reload belong to AU-4's defer operation. wsd has no config reload yet. |
+| an `account_changed` deferral writes one comment, has no timer, survives startup and replay, and is re-gated on a reload | **Moved to AU-4 by the §8 amendment (needs Liam's sign-off).** AU-5 keeps only its gate side: an `account_changed` result never sets a wake time, and a ready bead with it is never claimed (§5 pickup). |
 | losing the usage tables recovers to unknown | §5 usage |
 
 ## 7. Open decisions
 
-- **O1. `Deadline` on a claimed bead before AU-4.** Recommended: the interim shelve (§3.4). It parks with no blockers and reason `QUOTA`, and the existing resumable path, gated, resumes it after the deadline. Alternative: escalate with a new reason, like AU-3's interim `ACCOUNT_CHANGED`. That is safer to reason about, but it needs an operator release for a condition that clears by itself. Either way, it can't happen in production before AU-7.
-- **O2. Time storage.** ISO-8601 UTC text with whole seconds in AU-3's `TEXT` columns, instead of the ADR's literal "epoch seconds". This is the same instant and needs no schema change. The alternative is a v3 schema with `INTEGER` columns.
+**Needing Liam's sign-off:**
+- **O1. The interim quota shelve (§3.4)**, as a temporary stand-in for D5's deferral until AU-4. A claimed bead whose guard gate gives a `Deadline` is journaled `quota`, labelled `v2:parked` with no blockers, and finished `PARKED/QUOTA`. Plan 3's resumable path resumes it, gated, with a wake time. It uses `v2:parked` instead of `v2:deferred` and writes no `wsd-defer` comment. The alternative is escalation, like AU-3's interim `ACCOUNT_CHANGED`, which needs an operator release for a condition that clears by itself. Either way, it can't happen in production before AU-7.
+- **O4. The plan amendment in §8:** the `account_changed` lifecycle acceptance bullet moves from AU-5 to AU-4 as a whole.
+
+**Accepted in review r1, kept:**
 - **O3. Window identity and `kind`.** `window_id` is the producer's stable window identity (`codex:300m`, `five_hour`), never the Codex slot name, because the probe shows `primary` can be the 7-day window. `kind` is a display label. "A payload naming another account" is implemented as a producer-derived `claimed_key`. If AU-7 finds no payload field to derive it from, the check is inert, and attribution by channel is the only defence, as D3 intends.
-- **O4. Acceptance bullet moved.** The `account_changed` comment, no-timer and reload behaviour needs AU-4's deferral operation, and AU-4 is blocked by AU-5. AU-5 covers the gate side only (§6). The ADR's "on every configuration reload" needs a reload that wsd doesn't have yet. AU-4 must either add one or name where it lands.
 - **O5. The gate ignores untrusted rows entirely.** This reads D4 literally: only trusted windows and marks block. Untrusted rows act only through AU-4's and AU-7's own-bead deferral.
-- **O6. `AccountChanged` at pickup.** Recommended: don't skip; send the candidate to the guard, which escalates it, so it is visible. Skipping it would hide it with no wake time and no alert until AU-4.
-- **O7. `WsState.DEFERRED` now.** Recommended: in AU-5, because §5.2's "not idle" rule is pickup's. AU-9 only renders it. The alternative leaves the state to AU-9 and reports such a workstream as idle until then.
+- **O7. `WsState.DEFERRED` in AU-5**, because §5.2's "not idle" rule is pickup's. AU-9 only renders it.
+
+**Settled in r2:**
+- **O2** is dropped: times are epoch seconds, as D4 says (§2.2).
+- **O6** is narrowed: `AccountChanged` goes to the guard's escalation only for claimed resumes. Ready work is skipped without a claim (§3.6).
+
+## 8. Plan amendment (O4; needs Liam's sign-off)
+
+**Change to the accounts plan** (`docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md`): remove this bullet from AU-5's acceptance and add it, whole, to AU-4's:
+
+> an `account_changed` deferral writes one comment, has no timer, survives startup and replay unchanged, and is gated again on a config reload.
+
+**Why:** every part of it is a property of the deferral operation, its record and its comment. AU-4 builds those, and AU-4 depends on AU-5. AU-5 has no deferral writer, so it can only test the gate side, which it keeps (§6). wsd also has no configuration reload yet.
+
+**What AU-4 must then carry as tests**, all with the injected clock and the crash-point harness:
+1. **One comment.** A due quota deferral, or a resume, that gates to `account_changed` writes exactly one `wsd-defer … reason=account_changed until=none` comment and one superseding record. A crash at every step of that transition replays to one record and one comment (the comment and alert are idempotent on the deferral number).
+2. **No timer.** With the clock advanced by more than `max_window_hours`, any number of backstop pickups and `QUOTA_WAKE` triggers never re-gate it: the gate's call count for that session stays 0. `wake_at` never comes from it, and the pickup outcome isn't `DEFERRED` because of it.
+3. **Startup unchanged.** Restarting wsd (reopening the journal, then startup recovery and the startup pickup) re-gates it exactly once, as D5 requires. While the gate still gives `account_changed`, nothing is written: the same record and number, no new comment, no alert. A crash during startup's re-gate replays to the same result.
+4. **Replay unchanged.** A crash at each step of the defer operation and of the re-gate replays to the same record and the same single comment.
+5. **Reload re-gates.** The reload trigger re-gates every `account_changed` deferral once:
+   - With the account restored, the wait is journaled as over, and the next pickup undefers it with all its checks.
+   - With a deadline, it becomes a quota deferral, with the next number and one comment.
+   - With `account_changed` still, nothing is written.
+   - Repeated reloads with an unchanged config write nothing.
+
+**The reload trigger AU-4 adds:** a `wsctl reload` control request, which wsd's systemd `ExecReload` would also send. It re-resolves the host and workstream settings with plan 1's loader. If they are valid, it swaps them in under every workstream's operation lock and then runs the re-gate. An invalid config is refused with its path-free error, and the running settings are kept. There is no file watcher and no timer. `Parker.release` on a deferred bead runs the same re-gate for that one bead.
