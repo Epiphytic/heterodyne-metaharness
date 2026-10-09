@@ -2072,7 +2072,7 @@ def test_each_supported_field_is_applied_before_a_queued_pickup(tmp_path: Path,
         try:
             await until(inside.is_set)
             reloading = asyncio.create_task(wsd.handle(ctl.CtlRequest("reload")))
-            await until(lambda: daemon.RELOAD in submitted)
+            await until(lambda: (daemon.RELOAD, 1) in submitted)
             picking = asyncio.create_task(wsd.pickup(WS, Trigger(TriggerKind.OPERATOR)))
             await until(lambda: len(submitted) == 2)
         finally:
@@ -2083,6 +2083,66 @@ def test_each_supported_field_is_applied_before_a_queued_pickup(tmp_path: Path,
 
     assert asyncio.run(scenario()).result == "ok"
     assert sched.ws is new and sched.parker.ws is new and seen == [new] and wsd.s.workstreams == (new,)
+
+
+def test_overlapping_reloads_apply_each_snapshot_and_acknowledge_only_what_was_applied(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: a reload asked while another waits on a busy lane never joins its job, so the settings
+    `Wsd.s` ends with are the ones every lane runs."""
+    s = settings(tmp_path)
+    [ws] = s.workstreams
+    first = replace(s, workstreams=(replace(ws, usage=replace(ws.usage, reserve_percent=7)),))
+    second = replace(s, workstreams=(replace(ws, usage=replace(ws.usage, reserve_percent=9)),))
+    unloaded: list[WsdSettings | ConfigError] = [first, second]
+    wsd = reload_wsd(tmp_path, s, unloaded)
+    sched = wsd.parts.schedulers[WS]
+    inside, release, hold = held_lane(wsd, WS)
+    submitted = counted_submits(wsd.lanes[WS], monkeypatch)
+
+    async def scenario() -> list[ctl.CtlReply]:
+        holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await until(inside.is_set)
+            a = asyncio.create_task(wsd.handle(ctl.CtlRequest("reload")))
+            await until(lambda: (daemon.RELOAD, 1) in submitted)
+            b = asyncio.create_task(wsd.handle(ctl.CtlRequest("reload")))
+            for _ in range(20):         # yields, not a wait: b runs as far as it can while the lane is held
+                await asyncio.sleep(0)
+            assert unloaded == [second]     # b waits for all of a: it hasn't even loaded its settings
+        finally:
+            release.set()
+        await asyncio.wait_for(holder, 10)
+        return list(await asyncio.wait_for(asyncio.gather(a, b), 10))
+
+    replies = asyncio.run(scenario())
+    assert [r.result for r in replies] == ["ok", "ok"]
+    assert sched.ws.usage.reserve_percent == 9 and sched.parker.ws is sched.ws
+    assert wsd.s is second and wsd.s.workstreams == (sched.ws,)
+    assert [k for k in submitted if k != "hold"] == [(daemon.RELOAD, 1), (daemon.RELOAD, 2)]
+
+
+def test_a_reload_whose_recovery_fails_is_failed_and_a_later_one_regates(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 review: a lane whose recovery fails swaps but does not re-gate, and nothing else would re-gate it
+    in this process, so the reply is `failed` and the next reload re-gates it."""
+    wsd, world, _ = account_changed_wsd(tmp_path)
+    wsd.startup()
+    assert row_of(wsd) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED) and WS in wsd.regated
+    repoint_codex_at(tmp_path / "home", "")                 # the account is restored
+    real = daemon.recover
+    failures = [daemon.Recovered(WS, ok=False)]
+    monkeypatch.setattr(daemon, "recover", lambda sched: failures.pop() if failures else real(sched))
+    wsd.recovered.discard(WS)                               # a job raised: recovered again first
+    held = reload(wsd)
+    assert held.result == "failed" and "run wsctl reload again" in held.message
+    assert held.data == {WS: {"outcome": "held"}}
+    assert wsd.recover_one(WS).ok                           # recovered, but nothing re-gated it
+    assert wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP)) is not Outcome.RESUMED
+    assert row_of(wsd) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED)
+    again = reload(wsd)
+    assert again.result == "ok" and again.data == {WS: {"over": "1", "requota": "0", "unchanged": "0"}}
+    assert wsd.pickup_one(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.RESUMED
+    assert row_of(wsd) == (BeadState.RUNNING, None) and "v2:deferred" not in world.beads["btq-1"].labels
 
 
 # --- the reload request through the real loader ---

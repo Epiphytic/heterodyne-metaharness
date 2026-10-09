@@ -202,6 +202,8 @@ class Wsd:
         self.load = load            # `wsctl reload`'s settings: plan 1's loader
         self.recovered: set[str] = set()
         self.regated: set[str] = set()      # re-gated since this process started (AU-4 §5.1); memory only
+        self.reloads = 0                    # reload requests so far: each one's jobs get their own key
+        self.reloading: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self.stopping = False
         self.shutdown = threading.Lock()        # held while every lane closes; see Lane
         self.lanes = {name: Lane(name, self.shutdown) for name in [STATUS_LANE, *parts.schedulers]}
@@ -431,10 +433,25 @@ class Wsd:
                                       "next pickup", results)
         return CtlReply("ok", f"{req.job} done", results)
 
+    def _reload_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self.reloading is None or self.reloading[0] is not loop:
+            self.reloading = (loop, asyncio.Lock())
+        return self.reloading[1]
+
     async def _reload(self) -> CtlReply:
+        """One reload at a time, start to finish: a second one loads and compares only after the first
+        has swapped every lane and set `self.s`, and its jobs never join the first one's (each reload's
+        jobs have their own key), so every acknowledged snapshot is the one applied."""
+        async with self._reload_lock():
+            return await self._reload_once()
+
+    async def _reload_once(self) -> CtlReply:
         """Load the settings again, refuse anything but `accounts`, `usage` and `models` changing (O3), then
         swap and re-gate on every lane, each under its operation lock. `self.s` becomes the new settings
-        once every lane has swapped, so the next reload compares against them."""
+        once every lane has swapped, so the next reload compares against them. A lane whose recovery
+        failed swapped but did not re-gate: the reply is `failed`, and the operator reloads again once it
+        recovers (nothing else re-gates it; AU-4 §5.1)."""
         try:
             loaded = self.load()
         except ConfigError as exc:
@@ -446,7 +463,9 @@ class Wsd:
             return CtlReply("refused", f"restart required: {', '.join(changed)}; nothing was changed")
         streams = {w.name: w for w in loaded.workstreams}
         names = list(self.parts.schedulers)
-        done = await asyncio.gather(*(self._run(name, RELOAD, lambda n=name: self.reload_one(n, streams[n]))
+        self.reloads += 1
+        key = (RELOAD, self.reloads)
+        done = await asyncio.gather(*(self._run(name, key, lambda n=name: self.reload_one(n, streams[n]))
                                       for name in names), return_exceptions=True)
         self.s = loaded
         results: dict[str, dict[str, str]] = {}
@@ -459,10 +478,12 @@ class Wsd:
                 failed.append(f"{name}: {type(counts).__name__}")
                 results[name] = {"outcome": "failed", "error": type(counts).__name__}
             else:
+                if counts.get("outcome") == Outcome.HELD.value:
+                    failed.append(f"{name}: recovery failed")
                 results[name] = counts
         if failed:
-            return CtlReply("failed", f"reload applied, but re-gating failed ({'; '.join(failed)}); "
-                                      "recovered again before the next pickup", results)
+            return CtlReply("failed", f"reload applied, but re-gating did not finish ({'; '.join(failed)}); "
+                                      "run wsctl reload again once recovered", results)
         return CtlReply("ok", "reload done", results)
 
     async def _pause_state(self, name: str, paused: bool) -> CtlReply:
