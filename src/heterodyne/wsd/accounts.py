@@ -1,25 +1,28 @@
-"""The launch guard's view of accounts (ADR 0001 r14 §4.4 D1, D2, D7; AU-3 design §2.1).
+"""The launch guard's and pickup's view of accounts (ADR 0001 r14 §4.4 D1, D2, D4, D7; AU-3 design §2.1;
+AU-5 design §3.2).
 
-The guard reads accounts only through `Accounts`, so tests can change eligibility and logins between
-steps. Keys are AU-2's `credential_key`, and every key is resolved afresh from the account's configured
-path (a named account's raw `login_dir`, or `DEFAULT_LOGIN_DIRS[adapter]` for `default`), expanded with
-the supplied environment's HOME. The canonical paths AU-2 stored at config load are never rehashed: once
+They read accounts only through `Accounts`, so tests can change logins and capabilities between steps.
+Keys are AU-2's `credential_key`, and every key is resolved afresh from the account's configured path (a
+named account's raw `login_dir`, or `DEFAULT_LOGIN_DIRS[adapter]` for `default`), expanded with the
+supplied environment's HOME. The canonical paths AU-2 stored at config load are never rehashed: once
 `~/.codex` resolved to one login, repointing it to another would be invisible through them.
 
-`DefaultOnly` is AU-3's implementation: every launch uses `default` until AU-6 enables login binding, and
-AU-5 replaces `choose` with its gate at the same call site.
+`view` resolves a profile for the headroom gate (`headroom.py`): its adapter, failover mode, accounts in
+order with their keys as of now, and the adapter's capabilities.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
-from heterodyne.config import Config, paths
+from heterodyne.config import Config, ConfigError, paths
 from heterodyne.config.accounts import Account, canonical_login, credential_key
 from heterodyne.config.capabilities import CAPABILITIES, DEFAULT_LOGIN_DIRS, LOGIN_FILES, NONE, Capabilities
 from heterodyne.config.layers import table_at
+from heterodyne.config.secret_scan import show
 
 DEFAULT = "default"
+type Failover = Literal["none", "next"]
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,31 @@ class AccountChanged:
     """The session's last launched key is not the key it would launch on now, and the adapter can't
     switch accounts (D7). AU-4 replaces this interim stop with its `account_changed` deferral."""
     detail: str
+
+
+@dataclass(frozen=True)
+class Candidate:
+    account: str
+    key: str                       # the current credential key, resolved now
+
+
+@dataclass(frozen=True)
+class ProfileView:
+    """A profile as the gate sees it now (D4): its accounts in order, `(default,)` when it lists none."""
+    profile: str
+    adapter: str
+    failover: Failover
+    accounts: tuple[Candidate, ...]
+    capabilities: Capabilities
+
+
+@dataclass(frozen=True)
+class ProfileAccounts:
+    """One profile's account settings: its adapter, `accounts` (empty: the adapter's `default` login) and
+    `failover`."""
+    adapter: str
+    accounts: tuple[str, ...] = ()
+    failover: Failover = "none"
 
 
 class Accounts(Protocol):
@@ -53,41 +81,46 @@ class Accounts(Protocol):
         """Adoption only (D2): every login file resolves, strictly, to a regular file."""
         ...
 
-    def eligible(self, profile: str, account: str) -> bool:
-        """Whether the account is still permitted for the profile."""
-        ...
-
-    def choose(self, profile: str, previous_key: str | None) -> Chosen | AccountChanged:
-        """The account a new generation pins. `previous_key` is the key of the session's highest launched
-        generation, or None if it never launched."""
+    def view(self, profile: str) -> ProfileView:
+        """The profile resolved now. Raises ConfigError (path-free) if the profile is gone or a listed
+        account's key can't be resolved."""
         ...
 
 
-class DefaultOnly:
-    """Every launch uses the adapter's `default` login. `profiles` maps each profile to its adapter."""
+class ConfiguredAccounts:
+    """The configured accounts. `profiles` maps each profile to its adapter alone (its `default` login,
+    failover "none") or to its full `ProfileAccounts`."""
 
-    def __init__(self, profiles: Mapping[str, str], env: Mapping[str, str],
+    def __init__(self, profiles: Mapping[str, str | ProfileAccounts], env: Mapping[str, str],
                  named: Mapping[tuple[str, str], Account] | None = None,
                  capabilities: Mapping[str, Capabilities] | None = None) -> None:
-        self.profiles = dict(profiles)
+        self.profiles = {p: ProfileAccounts(v) if isinstance(v, str) else v for p, v in profiles.items()}
         self.env = dict(env)
         self.named = {k: v for k, v in (named or {}).items() if k[1] != DEFAULT}
         self.capabilities = CAPABILITIES if capabilities is None else capabilities
 
     @classmethod
-    def from_config(cls, cfg: Config, env: Mapping[str, str]) -> "DefaultOnly":
-        """From a loaded config: its profiles' adapters and AU-2's resolved accounts."""
-        profiles = {name: str(cast(Mapping[str, Any], value)["adapter"])
-                    for name, value in table_at(cfg.values, "profiles", "config.toml").items()}
+    def from_config(cls, cfg: Config, env: Mapping[str, str]) -> "ConfiguredAccounts":
+        """From a loaded config (AU-2 has validated it): each profile's adapter, accounts and failover,
+        and AU-2's resolved accounts."""
+        profiles: dict[str, str | ProfileAccounts] = {}
+        for name, value in table_at(cfg.values, "profiles", "config.toml").items():
+            p = cast(Mapping[str, Any], value)
+            profiles[name] = ProfileAccounts(str(p["adapter"]), tuple(cast(list[str], p.get("accounts", []))),
+                                             cast(Failover, p.get("failover", "none")))
         return cls(profiles, env, cfg.accounts)
 
     def adapter(self, profile: str) -> str | None:
-        return self.profiles.get(profile)
+        found = self.profiles.get(profile)
+        return None if found is None else found.adapter
 
     def _configured_dir(self, adapter: str, account: str) -> str:
         if account == DEFAULT:
             return DEFAULT_LOGIN_DIRS[adapter]
-        return self.named[(adapter, account)].configured_dir
+        found = self.named.get((adapter, account))
+        if found is None:
+            raise ConfigError(f"account {show(account, False)} is not configured for adapter {adapter}")
+        return found.configured_dir
 
     def configured(self, adapter: str) -> tuple[str, ...]:
         return tuple(name for (a, name) in self.named if a == adapter)
@@ -100,18 +133,14 @@ class DefaultOnly:
         try:
             login_dir = paths.expand(self._configured_dir(adapter, account), self.env)
             return all((login_dir / f).resolve(strict=True).is_file() for f in LOGIN_FILES[adapter])
-        except (OSError, RuntimeError, ValueError, KeyError):
+        except (OSError, RuntimeError, ValueError, KeyError, ConfigError):
             return False
 
-    def eligible(self, profile: str, account: str) -> bool:
-        return account == DEFAULT and profile in self.profiles
-
-    def choose(self, profile: str, previous_key: str | None) -> Chosen | AccountChanged:
-        adapter = self.profiles[profile]
-        key = self.current_key(adapter, DEFAULT)
-        can_switch = self.capabilities.get(adapter, NONE).can_switch
-        if previous_key is not None and previous_key != key and not can_switch:
-            return AccountChanged(f"the {adapter} default login's credential key changed since the session's "
-                                  "last launch, and the adapter can't switch accounts")
-        return Chosen(DEFAULT, key)
-
+    def view(self, profile: str) -> ProfileView:
+        spec = self.profiles.get(profile)
+        if spec is None:
+            raise ConfigError(f"profile {profile} no longer exists")
+        names = spec.accounts or (DEFAULT,)
+        return ProfileView(profile, spec.adapter, spec.failover,
+                           tuple(Candidate(n, self.current_key(spec.adapter, n)) for n in names),
+                           self.capabilities.get(spec.adapter, NONE))

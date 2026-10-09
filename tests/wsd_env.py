@@ -15,7 +15,7 @@ from fakes.checkpoints import Recorder
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 
-from heterodyne.wsd.accounts import DefaultOnly
+from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint
 from heterodyne.wsd.gate import ClaimGate
@@ -40,8 +40,21 @@ def login_home(path: Path) -> Path:
     return path
 
 
-def accounts_at(home: Path) -> DefaultOnly:
-    return DefaultOnly(ADAPTERS, {"HOME": str(home)})
+def accounts_at(home: Path) -> ConfiguredAccounts:
+    return ConfiguredAccounts(ADAPTERS, {"HOME": str(home)})
+
+
+class Clock:
+    """wsd's injected clock (UTC epoch seconds), moved only by the test."""
+
+    def __init__(self, now: int = 1_800_000_000) -> None:
+        self.now = now
+
+    def __call__(self) -> int:
+        return self.now
+
+    def advance(self, seconds: int) -> None:
+        self.now += seconds
 
 
 def git_repo(path: Path) -> Path:
@@ -61,6 +74,7 @@ class Rig:
     ws: WorkstreamSettings
     cp: Checkpoint = field(default_factory=Recorder)
     reconciler: ActionReconciler | None = None
+    clock: Clock = field(default_factory=Clock)
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -79,7 +93,7 @@ class Rig:
         self.beads = BeadsAdapter(factory(self.world))
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
-                         self.reconciler or HoldingReconciler(self.beads), self.cp)
+                         self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 

@@ -40,12 +40,15 @@ unconfirmed stop holds, and the operation stays open), then it ends, with any ho
 dropped.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from heterodyne.config import ConfigError
+from heterodyne.wsd.accounts import AccountChanged, Chosen
 from heterodyne.wsd.beads import (
     HELD,
+    NEEDS_HUMAN,
     PARKED,
     Bead,
     BeadsUnavailable,
@@ -53,22 +56,29 @@ from heterodyne.wsd.beads import (
     ClaimUncertain,
     ClaimView,
     NotOurs,
+    RecordUnreadable,
     RoutingChanged,
     SessionRecord,
     WorktreeConflict,
 )
 from heterodyne.wsd.gate import Paused
+from heterodyne.wsd.headroom import Deadline, clamp_bound, epoch, wake_time
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
+from heterodyne.wsd.launches import LAUNCHED
 from heterodyne.wsd.park import GUARD_STEPS, Launch, Parker, resumable
 from heterodyne.wsd.runtime import RuntimeUnavailable
-from heterodyne.wsd.states import BeadState, Reason, allowed, ws_state
+from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
+from heterodyne.wsd.usage import decide
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place, record
 
 POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed",
           "pickup.placed", "pickup.worktree!", "pickup.worktree", "pickup.recorded!",
           *(f"pickup.{step}" for step in GUARD_STEPS))
 RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
+# Rows of unclaimed ready beads, dropped once the bead is no longer listed.
+UNLISTED = frozenset({Reason.UNCLAIMABLE, Reason.ACCOUNT_REPOINTED})
+KEPT = frozenset({BeadState.HELD, BeadState.STUCK})     # never counted in the wake time
 
 
 class TriggerKind(StrEnum):
@@ -79,6 +89,7 @@ class TriggerKind(StrEnum):
     BACKSTOP = "backstop"
     OPERATOR = "operator"
     STARTUP = "startup"
+    QUOTA_WAKE = "quota_wake"     # the wake time a pickup armed for quota waiters (AU-5 §3.6)
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,17 @@ class Outcome(StrEnum):
     NOTHING = "nothing"          # nothing is ready and nothing is resumable
     STUCK = "stuck"              # only beads btq's claim can't take are ready; their rows say why
     HELD = "held"                # pickup is held (see the workstream's holds)
+    DEFERRED = "deferred"        # nothing started, and only quota waits: a wake time is armed (`wake_at`)
+
+
+type Verdict = Deadline | AccountChanged | None     # None: go on (an account, or not gated here)
+
+
+@dataclass
+class _Scan:
+    """One pickup's quota bookkeeping: the deadline of every candidate it skipped."""
+    now: int
+    deadlines: list[int] = field(default_factory=list[int])
 
 
 class Scheduler:
@@ -101,11 +123,14 @@ class Scheduler:
         self.ws = ws
         self.d = deps
         self.parker = parker or Parker(ws, deps)
+        # The quota wake time the last pickup computed (§3.6), in UTC epoch seconds; never journaled.
+        self.wake_at: int | None = None
 
     # --- entry point ---
 
     def pickup(self, trigger: Trigger) -> Outcome:
         with self.parker.entry():
+            self.wake_at = None
             try:
                 outcome = self._pickup(trigger)
             except BeadsUnavailable as exc:
@@ -120,10 +145,16 @@ class Scheduler:
             paused = self.d.beads.paused(name)
         except BeadsUnavailable:
             paused = True        # can't read the flag: show the workstream as stopped, never as running
-        j.set_ws_state(name, ws_state(paused, j.holds(name), (b.state for b in j.states(name))))
+        rows = [b for b in j.states(name) if b.state not in TERMINAL]
+        all_quota = bool(rows) and all((b.state, b.reason) == (BeadState.PARKED, Reason.QUOTA) for b in rows)
+        j.set_ws_state(name, ws_state(paused, j.holds(name), (b.state for b in rows),
+                                      self.wake_at is not None, all_quota))
 
     def _pickup(self, trigger: Trigger) -> Outcome:
         j, name = self.d.journal, self.ws.name
+        now = self.d.clock()
+        j.clamp_deadlines(clamp_bound(now, self.ws.usage))       # §3.5: before any gate, the guard's too
+        self.d.cp("usage.clamped")
         try:
             if not self.d.runtime.available():
                 raise RuntimeUnavailable("not available")
@@ -152,7 +183,22 @@ class Scheduler:
             return Outcome.HELD
         if coder:
             return Outcome.BUSY
+        scan = _Scan(now)
+        outcome = self._candidates(trigger, scan)
+        if outcome not in (Outcome.NOTHING, Outcome.STUCK):
+            return outcome
+        self.wake_at = wake_time([*scan.deadlines, *self._waiters(now), *self._deferrals(now)], now)
+        return Outcome.DEFERRED if outcome is Outcome.NOTHING and self.wake_at is not None else outcome
+
+    def _candidates(self, trigger: Trigger, scan: _Scan) -> Outcome:
+        """§5.2 step 7, each candidate gated on its own profile (AU-5 §3.6): resumable parked beads, then
+        new ready work, until one starts. A candidate with no headroom is skipped, never claimed."""
+        j, name = self.d.journal, self.ws.name
         for bead in self._resumable():
+            verdict = self._gate_resume(bead, scan.now)
+            if isinstance(verdict, Deadline):
+                scan.deadlines.append(verdict.at)
+                continue
             result = self.parker.resume(bead, trigger.ref)
             if result in (Launch.STARTED, Launch.LIVE):
                 return Outcome.RESUMED
@@ -171,6 +217,14 @@ class Scheduler:
                 j.adopt(name, bead.id, BeadState.STUCK, Reason.UNCLAIMABLE, why)
                 stuck = True
                 continue
+            verdict = self._gate_new(bead, scan.now)
+            if isinstance(verdict, Deadline):
+                scan.deadlines.append(verdict.at)
+                continue
+            if isinstance(verdict, AccountChanged):
+                j.adopt(name, bead.id, BeadState.STUCK, Reason.ACCOUNT_REPOINTED, verdict.detail)
+                stuck = True
+                continue
             try:
                 result = self.start_new(bead, trigger.ref)
             except Paused:
@@ -183,6 +237,78 @@ class Scheduler:
             stuck = stuck or (row is not None and row.reason is Reason.UNCLAIMABLE)
         return Outcome.STUCK if stuck else Outcome.NOTHING
 
+    # --- the headroom gate at pickup (AU-5 §3.6) ---
+
+    def _gate(self, bead: str, profile: str, session_key: str, now: int) -> Verdict | Chosen:
+        """The gate for one candidate session, or None where pickup must not gate: no accounts, a session
+        with an unresolved entry (dispatched, no outcome), an unsettled adoption, or a profile that can't
+        be resolved. Those go to the guard, which reconciles first and escalates with its reason."""
+        j, accounts = self.d.journal, self.ws.accounts
+        adoption = j.adoption(self.ws.name, bead)
+        entries = j.launches(session_key)
+        if (accounts is None or (adoption is not None and not adoption.settled)
+                or any(e.dispatched_at is not None and e.outcome is None for e in entries)):
+            return None
+        launched = [e for e in entries if e.outcome == LAUNCHED]
+        try:
+            return decide(accounts, j, profile, launched[-1].credential_key if launched else None, now,
+                          self.ws.usage)
+        except ConfigError:
+            return None
+
+    def _gate_resume(self, bead: Bead, now: int) -> Verdict | Chosen:
+        """A resumable bead, gated on its recorded session's profile. AccountChanged goes on: the guard
+        escalates a claimed bead (O6)."""
+        try:
+            rec = bead.record()
+        except RecordUnreadable:
+            return None
+        return None if rec is None else self._gate(bead.id, rec.profile, rec.session_key, now)
+
+    def _gate_new(self, bead: Bead, now: int) -> Verdict:
+        """A ready bead, gated on the profile and session its placement gives. Its STUCK/ACCOUNT_REPOINTED
+        row is dropped as soon as the gate gives anything else, before a Deadline is handled."""
+        j, name = self.d.journal, self.ws.name
+        try:
+            spot = place(self.ws, bead)
+        except ConfigInvalid:
+            return None             # start_new escalates it
+        verdict = self._gate(bead.id, spot.profile, spot.session_key, now)
+        row = j.state(name, bead.id)
+        if (row is not None and (row.state, row.reason) == (BeadState.STUCK, Reason.ACCOUNT_REPOINTED)
+                and not isinstance(verdict, AccountChanged)):
+            j.adopt(name, bead.id, BeadState.DROPPED, Reason.CLAIM_ABANDONED, "account restored")
+        return verdict if isinstance(verdict, Deadline | AccountChanged) else None
+
+    def _waiters(self, now: int) -> list[int]:
+        """Each runnable PARKED/QUOTA waiter's current gate deadline, or `now + min_recheck_seconds` if it
+        gates to an account or to `account_changed`, so the next pickup resumes or escalates it."""
+        j, name = self.d.journal, self.ws.name
+        rows = {r.bead for r in j.states(name) if (r.state, r.reason) == (BeadState.PARKED, Reason.QUOTA)}
+        found: list[int] = []
+        for bead in self.d.beads.ours(name):
+            if bead.id in rows and resumable(bead) and j.op_for(name, bead.id) is None:
+                verdict = self._gate_resume(bead, now)
+                found.append(verdict.at if isinstance(verdict, Deadline)
+                             else now + self.ws.usage.min_recheck_seconds)
+        return found
+
+    def _deferrals(self, now: int) -> list[int]:
+        """The `defer_until` of each current coder quota deferral still after `now` (AU-4 writes them),
+        except for beads the journal has HELD or STUCK, beads labelled `v2:held` or `needs-human`, and
+        beads with open blockers."""
+        j, name = self.d.journal, self.ws.name
+        rows = {r.bead: r.state for r in j.states(name)}
+        found: list[int] = []
+        for d in j.deferrals_current(name, self.ws.coder_role):
+            at = epoch(d.defer_until)
+            if d.reason != "quota" or at is None or at <= now or rows.get(d.bead) in KEPT:
+                continue
+            bead = self.d.beads.show(name, d.bead)
+            if HELD not in bead.labels and NEEDS_HUMAN not in bead.labels and not bead.open_blockers():
+                found.append(at)
+        return found
+
     def _unclaimable(self, bead: Bead) -> str:
         """Why btq's claim can't take a listed bead, or "" if it can."""
         if not self.d.beads.claimable(self.ws.name, bead):
@@ -192,10 +318,11 @@ class Scheduler:
         return ""
 
     def _forget_unlisted(self, listed: set[str]) -> None:
-        """UNCLAIMABLE rows of beads no longer listed as ready: nothing waits on them any more."""
+        """UNCLAIMABLE and ACCOUNT_REPOINTED rows of beads no longer listed as ready: nothing waits on them
+        any more."""
         j, name = self.d.journal, self.ws.name
         for row in j.states(name):
-            if (row.state is BeadState.STUCK and row.reason is Reason.UNCLAIMABLE and row.bead not in listed
+            if (row.state is BeadState.STUCK and row.reason in UNLISTED and row.bead not in listed
                     and j.op_for(name, row.bead) is None):
                 j.adopt(name, row.bead, BeadState.DROPPED, Reason.CLAIM_ABANDONED, "no longer ready")
 
@@ -326,6 +453,8 @@ class Scheduler:
 
     def _start(self, op: Op) -> Launch:
         j, name = self.d.journal, self.ws.name
+        if op.step == "quota":
+            return self.parker.finish_quota(op)     # a quota shelve's replay, before any other check
         if op.step == "claimed":
             if op.data.get("role") != self.ws.coder_role:
                 self.parker.escalate_from(op, Reason.CONFIG_INVALID,

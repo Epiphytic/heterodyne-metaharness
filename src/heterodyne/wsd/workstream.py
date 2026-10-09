@@ -6,7 +6,8 @@ park, recovery) reads the launched-session record on the bead instead, so a conf
 redirects a running or parked bead to another session or worktree.
 """
 
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.gate import ClaimGate
+from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime
 
@@ -46,6 +48,7 @@ class WorkstreamSettings:
     # The launch guard's accounts (AU-3 §2.1). None: no launch can pin an account, and the guard
     # escalates CONFIG_INVALID rather than guess.
     accounts: Accounts | None = None
+    usage: UsageSettings = field(default_factory=UsageSettings)     # the host's [usage] (AU-5 §2.1)
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,10 @@ def record(ws: WorkstreamSettings, spot: Placement) -> SessionRecord:
     return SessionRecord(ws.coder_role, spot.profile, spot.session_key, str(spot.repo), str(spot.worktree))
 
 
+def utc_now() -> int:
+    return int(time.time())
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -91,3 +98,5 @@ class Deps:
     runtime: AgentRuntime
     reconciler: ActionReconciler
     cp: Checkpoint = nothing
+    # Every AU-5 scheduling decision takes `now` from here (UTC epoch seconds), so tests drive one clock.
+    clock: Callable[[], int] = utc_now

@@ -12,6 +12,9 @@ Only beads with no open operation are swept: an open operation's replay owns its
   doesn't fit is escalated as UNEXPECTED_STATE; btq's post-claim checks must still pass.
 - A STUCK or HELD row of a bead that is not ours stays, unless bd confirms the bead no longer exists: then
   there is nothing to release, and it is dropped.
+- A PARKED/QUOTA row (AU-5's quota shelve) is kept, reason and detail, while the bead is still only
+  `v2:parked`; `needs-human`, a hold or a blocker replace it as for any waiting row. The sweep never writes
+  QUOTA itself.
 - A RUNNING bead with no session and a readable record gets a resume operation at `unlabelled` (it was
   never parked). With no readable record, or with a session under another key, it is escalated.
 
@@ -147,6 +150,9 @@ class _Sweep:
                 self._hold(bead, Reason.UNEXPECTED_STATE, "parked, but a session is listed")
             elif row.state in WAITING:
                 state = parked_state(bead)
+                if (row.state is BeadState.PARKED and row.reason is Reason.QUOTA and state is BeadState.PARKED
+                        and not bead.open_blockers()):
+                    return      # a completed quota shelve, still quota-parked: kept as it is (AU-5 §3.4)
                 if (row.state, row.detail) != (state, blocker_detail(bead)):
                     j.adopt(name, bead.id, state, REASONS[state], blocker_detail(bead))
             else:
