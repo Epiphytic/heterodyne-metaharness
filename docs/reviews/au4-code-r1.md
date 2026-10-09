@@ -1,0 +1,9 @@
+Reviewer: gpt-6.1-sol. Reviewed range: cc7bd17..7e018b0. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/wsd/states.py:139` — Interpretation **1** deviates from approved §2.2: an armed wake must make an otherwise **all-blocked** workstream DEFERRED too. For example, PARKED and quota-DEFERRED rows with a wake currently report ALL_BLOCKED. `tests/test_wsd_states.py:161` asserts the incorrect behavior. Fix the remaining-state branch to honor `wake`, preserving higher-priority states, and correct the test. Interpretations **2–22 are acceptable as stated**; the following are additional implementation defects.
+
+2. [BLOCKING] `src/heterodyne/wsd/daemon.py:449` — Concurrent reloads can acknowledge settings that were never applied. If reload A queues settings A behind a busy lane, reload B queues settings B under the same `RELOAD` key. `Lane.submit` returns A’s existing future and discards B’s function. Both requests succeed, but B assigns `Wsd.s = settings B` while the scheduler and parker use settings A. Fix by serializing the complete reload request, or otherwise preventing distinct settings snapshots from sharing a job. Add an overlapping-reload test with different configurations.
+
+3. [BLOCKING] `src/heterodyne/wsd/daemon.py:273` — Failed prerequisite recovery silently loses the reload’s re-gate. After startup has populated `regated`, invalidate recovery and reload settings that restore an account. If recovery returns `ok=False`, `reload_one` returns `outcome=held`; `_reload` nevertheless replies `ok`. A subsequent successful recovery skips startup re-gating because the workstream remains in `regated`, leaving the account_changed deferral unmarked indefinitely. Fix by retaining the pending reload re-gate for retry, or returning an explicit failed reload requiring another request. Test failed recovery followed by successful recovery and pickup.
+
+REVISE
