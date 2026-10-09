@@ -21,10 +21,11 @@ from wsd_env import (
     own_profile,
     probe_lock,
     profile_key,
+    repoint_codex,
 )
 
 from heterodyne.wsd import ids
-from heterodyne.wsd.accounts import Chosen, ConfiguredAccounts
+from heterodyne.wsd.accounts import Chosen
 from heterodyne.wsd.beads import DEFERRED, HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
 from heterodyne.wsd.headroom import Deadline, epoch, quota_detail
 from heterodyne.wsd.journal import JournalBusy
@@ -1424,21 +1425,6 @@ def test_unreadable_pause_flag_is_paused_not_unreachable(tmp_path: Path) -> None
 # --- AU-5: the headroom gate in pickup (design §3.6; §5 pickup) ---
 
 HOUR = 3600
-
-
-def repoint_codex(rig: Rig, to: str) -> None:
-    """Repoint the default codex login (`~/.codex/auth.json`) to another file, or back (`to` = "")."""
-    accounts = rig.ws.accounts
-    assert isinstance(accounts, ConfiguredAccounts)
-    link = Path(accounts.env["HOME"]) / ".codex" / "auth.json"
-    link.unlink()
-    if to:
-        other = link.parent.parent / f".codex-{to}" / "auth.json"
-        other.parent.mkdir(exist_ok=True)
-        other.write_text("{}")
-        link.symlink_to(other)
-    else:
-        link.write_text("{}")
 
 
 def handed_back(rig: Rig, bead: str) -> None:
