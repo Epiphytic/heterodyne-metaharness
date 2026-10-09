@@ -96,9 +96,9 @@ def resolve(cfg: Config, env: Mapping[str, str]) -> AdmindSettings:
     summarizer_name = admind.get("summarizer")
     summarizer, summarizer_binary, summarizer_account = (None, None, None) if summarizer_name is None else \
         _profile(cfg, summarizer_name, "summarizer")
-    for p, account in ((profile, agent_account), (summarizer, summarizer_account)):
-        if p is not None and account is not None:
-            _check_selector(p["adapter"], account, env)
+    for p in (profile, summarizer):
+        if p is not None:
+            _check_selector(p["adapter"], env)
 
     units = tuple(string_list(admind.get("restart_units", []), "[admind] restart_units"))
     for unit in units:
@@ -179,12 +179,12 @@ def admind_account(account: Account) -> AdmindAccount:
                          LOGIN_OVERRIDES[account.adapter])
 
 
-def _check_selector(adapter: str, account: AdmindAccount, env: Mapping[str, str]) -> None:
-    """A process on `default` runs on AU-2's fixed directory, so admind's own environment may not select
-    another one: the recorded credential key would name the wrong directory (§4.4 D1). A named account
-    sets the selector itself. The message names the variable, never its value."""
+def _check_selector(adapter: str, env: Mapping[str, str]) -> None:
+    """Logins are chosen by [accounts] only, so admind's own environment may not select one for either
+    process's adapter, whatever account it runs on (§3.2, §4.4 D1). The message names the variable, never
+    its value."""
     selector = SELECTOR[adapter]
-    if account.name == "default" and selector in env:
+    if selector in env:
         raise ConfigError(f"admind's environment sets {selector}; logins are chosen by [accounts] in "
                           "config.toml (ADR §4.4 D1). Unset it, or configure an account")
 

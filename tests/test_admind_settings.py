@@ -1,7 +1,9 @@
+import functools
 from pathlib import Path
 
 import pytest
 
+from heterodyne.admind import cli
 from heterodyne.admind import settings as admind_settings
 from heterodyne.admind.settings import resolve
 from heterodyne.config import ConfigError, load
@@ -323,11 +325,24 @@ def test_a_login_selector_in_adminds_environment_is_refused(tmp_path: Path) -> N
     resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, "CODEX_HOME": secret_dir})
 
 
-def test_a_selector_is_refused_while_either_process_is_on_default(tmp_path: Path) -> None:
-    selected = {"CLAUDE_CONFIG_DIR": str(tmp_path / "x")}
-    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "sum"))
-    resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, **selected})   # both set it themselves
+def test_a_selector_is_refused_whatever_account_either_process_is_on(tmp_path: Path) -> None:
+    """§3.2: named accounts set the selector themselves, but an inherited one is still refused."""
+    selected = {"CLAUDE_CONFIG_DIR": str(tmp_path / "x-MARKER")}
     plain = '[profiles.plain]\nadapter = "claude-code"\n'
-    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "plain") + plain)
-    with pytest.raises(ConfigError, match="sets CLAUDE_CONFIG_DIR"):
-        resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, **selected})
+    for summarizer in ("sum", "plain"):     # both on named accounts; the summarizer on default
+        env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, summarizer) + plain)
+        with pytest.raises(ConfigError, match="sets CLAUDE_CONFIG_DIR") as exc:
+            resolve(load(None, env, capabilities=ACCOUNTS_ON), {**env, **selected})
+        assert "MARKER" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+
+
+def test_admind_exits_78_on_an_inherited_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    env = write(tmp_path, with_summarizer(WITH_ACCOUNTS, "sum"))
+    for k, v in {**env, "CLAUDE_CONFIG_DIR": str(tmp_path / "x-MARKER")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli.hconfig, "load", functools.partial(load, capabilities=ACCOUNTS_ON))
+    assert cli.main(["run"]) == cli.EX_CONFIG
+    err = capsys.readouterr().err
+    assert "sets CLAUDE_CONFIG_DIR" in err
+    assert "MARKER" not in err and str(tmp_path) not in err
