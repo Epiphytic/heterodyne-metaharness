@@ -8,6 +8,10 @@
 - Release (the operator's, plan 6): remove `v2:held` and `needs-human`, then either back to parked or
   on to a resume. It is the only way out of HELD or STUCK.
 - Escalate: STUCK in the journal, then `needs-human` on the bead, replayed until it reads back.
+- Defer (AU-4, D5): the deferral record is the intent; then stop every session, WIP commit, `v2:deferred`
+  and the `wsd-defer` comment, with no blocking edge. The tail runs inside whichever op deferred the bead
+  (a standalone PARK, a pickup's or resume's guard, an undefer, a re-gate or a release), found by its
+  `defer.*` step names. Undefer gates the bead again, removes `v2:deferred` and launches through the guard.
 - `launch`, the guard: the only call to `AgentRuntime.launch`, used by pickup, resume and their replays.
 
 Every external effect is followed by a `<op>.<step>!` checkpoint, and every journal write by
@@ -23,6 +27,8 @@ budget and never escalates.
 import contextlib
 import threading
 from collections.abc import Generator
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -30,6 +36,7 @@ from heterodyne.config import ConfigError
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import DEFAULT, AccountChanged, Accounts
 from heterodyne.wsd.beads import (
+    DEFERRED,
     HELD,
     NEEDS_HUMAN,
     PARKED,
@@ -44,7 +51,7 @@ from heterodyne.wsd.beads import (
     WorktreeConflict,
 )
 from heterodyne.wsd.headroom import Deadline, quota_detail
-from heterodyne.wsd.journal import EntryConflict, Op, OpKind, OpStatus, now
+from heterodyne.wsd.journal import DeferralRow, EntryConflict, Op, OpKind, OpStatus, now
 from heterodyne.wsd.launches import (
     ABANDONED,
     LAUNCHED,
@@ -62,7 +69,7 @@ from heterodyne.wsd.upgrade import (
     check_agreement,
     configured_at_upgrade,
 )
-from heterodyne.wsd.usage import admitted, decide
+from heterodyne.wsd.usage import admitted, decide, untrusted_defer_until
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
 
 PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
@@ -73,18 +80,30 @@ PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "
 GUARD_STEPS = ("entry", "entry!", "dispatched", "dispatched!", "launched!", "receipt", "outcome", "outcome!",
                "done")
 UNRECEIPTED = ("dispatched", "dispatched!", "launched!")
-# The interim quota shelve's points (AU-5 §3.4), as `<kind>.<step>`: only a Deadline at step 2 reaches them.
-QUOTA_STEPS = ("quota", "quota!")
+# The defer tail's points (AU-4 §3.1), as `<kind>.<step>` for the op that contains it.
+DEFER_STEPS = ("defer.recorded", "defer.stopped!", "defer.stopped", "defer.committed!", "defer.committed",
+               "defer.labelled!", "defer.labelled", "defer.commented!", "defer.done")
+UNDEFER_POINTS = ("undefer.intent", "undefer.gated!", "undefer.gated", "undefer.unlabelled!",
+                  "undefer.unlabelled")
 RESUME_POINTS = ("resume.intent", "resume.unlabelled!", "resume.unlabelled",
                  *(f"resume.{step}" for step in GUARD_STEPS))
 RELEASE_POINTS = ("lock.waiting", "release.intent", "release.unlabelled!", "release.unlabelled",
                   "release.done")
+# A deferred bead's release (AU-4 §3.5): the `regate` step, the over-mark's finish, then the tail's points.
+RELEASE_REGATE_POINTS = ("release.regate", "release.regate.over!", *(f"release.{s}" for s in DEFER_STEPS))
 ADOPTED_RELEASE_POINTS = ("release.adopted", "release.adopted!")
 ESCALATE_POINTS = ("escalate.intent", "escalate.labelled!", "escalate.done")
 PARK_MARK = "wsd-park: "
 REASONS = {BeadState.HELD: Reason.HELD_BY_OPERATOR, BeadState.WAITING_INPUT: Reason.WAITING_ON_OPERATOR,
            BeadState.PARKED: Reason.BLOCKED_ON_BEAD}
-RELEASABLE = frozenset({BeadState.HELD, BeadState.STUCK})
+RELEASABLE = frozenset({BeadState.HELD, BeadState.STUCK, BeadState.DEFERRED})   # DEFERRED: account_changed
+# The deferral reasons and trusts (D5) as stored in `deferrals`.
+QUOTA = Reason.QUOTA.value
+ACCOUNT_CHANGED = Reason.ACCOUNT_CHANGED.value
+TRUSTED = "trusted"
+UNTRUSTED = "untrusted"
+DEFER_MARK = "wsd-defer "
+ACCOUNT_CHANGED_EVENT = "deferral_account_changed"
 # Holds the guard settles itself from the session list instead of waiting on, but only an operation's
 # own: the hold's detail names the bead whose launch was uncertain, and every other operation waits (D17).
 GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
@@ -101,7 +120,45 @@ class Launch(StrEnum):
 
 
 class NotReleasable(Exception):
-    """Release applies only to a HELD or STUCK bead with no operation open on it."""
+    """Release applies only to a HELD or STUCK bead, or a DEFERRED `account_changed` one, with no operation
+    open on it."""
+
+
+class NotDeferrable(Exception):
+    """A standalone defer needs the bead's launched-session record and no operation open on it."""
+
+
+class Regated(StrEnum):
+    """What a re-gate of an `account_changed` wait did (AU-4 §3.4)."""
+    OVER = "over"              # the gate gives an account: marked over, the next pickup undefers it
+    REQUOTA = "requota"        # the gate gives a deadline: the next number, as a quota deferral
+    UNCHANGED = "unchanged"    # still `account_changed`, or skipped: nothing written
+
+
+@dataclass(frozen=True)
+class RegateCounts:
+    over: int = 0
+    requota: int = 0
+    unchanged: int = 0
+
+
+def defer_mark(key: str, number: int) -> str:
+    """The `wsd-defer` comment's mark: unique per (session, number); the trailing space ends the number."""
+    return f"{DEFER_MARK}session={key} n={number} "
+
+
+def defer_comment(rec: DeferralRow) -> str:
+    """D5's one line, written once per deferral number."""
+    until = "none" if rec.defer_until is None else \
+        datetime.fromtimestamp(int(rec.defer_until), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"{defer_mark(rec.session_key, rec.number)}role={rec.role} until={until} reason={rec.reason}"
+
+
+def deferred_reason(rec: DeferralRow) -> tuple[Reason, str]:
+    """A DEFERRED row's reason and detail for its current record."""
+    if rec.reason == QUOTA and rec.defer_until is not None:
+        return Reason.QUOTA, quota_detail(int(rec.defer_until))
+    return Reason.ACCOUNT_CHANGED, "account changed"
 
 
 def park_comment(op: Op) -> str:
@@ -336,6 +393,295 @@ class Parker:
                 return BeadState.STUCK
             return BeadState.PARKING
 
+    # --- defer (AU-4 §3.1, §3.2) ---
+
+    def defer(self, bead: str, reason: str, until: int | None, trust: str = TRUSTED,
+              ref: str | None = None) -> BeadState:
+        """The standalone defer (entry 1): the session-reported path's entry point, and AU-7's later. An
+        `untrusted` until is clamped by D5's rule before it is recorded. Raises NotDeferrable."""
+        with self.entry():
+            return self.open_defer(bead, reason, until, trust, ref)
+
+    def open_defer(self, bead: str, reason: str, until: int | None, trust: str = TRUSTED,
+                   ref: str | None = None) -> BeadState:
+        """`defer` for a caller that already holds `entry()` (pickup's due resume, recovery's conversion):
+        a PARK op opened at `defer.recorded` with the next record, then the tail."""
+        j, ws = self.d.journal, self.ws.name
+        if reason not in (QUOTA, ACCOUNT_CHANGED) or (reason == QUOTA) != (until is not None or
+                                                                         trust == UNTRUSTED):
+            raise ValueError(f"no such deferral: {reason} until {until}")
+        if trust == UNTRUSTED:
+            until = untrusted_defer_until(until, self.d.clock(), self.ws.usage)
+        try:
+            rec = self.d.beads.show(ws, bead).record()
+        except RecordUnreadable:
+            rec = None
+        if rec is None:
+            raise NotDeferrable(f"{bead} has no readable launched-session record")
+        with j.transaction():
+            if j.op_for(ws, bead) is not None:
+                raise NotDeferrable(f"{bead} has an operation open")
+            op = j.op_open(OpKind.PARK, ws, bead, {"ref": ref or ""})
+            op = self._record_defer(op, rec, reason, until, trust)
+        self.d.cp("park.defer.recorded")
+        return self.defer_tail(op)
+
+    def _record_defer(self, op: Op, rec: SessionRecord | DeferralRow, reason: str, until: int | None,
+                      trust: str = TRUSTED) -> Op:
+        """Recording is the intent, in one transaction (joined by the caller's): the next record of `rec`'s
+        session (its key, role and profile), the op's `defer.recorded` step naming it, and the row in
+        PARKING. A replay continues with this number."""
+        j = self.d.journal
+        with j.transaction():
+            n = j.deferral_next(rec.session_key)
+            j.deferral_insert(DeferralRow(rec.session_key, n, op.bead, rec.role, rec.profile, reason,
+                                          None if until is None else str(until), trust))
+            op = j.op_step(op.op_id, "defer.recorded", {"defer": str(n), "defer_key": rec.session_key})
+            j.set_state(self.ws.name, op.bead, BeadState.PARKING, ref=op.data.get("ref") or None)
+        return op
+
+    def _defer_within(self, op: Op, rec: SessionRecord | DeferralRow, reason: str,
+                      until: int | None) -> BeadState:
+        """Move `op` to the tail with the next record (the guard, an undefer, a re-gate in a release)."""
+        op = self._record_defer(op, rec, reason, until)
+        self.d.cp(f"{op.kind.value}.defer.recorded")
+        return self.defer_tail(op)
+
+    def defer_tail(self, op: Op) -> BeadState:
+        """The steps after the intent, and their replay from any `defer.*` step (§3.1). The op ends DONE
+        for a PARK or RELEASE op and ABANDONED for a pickup, resume or undefer."""
+        ws, bead, j, kind = self.ws.name, op.bead, self.d.journal, op.kind.value
+        key, n = op.data["defer_key"], int(op.data["defer"])
+        if op.attempts >= self.ws.limits.park_attempts_before_human:      # a budget spent before a crash
+            self.escalate_from(op, Reason.PARK_FAILED, "the defer's attempts are spent")
+            return BeadState.STUCK
+        try:
+            if op.step == "defer.recorded":
+                for session in self._sessions(bead):
+                    self.d.runtime.stop(session.key)
+                if self._sessions(bead):
+                    return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+                self.d.cp(f"{kind}.defer.stopped!")
+                op = j.op_step(op.op_id, "defer.stopped")
+                self.d.cp(f"{kind}.defer.stopped")
+            if op.step == "defer.stopped":
+                if self.d.beads.read_claim(ws, bead) is not ClaimView.OURS:
+                    raise NotOurs(bead)
+                rec = self.d.beads.show(ws, bead).record()
+                if rec is None:
+                    self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record names the worktree")
+                    return BeadState.STUCK
+                worktree = self.d.beads.verify_worktree(ws, bead, Path(rec.repo), Path(rec.worktree))
+                sha = gitwip.wip_commit(worktree, f"defer:{key}:{n}", f"deferred {bead}")
+                self.d.cp(f"{kind}.defer.committed!")
+                op = j.op_step(op.op_id, "defer.committed", {"sha": sha})
+                self.d.cp(f"{kind}.defer.committed")
+            if op.step == "defer.committed":
+                self.d.beads.ensure_label(ws, bead, DEFERRED)
+                self.d.cp(f"{kind}.defer.labelled!")
+                op = j.op_step(op.op_id, "defer.labelled")
+                self.d.cp(f"{kind}.defer.labelled")
+            current = j.deferral_current(key)
+            if current is None or current.number != n:
+                self.escalate_from(op, Reason.UNEXPECTED_STATE, f"deferral {n} is not the session's current")
+                return BeadState.STUCK
+            self.d.beads.ensure_comment(ws, bead, defer_mark(key, n), defer_comment(current))
+            self.d.cp(f"{kind}.defer.commented!")
+            final = self._finish_defer(op, current, self.d.beads.show(ws, bead))
+            self.d.cp(f"{kind}.defer.done")
+            return final
+        except NotOurs:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return BeadState.STUCK
+        except RecordUnreadable:
+            self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "the session record does not parse")
+            return BeadState.STUCK
+        except WorktreeConflict as exc:
+            self.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
+            return BeadState.STUCK
+        except RuntimeUnavailable:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        except gitwip.GitFailed as exc:
+            if self._spend(op, self.ws.limits.park_attempts_before_human, Reason.PARK_FAILED, str(exc)):
+                return BeadState.STUCK
+            return BeadState.PARKING
+
+    def _finish_defer(self, op: Op, rec: DeferralRow, shown: Bead) -> BeadState:
+        """One transaction: the stale over-mark goes, the op ends, the row takes its final state (by
+        precedence: `needs-human`, `v2:held`, then DEFERRED) and an `account_changed` record's one alert."""
+        j = self.d.journal
+        if NEEDS_HUMAN in shown.labels:
+            final, reason, detail = BeadState.STUCK, Reason.NEEDS_HUMAN, ""
+        elif HELD in shown.labels:
+            final, reason, detail = BeadState.HELD, REASONS[BeadState.HELD], ""
+        else:
+            final = BeadState.DEFERRED
+            reason, detail = deferred_reason(rec)
+        done = op.kind in (OpKind.PARK, OpKind.RELEASE)
+        with j.transaction():
+            if rec.number > 1:
+                j.drop_over(rec.session_key, rec.number - 1)
+            self._finish(op, OpStatus.DONE if done else OpStatus.ABANDONED, final, reason, detail)
+            if rec.reason == ACCOUNT_CHANGED:
+                j.emit(self.ws.name, op.bead, ACCOUNT_CHANGED_EVENT, ref=f"{rec.session_key}:{rec.number}")
+        return final
+
+    def convert_quota(self, op: Op) -> Launch:
+        """§6: an op left at AU-5's `quota` step becomes the guard's defer, with the record's `until` from
+        the step's data, in one transaction with its `defer.recorded` step; then the tail."""
+        try:
+            rec = self.d.beads.show(self.ws.name, op.bead).record()
+        except RecordUnreadable:
+            rec = None
+        if rec is None:
+            self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record to defer")
+            return Launch.ENDED
+        self._defer_within(op, rec, QUOTA, int(op.data["until"]))
+        return Launch.ENDED
+
+    def current_deferral(self, shown: Bead) -> DeferralRow | None:
+        """The current deferral record of the bead's recorded session."""
+        try:
+            rec = shown.record()
+        except RecordUnreadable:
+            return None
+        return None if rec is None else self.d.journal.deferral_current(rec.session_key)
+
+    # --- undefer (AU-4 §3.3) ---
+
+    def undefer(self, bead: str, ref: str | None = None) -> Launch:
+        """Undefer a DEFERRED bead whose current deferral is over (pickup holds `entry()`): a RESUME op that
+        names the number, then the gate, `v2:deferred` removed and the guard."""
+        j, ws = self.d.journal, self.ws.name
+        current = self.current_deferral(self.d.beads.show(ws, bead))
+        if current is None:
+            raise NotDeferrable(f"{bead} has no deferral record")
+        with j.transaction():
+            op = j.op_open(OpKind.RESUME, ws, bead, {"ref": ref or "", "undefer": str(current.number),
+                                                     "defer_key": current.session_key})
+            j.set_state(ws, bead, BeadState.RESUMING, ref=ref)
+        self.d.cp("undefer.intent")
+        return self.replay_undefer(op)
+
+    def replay_undefer(self, op: Op) -> Launch:
+        ws, bead, j = self.ws.name, op.bead, self.d.journal
+        try:
+            if op.step == "intent":
+                ended = self._undefer_gate(op)
+                if ended is not None:
+                    return ended
+                op = j.op_step(op.op_id, "gated")
+                self.d.cp("undefer.gated")
+            if op.step == "gated":
+                self.d.beads.ensure_label(ws, bead, DEFERRED, present=False)
+                self.d.cp("undefer.unlabelled!")
+                op = j.op_step(op.op_id, "unlabelled")
+                self.d.cp("undefer.unlabelled")
+        except NotOurs:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
+            return Launch.ENDED
+        shown = self.d.beads.show(ws, bead)
+        if PARKED in shown.labels:           # plan 3's parked resume takes it once its blockers close
+            final = parked_state(shown)
+            self._finish(op, OpStatus.DONE, final, REASONS[final], blocker_detail(shown))
+            return Launch.ENDED
+        return self.launch(op)
+
+    def _undefer_gate(self, op: Op) -> Launch | None:
+        """The intent's checks, in order, then the gate. None: an account, go on to `gated`."""
+        j, ws, bead = self.d.journal, self.ws.name, op.bead
+        key, n = op.data["defer_key"], int(op.data["undefer"])
+        current = j.deferral_current(key)
+        shown = self.d.beads.show(ws, bead)
+        if current is None or current.number != n:          # superseded meanwhile
+            self._finish_deferred(op, current)
+            return Launch.ENDED
+        if NEEDS_HUMAN in shown.labels:
+            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.NEEDS_HUMAN)
+            return Launch.ENDED
+        if HELD in shown.labels:
+            self._finish(op, OpStatus.ABANDONED, BeadState.HELD, REASONS[BeadState.HELD])
+            return Launch.ENDED
+        if shown.open_blockers() and PARKED not in shown.labels:
+            self._finish_deferred(op, current)
+            return Launch.ENDED
+        verdict = self._regate_verdict(current)
+        if isinstance(verdict, ConfigError):
+            self.escalate_from(op, Reason.CONFIG_INVALID, str(verdict))
+            return Launch.ENDED
+        if verdict is None:
+            self.d.cp("undefer.gated!")
+            return None
+        if isinstance(verdict, Deadline):
+            self._defer_within(op, current, QUOTA, verdict.at)
+        elif current.reason == QUOTA:
+            self._defer_within(op, current, ACCOUNT_CHANGED, None)
+        else:                                               # still `account_changed`: its mark was stale
+            with j.transaction():
+                j.drop_over(key, n)
+                self._finish_deferred(op, current)
+        return Launch.ENDED
+
+    def _finish_deferred(self, op: Op, current: DeferralRow | None) -> None:
+        """End `op` ABANDONED with the row back in DEFERRED, still waiting on its current record."""
+        reason, detail = (Reason.ACCOUNT_CHANGED, "account changed") if current is None else \
+            deferred_reason(current)
+        self._finish(op, OpStatus.ABANDONED, BeadState.DEFERRED, reason, detail)
+
+    def _regate_verdict(self, current: DeferralRow) -> Deadline | AccountChanged | ConfigError | None:
+        """The gate on the record's profile and the session's previous key: None for an account. An
+        unresolvable profile is the guard's CONFIG_INVALID (returned, for the caller to place)."""
+        accounts = self.ws.accounts
+        if accounts is None:
+            return ConfigError("no account can be pinned for the profile")
+        try:
+            previous = self._previous_key(current.session_key)
+            verdict = decide(accounts, self.d.journal, current.profile, previous, self.d.clock(),
+                             self.ws.usage)
+        except ConfigError as exc:
+            return exc
+        return verdict if isinstance(verdict, Deadline | AccountChanged) else None
+
+    # --- re-gate (AU-4 §3.4) ---
+
+    def regate(self, bead: str, within: Op | None = None) -> Regated:
+        """Re-gate the bead's current `account_changed` wait. Without `within` (process start, reload) a
+        bead already marked over, with an open op, or held, needing a human, HELD or STUCK is skipped
+        without gating; within a release the outcome finishes that RELEASE op (§3.5)."""
+        j, ws = self.d.journal, self.ws.name
+        shown = self.d.beads.show(ws, bead)
+        current = self.current_deferral(shown)
+        if current is None or current.reason != ACCOUNT_CHANGED:
+            return Regated.UNCHANGED
+        if within is None:
+            row = j.state(ws, bead)
+            if (j.is_over(current.session_key, current.number) or j.op_for(ws, bead) is not None
+                    or HELD in shown.labels or NEEDS_HUMAN in shown.labels
+                    or row is None or row.state is not BeadState.DEFERRED):
+                return Regated.UNCHANGED
+        verdict = self._regate_verdict(current)
+        if verdict is None:
+            with j.transaction():
+                j.mark_over(current.session_key, current.number)
+                if within is not None:
+                    self._finish(within, OpStatus.DONE, BeadState.DEFERRED, *deferred_reason(current))
+            if within is not None:
+                self.d.cp("release.regate.over!")
+            return Regated.OVER
+        if isinstance(verdict, Deadline):
+            if within is not None:
+                self._defer_within(within, current, QUOTA, verdict.at)
+            else:
+                with j.transaction():
+                    op = j.op_open(OpKind.PARK, ws, bead, {"ref": ""})
+                    op = self._record_defer(op, current, QUOTA, verdict.at)
+                self.d.cp("park.defer.recorded")
+                self.defer_tail(op)
+            return Regated.REQUOTA
+        if within is not None:                  # still `account_changed`, or a profile that can't resolve
+            self._finish(within, OpStatus.DONE, BeadState.DEFERRED, *deferred_reason(current))
+        return Regated.UNCHANGED
+
     # --- resume ---
 
     def resume(self, bead: Bead, ref: str | None = None) -> Launch:
@@ -350,8 +696,13 @@ class Parker:
 
     def replay_resume(self, op: Op) -> Launch:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
+        if op.step.startswith("defer."):
+            self.defer_tail(op)
+            return Launch.ENDED
         if op.step == "quota":
-            return self.finish_quota(op)
+            return self.convert_quota(op)
+        if "undefer" in op.data:
+            return self.replay_undefer(op)
         if op.step == "intent":
             shown = self.d.beads.show(ws, bead)
             # `v2:parked` already gone is this operation's own unlabel, done before a crash: go on. The
@@ -387,9 +738,13 @@ class Parker:
                 row = j.state(ws, bead)
                 if row is None or row.state not in RELEASABLE or j.op_for(ws, bead) is not None:
                     raise NotReleasable(bead)
+                if row.state is BeadState.DEFERRED and row.reason is not Reason.ACCOUNT_CHANGED:
+                    raise NotReleasable(f"{bead} waits on quota")      # nothing for the operator to release
                 self._refuse_unverifiable(bead)
                 op = j.op_open(OpKind.RELEASE, ws, bead, {"ref": ref or ""})
-            self.d.cp("release.intent")
+                if row.state is BeadState.DEFERRED:       # nothing to unlabel: straight to `regate`
+                    op = j.op_step(op.op_id, "regate")
+            self.d.cp("release.regate" if op.step == "regate" else "release.intent")
             return self.replay_release(op)
 
     def _refuse_unverifiable(self, bead: str) -> None:
@@ -407,6 +762,10 @@ class Parker:
 
     def replay_release(self, op: Op) -> BeadState:
         ws, bead, j = self.ws.name, op.bead, self.d.journal
+        if op.step.startswith("defer."):
+            return self.defer_tail(op)
+        if op.step == "regate":
+            return self._release_regate(op)
         try:
             if op.step == "intent":
                 self.d.beads.ensure_label(ws, bead, HELD, present=False)
@@ -419,6 +778,17 @@ class Parker:
             if failed is not None:
                 self.escalate_from(op, Reason.UNEXPECTED_STATE, f"adoption still unverified: {failed}")
                 return BeadState.STUCK
+            if DEFERRED in shown.labels:          # never removed by a release: re-gated instead (§3.5)
+                current = self.current_deferral(shown)
+                if current is None:
+                    self.escalate_from(op, Reason.UNEXPECTED_STATE, "deferred without a deferral record")
+                    return BeadState.STUCK
+                with j.transaction():
+                    op = j.op_step(op.op_id, "regate")
+                    j.set_state(ws, bead, BeadState.DEFERRED, *deferred_reason(current),
+                                ref=op.data.get("ref") or None)
+                self.d.cp("release.regate")
+                return self._release_regate(op)
             if PARKED in shown.labels:
                 final = parked_state(shown)
                 self._finish(op, OpStatus.DONE, final, REASONS[final], blocker_detail(shown))
@@ -446,6 +816,23 @@ class Parker:
             j.set_state(ws, bead, BeadState.RESUMING, ref=op.data.get("ref") or None)
         self.d.cp("release.done")
         return BeadState.RESUMING
+
+    def _release_regate(self, op: Op) -> BeadState:
+        """The `regate` step (§3.5): a quota wait finishes as it is; an `account_changed` wait is re-gated
+        within this op, which settles over-marked, with the next quota record, or unchanged. Never a
+        launch, and `v2:deferred` stays."""
+        ws, bead, j = self.ws.name, op.bead, self.d.journal
+        current = self.current_deferral(self.d.beads.show(ws, bead))
+        if current is None:
+            self.escalate_from(op, Reason.UNEXPECTED_STATE, "deferred without a deferral record")
+            return BeadState.STUCK
+        if current.reason == ACCOUNT_CHANGED:
+            self.regate(bead, within=op)
+        else:
+            self._finish(op, OpStatus.DONE, BeadState.DEFERRED, *deferred_reason(current))
+        self.d.cp("release.done")
+        row = j.state(ws, bead)
+        return BeadState.STUCK if row is None else row.state
 
     def _resolve_adoption(self, op: Op, shown: Bead) -> str | None:
         """§3.3: before plan 3's parked/unparked branch, a held adoption is re-verified with today's facts
@@ -798,7 +1185,8 @@ class Parker:
 
     def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts) -> tuple[Op, LaunchEntry] | Launch:
         """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
-        copy. A Deadline quota-shelves the bead; AccountChanged is AU-3's interim escalation."""
+        copy. A Deadline or AccountChanged defers the bead inside this op (AU-4 §3.2 entry 3): no session
+        was dispatched for it, so the tail's stop only confirms that."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
         try:
@@ -807,11 +1195,10 @@ class Parker:
         except ConfigError as exc:
             self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
             return Launch.ENDED
-        if isinstance(chosen, AccountChanged):
-            self.escalate_from(op, Reason.ACCOUNT_CHANGED, chosen.detail)
+        if isinstance(chosen, AccountChanged | Deadline):
+            until = chosen.at if isinstance(chosen, Deadline) else None
+            self._defer_within(op, rec, QUOTA if until is not None else ACCOUNT_CHANGED, until)
             return Launch.ENDED
-        if isinstance(chosen, Deadline):
-            return self._quota_shelve(op, chosen)
         last = max((e.generation for e in entries), default=0)
         if last >= MAX_GENERATION:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"generations exhausted at {last}")
@@ -853,45 +1240,17 @@ class Parker:
         self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
         return Launch.ENDED
 
-    def _quota_shelve(self, op: Op, deadline: Deadline) -> Launch:
-        """AU-5 §3.4, the interim for a guard Deadline (O1; AU-4 replaces it with its deferral). Intent first:
-        the `quota` step with its `until` and the PARKED/QUOTA row, in one transaction, so a replay finishes
-        it as a quota shelve, never as an ordinary shelve or a launch."""
-        j, kind = self.d.journal, op.kind.value
-        with j.transaction():
-            op = j.op_step(op.op_id, "quota", {"until": str(deadline.at)})
-            j.set_state(self.ws.name, op.bead, BeadState.PARKED, Reason.QUOTA, quota_detail(deadline.at),
-                        op.data.get("ref") or None)
-        self.d.cp(f"{kind}.quota")
-        return self.finish_quota(op)
-
-    def finish_quota(self, op: Op) -> Launch:
-        """The quota shelve's steps 2 and 3, and its replay from step `quota`: label `v2:parked`, then read
-        the bead again. What was added meanwhile wins: `needs-human`, a hold or a blocker. The operation
-        ends ABANDONED in every case."""
-        ws, bead = self.ws.name, op.bead
-        try:
-            self.d.beads.ensure_label(ws, bead, PARKED)
-        except NotOurs:
-            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.CLAIM_LOST)
-            return Launch.ENDED
-        self.d.cp(f"{op.kind.value}.quota!")
-        shown = self.d.beads.show(ws, bead)
-        if NEEDS_HUMAN in shown.labels:
-            self._finish(op, OpStatus.ABANDONED, BeadState.STUCK, Reason.NEEDS_HUMAN)
-        elif HELD in shown.labels or shown.open_blockers():
-            final = parked_state(shown)
-            self._finish(op, OpStatus.ABANDONED, final, REASONS[final], blocker_detail(shown))
-        else:
-            self._finish(op, OpStatus.ABANDONED, BeadState.PARKED, Reason.QUOTA,
-                         quota_detail(int(op.data["until"])))
-        return Launch.ENDED
-
     # --- dispatch ---
 
     def replay(self, op: Op) -> None:
-        """Continue any open operation but a pickup (the scheduler owns those)."""
-        if op.kind is OpKind.PARK:
+        """Continue any open operation but a pickup (the scheduler owns those), except a pickup at a step
+        that never launches: a `defer.*` step goes to the tail, and AU-5's `quota` step to its conversion,
+        before anything else (§3.6)."""
+        if op.step.startswith("defer."):
+            self.defer_tail(op)
+        elif op.step == "quota" and op.kind in (OpKind.PICKUP, OpKind.RESUME):
+            self.convert_quota(op)
+        elif op.kind is OpKind.PARK:
             self.replay_park(op)
         elif op.kind is OpKind.RESUME:
             self.replay_resume(op)

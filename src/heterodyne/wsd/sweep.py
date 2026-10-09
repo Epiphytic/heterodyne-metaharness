@@ -12,9 +12,11 @@ Only beads with no open operation are swept: an open operation's replay owns its
   doesn't fit is escalated as UNEXPECTED_STATE; btq's post-claim checks must still pass.
 - A STUCK or HELD row of a bead that is not ours stays, unless bd confirms the bead no longer exists: then
   there is nothing to release, and it is dropped.
-- A PARKED/QUOTA row (AU-5's quota shelve) is kept, reason and detail, while the bead is still only
-  `v2:parked`; `needs-human`, a hold or a blocker replace it as for any waiting row. The sweep never writes
-  QUOTA itself.
+- A `v2:deferred` bead (AU-4 §7) is kept while its row is DEFERRED with a current deferral record and no
+  session is listed; anything else is UNEXPECTED_STATE, as is a DEFERRED row whose bead lost the label.
+- Migration only: a PARKED/QUOTA row (AU-5's quota shelve, which recovery converts) is kept, reason and
+  detail, while the bead is still only `v2:parked`; `needs-human`, a hold or a blocker replace it as for
+  any waiting row. The sweep never writes QUOTA itself.
 - A RUNNING bead with no session and a readable record gets a resume operation at `unlabelled` (it was
   never parked). With no readable record, or with a session under another key, it is escalated.
 
@@ -27,7 +29,16 @@ failure is carried on by the next pickup's launch guard, which waits on every ho
 from collections import defaultdict
 from dataclasses import dataclass
 
-from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, Bead, NotOurs, RecordUnreadable, RoutingChanged
+from heterodyne.wsd.beads import (
+    DEFERRED,
+    HELD,
+    NEEDS_HUMAN,
+    PARKED,
+    Bead,
+    NotOurs,
+    RecordUnreadable,
+    RoutingChanged,
+)
 from heterodyne.wsd.journal import OpKind
 from heterodyne.wsd.park import REASONS, Parker, blocker_detail, parked_state
 from heterodyne.wsd.runtime import RuntimeUnavailable, Session
@@ -143,7 +154,12 @@ class _Sweep:
         except NotOurs:
             j.adopt(name, bead.id, BeadState.STUCK, Reason.CLAIM_LOST)
             return
-        if HELD in bead.labels and PARKED not in bead.labels:
+        if DEFERRED in bead.labels:
+            self._deferred(bead, row.state, sessions)
+        elif row.state is BeadState.DEFERRED:
+            self._hold(bead, Reason.UNEXPECTED_STATE,
+                       "the journal says deferred, but the bead isn't labelled")
+        elif HELD in bead.labels and PARKED not in bead.labels:
             self._hold(bead, Reason.UNEXPECTED_STATE, "v2:held without v2:parked")
         elif PARKED in bead.labels:
             if sessions:
@@ -152,7 +168,7 @@ class _Sweep:
                 state = parked_state(bead)
                 if (row.state is BeadState.PARKED and row.reason is Reason.QUOTA and state is BeadState.PARKED
                         and not bead.open_blockers()):
-                    return      # a completed quota shelve, still quota-parked: kept as it is (AU-5 §3.4)
+                    return      # migration only: an AU-5 quota shelve recovery has not converted yet
                 if (row.state, row.detail) != (state, blocker_detail(bead)):
                     j.adopt(name, bead.id, state, REASONS[state], blocker_detail(bead))
             else:
@@ -161,6 +177,16 @@ class _Sweep:
             self._hold(bead, Reason.UNEXPECTED_STATE, f"running, but the journal says {row.state.value}")
         else:
             self._running(bead, sessions)
+
+    def _deferred(self, bead: Bead, state: BeadState, sessions: list[Session]) -> None:
+        """A `v2:deferred` bead (HELD and STUCK rows were kept before this): kept while its row is DEFERRED
+        with a current record and no session; `v2:parked` beside it changes nothing."""
+        if sessions:
+            self._hold(bead, Reason.UNEXPECTED_STATE, "deferred, but a session is listed")
+        elif state is not BeadState.DEFERRED:
+            self._hold(bead, Reason.UNEXPECTED_STATE, f"deferred, but the journal says {state.value}")
+        elif self.p.current_deferral(bead) is None:
+            self._hold(bead, Reason.UNEXPECTED_STATE, "deferred without a deferral record")
 
     def _running(self, bead: Bead, sessions: list[Session]) -> None:
         """A recorded running bead: its session runs on, or it gets a resume operation for the guard."""

@@ -15,6 +15,8 @@ leaves every launch to pickup's launch guard.
    and sessions from beads and the runtime, and holds whatever disagrees;
    4a. settle adoptions (AU-3 §3.2): an adopted legacy session's entry goes on its bead, and a held one's
    bead is escalated UNEXPECTED_STATE, taking over its open pickup or resume;
+   4b. convert AU-5's PARKED/QUOTA rows (AU-4 §6): each is gated fresh, then resumed as parked or deferred.
+   A pickup or resume at a `defer.*` or `quota` step is replayed in step 4 (it never launches);
 5. reconcile sessions (`sweep`, which every pickup also runs): a session whose bead is not ours
    (closed, claimed by another worker, gone) is stopped; a recorded running bead whose session is gone
    gets a resume operation that pickup will carry through the guard; anything beads and the journal
@@ -73,6 +75,11 @@ def recover(sched: Scheduler) -> Recovered:
         return result
 
 
+def _defers(op: Op) -> bool:
+    """A pickup or resume at a defer step, or at AU-5's quota step: it never launches (AU-4 §3.6)."""
+    return op.kind in (OpKind.PICKUP, OpKind.RESUME) and (op.step.startswith("defer.") or op.step == "quota")
+
+
 class _Recovery:
     def __init__(self, sched: Scheduler) -> None:
         self.s = sched
@@ -102,7 +109,7 @@ class _Recovery:
             if op.kind is OpKind.PICKUP and op.step == "intent":
                 if self.s.resolve_claim(op) is None and self._still_open(op):
                     raise BeadsUnavailable("the claim could not be read back")    # held CLAIM_UNCERTAIN
-            elif op.kind in (OpKind.PARK, OpKind.RELEASE, OpKind.ESCALATE):
+            elif op.kind in (OpKind.PARK, OpKind.RELEASE, OpKind.ESCALATE) or _defers(op):
                 self.s.replay(op)   # the scheduler's dispatch: a bead bd confirms is gone ends its op
                 if self._stop_unconfirmed(op):
                     raise RuntimeUnavailable("a stop was not confirmed")
@@ -112,6 +119,8 @@ class _Recovery:
         self._settle_orphans()
         self._settle_adoptions()
         d.cp("recovery.journals")
+        # 4b. AU-5's PARKED/QUOTA rows, converted before the sweep sees them (AU-4 §6)
+        self.s.convert_quota_rows()
         # 5. sessions, read again: the replays changed both
         swept = sweep(self.s.parker, defer=True)
         if swept.unconfirmed:
