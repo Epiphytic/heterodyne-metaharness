@@ -123,9 +123,9 @@ def check(src: BeadState | None, dst: BeadState) -> None:
 def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState],
              wake: bool = False) -> WsState:
     """The one-word workstream state for /workstreams (§6.3). Pickup has already run, so "idle" really
-    means nothing is ready and nothing is in progress (§5.2). `wake`: pickup armed a quota wake time, which
-    makes a workstream that would otherwise be idle DEFERRED (AU-5 §3.6). Every non-terminal row being
-    DEFERRED, whatever the reason, makes one that would otherwise be all-blocked DEFERRED (AU-4 §2.2)."""
+    means nothing is ready and nothing is in progress (§5.2). An armed quota wake (`wake`), or every
+    non-terminal row being DEFERRED whatever the reason, makes a workstream that would otherwise be idle or
+    all-blocked DEFERRED (AU-5 §3.6, AU-4 §2.2)."""
     states = set(beads) - TERMINAL
     if set(holds):
         return WsState.HELD
@@ -136,5 +136,5 @@ def ws_state(paused: bool, holds: Iterable[Reason], beads: Iterable[BeadState],
     if BeadState.STUCK in states:
         return WsState.STUCK
     if states:
-        return WsState.DEFERRED if states == {BeadState.DEFERRED} else WsState.ALL_BLOCKED
+        return WsState.DEFERRED if wake or states == {BeadState.DEFERRED} else WsState.ALL_BLOCKED
     return WsState.DEFERRED if wake else WsState.IDLE

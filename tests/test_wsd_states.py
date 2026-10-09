@@ -144,7 +144,7 @@ def test_stuck_runs_again_only_through_a_resume() -> None:
     (False, [], [BeadState.PARKED, BeadState.WAITING_INPUT, BeadState.HELD], WsState.ALL_BLOCKED),
     (False, [], [BeadState.HELD, BeadState.STUCK], WsState.STUCK),
     # AU-4: every non-terminal row DEFERRED, whatever the reason, is deferred; mixed with a parked one it
-    # is all-blocked, unless a wake is armed.
+    # is all-blocked, unless a wake is armed (below).
     (False, [], [BeadState.DEFERRED], WsState.DEFERRED),
     (False, [], [BeadState.DEFERRED, BeadState.CLOSED], WsState.DEFERRED),
     (False, [], [BeadState.DEFERRED, BeadState.PARKED], WsState.ALL_BLOCKED),
@@ -156,11 +156,17 @@ def test_ws_state_priority(paused: bool, holds: list[Reason], beads: list[BeadSt
     assert ws_state(paused, holds, beads) is expected
 
 
-def test_an_armed_wake_defers_only_an_idle_workstream() -> None:
-    # AU-5 §3.6: the wake applies where the workstream would otherwise be idle; AU-4 keeps that.
-    assert ws_state(False, [], [BeadState.PARKED], wake=True) is WsState.ALL_BLOCKED
+def test_an_armed_wake_defers_an_idle_or_all_blocked_workstream() -> None:
+    # AU-4 §2.2: the wake applies where the workstream would otherwise be idle or all-blocked; the states
+    # above those (held, paused, running, stuck) still win.
+    assert ws_state(False, [], [BeadState.PARKED], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [BeadState.PARKED, BeadState.DEFERRED], wake=True) is WsState.DEFERRED
+    assert ws_state(False, [], [BeadState.WAITING_INPUT, BeadState.HELD], wake=True) is WsState.DEFERRED
     assert ws_state(False, [], [], wake=True) is WsState.DEFERRED
     assert ws_state(False, [], [BeadState.STUCK], wake=True) is WsState.STUCK
+    assert ws_state(False, [], [BeadState.RUNNING, BeadState.PARKED], wake=True) is WsState.RUNNING
+    assert ws_state(True, [], [BeadState.PARKED], wake=True) is WsState.PAUSED
+    assert ws_state(False, [Reason.JOURNAL_LOST], [BeadState.PARKED], wake=True) is WsState.HELD
 
 
 @given(st.booleans(), st.lists(st.sampled_from(list(BeadState))))
