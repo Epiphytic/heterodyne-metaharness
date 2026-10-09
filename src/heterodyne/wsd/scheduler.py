@@ -59,15 +59,15 @@ from heterodyne.wsd.beads import (
 )
 from heterodyne.wsd.gate import Paused
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
-from heterodyne.wsd.park import Launch, Parker, resumable
+from heterodyne.wsd.park import GUARD_STEPS, Launch, Parker, resumable
 from heterodyne.wsd.runtime import RuntimeUnavailable
 from heterodyne.wsd.states import BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place, record
 
 POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed",
-          "pickup.placed", "pickup.worktree!", "pickup.worktree", "pickup.recorded!", "pickup.launched!",
-          "pickup.done")
+          "pickup.placed", "pickup.worktree!", "pickup.worktree", "pickup.recorded!",
+          *(f"pickup.{step}" for step in GUARD_STEPS))
 RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 
 

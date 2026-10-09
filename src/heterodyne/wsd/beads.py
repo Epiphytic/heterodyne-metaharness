@@ -33,6 +33,7 @@ import msgspec
 
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.btq import QueueFactory, QueueLike
+from heterodyne.wsd.launches import LAUNCHES_KEY, BeadLaunches, LaunchEntry, decode_launches, mergeable
 
 PARKED = "v2:parked"
 HELD = "v2:held"
@@ -92,6 +93,11 @@ class RecordUnreadable(Exception):
 
 class RecordConflict(Exception):
     """The bead already records a different launch identity than the one about to be written."""
+
+
+class LaunchConflict(Exception):
+    """The bead's copy of a launch entry differs from the journal's under the same generation, other than
+    a set-once field the bead still has empty: an entry is never changed."""
 
 
 class SessionRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=False):
@@ -162,6 +168,22 @@ class Bead:
             return msgspec.json.decode(value, type=SessionRecord)
         except (msgspec.DecodeError, msgspec.ValidationError):
             raise RecordUnreadable(self.id) from None
+
+    def launches(self) -> BeadLaunches:
+        """The bead's launch entries (`wsd_launches`), absent read as none. LaunchesUnreadable if present
+        but not a list of entries."""
+        return decode_launches(self.metadata.get(LAUNCHES_KEY))
+
+    def record_field(self, name: str) -> str | None:
+        """A string field of the raw record JSON that `SessionRecord` ignores (plan 4's additions), or
+        None. Never raises: the caller has already parsed the record."""
+        value = self.metadata.get(RECORD_KEY)
+        try:
+            found = msgspec.json.decode(value) if isinstance(value, str) else None
+        except msgspec.DecodeError:
+            return None
+        item = cast(dict[str, Any], found).get(name) if isinstance(found, dict) else None
+        return item if isinstance(item, str) and item else None
 
     def bases(self, worker: str, repo: str, worktree: str) -> list[str]:
         """The base of every provenance note btq wrote when `worker` made `worktree` from `repo`, oldest
@@ -490,6 +512,25 @@ class BeadsAdapter:
                     raise BeadsUnavailable("session record did not read back")
             if current != record:
                 raise RecordConflict(bead)
+
+    def ensure_launch(self, ws: str, bead: str, entry: LaunchEntry) -> None:
+        """Put the journal's `entry` on the bead's `wsd_launches`, and read it back (AU-3 §4.1). Absent:
+        appended. Present and equal: kept. Present with only set-once fields empty on the bead that
+        `entry` sets: those are set. Anything else is LaunchConflict, and an unreadable array
+        LaunchesUnreadable. Every other entry is rewritten byte-for-byte as read. The read, the write and
+        the read-back run under the per-bead worker's lock."""
+        with self._owned(ws, bead) as queue:
+            current = self.show(ws, bead).launches()
+            at = current.find(entry.ident)
+            if at is None or current.entries[at] != entry:
+                if at is not None and not mergeable(current.entries[at], entry):
+                    raise LaunchConflict(f"generation {entry.generation} differs on the bead")
+                value = current.with_entry(entry)
+                self._call(lambda: queue.bd("update", bead, "--set-metadata", f"{LAUNCHES_KEY}={value}"))
+                current = self.show(ws, bead).launches()
+                at = current.find(entry.ident)
+            if at is None or current.entries[at] != entry:
+                raise BeadsUnavailable("launch entry did not read back")
 
     # --- worktrees (§4.3: btq's convention) ---
 

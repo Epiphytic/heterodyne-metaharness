@@ -15,6 +15,7 @@ from fakes.checkpoints import Recorder
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 
+from heterodyne.wsd.accounts import DefaultOnly
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint
 from heterodyne.wsd.gate import ClaimGate
@@ -27,6 +28,20 @@ from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, r
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
+ADAPTERS = {"p-one": "claude-code", "p-two": "codex"}
+
+
+def login_home(path: Path) -> Path:
+    """A scratch HOME with a default login for each adapter: `~/.claude/.credentials.json` and
+    `~/.codex/auth.json` (fake contents)."""
+    for login in (path / ".claude" / ".credentials.json", path / ".codex" / "auth.json"):
+        login.parent.mkdir(parents=True, exist_ok=True)
+        login.write_text("{}")
+    return path
+
+
+def accounts_at(home: Path) -> DefaultOnly:
+    return DefaultOnly(ADAPTERS, {"HOME": str(home)})
 
 
 def git_repo(path: Path) -> Path:
@@ -103,7 +118,8 @@ class Rig:
 def make_rig(tmp_path: Path, cp: Checkpoint | None = None, limits: Limits | None = None) -> Rig:
     world = World(tmp_path / "btq-state")
     repo = git_repo(tmp_path / "repos" / "proj")
-    ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, limits or Limits())
+    ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, limits or Limits(),
+                            accounts=accounts_at(login_home(tmp_path / "home")))
     return Rig(tmp_path, world, FakeRuntime(), repo, ws, cp if cp is not None else Recorder())
 
 

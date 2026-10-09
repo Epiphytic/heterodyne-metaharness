@@ -31,15 +31,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Any, Literal, cast
 
 import msgspec
 
 from heterodyne.fsutil import private_dir
+from heterodyne.wsd.launches import SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
-SCHEMA_VERSION = "1"
-SCHEMA = """
+SCHEMA_VERSION = "2"
+V1_VERSION = "1"
+# Plan 3's schema, frozen: a version 1 journal must match it exactly to be upgraded (`upgrade.py`).
+V1_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE inbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +80,53 @@ CREATE TABLE events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, ws TEXT NOT NULL, bead TEXT,
     kind TEXT NOT NULL, detail TEXT NOT NULL, ref TEXT);
 """
+# Version 2 (AU-3): one statement each, so the upgrade runs them one `execute` at a time inside its own
+# transaction (`executescript` would commit first). The text is the schema: never edit one in place.
+V2_TABLES = (
+    """CREATE TABLE launches (
+    session_key TEXT NOT NULL, generation INTEGER NOT NULL CHECK (generation >= 1),
+    ws TEXT NOT NULL, bead TEXT NOT NULL, role TEXT NOT NULL, profile TEXT NOT NULL,
+    account TEXT NOT NULL, credential_key TEXT NOT NULL, model_passed TEXT NOT NULL,
+    dispatched_at TEXT, native_id TEXT, model_reported TEXT,
+    outcome TEXT CHECK (outcome IN ('launched', 'abandoned')),
+    adopted INTEGER NOT NULL DEFAULT 0 CHECK (adopted IN (0, 1)),
+    journaled_at TEXT NOT NULL,
+    rebuilt_at TEXT,
+    PRIMARY KEY (session_key, generation))""",
+    """CREATE TABLE receipts (
+    session_key TEXT NOT NULL, generation INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('started', 'refused')),
+    refusal TEXT CHECK (refusal IN ('failed', 'unavailable')),
+    tmux_session TEXT, tmux_pane TEXT, pane_pid INTEGER, native_id TEXT, error TEXT,
+    at TEXT NOT NULL,
+    PRIMARY KEY (session_key, generation),
+    FOREIGN KEY (session_key, generation) REFERENCES launches (session_key, generation),
+    CHECK ((kind = 'refused') = (refusal IS NOT NULL)))""",
+    """CREATE TABLE adoptions (
+    ws TEXT NOT NULL, bead TEXT NOT NULL, session_key TEXT,
+    verdict TEXT NOT NULL CHECK (verdict IN ('adopted', 'held')), detail TEXT NOT NULL,
+    facts TEXT NOT NULL,
+    settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
+    resolution TEXT CHECK (resolution IN ('adopted')), resolved_at TEXT, resolved_by TEXT,
+    PRIMARY KEY (ws, bead))""",
+    """CREATE TABLE deferrals (
+    session_key TEXT NOT NULL, number INTEGER NOT NULL, bead TEXT NOT NULL, role TEXT NOT NULL,
+    profile TEXT NOT NULL, reason TEXT NOT NULL, defer_until TEXT, trust TEXT NOT NULL,
+    PRIMARY KEY (session_key, number))""",
+    """CREATE TABLE account_usage (
+    credential_key TEXT NOT NULL, window_id TEXT NOT NULL, kind TEXT NOT NULL, used_percent REAL,
+    resets_at TEXT, observed_at TEXT NOT NULL, receipt_seq INTEGER NOT NULL, source TEXT NOT NULL,
+    PRIMARY KEY (credential_key, window_id))""",
+    """CREATE TABLE account_usage_untrusted (
+    session_key TEXT NOT NULL, generation INTEGER NOT NULL, window_id TEXT NOT NULL, kind TEXT NOT NULL,
+    used_percent REAL, resets_at TEXT, observed_at TEXT NOT NULL, receipt_seq INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (session_key, generation, window_id))""",
+    """CREATE TABLE account_exhausted (
+    credential_key TEXT PRIMARY KEY, until TEXT, observed_at TEXT NOT NULL, receipt_seq INTEGER NOT NULL)""",
+)
+V2_META = (("usage_receipt_seq", "0"),)     # orders AU-5's usage receipts; unused until then
+SCHEMA = V1_SCHEMA + "".join(f"{stmt};\n" for stmt in V2_TABLES)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
 
 
@@ -86,6 +136,11 @@ def now() -> str:
 
 class JournalCorrupt(Exception):
     """The journal failed its integrity check. wsd refuses to start; the file is left for the operator."""
+
+
+class JournalNeedsUpgrade(Exception):
+    """The journal is plan 3's exactly (schema and version 1). Nothing was written; `upgrade.run` upgrades
+    it in one transaction."""
 
 
 class JournalBusy(Exception):
@@ -106,6 +161,11 @@ class JournalUnusable(Exception):
 
 class OpConflict(Exception):
     """An operation is already open for this bead: finish or replay it first."""
+
+
+class EntryConflict(Exception):
+    """A launch entry's set-once field already holds a different value, or the entry already exists
+    with other fields: an entry is never changed."""
 
 
 class InboxStatus(StrEnum):
@@ -188,7 +248,51 @@ class Snapshot:
     last_event: int
 
 
+@dataclass(frozen=True)
+class Adoption:
+    """A legacy bead's adoption verdict (AU-3 §2.5): the upgrade-time evidence, never changed, plus
+    `settled` and the release's `resolution`, each set once."""
+    ws: str
+    bead: str
+    session_key: str | None
+    verdict: str            # "adopted" or "held"
+    detail: str
+    facts: str              # JSON: the upgrade-time facts
+    settled: bool
+    resolution: str | None
+    resolved_at: str | None
+    resolved_by: str | None
+
+    @property
+    def unresolved_hold(self) -> bool:
+        return self.verdict == "held" and self.resolution is None
+
+
 _DATA = msgspec.json.Decoder(dict[str, str])
+_LAUNCH_COLS = ("session_key", "generation", "ws", "bead", "role", "profile", "account", "credential_key",
+                "model_passed", "dispatched_at", "native_id", "model_reported", "outcome", "adopted",
+                "journaled_at")
+LAUNCH_SQL = ", ".join(_LAUNCH_COLS)
+LAUNCH_N = len(_LAUNCH_COLS)
+_RECEIPT = "session_key, generation, kind, refusal, tmux_session, tmux_pane, pane_pid, native_id, error"
+_ADOPTION = "ws, bead, session_key, verdict, detail, facts, settled, resolution, resolved_at, resolved_by"
+type ReceiptKind = Literal["started", "refused"]
+type Refusal = Literal["failed", "unavailable"]
+
+
+def launch_row(entry: LaunchEntry) -> tuple[object, ...]:
+    return tuple(int(entry.adopted) if c == "adopted" else getattr(entry, c) for c in _LAUNCH_COLS)
+
+
+def _launch(r: tuple[object, ...]) -> LaunchEntry:
+    values = dict(zip(_LAUNCH_COLS, r, strict=True))
+    values["adopted"] = bool(values["adopted"])
+    return LaunchEntry(**cast(dict[str, Any], values))
+
+
+def _adoption(r: tuple[object, ...]) -> Adoption:
+    return Adoption(str(r[0]), str(r[1]), _opt(r[2]), str(r[3]), str(r[4]), str(r[5]), bool(r[6]),
+                    _opt(r[7]), _opt(r[8]), _opt(r[9]))
 
 
 def state_detail(reason: Reason | None, detail: str) -> str:
@@ -274,6 +378,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         db.execute("PRAGMA journal_mode=WAL")
         _check_snapshot(db)
         db.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, False)
+        db.execute("PRAGMA foreign_keys = ON")      # a receipt needs its launch entry
     except BaseException:
         db.close()
         raise
@@ -289,6 +394,7 @@ def _create(path: Path) -> None:
         db.executescript("BEGIN;" + SCHEMA + "COMMIT;")
         db.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?), ('created_at', ?)",
                    (SCHEMA_VERSION, now()))
+        db.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", V2_META)
     finally:
         db.close()
     tmp.chmod(0o600)
@@ -303,27 +409,44 @@ def _schema(db: sqlite3.Connection) -> set[tuple[str, str, str, str]]:
     return {(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in rows if not str(r[1]).startswith("sqlite_")}
 
 
-def _expected() -> set[tuple[str, str, str, str]]:
+def _expected(schema: str) -> set[tuple[str, str, str, str]]:
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA)
+        db.executescript(schema)
         return _schema(db)
     finally:
         db.close()
 
 
-EXPECTED_SCHEMA = _expected()
+EXPECTED_SCHEMA = _expected(SCHEMA)
+EXPECTED_V1 = _expected(V1_SCHEMA)
+
+
+def _version(db: sqlite3.Connection) -> str | None:
+    row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    return None if row is None else str(row[0])
+
+
+def check_v1(db: sqlite3.Connection) -> bool:
+    """Whether the file is plan 3's journal exactly: the frozen v1 schema and version 1."""
+    return _schema(db) == EXPECTED_V1 and _version(db) == V1_VERSION
 
 
 def _check(db: sqlite3.Connection) -> None:
+    """Version 2 opens; version 1, exactly, needs the upgrade; anything else is refused."""
     rows = db.execute("PRAGMA integrity_check").fetchall()
     if [tuple(r) for r in rows] != [("ok",)]:
         raise JournalCorrupt("integrity_check failed")
-    if _schema(db) != EXPECTED_SCHEMA:
-        raise JournalCorrupt("schema differs")
-    row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    if row is None or str(row[0]) != SCHEMA_VERSION:
-        raise JournalCorrupt("unknown schema version")
+    schema = _schema(db)
+    if schema == EXPECTED_SCHEMA:
+        if _version(db) != SCHEMA_VERSION:
+            raise JournalCorrupt("unknown schema version")
+        return
+    if schema == EXPECTED_V1:
+        if _version(db) != V1_VERSION:
+            raise JournalCorrupt("unknown schema version")
+        raise JournalNeedsUpgrade("the journal is version 1")
+    raise JournalCorrupt("schema differs")
 
 
 def _check_snapshot(db: sqlite3.Connection) -> None:
@@ -353,6 +476,23 @@ def _refusal(exc: sqlite3.DatabaseError) -> Exception:
     if _transient(exc):
         return JournalBusy(exc.sqlite_errorname)
     return JournalCorrupt(type(exc).__name__)
+
+
+def backup_to(db: sqlite3.Connection, dest: Path) -> None:
+    """A consistent online copy of `db` at `dest` (0600), written under a temporary name and renamed."""
+    tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.part")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    os.close(fd)
+    try:
+        copy = sqlite3.connect(tmp)
+        try:
+            db.backup(copy)
+        finally:
+            copy.close()
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class Journal:
@@ -394,19 +534,7 @@ class Journal:
         Refused inside a transaction: the copy would wait on the caller's own write lock forever."""
         if self._depth or self.db.in_transaction:
             raise RuntimeError("backup() inside a journal transaction")
-        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.part")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        os.close(fd)
-        try:
-            copy = sqlite3.connect(tmp)
-            try:
-                self.db.backup(copy)
-            finally:
-                copy.close()
-            tmp.replace(dest)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        backup_to(self.db, dest)
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:
@@ -544,6 +672,19 @@ class Journal:
                         (status.value, now(), op_id))
 
     @_locked
+    def op_forget(self, op_id: str, *keys: str) -> Op:
+        """Drop `keys` from the op's data (a refused or abandoned generation, so the next attempt pins a
+        new one). The step is kept."""
+        with self.transaction():
+            op = self._op(op_id)
+            if op.status is not OpStatus.OPEN:
+                raise OpConflict(f"operation {op_id} is {op.status}")
+            kept = {k: v for k, v in op.data.items() if k not in keys}
+            self.db.execute("UPDATE ops SET data = ?, updated_at = ? WHERE op_id = ?",
+                            (msgspec.json.encode(kept).decode(), now(), op_id))
+            return self._op(op_id)
+
+    @_locked
     def ops_open(self, ws: str | None = None) -> list[Op]:
         if ws is None:
             rows = self.db.execute(f"SELECT {_OP} FROM ops WHERE status = 'open' "  # noqa: S608
@@ -558,6 +699,119 @@ class Journal:
         row = self.db.execute(f"SELECT {_OP} FROM ops WHERE status = 'open' AND ws = ? AND bead = ?",  # noqa: S608
                               (ws, bead)).fetchone()
         return None if row is None else _op(row)
+
+    # --- launch entries and receipts (AU-3 §2.2, §2.3) ---
+
+    @_locked
+    def launch_insert(self, entry: LaunchEntry, rebuilt: bool = False) -> None:
+        """Journal a new entry; `rebuilt` marks one copied from the bead (§4.2 step 1). An existing entry
+        is never replaced: the same one again is a no-op, any other is EntryConflict."""
+        with self.transaction():
+            current = self.launch(*entry.ident)
+            if current is not None:
+                if current != entry:
+                    raise EntryConflict(f"generation {entry.generation} is already journaled differently")
+                return
+            self.db.execute(
+                f"INSERT INTO launches ({LAUNCH_SQL}, rebuilt_at) VALUES ({', '.join('?' * LAUNCH_N)}, ?)",  # noqa: S608
+                (*launch_row(entry), now() if rebuilt else None))
+
+    @_locked
+    def launch_set(self, session_key: str, generation: int, name: str, value: str) -> LaunchEntry:
+        """Set one set-once field while it is empty. The same value again is a no-op (replay); a different
+        one is EntryConflict. Nothing else ever updates a launch row."""
+        if name not in SET_ONCE:
+            raise ValueError(f"{name} is not a set-once field")
+        with self.transaction():
+            current = self.launch(session_key, generation)
+            if current is None:
+                raise KeyError((session_key, generation))
+            have = getattr(current, name)
+            if have is None:
+                self.db.execute(f"UPDATE launches SET {name} = ? WHERE session_key = ? AND generation = ? "  # noqa: S608
+                                f"AND {name} IS NULL", (value, session_key, generation))
+                return msgspec.structs.replace(current, **{name: value})
+            if have != value:
+                raise EntryConflict(f"generation {generation} already has a different {name}")
+            return current
+
+    @_locked
+    def launch(self, session_key: str, generation: int) -> LaunchEntry | None:
+        row = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE session_key = ? AND generation = ?",  # noqa: S608
+                              (session_key, generation)).fetchone()
+        return None if row is None else _launch(row)
+
+    @_locked
+    def launches(self, session_key: str) -> list[LaunchEntry]:
+        rows = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE session_key = ? "  # noqa: S608
+                               "ORDER BY generation", (session_key,)).fetchall()
+        return [_launch(r) for r in rows]
+
+    @_locked
+    def launches_of(self, ws: str, bead: str) -> list[LaunchEntry]:
+        rows = self.db.execute(f"SELECT {LAUNCH_SQL} FROM launches WHERE ws = ? AND bead = ? "  # noqa: S608
+                               "ORDER BY session_key, generation", (ws, bead)).fetchall()
+        return [_launch(r) for r in rows]
+
+    @_locked
+    def rebuilt_at(self, session_key: str, generation: int) -> str | None:
+        row = self.db.execute("SELECT rebuilt_at FROM launches WHERE session_key = ? AND generation = ?",
+                              (session_key, generation)).fetchone()
+        return None if row is None else _opt(row[0])
+
+    @_locked
+    def receipt_put(self, receipt: Receipt) -> None:
+        """Journal what the runtime returned or raised for a dispatched generation. Written once: a second
+        receipt for the generation is EntryConflict."""
+        try:
+            self.db.execute(
+                f"INSERT INTO receipts ({_RECEIPT}, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",  # noqa: S608
+                (receipt.session_key, receipt.generation, receipt.kind, receipt.refusal, receipt.tmux_session,
+                 receipt.tmux_pane, receipt.pane_pid, receipt.native_id, receipt.error, now()))
+        except sqlite3.IntegrityError:
+            raise EntryConflict(f"generation {receipt.generation} already has a receipt") from None
+
+    @_locked
+    def receipt(self, session_key: str, generation: int) -> Receipt | None:
+        row = self.db.execute(f"SELECT {_RECEIPT} FROM receipts WHERE session_key = ? AND generation = ?",  # noqa: S608
+                              (session_key, generation)).fetchone()
+        if row is None:
+            return None
+        pid = row[6]
+        return Receipt(str(row[0]), int(cast(int, row[1])), cast(ReceiptKind, str(row[2])),
+                       cast(Refusal | None, _opt(row[3])), _opt(row[4]), _opt(row[5]),
+                       None if pid is None else int(cast(int, pid)), _opt(row[7]), _opt(row[8]))
+
+    @_locked
+    def receipts(self) -> int:
+        return int(cast(int, self.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]))
+
+    # --- adoptions (AU-3 §2.5, §3.2, §3.3) ---
+
+    @_locked
+    def adoption(self, ws: str, bead: str) -> Adoption | None:
+        row = self.db.execute(f"SELECT {_ADOPTION} FROM adoptions WHERE ws = ? AND bead = ?",  # noqa: S608
+                              (ws, bead)).fetchone()
+        return None if row is None else _adoption(row)
+
+    @_locked
+    def adoptions_unsettled(self, ws: str) -> list[Adoption]:
+        rows = self.db.execute(f"SELECT {_ADOPTION} FROM adoptions WHERE ws = ? AND settled = 0 "  # noqa: S608
+                               "ORDER BY bead", (ws,)).fetchall()
+        return [_adoption(r) for r in rows]
+
+    @_locked
+    def adoption_settle(self, ws: str, bead: str) -> None:
+        self.db.execute("UPDATE adoptions SET settled = 1 WHERE ws = ? AND bead = ?", (ws, bead))
+
+    @_locked
+    def adoption_resolve(self, ws: str, bead: str, by: str) -> None:
+        """The release that re-verified a held adoption (§3.3). Set once; the original evidence is kept."""
+        cur = self.db.execute("UPDATE adoptions SET resolution = 'adopted', resolved_at = ?, resolved_by = ? "
+                              "WHERE ws = ? AND bead = ? AND verdict = 'held' AND resolution IS NULL",
+                              (now(), by, ws, bead))
+        if cur.rowcount != 1:
+            raise EntryConflict(f"the adoption of {bead} is not an unresolved hold")
 
     # --- states, holds, events (plan 6 reads these) ---
 

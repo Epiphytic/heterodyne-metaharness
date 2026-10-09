@@ -15,6 +15,9 @@ process at once with exit 1 (`os._exit`, after flushing its message): a thread c
 returning would leave it able to write to the journal with no lock held, or keep the process alive
 indefinitely. The kernel releases the lock with the process. To the journal that is a crash, which
 recovery replays like any other.
+
+A version 1 journal (plan 3's) is upgraded in place before anything else uses it (`upgrade.run`, AU-3 §3).
+If the beads can't be read for it, the file is left untouched and `wsd run` exits 1: retrying is safe.
 """
 
 import argparse
@@ -25,10 +28,11 @@ import sys
 from collections.abc import Callable, Sequence
 
 from heterodyne.config import ConfigError
-from heterodyne.wsd import btq, ctl
+from heterodyne.wsd import btq, ctl, upgrade
+from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
-from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt
+from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
 
@@ -53,7 +57,10 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
     held = False        # jobs outlived shutdown: keep the journal and the lock until the process exits
     try:
         try:
-            journal = Journal(s.journal)
+            journal = _open(s, factory)
+        except upgrade.UpgradeAborted as exc:
+            print(f"wsd: {exc}", file=sys.stderr)
+            return 1
         except JournalCorrupt as exc:
             print(f"wsd: the journal failed its check ({exc}); it was left in place for inspection. "
                   "Move it aside to start from beads alone.", file=sys.stderr)
@@ -87,6 +94,16 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
     finally:
         if not held:
             os.close(lock)
+
+
+def _open(s: WsdSettings, factory: btq.QueueFactory) -> Journal:
+    try:
+        return Journal(s.journal)
+    except JournalNeedsUpgrade:
+        if s.accounts is None:
+            raise ConfigError("the journal upgrade needs the host's accounts") from None
+        upgrade.run(BeadsAdapter(factory), s.accounts, s.journal)
+        return Journal(s.journal)
 
 
 async def _serve(daemon: Wsd) -> None:

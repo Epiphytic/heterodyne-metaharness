@@ -16,6 +16,7 @@ from heterodyne.config import Config, ConfigError, load, paths, secret_scan
 from heterodyne.config.layers import table_at
 from heterodyne.config.secret_scan import show
 from heterodyne.wsd import ids
+from heterodyne.wsd.accounts import Accounts, DefaultOnly
 from heterodyne.wsd.workstream import DEFAULT_REPO, Limits, WorkstreamSettings
 
 WSD_KEYS = frozenset({"backstop_seconds", "reconcile_seconds", "launch_failures_before_human",
@@ -39,6 +40,7 @@ class WsdSettings:
     btq_checkout: Path
     btq_locations: dict[str, str]
     workstreams: tuple[WorkstreamSettings, ...]
+    accounts: Accounts | None = None     # the host's accounts: the journal upgrade's adapter facts (AU-3 §3)
 
     @property
     def journal(self) -> Path:
@@ -88,7 +90,8 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
         inbox_attempts_before_human=_int(wsd, "inbox_attempts_before_human"),
         btq_checkout=_path(btq.get("btq"), env, f"{BEADS} btq"),
         btq_locations=_locations(btq, env),
-        workstreams=streams)
+        workstreams=streams,
+        accounts=DefaultOnly.from_config(host, env))
 
 
 def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits,
@@ -105,7 +108,10 @@ def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits,
     coder_profile = table_at(cfg.values, "roles", where).get(coder_role)
     if not isinstance(coder_profile, str) or coder_profile not in profiles:
         raise ConfigError(f"{where}: roles.{coder_role} must name a profile from [profiles]")
-    return WorkstreamSettings(name, repos, coder_role, coder_profile, profiles, limits)
+    models = {p: str(cast(Mapping[str, Any], v).get("model") or "")
+              for p, v in table_at(cfg.values, "profiles", "config.toml").items()}
+    return WorkstreamSettings(name, repos, coder_role, coder_profile, profiles, limits, models,
+                              DefaultOnly.from_config(cfg, env))
 
 
 def _locations(btq: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, str]:

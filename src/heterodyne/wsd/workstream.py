@@ -6,10 +6,12 @@ park, recovery) reads the launched-session record on the bead instead, so a conf
 redirects a running or parked bead to another session or worktree.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from heterodyne.wsd import ids
+from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.gate import ClaimGate
@@ -39,6 +41,11 @@ class WorkstreamSettings:
     coder_profile: str
     profiles: frozenset[str]
     limits: Limits = field(default_factory=Limits)
+    # Each profile's `model` ("" when none is passed), journaled at a launch entry's pin (AU-3 §4.2).
+    models: Mapping[str, str] = field(default_factory=dict[str, str])
+    # The launch guard's accounts (AU-3 §2.1). None: no launch can pin an account, and the guard
+    # escalates CONFIG_INVALID rather than guess.
+    accounts: Accounts | None = None
 
 
 @dataclass(frozen=True)
