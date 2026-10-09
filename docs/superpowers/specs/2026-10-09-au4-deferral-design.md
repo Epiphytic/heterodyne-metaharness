@@ -431,16 +431,16 @@ Completion backed by a receipt is tested separately, at the guard's existing cra
   - With it, a wait clears only on a process start, a `wsctl reload` or a release.
   - The alternative is a slow periodic re-gate, for example every `max_window_hours`. That would put back the timer that test 2 forbids.
   - Recommendation: never on a timer, as designed.
-  - **Liam's decision:** _pending (date: —)_
+  - **Liam's decision:** approved, 2026-10-09 (Marmot, approval btq-4f3pb)
 - **O2 [Liam]: the §10 plan amendment.** The `BASE..HEAD` storage for review waits moves from AU-4 to AU-13, with AU-13's obligation and tests named there. On approval, team-lead carries the amendment into the plan.
-  - **Liam's decision:** _pending (date: —)_
+  - **Liam's decision:** approved, 2026-10-09 (Marmot, approval btq-4f3pb)
 - **O3 [Liam]: reload's supported set** is exactly `accounts`, `usage` and `models` (§5.2). Any other difference is refused with "restart required". That includes the workstream set, `coder_role`, repositories, btq locations and the daemon timers.
-  - **Liam's decision:** _pending (date: —)_
+  - **Liam's decision:** approved, 2026-10-09 (Marmot, approval btq-4f3pb)
 - **O4 (accepted by review r1): no new op kinds.** Defer and undefer reuse the existing kinds, and the tail is found by its `defer.*` step names (§3.6). The over-mark is a `meta` row.
 - **O5 [Liam]: the alert is a journal event until AU-9.** Liam accepts a temporary notification gap: until AU-9 delivers it, no message reaches the operator, and only `wsctl status` shows the DEFERRED/ACCOUNT_CHANGED row.
   - The event keeps its per-deferral identity: kind `deferral_account_changed`, ref `<session_key>:<n>`, one row per `account_changed` number, written with the op's finish.
   - AU-9 delivers each (kind, ref) once, including events written before AU-9 existed.
-  - **Liam's decision, including acceptance of the notification gap:** _pending (date: —)_
+  - **Liam's decision, including acceptance of the notification gap:** approved, 2026-10-09 (Marmot, approval btq-4f3pb); notification gap accepted
 - **O6 (accepted by review r1): a due resume defers rather than being skipped**, through PARKED → PARKING.
 - **O7 (accepted by review r1): the PARKED/QUOTA conversion re-gates**, before the sweep (§6).
 
