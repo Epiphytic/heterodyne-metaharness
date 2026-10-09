@@ -9,10 +9,12 @@ Base: main 25c7b2a (AU-5 merged as PR #33). Sources:
 
 Scope: plan 3b's defer and undefer operations, the `DEFERRED` bead state, deferral records and numbering, the quota and `account_changed` transitions, the re-gate (process start, `wsctl reload`, release), pickup and wake-time changes, sweep and recovery, and the retirement of AU-5's interim shelve and AU-3's interim `account_changed` escalation. Design only: nothing is implemented here. PoC-scoped: no usage producer (AU-7), no session-reported limit channel beyond a test entry point, no rendering or delivery of the alert or of the status wording (AU-9), no review-wait selection or storage (AU-13, by the §10 amendment).
 
+**r3 finding fix** (post-cap, not re-reviewed by Codex; verified by the controller against park.py): the uncertainty oracle now asserts what the guard already does. `_no_receipt` escalates the op through `escalate_from`, leaving the row STUCK/UNEXPECTED_STATE with the `needs-human` handoff. The generation stays unresolved, nothing is re-dispatched, and the runtime has zero dispatches for `dispatched` and `dispatched!` and one for `launched!`. Completion backed by a receipt is tested at the `receipt` point under the completed-run oracle (§8).
+
 **r3 changes** (review r2 on 13a6058):
 1. A release of a HELD or STUCK deferred bead moves the row to DEFERRED in the same transaction that journals its `regate` step. A deadline's defer intent then takes the allowed DEFERRED → PARKING, so release adds no transition of its own (§3.5). The tests cover HELD and STUCK, each with all three gate outcomes, with `check` enforced and crashes on both sides of that transaction.
 2. Reload compares a semantic `restart_view` of plain immutable values, never the settings objects (`ConfiguredAccounts` has no value equality). It compares against each lane's current settings, including what earlier reloads set (§5.2). The tests cover an unchanged reload and two consecutive supported changes through the real loader.
-3. Two oracles replace the single one. The completed-run oracle covers the defer, re-gate, release and completed-launch points. A new uncertainty oracle covers the guard's `dispatched`, `dispatched!` and `launched!` points: the op stays open, `launch_uncertain` holds, and nothing is re-dispatched and no new generation appears, until an authoritative receipt settles it (§8). No crash point is dropped.
+3. Two oracles replace the single one. The completed-run oracle covers the defer, re-gate, release and completed-launch points. A new uncertainty oracle covers the guard's `dispatched`, `dispatched!` and `launched!` points (§8). No crash point is dropped.
 4. O1, O2, O3 and O5 each have a slot for Liam's dated decision (§9).
 
 **r2 changes** (review r1 on e65f816):
@@ -345,13 +347,14 @@ It also checks against the fake runtime and git:
 - **Generations:** each launched generation has one launch entry and one receipt, and none is re-dispatched with a new generation for the same op.
 - **WIP:** the WIP commit carries the mark for (key, n), its tree holds the files that were dirty before the defer (checked by content), and its SHA equals the one journaled in `defer.stopped`'s data.
 
-**The uncertainty oracle** covers the guard's `dispatched`, `dispatched!` and `launched!` points, wherever an undefer, or a resume after one, reaches them. Those crashes come after the dispatch mark and before any receipt, so per ADR §11 the run can't match the completed one. After replay:
-- the op is still open;
-- the workstream holds `launch_uncertain` for the bead;
-- no second dispatch has happened, and no new generation exists, even while the session is listed;
-- the deferral records, labels and comments are unchanged from the crash.
+**The uncertainty oracle** covers the guard's `dispatched`, `dispatched!` and `launched!` points (`UNRECEIPTED`), wherever an undefer, or a resume after one, reaches them. Those crashes come after the dispatch mark and before any receipt, so per ADR §11 the run can't match the completed one. On replay, step 0 finds the op's generation dispatched with no receipt. `_no_receipt` then escalates it through `escalate_from`, and the oracle asserts that existing behaviour:
+- the op ends, with the row STUCK/UNEXPECTED_STATE, and the ESCALATE op with its `needs-human` handoff follows;
+- the generation stays unresolved: dispatched, with no receipt and no outcome;
+- nothing is re-dispatched, and no new generation appears;
+- runtime dispatches: zero for `dispatched` and `dispatched!`, which come before the runtime call, and exactly one for `launched!`;
+- the deferral records are unchanged from the crash.
 
-Then the test delivers the authoritative receipt from the fake runtime (or confirms the session absent) and runs one more pickup. That settles the op through the guard's existing reconciliation, and only then does the end state equal the completed-run oracle, with exactly one dispatch. A test that delivers no receipt checks that further pickups keep the hold and never dispatch.
+Completion backed by a receipt is tested separately, at the guard's existing crash point after the receipt is journaled (`receipt`), under the completed-run oracle.
 
 **Defer and undefer:**
 - A hypothesis crash at every defer point, for each of the five entry points. Entry 2 runs through public `Scheduler.pickup`, from a PARKED row with `check` enforced (no `adopt`).
