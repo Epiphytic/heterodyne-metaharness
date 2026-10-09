@@ -7,17 +7,35 @@ import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from wsd_env import WS, LockAt, Rig, Worker, finish, git_repo, make_rig, probe_lock
+from wsd_env import (
+    WS,
+    At,
+    LockAt,
+    Rig,
+    Worker,
+    block,
+    finish,
+    git_repo,
+    make_rig,
+    on_profile,
+    own_profile,
+    probe_lock,
+    profile_key,
+)
 
 from heterodyne.wsd import ids
+from heterodyne.wsd.accounts import Chosen, ConfiguredAccounts
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
+from heterodyne.wsd.headroom import Deadline, quota_detail
 from heterodyne.wsd.journal import JournalBusy
+from heterodyne.wsd.launches import LaunchEntry
 from heterodyne.wsd.park import UNRECEIPTED
 from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started
-from heterodyne.wsd.scheduler import POINTS, Outcome
+from heterodyne.wsd.scheduler import POINTS, Outcome, TriggerKind
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.sweep import Swept, sweep
-from heterodyne.wsd.workstream import Limits
+from heterodyne.wsd.usage import decide
+from heterodyne.wsd.workstream import Limits, place
 
 
 @pytest.fixture(autouse=True)
@@ -468,7 +486,9 @@ def test_unknown_liveness_never_starts_a_second_session(tmp_path: Path) -> None:
 # --- never idle while an unblocked bead exists ---
 
 KINDS = ("ok", "lost_race", "bad_repo", "launch_fails", "launch_uncertain", "uncertain_landed",
-         "uncertain_missed", "blocked", "closed_blocker", "parks", "released", "deleted", "pinned")
+         "uncertain_missed", "blocked", "closed_blocker", "parks", "released", "deleted", "pinned",
+         "quota_blocked", "quota_clears", "quota_race", "account_repointed")
+QUOTA_KINDS = ("quota_blocked", "quota_clears", "quota_race", "account_repointed")
 
 
 def gate_of(bead: str) -> str:
@@ -506,6 +526,50 @@ def settle(rig: Rig, plan: dict[str, str] | None = None, done: set[tuple[str, st
             rig.world.close(bead)
 
 
+def verdict(rig: Rig, bead: str, resume: bool = False) -> object:
+    """The shared gate (`usage.decide`) for a bead as pickup sees it: a ready bead on its placement, a
+    resumable one on its recorded profile; previous key from its launched entries."""
+    shown = rig.beads.show(WS, bead)
+    if resume:
+        rec = shown.record()
+        assert rec is not None
+        profile, key = rec.profile, rec.session_key
+    else:
+        spot = place(rig.ws, shown)
+        profile, key = spot.profile, spot.session_key
+    launched = [e for e in rig.journal.launches(key) if e.outcome == "launched"]
+    accounts = rig.ws.accounts
+    assert accounts is not None
+    return decide(accounts, rig.journal, profile, launched[-1].credential_key if launched else None,
+                  rig.clock(), rig.ws.usage)
+
+
+def quota_waiters(rig: Rig) -> list[str]:
+    """Runnable PARKED/QUOTA waiters: the row, a bead of ours that is resumable, and no open operation."""
+    rows = {r.bead for r in rig.journal.states(WS) if (r.state, r.reason) == (BeadState.PARKED, Reason.QUOTA)}
+    return [b for b in resumable_now(rig) if b in rows and rig.journal.op_for(WS, b) is None]
+
+
+class Racer(Recorder):
+    """At `gate.checked`, a quota_race bead being claimed for the first time gets a trusted mark on its
+    key: pickup's gate admitted it, and the guard's step 2 then gives a Deadline."""
+
+    def __init__(self, rig: Rig, keys: dict[str, str]) -> None:
+        super().__init__()
+        self.rig = rig
+        self.keys = keys
+        self.raced: set[str] = set()
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        if name != "gate.checked":
+            return
+        for op in self.rig.journal.ops_open(WS):
+            if op.bead in self.keys and op.bead not in self.raced:
+                self.raced.add(op.bead)
+                block(self.rig, self.keys[op.bead], 1800)
+
+
 def resumable_now(rig: Rig) -> list[str]:
     """Parked beads of ours that pickup must resume: in progress under their per-bead worker, parked,
     neither held nor `needs-human`, and with every blocker closed."""
@@ -525,13 +589,22 @@ def claimable_now(rig: Rig) -> list[str]:
 def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.TempPathFactory,
                                                     kinds: list[str]) -> None:
     """The oracle, per pickup: STARTED, RESUMED and BUSY each mean exactly one coder session is listed;
-    HELD means a hold names why; NOTHING means no bead is ready, none is resumable and no coder runs;
-    STUCK means the same except that ready beads btq's claim can't take are left, each recorded as
-    UNCLAIMABLE. Faults are scoped to their bead, so one bead's trouble never hides another's. The world
-    also parks beads and unblocks them, hands claims back, deletes a bead under its open operation and
-    pins beads to the workstream session. (Configuration changes across a crash are covered by
+    HELD means a hold names why; NOTHING means no bead is ready, none is resumable, no quota waiter is left
+    and no coder runs; STUCK means the same except that ready beads btq's claim can't take are left, each
+    recorded as UNCLAIMABLE (or, AU-5, ACCOUNT_REPOINTED), or skipped for quota; DEFERRED means no coder
+    runs, every ready, resumable or quota-waiting bead gates to a Deadline, and the wake is after now.
+    AU-5's kinds: "quota_blocked" (its profile's key stays blocked), "quota_clears" (blocked for 30
+    minutes), "quota_race" (blocked at `gate.checked`, after pickup's gate admitted it) and
+    "account_repointed" (launched before on another key, under failover "none": never claimed). On
+    DEFERRED the clock moves to the wake time, as the wake trigger would. Faults are scoped to their
+    bead, so one bead's trouble never hides another's. The world also parks beads and unblocks them,
+    hands claims back, deletes a bead under its open operation and pins beads to the workstream session.
+    (Configuration changes across a crash are covered by
     test_replay_after_a_repository_change_uses_the_recorded_placement.)"""
     rig = make_rig(tmp_path_factory.mktemp("never-idle"))
+    quota = {f"btq-{n}": own_profile(rig, f"q-{n}") for n, kind in enumerate(kinds) if kind in QUOTA_KINDS}
+    racer = Racer(rig, {b: k for b, k in quota.items() if kinds[int(b[4:])] == "quota_race"})
+    rig.restart(racer)
     rig.world.add("btq-zz-blocker")
     rig.world.beads["btq-zz-blocker"].labels.remove("agent:wsd")      # someone else's bead
     rig.world.add("btq-zz-done", status="closed")
@@ -561,6 +634,15 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
             rig.world.beads[gate_of(bead)].labels.remove("agent:wsd")
         elif kind == "pinned":
             pinned(rig, bead)
+        elif kind in QUOTA_KINDS:
+            on_profile(rig, bead, f"q-{n}")
+            if kind in ("quota_blocked", "quota_clears"):
+                block(rig, quota[bead], 1800 if kind == "quota_clears" else 100 * 3600)
+            elif kind == "account_repointed":
+                key = ids.role_session(bead, "coder", f"q-{n}")
+                rig.journal.launch_insert(LaunchEntry(key, 1, WS, bead, "coder", f"q-{n}", f"q-{n}",
+                                                      "ck1-" + "0" * 32, "", False, "t", "t", None, None,
+                                                      "launched"))
     done: set[tuple[str, str]] = set()
     for _ in range(8 * len(kinds) + 8):
         outcome = rig.pickup()
@@ -571,30 +653,51 @@ def test_never_idle_while_an_unblocked_bead_exists(tmp_path_factory: pytest.Temp
         elif outcome is Outcome.HELD:
             assert rig.journal.holds(WS)
         else:
-            assert outcome in (Outcome.NOTHING, Outcome.STUCK)
+            assert outcome in (Outcome.NOTHING, Outcome.STUCK, Outcome.DEFERRED)
             # AU-3: an uncertain launch leaves no receipt, so its bead is STUCK at once while its session
             # may still be listed; it holds the role until the sweep or the agent ends it.
             unreceipted = [rig.runtime.listed[k].bead for k in rig.runtime.listed]
             assert all(reason(rig, b) == ("stuck", Reason.UNEXPECTED_STATE) for b in unreceipted)
-            assert claimable_now(rig) == [] or unreceipted
-            assert resumable_now(rig) == []
+            gated = {b for b in claimable_now(rig) if not isinstance(verdict(rig, b), Chosen)}
+            assert [b for b in claimable_now(rig) if b not in gated] == [] or unreceipted
+            assert all(isinstance(verdict(rig, b, resume=True), Deadline) for b in resumable_now(rig))
+            waiters = quota_waiters(rig)
+            assert all(isinstance(verdict(rig, b, resume=True), Deadline) for b in waiters)
             left = [b.id for b in rig.world.ready_for(WS)]
+            stuck_left = [b for b in left if reason_of(rig, b) in (("stuck", Reason.UNCLAIMABLE),
+                                                                    ("stuck", Reason.ACCOUNT_REPOINTED))]
+            quota_left = [b for b in left if isinstance(verdict(rig, b), Deadline)]
             if outcome is Outcome.NOTHING:
-                assert left == []
+                assert left == [] and waiters == [] and rig.sched.wake_at is None
+            elif outcome is Outcome.DEFERRED:
+                # as for NOTHING, only an unreceipted (STUCK) session may still be listed (AU-3)
+                assert set(coders) <= set(unreceipted)
+                assert stuck_left == [] and sorted(quota_left) == sorted(left)
+                assert rig.sched.wake_at is not None and rig.sched.wake_at > rig.clock()
+                assert quota_left or waiters
             else:
-                assert left and all(reason(rig, b) == ("stuck", Reason.UNCLAIMABLE) for b in left)
+                assert stuck_left and sorted(stuck_left + quota_left) == sorted(left)
             pending = any(("parked", b) in done and ("opened", b) not in done for b in plan)
-            if not rig.journal.ops_open() and not pending:
+            waking = any(plan[b] in ("quota_clears", "quota_race") and rig.world.beads[b].status != "closed"
+                         for b in quota)
+            if waking and rig.sched.wake_at is not None:
+                rig.clock.now = rig.sched.wake_at          # the wake fires
+            elif not rig.journal.ops_open() and not pending:
                 break
         settle(rig, plan, done)
+        for b, key in quota.items():
+            if plan[b] == "quota_blocked":
+                block(rig, key, 100 * 3600)                # it stays blocked, however the clock moves
     else:
         pytest.fail("pickup never settled")
     assert "btq-zz-blocker" not in rig.world.claims
+    assert not any(plan[b] in ("account_repointed", "quota_blocked") for b in rig.world.claims)
     for n, kind in enumerate(kinds):
         expected = {"ok": "closed", "closed_blocker": "closed", "launch_uncertain": "closed",
                     "uncertain_landed": "closed", "uncertain_missed": "closed", "lost_race": "dropped",
                     "bad_repo": "stuck", "launch_fails": "stuck", "blocked": None, "parks": "closed",
-                    "released": "closed", "deleted": "dropped", "pinned": "stuck"}[kind]
+                    "released": "closed", "deleted": "dropped", "pinned": "stuck", "quota_blocked": None,
+                    "quota_clears": "closed", "quota_race": "closed", "account_repointed": "stuck"}[kind]
         # "launch_uncertain" and "deleted": the uncertain launch left no receipt, so its bead is STUCK at
         # once (AU-3 §4.3); it ends closed or dropped only if its agent closes it or bd loses it first.
         if kind in ("launch_uncertain", "deleted"):
@@ -847,6 +950,11 @@ def started(tmp_path: Path) -> Rig:
     rig.world.add("btq-1")
     assert rig.pickup() is Outcome.STARTED
     return rig
+
+
+def reason_of(rig: Rig, bead: str) -> tuple[str, Reason | None] | None:
+    row = rig.journal.state(WS, bead)
+    return None if row is None else (row.state.value, row.reason)
 
 
 def reason(rig: Rig, bead: str = "btq-1") -> tuple[str, Reason | None]:
@@ -1281,3 +1389,271 @@ def test_unreadable_pause_flag_is_paused_not_unreachable(tmp_path: Path) -> None
         assert rig.journal.holds(WS) == {} and rig.world.claims == []
     finally:
         state.chmod(0o700)
+
+
+# --- AU-5: the headroom gate in pickup (design §3.6; §5 pickup) ---
+
+HOUR = 3600
+
+
+def repoint_codex(rig: Rig, to: str) -> None:
+    """Repoint the default codex login (`~/.codex/auth.json`) to another file, or back (`to` = "")."""
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    link = Path(accounts.env["HOME"]) / ".codex" / "auth.json"
+    link.unlink()
+    if to:
+        other = link.parent.parent / f".codex-{to}" / "auth.json"
+        other.parent.mkdir(exist_ok=True)
+        other.write_text("{}")
+        link.symlink_to(other)
+    else:
+        link.write_text("{}")
+
+
+def handed_back(rig: Rig, bead: str) -> None:
+    """The bead's session ended and its claim went back to the queue: ready again, launched before."""
+    rig.runtime.end(rig.key(bead))
+    released(rig, bead)
+
+
+def test_an_eligible_later_candidate_starts_while_an_earlier_one_is_blocked(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    key = own_profile(rig, "q-a")
+    rig.world.add("btq-1")
+    on_profile(rig, "btq-1", "q-a")
+    rig.world.add("btq-2")
+    block(rig, key, HOUR)
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-2"] and rig.state("btq-1") is None
+    assert rig.sched.wake_at is None                       # the coder role is busy: no wake time
+
+
+def test_only_blocked_candidates_left_is_deferred_with_the_deadline(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    until = block(rig, profile_key(rig, "p-one"), HOUR)
+    assert rig.pickup() is Outcome.DEFERRED
+    assert rig.world.claims == [] and rig.sched.wake_at == until
+    assert rig.journal.snapshot(WS).state is WsState.DEFERRED
+    rig.clock.advance(HOUR)
+    assert rig.pickup(TriggerKind.QUOTA_WAKE) is Outcome.STARTED
+    assert rig.world.claims == ["btq-1"] and rig.sched.wake_at is None
+
+
+def test_a_resumable_bead_is_gated_on_its_recorded_profile(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    assert rig.pickup() is Outcome.STARTED                 # on p-one
+    rig.parker.park("btq-1", ("btq-2",))
+    rig.world.close("btq-2")
+    rig.ws = replace(rig.ws, coder_profile="p-two")        # the configured default moved on
+    rig.restart()
+    until = block(rig, profile_key(rig, "p-one"), HOUR)
+    block(rig, profile_key(rig, "p-two"), 2 * HOUR)
+    assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
+    assert len(rig.runtime.launches) == 1
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED                 # p-one clears; p-two still blocks
+    assert rig.runtime.launches[-1].profile == "p-one"
+
+
+def deferral(rig: Rig, bead: str, until: int | None, reason: str = "quota", role: str = "coder") -> None:
+    rig.journal.db.execute("INSERT INTO deferrals VALUES (?, 1, ?, ?, 'p-one', ?, ?, 'trusted')",
+                           (f"sk-{bead}", bead, role, reason, None if until is None else str(until)))
+
+
+def bystander(rig: Rig, bead: str, state: BeadState = BeadState.DROPPED) -> None:
+    """A bead of the journal's that pickup never considers: not wsd's, so never ready."""
+    rig.world.add(bead)
+    rig.world.beads[bead].labels.remove("agent:wsd")
+    rig.journal.adopt(WS, bead, state)
+
+
+@pytest.mark.parametrize("excluded", ["none", "past", "held_row", "stuck_row", "held_label", "needs_human",
+                                      "blocked", "account_changed", "reviewer"])
+def test_the_wake_time_counts_current_coder_quota_deferrals(tmp_path: Path, excluded: str) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    until = block(rig, profile_key(rig, "p-one"), HOUR)
+    now = rig.clock()
+    state = {"held_row": BeadState.HELD, "stuck_row": BeadState.STUCK}.get(excluded, BeadState.DROPPED)
+    bystander(rig, "btq-5", state)
+    if excluded == "held_label":
+        rig.world.beads["btq-5"].labels.append(HELD)
+    elif excluded == "needs_human":
+        rig.world.beads["btq-5"].labels.append(NEEDS_HUMAN)
+    elif excluded == "blocked":
+        rig.world.add("btq-6")
+        rig.world.beads["btq-5"].deps.append(("btq-6", "blocks"))
+        rig.world.beads["btq-6"].labels.remove("agent:wsd")
+    deferral(rig, "btq-5", now - 1 if excluded == "past" else now + 600,
+             "account_changed" if excluded == "account_changed" else "quota",
+             "reviewer" if excluded == "reviewer" else "coder")
+    assert rig.pickup() is Outcome.DEFERRED
+    wake = rig.sched.wake_at
+    assert wake is not None and wake > now and wake == (now + 600 if excluded == "none" else until)
+
+
+def test_an_account_changed_deferral_alone_never_arms_a_wake(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    bystander(rig, "btq-5")
+    deferral(rig, "btq-5", None, "account_changed")
+    assert rig.pickup() is Outcome.NOTHING and rig.sched.wake_at is None
+    assert rig.journal.snapshot(WS).state is WsState.IDLE
+
+
+def repointed(tmp_path: Path) -> Rig:
+    """btq-1 launched on p-two (codex default, failover "none"), handed back, and its login repointed."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    on_profile(rig, "btq-1", "p-two")
+    assert rig.pickup() is Outcome.STARTED
+    handed_back(rig, "btq-1")
+    repoint_codex(rig, "other")
+    return rig
+
+
+def test_a_ready_bead_whose_account_changed_is_never_claimed(tmp_path: Path) -> None:
+    rig = repointed(tmp_path)
+    rig.world.add("btq-2")
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1", "btq-2"]          # btq-1 only its first time
+    assert reason(rig) == ("stuck", Reason.ACCOUNT_REPOINTED)
+    rig.world.close("btq-2")
+    assert rig.pickup() is Outcome.STUCK and rig.sched.wake_at is None
+    assert rig.world.claims == ["btq-1", "btq-2"]
+    assert rig.journal.snapshot(WS).state is WsState.STUCK
+    repoint_codex(rig, "")                                 # restored
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1", "btq-2", "btq-1"] and rig.state("btq-1") == "running"
+
+
+def test_account_changed_then_deadline_then_chosen(tmp_path: Path) -> None:
+    rig = repointed(tmp_path)
+    bystander(rig, "btq-9", BeadState.STUCK)
+    rig.journal.adopt(WS, "btq-9", BeadState.STUCK, Reason.ACCOUNT_CHANGED, "a claimed bead's escalation")
+    assert rig.pickup() is Outcome.STUCK
+    assert reason(rig) == ("stuck", Reason.ACCOUNT_REPOINTED)
+    repoint_codex(rig, "")
+    until = block(rig, profile_key(rig, "p-two"), HOUR)
+    assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
+    assert reason(rig) == ("dropped", Reason.CLAIM_ABANDONED)
+    assert rig.world.claims == ["btq-1"]
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.STARTED
+    assert rig.world.claims == ["btq-1", "btq-1"] and rig.state("btq-1") == "running"
+    assert reason(rig, "btq-9") == ("stuck", Reason.ACCOUNT_CHANGED)
+
+
+def test_an_unlisted_account_repointed_row_is_dropped(tmp_path: Path) -> None:
+    rig = repointed(tmp_path)
+    assert rig.pickup() is Outcome.STUCK
+    rig.world.close("btq-1")
+    assert rig.pickup() is Outcome.NOTHING
+    assert reason(rig) == ("dropped", Reason.CLAIM_ABANDONED) and rig.world.claims == ["btq-1"]
+
+
+def raced(tmp_path: Path) -> tuple[Rig, int]:
+    """btq-1 admitted by pickup's gate, then blocked (a trusted mark) before the guard's step 2."""
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    until = rig.clock() + HOUR
+    rig.restart(At("gate.checked", lambda: block(rig, profile_key(rig, "p-one"), HOUR)))
+    return rig, until
+
+
+def test_the_guard_race_is_deferred_with_a_wake(tmp_path: Path) -> None:
+    rig, until = raced(tmp_path)
+    assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
+    assert reason(rig) == ("parked", Reason.QUOTA) and rig.runtime.launches == []
+    assert PARKED in rig.world.beads["btq-1"].labels and rig.journal.ops_open() == []
+    rig.clock.advance(HOUR)
+    assert rig.pickup(TriggerKind.QUOTA_WAKE) is Outcome.RESUMED
+    assert len(rig.runtime.launches) == 1 and rig.state("btq-1") == "running"
+
+
+@pytest.mark.parametrize("point", ["pickup.quota", "pickup.quota!"])
+def test_a_crash_in_the_quota_shelve_replays_to_parked_quota(tmp_path: Path, point: str) -> None:
+    rig, until = raced(tmp_path)
+    assert isinstance(rig.cp, At)
+    block_now = rig.cp.fn
+    rig.restart(Both(At("gate.checked", block_now), CrashAt(point)))
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.restart()
+    assert rig.pickup() is Outcome.DEFERRED and rig.sched.wake_at == until
+    assert reason(rig) == ("parked", Reason.QUOTA) and rig.runtime.launches == []
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.detail == quota_detail(until)
+
+
+@pytest.mark.parametrize("point", ["resume.quota", "resume.quota!", None])
+def test_the_resume_race_is_deferred_and_replays(tmp_path: Path, point: str | None) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    assert rig.pickup() is Outcome.STARTED
+    rig.parker.park("btq-1", ("btq-2",))
+    rig.world.close("btq-2")
+    until = rig.clock() + HOUR
+    blocker = At("resume.intent", lambda: block(rig, profile_key(rig, "p-one"), HOUR))
+    if point is None:
+        rig.restart(blocker)
+        assert rig.pickup() is Outcome.DEFERRED
+    else:
+        rig.restart(Both(blocker, CrashAt(point)))
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+        rig.restart()
+        assert rig.pickup() is Outcome.DEFERRED
+    assert rig.sched.wake_at == until and reason(rig) == ("parked", Reason.QUOTA)
+    assert len(rig.runtime.launches) == 1
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED and len(rig.runtime.launches) == 2
+
+
+@pytest.mark.parametrize("added", ["blocker", "held", "needs_human"])
+def test_a_quota_waiter_that_gains_a_stop_before_the_replay_ends_in_it(tmp_path: Path, added: str) -> None:
+    rig, _ = raced(tmp_path)
+    assert isinstance(rig.cp, At)
+    rig.restart(Both(At("gate.checked", rig.cp.fn), CrashAt("pickup.quota")))
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    if added == "blocker":
+        rig.world.add("btq-2")
+        rig.world.beads["btq-2"].labels.remove("agent:wsd")
+        rig.world.beads["btq-1"].deps.append(("btq-2", "blocks"))
+    else:
+        rig.world.beads["btq-1"].labels.append(HELD if added == "held" else NEEDS_HUMAN)
+    rig.restart()
+    outcome = rig.pickup()
+    expected = {"blocker": ("parked", Reason.BLOCKED_ON_BEAD), "held": ("held", Reason.HELD_BY_OPERATOR),
+                "needs_human": ("stuck", Reason.NEEDS_HUMAN)}[added]
+    assert reason(rig) == expected and rig.sched.wake_at is None
+    assert outcome is not Outcome.DEFERRED
+
+
+def test_a_runnable_waiter_counts_at_its_deadline_or_the_recheck(tmp_path: Path) -> None:
+    rig, until = raced(tmp_path)
+    assert rig.pickup() is Outcome.DEFERRED
+    now = rig.clock()
+    assert rig.sched._waiters(now) == [until]  # pyright: ignore[reportPrivateUsage]
+    rig.journal.db.execute("DELETE FROM account_exhausted")
+    assert rig.sched._waiters(now) == [now + rig.ws.usage.min_recheck_seconds]  # pyright: ignore[reportPrivateUsage]
+
+
+class Both(Recorder):
+    """Two checkpoint doubles at once, in order."""
+
+    def __init__(self, *parts: Recorder) -> None:
+        super().__init__()
+        self.parts = parts
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        for part in self.parts:
+            part(name)

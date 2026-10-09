@@ -8,17 +8,19 @@ import sqlite3
 import subprocess
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from fakes.checkpoints import Recorder
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 
-from heterodyne.wsd.accounts import ConfiguredAccounts
+from heterodyne.config.accounts import Account
+from heterodyne.wsd.accounts import ConfiguredAccounts, Failover, ProfileAccounts
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint
 from heterodyne.wsd.gate import ClaimGate
+from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSpec
@@ -192,6 +194,56 @@ def probe_lock(rig: Rig, who: str) -> ProbedLock:
     lock = ProbedLock(rig.parker.lock, who)
     rig.parker.lock = lock  # pyright: ignore[reportAttributeAccessIssue] - a test double for the RLock
     return lock
+
+
+class At(Recorder):
+    """Run `fn` once, the first time `point` is reached (another process acting at that moment)."""
+
+    def __init__(self, point: str, fn: Callable[[], object]) -> None:
+        super().__init__()
+        self.point = point
+        self.fn = fn
+        self.fired = False
+
+    def __call__(self, name: str) -> None:
+        super().__call__(name)
+        if name == self.point and not self.fired:
+            self.fired = True
+            self.fn()
+
+
+def own_profile(rig: Rig, profile: str, failover: Failover = "none") -> str:
+    """Add `profile` (codex) with its own named account, whose login is its own file under the rig's
+    HOME, so it has a credential key no other profile shares. Returns that key. Rebuilds the rig."""
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    login = Path(accounts.env["HOME"]) / f".codex-{profile}"
+    login.mkdir(parents=True, exist_ok=True)
+    (login / "auth.json").write_text("{}")
+    accounts.named[("codex", profile)] = Account(profile, "codex", str(login), login, (), "")
+    accounts.profiles[profile] = ProfileAccounts("codex", (profile,), failover)
+    rig.ws = replace(rig.ws, profiles=rig.ws.profiles | {profile})
+    rig.restart(rig.cp)
+    return accounts.current_key("codex", profile)
+
+
+def profile_key(rig: Rig, profile: str) -> str:
+    accounts = rig.ws.accounts
+    assert accounts is not None
+    [candidate] = accounts.view(profile).accounts
+    return candidate.key
+
+
+def block(rig: Rig, key: str, seconds: int) -> int:
+    """A trusted exhaustion mark on `key`, observed now, until `seconds` from now. Returns its until."""
+    until = rig.clock() + seconds
+    rig.journal.exhausted_put(key, Mark(until, rig.clock(), 0), rig.journal.usage_seq_next())
+    return until
+
+
+def on_profile(rig: Rig, bead: str, profile: str) -> None:
+    """The bead's `role:coder=<profile>` override."""
+    rig.world.beads[bead].labels.append(f"role:coder={profile}")
 
 
 class LockAt(Recorder):

@@ -17,9 +17,17 @@ from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import AccountChanged, Candidate, Chosen, ConfiguredAccounts, ProfileAccounts
-from heterodyne.wsd.beads import RECORD_KEY, BeadsAdapter, BeadsUnavailable, LaunchConflict
+from heterodyne.wsd.beads import (
+    HELD,
+    NEEDS_HUMAN,
+    PARKED,
+    RECORD_KEY,
+    BeadsAdapter,
+    BeadsUnavailable,
+    LaunchConflict,
+)
 from heterodyne.wsd.checkpoints import Checkpoint
-from heterodyne.wsd.headroom import UsageCache, UsageSettings, Window, gate
+from heterodyne.wsd.headroom import Mark, UsageCache, UsageSettings, Window, gate, quota_detail
 from heterodyne.wsd.journal import EntryConflict, Journal, OpKind
 from heterodyne.wsd.launches import (
     LAUNCHES_KEY,
@@ -34,7 +42,7 @@ from heterodyne.wsd.park import UNRECEIPTED
 from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
-from heterodyne.wsd.states import Reason
+from heterodyne.wsd.states import BeadState, Reason
 
 KEY = ids.role_session("btq-1", "coder", "p-one")
 
@@ -419,6 +427,53 @@ def test_a_blocked_pin_is_abandoned_and_quota_shelved(tmp_path: Path) -> None:
     assert {e.outcome for e in rig.journal.launches_of(WS, "btq-1")} == {"abandoned"}
     row = rig.journal.state(WS, "btq-1")
     assert row is not None and row.reason is Reason.QUOTA
+
+
+def pinned_then_blocked(tmp_path: Path, kind: str) -> tuple[Rig, int]:
+    """A pickup (or a resume) that crashed after journaling its pin, whose pinned key is then blocked by
+    a trusted mark. Returns the mark's until."""
+    rig = started(tmp_path) if kind == "pickup" else resumable(tmp_path)
+    crash(rig, f"{kind}.entry!")
+    pinned = rig.journal.launches_of(WS, "btq-1")[-1]
+    until = rig.clock() + 3600
+    seq = rig.journal.usage_seq_next()
+    rig.journal.exhausted_put(pinned.credential_key, Mark(until, rig.clock(), seq), seq)
+    return rig, until
+
+
+@pytest.mark.parametrize("kind", ["pickup", "resume"])
+@pytest.mark.parametrize("step", ["abandoned", "abandoned!", "quota", "quota!"])
+def test_a_crash_in_a_quota_shelve_replays_to_parked_quota(tmp_path: Path, kind: str, step: str) -> None:
+    rig, until = pinned_then_blocked(tmp_path, kind)
+    launched = len(rig.runtime.launches)
+    crash(rig, f"{kind}.{step}")
+    rig.pickup()
+    assert len(rig.runtime.launches) == launched and rig.journal.ops_open() == []
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (row.state, row.reason) == (BeadState.PARKED, Reason.QUOTA)
+    assert row.detail == quota_detail(until) and PARKED in rig.world.beads["btq-1"].labels
+    assert rig.sched.wake_at == until
+    rig.clock.advance(3600)
+    assert rig.pickup() is Outcome.RESUMED and len(rig.runtime.launches) == launched + 1
+
+
+@pytest.mark.parametrize("kind", ["pickup", "resume"])
+@pytest.mark.parametrize("added", ["held", "needs_human", "blocker"])
+def test_a_stop_added_before_the_quota_replay_wins(tmp_path: Path, kind: str, added: str) -> None:
+    rig, _ = pinned_then_blocked(tmp_path, kind)
+    crash(rig, f"{kind}.quota")
+    if added == "blocker":
+        rig.world.add("btq-3")
+        rig.world.beads["btq-3"].labels.remove("agent:wsd")
+        rig.world.beads["btq-1"].deps.append(("btq-3", "blocks"))
+    else:
+        rig.world.beads["btq-1"].labels.append(HELD if added == "held" else NEEDS_HUMAN)
+    rig.pickup()
+    row = rig.journal.state(WS, "btq-1")
+    expected = {"held": (BeadState.HELD, Reason.HELD_BY_OPERATOR), "needs_human": (BeadState.STUCK,
+                Reason.NEEDS_HUMAN), "blocker": (BeadState.PARKED, Reason.BLOCKED_ON_BEAD)}[added]
+    assert row is not None and (row.state, row.reason) == expected
+    assert rig.journal.ops_open() == [] and rig.sched.wake_at is None
 
 
 @pytest.mark.parametrize("point", ["pickup.abandoned", "pickup.abandoned!"])

@@ -18,11 +18,12 @@ import msgspec
 import pytest
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
 
 from heterodyne.wsd import cli, ctl, daemon, ids, journal
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
+from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import Session
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
@@ -1135,7 +1136,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
 from heterodyne.wsd import cli, daemon
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
@@ -1517,7 +1518,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
 from heterodyne.wsd import cli
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
@@ -1641,3 +1642,100 @@ def test_shutdown_closes_every_lane_before_any_starts_a_queued_job(tmp_path: Pat
     assert not closing.is_alive() and shutdown_done
     cf.wait([queued], 10)
     assert ran == [] and queued.cancelled()
+
+
+# --- AU-5: the quota wake (design §3.6; §5 daemon) ---
+
+HOUR = 3600
+
+
+def deferred_wsd(tmp_path: Path) -> tuple[Wsd, Clock, int]:
+    """A daemon on an injected clock whose only bead is blocked for an hour: its pickups are DEFERRED."""
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+    world.add("btq-1")
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(world), FakeRuntime()))
+    clock = Clock()
+    sched = wsd.parts.schedulers[WS]
+    sched.d = replace(sched.d, clock=clock)
+    sched.parker.d = sched.d
+    [candidate] = s.workstreams[0].accounts.view("p-one").accounts  # type: ignore[union-attr]
+    until = clock() + HOUR
+    seq = sched.d.journal.usage_seq_next()
+    sched.d.journal.exhausted_put(candidate.key, Mark(until, clock(), seq), seq)
+    return wsd, clock, until
+
+
+def test_a_deferred_pickup_arms_one_wake_and_the_next_replaces_it(tmp_path: Path) -> None:
+    wsd, clock, until = deferred_wsd(tmp_path)
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        assert await wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.DEFERRED
+        first = wsd.wakes[WS]
+        assert abs(first.when() - loop.time() - (until - clock())) < 5
+        clock.advance(600)
+        assert await wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.DEFERRED
+        second = wsd.wakes[WS]
+        assert first.cancelled() and not second.cancelled() and len(wsd.wakes) == 1
+        assert abs(second.when() - loop.time() - (until - clock())) < 5
+        await wsd._cancel_wakes()  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(scenario())
+
+
+def test_a_firing_wake_submits_a_quota_wake_pickup_through_the_lane(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, clock, until = deferred_wsd(tmp_path)
+    sched = wsd.parts.schedulers[WS]
+    seen: list[TriggerKind] = []
+    real = sched.pickup
+
+    def counted(trigger: Trigger) -> Outcome:
+        seen.append(trigger.kind)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", counted)
+    keys = counted_submits(wsd.lanes[WS], monkeypatch)
+
+    async def scenario() -> None:
+        assert await wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.DEFERRED
+        clock.now = until                                  # the deadline passes
+        wsd._wake(WS)  # pyright: ignore[reportPrivateUsage] - what the armed handle calls
+        [task] = wsd.waking
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+    assert seen == [TriggerKind.BACKSTOP, TriggerKind.QUOTA_WAKE]
+    assert keys == [("pickup", None), ("pickup", None)]
+    assert wsd.parts.journal.state(WS, "btq-1") is not None and WS not in wsd.wakes
+
+
+def test_stop_cancels_the_wake(tmp_path: Path) -> None:
+    wsd, _, _ = deferred_wsd(tmp_path)
+
+    async def scenario() -> asyncio.TimerHandle:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(lambda: WS in wsd.wakes)               # startup's pickup armed it
+        handle = wsd.wakes[WS]
+        stop.set()
+        await task
+        return handle
+
+    handle = asyncio.run(scenario())
+    assert handle.cancelled() and wsd.wakes == {} and wsd.waking == set()
+
+
+def test_no_wake_is_armed_once_stopping(tmp_path: Path) -> None:
+    wsd, _, _ = deferred_wsd(tmp_path)
+
+    async def scenario() -> None:
+        assert await wsd.pickup(WS, Trigger(TriggerKind.BACKSTOP)) is Outcome.DEFERRED
+        wsd._cancel_queued()  # pyright: ignore[reportPrivateUsage]
+        wsd._arm(WS)  # pyright: ignore[reportPrivateUsage]
+        assert wsd.wakes == {}
+        wsd._wake(WS)  # pyright: ignore[reportPrivateUsage]
+        assert wsd.waking == set()
+
+    asyncio.run(scenario())
