@@ -41,20 +41,22 @@ Everything a session sends is untrusted. Only three things are read from it:
 - the Codex thread ID, used for that session's own resume;
 - the probe results, from a peer the host verifies itself.
 
+Those results count only under r15's Probe protection gate (Task 9A): the host checks on every launch that nothing in the workload can trace, write into or remount the probe, and the probe checks the same denial from inside.
+
 Backends hide behind a `Backend` protocol. The tests' `FakeBackend` runs commands on the host, so the runtime, the adapters, tmux and the session socket are tested offline end to end. OpenShell is tested against a recording runner, and for real only in `tests/live`.
 
 **Tech Stack:** Python 3.12+, stdlib (`socket`, `threading`, `subprocess`, `json`, `hashlib`), msgspec stays the only runtime dependency. tmux, git, NVIDIA OpenShell 0.1.2 with the podman compute driver, and podman 5. Tests use pytest, hypothesis, ruff and pyright (strict on `src/`).
 
-**Spec:** ADR 0001 revision 14 is design-repo commit `82b2e4b` in `$DESIGN_REPO`, approved in bead `btq-k942c`. Section numbers (§) refer to it. The parts this plan implements are §4.2, §4.4 D2 (the receipts this runtime returns), §7, §10 (`wsd` down) and §11 (sandbox compilation for both backends, integration fakes).
+**Spec:** ADR 0001 revision 15 is design-repo commit `28e3df4` in `$DESIGN_REPO` (branch `adr-r15`), approved in bead `btq-9r2w3`. It is the S5 amendment to revision 14 (`82b2e4b`, `btq-k942c`). Section numbers (§) refer to r15. The parts this plan implements are §4.2, §4.4 D2 (the receipts this runtime returns), §7 (with r15's OpenShell runtime, direct-network proof, result channel, Probe protection and "Plan 4 notes for OpenShell"), §10 (`wsd` down) and §11 (sandbox compilation for both backends, integration fakes, and r15's negative and adversarial controls).
 
 The plan also draws on these sources:
 
 - Roadmap row 4 (`docs/superpowers/plans/2026-09-29-heterodyne-v1-roadmap.md`) scopes this plan.
 - Spike S5 (`docs/spikes/s5-openshell.md`, code `spikes/s5/`) supplies the launch shape, the probes and the ADR impact items 1–11.
 - Spike S8's open items (`docs/spikes/s8-marmot-only.md`) cover the Codex launch shape and hook trust.
-- ADR revision 15 (being drafted by `s5-spike` when this plan was written) is expected to accept OpenShell's broker answers as §7's direct-network proof. Every task that depends on it is marked **[r15]** (see "ADR revision 15 dependency" below).
+- ADR revision 15 accepts OpenShell's broker answers as §7's direct-network proof and adds the OpenShell-specific rules. The tasks that implement them are marked **[r15]** (see "ADR revision 15" below).
 
-**Status:** revision 1, written for the cross-model review. **Design approval is not set.** The §17 decisions it depends on are listed below, with the parts that wait for them. Gap 13 (git in a sandboxed linked worktree) needs an operator decision before the OpenShell backend is enabled on a real host.
+**Status:** revision 2, folding in the approved ADR r15, for the cross-model review. **Design approval is not set.** The §17 decisions it depends on are listed below. Two items need an operator decision before the OpenShell backend is enabled on a real host: gap 13 (git in a sandboxed linked worktree) and gap 15 (`kernel.yama.ptrace_scope = 2`, which the Probe protection gate needs).
 
 ## Global Constraints
 
@@ -74,7 +76,7 @@ The plan also draws on these sources:
 - **The pre-commit install-agnostic hook rejects absolute `/home` paths** in committed files. Tests build paths from `tmp_path`.
 - **Long commands** use `timeout`. The full suite runs in the background with `timeout 3600` (about 27 minutes). Each task's own tests run in the foreground.
 - **Review rule:** every task ends with a review by a **different LLM than the implementer** (cross-model), or by a fresh-context adversarial agent when only one LLM is available. The brief names the diff range and the ADR sections, and asks for `[BLOCKING]`/`[NON-BLOCKING]` findings. Every blocking finding is fixed or rebutted. Review runs at most three cycles; the third asks whether the result is good enough for this stage. Close evidence includes `Code-Review: reviewer=<model> author=<model> mode=<cross-model|adversarial> range=<BASE>..<HEAD>`.
-- **Beads** (workstream `heterodyne`): Tasks 1–14 are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=82b2e4b` (or the r15 commit for an **[r15]** task), and a blocking dependency on the approval bead. **[r15]** tasks are also blocked by the bead that approves ADR revision 15. The dependency order is in "Task order" below.
+- **Beads** (workstream `heterodyne`): Tasks 1–15 and 9A are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=28e3df4` and a blocking dependency on the approval bead. The dependency order is in "Task order" below.
 - **Branches:** integration branch `plan-4-agents` in `$HZ`, from `main`, at or after the merge of AU-4/AU-11 (PR #35). Make one commit or more per task. Merge `origin/main`, never rebase, and never amend a pushed commit.
 
 ---
@@ -99,25 +101,27 @@ The plan also draws on these sources:
 | D14 | The hook shim when wsd is down (§10). | The shim waits up to `[timeouts] hook_wait_seconds`. With no answer, a PreToolUse is allowed only for the local class `worktree_edit`, and only if that class is in the auto-approve tier: an `Edit`, `Write`, `MultiEdit` or `NotebookEdit` whose real path is inside the worktree. Everything else is denied with "control plane unavailable; retry shortly", as the JSON PreToolUse decision (S8 capability 1). Other events are never blocked; with no answer they are spooled to `$HOME/.hz/spool.jsonl`. | This is narrower than §10 allows (running tests and local git are not classified locally), so it fails closed more often, never less. |
 | D15 | Tool policy before plan 5. | While wsd answers, every `hook_event` gets `{"ok": true}`, so no tool call is denied by wsd. `ws_request` gets `{"ok": false, "error": "unsupported"}`. | Plan 5 owns the policy engine and `ws-request` processing. The sandbox is the security boundary (§5.3), and the hook is a UX layer. |
 | D16 | The self-test's allowlisted control (§7 Egress). | The probe control host (`api.openai.com`, configurable) stays allowed to `/usr/bin/curl` for the session's life. | OpenShell's policy is fixed at create time in 0.1.2. The residual is flagged below (gap 4). |
-| D17 | Bubblewrap (roadmap row 4: "bubblewrap from the S3 prototype only if S5 fails"). | **Not in this plan.** If ADR revision 15 is rejected, or S5 is closed as failed, a contingent plan 4b replaces the **[r15]** tasks with a bubblewrap backend behind the same `Backend` and `SelfTest` protocols. Every other task stands unchanged. | S5 passed apart from the direct-network deviation that r15 addresses. Writing both backends now would double the review for a path that should not be needed. Flagged as decision 1 below. |
+| D17 | Bubblewrap (roadmap row 4: "bubblewrap from the S3 prototype only if S5 fails"). | **Not in this plan.** r15 §7 selects bubblewrap only if the operator explicitly rejects the OpenShell direct-network proof, and approving r15 accepted it. If plan 4 finds that OpenShell can't enforce a §7 rule (Probe protection included), plan 4 stops and the choice goes back to the operator; nothing falls back automatically. | That is r15's fallback rule. There is no contingent plan 4b any more. |
 | D18 | The wsd tmux server. | Socket name `heterodyne-wsd`. On systemd, each start runs in a transient scope with a unique name (`heterodyne-wsd-tmux-<12 hex>`), as admind's does. Panes run `env -i <tool env> openshell sandbox exec … --tty`, so the pane gets no host environment. | It survives a wsd restart (`KillMode=control-group`), so sessions outlive wsd as §10 requires, and break-glass `tmux attach` still works (§4.2). |
 | D19 | Turn boundaries after a wsd restart. | A restarted wsd re-binds each live session's socket at the next `sessions` call, with an empty turn state. Until a new `Stop` arrives, the lifetime stop for that session is hard. | Turn state is in-memory and untrusted. Restoring it from the spool would trust a file the agent's events wrote. |
 | D20 | Where launch-time waits run. | A launch blocks the workstream's operation lock for up to about 6 minutes in the worst case: sandbox create (300 s at most), the exec probes (180 s), the agent prompt (90 s) and the agent probes (`agent_probe_seconds`, 240 s). Other workstreams are unaffected. | §5.2 serialises launches per workstream anyway. Flagged for plan 8's health checks (gap 6). |
 | D21 | Configured backends this plan does not build. | `[platform] sandbox = "bubblewrap"` or `"seatbelt"` makes `wsd run` print a notice ("… is not built yet; no agents will run") and use `NoRuntime`, as `"none"` does. Any other unknown name is a `ConfigError`. The Linux platform default becomes `"openshell"`, so `heterodyne setup` records it on new installs. | Existing configs (the live harness and admind tests carry `bubblewrap`) keep working with no agents, exactly as before plan 4. Failing them would break hosts that never asked for plan 4. |
 | D22 | The Other accounts probe with no named accounts. | It runs with an empty list of other accounts. The canary (written outside every bind just before, then read back outside) is always checked inside, so the probe never passes vacuously. | A host with only default logins is the common case, and plan 4 launches only the default. The canary is the positive control that S5's probe lacked. |
+| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A). The host requires `kernel.yama.ptrace_scope` ≥ 2, so only `CAP_SYS_PTRACE` can attach or open another process's memory. Every workload process with `NoNewPrivs: 1` (every process the agent can start) must have no effective or permitted capability. The verified probe must have `NoNewPrivs: 1` and the same user and mount namespaces as its CLI ancestor, so no agent-made namespace has a mount over its files. `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) is read-only. On every launch the probe also checks the denial from inside (`probe-tamper-denied`, `probe-files-readonly`), and the curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. Scope 2 is a host change (gap 15). |
+| D24 | Codex hooks (r15 §4.2, §5.3: Codex stays headless until trust is pre-seeded without an operator step). | Codex is treated as headless. Its hooks are used only for the thread ID (D8) and the turn state (D13), never to enforce anything; the sandbox is the boundary. D6 is plan 4's trust pre-seeding, and each launch verifies it: the second `hooks/list` must be empty, and the generation's `SessionStart` must arrive. | A missed hook then only makes the lifetime stop hard or fails the launch; it never lets a tool call through that the sandbox would refuse. |
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
 
-1. **Bubblewrap fallback.** D17 leaves it to a contingent plan 4b. The alternative is to build it inside plan 4 now, at about 3 extra tasks and a second live gate. *Proposed:* plan 4b only if r15 is rejected or §17 #2 closes S5 as failed.
-2. **§7's direct-network wording.** Under OpenShell a literal-address connect gets EACCES from the seccomp broker, never "unreachable" (S5 item 2). Task 8's probe passes only with the full set of broker answers, plus `Seccomp: 2`/`NoNewPrivs: 1` inside and `NetworkMode=none` checked from outside. **That is what r15 must accept**, and it is why Tasks 3, 4, 8, 9, 12 and 14 are **[r15]**.
-3. **§7's credential-source rule vs the Codex install path.** §7 says "a source in any other account's login directory (the adapter's default login included) refuses the launch". codex-cli 0.160.0 installs under `~/.codex/packages/standalone/releases/…`, inside the default login directory. Read literally, every Codex launch with a named account chosen (AU-6) would be refused, and with the default chosen the CLI root would sit inside the chosen account's own login directory. *Proposed (D10):* refuse a source that equals or contains a login file or a login directory, and allow a source strictly inside a login directory only if it contains no login file. The Other accounts probe still proves that each login file is unreachable inside. This needs an ADR sentence, and could go into r15.
+1. **Bubblewrap fallback.** *Resolved by r15:* bubblewrap only on an explicit rejection of the direct-network proof, and plan 4 stops on any rule OpenShell can't enforce (D17).
+2. **§7's direct-network wording.** *Resolved by r15:* §7 accepts the broker answers (`EACCES` for TCP and UDP connects, `EDESTADDRREQ` for a UDP `sendto`, `EPROTONOSUPPORT` for raw sockets), `Seccomp: 2`, `NoNewPrivs: 1` and no capability inside, and `NetworkMode=none` with the log line from outside. Task 8's probe checks exactly that.
+3. **§7's credential-source rule vs the Codex install path.** §7 says "a source in any other account's login directory (the adapter's default login included) refuses the launch". codex-cli 0.160.0 installs under `~/.codex/packages/standalone/releases/…`, inside the default login directory. Read literally, every Codex launch with a named account chosen (AU-6) would be refused, and with the default chosen the CLI root would sit inside the chosen account's own login directory. *Proposed (D10):* refuse a source that equals or contains a login file or a login directory, and allow a source strictly inside a login directory only if it contains no login file. The Other accounts probe still proves that each login file is unreachable inside. This needs an ADR sentence. r15 didn't take it up, so it is still open, and it matters once AU-6 binds named accounts.
 4. **The probe control stays reachable** (D16). `/usr/bin/curl` inside every session can reach `api.openai.com` for the session's life, an exfiltration path §7's residual-risk list doesn't name. *Proposed:* record it as residual risk in r15. Alternatively, point `probe_allowed_host` at a host the operator controls. Removing the rule after the self-test needs OpenShell policy updates on a live sandbox, which S5 did not test.
 5. **`RuntimeUnavailable` when state is missing** (D9) holds the whole workstream. That happens when a record says a generation ran and the home holds session state, but not the wanted ID's (a transcript or rollout deleted by hand, or a home swapped under the record). Plan 3's contract demands this outcome. *Alternative:* `LaunchFailed`, which spends the bead's launch budget and makes it `needs-human` without holding the other beads. This plan keeps the contract. The operator may prefer the alternative.
 6. **Long launches hold the workstream lock** (D20). That is acceptable for v1. Plan 8's health view should show "launching" with its elapsed time.
 7. **Git push.** §7 says "there is no git push". Plan 4 relies on there being no credential inside, and egress to a forge host is read-only only by that absence. No L7 rule blocks `git push` itself, because the proxy can't see paths (§7 residual risks). The live test checks that a push fails.
 8. **The lifetime WIP commit is not a journaled step** (D13). It is idempotent by its mark, made after the sandbox is confirmed gone, and its failure is recorded in the session record. A failed or lost commit leaves the worktree as it was, and the relaunch resumes in it. §7 says "interrupt, then commit the WIP" but does not make it a journal transition. *Proposed:* accept.
 9. **Session records and plan 8's cleanup** (D9). The resume contract treats a missing record as "never existed". Plan 8's garbage collection must keep a tombstone (the record with `phase = ended`) for every key whose bead is not closed. That becomes a requirement on plan 8's row.
-10. **OpenShell's supervisor is in the TCB** (S5 ADR impact 3). It terminates TLS and sees bearer tokens in plaintext. That is acceptable while login files are the credential (§17 #5). It is recorded here because a later move to injection makes it central.
+10. **OpenShell's supervisor is in the TCB** (S5 ADR impact 3). *Resolved:* r15 §7 Residual risk and §17 #5 record it.
 11. **The agent-path self-test makes one model call per launch.** Its prompt and output also enter the session's transcript, so a resumed session sees them. S5 accepted this, and §7 requires the self-test before every launch.
 12. **S8 open item 1** (Codex `SessionStart` fires only on the first prompt). The agent-path probe prompt *is* that first prompt, so plan 4 gets the thread ID without a separate preflight. Whether admind adopts the same preflight is admind's decision (§8.1), not this plan's.
 13. **Git in a sandboxed linked worktree. Blocking: it needs an operator decision before the backend is enabled.**
@@ -133,14 +137,18 @@ The plan also draws on these sources:
       - The residual risk: an agent can move other beads' `btq/` branches. ADR text is needed for that.
     - This changes plan 3's gitwip contract, so it is not decided silently here. It blocks enabling `[platform] sandbox = "openshell"` on a real host. It doesn't block Tasks 1–13. The resolution is either a plan 4 amendment (one task, before Task 12's backend is enabled) or a plan 3 follow-up.
 14. **The live test and a running wsd.** A wsd on the OpenShell runtime finds Task 14's sandboxes in the backend's listing with no record of its own, and holds its workstreams until they are gone (Task 10's fail-closed rule). The live test therefore runs only while no wsd on the host uses OpenShell, and it deletes only the sandboxes it launched, never by name prefix.
+15. **`kernel.yama.ptrace_scope = 2` on the reference host (D23). Blocking: it needs an operator decision before the backend is enabled.** The host is at 1 today, which lets a process attach to its own descendants. The agent's own tool shell starts the probe, so it is the probe's ancestor and may attach to it. Scope 2 limits attach to `CAP_SYS_PTRACE` holders host-wide: a debugger run as the service user can no longer attach to its own processes without `sudo`. Without the change every launch fails `ptrace-scope`, closed. *Alternative:* scope 3 (no attach at all, until reboot); or §17 #12's options if neither is acceptable.
 
 ## §17 operator decisions this plan depends on
 
 | §17 | Decision | What depends on it | Until it is decided |
 |---|---|---|---|
-| #2 | S5 fallback and timebox | Every **[r15]** task (3, 4, 8, 9, 12, 14) assumes OpenShell. If S5 is closed as failed, plan 4b replaces them (D17). | The **[r15]** tasks don't start. Tasks 1, 2, 5, 6, 7, 10, 11 and 13 are backend-neutral and can proceed. |
-| #3 | Host changes for OpenShell (podman 5) | Task 12's `[sandbox] tool_env` (the side-by-side podman's `PATH` and `CONTAINERS_CONF`), the gateway configuration (`packaging/sandbox/gateway.toml`) and Task 14's live run all assume the S5 host changes stay in place. | Task 12 is code only and doesn't need the decision. Enabling `[platform] sandbox = "openshell"` on the reference host does, and so does running Task 14 there. |
+| #2 | S5 fallback and timebox | Settled by r15 (no longer open). | Nothing waits. |
+| #3 | Host changes for OpenShell (podman 5) | Settled on 2026-10-08: podman 5.8.8 side by side, serving only the service user's socket. Task 12's `[sandbox] tool_env`, `packaging/sandbox/gateway.toml` and Task 14's live run assume it. | Nothing waits. |
 | #5 | Credential injection for model auth | The whole plan assumes v1 keeps read-only login files under the freshness gate (D12). | Nothing waits. If the operator later chooses injection, that is a new ADR revision, and the spec, the gate and the probes change with it. |
+| #11 | Tools reaching the model host | r15 accepts it as residual risk: a binary's grant covers its process tree. Task 14's registry and git-fetch test relies on it. | Nothing waits. |
+| #12 | If plan 4 can't protect the probe | Task 9A and Task 15's adversarial controls. | If the controls fail on the reference host, plan 4 stops and the operator chooses among #12's options. |
+| (new) | `kernel.yama.ptrace_scope = 2` (gap 15) | Every launch's `ptrace-scope` check (D23), Task 14 and Task 15. | Code proceeds; no launch passes on a host at scope 1. |
 
 These are **not** dependencies:
 
@@ -148,18 +156,41 @@ These are **not** dependencies:
 - #7 (host exceptions): plan 4 keeps "startup break-glass" possible, because the wsd tmux server can be attached, but it needs no answer.
 - #1, #6, #8, #9 and #10.
 
-## ADR revision 15 dependency
+## ADR revision 15
 
-r15, being drafted, is expected to accept S5's EACCES-broker evidence as §7's direct-network proof (gap 2), together with S5's ADR impact items. The **[r15]** tasks are:
+r15 is approved (`btq-9r2w3`), so nothing waits for it. **[r15]** marks the tasks that implement its OpenShell specifics:
 
 - **Task 3** (OpenShell policy compilation);
-- **Task 4** (OpenShell backend);
-- **Task 8** (the probes and the exec-path self-test, including the direct-network criterion);
-- **Task 9** (the agent-path self-test, whose peer check uses the workload container's netns);
+- **Task 4** (OpenShell backend: names, asynchronous delete, explicit stdin, the log read);
+- **Task 8** (the probes and the exec-path self-test, including the direct-network proof);
+- **Task 9** (the agent-path self-test and its verified result channel);
+- **Task 9A** (Probe protection, the mandatory acceptance gate);
 - **Task 12** (`openshell` becomes the Linux default, and `wsd run` uses the sandbox runtime);
-- **Task 14** (the live test).
+- **Task 14** (the live test);
+- **Task 15** (the live negative and adversarial controls).
 
-The backend-neutral tasks (1, 2, 5, 6, 7, 10, 11, 13) do not depend on r15. However, §7 says "Plan 4 (the sandbox runtime) starts only once S5 has either passed or been closed as failed". If the operator reads that as covering the whole plan, nothing starts until r15 is decided. That costs only time: the neutral tasks are needed under bubblewrap too.
+Where r15's items land:
+
+| r15 item | Where |
+|---|---|
+| §7 Plan 4 notes: 19-character names | D1, Task 2 (`sandbox_name`) |
+| asynchronous `sandbox delete` | Task 4 (delete, then wait until the listing drops it); Task 10 (`LaunchUncertain`) |
+| the supervisor's log buffer | Tasks 8 and 9 (`_logs` reads right after each path's probes) |
+| explicit `sandbox exec` stdin; the probe configuration on a pipe, never argv | Task 4 (`/dev/null` unless given input); Task 8 (configuration on stdin); Task 9 (a read-only file in `/run/hz`); D5 (the token in a file). None is on argv. |
+| `keep-id`: only the mount table keeps a file out | `packaging/sandbox/gateway.toml` (Task 12); the real-home and Other accounts probes (Task 8) |
+| gateway: bind mounts enabled, resource admission disabled | `packaging/sandbox/gateway.toml` (Task 12) |
+| the turn-boundary lifetime stop and the relaunch | D13, Task 11 |
+| §7 Result channel (peer credentials, exe/argv, untraced, netns, environment, CLI ancestor) | Task 9 |
+| §7 Probe protection | D23, Task 9A, Task 15 |
+| §7 Environment: OpenShell's injected set, per-version tool variables | D4, Task 8 (`env_allowed`) |
+| §11 negative controls: missing canary | Task 8 (`canary-precondition`, offline) |
+| canary inside a mount, wrong pinned hash, leaked variable, dead socket, failed outer fence, failure after a pass | Task 15 |
+| probes without the runtime (`--network=none`, a connected network) | Task 15 |
+| agent path: a forged result, a variable only on the tool path | Task 9 (a forged result, offline); Task 15 (both, live) |
+| §11 adversarial controls (ptrace, `/proc/<pid>/mem`, a user-namespace mount, the configuration or socket) | Task 9A (offline), Task 15 (live) |
+| §7 still to verify: package-registry egress, read-only git fetch | Task 14 |
+| the reviewer's read-only bind | Task 14 |
+| Codex's diagnostic-log warning | **Not addressed.** It is non-fatal, and r15 lists its cause as still to verify. Task 14's run record notes whether it appears. |
 
 ## Relation to the accounts plan (AU, `heterodyne-metaharness-v2-accounts` at `66ad195`)
 
@@ -172,7 +203,7 @@ The backend-neutral tasks (1, 2, 5, 6, 7, 10, 11, 13) do not depend on r15. Howe
 
 ## Task order
 
-1 → 2 → 5 → 6 → 7 → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 are **[r15]**: Task 3 is blocked by Task 2 and the r15 approval, and Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol). Task 12 is blocked by 4, 9 and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 12 and 13.
+1 → 2 → 5 → 6 → 7 → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 → 9A are **[r15]**: Task 3 is blocked by Task 2, Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol), and 9A by 9. Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 12 and 13, and Task 15 by 14.
 
 ## File map
 
@@ -189,9 +220,9 @@ The backend-neutral tasks (1, 2, 5, 6, 7, 10, 11, 13) do not depend on r15. Howe
 | `src/heterodyne/session/shim.py`, `pyproject.toml` | 6 | `ws-hook`, `ws-request` |
 | `src/heterodyne/agents/base.py`, `claude_code.py`, `codex.py`, `registry.py` | 7 | `Adapter`, `ClaudeCode`, `Codex`, `ADAPTERS` |
 | `src/heterodyne/sandbox/resources/codex_trust.py` | 7 | in-sandbox hook-trust lister |
-| `src/heterodyne/sandbox/resources/probes.py` | 8 | in-sandbox probes (port of `spikes/s5/probes.py`) **[r15]** |
-| `src/heterodyne/sandbox/openshell_selftest.py` | 8, 9 | `OpenShellSelfTest` **[r15]** |
-| `src/heterodyne/sandbox/channel.py`, `src/heterodyne/platform.py` | 9 | `ProbeChannel`, `ProcVerifier`; `peer_pid_checked` **[r15]** |
+| `src/heterodyne/sandbox/resources/probes.py` | 8, 9A | in-sandbox probes (port of `spikes/s5/probes.py`) **[r15]** |
+| `src/heterodyne/sandbox/openshell_selftest.py` | 8, 9, 9A | `OpenShellSelfTest` **[r15]** |
+| `src/heterodyne/sandbox/channel.py`, `src/heterodyne/platform.py` | 9, 9A | `ProbeChannel`, `ProcVerifier` (9A: the protection checks); `peer_pid_checked` **[r15]** |
 | `src/heterodyne/tmux.py` | 10 | `pane_info` |
 | `src/heterodyne/sandbox/selftest.py` | 10 | `SelfTest`, `ProbeContext`, `SelfTestFailed` |
 | `src/heterodyne/sandbox/runtime.py` | 10, 11 | `SandboxRuntime`, `SessionRecord`, `Phase`, `RuntimeConfig` |
@@ -199,7 +230,7 @@ The backend-neutral tasks (1, 2, 5, 6, 7, 10, 11, 13) do not depend on r15. Howe
 | `src/heterodyne/sandbox/build.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/platform.py`, `examples/config.toml`, `packaging/sandbox/*`, `docs/wsd.md`, `docs/configuration.md`, `docs/install.md`, `docs/security-model.md` | 12 | wiring, the Linux default, the image, docs **[r15]** |
 | `tests/sandbox_env.py`, `tests/fakes/fake_agent_cli.py`, `tests/fakes/fake_backend.py`, `tests/fakes/scripted_selftest.py`, `tests/fakes/fake_runtime.py` | 1, 7, 10, 11 | test rig and fakes |
 | `tests/test_sandbox_*.py` (including `test_sandbox_build.py` and `test_sandbox_scheduler.py`), `tests/test_session_*.py`, `tests/test_agents_*.py`, `tests/test_wsd_lifetime.py`, `tests/test_wsd_accounts.py`, `tests/test_platform.py`, `tests/test_tmux.py` | 1–13 | tests |
-| `tests/live/test_live_sandbox.py` | 14 | live OpenShell test **[r15]** |
+| `tests/live/test_live_sandbox.py` | 14, 15 | live OpenShell test; live negative and adversarial controls **[r15]** |
 
 ---
 
@@ -4191,7 +4222,7 @@ def fake_probe_proc(proc: Path, cli: Path) -> None:
         (d / "ns" / "net").symlink_to("net:[4026531999]")
         (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
         (d / "environ").write_bytes(b"HOME=/s/home\0")
-        (d / "status").write_text(f"PPid:\t{ppid}\nTracerPid:\t0\n")
+        (d / "status").write_text(f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\n")
     (proc / "7").mkdir()
     (proc / "7" / "ns").mkdir()
     (proc / "7" / "ns" / "net").symlink_to("net:[4026531999]")            # the workload's first process
@@ -4578,6 +4609,442 @@ Expected: PASS; clean.
 git add src/heterodyne/platform.py src/heterodyne/sandbox/channel.py src/heterodyne/sandbox/openshell_selftest.py \
   tests/test_platform.py tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py
 git commit -m "plan4 T9: agent-path self-test with a host-verified probe channel"
+```
+
+### Task 9A [r15]: Probe protection (the §7 acceptance gate)
+
+**Files:**
+- Modify:
+  - `src/heterodyne/sandbox/channel.py` (replace `ProcVerifier`);
+  - `src/heterodyne/sandbox/openshell_selftest.py` (`read_ptrace_scope`, the `ptrace-scope` precondition, the protection checks);
+  - `src/heterodyne/sandbox/resources/probes.py` (section 11).
+- Test: `tests/test_sandbox_channel.py`, `tests/test_sandbox_openshell_selftest.py`
+
+**Interfaces:**
+- Consumes: Task 9's `ProcVerifier`, `ProbeChannel`, `OpenShellSelfTest.agent_path`; Task 8's `probes.py`, `TAIL_CHECKS`, `exec_path`; Task 4's `Backend.workload_pid`.
+- Produces:
+  - `openshell_selftest.MIN_PTRACE_SCOPE = 2`, `YAMA_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")`, `read_ptrace_scope(path: Path = YAMA_SCOPE) -> int` (`-1` when Yama is absent or the value is unreadable), `PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly")`, part of both `EXEC_CHECKS` and `AGENT_CHECKS`;
+  - `OpenShellSelfTest(*, wall, sleep, proc, peer_pid, ptrace_scope: Callable[[], int] = read_ptrace_scope)`. Both paths first check `ptrace_scope() >= MIN_PTRACE_SCOPE`, raising `SelfTestFailed("ptrace-scope: …")`.
+  - `ProcVerifier(netns, cli_binary, allowed_env, *, root_pid: int, ptrace_scope: Callable[[], int], proc=Path("/proc"))`. It adds four checks to Task 9's:
+    - the probe has `NoNewPrivs: 1`;
+    - its user and mount namespaces are its CLI ancestor's;
+    - Yama's scope is at least 2;
+    - no workload process holds a capability.
+
+ADR 0001 r15 §7 "Probe protection" makes this a **mandatory plan 4 acceptance condition**. The agent path's result counts only if the agent can't change the probe's code, configuration, memory or result channel at any point while it runs. r15 allows two ways. This plan takes the second, tamper denial checked on every launch (D23):
+
+- **Memory and execution: denied by Yama scope 2 and an empty capability set.**
+  - With `kernel.yama.ptrace_scope` at 2, only a process with `CAP_SYS_PTRACE` over the target may use `ptrace` attach. The same rule covers every way to reach another process's memory or descriptors, because each is a `PTRACE_MODE_ATTACH` check: `/proc/<pid>/mem`, `process_vm_writev` and `pidfd_getfd`.
+  - Every workload process runs under `no_new_privs` and without capabilities (S5). `no_new_privs` can't be cleared, and capabilities can't be regained without exec of a privileged file, which `no_new_privs` blocks.
+  - The host checks all of this at both of Task 9's verification points:
+    - Yama's scope, from the host's own `/proc/sys`, where the workload can't reach it;
+    - `CapEff` and `CapPrm` of every descendant of the workload's first process that runs with `no_new_privs`.
+
+    Processes without `no_new_privs` are OpenShell's supervisor, which is inside the trusted computing base (r15 §7 Residual risk).
+
+    A process in a user namespace it created shows its capabilities in that namespace, and the check rejects it too. That fails closed: the agent can only fail its own launch.
+- **Mounts over the probe's files.** A process in a new user and mount namespace could overlay `/run/hz`. The host requires the probe's `ns/user` and `ns/mnt` to be its CLI ancestor's. Without a capability in the CLI's own user namespace, nothing can change the CLI's mount namespace.
+- **Configuration and result socket.**
+  - The script, its configuration (`agent-probe.json`), the token and `p.sock` all live in the run directory, which is bound read-only at `/run/hz`. So none of them can be rewritten, replaced or renamed from inside.
+  - The probe's open socket can be reached only through `pidfd_getfd`, which Yama scope 2 denies.
+  - The probe checks the read-only files itself on every run (`probe-files-readonly`).
+- **Positive controls on every launch (`probe-tamper-denied`).**
+  - The probe starts a child of its own, which is the case Yama's scope 1 allows. It then requires `ptrace(PTRACE_ATTACH)` on the child to be refused, and opening `/proc/<child>/mem` for writing to give `EACCES` or `EPERM`.
+    - An attach is refused with `EPERM` (Yama), or `EACCES`/`ENOSYS` (a seccomp filter).
+    - `ESRCH` (the child is gone) fails the check, because it shows nothing about the denial.
+  - So a host whose scope was lowered, or a workload that kept a capability, fails the self-test from inside as well as from outside.
+- **curl results are corroborated from outside.** A tool the probe starts (curl) is a separate process, and the same denial covers it. Every curl result on the agent path is also corroborated by this run's supervisor log line, read by the host (Task 9's needles), so a changed report alone could never pass.
+
+The first way, a supervisor-controlled probe path, is not taken. OpenShell 0.1.2 has no way to start a process that is both outside the agent's reach and a descendant of the CLI, which the per-binary policy needs (r15 §7).
+
+**This needs a host change (gap 15).** The reference host runs `kernel.yama.ptrace_scope = 1` today. Until the operator sets it to 2, every launch fails `ptrace-scope`, fail-closed.
+
+The §11 adversarial controls:
+- **Offline (this task):** a traced probe, a scope below 2, a capable workload process, and a probe in another user or mount namespace each fail verification.
+- **Live (Task 15):**
+  - ptrace attach and `/proc/<pid>/mem` are refused inside;
+  - a user-namespace mount can't reach the probe;
+  - the probe's files are read-only.
+
+If any live control shows tampering is possible, **plan 4 stops** (r15 §17 item 12), and the choice goes back to the operator.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_sandbox_channel.py`, replace `fake_proc`, `probe_tree` and `verifier` with:
+
+```python
+NO_CAPS = "0000000000000000"
+
+
+def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: int, netns: str = NETNS,
+              env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
+              userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]") -> None:
+    d = root / str(pid)
+    (d / "ns").mkdir(parents=True)
+    (d / "exe").symlink_to(exe)
+    (d / "ns" / "net").symlink_to(netns)
+    (d / "ns" / "user").symlink_to(userns)
+    (d / "ns" / "mnt").symlink_to(mntns)
+    (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+    (d / "environ").write_bytes(b"".join(e.encode() + b"\0" for e in env))
+    (d / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n"
+                              f"NoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
+
+
+def probe_tree(root: Path, **probe: object) -> None:
+    """pid 7: the workload's first process (the supervisor: no no_new_privs, capable), 30: the CLI,
+    31: a shell, 32: the probe."""
+    fake_proc(root, 7, exe="/opt/openshell/bin/supervisor", argv=("supervisor",), ppid=1, nnp=0,
+              caps="000001ffffffffff")
+    fake_proc(root, 30, exe=CLI, argv=("codex",), ppid=7)
+    fake_proc(root, 31, exe="/usr/bin/bash", argv=("bash", "-c", "..."), ppid=30)
+    fields = {"exe": PROBE_EXE, "argv": PROBE_ARGV, "ppid": 31, **probe}
+    fake_proc(root, 32, **fields)  # type: ignore[arg-type]
+
+
+def verifier(root: Path, scope: int = 2) -> ProcVerifier:
+    return ProcVerifier(NETNS, CLI, ALLOWED, root_pid=7, ptrace_scope=lambda: scope, proc=root)
+```
+
+and in `test_no_cli_ancestor_inside_the_netns_is_rejected`, pass `ppid=7` for pid 30 (the rest is unchanged). Then append:
+
+```python
+@pytest.mark.parametrize("probe, reason", [
+    ({"nnp": 0}, "the probe can gain privileges"),
+    ({"mntns": "mnt:[4026533333]"}, "another user or mount namespace"),       # an overlay from a new mount ns
+    ({"userns": "user:[4026533334]"}, "another user or mount namespace"),
+])
+def test_a_probe_that_could_be_tampered_with_is_rejected(tmp_path: Path, probe: dict[str, object],
+                                                          reason: str) -> None:
+    probe_tree(tmp_path, **probe)
+    assert reason in verifier(tmp_path)(32)
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 1])
+def test_a_ptrace_scope_below_2_is_rejected(tmp_path: Path, scope: int) -> None:
+    probe_tree(tmp_path)
+    assert f"kernel.yama.ptrace_scope is {scope}" in verifier(tmp_path, scope)(32)
+
+
+def test_a_capable_workload_process_is_rejected(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    fake_proc(tmp_path, 40, exe="/usr/bin/python3.12", argv=("python3",), ppid=30, caps="0000000000080000")
+    assert verifier(tmp_path)(32) == "workload process 40 holds capabilities"
+
+
+def test_capable_processes_outside_the_workload_are_ignored(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff")
+    assert verifier(tmp_path)(32) == ""
+
+
+def test_a_probe_traced_after_it_connected_fails_at_completion(sock_dir: Path, tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    v = verifier(tmp_path)
+    ch = ProbeChannel(sock_dir / "p.sock", v, peer_pid=lambda s: 32)
+    ch.start()
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(str(sock_dir / "p.sock"))
+            s.sendall(b"".join((json.dumps(m) + "\n").encode() for m in all_pass(EXPECTED)[:-1]))
+            wait_for(lambda: bool(ch.runs) and len(ch.runs[0].checks) == len(EXPECTED))
+            status = tmp_path / "32" / "status"
+            status.write_text(status.read_text().replace("TracerPid:\t0", "TracerPid:\t31"))
+            s.sendall(b'{"done": 0}\n')
+        wait_for(ch.done)
+        assert ch.verdict(EXPECTED) == "the probe changed before it finished"
+    finally:
+        ch.close()
+```
+
+In `tests/test_sandbox_openshell_selftest.py`:
+
+- In `test_probes_file_is_stdlib_only_and_names_every_check`, add `"ctypes"` to the allowed import set.
+- Replace `selftest` with:
+
+```python
+def selftest(scope: int = 2) -> OpenShellSelfTest:
+    return OpenShellSelfTest(wall=lambda: 1_800_000_000.0, sleep=lambda s: None, ptrace_scope=lambda: scope)
+```
+
+- Replace `fake_probe_proc` with:
+
+```python
+def fake_probe_proc(proc: Path, cli: Path) -> None:
+    for pid, exe, argv, ppid in ((7, "/opt/openshell/bin/supervisor", ("supervisor",), 1),
+                                 (30, str(cli), ("codex",), 7), (32, PROBE_EXE, PROBE_ARGV, 30)):
+        d = proc / str(pid)
+        (d / "ns").mkdir(parents=True)
+        (d / "exe").symlink_to(exe)
+        for ns, value in (("net", "net:[4026531999]"), ("user", "user:[1]"), ("mnt", "mnt:[2]")):
+            (d / "ns" / ns).symlink_to(value)
+        (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+        (d / "environ").write_bytes(b"HOME=/s/home\0")
+        nnp = 0 if pid == 7 else 1
+        (d / "status").write_text(f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
+                                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
+```
+
+- Replace `agent_selftest` with:
+
+```python
+def agent_selftest(proc: Path) -> OpenShellSelfTest:
+    """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
+    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer_pid=lambda s: 32,
+                             ptrace_scope=lambda: 2)
+```
+
+- In the two tests that build `OpenShellSelfTest(wall=…, sleep=lambda s: None, proc=root / "proc", peer_pid=lambda s: 32)` directly, add `ptrace_scope=lambda: 2`.
+
+Then append:
+
+```python
+from heterodyne.sandbox.openshell_selftest import PROTECTION_CHECKS, read_ptrace_scope
+
+
+def test_both_paths_run_the_protection_checks() -> None:
+    assert set(PROTECTION_CHECKS) <= set(EXEC_CHECKS) and set(PROTECTION_CHECKS) <= set(AGENT_CHECKS)
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 1])
+def test_the_exec_path_needs_ptrace_scope_2(tmp_path: Path, scope: int) -> None:
+    ctx = context(tmp_path, StubBackend())
+    with pytest.raises(SelfTestFailed, match=f"ptrace-scope: {scope}"):
+        selftest(scope).exec_path(ctx)
+
+
+def test_the_agent_path_needs_ptrace_scope_2() -> None:
+    with short_dir() as root:
+        ctx = agent_context(root, StubTmux())
+        st = OpenShellSelfTest(sleep=lambda s: None, proc=root / "proc", peer_pid=lambda s: 32,
+                               ptrace_scope=lambda: 1)
+        with pytest.raises(SelfTestFailed, match="ptrace-scope: 1"):
+            st.agent_path(ctx)
+
+
+def test_read_ptrace_scope(tmp_path: Path) -> None:
+    (tmp_path / "scope").write_text("2\n")
+    (tmp_path / "junk").write_text("x")
+    assert (read_ptrace_scope(tmp_path / "scope"), read_ptrace_scope(tmp_path / "junk"),
+            read_ptrace_scope(tmp_path / "missing")) == (2, -1, -1)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py -q`
+Expected: FAIL with `TypeError: ProcVerifier.__init__() got an unexpected keyword argument 'root_pid'` and `ImportError: cannot import name 'PROTECTION_CHECKS'`.
+
+- [ ] **Step 3: Add the scope check and the protection checks to `openshell_selftest.py`**
+
+Replace the `TAIL_CHECKS` definition with:
+
+```python
+PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly")
+TAIL_CHECKS = ("hook-event-accepted", "host-env-not-inherited", "openshell-control-material-unreadable",
+               "other-accounts", *PROTECTION_CHECKS)
+```
+
+add after `DIRECT_TARGET`:
+
+```python
+# §7 Probe protection (D23): with Yama at 2, only CAP_SYS_PTRACE may attach to a process or open its
+# memory, and no workload process holds a capability (checked from the host by the channel).
+MIN_PTRACE_SCOPE = 2
+YAMA_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")
+
+
+def read_ptrace_scope(path: Path = YAMA_SCOPE) -> int:
+    """The host's kernel.yama.ptrace_scope; -1 when Yama is absent or the value is unreadable."""
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return -1
+```
+
+change `__init__` to:
+
+```python
+    def __init__(self, *, wall: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
+                 proc: Path = Path("/proc"), peer_pid: Callable[[socket.socket], int] = peer_pid_checked,
+                 ptrace_scope: Callable[[], int] = read_ptrace_scope) -> None:
+        self.wall = wall
+        self.sleep = sleep
+        self.proc = proc
+        self.peer_pid = peer_pid
+        self.ptrace_scope = ptrace_scope
+```
+
+add the method:
+
+```python
+    def _protection(self) -> None:
+        scope = self.ptrace_scope()
+        if scope < MIN_PTRACE_SCOPE:
+            raise SelfTestFailed(f"ptrace-scope: {scope}, probe protection needs {MIN_PTRACE_SCOPE} or more")
+```
+
+make `self._protection()` the first statement of `exec_path` and of `agent_path` (in `agent_path`, after the local import). In `agent_path`, replace the netns lookup and the `ProcVerifier` construction with:
+
+```python
+        try:
+            root = ctx.backend.workload_pid(ctx.spec.name)
+            netns = os.readlink(self.proc / str(root) / "ns" / "net")
+        except OSError:
+            raise SelfTestFailed("workload-netns") from None
+        verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"), root_pid=root,
+                              ptrace_scope=self.ptrace_scope, proc=self.proc)
+```
+
+- [ ] **Step 4: Replace `ProcVerifier` in `channel.py`**
+
+Change the import line to `from heterodyne.sandbox.openshell_selftest import MIN_PTRACE_SCOPE, PROBE_ARGV, PROBE_EXE`, add `NO_CAPS = "0000000000000000"` beside `MAX_PEERS`, append to the module docstring "It also checks, at both points, that nothing in the workload can tamper with the probe while it runs (§7 Probe protection, D23).", and replace the class with:
+
+```python
+class ProcVerifier:
+    def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *, root_pid: int,
+                 ptrace_scope: Callable[[], int], proc: Path = Path("/proc")) -> None:
+        self.netns = netns
+        self.cli = cli_binary
+        self.allowed = allowed_env
+        self.root = root_pid                 # the workload container's first process
+        self.ptrace_scope = ptrace_scope
+        self.proc = proc
+
+    @staticmethod
+    def _field(status: str, name: str) -> str:
+        return status.split(f"\n{name}:\t", 1)[1].split("\n", 1)[0]
+
+    def _ppid(self, pid: int) -> int:
+        return int(self._field((self.proc / str(pid) / "status").read_text(), "PPid"))
+
+    def _cli_ancestor(self, pid: int) -> int | None:
+        q = pid
+        while q > 1:
+            try:
+                q = self._ppid(q)
+                if os.readlink(self.proc / str(q) / "ns" / "net") != self.netns:
+                    return None
+                if os.readlink(self.proc / str(q) / "exe") == self.cli:
+                    return q
+            except (OSError, IndexError, ValueError):
+                return None
+        return None
+
+    def _capable(self) -> str:
+        """The first workload process (a descendant of the container's first process, under no_new_privs)
+        holding any permitted or effective capability, else "". Entries that vanish mid-scan ended."""
+        children: dict[int, list[int]] = {}
+        held: dict[int, bool] = {}
+        for d in self.proc.iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                status = (d / "status").read_text()
+                ppid = int(self._field(status, "PPid"))
+                nnp = self._field(status, "NoNewPrivs") == "1"
+                caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(d.name))
+            held[int(d.name)] = nnp and caps != {NO_CAPS}
+        todo, seen = list(children.get(self.root, [])), set[int]()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            if held.get(pid):
+                return str(pid)
+            todo.extend(children.get(pid, []))
+        return ""
+
+    def __call__(self, pid: int) -> str:
+        p = self.proc / str(pid)
+        try:
+            exe = os.readlink(p / "exe")
+            argv = tuple(a.decode("utf-8", "replace") for a in (p / "cmdline").read_bytes().split(b"\0")[:-1])
+            status = (p / "status").read_text()
+            netns = os.readlink(p / "ns" / "net")
+            env = {e.split(b"=", 1)[0].decode("utf-8", "replace")
+                   for e in (p / "environ").read_bytes().split(b"\0") if e}
+        except OSError as exc:
+            return f"/proc/{pid} unreadable ({exc.strerror})"
+        if exe != PROBE_EXE or argv != PROBE_ARGV:
+            return "not the probe"
+        if "\nTracerPid:\t0\n" not in status:
+            return "traced"
+        if "\nNoNewPrivs:\t1\n" not in status:
+            return "the probe can gain privileges"
+        if netns != self.netns:
+            return "netns is not the workload container's"
+        if env - self.allowed:
+            return f"environment beyond the allowlist: {' '.join(sorted(env - self.allowed))}"
+        cli = self._cli_ancestor(pid)
+        if cli is None:
+            return f"no {self.cli} ancestor inside the workload netns"
+        try:
+            same = all(os.readlink(p / "ns" / ns) == os.readlink(self.proc / str(cli) / "ns" / ns)
+                       for ns in ("user", "mnt"))
+        except OSError:
+            same = False
+        if not same:
+            return "the probe is in another user or mount namespace than its CLI"
+        scope = self.ptrace_scope()
+        if scope < MIN_PTRACE_SCOPE:
+            return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
+        holder = self._capable()
+        if holder:
+            return f"workload process {holder} holds capabilities"
+        return ""
+```
+
+The `TracerPid` and `NoNewPrivs` matches include the leading newline, as `_field` does, so neither can match inside another field. Real `/proc` always puts `Name` first.
+
+- [ ] **Step 5: Add section 11 to `probes.py`**
+
+Add `import ctypes` to its imports (it stays standard library only), and insert before the final `report({'done': rc})`:
+
+```python
+# 11. Probe protection (§7, D23). Nothing in the workload may trace this probe or write its memory: a
+#     child of this probe (the case Yama's scope 1 would allow) can't be attached to and its memory
+#     can't be opened for writing. The probe's own files are read-only. The host checks the same
+#     denial from outside (Yama's scope, no capability anywhere in the workload).
+PTRACE_ATTACH, PTRACE_DETACH = 16, 17
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+try:
+    if libc.ptrace(PTRACE_ATTACH, child.pid, None, None) == 0:
+        attach = 'ATTACHED'
+        libc.ptrace(PTRACE_DETACH, child.pid, None, None)
+    else:
+        attach = errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+    mem = open_result(f'/proc/{child.pid}/mem', 'r+b')
+finally:
+    child.kill()
+    child.wait()
+check('probe-tamper-denied', attach in ('EPERM', 'EACCES', 'ENOSYS') and mem in ('EACCES', 'EPERM'),
+      f'ptrace(ATTACH, own child) -> {attach}; open(/proc/<child>/mem, rw) -> {mem}')
+own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-probe.json']
+res = {p: open_result(p, 'ab') for p in own}
+check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res.values()),
+      ' '.join(f'{p}->{v}' for p, v in res.items()))
+```
+
+`open_result` reports a successful `r+b` open as `READABLE`, which is not an accepted answer. On the exec path `agent-probe.json` doesn't exist yet: creating it fails with `EROFS` all the same, because the whole run directory is read-only.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
+Expected: PASS; clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/heterodyne/sandbox/channel.py src/heterodyne/sandbox/openshell_selftest.py \
+  src/heterodyne/sandbox/resources/probes.py tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py
+git commit -m "plan4 T9A: probe protection, Yama scope 2, no workload capability, namespace and read-only checks"
 ```
 
 ### Task 10: The sandbox runtime
@@ -6429,6 +6896,7 @@ This is the roadmap's plan 4 live gate. It is **[r15]** because its pass criteri
 
 **What the host needs:**
 - the S5 host changes (§17 #3);
+- `kernel.yama.ptrace_scope = 2` (gap 15); without it every launch fails `ptrace-scope`;
 - the agent image (`packaging/sandbox/README.md`);
 - both pinned CLIs on `PATH`;
 - a valid default login for each.
@@ -6448,11 +6916,11 @@ This is the roadmap's plan 4 live gate. It is **[r15]** because its pass criteri
 
 **Running it beside wsd.** Run it only while no wsd on this host uses the OpenShell runtime. Such a wsd would find these sandboxes in `openshell sandbox list` with no record of its own, and would hold its workstreams until they are gone. That is the fail-closed rule of Task 10 working as designed.
 
-**Cost.** Each launch makes one model call (gap 11). The module makes six launches and one extra prompt.
+**Cost.** Each launch makes one model call (gap 11). This task's tests make six launches and two extra prompts, and Task 15's controls about ten more launches.
 
 It checks what the offline suite can't:
 - **Shapes and self-test:** both managed shapes launch on the real backend, and the full self-test passes on both paths.
-- **Egress:** a non-allowlisted host is refused.
+- **Egress:** a non-allowlisted host is refused. From the agent's own tool, a package registry and a read-only git fetch work (r15 §7 "still to verify").
 - **No push credential:** none is inside, and a push fails (gap 7).
 - **Read-only reviewer:** the reviewer's worktree is read-only.
 - **wsd down:** with the session socket closed, a Codex `PreToolUse` is denied with the fail-closed reason (D14, S8 capability 1).
@@ -6554,7 +7022,7 @@ def host_config() -> str:
     pairs = ", ".join(f'{k} = "{v}"' for k, v in tool_env.items())
     image = os.environ["HZ_LIVE_SANDBOX_IMAGE"]
     return (f'\n[platform]\nsandbox = "openshell"\n\n[sandbox]\nimage = "{image}"\n'
-            f'egress_approved = ["github.com"]\ntool_env = {{ {pairs} }}\n')
+            f'egress_approved = ["github.com", "pypi.org"]\ntool_env = {{ {pairs} }}\n')
 
 
 @pytest.fixture(scope="module")
@@ -6562,7 +7030,8 @@ def live() -> Iterator[Live]:
     real_home = Path.home()
     canary = real_home / ".heterodyne-live-canary"
     with short_dir() as root:
-        env = config_env(root / "c", host_config(), {"alpha": '[sandbox]\nextra_egress = ["github.com"]\n'})
+        env = config_env(root / "c", host_config(),
+                         {"alpha": '[sandbox]\nextra_egress = ["github.com", "pypi.org"]\n'})
         settings = sandbox_settings(env)
         tmux = Tmux(f"hz-live-sb-{uuid.uuid4().hex[:8]}")
         backend = OpenShellBackend(settings.openshell, settings.podman, settings.image, settings.tool_env)
@@ -6600,6 +7069,23 @@ def test_egress_is_refused_and_no_push_credential_is_inside(live: Live, cli: str
                                      '&& test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}"') == 0
     assert live.run(key, "env", "GIT_TERMINAL_PROMPT=0", "git", "push", "https://github.com/example/none.git",
                     "HEAD:refs/heads/hz-live") != 0
+
+
+FETCH = ('git ls-remote https://github.com/git/git.git HEAD && python3 -I -c "import urllib.request; '
+         'urllib.request.urlopen(\'https://pypi.org/simple/pip/\', timeout=20).read(1)"')
+
+
+def test_registry_and_git_fetch_work_on_the_agent_path(live: Live) -> None:
+    """r15 §7 "still to verify": package-registry egress and a read-only git fetch, from the agent's own
+    tool (the workstream's extra egress is granted to the CLI's process tree)."""
+    spec, _ = live.first["claude"]
+    rec = live.record(spec.session_key)
+    out = live.runtime.layout(spec.session_key).home / ".hz-live-fetch.out"
+    target = '"$HOME/.hz-live-fetch.out"'
+    live.tmux.paste(rec.tmux_session, "Run exactly this shell command, then reply with only its exit status: "
+                    f'{FETCH} > {target} 2>&1; echo "rc=$?" >> {target}')
+    assert wait_until(lambda: out.exists() and "rc=" in out.read_text(), PROMPT_SECONDS)
+    assert "rc=0" in out.read_text()
 
 
 def test_the_reviewer_worktree_is_read_only(live: Live) -> None:
@@ -6666,13 +7152,281 @@ Expected:
 - every test passes, and the linked-worktree test reports `XFAIL`;
 - `openshell sandbox list` shows none of the module's sandboxes afterwards.
 
-Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions and the pass/xfail line. Paste no output that holds a path under the home directory.
+Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions, the pass/xfail line, and whether Codex printed its warning about saving diagnostic logs (r15 §7 still to verify). Paste no output that holds a path under the home directory.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add tests/live/test_live_sandbox.py docs/wsd.md
 git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, fail-closed hook, resume"
+```
+
+### Task 15 [r15]: The live negative and adversarial controls
+
+**Files:**
+- Modify: `tests/live/test_live_sandbox.py` (append; still the only change under `tests/live/`)
+
+**Interfaces:**
+- Consumes:
+  - Task 14's `Live` fixture and helpers;
+  - Task 8's `probe_config`, `env_allowed`, `AGENT_CHECKS`;
+  - Task 9A's `read_ptrace_scope`, `MIN_PTRACE_SCOPE`;
+  - Task 10's `SandboxRuntime`, `RuntimeConfig`;
+  - plan 3's `LaunchFailed`.
+- Produces: nothing (a live test).
+
+This task covers r15 §11, "Sandbox runtime".
+
+**The negative controls.** Each launch self-test probe has a negative control that must refuse the launch:
+- a canary inside a mount;
+- a wrong pinned login hash;
+- a leaked variable;
+- a dead session socket;
+- a failed outer-fence check.
+
+**The probes without the runtime.** The probes also run without OpenShell, and must fail there:
+- under plain podman with `--network=none`;
+- on a connected network.
+
+This shows they recognise OpenShell's specific enforcement rather than any failure.
+
+**A failure after a pass.** A failure injected after a passing self-test refuses the launch. This is the outer-fence control, run on a key that has just passed.
+
+**The agent-path controls:**
+- a forged result from a process that is not the probe;
+- a variable present only on the tool path.
+
+**The probe-protection controls.** Each must fail the self-test or be shown impossible:
+- **ptrace attach:** a ptrace attach to every process the workload can see is refused, and so is a write open of its memory.
+- **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. Task 9A's verifier rejects that offline, so the mount can't reach a counted probe.
+- **probe files:** the probe's files and socket directory can't be changed.
+
+The "missing canary" control is the offline `test_an_unwritable_canary_fails_the_precondition` (Task 8). A missing canary can only arise when the precondition write fails, and that refuses the launch.
+
+**If any probe-protection control fails, plan 4 stops** (r15 §17 item 12). Don't loosen the test. Report the output to the operator, who chooses among r15's options.
+
+- [ ] **Step 1: Append the controls**
+
+Add to the imports of `tests/live/test_live_sandbox.py`:
+
+```python
+import json
+import threading
+
+from heterodyne.sandbox import openshell_selftest  # noqa: E402
+from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
+    AGENT_CHECKS, MIN_PTRACE_SCOPE, OpenShellSelfTest, probe_config, read_ptrace_scope)
+from heterodyne.sandbox.selftest import ProbeContext  # noqa: E402
+from heterodyne.wsd.runtime import LaunchFailed  # noqa: E402
+```
+
+(`OpenShellSelfTest` moves into this import; drop its separate line.) Then append:
+
+```python
+class Hooked(OpenShellSelfTest):
+    """The real self-test, with an action before the exec path or beside the agent path."""
+
+    def __init__(self, before_exec: Callable[[ProbeContext], None] | None = None,
+                 beside_agent: Callable[[ProbeContext], None] | None = None) -> None:
+        super().__init__()
+        self.before_exec = before_exec
+        self.beside_agent = beside_agent
+        self.seen: list[ProbeContext] = []
+
+    def exec_path(self, ctx: ProbeContext) -> None:
+        self.seen.append(ctx)
+        if self.before_exec is not None:
+            self.before_exec(ctx)
+        super().exec_path(ctx)
+
+    def agent_path(self, ctx: ProbeContext) -> None:
+        if self.beside_agent is None:
+            super().agent_path(ctx)
+            return
+        t = threading.Thread(target=self.beside_agent, args=(ctx,), daemon=True)
+        t.start()
+        try:
+            super().agent_path(ctx)
+        finally:
+            t.join(EXEC_SECONDS)
+
+
+class FenceDown(OpenShellBackend):
+    def network_mode(self, name: str) -> str:
+        return "bridge"
+
+
+def runtime(live: Live, *, backend: OpenShellBackend | None = None, selftest: OpenShellSelfTest | None = None,
+            config: RuntimeConfig | None = None) -> SandboxRuntime:
+    return SandboxRuntime(config or live.runtime.c, backend or live.backend, selftest or OpenShellSelfTest())
+
+
+def refused(live: Live, rt: SandboxRuntime, spec: LaunchSpec, check: str) -> None:
+    live.keys.append(spec.session_key)
+    with pytest.raises(LaunchFailed, match=check):
+        rt.launch(spec)
+    assert live.record(spec.session_key).sandbox not in live.backend.names()
+
+
+def test_host_ptrace_scope_allows_probe_protection() -> None:
+    assert read_ptrace_scope() >= MIN_PTRACE_SCOPE, "set kernel.yama.ptrace_scope = 2 on the host (gap 15)"
+
+
+def test_a_canary_inside_a_mount_refuses_the_launch(live: Live) -> None:
+    canary = live.runtime.c.real_home_canary
+    canary.write_text("x")
+    host = host_config() + f'ro_mounts_approved = ["{canary}"]\n'      # [sandbox] is host_config's last table
+    env = config_env(live.root / "c2", host, {"beta": f'[sandbox]\nextra_ro_mounts = ["{canary}"]\n'})
+    config = replace(live.runtime.c, settings=sandbox_settings(env))
+    spec = replace(live.spec("claude", "btq-live-n1"), ws="beta")
+    refused(live, runtime(live, config=config), spec, "real-home-canary-unreadable")
+
+
+def test_a_wrong_pinned_login_hash_refuses_the_launch(live: Live, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.probe_config
+
+    def wrong(ctx: ProbeContext, path: str) -> dict[str, Any]:
+        cfg = real(ctx, path)
+        cfg["chosen"] = [{**c, "sha256": "not-the-pinned-hash"} for c in cfg["chosen"]]
+        return cfg
+
+    monkeypatch.setattr(openshell_selftest, "probe_config", wrong)
+    refused(live, runtime(live), live.spec("claude", "btq-live-n2"), "other-accounts")
+
+
+def test_a_leaked_variable_refuses_the_launch(live: Live, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.env_allowed
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, p) - {"LANG"})
+    refused(live, runtime(live), live.spec("claude", "btq-live-n3"), "host-env-not-inherited")
+
+
+def test_a_dead_session_socket_refuses_the_launch(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-n4")
+    holder: list[SandboxRuntime] = []
+    rt = runtime(live, selftest=Hooked(before_exec=lambda ctx: holder[0].servers[spec.session_key].close()))
+    holder.append(rt)
+    refused(live, rt, spec, "hook-event-accepted")
+
+
+def test_a_failed_outer_fence_refuses_a_launch_right_after_a_pass(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-n5")
+    first = live.launch(spec)
+    live.runtime.stop(spec.session_key)
+    s = live.runtime.c.settings
+    down = FenceDown(s.openshell, s.podman, s.image, s.tool_env)
+    again = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    refused(live, runtime(live, backend=down), again, "outer-fence-network-none")
+
+
+def test_the_probes_fail_without_the_runtime(live: Live) -> None:
+    hooked = Hooked()
+    spec = live.spec("claude", "btq-live-n6")
+    live.keys.append(spec.session_key)
+    runtime(live, selftest=hooked).launch(spec)
+    try:
+        ctx = hooked.seen[0]
+        data = json.dumps(probe_config(ctx, "exec")).encode()
+        s = live.runtime.c.settings
+        for net in (["--network=none"], []):        # no broker, then a connected network
+            argv = [s.podman, "run", "--rm", "-i", "--userns=keep-id", *net,
+                    "-v", f"{ctx.layout.run(ctx.generation)}:/run/hz:ro", s.image,
+                    "python3", "-I", "/run/hz/probes.py"]
+            r = subprocess.run(argv, input=data, capture_output=True, timeout=PROMPT_SECONDS,
+                               env={**os.environ, **s.tool_env}, check=False)
+            assert r.returncode != 0 and b"FAIL direct-network-blocked" in r.stdout, net
+    finally:
+        live.runtime.stop(spec.session_key)
+
+
+FORGER = ("import socket, sys\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
+          "s.sendall(sys.stdin.buffer.read())\n")
+
+
+def test_a_forged_agent_path_result_refuses_the_launch(live: Live) -> None:
+    forged = b"".join((json.dumps(m) + "\n").encode() for m in
+                      [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
+
+    def forge(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, ["python3", "-I", "-c", FORGER], input=forged,
+                             timeout=EXEC_SECONDS)
+
+    refused(live, runtime(live, selftest=Hooked(beside_agent=forge)), live.spec("claude", "btq-live-n7"),
+            "agent-path-channel: a peer that is not the probe connected")
+
+
+def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.env_allowed
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, "exec"))
+    refused(live, runtime(live), live.spec("claude", "btq-live-n8"), "agent-path-channel")
+
+
+ATTACK = r"""
+import ctypes, errno, os, subprocess, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+for pid in sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.getpid()}):
+    if libc.ptrace(16, pid, None, None) == 0:
+        print(f'attach {pid} ATTACHED')
+        libc.ptrace(17, pid, None, None)
+    else:
+        print(f'attach {pid} {errno.errorcode.get(ctypes.get_errno(), "?")}')
+    try:
+        open(f'/proc/{pid}/mem', 'r+b').close()
+        print(f'mem {pid} OPENED')
+    except OSError as e:
+        print(f'mem {pid} {errno.errorcode.get(e.errno, "?")}')
+child.kill()
+"""
+FILES = ("touch /run/hz/hz-new; echo $?; echo x >> /run/hz/token; echo $?; "
+         "mv /run/hz/token /run/hz/token2; echo $?")
+NAMESPACES = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
+
+
+def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-adv")
+    live.launch(spec)
+    rec = live.record(spec.session_key)
+    try:
+        def run(*argv: str) -> str:
+            r = live.backend.exec(rec.sandbox, Path(rec.worktree), list(argv), timeout=EXEC_SECONDS)
+            return r.stdout.decode("utf-8", "replace")
+
+        attacks = run("python3", "-I", "-c", ATTACK)
+        assert "attach " in attacks and "ATTACHED" not in attacks and "OPENED" not in attacks, attacks
+        assert all(rc != "0" for rc in run("sh", "-c", FILES).split()), "the probe's files changed"
+        own, new = (run("sh", "-c", NAMESPACES).splitlines() + ["", ""])[:2]
+        assert new == "refused" or (new and new != own), "a new mount namespace must not be the workload's"
+    finally:
+        live.runtime.stop(spec.session_key)
+```
+
+Add `from typing import Any` to the imports.
+
+The adversarial test attacks every process it can see, its own child included. If any attach or memory open succeeds, the assertion prints the whole list.
+
+- [ ] **Step 2: Check it offline**
+
+Run: `timeout 300 uv run pytest tests/live/test_live_sandbox.py -q && timeout 300 uv run pyright tests/live/test_live_sandbox.py && timeout 300 uv run ruff check tests/live`
+Expected: every test skipped; clean.
+
+- [ ] **Step 3: Run it live, with Task 14's command and conditions**
+
+Expected:
+- every test passes;
+- the linked-worktree test reports `XFAIL`;
+- `openshell sandbox list` shows none of the module's sandboxes afterwards.
+
+If `test_nothing_in_the_workload_can_tamper_with_a_probe` or `test_host_ptrace_scope_allows_probe_protection` fails after gap 15's host change, stop: that is r15 §17 item 12.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/live/test_live_sandbox.py
+git commit -m "plan4 T15: live negative and probe-protection controls (r15 §11)"
 ```
 
 ---
@@ -6682,8 +7436,8 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
 - **Approach:** subagent-driven (superpowers:subagent-driven-development), one fresh implementer per task, with a review before each task's close. The review is cross-model, at most 3 cycles.
 - **Prerequisites:**
   - design approval of this plan;
-  - for the **[r15]** tasks, ADR revision 15 approved;
-  - before Task 14's live run, the §17 #3 host changes and the agent image in place.
-- **Order:** Tasks 1, 2, 5, 6, 7, 10, 11 and 13 can start as soon as the plan is approved (see "Task order"). The **[r15]** tasks wait for r15.
-- **Before enabling the backend:** gap 13's resolution has to land before `[platform] sandbox = "openshell"` is set on any real host.
+  - before Tasks 14 and 15 run live: the §17 #3 host changes (settled), the agent image, and `kernel.yama.ptrace_scope = 2` (gap 15).
+- **Order:** see "Task order"; every task can start once the plan is approved.
+- **Before enabling the backend:** gap 13's resolution has landed, gap 15 is decided, and Task 15 has passed on the reference host. Only then is `[platform] sandbox = "openshell"` set on a real host.
+- **Stop rule:** if Task 15's probe-protection controls fail on the reference host, plan 4 stops (r15 §17 #12) and the choice goes back to the operator.
 - **Suite:** run the whole suite once per task, in the background with `timeout 3600`.
