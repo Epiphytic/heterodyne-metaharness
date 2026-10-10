@@ -56,7 +56,7 @@ The plan also draws on these sources:
 - Spike S8's open items (`docs/spikes/s8-marmot-only.md`) cover the Codex launch shape and hook trust.
 - ADR revision 15 accepts OpenShell's broker answers as §7's direct-network proof and adds the OpenShell-specific rules. The tasks that implement them are marked **[r15]** (see "ADR revision 15" below).
 
-**Status:** revision 2, folding in the approved ADR r15, for the cross-model review. **Design approval is not set.** The §17 decisions it depends on are listed below. Two items need an operator decision before the OpenShell backend is enabled on a real host: gap 13 (git in a sandboxed linked worktree) and gap 15 (`kernel.yama.ptrace_scope = 2`, which the Probe protection gate needs).
+**Status:** revision 3: the approved ADR r15 folded in, and the first cross-model review's findings addressed. **Design approval is not set.** The §17 decisions it depends on are listed below. One item needs an operator decision before the OpenShell backend is enabled on a real host: gap 15 (`kernel.yama.ptrace_scope = 2`, which the Probe protection gate needs). Gap 13 (git in a sandboxed linked worktree) is now resolved in the plan (Task 7A).
 
 ## Global Constraints
 
@@ -93,11 +93,11 @@ The plan also draws on these sources:
 | D6 | Codex hook trust. | Before each Codex launch, `codex_trust.py` runs inside the sandbox. It asks `codex app-server` over stdio (`hooks/list`) which hooks are untrusted or modified. The host validates each key and hash, appends `[hooks.state."<key>"] trusted_hash = "<hash>"` to the freshly rewritten `config.toml`, then runs the script again and requires an empty list. | This is S8's demonstrated setup step, run where the CLI and its `CODEX_HOME` are. The output comes from inside, so it is validated before it is written as TOML, and it can only affect the session's own config. |
 | D7 | Codex's daemon (S8: it survives `tmux kill-session`). | Codex uses the managed `--remote` shape only: a per-session `codex app-server --listen unix:///run/hz-bridge/app.sock` inside the sandbox, and the TUI attached with `--remote`. Ending a session always deletes its sandbox, which ends every process in it, the app-server included. | Deleting the sandbox is a stronger end than `--no-daemon`, and it is confirmed by the backend's listing. |
 | D8 | The Codex thread ID (§4.1, §4.2). | It is taken from the first `SessionStart` hook event of the generation whose `session_id` is a canonical UUID. The agent-path self-test submits the first prompt, which makes Codex fire `SessionStart` (S8 capability 3). It is untrusted, and it is used only as this session's own resume ID (`Started.native_id`). A resume that reports a different thread fails the launch. | Codex assigns the ID itself, and hooks are the only channel that reports it. A forged ID can only point this session's own resume at a thread its own home holds. |
-| D9 | The resume contract (plan 3: "resume if it holds state, create if it can establish none ever existed, else RuntimeUnavailable"). | **State held:** the adapter finds the native ID's state in the synthetic home: Claude's `projects/*/<id>.jsonl`, or Codex's `sessions/**/rollout-*<id>.jsonl`. The ID wanted is the spec's `native_id`, else the record's when a generation ran. **None ever existed:** there is no session record, or the record's `ran` is false (`ran` is set when a generation reaches `running`, after the self-test, and is never cleared), or the synthetic home holds no session state of the adapter at all. A fresh start then uses the spec's `native_id` for Claude and none for Codex (`assigns_id`: Codex reports its own thread, D8). **Otherwise** (the session ran and its home holds other session state, but not the wanted ID's) it is `RuntimeUnavailable`. `spec.resume` only matters when there is no state, and a held state is always resumed (so a fresh `--session-id` never collides). | The record is written before anything can start, so its absence is evidence. `ran` is set only after the self-test, so a launch that failed earlier never makes a later one wait for state that was never kept. Plan 8's cleanup must keep records (flagged below). |
-| D10 | The credential check (§7 home isolation). | The login binds must be exactly the chosen account's login files, read-only. No other bind may equal or contain a login file of any other account of the adapter (the default login included), or equal or contain such a login directory, or the chosen account's login directory. No bind may contain the real home. | §7's rule, with one refinement flagged below (conflict 3): a source *inside* a login directory that contains no login file is allowed. This is needed because codex-cli installs itself under `~/.codex/packages/`. |
+| D9 | The resume contract (plan 3: "resume if it holds state, create if it can establish none ever existed, else RuntimeUnavailable"). | **State held:** the adapter finds the native ID's state in the synthetic home: Claude's `projects/*/<id>.jsonl`, or Codex's `sessions/**/rollout-*<id>.jsonl`. The ID wanted is the spec's `native_id`, else the record's when a generation ran. **None ever existed:** there is no session record, or the record's `ran` is false (`ran` is set when a generation reaches `running`, after the self-test, and is never cleared). A fresh start then uses the spec's `native_id` for Claude and none for Codex (`assigns_id`: Codex reports its own thread, D8). **Otherwise** (the session ran and its home doesn't hold the wanted ID's state, even if it holds no session state at all, or its whole state directory is gone) it is `RuntimeUnavailable`: missing state is never evidence that none existed. `spec.resume` only matters when there is no state, and a held state is always resumed (so a fresh `--session-id` never collides). | The record is written before anything can start, so its absence is evidence. `ran` is set only after the self-test, so a launch that failed earlier never makes a later one wait for state that was never kept. Plan 8's cleanup must keep records (flagged below). |
+| D10 | The credential check (§7 home isolation). | The login binds must be exactly the chosen account's login files, read-only. No other bind may equal, contain or lie inside another account's login directory (the default login's included when it isn't chosen), or equal or contain any account's login file, or equal or contain the chosen account's login directory. No bind may contain the real home. | This is §7's rule as written for other accounts. A source inside the *chosen* account's own login directory that holds no login file is allowed: codex-cli installs itself under `~/.codex/packages/`, and plan 4 launches only the default account (gap 3). |
 | D11 | Accounts in plan 4 (§4.4 D7; AU-6 binds named accounts). | Plan 4 launches only the `default` account. A launch entry pinning a named account fails with "named accounts are bound by AU-6", which spends the launch budget. The Other accounts probe already covers every configured named account of the adapter, plus the canary. | AU-6 adds named-account binding on top of this launcher. A host with named accounts must not run one silently on the default login. |
 | D12 | The freshness gate (§7, §4.4 D8). | The gate reads the chosen login's access-token expiry: Claude's `claudeAiOauth.expiresAt`, or the `exp` of Codex's `tokens.access_token`. It refuses unless more than `max_lifetime + stop_margin` remains, with defaults of 120 + 15 minutes. **Plan 4 never refreshes**, so the launch is refused. AU-6 adds the host refresh under the D8 lock. | §7 allows "refreshes on the host first, or refuses". Refusing is the half that needs no shared-token rules. |
-| D13 | The lifetime stop (§7). | `AgentRuntime.expire(ws, now)` is new. It runs in every pickup, just before the sweep. Once the stop window opens (`deadline − stop_margin`), a session at a turn boundary is stopped: its last turn event was a `Stop`. At the deadline, any session is stopped (Escape, then the sandbox deleted). Then the WIP is committed with the mark `lifetime:<key>:<gen>`. The sweep in the same pickup gives the running bead a resume operation, and that relaunches it at once through the launch guard. A relaunch the gate refuses is a `LaunchFailed`, so the existing budget makes the bead `needs-human`. | This is §7's sequence, with no new journal operation: the sweep, the guard and the launch budget already exist. Backstop pickups (every 60 s) bound the delay. A missed `Stop` only makes the stop hard. |
+| D13 | The lifetime stop (§7). | **The deadline** is fixed when the login is first exposed, just before the sandbox is created: `min(exposure + max_lifetime, checked expiry − stop_margin)`. A launch that hasn't reached `running` before the stop window opens is refused. **wsd's stop:** `AgentRuntime.expire(ws, now)` is new. It runs in every pickup, just before the sweep. Once the stop window opens (`deadline − stop_margin`), a session at a turn boundary is stopped: its last turn event was a `Stop`. At the deadline, any session is stopped (Escape, then the sandbox deleted). **The backstop:** a reaper process per session, in wsd's tmux server, deletes the sandbox at the deadline whatever wsd, its queue or its reconciliation are doing. **The WIP:** the stop reason and the owed commit (`lifetime:<key>:<gen>`) are recorded with `stopping`, before anything is stopped. The commit lands after `ended`, and is replayed by `expire` and before any relaunch. The sweep in the same pickup gives the running bead a resume operation, and that relaunches it at once through the launch guard. A relaunch the gate refuses is a `LaunchFailed`, so the existing budget makes the bead `needs-human`. | This is §7's sequence, with no new journal operation: the sweep, the guard and the launch budget already exist. A slow start eats into the session's own lifetime, never into the login's margin. The reaper needs neither a pickup nor a running wsd: the tmux server is in its own systemd scope. `wip_commit` is idempotent by its mark, so a crash anywhere replays it exactly once. A missed `Stop` only makes the stop hard. |
 | D14 | The hook shim when wsd is down (§10). | The shim waits up to `[timeouts] hook_wait_seconds`. With no answer, a PreToolUse is allowed only for the local class `worktree_edit`, and only if that class is in the auto-approve tier: an `Edit`, `Write`, `MultiEdit` or `NotebookEdit` whose real path is inside the worktree. Everything else is denied with "control plane unavailable; retry shortly", as the JSON PreToolUse decision (S8 capability 1). Other events are never blocked; with no answer they are spooled to `$HOME/.hz/spool.jsonl`. | This is narrower than §10 allows (running tests and local git are not classified locally), so it fails closed more often, never less. |
 | D15 | Tool policy before plan 5. | While wsd answers, every `hook_event` gets `{"ok": true}`, so no tool call is denied by wsd. `ws_request` gets `{"ok": false, "error": "unsupported"}`. | Plan 5 owns the policy engine and `ws-request` processing. The sandbox is the security boundary (§5.3), and the hook is a UX layer. |
 | D16 | The self-test's allowlisted control (§7 Egress). | The probe control host (`api.openai.com`, configurable) stays allowed to `/usr/bin/curl` for the session's life. | OpenShell's policy is fixed at create time in 0.1.2. The residual is flagged below (gap 4). |
@@ -109,33 +109,32 @@ The plan also draws on these sources:
 | D22 | The Other accounts probe with no named accounts. | It runs with an empty list of other accounts. The canary (written outside every bind just before, then read back outside) is always checked inside, so the probe never passes vacuously. | A host with only default logins is the common case, and plan 4 launches only the default. The canary is the positive control that S5's probe lacked. |
 | D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A). The host requires `kernel.yama.ptrace_scope` ≥ 2, so only `CAP_SYS_PTRACE` can attach or open another process's memory. Every workload process with `NoNewPrivs: 1` (every process the agent can start) must have no effective or permitted capability. The verified probe must have `NoNewPrivs: 1` and the same user and mount namespaces as its CLI ancestor, so no agent-made namespace has a mount over its files. `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) is read-only. On every launch the probe also checks the denial from inside (`probe-tamper-denied`, `probe-files-readonly`), and the curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. Scope 2 is a host change (gap 15). |
 | D24 | Codex hooks (r15 §4.2, §5.3: Codex stays headless until trust is pre-seeded without an operator step). | Codex is treated as headless. Its hooks are used only for the thread ID (D8) and the turn state (D13), never to enforce anything; the sandbox is the boundary. D6 is plan 4's trust pre-seeding, and each launch verifies it: the second `hooks/list` must be empty, and the generation's `SessionStart` must arrive. | A missed hook then only makes the lifetime stop hard or fails the launch; it never lets a tool call through that the sandbox would refuse. |
+| D25 | Host writes into the synthetic home (§7 home isolation). | The home persists and is agent-writable. Every host write into it opens each directory from the home down with `O_NOFOLLOW`, refuses a link, and writes through an exclusive (`O_EXCL`), randomly named temporary file in the anchored directory, renamed into place. Reads use the same anchoring. Codex's trust append is a read and a rewrite through the same descriptors. | An agent can replace `.claude`, `.codex` or a predictable temporary name with a link between generations. A host write that followed it would write outside the home, on the next relaunch or during trust. |
+| D26 | Git for a sandboxed linked worktree (§7: agents commit to their local `btq/<id>` branch; gap 13). | Task 7A. Host git on a worktree is pinned to the trusted repository's directories, with `HEAD` required to name `btq/<id>`, no link in its metadata, and no hooks, fsmonitor or per-worktree config. The sandbox gets a private git directory per generation at the worktree's git-directory path, with the common object store read-only. After the sandbox is confirmed gone, the bead branch's tip alone is imported (`index-pack --strict`, compare-and-swap). A failure is recorded and refuses the next launch. | The sandbox never sees anything host git trusts. The only effect its git can have on the host is the bead branch's tip, which is the agent's to move. |
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
 
 1. **Bubblewrap fallback.** *Resolved by r15:* bubblewrap only on an explicit rejection of the direct-network proof, and plan 4 stops on any rule OpenShell can't enforce (D17).
 2. **§7's direct-network wording.** *Resolved by r15:* §7 accepts the broker answers (`EACCES` for TCP and UDP connects, `EDESTADDRREQ` for a UDP `sendto`, `EPROTONOSUPPORT` for raw sockets), `Seccomp: 2`, `NoNewPrivs: 1` and no capability inside, and `NetworkMode=none` with the log line from outside. Task 8's probe checks exactly that.
-3. **§7's credential-source rule vs the Codex install path.** §7 says "a source in any other account's login directory (the adapter's default login included) refuses the launch". codex-cli 0.160.0 installs under `~/.codex/packages/standalone/releases/…`, inside the default login directory. Read literally, every Codex launch with a named account chosen (AU-6) would be refused, and with the default chosen the CLI root would sit inside the chosen account's own login directory. *Proposed (D10):* refuse a source that equals or contains a login file or a login directory, and allow a source strictly inside a login directory only if it contains no login file. The Other accounts probe still proves that each login file is unreachable inside. This needs an ADR sentence. r15 didn't take it up, so it is still open, and it matters once AU-6 binds named accounts.
-4. **The probe control stays reachable** (D16). `/usr/bin/curl` inside every session can reach `api.openai.com` for the session's life, an exfiltration path §7's residual-risk list doesn't name. *Proposed:* record it as residual risk in r15. Alternatively, point `probe_allowed_host` at a host the operator controls. Removing the rule after the self-test needs OpenShell policy updates on a live sandbox, which S5 did not test.
-5. **`RuntimeUnavailable` when state is missing** (D9) holds the whole workstream. That happens when a record says a generation ran and the home holds session state, but not the wanted ID's (a transcript or rollout deleted by hand, or a home swapped under the record). Plan 3's contract demands this outcome. *Alternative:* `LaunchFailed`, which spends the bead's launch budget and makes it `needs-human` without holding the other beads. This plan keeps the contract. The operator may prefer the alternative.
+3. **§7's credential-source rule vs the Codex install path.** §7 says "a source in any other account's login directory (the adapter's default login included) refuses the launch". codex-cli 0.160.0 installs under `~/.codex/packages/standalone/releases/…`, inside the default login directory. *In plan 4:* D10 enforces the rule as written. A source inside another account's login directory refuses the launch. Only a source inside the chosen account's own directory that holds no login file is allowed, and with the default chosen (plan 4's only case) that is all Codex needs. *Before AU-6 (an r16 item):* with a named account chosen, the Codex install sits inside another account's (the default's) directory and is refused. Either relocate the Codex install outside `~/.codex`, or amend §7 with an ADR sentence.
+4. **The probe control stays reachable** (D16). `/usr/bin/curl` inside every session can reach `api.openai.com` for the session's life. *Resolved:* this is within r15 §7's accepted residual risk for allowlisted endpoints, so no ADR change is needed. The operator may still point `probe_allowed_host` at a host they control. Removing the rule after the self-test would need OpenShell policy updates on a live sandbox, which S5 did not test.
+5. **`RuntimeUnavailable` when state is missing** (D9) holds the whole workstream. That happens when a record says a generation ran and the home doesn't hold the wanted ID's state (a transcript or rollout deleted by hand, the whole state directory deleted, or a home swapped under the record). Plan 3's contract demands this outcome. *Alternative:* `LaunchFailed`, which spends the bead's launch budget and makes it `needs-human` without holding the other beads. This plan keeps the contract. The operator may prefer the alternative.
 6. **Long launches hold the workstream lock** (D20). That is acceptable for v1. Plan 8's health view should show "launching" with its elapsed time.
-7. **Git push.** §7 says "there is no git push". Plan 4 relies on there being no credential inside, and egress to a forge host is read-only only by that absence. No L7 rule blocks `git push` itself, because the proxy can't see paths (§7 residual risks). The live test checks that a push fails.
-8. **The lifetime WIP commit is not a journaled step** (D13). It is idempotent by its mark, made after the sandbox is confirmed gone, and its failure is recorded in the session record. A failed or lost commit leaves the worktree as it was, and the relaunch resumes in it. §7 says "interrupt, then commit the WIP" but does not make it a journal transition. *Proposed:* accept.
+7. **Git push.** §7 says "there is no git push". Plan 4 relies on there being no credential inside, and egress to a forge host is read-only only by that absence. No L7 rule blocks `git push` itself, because the proxy can't see paths (§7 residual risks). The live test pushes, from the agent's own tool, to the repository it has just fetched from, and requires git's report that the server asked for a username it couldn't supply.
+8. **The lifetime WIP commit is not a journaled step** (D13). It is owed durably in the session record from the moment the stop begins, made after the sandbox is confirmed gone, replayed after any crash (it is idempotent by its mark), and its failure is recorded in the session record. A failed commit leaves the worktree as it was, and the relaunch resumes in it. §7 says "interrupt, then commit the WIP" but does not make it a journal transition. *Proposed:* accept.
 9. **Session records and plan 8's cleanup** (D9). The resume contract treats a missing record as "never existed". Plan 8's garbage collection must keep a tombstone (the record with `phase = ended`) for every key whose bead is not closed. That becomes a requirement on plan 8's row.
 10. **OpenShell's supervisor is in the TCB** (S5 ADR impact 3). *Resolved:* r15 §7 Residual risk and §17 #5 record it.
 11. **The agent-path self-test makes one model call per launch.** Its prompt and output also enter the session's transcript, so a resumed session sees them. S5 accepted this, and §7 requires the self-test before every launch.
 12. **S8 open item 1** (Codex `SessionStart` fires only on the first prompt). The agent-path probe prompt *is* that first prompt, so plan 4 gets the thread ID without a separate preflight. Whether admind adopts the same preflight is admind's decision (§8.1), not this plan's.
-13. **Git in a sandboxed linked worktree. Blocking: it needs an operator decision before the backend is enabled.**
-    - **What's wrong.** §7 says agents commit to their local `btq/<id>` branch. btq worktrees are linked worktrees, though: their `.git` is a file that points at `<repo>/.git/worktrees/<n>`, and from there at the common directory `<repo>/.git`. Plan 4 binds only the worktree, so a commit inside fails. Task 14 records this as a strict `xfail`.
-    - **Why the obvious fix is unsafe.** Binding `<repo>/.git` read-write would let the agent write `.git/config` or `worktrees/<n>/{commondir,gitdir,config.worktree}`. Host-side git (plan 3's `gitwip.wip_commit` for park, defer and now the lifetime stop, and btq itself) would then run agent-chosen configuration, for example `core.fsmonitor`, a filter driver or a redirected `commondir`. That is a sandbox escape. `core.hooksPath=/dev/null` doesn't cover it.
-    - **It is partly present already.** Host git already trusts one agent-writable file today: the worktree's `.git` file, which says where the git directory is. An agent can point it elsewhere. Plan 3's gitwip needs the same hardening even without a common-directory bind.
-    - *Proposed:*
-      - Bind the common directory read-only, with read-write binds over `objects/`, `refs/heads/btq/`, `logs/refs/heads/btq/` and `worktrees/<n>/`. Git renames `HEAD.lock` and index locks in place, so those directories must be writable, not just the files.
-      - Harden every host-side git call in a worktree:
-        - pass `GIT_DIR=<common>/worktrees/<n>`, `GIT_COMMON_DIR=<common>` and `GIT_WORK_TREE`, computed from the trusted repo path in config, never from the worktree's `.git` file or `commondir`;
-        - add `-c core.fsmonitor=false` beside `core.hooksPath=/dev/null`;
-        - refuse when `extensions.worktreeConfig` is set.
-      - The residual risk: an agent can move other beads' `btq/` branches. ADR text is needed for that.
-    - This changes plan 3's gitwip contract, so it is not decided silently here. It blocks enabling `[platform] sandbox = "openshell"` on a real host. It doesn't block Tasks 1–13. The resolution is either a plan 4 amendment (one task, before Task 12's backend is enabled) or a plan 3 follow-up.
+13. **Git in a sandboxed linked worktree.** *Resolved in this plan by Task 7A (D26); one residual is flagged.*
+    - **What's wrong.** §7 says agents commit to their local `btq/<id>` branch. btq worktrees are linked worktrees, though: their `.git` is a file that points at `<repo>/.git/worktrees/<n>`, and from there at the common directory `<repo>/.git`. Binding only the worktree makes a commit inside fail.
+    - **Why binding the git directory is unsafe.** A writable `worktrees/<n>/HEAD` lets the agent select `refs/heads/main`, and the host's next WIP commit would then move `main`. A writable config, `commondir` or `gitdir` would let it choose what host git runs (`core.fsmonitor`, a filter driver, a redirected common directory). Host git already trusted one agent-writable file before plan 4: the worktree's `.git` pointer.
+    - **The fix (Task 7A).**
+      - Every heterodyne host git call on a worktree is pinned. Its directories come from the trusted repository path, never from `.git`. `HEAD` must name `btq/<id>`, and no metadata path may be a link. Hooks and fsmonitor are off, and per-worktree config refuses the worktree.
+      - The sandbox gets a private git directory per generation, bound at the worktree's git-directory path, with the object store read-only.
+      - After the sandbox is confirmed gone, host git imports the bead branch's tip and nothing else, with `index-pack --strict` and a compare-and-swap on `refs/heads/btq/<id>`.
+      - Task 14's linked-worktree test is an ordinary passing test.
+    - **Residual (a follow-up for the btq repository, not blocking).** btq's own git calls are in the beads-task-queue repository, which this plan doesn't change. While a session runs, they follow the worktree's `.git` file as before; every end rewrites it to the trusted pointer. Hardening btq the same way is a btq change. Landing has host git parse the agent's object files, as a fetch from an untrusted remote parses its pack. Accepting broader shared-ref access (for example, letting an agent move other branches) would need the operator, and this plan does not do it.
 14. **The live test and a running wsd.** A wsd on the OpenShell runtime finds Task 14's sandboxes in the backend's listing with no record of its own, and holds its workstreams until they are gone (Task 10's fail-closed rule). The live test therefore runs only while no wsd on the host uses OpenShell, and it deletes only the sandboxes it launched, never by name prefix.
 15. **`kernel.yama.ptrace_scope = 2` on the reference host (D23). Blocking: it needs an operator decision before the backend is enabled.** The host is at 1 today, which lets a process attach to its own descendants. The agent's own tool shell starts the probe, so it is the probe's ancestor and may attach to it. Scope 2 limits attach to `CAP_SYS_PTRACE` holders host-wide: a debugger run as the service user can no longer attach to its own processes without `sudo`. Without the change every launch fails `ptrace-scope`, closed. *Alternative:* scope 3 (no attach at all, until reboot); or §17 #12's options if neither is acceptable.
 
@@ -179,16 +178,18 @@ Where r15's items land:
 | explicit `sandbox exec` stdin; the probe configuration on a pipe, never argv | Task 4 (`/dev/null` unless given input); Task 8 (configuration on stdin); Task 9 (a read-only file in `/run/hz`); D5 (the token in a file). None is on argv. |
 | `keep-id`: only the mount table keeps a file out | `packaging/sandbox/gateway.toml` (Task 12); the real-home and Other accounts probes (Task 8) |
 | gateway: bind mounts enabled, resource admission disabled | `packaging/sandbox/gateway.toml` (Task 12) |
-| the turn-boundary lifetime stop and the relaunch | D13, Task 11 |
+| the turn-boundary lifetime stop and the relaunch | D13, Task 10 (the exposure deadline, the reaper), Task 11 |
+| agents commit to their local `btq/<id>` branch (§7) | D26, Task 7A, Task 10, Task 14 |
 | §7 Result channel (peer credentials, exe/argv, untraced, netns, environment, CLI ancestor) | Task 9 |
 | §7 Probe protection | D23, Task 9A, Task 15 |
 | §7 Environment: OpenShell's injected set, per-version tool variables | D4, Task 8 (`env_allowed`) |
-| §11 negative controls: missing canary | Task 8 (`canary-precondition`, offline) |
-| canary inside a mount, wrong pinned hash, leaked variable, dead socket, failed outer fence, failure after a pass | Task 15 |
+| §11 negative controls: missing canary | Task 8 (`canary-precondition` for both canaries, offline) |
+| canary inside a mount, wrong pinned hash, leaked variable (including a tool-only one), dead socket, failed outer fence | Task 8 (`test_sandbox_probes.py`: the real probes against a scripted world, offline); Task 15 (live) |
+| failure after a pass | Task 15 |
 | probes without the runtime (`--network=none`, a connected network) | Task 15 |
 | agent path: a forged result, a variable only on the tool path | Task 9 (a forged result, offline); Task 15 (both, live) |
 | §11 adversarial controls (ptrace, `/proc/<pid>/mem`, a user-namespace mount, the configuration or socket) | Task 9A (offline), Task 15 (live) |
-| §7 still to verify: package-registry egress, read-only git fetch | Task 14 |
+| §7 still to verify: package-registry egress, read-only git fetch | Task 14 (through the agent's own tool, with an attributable push refusal) |
 | the reviewer's read-only bind | Task 14 |
 | Codex's diagnostic-log warning | **Not addressed.** It is non-fatal, and r15 lists its cause as still to verify. Task 14's run record notes whether it appears. |
 
@@ -203,7 +204,14 @@ Where r15's items land:
 
 ## Task order
 
-1 → 2 → 5 → 6 → 7 → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 → 9A are **[r15]**: Task 3 is blocked by Task 2, Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol), and 9A by 9. Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 12 and 13, and Task 15 by 14.
+1 → 2 → 5 → 6 → 7 → 7A → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 → 9A are **[r15]**: Task 3 is blocked by Task 2, Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol), and 9A by 9.
+
+Two neutral tasks also need an [r15] one:
+
+- **Task 10 is blocked by Task 3.** It imports `Backend`, `BackendError` and `BackendUnavailable` from Task 3's `backend.py`, and `reaper_argv` is part of that protocol. `backend.py` holds no OpenShell code, and Task 10's tests use the fake backend.
+- **Task 11 is blocked by Task 4.** The reaper's `main` builds `OpenShellBackend` to delete the sandbox. Its logic (`reap`) is tested with fakes.
+
+Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 12 and 13, and Task 15 by 14.
 
 ## File map
 
@@ -220,12 +228,15 @@ Where r15's items land:
 | `src/heterodyne/session/shim.py`, `pyproject.toml` | 6 | `ws-hook`, `ws-request` |
 | `src/heterodyne/agents/base.py`, `claude_code.py`, `codex.py`, `registry.py` | 7 | `Adapter`, `ClaudeCode`, `Codex`, `ADAPTERS` |
 | `src/heterodyne/sandbox/resources/codex_trust.py` | 7 | in-sandbox hook-trust lister |
+| `src/heterodyne/wsd/gitwip.py`, `src/heterodyne/wsd/beads.py`, `src/heterodyne/wsd/park.py`, `src/heterodyne/wsd/runtime.py` (plan 3) | 7A | `Pinned`, `pin`, `pinned_git`; pinned WIP commits; `LaunchSpec.repo` |
+| `src/heterodyne/sandbox/sessiongit.py` | 7A | the private session git dir: `seed`, `land` |
 | `src/heterodyne/sandbox/resources/probes.py` | 8, 9A | in-sandbox probes (port of `spikes/s5/probes.py`) **[r15]** |
 | `src/heterodyne/sandbox/openshell_selftest.py` | 8, 9, 9A | `OpenShellSelfTest` **[r15]** |
 | `src/heterodyne/sandbox/channel.py`, `src/heterodyne/platform.py` | 9, 9A | `ProbeChannel`, `ProcVerifier` (9A: the protection checks); `peer_pid_checked` **[r15]** |
 | `src/heterodyne/tmux.py` | 10 | `pane_info` |
 | `src/heterodyne/sandbox/selftest.py` | 10 | `SelfTest`, `ProbeContext`, `SelfTestFailed` |
 | `src/heterodyne/sandbox/runtime.py` | 10, 11 | `SandboxRuntime`, `SessionRecord`, `Phase`, `RuntimeConfig` |
+| `src/heterodyne/sandbox/reaper.py` | 11 | the per-session lifetime backstop |
 | `src/heterodyne/wsd/runtime.py`, `scheduler.py` | 11 | `AgentRuntime.expire`; pickup calls it |
 | `src/heterodyne/sandbox/build.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/platform.py`, `examples/config.toml`, `packaging/sandbox/*`, `docs/wsd.md`, `docs/configuration.md`, `docs/install.md`, `docs/security-model.md` | 12 | wiring, the Linux default, the image, docs **[r15]** |
 | `tests/sandbox_env.py`, `tests/fakes/fake_agent_cli.py`, `tests/fakes/fake_backend.py`, `tests/fakes/scripted_selftest.py`, `tests/fakes/fake_runtime.py` | 1, 7, 10, 11 | test rig and fakes |
@@ -612,9 +623,9 @@ git commit -m "plan4 T1: sandbox settings ([sandbox], [platform] sandbox, per-wo
 - Produces (all in `heterodyne.sandbox.spec`):
   - `SpecRefused(Exception)`, with fixed, path-free wording.
   - `short_id(key) -> str` and `sandbox_name(key, generation) -> str` (D1).
-  - `SessionLayout(root)`: `.at(sessions, key)`, `.record`, `.home`, `.bridge`, `.daemon`, `.oa_canary`, `.run(gen)`, `.socket(gen)`, `.probe_socket(gen)`, `.events(gen)`, `.scratch(gen)`.
+  - `SessionLayout(root)`: `.at(sessions, key)`, `.record`, `.home`, `.bridge`, `.daemon`, `.git`, `.oa_canary`, `.run(gen)`, `.socket(gen)`, `.probe_socket(gen)`, `.events(gen)`, `.scratch(gen)`.
   - In-sandbox paths: `RUN_INSIDE`, `BRIDGE_INSIDE`, `SOCKET_INSIDE`, `PROBE_SOCKET_INSIDE`, `TOKEN_INSIDE`, `SHIM_INSIDE`, `SHIM_CONFIG_INSIDE`, `PROBES_INSIDE`, `AGENT_PROBE_INSIDE`, `REQUEST_INSIDE`.
-  - Value types: `Bind(source, target, read_only)`, `Egress(name, hosts, binaries)`, `AgentFacts(...)`, `SpecInput(...)`, `SandboxSpec(...)`, `Protected(chosen_dir, chosen_files, others)`.
+  - Value types: `Bind(source, target, read_only)`, `Egress(name, hosts, binaries)`, `AgentFacts(...)`, `SpecInput(...)` (its last field, `git_binds`, defaults to none), `SandboxSpec(...)`, `Protected(chosen_dir, chosen_files, other_dirs, other_files)`.
   - `build_spec(SpecInput) -> SandboxSpec` and `check_credentials(spec, protected, real_home) -> None`.
   - `LAUNCHER_ENV`, the variable names a spec may set.
   - `Accounts.login_paths(adapter, account) -> tuple[Path, tuple[Path, ...]]`: the configured login directory and files, `~` expanded, symlinks not resolved.
@@ -680,7 +691,7 @@ def protected(root: Path) -> Protected:
     other = root / "home" / ".codex-b"
     chosen = root / "home" / ".codex"
     return Protected(chosen_dir=chosen, chosen_files=(chosen / "auth.json",),
-                     others=(other, other / "auth.json"))
+                     other_dirs=(other,), other_files=(other / "auth.json",))
 
 
 def test_names_are_short_and_deterministic() -> None:
@@ -697,7 +708,16 @@ def test_layout(tmp_path: Path) -> None:
     assert lay.root == tmp_path / short_id(KEY)
     assert lay.socket(3) == lay.root / "r3" / "s.sock" and lay.probe_socket(3) == lay.root / "r3" / "p.sock"
     assert lay.events(3) == lay.root / "r3-events.jsonl" and lay.oa_canary.parent == lay.root
-    assert lay.daemon == lay.bridge / "daemon"
+    assert lay.daemon == lay.bridge / "daemon" and lay.git == lay.root / "git"
+
+
+def test_git_binds_keep_their_modes(tmp_path: Path) -> None:
+    private = Bind(tmp_path / "git", tmp_path / "repo" / ".git" / "worktrees" / "wt", False)
+    objects = Bind(tmp_path / "repo" / ".git" / "objects", tmp_path / "repo" / ".git" / "objects", True)
+    spec = build_spec(spec_input(tmp_path, git_binds=(private, objects)))
+    assert {private, objects} <= set(spec.binds)
+    assert str(private.target) in spec.read_write and str(objects.target) in spec.read_only
+    assert str(objects.target) not in spec.read_write
 
 
 def test_coder_spec(tmp_path: Path) -> None:
@@ -769,6 +789,17 @@ def test_a_bind_exposing_a_login_or_the_home_is_refused(tmp_path: Path, source: 
     src = (tmp_path / source).resolve()
     bad = replace(spec, binds=(*spec.binds, Bind(src, Path("/mnt/x"), True)))
     with pytest.raises(SpecRefused):
+        check_credentials(bad, protected(tmp_path), tmp_path / "home")
+
+
+def test_a_source_inside_another_accounts_login_dir_is_refused(tmp_path: Path) -> None:
+    """r15 §7: a source in any other account's login directory refuses the launch, even one that holds
+    no login file. Only the chosen account's own directory may hold a bound source (the Codex CLI)."""
+    inner = tmp_path / "home" / ".codex-b" / "packages"
+    inner.mkdir(parents=True)
+    spec = build_spec(spec_input(tmp_path))
+    bad = replace(spec, binds=(*spec.binds, Bind(inner, Path("/mnt/x"), True)))
+    with pytest.raises(SpecRefused, match="another account's login directory"):
         check_credentials(bad, protected(tmp_path), tmp_path / "home")
 
 
@@ -894,8 +925,8 @@ def sandbox_name(key: str, generation: int) -> str:
 
 @dataclass(frozen=True)
 class SessionLayout:
-    """One session's host directory (D2). Only `home`, `bridge` and `run(gen)` are ever bound in; the
-    record, the event spools, the scratch and the canary stay outside every bind."""
+    """One session's host directory (D2). Only `home`, `bridge`, `git` and `run(gen)` are ever bound in;
+    the record, the event spools, the scratch and the canary stay outside every bind."""
     root: Path
 
     @classmethod
@@ -917,6 +948,10 @@ class SessionLayout:
     @property
     def daemon(self) -> Path:
         return self.bridge / "daemon"
+
+    @property
+    def git(self) -> Path:
+        return self.root / "git"            # the session's private git directory (Task 7A, D26)
 
     @property
     def oa_canary(self) -> Path:
@@ -982,6 +1017,7 @@ class SpecInput:
     probe_allowed_host: str
     uid: int
     gid: int
+    git_binds: tuple[Bind, ...] = ()    # Task 7A's private git directory and the read-only object store
 
 
 @dataclass(frozen=True)
@@ -1023,12 +1059,14 @@ def build_spec(i: SpecInput) -> SandboxSpec:
              Bind(i.layout.run(i.generation), RUN_INSIDE, True),
              Bind(i.agent.cli_root, i.agent.cli_root, True),
              *i.agent.binds,
+             *i.git_binds,
              *(Bind(m, m, True) for m in i.extra_ro_mounts))
     read_only = (*SYSTEM_READ_ONLY, str(RUN_INSIDE), str(i.agent.cli_root),
                  *(str(m) for m in i.extra_ro_mounts), *(str(b.target) for b in logins),
-                 *((str(i.worktree),) if worktree_ro else ()))
+                 *((str(i.worktree),) if worktree_ro else ()),
+                 *(str(b.target) for b in i.git_binds if b.read_only))
     read_write = (*SYSTEM_READ_WRITE, str(i.layout.home), *(() if worktree_ro else (str(i.worktree),)),
-                  *i.agent.read_write)
+                  *i.agent.read_write, *(str(b.target) for b in i.git_binds if not b.read_only))
     cli = (str(i.agent.cli_binary),)
     egress = [Egress("model", i.agent.model_hosts, cli)]
     if i.extra_egress:
@@ -1045,10 +1083,12 @@ def build_spec(i: SpecInput) -> SandboxSpec:
 @dataclass(frozen=True)
 class Protected:
     """The login material a session must not see (§7): the chosen account's login directory and files,
-    and every other configured account's (the default included), each as configured."""
+    and every other configured account's directory and files (the default included when it is not the
+    chosen one), each as configured."""
     chosen_dir: Path
     chosen_files: tuple[Path, ...]
-    others: tuple[Path, ...]
+    other_dirs: tuple[Path, ...]
+    other_files: tuple[Path, ...]
 
 
 def _real(path: Path) -> Path:
@@ -1058,14 +1098,16 @@ def _real(path: Path) -> Path:
 def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) -> None:
     """D10. The login binds are exactly the chosen account's login files, read-only. No other bind's
     source, by its own path or its canonical one, equals or contains the real home, a login directory or
-    a login file. A source strictly inside a login directory that holds no login file is allowed (the
-    Codex CLI installs under its default login directory)."""
+    a login file, or lies inside another account's login directory (r15 §7). A source strictly inside the
+    chosen account's own login directory that holds no login file is allowed: the Codex CLI installs
+    under its default login directory, and plan 4 chooses only the default (D11)."""
     want = {_real(p) for p in protected.chosen_files}
     got = [_real(b.source) for b in spec.logins]
     if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
         raise SpecRefused("the login binds are not exactly the chosen account's login files, read-only")
-    guarded = {q for p in (protected.chosen_dir, *protected.chosen_files, *protected.others)
-               for q in (p, _real(p))}
+    guarded = {q for p in (protected.chosen_dir, *protected.chosen_files, *protected.other_dirs,
+                           *protected.other_files) for q in (p, _real(p))}
+    other_dirs = {q for p in protected.other_dirs for q in (p, _real(p))}
     homes = {real_home, _real(real_home)}
     for b in spec.binds:
         for source in {b.source, _real(b.source)}:
@@ -1073,6 +1115,8 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
                 raise SpecRefused("a bind would expose the real home directory")
             if any(p.is_relative_to(source) for p in guarded):
                 raise SpecRefused("a bind would expose a login directory or login file")
+            if any(source.is_relative_to(d) for d in other_dirs):
+                raise SpecRefused("a bind would reach into another account's login directory")
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -1247,6 +1291,12 @@ class Backend(Protocol):
 
     def pane_env(self) -> Mapping[str, str]:
         """The environment `tty_argv` gives the host command."""
+        ...
+
+    def reaper_argv(self, name: str, deadline: int) -> list[str]:
+        """A host command, run outside wsd (D13's backstop), that waits until `deadline` (UTC epoch
+        seconds) and then deletes the sandbox until the backend no longer lists it. It carries its own
+        environment, as `tty_argv` does."""
         ...
 ```
 
@@ -1460,6 +1510,14 @@ def test_tty_argv_carries_its_own_environment() -> None:
                     "--tty", "--no-login-shell", "--workdir", "/w", "--", "claude", "--resume", "x"]
 
 
+def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
+    argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200)
+    assert argv[:3] == ["env", "-i", "PATH=/usr/bin"]
+    assert argv[4:7] == ["-I", "-m", "heterodyne.sandbox.reaper"]
+    assert argv[7:] == ["--deadline", "1800007200", "--openshell", "openshell", "--podman", "podman",
+                        "--image", "img:1", "hz0123456789abg1"]
+
+
 def test_tool_env_takes_only_what_the_tools_need() -> None:
     base = {"HOME": "/h", "PATH": "/usr/bin", "XDG_RUNTIME_DIR": "/run/user/1", "SECRET_TOKEN": "x",
             "LANG": "C"}
@@ -1475,7 +1533,7 @@ Expected: FAIL with `ImportError: cannot import name 'OpenShellBackend'`.
 
 - [ ] **Step 3: Implement**
 
-Append to `src/heterodyne/sandbox/openshell.py` (extend its imports to `json, os, subprocess, time`, `from collections.abc import Callable, Mapping, Sequence`, and `from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult` plus `from heterodyne.sandbox.spec import NAME, SandboxSpec`):
+Append to `src/heterodyne/sandbox/openshell.py` (extend its imports to `json, os, subprocess, sys, time`, `from collections.abc import Callable, Mapping, Sequence`, and `from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult` plus `from heterodyne.sandbox.spec import NAME, SandboxSpec`):
 
 ```python
 Runner = Callable[[Sequence[str], bytes | None, float], subprocess.CompletedProcess[bytes]]
@@ -1565,6 +1623,11 @@ class OpenShellBackend:
 
     def pane_env(self) -> Mapping[str, str]:
         return dict(self.env)
+
+    def reaper_argv(self, name: str, deadline: int) -> list[str]:
+        return ["env", "-i", *(f"{k}={v}" for k, v in self.env.items()), sys.executable, "-I", "-m",
+                "heterodyne.sandbox.reaper", "--deadline", str(deadline), "--openshell", self.openshell,
+                "--podman", self.podman, "--image", self.image, name]
 
     def delete(self, name: str) -> bool:
         try:
@@ -2361,12 +2424,13 @@ git commit -m "plan4 T6: ws-hook and ws-request shims (stdlib, fail closed when 
   - `base.HOOK_COMMAND = "python3 -I /run/hz/shim.py hook"`, `base.HOOK_EVENTS`;
   - `base.AdapterError(Exception)`, fixed wording;
   - `base.Cli(binary: Path, root: Path, version: str)`;
+  - `base.write_private(path, text)` (host-only directories), and for the synthetic home `base.home_dir(home, *parts) -> int`, `base.write_at(dirfd, name, text)`, `base.read_text_at(dirfd, name) -> str`, `base.read_json_at(dirfd, name) -> dict`;
   - `base.Adapter` (Protocol), with the attributes `name`, `config_var`, `config_subdir`, `login_names`, `model_hosts`, `version_pin`, `tool_env`, `prompt_marker`, `assigns_id` and the methods:
     - `locate(binary: str, path: str) -> Cli`;
     - `facts(layout, cli, uid) -> AgentFacts`;
     - `prepare_home(layout, worktree) -> None`;
     - `run_files() -> Mapping[str, str]` (file name → text, written into each run directory: Claude's hook settings, Codex's `codex_trust.py`);
-    - `has_state(home, native_id: str | None) -> bool` and `any_state(home) -> bool`;
+    - `has_state(home, native_id: str | None) -> bool`;
     - `access_expiry(login_files) -> float` (epoch seconds);
     - `server_argv(cli) -> list[str] | None` and `server_ready(layout) -> bool`;
     - `tui_argv(cli, profile, *, native_id, resume, label) -> list[str]`;
@@ -2380,6 +2444,7 @@ Everything specific to one CLI lives here (Global Constraints). The rules each a
 - **Synthetic home** (§7 home isolation). The config directory is `<home>/.claude` or `<home>/.codex`, named by `CLAUDE_CONFIG_DIR` or `CODEX_HOME` (D4). The login file is bound into it read-only by the spec, never copied.
   - Claude: `settings.json` holds only `skipDangerousModePermissionPrompt`. `.claude.json` is merged, not replaced (Claude keeps its own state there), with onboarding done, bypass mode accepted and the worktree trusted. The hooks are in `/run/hz/claude-settings.json`, in the read-only run directory, passed with `--settings`.
   - Codex: `config.toml` is rewritten on every launch (`approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, the worktree trusted, `[features] apps = false`), and so is `hooks.json`. Stale sockets in the bridge directory are removed, so a dead generation's socket can't pass for the new app-server's.
+- **Host writes into the home** (D25). The synthetic home persists and the agent can change anything in it between generations. So every host write there goes through `home_dir`, which opens each directory relative to the one before with `O_NOFOLLOW`, and `write_at`, which writes an exclusive temporary file with a random name and renames it over the target. A planted link refuses the launch or is replaced; it is never followed. `has_state` refuses a linked config directory. `write_private` is only for directories the agent can't write (run and session directories).
 - **Hooks**: `SessionStart`, `UserPromptSubmit`, `Stop` and `PreToolUse`, each with the one fixed command (D5).
 - **State** (D9): Claude's `<config>/projects/*/<id>.jsonl`, Codex's `<config>/sessions/**/rollout-*<id>.jsonl`. A native ID that is not a canonical UUID is refused before it reaches a glob.
 - **Codex trust** (D6): `codex_trust.py` lists what is untrusted or modified. `apply_trust` accepts only entries whose key is under this session's own `hooks.json` and contains no quote, backslash or control character, and whose hash is hex (optionally `sha256:`-prefixed). Anything else refuses the launch.
@@ -2673,14 +2738,14 @@ def test_codex_facts_bind_the_bridge_and_daemon(layout: SessionLayout, tmp_path:
 
 def test_state_is_found_where_each_cli_keeps_it(layout: SessionLayout) -> None:
     for adapter in (ClaudeCode(), Codex()):
-        assert not adapter.has_state(layout.home, ID) and not adapter.any_state(layout.home)
+        assert not adapter.has_state(layout.home, ID)
     (layout.home / ".claude" / "projects" / "-w").mkdir(parents=True)
     (layout.home / ".claude" / "projects" / "-w" / f"{ID}.jsonl").write_text("")
     rollouts = layout.home / ".codex" / "sessions" / "2026" / "10" / "09"
     rollouts.mkdir(parents=True)
     (rollouts / f"rollout-2026-10-09T00-00-00-{ID}.jsonl").write_text("")
     for adapter in (ClaudeCode(), Codex()):
-        assert adapter.has_state(layout.home, ID) and adapter.any_state(layout.home)
+        assert adapter.has_state(layout.home, ID)
         assert not adapter.has_state(layout.home, None)
         with pytest.raises(AdapterError, match="native ID"):
             adapter.has_state(layout.home, "*")
@@ -2719,6 +2784,49 @@ def trust_listing(layout: SessionLayout, codex: Path, worktree: Path) -> bytes:
     proc = subprocess.run([sys.executable, "-I", str(TRUST), str(codex), str(worktree)], env=env,
                           capture_output=True, timeout=60, check=True)
     return proc.stdout
+
+
+@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
+def test_a_linked_config_dir_refuses_the_home(layout: SessionLayout, tmp_path: Path, adapter: str) -> None:
+    """The home persists and is the agent's: a link it plants between generations must not redirect a
+    host write on the next launch."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (layout.home / ADAPTERS[adapter].config_subdir).symlink_to(outside)
+    with pytest.raises(AdapterError, match="won't follow"):
+        ADAPTERS[adapter].prepare_home(layout, tmp_path / "wt")
+    with pytest.raises(AdapterError, match="won't follow"):
+        ADAPTERS[adapter].has_state(layout.home, ID)
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("adapter, name", [("claude-code", "settings.json"), ("claude-code", ".claude.json"),
+                                           ("codex", "config.toml"), ("codex", "hooks.json")])
+def test_linked_files_and_temp_names_are_replaced_not_followed(layout: SessionLayout, tmp_path: Path,
+                                                               adapter: str, name: str) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text('{"stolen": true}')
+    conf = layout.home / ADAPTERS[adapter].config_subdir
+    conf.mkdir()
+    (conf / name).symlink_to(victim)
+    (conf / f".{name}.tmp").symlink_to(victim)               # the old, predictable temporary name
+    ADAPTERS[adapter].prepare_home(layout, tmp_path / "wt")
+    assert victim.read_text() == '{"stolen": true}'
+    assert not (conf / name).is_symlink() and "stolen" not in (conf / name).read_text()
+
+
+def test_trust_refuses_a_config_swapped_for_a_link(layout: SessionLayout, tmp_path: Path) -> None:
+    codex = install_fake_cli(tmp_path, "codex")
+    Codex().prepare_home(layout, tmp_path)
+    listed = trust_listing(layout, codex, tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_text("keep\n")
+    config = layout.home / ".codex" / "config.toml"
+    config.unlink()
+    config.symlink_to(victim)
+    with pytest.raises(AdapterError, match="trust"):
+        Codex().apply_trust(layout, listed)
+    assert victim.read_text() == "keep\n"
 
 
 def test_codex_run_files_ship_the_trust_lister() -> None:
@@ -2769,9 +2877,13 @@ and pinned, what its synthetic home holds, where it keeps resumable state, how i
 and how it is started in its managed shape. Nothing outside `heterodyne.agents` names a CLI."""
 
 import base64
+import contextlib
+import errno
 import json
 import os
+import secrets
 import shutil
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -2816,13 +2928,77 @@ def hook_group(matcher: str | None = None) -> dict[str, Any]:
     return group if matcher is None else {"matcher": matcher, **group}
 
 
+def write_at(dirfd: int, name: str, text: str) -> None:
+    """Write `name` in the directory `dirfd` atomically, mode 0600. The temporary file is exclusive, has an
+    unpredictable name and is never reached through a link, and the rename replaces whatever `name` is (a
+    link there is replaced, not followed). Raises OSError."""
+    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dirfd)
+        raise
+
+
 def write_private(path: Path, text: str) -> None:
-    """Write `text` atomically, mode 0600."""
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(text)
-    tmp.replace(path)
+    """write_at in a directory only the host writes (a run directory, a session directory). Never use it
+    under a synthetic home: that is the agent's to change, and goes through home_dir."""
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        write_at(fd, path.name, text)
+    finally:
+        os.close(fd)
+
+
+def home_dir(home: Path, *parts: str) -> int:
+    """An open directory descriptor for <home>/<parts...>, each created 0700 if missing. Every component is
+    opened relative to the one before without following a link, so a link the agent planted in its home
+    between generations refuses the launch instead of redirecting a host write. The caller closes it."""
+    try:
+        fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        raise AdapterError("the synthetic home can't be opened") from None
+    try:
+        for part in parts:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, 0o700, dir_fd=fd)
+            inner = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+    except OSError:
+        os.close(fd)
+        raise AdapterError("the synthetic home holds a path the host won't follow") from None
+    return fd
+
+
+def read_text_at(dirfd: int, name: str) -> str:
+    """The text of the regular file `name` in `dirfd`, never through a link, never blocking on a FIFO.
+    Raises OSError for anything else."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        return fh.read().decode("utf-8", "replace")
+
+
+def read_json_at(dirfd: int, name: str) -> dict[str, Any]:
+    """read_text_at as a JSON object; {} when missing, not a regular file, or not an object."""
+    try:
+        data: Any = json.loads(read_text_at(dirfd, name))
+    except (OSError, ValueError):
+        return {}
+    return cast(dict[str, Any], data) if isinstance(data, dict) else {}
+
+
+def no_link(home: Path, subdir: str) -> None:
+    """has_state's guard: the config directory itself must not be a link (globs below it follow links,
+    but a match there only names a session the CLI then fails to resume inside)."""
+    if (home / subdir).is_symlink():
+        raise AdapterError("the synthetic home holds a path the host won't follow")
 
 
 def checked_id(native_id: str | None) -> str | None:
@@ -2877,10 +3053,6 @@ class Adapter(Protocol):
         that is not a canonical UUID, and OSError if the home can't be read."""
         ...
 
-    def any_state(self, home: Path) -> bool:
-        """The synthetic home holds resumable state for any session at all."""
-        ...
-
     def access_expiry(self, login_files: Sequence[Path]) -> float: ...
 
     def server_argv(self, cli: Cli) -> list[str] | None: ...
@@ -2921,7 +3093,10 @@ from heterodyne.agents.base import (
     hook_group,
     install_root,
     read_json,
-    write_private,
+    home_dir,
+    no_link,
+    read_json_at,
+    write_at,
 )
 from heterodyne.sandbox.spec import RUN_INSIDE, AgentFacts, SessionLayout
 ```
@@ -2962,19 +3137,23 @@ class ClaudeCode:
                           model_hosts=self.model_hosts, extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
 
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
-        conf = layout.home / self.config_subdir
-        conf.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_private(conf / "settings.json", json.dumps({"skipDangerousModePermissionPrompt": True}))
-        state = read_json(conf / ".claude.json")
-        projects: Any = state.get("projects")
-        projects = cast(dict[str, Any], projects) if isinstance(projects, dict) else {}
-        project: Any = projects.get(str(worktree))
-        project = cast(dict[str, Any], project) if isinstance(project, dict) else {}
-        projects[str(worktree)] = {**project, "hasTrustDialogAccepted": True,
-                                   "hasCompletedProjectOnboarding": True}
-        state.update(hasCompletedOnboarding=True, bypassPermissionsModeAccepted=True, projects=projects)
-        state.setdefault("theme", "dark")
-        write_private(conf / ".claude.json", json.dumps(state))
+        conf = home_dir(layout.home, self.config_subdir)
+        try:
+            write_at(conf, "settings.json", json.dumps({"skipDangerousModePermissionPrompt": True}))
+            state = read_json_at(conf, ".claude.json")
+            projects: Any = state.get("projects")
+            projects = cast(dict[str, Any], projects) if isinstance(projects, dict) else {}
+            project: Any = projects.get(str(worktree))
+            project = cast(dict[str, Any], project) if isinstance(project, dict) else {}
+            projects[str(worktree)] = {**project, "hasTrustDialogAccepted": True,
+                                       "hasCompletedProjectOnboarding": True}
+            state.update(hasCompletedOnboarding=True, bypassPermissionsModeAccepted=True, projects=projects)
+            state.setdefault("theme", "dark")
+            write_at(conf, ".claude.json", json.dumps(state))
+        except OSError:
+            raise AdapterError("the synthetic home can't be prepared") from None
+        finally:
+            os.close(conf)
 
     def run_files(self) -> Mapping[str, str]:
         hooks = {e: [hook_group("*" if e == "PreToolUse" else None)] for e in HOOK_EVENTS}
@@ -2985,12 +3164,9 @@ class ClaudeCode:
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)
+        no_link(home, self.config_subdir)
         projects = self._projects(home)
         return found is not None and projects.is_dir() and any(projects.glob(f"*/{found}.jsonl"))
-
-    def any_state(self, home: Path) -> bool:
-        projects = self._projects(home)
-        return projects.is_dir() and any(projects.glob("*/*.jsonl"))
 
     def access_expiry(self, login_files: Sequence[Path]) -> float:
         oauth: Any = read_json(login_files[0]).get("claudeAiOauth")
@@ -3047,8 +3223,11 @@ from heterodyne.agents.base import (
     install_root,
     jwt_exp,
     profile_args,
+    home_dir,
+    no_link,
     read_json,
-    write_private,
+    read_text_at,
+    write_at,
 )
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, AgentFacts, Bind, SessionLayout
 
@@ -3099,21 +3278,25 @@ class Codex:
                           read_write=(str(BRIDGE_INSIDE),))
 
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
-        conf = layout.home / self.config_subdir
-        conf.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for folder in (layout.bridge, layout.daemon):
+        for folder in (layout.bridge, layout.daemon):          # host-side session directories, not the home
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
             folder.chmod(0o700)                # codex refuses a socket directory that is not 0700
             for entry in folder.iterdir():
                 if _socket(entry) or entry.is_symlink():
                     entry.unlink()
-        # JSON string escapes are valid TOML basic-string escapes.
-        write_private(conf / "config.toml",
-                      'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
-                      f"[projects.{json.dumps(str(worktree))}]\ntrust_level = \"trusted\"\n"
-                      "[features]\napps = false\n")
         hooks = {e: [hook_group()] for e in HOOK_EVENTS}
-        write_private(conf / HOOKS_FILE, json.dumps({"hooks": hooks}))
+        conf = home_dir(layout.home, self.config_subdir)
+        try:
+            # JSON string escapes are valid TOML basic-string escapes.
+            write_at(conf, "config.toml",
+                     'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
+                     f"[projects.{json.dumps(str(worktree))}]\ntrust_level = \"trusted\"\n"
+                     "[features]\napps = false\n")
+            write_at(conf, HOOKS_FILE, json.dumps({"hooks": hooks}))
+        except OSError:
+            raise AdapterError("the synthetic home can't be prepared") from None
+        finally:
+            os.close(conf)
 
     def run_files(self) -> Mapping[str, str]:
         return {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
@@ -3123,12 +3306,9 @@ class Codex:
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)
+        no_link(home, self.config_subdir)
         sessions = self._sessions(home)
         return found is not None and sessions.is_dir() and any(sessions.rglob(f"rollout-*{found}.jsonl"))
-
-    def any_state(self, home: Path) -> bool:
-        sessions = self._sessions(home)
-        return sessions.is_dir() and any(sessions.rglob("rollout-*.jsonl"))
 
     def access_expiry(self, login_files: Sequence[Path]) -> float:
         tokens: Any = read_json(login_files[0]).get("tokens")
@@ -3177,8 +3357,13 @@ class Codex:
                 raise AdapterError("the hook trust listing has an invalid entry")
             lines.append(f'\n[hooks.state."{key}"]\ntrusted_hash = "{digest}"\n')
         if lines:
-            with (conf / "config.toml").open("a") as fh:
-                fh.writelines(lines)
+            fd = home_dir(layout.home, self.config_subdir)
+            try:
+                write_at(fd, "config.toml", read_text_at(fd, "config.toml") + "".join(lines))
+            except OSError:
+                raise AdapterError("the hook trust can't be recorded") from None
+            finally:
+                os.close(fd)
         return len(lines)
 ```
 
@@ -3283,11 +3468,478 @@ git add src/heterodyne/agents/base.py src/heterodyne/agents/claude_code.py src/h
 git commit -m "plan4 T7: claude-code and codex adapters, synthetic home, Codex hook trust"
 ```
 
+### Task 7A: Git in a sandboxed linked worktree
+
+**Files:**
+- Modify: `src/heterodyne/wsd/gitwip.py` (`Pinned`, `pin`, `pinned_git`; `find_wip`, `wip_commit` and `descends_from` take a `Pinned`), `src/heterodyne/wsd/beads.py` (`verify_worktree` pins), `src/heterodyne/wsd/park.py` (park and defer commit through a pin; the guard passes `repo`), `src/heterodyne/wsd/runtime.py` (`LaunchSpec.repo`)
+- Create: `src/heterodyne/sandbox/sessiongit.py`
+- Test: `tests/test_session_git.py`, and plan 3's `tests/test_wsd_gitwip.py`, `tests/test_wsd_beads.py`, `tests/test_wsd_park.py`, `tests/test_wsd_defer.py` (call sites only)
+
+**Interfaces:**
+- Consumes:
+  - Task 2's `Bind`;
+  - Task 7's `write_at`;
+  - plan 3's `gitwip.git`, `GitFailed`, `PARK_MARK` and `NO_HOOKS`.
+- Produces:
+  - `gitwip.Pinned(work_tree, git_dir, common, branch)` and `gitwip.pin(repo: Path, worktree: Path, branch: str) -> Pinned`;
+  - `gitwip.pinned_git(p, *args, alternates=None, data=None, ok=(0,)) -> bytes`, `gitwip.no_link(base, *parts) -> Path`, `gitwip.read_meta(path) -> str` and `gitwip.FULL_SHA`;
+  - `gitwip.find_wip(p, mark)`, `gitwip.wip_commit(p, mark, summary)` and `gitwip.descends_from(p, base)`, each taking a `Pinned`;
+  - `LaunchSpec.repo: Path | None = None`, which the guard sets from the bead's session record;
+  - `sessiongit.seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind]` and `sessiongit.land(p: Pinned, private: Path) -> str | None`.
+
+This is D26, and it resolves gap 13. It lands before Task 10, which uses it for every launch and every end.
+
+- **Host git is pinned.** Every host git call on a worktree takes its directories from the trusted repository path (the bead's session record), never from the worktree's `.git` file, which the agent can rewrite:
+  - `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` are set, and every other `GIT_*` variable is dropped;
+  - `-c core.hooksPath=/dev/null -c core.fsmonitor=false` comes first on every command;
+  - `extensions.worktreeConfig` refuses the worktree.
+- **The bead branch is pinned.** `pin` finds the linked worktree's git directory by the back-pointer in `<common>/worktrees/*/gitdir`. It requires that `HEAD` is exactly `ref: refs/heads/btq/<id>` and that `commondir` is `../..`. Each of those files must be a regular file, and no directory on the way may be a link.
+- **The sandbox never sees the real git directory.** Each generation, wsd builds a private git directory in the session's state:
+  - `HEAD` names the bead branch, with its tip as a loose ref;
+  - the other branches, remotes and tags are a read-only snapshot in `packed-refs`;
+  - the index is a copy;
+  - the common object store is reached read-only through `objects/info/alternates`.
+  It is bound read-write at the linked worktree's own git-directory path, so the worktree's `.git` file finds it unchanged. The common `objects/` is bound read-only at its own path. Whatever the agent writes there (another branch, a moved `HEAD`, a config, an alternates file) reaches nothing on the host.
+- **Landing.** After the sandbox is confirmed gone, `land` runs:
+  1. It rewrites the worktree's `.git` file to the trusted pointer, so btq's own git calls see it too.
+  2. It refuses a private object store that holds anything but directories and regular files, and rewrites its alternates to the trusted one.
+  3. It reads the bead branch's tip (loose or packed) and validates it as a full SHA.
+  4. It copies the missing objects into the common store through `index-pack --strict`, checks that the result is connected, and moves `refs/heads/btq/<id>` alone, compare-and-swap. No other ref is ever written.
+  Landing is idempotent: a tip already landed is a no-op. Task 10 records a failure and keeps the private directory, and the next launch refuses until a human looks.
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/test_session_git.py`:
+
+```python
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+from wsd_env import git_repo
+
+from heterodyne.sandbox import sessiongit
+from heterodyne.wsd import gitwip
+
+BRANCH = "btq/btq-1"
+IDENT = ("-c", "user.name=agent", "-c", "user.email=agent@example.org")
+
+
+def linked(tmp_path: Path) -> tuple[Path, Path]:
+    repo = git_repo(tmp_path / "repo")
+    worktree = tmp_path / "wt"
+    gitwip.git(repo, "worktree", "add", "-q", "-b", BRANCH, str(worktree))
+    return repo, worktree
+
+
+def inside(private: Path, worktree: Path, *args: str) -> str:
+    """git as the agent runs it: the worktree's `.git` file finds the private directory at its bind."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {"GIT_DIR": str(private), "GIT_WORK_TREE": str(worktree)}
+    return subprocess.run(["git", *args], cwd=worktree, env=env, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def tip(repo: Path, ref: str) -> str:
+    return gitwip.git(repo, "rev-parse", ref)
+
+
+def test_pin_takes_the_git_dir_from_the_repository_not_the_dot_git_file(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    marker = tmp_path / "ran"
+    evil = git_repo(tmp_path / "evil")
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o700)
+    gitwip.git(evil, "config", "core.fsmonitor", str(hook))
+    (worktree / ".git").write_text(f"gitdir: {evil / '.git'}\n")        # the agent redirects it
+    p = gitwip.pin(repo, worktree, BRANCH)
+    assert p.git_dir == (repo / ".git" / "worktrees" / "wt").resolve()
+    assert p.common == (repo / ".git").resolve()
+    sha = gitwip.wip_commit(p, "m1", "test")
+    assert tip(repo, BRANCH) == sha and not marker.exists()
+
+
+def test_pin_refuses_a_head_moved_off_the_bead_branch(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    (repo / ".git" / "worktrees" / "wt" / "HEAD").write_text("ref: refs/heads/main\n")
+    with pytest.raises(gitwip.GitFailed, match="bead branch"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+@pytest.mark.parametrize("name", ["HEAD", "commondir", "gitdir"])
+def test_pin_refuses_linked_metadata(tmp_path: Path, name: str) -> None:
+    repo, worktree = linked(tmp_path)
+    meta = repo / ".git" / "worktrees" / "wt" / name
+    copy = tmp_path / f"copy-{name}"
+    copy.write_text(meta.read_text())
+    meta.unlink()
+    meta.symlink_to(copy)
+    with pytest.raises(gitwip.GitFailed):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_pin_refuses_a_linked_worktree_directory(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    real = repo / ".git" / "worktrees" / "wt"
+    real.rename(tmp_path / "moved")
+    real.symlink_to(tmp_path / "moved")
+    with pytest.raises(gitwip.GitFailed):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_pin_refuses_per_worktree_config(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", "extensions.worktreeConfig", "true")
+    with pytest.raises(gitwip.GitFailed, match="per-worktree"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_the_main_worktree_is_never_seeded(tmp_path: Path) -> None:
+    repo = git_repo(tmp_path / "repo")
+    gitwip.git(repo, "checkout", "-q", "-b", BRANCH)
+    p = gitwip.pin(repo, repo, BRANCH)                  # plan 3's callers may still commit in it
+    with pytest.raises(gitwip.GitFailed, match="main worktree"):
+        sessiongit.seed(p, tmp_path / "private", read_only=False)
+
+
+def test_a_session_commit_lands_on_the_bead_branch_alone(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    rw, objects = sessiongit.seed(p, private, read_only=False)
+    assert (rw.source, rw.target, rw.read_only) == (private, p.git_dir, False)
+    assert (objects.source, objects.target, objects.read_only) == (p.common / "objects",) * 2 + (True,)
+    main = tip(repo, "main")
+    assert inside(private, worktree, "rev-parse", "main") == main            # the snapshot is readable
+    (worktree / "a.txt").write_text("work")
+    inside(private, worktree, "add", "a.txt")
+    inside(private, worktree, *IDENT, "commit", "-q", "-m", "agent work")
+    made = inside(private, worktree, "rev-parse", "HEAD")
+    inside(private, worktree, "update-ref", "refs/heads/main", made)       # moves only its own copy
+    (worktree / ".git").write_text("gitdir: /nowhere\n")
+    assert sessiongit.land(p, private) == made
+    assert tip(repo, BRANCH) == made and tip(repo, "main") == main
+    assert (worktree / ".git").read_text() == f"gitdir: {p.git_dir}\n"
+    assert sessiongit.land(p, private) is None                             # idempotent
+    assert gitwip.git(repo, "fsck", "--connectivity-only", "--no-dangling") == ""
+
+
+def test_a_packed_bead_branch_still_lands(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "agent work")
+    inside(private, worktree, "pack-refs", "--all")
+    assert sessiongit.land(p, private) == tip(repo, BRANCH)
+
+
+def test_landing_refuses_a_link_in_the_session_objects(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    before = tip(repo, BRANCH)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "agent work")
+    (private / "objects" / "zz").symlink_to(tmp_path)
+    with pytest.raises(gitwip.GitFailed, match="link"):
+        sessiongit.land(p, private)
+    assert tip(repo, BRANCH) == before
+
+
+def test_landing_ignores_an_alternates_file_the_agent_rewrote(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    other = git_repo(tmp_path / "other")                  # holds a commit this repository never had
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    before = tip(repo, BRANCH)
+    (private / "objects" / "info" / "alternates").write_text(f"{other / '.git' / 'objects'}\n")
+    (private / "refs" / "heads" / "btq" / "btq-1").write_text(tip(other, "main") + "\n")
+    with pytest.raises(gitwip.GitFailed):
+        sessiongit.land(p, private)
+    assert tip(repo, BRANCH) == before
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_session_git.py -q`
+Expected: FAIL with `ImportError: cannot import name 'sessiongit'`.
+
+- [ ] **Step 3: Pin host git**
+
+In `src/heterodyne/wsd/gitwip.py`, add `import re`, `import stat` and `from dataclasses import dataclass` to the imports. Keep `git(path, *args)` for repository-level calls on trusted paths (`worktree add`, the tests). Replace `branch`, `toplevel` and `common_dir`, and change `find_wip`, `wip_commit` and `descends_from`, to:
+
+```python
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+PINNED = (*NO_HOOKS, "-c", "core.fsmonitor=false")
+
+
+@dataclass(frozen=True)
+class Pinned:
+    """A bead's worktree with its git directories taken from the trusted repository path, never from
+    the worktree's own `.git` file, which an agent can rewrite (D26)."""
+    work_tree: Path
+    git_dir: Path               # <common>/worktrees/<n>, or the common directory for the main worktree
+    common: Path                # <repo>/.git
+    branch: str                 # btq/<id>
+
+
+def no_link(base: Path, *parts: str) -> Path:
+    path = base
+    for part in parts:
+        path = path / part
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise GitFailed("git metadata is a link")
+    return path
+
+
+def read_meta(path: Path) -> str:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise GitFailed("git metadata is not a regular file")
+        return os.read(fd, 4096).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
+    """Pin `worktree` of `repo` on `branch`. GitFailed unless the worktree is one of the repository's own,
+    its HEAD is exactly the branch, and nothing on the way is a link."""
+    try:
+        root = repo.resolve(strict=True)
+        common = no_link(root, ".git")
+        work_tree = worktree.resolve(strict=True)
+        if work_tree == root:
+            git_dir = common
+        else:
+            pointer = f"{work_tree / '.git'}\n"
+            found = [d for d in sorted(no_link(common, "worktrees").iterdir())
+                     if stat.S_ISDIR(os.lstat(d).st_mode) and os.path.lexists(d / "gitdir")
+                     and read_meta(d / "gitdir") == pointer]
+            if len(found) != 1:
+                raise GitFailed("the worktree is not one of the repository's linked worktrees")
+            git_dir = found[0]
+            if read_meta(git_dir / "commondir") != "../..\n":
+                raise GitFailed("the worktree's common directory is redirected")
+        if read_meta(git_dir / "HEAD") != f"ref: refs/heads/{branch}\n":
+            raise GitFailed("the worktree's HEAD is not its bead branch")
+    except OSError:
+        raise GitFailed("the worktree's git metadata can't be read") from None
+    p = Pinned(work_tree, git_dir, common, branch)
+    if pinned_git(p, "config", "--get", "extensions.worktreeConfig", ok=(0, 1)).strip():
+        raise GitFailed("the repository uses per-worktree config")
+    return p
+
+
+def pinned_git(p: Pinned, *args: str, alternates: Path | None = None, data: bytes | None = None,
+               ok: tuple[int, ...] = (0,)) -> bytes:
+    """git on the pinned directories, with no hook, no fsmonitor and no inherited GIT_* variable."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {"GIT_DIR": str(p.git_dir), "GIT_COMMON_DIR": str(p.common), "GIT_WORK_TREE": str(p.work_tree)}
+    if alternates is not None:
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(alternates)
+    try:
+        result = subprocess.run(["git", *PINNED, *args], cwd=p.work_tree, env=env, input=data,
+                                capture_output=True, timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitFailed(type(exc).__name__) from None
+    if result.returncode not in ok:
+        raise GitFailed(f"git {args[0]} exited {result.returncode}")
+    return result.stdout
+
+
+def _text(p: Pinned, *args: str) -> str:
+    return pinned_git(p, *args).decode().strip()
+
+
+def find_wip(p: Pinned, mark: str) -> str | None:
+    """The SHA of the commit on HEAD's history whose message holds the mark, if any. Only the last 50
+    commits are searched: a park's own commit is at or near the tip."""
+    shas = _text(p, "log", "-n", "50", "--format=%H", "--fixed-strings", f"--grep={PARK_MARK}{mark}").split()
+    return shas[0] if shas else None
+
+
+def wip_commit(p: Pinned, mark: str, summary: str) -> str:
+    """Commit everything in the worktree as WIP and return HEAD. Idempotent: if a commit with the mark
+    already exists, return it; if there is nothing to commit, an empty commit still records the mark."""
+    found = find_wip(p, mark)
+    if found is not None:
+        return found
+    _text(p, "add", "--all")
+    _text(p, "-c", "user.name=wsd", "-c", "user.email=wsd@localhost", "commit", "--allow-empty",
+          "--no-verify", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
+    head = _text(p, "rev-parse", "HEAD")
+    if find_wip(p, mark) != head:      # the mark is what a replayed park looks for
+        raise GitFailed("the WIP commit does not carry its park mark")
+    return head
+
+
+def descends_from(p: Pinned, base: str) -> bool:
+    """HEAD is the commit `base` or a descendant of it. git refuses (and this is False) when `base` names
+    no object, or an object that is not a commit (a tree, a blob)."""
+    try:
+        pinned_git(p, "merge-base", "--is-ancestor", base, "HEAD")
+    except GitFailed:
+        return False
+    return True
+```
+
+In `src/heterodyne/wsd/beads.py`, `verify_worktree`'s check becomes:
+
+```python
+        try:
+            pinned = gitwip.pin(repo, worktree, f"btq/{bead}")
+            ok = (bool(bases) and worktree.is_dir() and not worktree.is_symlink()
+                  and pinned.work_tree == worktree.resolve()
+                  and all(FULL_SHA.fullmatch(base) and gitwip.descends_from(pinned, base)
+                          for base in bases))
+        except (OSError, gitwip.GitFailed):
+            ok = False
+```
+
+In `src/heterodyne/wsd/park.py`, both WIP commits pin first: `sha = gitwip.wip_commit(gitwip.pin(Path(rec.repo), worktree, f"btq/{bead}"), op.op_id, f"parked {bead}")`, and the same for `defer:{key}:{n}`. `_pin_and_dispatch` passes `repo=Path(rec.repo)` to `LaunchSpec`. In `src/heterodyne/wsd/runtime.py`, add to `LaunchSpec`, after `model`:
+
+```python
+    repo: Path | None = None    # the bead's repository, as recorded: the only trusted source of its git dirs
+```
+
+In plan 3's tests, the `wip_commit`, `find_wip` and `descends_from` calls pass `gitwip.pin(repo, worktree, branch)` instead of a path; `gitwip.branch(path)` in `tests/test_wsd_beads.py` becomes `gitwip.git(path, "rev-parse", "--abbrev-ref", "HEAD")`. No assertion changes.
+
+- [ ] **Step 4: Write the session git directory**
+
+`src/heterodyne/sandbox/sessiongit.py`:
+
+```python
+"""The session's own git directory (ADR 0001 §7: agents commit to their local btq/<id> branch; D26).
+
+The sandbox never sees the repository's real git directory. Each generation gets a private one, bound at
+the linked worktree's git-directory path so the worktree's own `.git` file finds it, with the common
+object store read-only behind `objects/info/alternates`. Once the sandbox is gone, `land` imports the
+bead branch alone, through pinned host git only."""
+
+import os
+import shutil
+import stat
+from pathlib import Path
+
+from heterodyne.agents.base import write_at
+from heterodyne.sandbox.spec import Bind
+from heterodyne.wsd.gitwip import FULL_SHA, GitFailed, Pinned, no_link, pinned_git, read_meta
+
+SNAPSHOT = ("refs/heads", "refs/remotes", "refs/tags")
+
+
+def _write(directory: Path, name: str, text: str) -> None:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        write_at(fd, name, text)
+    finally:
+        os.close(fd)
+
+
+def seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind]:
+    """Build a fresh private git directory for one generation. Returns its bind and the common store's."""
+    if p.git_dir == p.common:
+        raise GitFailed("a sandbox can't hold the main worktree: its git directory is inside it")
+    if os.path.lexists(private):
+        shutil.rmtree(private)                  # avoids symlink attacks; what it held was landed or refused
+    tip = pinned_git(p, "rev-parse", "--verify", f"refs/heads/{p.branch}^{{commit}}").decode().strip()
+    if not FULL_SHA.fullmatch(tip):
+        raise GitFailed("the bead branch has no commit")
+    listed = pinned_git(p, "for-each-ref", "--format=%(objectname) %(refname)", *SNAPSHOT).decode()
+    others = [line for line in listed.splitlines() if not line.endswith(f" refs/heads/{p.branch}")]
+    _write(private, "HEAD", f"ref: refs/heads/{p.branch}\n")
+    _write(private, "config", "[core]\n\trepositoryformatversion = 0\n\tbare = false\n")
+    _write(private, "packed-refs", "".join(f"{line}\n" for line in others))
+    owner, _, leaf = p.branch.rpartition("/")
+    _write(private / "refs" / "heads" / owner, leaf, f"{tip}\n")
+    _write(private / "objects" / "info", "alternates", f"{p.common / 'objects'}\n")
+    for name in ("index", "shallow"):
+        source = p.git_dir / name if name == "index" else p.common / name
+        if source.is_file() and not source.is_symlink():
+            shutil.copyfile(source, private / name)
+    return Bind(private, p.git_dir, read_only), Bind(p.common / "objects", p.common / "objects", True)
+
+
+def _plain_tree(root: Path) -> None:
+    for top, dirs, files in os.walk(root, followlinks=False):
+        for name in (*dirs, *files):
+            mode = os.lstat(Path(top) / name).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise GitFailed("the session's git objects hold a link or a special file")
+
+
+def _tip(private: Path, branch: str) -> str:
+    owner, _, leaf = branch.rpartition("/")
+    loose = private / "refs" / "heads" / owner / leaf
+    try:
+        if os.path.lexists(loose):
+            no_link(private, "refs", "heads", *owner.split("/"))
+            text = read_meta(loose).strip()
+        else:
+            packed = read_meta(private / "packed-refs").splitlines()
+            text = next((line.split()[0] for line in packed if line.endswith(f" refs/heads/{branch}")), "")
+    except OSError:
+        raise GitFailed("the session's bead branch can't be read") from None
+    if not FULL_SHA.fullmatch(text):
+        raise GitFailed("the session's bead branch is not a commit")
+    return text
+
+
+def land(p: Pinned, private: Path) -> str | None:
+    """Import the session's bead-branch tip. The new tip, or None when it didn't move. Idempotent."""
+    fd = os.open(p.work_tree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        write_at(fd, ".git", f"gitdir: {p.git_dir}\n")        # btq's own git sees the trusted pointer
+    except IsADirectoryError:
+        raise GitFailed("the worktree's .git was replaced by a directory") from None
+    finally:
+        os.close(fd)
+    objects = private / "objects"
+    try:
+        _plain_tree(objects)
+        _write(objects / "info", "alternates", f"{p.common / 'objects'}\n")
+    except OSError:
+        raise GitFailed("the session's git objects can't be read") from None
+    tip = _tip(private, p.branch)
+    old = pinned_git(p, "rev-parse", f"refs/heads/{p.branch}").decode().strip()
+    if tip == old:
+        return None
+    if pinned_git(p, "cat-file", "-t", tip, alternates=objects).decode().strip() != "commit":
+        raise GitFailed("the session's bead branch is not a commit")
+    names = pinned_git(p, "rev-list", "--objects", tip, "--not", "--all", alternates=objects)
+    if names.strip():
+        pack = pinned_git(p, "pack-objects", "--stdout", alternates=objects, data=names)
+        pinned_git(p, "index-pack", "--stdin", "--strict", "--fix-thin", data=pack)
+    pinned_git(p, "rev-list", "--quiet", "--objects", tip, "--not", "--all")      # connected, here alone
+    pinned_git(p, "update-ref", "-m", "wsd: land the session's commits", f"refs/heads/{p.branch}", tip, old)
+    return tip
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `timeout 900 uv run pytest tests/test_session_git.py tests/test_wsd_gitwip.py tests/test_wsd_beads.py tests/test_wsd_park.py tests/test_wsd_defer.py tests/test_wsd_recovery.py -q && timeout 300 uv run pyright src/heterodyne/wsd src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
+Expected: PASS; clean. Plan 3's suites are the regression check: pinning changes no outcome of theirs.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/heterodyne/wsd/gitwip.py src/heterodyne/wsd/beads.py src/heterodyne/wsd/park.py \
+  src/heterodyne/wsd/runtime.py src/heterodyne/sandbox/sessiongit.py tests/test_session_git.py \
+  tests/test_wsd_gitwip.py tests/test_wsd_beads.py tests/test_wsd_park.py tests/test_wsd_defer.py
+git commit -m "plan4 T7A: pinned host git and the session's private git directory (gap 13)"
+```
+
 ### Task 8 [r15]: The probes and the exec-path self-test
 
 **Files:**
 - Create: `src/heterodyne/sandbox/resources/probes.py` (port of `spikes/s5/probes.py`), `src/heterodyne/sandbox/openshell_selftest.py`
-- Test: `tests/test_sandbox_openshell_selftest.py`
+- Test: `tests/test_sandbox_openshell_selftest.py`, `tests/test_sandbox_probes.py`
 
 **Interfaces:**
 - Consumes:
@@ -3504,13 +4156,277 @@ def test_an_unwritable_canary_fails_the_precondition(tmp_path: Path) -> None:
         selftest().exec_path(ctx)
 
 
+def test_an_unwritable_other_accounts_canary_fails_the_precondition(tmp_path: Path) -> None:
+    ctx = context(tmp_path, StubBackend())
+    ctx.layout.oa_canary.mkdir(parents=True)
+    with pytest.raises(SelfTestFailed, match="canary-precondition"):
+        selftest().exec_path(ctx)
+
+
 def test_files_ship_the_probes() -> None:
     assert selftest().files() == {"probes.py": PROBES.read_text()}
 ```
 
+`tests/test_sandbox_probes.py` runs the real `probes.py` offline, against a scripted sandbox world: its files, the broker's answers, the session sockets, the environment and curl. These are r15 §11's negative controls for the probe logic itself. Each control breaks one rule of an otherwise enforcing world and requires exactly that rule's check, and no other, to fail. A missing canary needs no control here: inside, it is indistinguishable from an unreachable one, which is why the host writes each canary and reads it back first (`canary-precondition`, above). The kernel and runtime demonstrations stay in `tests/live` (Task 15).
+
+```python
+"""The probes' own logic, offline (ADR 0001 r15 §11's negative controls).
+
+Each test runs the real resources/probes.py against a scripted sandbox world: every file it opens is
+mapped under a temporary root, and the broker's answers, the session sockets, the environment and curl
+are fakes. A probe that passed a world which doesn't enforce a rule fails one of these tests.
+"""
+import builtins
+import errno
+import hashlib
+import io
+import json
+import os
+import socket
+import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, Any
+
+import pytest
+
+from heterodyne.agents.codex import Codex
+from heterodyne.sandbox.openshell_selftest import AGENT_CHECKS, EXEC_CHECKS, OPENSHELL_ENV, env_allowed
+from heterodyne.sandbox.spec import LAUNCHER_ENV
+
+PROBES = Path(__file__).resolve().parents[1] / "src" / "heterodyne" / "sandbox" / "resources" / "probes.py"
+CODE = compile(PROBES.read_text(), str(PROBES), "exec")
+RUN = "/run/hz"
+CHOSEN = "/sandbox/home/.codex/auth.json"
+LOGIN = '{"fake": "not-a-token"}'
+REAL_HOME_CANARY = "/outside/real-home/.heterodyne-canary"
+OA_CANARY = "/outside/sessions/hz0123456789ab/oa-canary"
+OTHER_LOGIN = "/outside/accounts/work/auth.json"
+WSD_SOCKET = "/outside/state/wsd/ctl.sock"
+ALLOWED, DENIED, MODEL = "probe.example.org", "denied.example.org", "chatgpt.com"
+SYNTHETIC = "198.18.0.7"                       # OpenShell's policy DNS answers from 198.18.0.0/15
+PROXY_CA = "*  issuer: O=OpenShell; CN=OpenShell Sandbox CA"
+REFUSED = (7, "http=000", "* connect to 198.18.0.7 port 443 failed: Permission denied")
+REACHED = (0, "http=200", PROXY_CA)
+FORBIDDEN = '{"ok": false, "error": "forbidden"}'
+STATUS = "Name:\tpython3\nSeccomp:\t2\nNoNewPrivs:\t1\nCapEff:\t0000000000000000\n"
+NET_DEV = "Inter-|   Receive\n face |bytes    packets\n    lo: 0 0\n"
+Results = tuple[int, dict[str, bool]]
+
+
+@dataclass
+class World:
+    """A sandbox as the probe sees it. The defaults enforce every rule."""
+    root: Path
+    path: str = "exec"
+    env: dict[str, str] = field(default_factory=dict[str, str])
+    readonly: tuple[str, ...] = (RUN, CHOSEN)
+    denied: dict[str, int] = field(default_factory=dict[str, int])   # paths whose open gives this errno
+    inet: int = errno.EACCES               # the broker's answer to an INET connect()
+    udp_send: int = errno.EDESTADDRREQ     # ... to a non-DNS UDP sendto()
+    raw: int = errno.EPROTONOSUPPORT       # ... to a raw or ICMP socket(); 0 creates it
+    resolve: str = SYNTHETIC
+    session_socket: bool = True
+    replies: dict[str, str] = field(
+        default_factory=lambda: {"approve": FORBIDDEN, "hook_event": '{"ok": true}'})
+    curl: dict[str, tuple[int, str, str]] = field(default_factory=dict[str, tuple[int, str, str]])
+    reported: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+
+    def at(self, path: str | os.PathLike[str]) -> Path:
+        return self.root / str(path).lstrip("/")
+
+    def put(self, path: str, text: str) -> None:
+        self.at(path).parent.mkdir(parents=True, exist_ok=True)
+        self.at(path).write_text(text)
+
+    def open(self, file: str, mode: str = "r") -> IO[Any]:
+        if file in self.denied:
+            raise OSError(self.denied[file], os.strerror(self.denied[file]), file)
+        under = any(file == r or file.startswith(r + "/") for r in self.readonly)
+        if under and any(c in mode for c in "wa+"):
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS), file)
+        return builtins.open(self.at(file), mode)
+
+    def answer(self, host: str) -> tuple[int, str, str]:
+        if host in self.curl:
+            return self.curl[host]
+        if host == ALLOWED or (host == MODEL and self.path == "agent"):
+            return REACHED
+        return REFUSED
+
+    def config(self) -> dict[str, Any]:
+        """The probes' input, shaped as Task 8's probe_config builds it."""
+        return {"path": self.path, "real_home_canary": REAL_HOME_CANARY, "oa_canary": OA_CANARY,
+                "other_accounts": [{"account": "work", "class": "present", "paths": [OTHER_LOGIN]}],
+                "chosen": [{"path": CHOSEN, "sha256": hashlib.sha256(LOGIN.encode()).hexdigest()}],
+                "allowed": ALLOWED, "denied": DENIED, "model_host": MODEL, "wsd_socket": WSD_SOCKET,
+                "env_allowed": sorted(env_allowed(Codex(), self.path)),
+                "env_user": sorted(LAUNCHER_ENV | OPENSHELL_ENV)}
+
+
+def fake_socket(world: World) -> type:
+    class FakeSocket:
+        def __init__(self, family: int = socket.AF_INET, kind: int = socket.SOCK_STREAM,
+                     proto: int = 0) -> None:
+            special = kind == socket.SOCK_RAW or proto == socket.IPPROTO_ICMP
+            if world.raw and family != socket.AF_UNIX and special:
+                raise OSError(world.raw, os.strerror(world.raw))
+            self.family, self.peer, self.sent = family, "", b""
+
+        def settimeout(self, seconds: float) -> None:
+            pass
+
+        def connect(self, addr: object) -> None:
+            if self.family != socket.AF_UNIX:
+                raise OSError(world.inet, os.strerror(world.inet))
+            if not world.session_socket or addr not in (f"{RUN}/s.sock", f"{RUN}/p.sock"):
+                raise OSError(errno.ECONNREFUSED, os.strerror(errno.ECONNREFUSED))
+            self.peer = str(addr)
+
+        def sendto(self, data: bytes, addr: object) -> None:
+            raise OSError(world.udp_send, os.strerror(world.udp_send))
+
+        def sendall(self, data: bytes) -> None:
+            self.sent += data
+            if self.peer.endswith("p.sock"):
+                world.reported += [json.loads(ln) for ln in data.splitlines()]
+
+        def makefile(self) -> io.StringIO:
+            return io.StringIO(world.replies[json.loads(self.sent)["type"]] + "\n")
+
+        def close(self) -> None:
+            pass
+
+    return FakeSocket
+
+
+@pytest.fixture
+def world(tmp_path: Path) -> World:
+    w = World(tmp_path, env={"HOME": "/sandbox/home", "PWD": "/sandbox/work", "OPENSHELL_SANDBOX": "1",
+                             "OPENSHELL_USER_ENVIRONMENT": json.dumps({"OPENSHELL_SANDBOX": "1"})})
+    w.put(f"{RUN}/token", "fake-session-token\n")
+    w.put(CHOSEN, LOGIN)
+    w.put("/proc/net/dev", NET_DEV)
+    w.put("/proc/net/route", "Iface\tDestination\tGateway\n")
+    w.put("/proc/net/ipv6_route", "00000000000000000000000000000001 80 0 0 0 0 0 0 0 lo\n")
+    w.put("/proc/self/status", STATUS)
+    return w
+
+
+@pytest.fixture
+def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> Callable[[World], Results]:
+    def go(world: World) -> Results:
+        cfg = json.dumps(world.config())
+        if world.path == "agent":
+            world.put(f"{RUN}/agent-probe.json", cfg)
+        listdir, lstat = os.listdir, os.lstat
+        monkeypatch.setattr(sys, "argv", ["probes.py", "--agent"] if world.path == "agent" else ["probes.py"])
+        monkeypatch.setattr(sys, "stdin", io.StringIO(cfg))
+        monkeypatch.setattr(os, "environ", dict(world.env))
+        monkeypatch.setattr(os, "listdir", lambda p: listdir(world.at(p)))
+        monkeypatch.setattr(os, "lstat", lambda p: lstat(world.at(p)))
+        monkeypatch.setattr(socket, "socket", fake_socket(world))
+        monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *a: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (world.resolve, port))])
+
+        def curl(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            rc, out, err = world.answer(argv[-1].removeprefix("https://").rstrip("/"))
+            return subprocess.CompletedProcess(argv, rc, out, err)
+
+        monkeypatch.setattr(subprocess, "run", curl)
+        try:
+            exec(CODE, {"__name__": "__main__", "open": world.open})
+            rc = -1                                    # the probe always ends with sys.exit
+        except SystemExit as stop:
+            rc = int(stop.code or 0)
+        monkeypatch.undo()
+        lines = capsys.readouterr().out.splitlines()
+        verdicts = [ln.split()[:2] for ln in lines if ln.startswith(("PASS ", "FAIL "))]
+        return rc, {name: verdict == "PASS" for verdict, name in verdicts}
+    return go
+
+
+def test_an_enforcing_world_passes_every_check(world: World, run: Callable[[World], Results]) -> None:
+    rc, results = run(world)
+    assert rc == 0 and set(EXEC_CHECKS) <= results.keys() and all(results.values())
+
+
+def test_the_agent_path_allows_the_cli_tool_env_and_reports_every_result(
+        world: World, run: Callable[[World], Results]) -> None:
+    world.path = "agent"
+    world.env["CODEX_THREAD_ID"] = "fake-thread"
+    rc, results = run(world)
+    assert rc == 0 and set(AGENT_CHECKS) <= results.keys() and all(results.values())
+    assert {r["check"] for r in world.reported if "check" in r} == results.keys()
+    assert world.reported[-1] == {"done": 0}
+
+
+def _env(**extra: str) -> Callable[[World], None]:
+    return lambda w: w.env.update(extra)
+
+
+def _replace(path: str, old: str, new: str) -> Callable[[World], None]:
+    return lambda w: w.put(path, w.at(path).read_text().replace(old, new))
+
+
+NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
+    ("a mounted real-home canary", lambda w: w.put(REAL_HOME_CANARY, "x"), {"real-home-canary-unreadable"}),
+    ("a mounted other-accounts canary", lambda w: w.put(OA_CANARY, "x"), {"other-accounts"}),
+    ("another account's login reachable", lambda w: w.put(OTHER_LOGIN, LOGIN), {"other-accounts"}),
+    ("a wrong login hash", lambda w: w.put(CHOSEN, '{"fake": "another"}'), {"other-accounts"}),
+    ("a writable login", lambda w: setattr(w, "readonly", (RUN,)), {"other-accounts"}),
+    ("a leaked variable", _env(GITHUB_TOKEN="fake"), {"host-env-not-inherited"}),
+    ("a leaked user-environment variable",
+     _env(OPENSHELL_USER_ENVIRONMENT=json.dumps({"ANTHROPIC_API_KEY": "fake"})), {"host-env-not-inherited"}),
+    ("a tool-only variable on the exec path", _env(CODEX_THREAD_ID="fake-thread"),
+     {"host-env-not-inherited"}),
+    ("a dead session socket", lambda w: setattr(w, "session_socket", False),
+     {"control-op-rejected", "hook-event-accepted"}),
+    ("a control operation accepted", lambda w: w.replies.update(approve='{"ok": true}'),
+     {"control-op-rejected"}),
+    ("a failed outer fence: an interface", _replace("/proc/net/dev", "lo: 0 0", "lo: 0 0\n  eth0: 0 0"),
+     {"direct-network-blocked"}),
+    ("a failed outer fence: a route", _replace("/proc/net/route", "Gateway\n", "Gateway\neth0\t0\t1\n"),
+     {"direct-network-blocked"}),
+    ("no seccomp broker", _replace("/proc/self/status", "Seccomp:\t2", "Seccomp:\t0"),
+     {"direct-network-blocked"}),
+    ("a capability", _replace("/proc/self/status", "CapEff:\t0000000000000000",
+                              "CapEff:\t0000000000002000"),
+     {"direct-network-blocked"}),
+    ("the kernel fence's answer instead of the broker's", lambda w: setattr(w, "inet", errno.ENETUNREACH),
+     {"direct-network-blocked", "non-allowlisted-host-blocked"}),
+    ("a raw socket created", lambda w: setattr(w, "raw", 0), {"direct-network-blocked"}),
+    ("a UDP send allowed", lambda w: setattr(w, "udp_send", errno.ENETUNREACH), {"direct-network-blocked"}),
+    ("the denied host resolved for real", lambda w: setattr(w, "resolve", "192.0.2.7"),
+     {"non-allowlisted-host-blocked"}),
+    ("the denied host reached", lambda w: w.curl.update({DENIED: REACHED}), {"non-allowlisted-host-blocked"}),
+    ("the control reached around the proxy",
+     lambda w: w.curl.update({ALLOWED: (0, "http=200", "*  issuer: CN=R11")}),
+     {"allowlisted-host-reachable"}),
+    ("the model host reached from the exec path", lambda w: w.curl.update({MODEL: REACHED}),
+     {"model-host-exec-path"}),
+    ("wsd's socket reachable", lambda w: w.put(WSD_SOCKET, ""), {"wsd-socket-absent"}),
+    ("OpenShell's key readable", lambda w: w.put("/.openshell/channel/sandbox/server.key", "fake"),
+     {"openshell-control-material-unreadable"}),
+]
+
+
+@pytest.mark.parametrize("break_it, failing", [(f, c) for _, f, c in NEGATIVE_CONTROLS],
+                         ids=[name for name, _, _ in NEGATIVE_CONTROLS])
+def test_each_broken_rule_fails_its_own_check_only(
+        world: World, run: Callable[[World], Results], break_it: Callable[[World], None],
+        failing: set[str]) -> None:
+    break_it(world)
+    rc, results = run(world)
+    assert rc == 1
+    assert {name for name, ok in results.items() if not ok} == failing
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `timeout 300 uv run pytest tests/test_sandbox_openshell_selftest.py -q`
+Run: `timeout 300 uv run pytest tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'heterodyne.sandbox.openshell_selftest'`.
 
 - [ ] **Step 3: Write the probes**
@@ -3852,8 +4768,11 @@ def env_allowed(adapter: Adapter, path: str) -> frozenset[str]:
 def probe_config(ctx: ProbeContext, path: str) -> dict[str, Any]:
     """The probes' input, after the host-side preconditions: a fresh Other accounts canary readable
     outside, each chosen login file's hash, and the other accounts' classes. It holds no secret."""
-    ctx.layout.oa_canary.write_text(secrets.token_hex(8))
-    ctx.layout.oa_canary.read_bytes()
+    try:
+        ctx.layout.oa_canary.write_text(secrets.token_hex(8))
+        ctx.layout.oa_canary.read_bytes()
+    except OSError:
+        raise SelfTestFailed("canary-precondition") from None
     chosen = [{"path": str(b.target), "sha256": hashlib.sha256(b.source.read_bytes()).hexdigest()}
               for b in ctx.spec.logins]
     return {"path": path, "real_home_canary": str(ctx.real_home_canary),
@@ -3929,14 +4848,14 @@ Task 9 replaces the `agent_path` stub (which fails closed, so a runtime wired be
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `timeout 300 uv run pytest tests/test_sandbox_openshell_selftest.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
+Run: `timeout 300 uv run pytest tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
 Expected: PASS; clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/heterodyne/sandbox/resources/probes.py src/heterodyne/sandbox/openshell_selftest.py \
-  tests/test_sandbox_openshell_selftest.py
+  tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py
 git commit -m "plan4 T8: in-sandbox probes and the exec-path self-test (OpenShell, r15 criterion)"
 ```
 
@@ -4618,7 +5537,7 @@ git commit -m "plan4 T9: agent-path self-test with a host-verified probe channel
   - `src/heterodyne/sandbox/channel.py` (replace `ProcVerifier`);
   - `src/heterodyne/sandbox/openshell_selftest.py` (`read_ptrace_scope`, the `ptrace-scope` precondition, the protection checks);
   - `src/heterodyne/sandbox/resources/probes.py` (section 11).
-- Test: `tests/test_sandbox_channel.py`, `tests/test_sandbox_openshell_selftest.py`
+- Test: `tests/test_sandbox_channel.py`, `tests/test_sandbox_openshell_selftest.py`, `tests/test_sandbox_probes.py`
 
 **Interfaces:**
 - Consumes: Task 9's `ProcVerifier`, `ProbeChannel`, `OpenShellSelfTest.agent_path`; Task 8's `probes.py`, `TAIL_CHECKS`, `exec_path`; Task 4's `Backend.workload_pid`.
@@ -4829,10 +5748,76 @@ def test_read_ptrace_scope(tmp_path: Path) -> None:
             read_ptrace_scope(tmp_path / "missing")) == (2, -1, -1)
 ```
 
+In `tests/test_sandbox_probes.py`, the world gains section 11's answers. Add `import ctypes`, and these fields to `World`:
+
+```python
+    attach: int = errno.EPERM              # ptrace(PTRACE_ATTACH) on the probe's child; 0 attaches
+```
+
+In the `world` fixture, before `return w`, deny the child's memory as Yama scope 2 does:
+
+```python
+    w.put(f"/proc/{CHILD}/mem", "")
+    w.denied[f"/proc/{CHILD}/mem"] = errno.EACCES
+```
+
+Add, after `fake_socket`:
+
+```python
+CHILD = 4242
+
+
+class FakeChild:
+    pid = CHILD
+
+    def __init__(self, argv: list[str]) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return -9
+
+
+class FakeLibc:
+    def __init__(self, world: World) -> None:
+        self.world = world
+        self.restype: object = None
+        self.argtypes: object = None
+
+    @property
+    def ptrace(self) -> "FakeLibc":
+        return self
+
+    def __call__(self, request: int, pid: int, addr: object, data: object) -> int:
+        return 0 if self.world.attach == 0 else -1
+```
+
+In `run`, after the `subprocess.run` patch:
+
+```python
+        monkeypatch.setattr(subprocess, "Popen", FakeChild)
+        monkeypatch.setattr(ctypes, "CDLL", lambda name, use_errno=False: FakeLibc(world))
+        monkeypatch.setattr(ctypes, "get_errno", lambda: world.attach)
+```
+
+and append to `NEGATIVE_CONTROLS`:
+
+```python
+NEGATIVE_CONTROLS += [
+    ("the probe's child attachable", lambda w: setattr(w, "attach", 0), {"probe-tamper-denied"}),
+    ("the attach refused only because the child is gone", lambda w: setattr(w, "attach", errno.ESRCH),
+     {"probe-tamper-denied"}),
+    ("the child's memory writable", lambda w: w.denied.clear(), {"probe-tamper-denied"}),
+    ("the run directory writable", lambda w: setattr(w, "readonly", (CHOSEN,)), {"probe-files-readonly"}),
+]
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py -q`
-Expected: FAIL with `TypeError: ProcVerifier.__init__() got an unexpected keyword argument 'root_pid'` and `ImportError: cannot import name 'PROTECTION_CHECKS'`.
+Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py -q`
+Expected: FAIL with `TypeError: ProcVerifier.__init__() got an unexpected keyword argument 'root_pid'` and `ImportError: cannot import name 'PROTECTION_CHECKS'`. In `test_sandbox_probes.py`, the four new controls and both passing-world tests fail: the probe doesn't print section 11's checks yet.
 
 - [ ] **Step 3: Add the scope check and the protection checks to `openshell_selftest.py`**
 
@@ -5036,21 +6021,22 @@ check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
+Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests`
 Expected: PASS; clean.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/heterodyne/sandbox/channel.py src/heterodyne/sandbox/openshell_selftest.py \
-  src/heterodyne/sandbox/resources/probes.py tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py
+  src/heterodyne/sandbox/resources/probes.py tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py \
+  tests/test_sandbox_probes.py
 git commit -m "plan4 T9A: probe protection, Yama scope 2, no workload capability, namespace and read-only checks"
 ```
 
 ### Task 10: The sandbox runtime
 
 **Files:**
-- Create: `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/runtime.py`, `tests/fakes/fake_backend.py`, `tests/fakes/scripted_selftest.py`
+- Create: `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/runtime.py`, `tests/fakes/fake_backend.py`, `tests/fakes/scripted_selftest.py` (Task 11 creates `reaper.py`, which only a real backend's reaper runs)
 - Modify: `src/heterodyne/tmux.py` (add `pane_info`), `tests/sandbox_env.py` (append the runtime rig)
 - Test: `tests/test_sandbox_runtime.py`, `tests/test_tmux.py` (one test added)
 
@@ -5063,7 +6049,9 @@ git commit -m "plan4 T9A: probe protection, Yama scope 2, no workload capability
   - Task 3's `Backend`, `BackendError`, `BackendUnavailable`;
   - Task 5's `SessionServer`;
   - Task 6's `shim` (`TOKEN_FILE`, `CONFIG_FILE`, `REQUEST_WRAPPER`);
-  - Task 7's `Adapter`, `AdapterError`, `Cli`, `write_private`, `ADAPTERS`.
+  - Task 7's `Adapter`, `AdapterError`, `Cli`, `write_private`, `ADAPTERS`;
+  - Task 7A's `gitwip.pin`, `gitwip.Pinned`, `gitwip.wip_commit`, `gitwip.GitFailed`, `sessiongit.seed` and `sessiongit.land`, and `LaunchSpec.repo`;
+  - Task 4's contract for `Backend.reaper_argv` (Task 3's protocol).
 - Produces:
   - `Tmux.pane_info(name) -> tuple[str, int]` (pane ID, pane PID), raising `TmuxError`.
   - `heterodyne.sandbox.selftest`:
@@ -5072,24 +6060,27 @@ git commit -m "plan4 T9A: probe protection, Yama scope 2, no workload capability
     - `SelfTest` (Protocol): `files() -> Mapping[str, str]`, `exec_path(ctx)`, `agent_path(ctx)`.
   - `heterodyne.sandbox.runtime`:
     - `Phase` (StrEnum): `creating`, `testing`, `starting`, `running`, `stopping`, `ended`;
-    - `SessionRecord` (msgspec Struct): `key`, `ws`, `bead`, `role`, `profile`, `adapter`, `generation`, `phase`, `sandbox`, `tmux_session`, `ran`, `native_id`, `worktree`, `started_at`, `deadline`, `error`;
+    - `SessionRecord` (msgspec Struct): `key`, `ws`, `bead`, `role`, `profile`, `adapter`, `generation`, `phase`, `sandbox`, `tmux_session`, `ran`, `native_id`, `worktree`, `started_at`, `deadline`, `error`, `stop_reason`, `wip_mark`, `repo`, `unlanded`;
     - `read_record(layout) -> SessionRecord | None`, `write_record(layout, rec)`;
     - `RuntimeConfig` (frozen dataclass): `sessions`, `settings`, `accounts`, `real_home`, `real_home_canary`, `wsd_socket`, `uid`, `gid`, `tmux`, `path`, `clock`, `wait_clock`, `sleep`, `adapters`;
-    - `SandboxRuntime(config, backend, selftest)`, implementing `AgentRuntime`, with `tmux_name(key) -> str` and `layout(key) -> SessionLayout`; Task 11 adds `expire`.
+    - `SandboxRuntime(config, backend, selftest)`, implementing `AgentRuntime`, with `tmux_name(key) -> str`, `reaper_name(key) -> str`, `layout(key) -> SessionLayout`, `_end(rec, *, interrupt, lifetime=False) -> bool` and `_settle_wip(layout, rec) -> SessionRecord`; Task 11 adds `expire`.
   - `tests/fakes/fake_backend.py`: `FakeBackend`. `tests/fakes/scripted_selftest.py`: `ScriptedSelfTest`.
-  - In `tests/sandbox_env.py`: `RuntimeRig` and `runtime_rig(root, tmux, clock) -> RuntimeRig`, `launch_spec(rig, profile, bead="btq-1", **changes) -> LaunchSpec`.
+  - In `tests/sandbox_env.py`: `RuntimeRig` (its `worktree` is a linked worktree of `repo` on `btq/btq-1`) and `runtime_rig(root, tmux, clock) -> RuntimeRig`, `launch_spec(rig, profile, bead="btq-1", **changes) -> LaunchSpec`.
+  - `FakeBackend.reapers: list[tuple[str, int]]` and `ScriptedSelfTest.during_agent`.
 
 This is where the launch sequence of the Architecture section lives. The rules it keeps:
 
 - **The record comes first.** `session.json` is written (atomically, 0600) before each step it describes. A record in any phase but `running` or `ended` is a launch that stopped part way, by an error or a dead wsd, and its sandbox and pane are cleaned up before anything else uses the key. `ran` is set when a generation reaches `running` and never cleared.
-- **The resume contract (D9, refined).** The native ID to look for is the spec's, or else the record's when a generation ran.
+- **The resume contract (D9, plan 3's unchanged).** The native ID to look for is the spec's, or else the record's when a generation ran.
   - If the home holds that ID's state, the session resumes it.
-  - It starts fresh if there is no record, or no generation ever reached `running`, or the home holds no state for any session. A generation that never reached `running` was a launch that failed, or was cut off, before wsd got its receipt; the only turn it held was the self-test's prompt.
-  - Anything else is `RuntimeUnavailable`.
+  - It starts fresh only if there is no record, or no generation ever reached `running`. A generation that never reached `running` was a launch that failed, or was cut off, before wsd got its receipt; the only turn it held was the self-test's prompt.
+  - Anything else is `RuntimeUnavailable`, even when the home holds no session state at all: missing state is never evidence that none existed.
   - A fresh Codex start passes no ID (Codex assigns the thread); a fresh Claude start passes the spec's.
 - **Failure.** Any exception after the first record write deletes the sandbox, kills the pane, closes the socket and confirms the end: then `LaunchFailed` with a fixed reason. If the end can't be confirmed, it is `LaunchUncertain`, and the record stays `stopping` so `sessions` keeps the key listed as `unknown`. Known failures keep their own fixed text; anything else becomes "launch step failed (<type>)".
 - **`sessions`** fails closed. A backend that can't list, an unreadable record, or a sandbox named like ours (`hz…g…`) whose short ID has no record is `RuntimeUnavailable`. A running record is live only if its sandbox is listed and its pane is alive; it then gets its socket re-bound if this wsd hasn't one (D19). Any other non-ended record is cleaned up; one that can't be is listed `unknown`.
-- **`stop`** interrupts (Escape), kills the pane and deletes every listed sandbox of the key, then records `ended`. It is idempotent, and `RuntimeUnavailable` if the end can't be confirmed.
+- **`stop`** interrupts (Escape), kills the pane and deletes every listed sandbox of the key, lands the session's commits (D26), then records `ended`. It is idempotent, and `RuntimeUnavailable` if the end can't be confirmed.
+- **The deadline (D13).** It is fixed when the login is first exposed, just before the sandbox is created: the lifetime from then, capped at the checked expiry minus the stop margin. A launch still short of `running` once the stop window has opened is refused. The reaper (Task 11's module, started here through `Backend.reaper_argv`) is in place before the sandbox exists.
+- **Git (D26).** The launch pins the worktree from `LaunchSpec.repo` and refuses a main worktree or a moved `HEAD`. Each generation gets a fresh private git directory (Task 7A). An end lands its commits before `ended` is recorded; a failure sets `unlanded`, and the next launch refuses.
 
 `FakeBackend` runs each sandbox's commands on the host, so the offline tests exercise the real adapters, shim, socket and tmux. It maps every bind whose target differs from its source (`/run/hz`, `/run/hz-bridge`, the Codex daemon directory) back to its source in argv and the environment, and passes the map as `HZ_FAKE_PATHS` for the fake CLI's hook commands. `ScriptedSelfTest` stands in for the OpenShell self-test. Its agent path does what the real one needs of the agent: it waits for the prompt, submits one line and waits for the `Stop`, so Codex reports its thread ID.
 
@@ -5228,6 +6219,7 @@ class FakeBackend:
     created: list[str] = field(default_factory=list[str])
     deleted: list[str] = field(default_factory=list[str])
     execs: list[list[str]] = field(default_factory=list[list[str]])
+    reapers: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
 
     def available(self) -> bool:
         return self.up
@@ -5310,6 +6302,12 @@ class FakeBackend:
     def workload_pid(self, name: str) -> int:
         return os.getpid()
 
+    def reaper_argv(self, name: str, deadline: int) -> list[str]:
+        """The fake's sandboxes live in this process, so its backstop only waits; Task 11's tests drive
+        the deletion it stands for, and `reaper.reap` is tested on its own."""
+        self.reapers.append((name, deadline))
+        return [sys.executable, "-I", "-c", "import time; time.sleep(86400)"]
+
     def pane_env(self) -> Mapping[str, str]:
         return {}
 ```
@@ -5345,6 +6343,7 @@ class ScriptedSelfTest:
         self.agent_fail = ""
         self.exec_runs: list[str] = []
         self.agent_runs: list[str] = []
+        self.during_agent: Callable[[], None] | None = None     # e.g. a test clock advanced: a slow start
 
     def files(self) -> Mapping[str, str]:
         return {"probes.py": "# scripted self-test: no probes\n"}
@@ -5358,6 +6357,8 @@ class ScriptedSelfTest:
         self.agent_runs.append(ctx.spec.name)
         if self.agent_fail:
             raise SelfTestFailed(self.agent_fail)
+        if self.during_agent is not None:
+            self.during_agent()
         _wait(lambda: ctx.adapter.prompt_marker in ctx.tmux.capture(ctx.tmux_session, 50))
         before = ctx.turns().stops
         ctx.tmux.paste(ctx.tmux_session, "self-test")
@@ -5366,7 +6367,7 @@ class ScriptedSelfTest:
 
 `ScriptedSelfTest` keeps its own bounded wait so that it doesn't import `sandbox_env`, which imports it.
 
-Append to `tests/sandbox_env.py` (add `import os`, `from dataclasses import dataclass` and the imports below to its import block):
+Append to `tests/sandbox_env.py` (add `import os`, `import subprocess`, `from dataclasses import dataclass` and the imports below to its import block):
 
 ```python
 from fakes.fake_backend import FakeBackend
@@ -5390,6 +6391,7 @@ class RuntimeRig:
     clock: Clock
     worktree: Path
     home: Path
+    repo: Path
 
 
 def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> RuntimeRig:
@@ -5405,7 +6407,10 @@ def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> Runtime
         real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
         tmux=tmux, path=os.pathsep.join((str(claude.parent), str(codex.parent))), clock=clock)
     runtime = SandboxRuntime(config, backend, selftest)
-    return RuntimeRig(root, runtime, backend, selftest, tmux, clock, git_repo(root / "w"), home)
+    repo, worktree = git_repo(root / "r"), root / "w"          # a linked worktree, as btq makes them
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "btq/btq-1", str(worktree)],
+                   check=True, capture_output=True)
+    return RuntimeRig(root, runtime, backend, selftest, tmux, clock, worktree, home, repo)
 
 
 def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: str = "default",
@@ -5415,7 +6420,7 @@ def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: 
     key = ids.role_session(bead, "coder", profile)
     native = key if profile == "p-one" else None
     return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
-                      native_id=native, account=account)
+                      native_id=native, account=account, repo=rig.repo)
 ```
 
 - [ ] **Step 4: Write the failing runtime tests**
@@ -5425,13 +6430,15 @@ def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: 
 ```python
 import contextlib
 import json
+import os
 import shutil
+import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sandbox_env import RuntimeRig, launch_spec, runtime_rig, short_dir, wait_for
+from sandbox_env import RuntimeRig, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
 from wsd_env import Clock
 
@@ -5550,6 +6557,98 @@ def test_state_that_ran_but_is_gone_is_unavailable(rig: RuntimeRig) -> None:
         rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
 
 
+@pytest.mark.parametrize("profile, state", [("p-one", ".claude"), ("p-two", ".codex")])
+def test_a_session_that_ran_with_its_whole_state_dir_deleted_is_unavailable(
+        rig: RuntimeRig, profile: str, state: str) -> None:
+    """Plan 3's contract: a record that says a generation ran proves state existed. Deleting all of it
+    is not evidence that none ever did, and Codex must never be handed a different thread."""
+    spec = launch_spec(rig, profile)
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    shutil.rmtree(rig.runtime.layout(spec.session_key).home / state)
+    with pytest.raises(RuntimeUnavailable, match="state"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert record(rig, spec.session_key).generation == 1        # nothing new was recorded
+
+
+def test_a_home_link_planted_by_the_agent_refuses_the_relaunch(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    conf = rig.runtime.layout(spec.session_key).home / ".claude"
+    shutil.rmtree(conf)
+    outside = rig.root / "outside"
+    outside.mkdir()
+    conf.symlink_to(outside)
+    with pytest.raises(LaunchFailed, match="won't follow"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert list(outside.iterdir()) == []
+
+
+def agent_git(rig: RuntimeRig, key: str, *args: str) -> str:
+    """git as the agent runs it inside: the worktree's `.git` file finds the private git directory."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {"GIT_DIR": str(rig.runtime.layout(key).git), "GIT_WORK_TREE": str(rig.worktree)}
+    r = subprocess.run(["git", "-c", "user.name=agent", "-c", "user.email=agent@example.org", *args],
+                       cwd=rig.worktree, env=env, capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+def host_tip(rig: RuntimeRig, ref: str) -> str:
+    return subprocess.run(["git", "-C", str(rig.repo), "rev-parse", ref], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def test_the_sandbox_gets_a_private_git_dir_and_its_commits_land_on_stop(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    [box] = rig.backend.boxes.values()
+    by_target = {b.target: b for b in box.spec.binds}
+    git_dir = rig.repo / ".git" / "worktrees" / "w"
+    assert by_target[git_dir.resolve()].source == layout.git and not by_target[git_dir.resolve()].read_only
+    assert by_target[(rig.repo / ".git" / "objects").resolve()].read_only
+    assert (rig.repo / ".git").resolve() not in by_target
+    main = host_tip(rig, "main")
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
+    agent_git(rig, spec.session_key, "update-ref", "refs/heads/main", made)
+    rig.runtime.stop(spec.session_key)
+    assert host_tip(rig, "btq/btq-1") == made and host_tip(rig, "main") == main
+
+
+def test_commits_that_cant_land_refuse_the_relaunch(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    before = host_tip(rig, "btq/btq-1")
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
+    rig.runtime.stop(spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
+    assert rec.error == "the session's commits could not be landed"
+    assert host_tip(rig, "btq/btq-1") == before
+    with pytest.raises(LaunchFailed, match="not landed"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert (rig.runtime.layout(spec.session_key).git / "objects" / "zz").is_symlink()     # kept for a human
+
+
+@pytest.mark.parametrize("change", ["no repo", "main worktree", "head moved"])
+def test_a_worktree_host_git_cant_pin_is_refused(rig: RuntimeRig, change: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    if change == "no repo":
+        spec = replace(spec, repo=None)
+    elif change == "main worktree":
+        subprocess.run(["git", "-C", str(rig.repo), "checkout", "-q", "-b", "btq/btq-1-main"], check=True,
+                       capture_output=True)
+        spec = replace(spec, bead="btq-1-main", worktree=rig.repo)
+    else:
+        (rig.repo / ".git" / "worktrees" / "w" / "HEAD").write_text("ref: refs/heads/main\n")
+    with pytest.raises(LaunchFailed):
+        rig.runtime.launch(spec)
+    assert rig.backend.created == []
+
+
 def test_a_named_account_is_refused(rig: RuntimeRig) -> None:
     with pytest.raises(LaunchFailed, match="AU-6"):
         rig.runtime.launch(launch_spec(rig, "p-one", account="work"))
@@ -5570,6 +6669,34 @@ def test_the_freshness_gate_refuses_a_login_that_expires_too_soon(rig: RuntimeRi
     with pytest.raises(LaunchFailed, match="expires"):
         rig.runtime.launch(launch_spec(rig, "p-two"))
     assert rig.backend.created == []
+
+
+def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: RuntimeRig) -> None:
+    s = rig.runtime.c.settings
+    t0 = rig.clock.now
+    fresh_logins(rig.home, t0 + s.max_lifetime_seconds + s.stop_margin_seconds + 1)
+    # the agent path takes longer than the whole margin
+    rig.selftest.during_agent = lambda: rig.clock.advance(s.stop_margin_seconds + 60)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert rec.started_at == t0 + s.stop_margin_seconds + 60
+    assert rec.deadline == t0 + s.max_lifetime_seconds           # not started_at + the lifetime
+    assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+    rig.runtime.stop(spec.session_key)
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+
+
+def test_a_launch_that_outlasts_its_window_is_refused_and_cleaned_up(rig: RuntimeRig) -> None:
+    s = rig.runtime.c.settings
+    rig.selftest.during_agent = lambda: rig.clock.advance(s.max_lifetime_seconds - s.stop_margin_seconds)
+    spec = launch_spec(rig, "p-two")
+    with pytest.raises(LaunchFailed, match="outlasted"):
+        rig.runtime.launch(spec)
+    assert rig.backend.boxes == {}
+    assert record(rig, spec.session_key).phase is Phase.ENDED
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
 
 
 @pytest.mark.parametrize("fail", ["exec", "agent", "create"])
@@ -5675,6 +6802,7 @@ Every step is described by the session's record before it is taken, so a dead ws
 found and cleaned up. Everything fails closed: what can't be listed, read or confirmed is
 RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 
+import contextlib
 import json
 import secrets
 import shutil
@@ -5691,12 +6819,14 @@ import msgspec
 from heterodyne.agents.base import Adapter, AdapterError, Cli, write_private
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError
+from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
     BRIDGE_INSIDE,
     NAME,
+    READ_ONLY_ROLES,
     REQUEST_INSIDE,
     Protected,
     SandboxSpec,
@@ -5711,6 +6841,7 @@ from heterodyne.sandbox.spec import (
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import Tmux, TmuxError
+from heterodyne.wsd import gitwip
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.runtime import (
     LaunchFailed,
@@ -5754,8 +6885,12 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     native_id: str | None = None      # the latest running generation's
     worktree: str = ""
     started_at: int = 0
-    deadline: int = 0
+    deadline: int = 0                 # D13: set before the sandbox exists, from the login's exposure
     error: str = ""
+    stop_reason: str = ""             # "lifetime" once a lifetime stop has begun (Task 11)
+    wip_mark: str = ""                # a lifetime WIP commit still owed; cleared once it lands (Task 11)
+    repo: str = ""                    # the bead's repository, as the launch named it (D26)
+    unlanded: bool = False            # the session's commits could not be landed: a human looks first
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -5780,7 +6915,7 @@ class _StepFailed(Exception):
     """A launch step failed. Fixed wording."""
 
 
-KNOWN_FAILURES = (SpecRefused, AdapterError, BackendError, _StepFailed, ConfigError)
+KNOWN_FAILURES = (SpecRefused, AdapterError, BackendError, _StepFailed, ConfigError, gitwip.GitFailed)
 
 
 @dataclass(frozen=True)
@@ -5816,6 +6951,16 @@ class SandboxRuntime:
     def tmux_name(self, key: str) -> str:
         return f"wsd-{short_id(key)}"
 
+    def reaper_name(self, key: str) -> str:
+        return f"wsd-{short_id(key)}-r"
+
+    def _reaper(self, rec: SessionRecord) -> None:
+        """D13's backstop: a process in wsd's tmux server (its own systemd scope, so it outlives wsd) that
+        deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
+        name = self.reaper_name(rec.key)
+        self.c.tmux.kill(name)
+        self.c.tmux.new_session(name, self.c.sessions, self.backend.reaper_argv(rec.sandbox, rec.deadline))
+
     # --- AgentRuntime ---
 
     def available(self) -> bool:
@@ -5837,7 +6982,7 @@ class SandboxRuntime:
             if rec.phase is Phase.RUNNING and self._alive(rec, names):
                 self._rebind(rec)
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.LIVE))
-            elif not self._end(rec, interrupt=False):
+            elif not self._end(rec, interrupt=False, lifetime=self._overdue(rec)):
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.UNKNOWN))
         return listed
 
@@ -5847,18 +6992,34 @@ class SandboxRuntime:
             raise LaunchFailed("the profile's adapter can't be run in a sandbox")
         if spec.account != DEFAULT_ACCOUNT:
             raise LaunchFailed("named accounts are bound by AU-6")
+        if spec.repo is None:
+            raise LaunchFailed("the launch names no repository")
+        try:
+            pinned = gitwip.pin(spec.repo, spec.worktree, f"btq/{spec.bead}")
+        except gitwip.GitFailed as exc:
+            raise LaunchFailed(str(exc)) from None
+        if pinned.git_dir == pinned.common:
+            raise LaunchFailed("a sandbox can't hold the main worktree: its git directory is inside it")
         layout = self.layout(spec.session_key)
         prev = read_record(layout)
         if prev is not None and prev.phase is not Phase.ENDED:
             if prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
                 return self._started(prev)              # idempotent: a live session is left alone
-            if not self._end(prev, interrupt=False):
+            if not self._end(prev, interrupt=False, lifetime=self._overdue(prev)):
                 raise RuntimeUnavailable("an earlier launch of this session could not be cleaned up")
             prev = read_record(layout)
+        if prev is not None and prev.wip_mark:
+            try:
+                prev = self._settle_wip(layout, prev)   # D13: a lifetime commit a crash left owed lands first
+            except OSError:
+                raise RuntimeUnavailable("the session record can't be written") from None
+        if prev is not None and prev.unlanded:
+            raise LaunchFailed("the last generation's commits were not landed; inspect the session's git "
+                               "directory")
         resume, native = self._resume(adapter, layout, prev, spec)
         cli = self._cli(adapter)
         protected, others = self._logins(adapter)
-        self._fresh(adapter, protected.chosen_files)
+        expiry = self._fresh(adapter, protected.chosen_files)
         try:
             name = sandbox_name(spec.session_key, spec.generation)
         except SpecRefused as exc:
@@ -5867,10 +7028,11 @@ class SandboxRuntime:
                             profile=spec.profile, adapter=adapter.name, generation=spec.generation,
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
                             ran=prev.ran if prev else False, native_id=prev.native_id if prev else None,
-                            worktree=str(spec.worktree))
+                            worktree=str(spec.worktree), repo=str(spec.repo))
         write_record(layout, rec)
         try:
-            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others)
+            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others, expiry,
+                               pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
 
@@ -5885,13 +7047,13 @@ class SandboxRuntime:
 
     def _resume(self, adapter: Adapter, layout: SessionLayout, prev: SessionRecord | None,
                 spec: LaunchSpec) -> tuple[bool, str | None]:
-        """D9: (resume, native ID). Resume held state; start fresh when none can ever have been kept;
-        otherwise RuntimeUnavailable."""
+        """D9: (resume, native ID). Resume held state; start fresh only when the record shows no generation
+        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed."""
         wanted = spec.native_id or (prev.native_id if prev is not None and prev.ran else None)
         try:
             if adapter.has_state(layout.home, wanted):
                 return True, wanted
-            if prev is None or not prev.ran or not adapter.any_state(layout.home):
+            if prev is None or not prev.ran:
                 return False, None if adapter.assigns_id else spec.native_id
         except AdapterError as exc:
             raise LaunchFailed(str(exc)) from None
@@ -5922,11 +7084,11 @@ class SandboxRuntime:
                 others += [(account, f) for f in files]
         except ConfigError as exc:
             raise LaunchFailed(str(exc)) from None
-        return Protected(chosen_dir, chosen, (*dirs, *(f for _, f in others))), tuple(others)
+        return Protected(chosen_dir, chosen, tuple(dirs), tuple(f for _, f in others)), tuple(others)
 
-    def _fresh(self, adapter: Adapter, login_files: tuple[Path, ...]) -> None:
+    def _fresh(self, adapter: Adapter, login_files: tuple[Path, ...]) -> int:
         """§7 freshness gate (D12): plan 4 never refreshes, so a login that would expire within the
-        session's maximum lifetime and stop margin refuses the launch."""
+        session's maximum lifetime and stop margin refuses the launch. Returns the expiry it checked."""
         try:
             expiry = adapter.access_expiry(login_files)
         except AdapterError as exc:
@@ -5935,10 +7097,11 @@ class SandboxRuntime:
         if expiry - self.c.clock() <= s.max_lifetime_seconds + s.stop_margin_seconds:
             raise LaunchFailed("the login expires within the session's maximum lifetime; refresh it on "
                                "the host")
+        return int(expiry)
 
     def _start(self, spec: LaunchSpec, adapter: Adapter, cli: Cli, layout: SessionLayout, rec: SessionRecord,
                resume: bool, native: str | None, protected: Protected,
-               others: tuple[tuple[str, Path], ...]) -> Started:
+               others: tuple[tuple[str, Path], ...], expiry: int, pinned: gitwip.Pinned) -> Started:
         c, gen = self.c, spec.generation
         run, scratch = layout.run(gen), layout.scratch(gen)
         for folder in (run, scratch):
@@ -5959,10 +7122,18 @@ class SandboxRuntime:
         server = SessionServer(layout.socket(gen), token, layout.events(gen))
         server.start()
         self.servers[spec.session_key] = server
+        git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
         sp = build_spec(SpecInput(spec.session_key, gen, spec.role, layout, spec.worktree,
                                   adapter.facts(layout, cli, c.uid), protected.chosen_files, ws.extra_egress,
-                                  ws.extra_ro_mounts, c.settings.probe_allowed_host, c.uid, c.gid))
+                                  ws.extra_ro_mounts, c.settings.probe_allowed_host, c.uid, c.gid,
+                                  git_binds))
         check_credentials(sp, protected, c.real_home)
+        # D13: the lifetime runs from the moment the login can be reached, never from the end of a slow
+        # start, and the hard stop is always a full margin before the checked expiry.
+        exposed = c.clock()
+        rec = self._phase(layout, rec, deadline=min(exposed + c.settings.max_lifetime_seconds,
+                                                    expiry - c.settings.stop_margin_seconds))
+        self._reaper(rec)                    # the backstop exists before the sandbox does
         self.backend.create(sp, scratch)
         self._trust(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.TESTING)
@@ -5981,8 +7152,11 @@ class SandboxRuntime:
         self.selftest.agent_path(ctx)
         native = self._native(server, native)
         now = c.clock()
+        if now >= rec.deadline - c.settings.stop_margin_seconds:
+            raise _StepFailed("the launch outlasted its login's lifetime window; "
+                              "refresh the login on the host")
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
-                          deadline=now + c.settings.max_lifetime_seconds, error="")
+                          error="")
         return Started(rec.tmux_session, pane, pid, native)
 
     def _phase(self, layout: SessionLayout, rec: SessionRecord, **changes: Any) -> SessionRecord:
@@ -6078,12 +7252,19 @@ class SandboxRuntime:
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
 
-    def _end(self, rec: SessionRecord, *, interrupt: bool) -> bool:
+    def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False) -> bool:
         """End the session: interrupt it if asked, kill its pane, delete every sandbox of its key. True
-        (recorded `ended`) only once the pane is gone and the backend no longer lists any of them."""
+        (recorded `ended`) only once the pane is gone and the backend no longer lists any of them.
+
+        A lifetime end (D13) records its reason and the WIP commit it owes in the same write that records
+        `stopping`, before anything is stopped, so a crash on either side of any later step replays it."""
         layout = self.layout(rec.key)
+        owed: dict[str, str] = {}
+        if lifetime or rec.stop_reason == "lifetime":
+            mark = rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"
+            owed = {"stop_reason": "lifetime", "wip_mark": mark}
         try:
-            rec = self._phase(layout, rec, phase=Phase.STOPPING)
+            rec = self._phase(layout, rec, phase=Phase.STOPPING, **owed)
         except OSError:
             return False
         server = self.servers.pop(rec.key, None)
@@ -6105,12 +7286,44 @@ class SandboxRuntime:
         except (BackendUnavailable, BackendError):
             deleted = False
         if not (pane_gone and deleted):
-            return False
+            return False                     # the reaper stays: it is the backstop until the end is confirmed
+        with contextlib.suppress(*TMUX_ERRORS):
+            tmux.kill(self.reaper_name(rec.key))
         try:
-            self._phase(layout, rec, phase=Phase.ENDED)
+            rec = self._land(layout, rec)    # D26: before any host git (the lifetime WIP, a park) runs
+            rec = self._phase(layout, rec, phase=Phase.ENDED)
         except OSError:
             return False
+        with contextlib.suppress(OSError):
+            self._settle_wip(layout, rec)    # a lost record write keeps the mark; the replay is idempotent
         return True
+
+    def _land(self, layout: SessionLayout, rec: SessionRecord) -> SessionRecord:
+        """Land the generation's commits on the bead branch (Task 7A). Idempotent; a failure keeps the
+        private git directory and is recorded, and the next launch refuses until a human looks."""
+        if rec.unlanded or not rec.repo or not layout.git.exists():
+            return rec
+        try:
+            sessiongit.land(gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{rec.bead}"), layout.git)
+        except (gitwip.GitFailed, OSError):
+            return self._phase(layout, rec, unlanded=True, error="the session's commits could not be landed")
+        return rec
+
+    def _overdue(self, rec: SessionRecord) -> bool:
+        """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""
+        return rec.started_at > 0 and self.c.clock() >= rec.deadline
+
+    def _settle_wip(self, layout: SessionLayout, rec: SessionRecord) -> SessionRecord:
+        """Land the lifetime WIP commit an ended session still owes (D13), then clear the mark. The commit is
+        idempotent by its mark, so a replay after a crash before or after it lands it exactly once."""
+        if not rec.wip_mark or rec.phase is not Phase.ENDED:
+            return rec
+        try:
+            pinned = gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{rec.bead}")
+            gitwip.wip_commit(pinned, rec.wip_mark, "maximum lifetime reached")
+        except gitwip.GitFailed:
+            return self._phase(layout, rec, wip_mark="", error="the lifetime WIP commit failed")
+        return self._phase(layout, rec, wip_mark="")
 
     def _records(self) -> list[SessionRecord]:
         if not self.c.sessions.exists():
@@ -6146,28 +7359,35 @@ git commit -m "plan4 T10: SandboxRuntime, session records, the resume contract a
 ### Task 11: The lifetime stop
 
 **Files:**
+- Create: `src/heterodyne/sandbox/reaper.py` (the independent backstop)
 - Modify: `src/heterodyne/wsd/runtime.py` (`AgentRuntime.expire`, `NoRuntime.expire`), `src/heterodyne/wsd/scheduler.py` (`_pickup` calls it), `tests/fakes/fake_runtime.py` (records it), `src/heterodyne/sandbox/runtime.py` (`SandboxRuntime.expire`)
 - Test: `tests/test_wsd_lifetime.py`
 
 **Interfaces:**
 - Consumes:
-  - Task 10's `SandboxRuntime` (`_records`, `_end`, `_phase`, `servers`, `layout`), `Phase`, `read_record`;
+  - Task 10's `SandboxRuntime` (`_records`, `_end(rec, *, interrupt, lifetime)`, `_settle_wip`, `_phase`, `servers`, `layout`, `reaper_name`), `SessionRecord.stop_reason` and `.wip_mark`, `Phase`, `read_record`;
+  - Task 4's `OpenShellBackend` and `reaper_argv` (whose module this task creates), Task 3's `BackendError` and `BackendUnavailable`;
   - Task 5's `TurnState.idle`;
-  - plan 3's `gitwip.wip_commit(worktree, mark, summary)`, `GitFailed`, and `Scheduler._pickup`.
+  - Task 7A's `gitwip.pin` and `gitwip.wip_commit(pinned, mark, summary)`; plan 3's `GitFailed` and `Scheduler._pickup`.
 - Produces:
   - `AgentRuntime.expire(ws: str, now: int) -> None`: stop every session of the workstream whose lifetime is up. Raises RuntimeUnavailable if a stop can't be confirmed.
   - `FakeRuntime.expires: list[tuple[str, int]]` and `FakeRuntime.expire_failures: int`.
+  - `heterodyne.sandbox.reaper.reap(name, deadline, delete, *, clock, sleep) -> bool` and `main(argv) -> int`, run as `python -I -m heterodyne.sandbox.reaper --deadline N --openshell P --podman P --image I <name>`.
 
 This is D13.
 
+- **The backstop.** Task 10 starts one reaper per session, in wsd's tmux server, before the sandbox exists. It sleeps until the deadline, then deletes the sandbox and retries until the backend confirms it. The tmux server runs in its own systemd scope, so the reaper outlives a wsd crash or restart, and it needs neither the queue, nor a pickup, nor reconciliation. wsd kills it only once a session's end is confirmed.
+- **A durable stop.** Whatever ends a session for its lifetime (this task's `expire`, the cleanup in `sessions` or `launch` of a session past its deadline, or a stop already begun) writes `stop_reason = "lifetime"` and `wip_mark = lifetime:<key>:<gen>` in the same record write as `stopping`, before anything is stopped. The commit is made after `ended` is recorded, and the mark is cleared after it. `expire` replays an ended record that still holds a mark, and `launch` lands it before a relaunch. `wip_commit` is idempotent by its mark, so a crash on either side of any of these writes lands the commit exactly once.
+
 - **When it stops a session.** `expire` runs in every pickup, just before the sweep. A running session whose stop window is open (`now ≥ deadline − stop_margin`) is stopped if it is at a turn boundary: its socket's last turn event was a `Stop`. At the deadline it is stopped whatever it is doing, with Escape first.
 - **After the stop.**
-  - The WIP is committed with the mark `lifetime:<key>:<generation>`, after the sandbox is confirmed gone. A failed commit is recorded in the session record's `error`, and nothing else changes (gap 8).
+  - The WIP is committed with the mark `lifetime:<key>:<generation>`, after the sandbox is confirmed gone. A failed commit is recorded in the session record's `error` and clears the mark, and nothing else changes (gap 8). An unconfirmed stop keeps the mark, and so does a crash.
   - The sweep that follows in the same pickup sees a running bead with no session and gives it a resume operation. The guard then relaunches it through the freshness gate.
   - This needs no new journal operation.
 - **Restarts and timing.**
   - A session re-bound after a wsd restart has an empty turn state, so its stop is hard (D19).
-  - Backstop pickups (every 60 s) bound how late a stop can be. Task 1 allows a stop margin down to one minute, so the window always spans at least one backstop. A hard stop can come up to one backstop after the deadline, which is still before the login expires: the gate required `max_lifetime + stop_margin` of it.
+  - Backstop pickups (every 60 s) bound how late wsd's own stop can be. Task 1 allows a stop margin down to one minute, so the window always spans at least one backstop.
+  - If pickups don't run at all, the reaper deletes the sandbox within one poll (30 s) of the deadline. The deadline was set when the login was first exposed, and capped at its checked expiry minus the margin (Task 10), so even the backstop acts a full margin before the login expires.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6178,6 +7398,7 @@ import contextlib
 import shutil
 import subprocess
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -6185,7 +7406,10 @@ from sandbox_env import RuntimeRig, launch_spec, runtime_rig, short_dir
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Clock, make_rig
 
+from heterodyne.sandbox import reaper
+from heterodyne.sandbox.backend import BackendUnavailable
 from heterodyne.sandbox.runtime import Phase, SessionRecord, read_record
+from heterodyne.wsd import gitwip
 from heterodyne.wsd.runtime import NoRuntime, RuntimeUnavailable
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import Reason
@@ -6219,6 +7443,10 @@ def wip_marks(rig: RuntimeRig) -> list[str]:
     out = subprocess.run(["git", "-C", str(rig.worktree), "log", "--format=%B"], capture_output=True,
                          text=True, check=True).stdout
     return [line for line in out.splitlines() if line.startswith("wsd-park: lifetime:")]
+
+
+class Crash(BaseException):
+    """wsd dies here: nothing after this point runs, and no handler catches it."""
 
 
 @needs_tools
@@ -6259,23 +7487,117 @@ def test_a_session_with_no_turn_boundary_stops_hard_at_the_deadline(rig: Runtime
 
 
 @needs_tools
-def test_an_unconfirmed_lifetime_stop_is_unavailable(rig: RuntimeRig) -> None:
+@pytest.mark.parametrize("retry", ["expire", "sessions"])
+def test_an_unconfirmed_lifetime_stop_keeps_its_wip_owed(rig: RuntimeRig, retry: str) -> None:
     spec = launch_spec(rig, "p-one")
     rig.runtime.launch(spec)
+    deadline = record(rig, spec.session_key).deadline
     rig.backend.delete_unconfirmed = 1
     with pytest.raises(RuntimeUnavailable):
-        rig.runtime.expire("alpha", record(rig, spec.session_key).deadline)
-    assert record(rig, spec.session_key).phase is Phase.STOPPING and wip_marks(rig) == []
+        rig.runtime.expire("alpha", deadline)
+    owed = record(rig, spec.session_key)
+    assert (owed.phase, owed.stop_reason, owed.wip_mark) == (
+        Phase.STOPPING, "lifetime", f"lifetime:{spec.session_key}:1")
+    assert wip_marks(rig) == []
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))      # the backstop stays
+    if retry == "expire":
+        rig.runtime.expire("alpha", deadline)
+    else:
+        assert rig.runtime.sessions("alpha") == []   # ordinary cleanup, with wsd's clock before the deadline
+    assert record(rig, spec.session_key).phase is Phase.ENDED
+    assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
 
 
 @needs_tools
-def test_a_failed_wip_commit_is_recorded(rig: RuntimeRig) -> None:
+def test_a_sandbox_the_reaper_deleted_ends_with_its_lifetime_wip(rig: RuntimeRig) -> None:
     spec = launch_spec(rig, "p-one")
     rig.runtime.launch(spec)
-    shutil.rmtree(rig.worktree / ".git")
+    rec = record(rig, spec.session_key)
+    rig.clock.advance(rec.deadline - rig.clock.now)
+    del rig.backend.boxes[rec.sandbox]                  # the backstop acted while wsd's pickups did not
+    assert rig.runtime.sessions("alpha") == []
+    after = record(rig, spec.session_key)
+    assert (after.phase, after.stop_reason, after.wip_mark) == (Phase.ENDED, "lifetime", "")
+    assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+
+
+@needs_tools
+@pytest.mark.parametrize("point", ["stopping", "ended", "committed"])
+@pytest.mark.parametrize("replay", ["expire", "launch"])
+def test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, point: str, replay: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    deadline = record(rig, spec.session_key).deadline
+    rig.clock.advance(deadline - rig.clock.now)
+    real = gitwip.wip_commit
+
+    def crash(*_: object) -> None:
+        raise Crash
+
+    def commit_then_crash(pinned: gitwip.Pinned, mark: str, summary: str) -> None:
+        real(pinned, mark, summary)
+        raise Crash
+
+    with monkeypatch.context() as m:
+        if point == "stopping":
+            m.setattr(rig.backend, "names", crash)          # `stopping` is written; the sandbox is not gone
+        else:
+            m.setattr(gitwip, "wip_commit", crash if point == "ended" else commit_then_crash)
+        with pytest.raises(Crash):
+            rig.runtime.expire("alpha", deadline)
+    owed = record(rig, spec.session_key)
+    assert (owed.stop_reason, owed.wip_mark) == ("lifetime", f"lifetime:{spec.session_key}:1")
+    assert owed.phase is (Phase.STOPPING if point == "stopping" else Phase.ENDED)
+    if replay == "expire":
+        rig.runtime.expire("alpha", deadline)
+        assert record(rig, spec.session_key).phase is Phase.ENDED
+    else:
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+        assert record(rig, spec.session_key).generation == 2
+    assert record(rig, spec.session_key).wip_mark == ""
+    assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]     # landed, and only once
+
+
+@needs_tools
+def test_a_failed_wip_commit_is_recorded(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+
+    def failed(*_: object) -> str:
+        raise gitwip.GitFailed("git commit exited 1")
+
+    monkeypatch.setattr(gitwip, "wip_commit", failed)
     rig.runtime.expire("alpha", record(rig, spec.session_key).deadline)
     rec = record(rig, spec.session_key)
-    assert rec.phase is Phase.ENDED and rec.error == "the lifetime WIP commit failed"
+    assert (rec.phase, rec.error, rec.wip_mark) == (Phase.ENDED, "the lifetime WIP commit failed", "")
+
+
+def test_the_reaper_waits_for_the_deadline_then_deletes_until_confirmed() -> None:
+    now = [1000.0]
+    slept: list[float] = []
+    tries: list[float] = []
+    answers: list[bool | None] = [None, False, True]        # None: the backend is down
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    def delete(name: str) -> bool:
+        assert name == "box"
+        tries.append(now[0])
+        answer = answers.pop(0)
+        if answer is None:
+            raise BackendUnavailable("down")
+        return answer
+
+    assert reaper.reap("box", 1075, delete, clock=lambda: now[0], sleep=sleep)
+    assert slept[:3] == [30, 30, 15] and tries[0] == 1075 and len(tries) == 3
+
+
+def test_a_reaper_that_never_sees_the_deletion_fails() -> None:
+    assert not reaper.reap("box", 0, lambda _: False, clock=lambda: 1.0, sleep=lambda _: None)
 
 
 def test_no_runtime_expires_nothing() -> None:
@@ -6296,7 +7618,7 @@ def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `timeout 300 uv run pytest tests/test_wsd_lifetime.py -q`
-Expected: FAIL with `AttributeError: 'SandboxRuntime' object has no attribute 'expire'` (and `'NoRuntime'`, `'FakeRuntime'`).
+Expected: FAIL at collection with `ImportError: cannot import name 'reaper'`. Once Step 5 exists, the remaining failures are `AttributeError: 'SandboxRuntime' object has no attribute 'expire'` (and `'NoRuntime'`, `'FakeRuntime'`).
 
 - [ ] **Step 3: Add `expire` to the protocol, `NoRuntime`, the fake and the pickup**
 
@@ -6344,41 +7666,101 @@ In `src/heterodyne/wsd/scheduler.py`, `_pickup`, the second `try:` becomes:
 
 - [ ] **Step 4: Add `SandboxRuntime.expire`**
 
-In `src/heterodyne/sandbox/runtime.py`, add `from heterodyne.wsd import gitwip` to the imports and this method after `stop`:
+In `src/heterodyne/sandbox/runtime.py`, add this method after `stop`. Task 10's `_end(..., lifetime=True)` makes the stop durable and lands the WIP; `expire` only decides when, and replays what a crash left owed:
 
 ```python
     def expire(self, ws: str, now: int) -> None:
         margin = self.c.settings.stop_margin_seconds
         for rec in self._records():
-            if rec.ws != ws or rec.phase is not Phase.RUNNING or now < rec.deadline - margin:
+            if rec.ws != ws:
                 continue
-            hard = now >= rec.deadline
-            server = self.servers.get(rec.key)
-            if not hard and (server is None or not server.turns().idle):
-                continue                         # not at a turn boundary: wait for one, or the deadline
-            if not self._end(rec, interrupt=hard):
+            if rec.phase is Phase.ENDED:
+                if rec.wip_mark:
+                    try:
+                        self._settle_wip(self.layout(rec.key), rec)    # a crash came between end and commit
+                    except OSError:
+                        raise RuntimeUnavailable("the session record can't be written") from None
+                continue
+            if rec.stop_reason == "lifetime":
+                hard = True                      # a lifetime stop already begun: finish it
+            elif rec.phase is not Phase.RUNNING or now < rec.deadline - margin:
+                continue
+            else:
+                hard = now >= rec.deadline
+                server = self.servers.get(rec.key)
+                if not hard and (server is None or not server.turns().idle):
+                    continue                     # not at a turn boundary: wait for one, or the deadline
+            if not self._end(rec, interrupt=hard, lifetime=True):
                 raise RuntimeUnavailable("a session at its maximum lifetime could not be stopped")
-            try:
-                gitwip.wip_commit(Path(rec.worktree), f"lifetime:{rec.key}:{rec.generation}",
-                                  "maximum lifetime reached")
-            except gitwip.GitFailed:
-                layout = self.layout(rec.key)
-                ended = read_record(layout)
-                if ended is not None:
-                    self._phase(layout, ended, error="the lifetime WIP commit failed")
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Add the reaper**
+
+`src/heterodyne/sandbox/reaper.py` is the process Task 4's `reaper_argv` names and Task 10's `_reaper` starts. It reads nothing from the sandbox and holds no login:
+
+```python
+"""The lifetime backstop (ADR 0001 §7, D13): delete one sandbox at its deadline, independently of wsd.
+
+wsd starts it in its own tmux server, which runs in its own systemd scope, so it outlives a wsd crash or
+restart and acts whether or not the queue, the pickup or reconciliation works. wsd's own stop at a turn
+boundary comes first; this only guarantees that nothing runs past the deadline."""
+
+import argparse
+import os
+import sys
+import time
+from collections.abc import Callable
+
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable
+from heterodyne.sandbox.openshell import OpenShellBackend
+
+POLL_SECONDS = 30
+RETRY_SECONDS = 5
+ATTEMPTS = 60
+
+
+def reap(name: str, deadline: int, delete: Callable[[str], bool], *,
+         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep) -> bool:
+    """Wait for the deadline, then delete the sandbox until the backend confirms it. True once confirmed."""
+    while (left := deadline - clock()) > 0:
+        sleep(min(POLL_SECONDS, left))
+    for _ in range(ATTEMPTS):
+        try:
+            if delete(name):
+                return True
+        except (BackendUnavailable, BackendError):
+            pass                             # retried: only a confirmed deletion ends the backstop
+        sleep(RETRY_SECONDS)
+    return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="heterodyne-reaper")
+    parser.add_argument("--deadline", type=int, required=True)
+    parser.add_argument("--openshell", required=True)
+    parser.add_argument("--podman", required=True)
+    parser.add_argument("--image", required=True)
+    parser.add_argument("name")
+    args = parser.parse_args(argv)
+    backend = OpenShellBackend(args.openshell, args.podman, args.image, dict(os.environ))
+    return 0 if reap(args.name, args.deadline, backend.delete) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `timeout 900 uv run pytest tests/test_wsd_lifetime.py tests/test_wsd_pickup.py tests/test_wsd_sweep.py tests/test_wsd_runtime.py -q && timeout 300 uv run pyright src/heterodyne/sandbox src/heterodyne/wsd && timeout 300 uv run ruff check src tests`
 Expected: PASS; clean. The pickup and sweep suites are the regression check: a `FakeRuntime` that records `expire` changes nothing else.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/heterodyne/wsd/runtime.py src/heterodyne/wsd/scheduler.py src/heterodyne/sandbox/runtime.py \
-  tests/fakes/fake_runtime.py tests/test_wsd_lifetime.py
-git commit -m "plan4 T11: the maximum-lifetime stop at a turn boundary or the deadline, before the sweep"
+  src/heterodyne/sandbox/reaper.py tests/fakes/fake_runtime.py tests/test_wsd_lifetime.py
+git commit -m "plan4 T11: the maximum-lifetime stop, its durable WIP commit and the independent backstop"
 ```
 
 
@@ -6921,13 +8303,14 @@ This is the roadmap's plan 4 live gate. It is **[r15]** because its pass criteri
 It checks what the offline suite can't:
 - **Shapes and self-test:** both managed shapes launch on the real backend, and the full self-test passes on both paths.
 - **Egress:** a non-allowlisted host is refused. From the agent's own tool, a package registry and a read-only git fetch work (r15 §7 "still to verify").
-- **No push credential:** none is inside, and a push fails (gap 7).
+- **No push credential:** none is inside. From the agent's own tool, a push to the very repository the fetch just read fails, and git reports the server's demand for a username it can't supply (gap 7). The fetch and the push share the host and the path, so the failure is attributable to the missing credential alone.
+- **Git (gap 13, D26):** an agent commits in a btq linked worktree; the commit lands on `btq/<id>` on the host; its move of its own `main` copy lands nowhere; the real git config isn't reachable. This runs before the network test, which also checks git first.
+- **The backstop:** each launch has its reaper session, and a confirmed end removes it.
 - **Read-only reviewer:** the reviewer's worktree is read-only.
 - **wsd down:** with the session socket closed, a Codex `PreToolUse` is denied with the fail-closed reason (D14, S8 capability 1).
 - **Resume:** both CLIs resume their own session in a new generation, Codex under `--remote`.
 - **Lifetime:** the lifetime stop ends a real sandbox.
 
-One test is a strict `xfail` that documents gap 13: an agent can't commit in a btq linked worktree, because the git common directory isn't bound. When gap 13's resolution lands, that test passes, and its `xfail` comes off in the same change.
 
 - [ ] **Step 1: Write the live test**
 
@@ -6981,16 +8364,23 @@ class Live:
     runtime: SandboxRuntime
     backend: OpenShellBackend
     tmux: Tmux
-    worktree: Path
+    repo: Path
     keys: list[str] = field(default_factory=list[str])      # every session this module launched
     first: dict[str, tuple[LaunchSpec, Started]] = field(
         default_factory=dict[str, tuple[LaunchSpec, Started]])     # cli -> its first launch
 
-    def spec(self, cli: str, bead: str, role: str = "coder", worktree: Path | None = None) -> LaunchSpec:
+    def worktree(self, bead: str) -> Path:
+        """The bead's linked worktree on `btq/<bead>`, as btq makes it."""
+        path = self.root / f"w-{bead}"
+        if not path.exists():
+            git(self.repo, "worktree", "add", "-q", "-b", f"btq/{bead}", str(path))
+        return path
+
+    def spec(self, cli: str, bead: str, role: str = "coder") -> LaunchSpec:
         profile = PROFILES[cli]
         key = ids.role_session(bead, role, profile)
-        return LaunchSpec("alpha", bead, role, profile, key, f"{bead} · {role}", worktree or self.worktree,
-                          resume=False, native_id=key if cli == "claude" else None)
+        return LaunchSpec("alpha", bead, role, profile, key, f"{bead} · {role}", self.worktree(bead),
+                          resume=False, native_id=key if cli == "claude" else None, repo=self.repo)
 
     def launch(self, spec: LaunchSpec) -> Started:
         self.keys.append(spec.session_key)
@@ -7004,6 +8394,11 @@ class Live:
     def run(self, key: str, *argv: str) -> int:
         rec = self.record(key)
         return self.backend.exec(rec.sandbox, Path(rec.worktree), list(argv), timeout=EXEC_SECONDS).returncode
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True).stdout.strip()
 
 
 def wait_until(pred: Callable[[], bool], seconds: float) -> bool:
@@ -7040,7 +8435,7 @@ def live() -> Iterator[Live]:
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, OpenShellSelfTest()), backend, tmux,
-                    git_repo(root / "w"))
+                    git_repo(root / "r"))
         try:
             yield live
         finally:
@@ -7058,6 +8453,7 @@ def test_both_shapes_launch_through_the_full_self_test(live: Live, cli: str) -> 
     live.first[cli] = (spec, started)
     rec = live.record(spec.session_key)
     assert rec.phase is Phase.RUNNING and started.native_id is not None
+    assert live.tmux.has_session(live.runtime.reaper_name(spec.session_key))      # D13's backstop
     assert {s.key: s.liveness for s in live.runtime.sessions("alpha")}[spec.session_key] is Liveness.LIVE
 
 
@@ -7067,32 +8463,57 @@ def test_egress_is_refused_and_no_push_credential_is_inside(live: Live, cli: str
     assert live.run(key, "curl", "-sS", "-m", "10", "-o", "/dev/null", "https://example.org") != 0
     assert live.run(key, "sh", "-c", 'test ! -e "$HOME/.git-credentials" && test ! -e "$HOME/.config/gh" '
                                      '&& test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}"') == 0
-    assert live.run(key, "env", "GIT_TERMINAL_PROMPT=0", "git", "push", "https://github.com/example/none.git",
-                    "HEAD:refs/heads/hz-live") != 0
 
 
-FETCH = ('git ls-remote https://github.com/git/git.git HEAD && python3 -I -c "import urllib.request; '
-         'urllib.request.urlopen(\'https://pypi.org/simple/pip/\', timeout=20).read(1)"')
+def test_an_agent_commits_on_its_bead_branch_and_nothing_else_moves(live: Live) -> None:
+    """Gap 13, D26: git works in a btq linked worktree, and only the bead branch lands on the host."""
+    spec = live.spec("claude", "btq-live-3")
+    live.launch(spec)
+    main = git(live.repo, "rev-parse", "main")
+    key = spec.session_key
+    try:
+        assert live.run(key, "git", "-c", "user.name=agent", "-c", "user.email=agent@example.org", "commit",
+                        "--allow-empty", "-q", "-m", "hz-live") == 0
+        assert live.run(key, "git", "update-ref", "refs/heads/main", "HEAD") == 0      # its own copy only
+        assert live.run(key, "test", "!", "-e", str(live.repo / ".git" / "config")) == 0
+    finally:
+        live.runtime.stop(key)
+    assert git(live.repo, "log", "-1", "--format=%s", "btq/btq-live-3") == "hz-live"
+    assert git(live.repo, "rev-parse", "main") == main
 
 
-def test_registry_and_git_fetch_work_on_the_agent_path(live: Live) -> None:
-    """r15 §7 "still to verify": package-registry egress and a read-only git fetch, from the agent's own
-    tool (the workstream's extra egress is granted to the CLI's process tree)."""
+# From the agent's own tool: the workstream's extra egress is granted to the CLI's process tree only. The
+# push goes to the same host and repository the fetch reads, so its failure can only be the missing
+# credential: git reports the server's demand for a username, which it can't supply.
+AGENT_NET = ('git rev-parse HEAD >/dev/null; echo "git=$?"; '
+             'git ls-remote https://github.com/git/git.git HEAD >/dev/null; echo "fetch=$?"; '
+             'python3 -I -c "import urllib.request; '
+             'urllib.request.urlopen(\'https://pypi.org/simple/pip/\', timeout=20).read(1)"; '
+             'echo "registry=$?"; '
+             'GIT_TERMINAL_PROMPT=0 git push https://github.com/git/git.git HEAD:refs/heads/hz-live-push; '
+             'echo "push=$?"')
+
+
+def test_fetch_and_registry_work_and_push_fails_for_want_of_a_credential(live: Live) -> None:
+    """r15 §7 "still to verify" and gap 7, on the managed agent path, in a linked worktree."""
     spec, _ = live.first["claude"]
     rec = live.record(spec.session_key)
-    out = live.runtime.layout(spec.session_key).home / ".hz-live-fetch.out"
-    target = '"$HOME/.hz-live-fetch.out"'
-    live.tmux.paste(rec.tmux_session, "Run exactly this shell command, then reply with only its exit status: "
-                    f'{FETCH} > {target} 2>&1; echo "rc=$?" >> {target}')
-    assert wait_until(lambda: out.exists() and "rc=" in out.read_text(), PROMPT_SECONDS)
-    assert "rc=0" in out.read_text()
+    out = live.runtime.layout(spec.session_key).home / ".hz-live-net.out"
+    target = '"$HOME/.hz-live-net.out"'
+    live.tmux.paste(rec.tmux_session, "Run exactly this shell command, then reply with only the word done: "
+                    f"( {AGENT_NET} ) > {target} 2>&1")
+    assert wait_until(lambda: out.exists() and "push=" in out.read_text(), PROMPT_SECONDS)
+    text = out.read_text()
+    assert {"git=0", "fetch=0", "registry=0"} <= set(text.split()), text
+    assert "push=0" not in text.split()
+    assert "could not read Username for 'https://github.com'" in text
 
 
 def test_the_reviewer_worktree_is_read_only(live: Live) -> None:
     spec = live.spec("claude", "btq-live-2", role="reviewer")
     live.launch(spec)
-    assert live.run(spec.session_key, "touch", str(live.worktree / "hz-live-ro")) != 0
-    assert not (live.worktree / "hz-live-ro").exists()
+    assert live.run(spec.session_key, "touch", str(spec.worktree / "hz-live-ro")) != 0
+    assert not (spec.worktree / "hz-live-ro").exists()
     live.runtime.stop(spec.session_key)
 
 
@@ -7120,20 +8541,7 @@ def test_the_lifetime_stop_ends_a_real_sandbox(live: Live) -> None:
     live.runtime.expire("alpha", rec.deadline)
     assert live.record(spec.session_key).phase is Phase.ENDED
     assert rec.sandbox not in live.backend.names()
-
-
-@pytest.mark.xfail(strict=True, reason="gap 13: the git common directory of a linked worktree is not bound")
-def test_an_agent_can_commit_in_a_btq_linked_worktree(live: Live) -> None:
-    linked = live.root / "w-btq-live-3"
-    subprocess.run(["git", "-C", str(live.worktree), "worktree", "add", "-q", "-b", "btq/btq-live-3",
-                    str(linked)], check=True, capture_output=True)
-    spec = live.spec("claude", "btq-live-3", worktree=linked)
-    live.launch(spec)
-    try:
-        assert live.run(spec.session_key, "git", "-c", "user.name=agent", "-c",
-                        "user.email=agent@example.org", "commit", "--allow-empty", "-q", "-m", "hz-live") == 0
-    finally:
-        live.runtime.stop(spec.session_key)
+    assert not live.tmux.has_session(live.runtime.reaper_name(spec.session_key))
 ```
 
 The tests depend on file order (pytest's default): the first test launches the two sessions the rest use. A test that finds `live.first` missing fails with a `KeyError`, which points back at the first test's failure.
@@ -7149,10 +8557,10 @@ Ack team-lead first; this makes model calls on the operator's logins.
 
 Run: `HZ_LIVE=1 HZ_LIVE_SANDBOX=1 HZ_LIVE_SANDBOX_IMAGE=localhost/heterodyne-agent:1 HZ_LIVE_SANDBOX_PATH="<podman 5 bin>:$PATH" HZ_LIVE_SANDBOX_CONTAINERS_CONF="<podman 5 containers.conf>" timeout 3600 uv run pytest tests/live/test_live_sandbox.py -v`
 Expected:
-- every test passes, and the linked-worktree test reports `XFAIL`;
+- every test passes;
 - `openshell sandbox list` shows none of the module's sandboxes afterwards.
 
-Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions, the pass/xfail line, and whether Codex printed its warning about saving diagnostic logs (r15 §7 still to verify). Paste no output that holds a path under the home directory.
+Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions, the pass line, and whether Codex printed its warning about saving diagnostic logs (r15 §7 still to verify). Paste no output that holds a path under the home directory.
 
 - [ ] **Step 4: Commit**
 
@@ -7417,7 +8825,6 @@ Expected: every test skipped; clean.
 
 Expected:
 - every test passes;
-- the linked-worktree test reports `XFAIL`;
 - `openshell sandbox list` shows none of the module's sandboxes afterwards.
 
 If `test_nothing_in_the_workload_can_tamper_with_a_probe` or `test_host_ptrace_scope_allows_probe_protection` fails after gap 15's host change, stop: that is r15 §17 item 12.
