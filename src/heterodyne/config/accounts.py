@@ -53,17 +53,18 @@ def _reason(exc: BaseException) -> str:
 def _resolve(path: Path) -> Path:
     """path.resolve(strict=False), failing with OSError ELOOP on a symlink loop on every Python. 3.12
     raises RuntimeError for a loop; 3.13 and later return the loop unresolved, so stat it as 3.12 did."""
-    loop = False
+    resolved: Path | None
     try:
         resolved = path.resolve(strict=False)
     except RuntimeError:
-        loop = True
-    else:
+        resolved = None
+    if resolved is not None:
         try:
             resolved.stat()
         except OSError as exc:
-            loop = exc.errno == errno.ELOOP
-    if loop:
+            if exc.errno == errno.ELOOP:
+                resolved = None
+    if resolved is None:            # raised outside the handlers, so no path-bearing context is chained
         raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
     return resolved
 
