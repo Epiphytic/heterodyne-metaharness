@@ -335,7 +335,8 @@ class Wsd:
     async def _run[T](self, lane: str, key: Hashable, fn: Callable[[], T]) -> T:
         """Run blocking work on a lane, or join the job queued there under `key` and not yet started, and
         wait for it. Cancelling the caller leaves the job to its lane (a thread can't be stopped; shutdown
-        drains it). Refused, and a job that shutdown cancelled before it started reads, as Stopping."""
+        drains it). Refused, and a job that shutdown cancelled before it started reads, as Stopping;
+        unless the caller was cancelled as well, which it stays (a timer would carry on from Stopping)."""
         if self.stopping:
             raise Stopping
         fut = self.lanes[lane].submit(key, fn)
@@ -344,7 +345,8 @@ class Wsd:
         try:
             return await asyncio.shield(asyncio.wrap_future(fut))  # type: ignore[return-value]
         except asyncio.CancelledError:
-            if fut.cancelled():
+            task = asyncio.current_task()
+            if fut.cancelled() and not (task and task.cancelling()):
                 raise Stopping from None
             raise
 
