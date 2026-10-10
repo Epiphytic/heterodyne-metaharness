@@ -38,16 +38,17 @@ jobs:
         run: tmux -V
       # The admind tests put a Unix socket under tmp_path, and a socket path is limited to about 100
       # bytes. pytest's default base, $TMPDIR/pytest-of-<user>, grows with the runner's user name,
-      # so each job gets its own short, unique base instead.
+      # so each job gets its own short, unique base instead. It is passed on pytest's command line,
+      # never through PYTEST_ADDOPTS: the tmux watchdog tests run child pytests inside the base,
+      # which would inherit it and refuse a basetemp that is a parent of their working directory.
       - name: short pytest base
         run: |
           base=$(mktemp -d /tmp/hzXXXX)
           echo "HZ_BASETEMP=$base" >> "$GITHUB_ENV"
-          echo "PYTEST_ADDOPTS=--basetemp=$base" >> "$GITHUB_ENV"
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run pyright
-      - run: uv run pytest -q
+      - run: uv run pytest -q --basetemp="$HZ_BASETEMP"
         env:
           HZ_REQUIRE_TMUX: "1"
       # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
