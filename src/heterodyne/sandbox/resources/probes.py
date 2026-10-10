@@ -220,8 +220,9 @@ check('host-env-not-inherited', not extra, f"{PATH} path, unexpected vars: {' '.
 paths = ['/.openshell/channel/sandbox/bootstrap.json', '/.openshell/channel/sandbox/server.key',
          '/run/secrets', '/etc/openshell/auth/sandbox.jwt', '/etc/openshell/tls/client/tls.key']
 res = {p: open_result(p) for p in paths}
-check('openshell-control-material-unreadable', all(v in ('ENOENT', 'EACCES', 'EPERM', 'EISDIR') and
-      (v != 'EISDIR' or open_result(p + '/x') != 'READABLE') for p, v in res.items()),
+#    A directory that opens (EISDIR) fails: what it holds is unknown. S5 saw /run/secrets give EACCES
+#    under OpenShell and ENOENT without it, never EISDIR.
+check('openshell-control-material-unreadable', all(v in ('ENOENT', 'EACCES', 'EPERM') for v in res.values()),
       ' '.join(f'{p}->{v}' for p, v in res.items()))
 
 # 10. Other accounts (§7): each present or unknown login file, by configured and canonical path, gives
@@ -247,5 +248,6 @@ for c in cfg['chosen']:
     ok &= same is True and w in ('EROFS', 'EACCES', 'EPERM')
     ev.append(f"chosen:{c['path']} sha256-match={same} write->{w}")
 check('other-accounts', ok and bool(cfg['chosen']), '; '.join(ev))
+print(f'DONE {rc}', flush=True)     # the host passes only output that ends here
 report({'done': rc})
 sys.exit(rc)

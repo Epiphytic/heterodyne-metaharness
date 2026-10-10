@@ -170,6 +170,7 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
             rc = int(stop.code or 0)
         monkeypatch.undo()
         lines = capsys.readouterr().out.splitlines()
+        assert lines[-1] == f"DONE {rc}"               # the probes' explicit completion, last
         verdicts = [ln.split()[:2] for ln in lines if ln.startswith(("PASS ", "FAIL "))]
         return rc, {name: verdict == "PASS" for verdict, name in verdicts}
     return go
@@ -236,6 +237,8 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
      {"model-host-exec-path"}),
     ("wsd's socket reachable", lambda w: w.put(WSD_SOCKET, ""), {"wsd-socket-absent"}),
     ("OpenShell's key readable", lambda w: w.put("/.openshell/channel/sandbox/server.key", "fake"),
+     {"openshell-control-material-unreadable"}),
+    ("a readable secrets directory", lambda w: w.put("/run/secrets/actual.jwt", "fake"),
      {"openshell-control-material-unreadable"}),
 ]
 

@@ -1,7 +1,9 @@
 import ast
 import hashlib
 import json
-from collections.abc import Sequence
+import os
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -11,6 +13,7 @@ from sandbox_env import config_env
 
 from heterodyne.agents.base import Cli
 from heterodyne.agents.codex import Codex
+from heterodyne.sandbox import openshell_selftest
 from heterodyne.sandbox.backend import Backend, BackendError, ExecResult
 from heterodyne.sandbox.openshell_selftest import (
     AGENT_CHECKS,
@@ -29,6 +32,7 @@ from heterodyne.session.server import TurnState
 from heterodyne.tmux import Tmux
 
 PROBES = Path(__file__).resolve().parents[1] / "src" / "heterodyne" / "sandbox" / "resources" / "probes.py"
+PASSING = "".join(f"PASS {c} [evidence]\n" for c in EXEC_CHECKS) + "DONE 0\n"
 
 
 @dataclass
@@ -36,7 +40,7 @@ class StubBackend:
     """Answers the self-test's backend calls; records what it was asked."""
     mode: str = "none"
     rc: int = 0
-    out: bytes = b""
+    out: bytes = PASSING.encode()
     lines: list[str] = field(default_factory=list[str])
     raises: bool = False
     calls: list[tuple[list[str], bytes | None]] = field(default_factory=list[tuple[list[str], bytes | None]])
@@ -187,3 +191,122 @@ def test_an_unwritable_other_accounts_canary_fails_the_precondition(tmp_path: Pa
 
 def test_files_ship_the_probes() -> None:
     assert selftest().files() == {"probes.py": PROBES.read_text()}
+
+
+# r1 review: the probes' output is validated in full, the canaries are verified, classify never blocks.
+
+
+def _drop(check: str) -> str:
+    return PASSING.replace(f"PASS {check} [evidence]\n", "")
+
+
+@pytest.mark.parametrize("out", [
+    "",
+    _drop("other-accounts"),
+    PASSING.replace("DONE 0\n", "PASS other-accounts [evidence]\nDONE 0\n"),
+    PASSING.replace("DONE 0\n", "PASS made-up-check [evidence]\nDONE 0\n"),
+    PASSING.replace("DONE 0\n", "something else\nDONE 0\n"),
+    PASSING.replace("DONE 0\n", ""),
+    PASSING.replace("DONE 0\n", "DONE 1\n"),
+    PASSING + "PASS real-home-canary-unreadable [after the end]\n",
+], ids=["empty", "partial", "duplicate", "unexpected", "malformed", "no-completion", "failed-completion",
+        "after-completion"])
+def test_an_exit_code_of_zero_without_every_result_fails(tmp_path: Path, out: str) -> None:
+    backend = StubBackend(out=out.encode())
+    ctx = context(tmp_path, backend)
+    backend.lines = passing_logs(ctx)
+    with pytest.raises(SelfTestFailed, match="probes-output"):
+        selftest().exec_path(ctx)
+
+
+def test_a_failed_check_fails_whatever_the_exit_code(tmp_path: Path) -> None:
+    out = PASSING.replace("PASS wsd-socket-absent", "FAIL wsd-socket-absent")
+    backend = StubBackend(out=out.encode())
+    ctx = context(tmp_path, backend)
+    backend.lines = passing_logs(ctx)
+    with pytest.raises(SelfTestFailed, match="^wsd-socket-absent$"):
+        selftest().exec_path(ctx)
+
+
+def test_an_unknown_failed_name_is_never_echoed(tmp_path: Path) -> None:
+    backend = StubBackend(rc=1, out=b"FAIL /some/host/path [x]\n")
+    ctx = context(tmp_path, backend)
+    with pytest.raises(SelfTestFailed, match="^probes$"):
+        selftest().exec_path(ctx)
+
+
+CANARIES = {"real-home": lambda ctx: ctx.real_home_canary, "other-accounts": lambda ctx: ctx.layout.oa_canary}
+
+
+def _plant(kind: str, canary: Path, tmp_path: Path) -> None:
+    if kind == "link-to-dev-null":
+        canary.symlink_to(os.devnull)
+    elif kind == "link-to-a-file":
+        (tmp_path / "elsewhere").write_text("")
+        canary.symlink_to(tmp_path / "elsewhere")
+    elif kind == "hard-link":
+        (tmp_path / "elsewhere").write_text("")
+        os.link(tmp_path / "elsewhere", canary)
+    elif kind == "fifo":
+        os.mkfifo(canary)
+
+
+@pytest.mark.parametrize("which", sorted(CANARIES))
+@pytest.mark.parametrize("kind", ["link-to-dev-null", "link-to-a-file", "hard-link", "fifo"])
+def test_a_canary_that_is_not_its_own_regular_file_fails_the_precondition(
+        tmp_path: Path, which: str, kind: str) -> None:
+    ctx = context(tmp_path, StubBackend())
+    _plant(kind, CANARIES[which](ctx), tmp_path)
+    with pytest.raises(SelfTestFailed, match="canary-precondition"):
+        selftest().exec_path(ctx)
+
+
+@pytest.mark.parametrize("which", sorted(CANARIES))
+@pytest.mark.parametrize("readback", [b"", b"0" * 16, b"x" * 17])
+def test_a_canary_read_back_other_than_written_fails_the_precondition(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str, readback: bytes) -> None:
+    ctx = context(tmp_path, StubBackend())
+    canary = CANARIES[which](ctx)
+    real = os.pread
+
+    def pread(fd: int, n: int, offset: int) -> bytes:
+        same = os.fstat(fd).st_ino == canary.stat().st_ino
+        return readback if same else real(fd, n, offset)
+
+    monkeypatch.setattr(openshell_selftest.os, "pread", pread)
+    with pytest.raises(SelfTestFailed, match="canary-precondition"):
+        selftest().exec_path(ctx)
+
+
+def test_a_canary_holds_its_fresh_value(tmp_path: Path) -> None:
+    backend = StubBackend()
+    ctx = context(tmp_path, backend)
+    backend.lines = passing_logs(ctx)
+    ctx.real_home_canary.write_text("stale")
+    selftest().exec_path(ctx)
+    first = ctx.real_home_canary.read_text()
+    selftest().exec_path(ctx)
+    assert first != "stale" and len(first) == 16 and ctx.real_home_canary.read_text() != first
+
+
+def _within(seconds: float, fn: Callable[[], str]) -> str:
+    result: list[str] = []
+    t = threading.Thread(target=lambda: result.append(fn()), daemon=True)
+    t.start()
+    t.join(seconds)
+    assert result, "classify blocked"
+    return result[0]
+
+
+def test_classify_never_blocks_on_a_fifo(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "auth.json")
+    assert _within(5, lambda: classify(tmp_path / "auth.json")) == "unknown"
+
+
+def test_classify_reads_a_bounded_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for i in range(5):
+        (tmp_path / f"f{i}").write_text("")
+    assert classify(tmp_path / "auth.json") == "absent"
+    monkeypatch.setattr(openshell_selftest, "LIST_LIMIT", 3)
+    assert classify(tmp_path / "auth.json") == "unknown"
+    assert classify(tmp_path / "f4") == "present"

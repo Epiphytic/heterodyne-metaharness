@@ -10,7 +10,9 @@ then deletes the sandbox and the launch fails.
 import hashlib
 import json
 import os
+import re
 import secrets
+import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -40,21 +42,58 @@ EXEC_CHECKS = (*COMMON_CHECKS, "model-host-exec-path", *TAIL_CHECKS)
 AGENT_CHECKS = (*COMMON_CHECKS, "model-host-agent-path", *TAIL_CHECKS)
 PROBE_SECONDS = 180
 LOG_SETTLE_SECONDS = 3
+LIST_LIMIT = 4096                   # entries classify reads from a login's directory before "unknown"
+CANARY_BYTES = 16
+VERDICT = re.compile(r"(PASS|FAIL) (\S+) \[.*\]")
 DIRECT_TARGET = "1.1.1.1:443"       # install-agnostic: allow=ip-port (the probes' literal-address target)
 
 
 def classify(path: Path) -> str:
-    """present: it opens. absent: its directory lists and the name is not in it. unknown: anything else,
-    such as an unlistable directory, or a listed name that doesn't open (a dangling symlink, EACCES)."""
+    """present: it opens as a regular file. absent: its directory lists, within LIST_LIMIT entries, and
+    the name is not in it. unknown: anything else, such as an unlistable or oversized directory, a FIFO or
+    device, or a listed name that doesn't open (a dangling symlink, EACCES). Never blocks."""
     try:
-        path.open("rb").close()
-        return "present"
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         pass
+    else:
+        try:
+            return "present" if stat.S_ISREG(os.fstat(fd).st_mode) else "unknown"
+        finally:
+            os.close(fd)
     try:
-        return "unknown" if path.name in {p.name for p in path.parent.iterdir()} else "absent"
+        with os.scandir(path.parent) as entries:
+            for count, entry in enumerate(entries):
+                if count >= LIST_LIMIT or entry.name == path.name:
+                    return "unknown"
     except OSError:
         return "unknown"
+    return "absent"
+
+
+def write_canary(path: Path) -> None:
+    """Write a fresh value to the canary and read exactly it back from the same file: opened through its
+    directory without following a link, a regular file with no other link. Anything else fails
+    canary-precondition, so the probe's "unreachable" inside is never vacuous."""
+    value = secrets.token_hex(CANARY_BYTES // 2).encode()
+    try:
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         0o600, dir_fd=parent)
+        finally:
+            os.close(parent)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise SelfTestFailed("canary-precondition")
+            os.ftruncate(fd, 0)
+            if os.pwrite(fd, value, 0) != len(value) or os.pread(fd, len(value) + 1, 0) != value:
+                raise SelfTestFailed("canary-precondition")
+        finally:
+            os.close(fd)
+    except OSError:
+        raise SelfTestFailed("canary-precondition") from None
 
 
 def other_accounts(others: Sequence[tuple[str, Path]], logins: Sequence[Bind]) -> list[dict[str, Any]]:
@@ -79,11 +118,7 @@ def env_allowed(adapter: Adapter, path: str) -> frozenset[str]:
 def probe_config(ctx: ProbeContext, path: str) -> dict[str, Any]:
     """The probes' input, after the host-side preconditions: a fresh Other accounts canary readable
     outside, each chosen login file's hash, and the other accounts' classes. It holds no secret."""
-    try:
-        ctx.layout.oa_canary.write_text(secrets.token_hex(8))
-        ctx.layout.oa_canary.read_bytes()
-    except OSError:
-        raise SelfTestFailed("canary-precondition") from None
+    write_canary(ctx.layout.oa_canary)
     chosen = [{"path": str(b.target), "sha256": hashlib.sha256(b.source.read_bytes()).hexdigest()}
               for b in ctx.spec.logins]
     return {"path": path, "real_home_canary": str(ctx.real_home_canary),
@@ -111,6 +146,21 @@ def log_needles(ctx: ProbeContext, path: str) -> list[tuple[str, str]]:
             ancestry]
 
 
+def _results(returncode: int, stdout: bytes, checks: Sequence[str]) -> None:
+    """Pass only on exactly one PASS line for each of `checks`, nothing else, then `DONE 0` last and a
+    zero exit. A FAIL names its check (only names from `checks` are ever echoed); any other shortfall is
+    probes-output."""
+    lines = stdout.decode("utf-8", "replace").splitlines()
+    found = [VERDICT.fullmatch(ln) for ln in lines]
+    failed = [m[2] for m in found if m and m[1] == "FAIL" and m[2] in checks]
+    if returncode != 0 or failed:
+        raise SelfTestFailed(", ".join(dict.fromkeys(failed)) or "probes")
+    names = [m[2] for m in found[:-1] if m]
+    complete = lines[-1:] == ["DONE 0"] and len(names) == len(lines) - 1
+    if not complete or sorted(names) != sorted(checks):
+        raise SelfTestFailed("probes-output")
+
+
 class OpenShellSelfTest:
     def __init__(self, *, wall: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep) -> None:
@@ -120,13 +170,6 @@ class OpenShellSelfTest:
     def files(self) -> Mapping[str, str]:
         return {"probes.py": PROBES_SOURCE.read_text()}
 
-    def _canary(self, ctx: ProbeContext) -> None:
-        try:
-            ctx.real_home_canary.write_text(secrets.token_hex(8))
-            ctx.real_home_canary.read_bytes()
-        except OSError:
-            raise SelfTestFailed("canary-precondition") from None
-
     def _logs(self, ctx: ProbeContext, since: float, path: str) -> None:
         self.sleep(LOG_SETTLE_SECONDS)       # outside: the supervisor's log must show this run's lines
         lines = ctx.backend.logs(ctx.spec.name, since)
@@ -135,7 +178,7 @@ class OpenShellSelfTest:
             raise SelfTestFailed(", ".join(missing))
 
     def exec_path(self, ctx: ProbeContext) -> None:
-        self._canary(ctx)
+        write_canary(ctx.real_home_canary)
         if ctx.backend.network_mode(ctx.spec.name) != "none":
             raise SelfTestFailed("outer-fence-network-none")
         data = json.dumps(probe_config(ctx, "exec")).encode()
@@ -145,10 +188,7 @@ class OpenShellSelfTest:
                                  input=data, timeout=PROBE_SECONDS)
         except BackendError:
             raise SelfTestFailed("probes-timeout") from None
-        if r.returncode != 0:
-            failed = [ln.split()[1] for ln in r.stdout.decode("utf-8", "replace").splitlines()
-                      if ln.startswith("FAIL ") and len(ln.split()) > 1]
-            raise SelfTestFailed(", ".join(failed) or "probes")
+        _results(r.returncode, r.stdout, EXEC_CHECKS)
         self._logs(ctx, since, "exec")
 
     def agent_path(self, ctx: ProbeContext) -> None:
