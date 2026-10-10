@@ -55,6 +55,7 @@ PROGRAM = re.compile(r"gpg\.program|gpg\.[^.]+\.program|gpg\.ssh\.defaultkeycomm
                      r"|interactive\.difffilter|(merge|diff)tool\..+\.cmd|(browser|man)\..+\.cmd"
                      r"|uploadpack\.packobjectshook")
 BOOLEAN = {"", "true", "false", "yes", "no", "on", "off", "1", "0"}
+# The scan must see the config btq's unpinned git sees, so it keeps the variables that locate it.
 HOST_CONFIG = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL")
 META_LIMIT = 4096
 
