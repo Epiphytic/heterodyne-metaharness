@@ -21,6 +21,7 @@ from heterodyne.sandbox.openshell_selftest import (
     OpenShellSelfTest,
     classify,
     env_allowed,
+    held_canaries,
     log_needles,
     other_accounts,
     probe_config,
@@ -44,13 +45,17 @@ class StubBackend:
     lines: list[str] = field(default_factory=list[str])
     raises: bool = False
     calls: list[tuple[list[str], bytes | None]] = field(default_factory=list[tuple[list[str], bytes | None]])
+    before: Callable[[], None] = lambda: None        # runs as the network mode is asked, before the probe
+    during: Callable[[], None] = lambda: None        # runs while the probe "runs"
 
     def network_mode(self, name: str) -> str:
+        self.before()
         return self.mode
 
     def exec(self, name: str, workdir: Path, argv: Sequence[str], *, input: bytes | None = None,
              timeout: float) -> ExecResult:
         self.calls.append((list(argv), input))
+        self.during()
         if self.raises:
             raise BackendError("openshell sandbox timed out")
         return ExecResult(self.rc, self.out, b"")
@@ -132,14 +137,15 @@ def test_env_allowed_adds_the_cli_tool_env_on_the_agent_path_only() -> None:
 
 def test_probe_config_holds_no_token_and_pins_the_chosen_hash(tmp_path: Path) -> None:
     ctx = context(tmp_path, StubBackend())
-    cfg = probe_config(ctx, "exec")
+    with held_canaries(ctx):
+        cfg = probe_config(ctx, "exec")
+        assert ctx.layout.oa_canary.read_text()                     # written fresh, readable outside
     assert "fake-session-token" not in json.dumps(cfg)
     [chosen] = cfg["chosen"]
     login = ctx.spec.logins[0]
     digest = hashlib.sha256(login.source.read_bytes()).hexdigest()
     assert chosen == {"path": str(login.target), "sha256": digest}
     assert cfg["model_host"] == "chatgpt.com" and cfg["wsd_socket"] == str(ctx.wsd_socket)
-    assert ctx.layout.oa_canary.read_text()                         # written fresh, readable outside
 
 
 def test_exec_path_passes(tmp_path: Path) -> None:
@@ -310,3 +316,60 @@ def test_classify_reads_a_bounded_directory(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(openshell_selftest, "LIST_LIMIT", 3)
     assert classify(tmp_path / "auth.json") == "unknown"
     assert classify(tmp_path / "f4") == "present"
+
+
+# r2 review: each canary's path still names the file written, before the probe runs and after it.
+
+
+def _unlink(canary: Path) -> None:
+    canary.unlink()
+
+
+def _rename_away(canary: Path) -> None:
+    canary.rename(canary.with_name("moved"))
+
+
+def _replace(canary: Path) -> None:
+    fresh = canary.with_name("fresh")
+    fresh.write_text(canary.read_text())         # the same value, a different file
+    fresh.replace(canary)
+
+
+CHANGED = {"real-home": "real-home-canary-changed", "other-accounts": "other-accounts-canary-changed"}
+CHANGES = {"unlink": _unlink, "rename-away": _rename_away, "replace": _replace}
+
+
+@pytest.mark.parametrize("which", sorted(CANARIES))
+@pytest.mark.parametrize("change", sorted(CHANGES))
+def test_a_canary_changed_while_the_probe_runs_fails_its_own_check(
+        tmp_path: Path, which: str, change: str) -> None:
+    backend = StubBackend()
+    ctx = context(tmp_path, backend)
+    backend.lines = passing_logs(ctx)
+    backend.during = lambda: CHANGES[change](CANARIES[which](ctx))
+    with pytest.raises(SelfTestFailed, match=f"^{CHANGED[which]}$"):
+        selftest().exec_path(ctx)
+
+
+@pytest.mark.parametrize("which", sorted(CANARIES))
+@pytest.mark.parametrize("change", sorted(CHANGES))
+def test_a_canary_changed_before_the_probe_fails_the_precondition(
+        tmp_path: Path, which: str, change: str) -> None:
+    backend = StubBackend()
+    ctx = context(tmp_path, backend)
+    backend.before = lambda: CHANGES[change](CANARIES[which](ctx))
+    with pytest.raises(SelfTestFailed, match="^canary-precondition$"):
+        selftest().exec_path(ctx)
+    assert backend.calls == []                   # the probe never ran
+
+
+def test_the_canaries_are_released_whatever_happens(tmp_path: Path) -> None:
+    before = len(os.listdir("/proc/self/fd"))  # noqa: PTH208
+    for backend in (StubBackend(), StubBackend(raises=True), StubBackend(mode="bridge")):
+        ctx = context(tmp_path, backend)
+        backend.lines = passing_logs(ctx)
+        try:
+            selftest().exec_path(ctx)
+        except SelfTestFailed:
+            pass
+    assert len(os.listdir("/proc/self/fd")) == before  # noqa: PTH208

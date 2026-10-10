@@ -14,7 +14,9 @@ import re
 import secrets
 import stat
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,29 +73,76 @@ def classify(path: Path) -> str:
     return "absent"
 
 
-def write_canary(path: Path) -> None:
-    """Write a fresh value to the canary and read exactly it back from the same file: opened through its
-    directory without following a link, a regular file with no other link. Anything else fails
+@dataclass(frozen=True)
+class HeldCanary:
+    """A canary the host wrote, held open (its directory and the file) until the probe has run."""
+    parent: int
+    fd: int
+    name: str
+    ident: tuple[int, int]          # (st_dev, st_ino)
+    value: bytes
+
+    def verify(self, check: str) -> None:
+        """SelfTestFailed(check) unless the canary's name, looked up in its held directory without
+        following a link, is still the file written: the same inode, a regular file with one link,
+        holding exactly the value."""
+        try:
+            info = os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)
+            same = ((info.st_dev, info.st_ino) == self.ident and stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 1 and os.pread(self.fd, len(self.value) + 1, 0) == self.value)
+        except OSError:
+            same = False
+        if not same:
+            raise SelfTestFailed(check)
+
+    def close(self) -> None:
+        os.close(self.fd)
+        os.close(self.parent)
+
+
+def write_canary(path: Path) -> HeldCanary:
+    """Write a fresh value to the canary through its directory, never following a link, and hold both
+    open. Anything but a regular file with one link that reads back exactly the value fails
     canary-precondition, so the probe's "unreachable" inside is never vacuous."""
     value = secrets.token_hex(CANARY_BYTES // 2).encode()
     try:
         parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                         0o600, dir_fd=parent)
-        finally:
-            os.close(parent)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise SelfTestFailed("canary-precondition")
-            os.ftruncate(fd, 0)
-            if os.pwrite(fd, value, 0) != len(value) or os.pread(fd, len(value) + 1, 0) != value:
-                raise SelfTestFailed("canary-precondition")
-        finally:
-            os.close(fd)
     except OSError:
         raise SelfTestFailed("canary-precondition") from None
+    fd = -1
+    try:
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     0o600, dir_fd=parent)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SelfTestFailed("canary-precondition")
+        os.ftruncate(fd, 0)
+        if os.pwrite(fd, value, 0) != len(value):
+            raise SelfTestFailed("canary-precondition")
+        held = HeldCanary(parent, fd, path.name, (info.st_dev, info.st_ino), value)
+        held.verify("canary-precondition")
+        return held
+    except BaseException as exc:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent)
+        if isinstance(exc, OSError):
+            raise SelfTestFailed("canary-precondition") from None
+        raise
+
+
+@contextmanager
+def held_canaries(ctx: ProbeContext) -> Generator[tuple[HeldCanary, HeldCanary]]:
+    """The real-home and Other accounts canaries, freshly written and held until the block ends."""
+    home = write_canary(ctx.real_home_canary)
+    try:
+        oa = write_canary(ctx.layout.oa_canary)
+        try:
+            yield home, oa
+        finally:
+            oa.close()
+    finally:
+        home.close()
 
 
 def other_accounts(others: Sequence[tuple[str, Path]], logins: Sequence[Bind]) -> list[dict[str, Any]]:
@@ -116,9 +165,8 @@ def env_allowed(adapter: Adapter, path: str) -> frozenset[str]:
 
 
 def probe_config(ctx: ProbeContext, path: str) -> dict[str, Any]:
-    """The probes' input, after the host-side preconditions: a fresh Other accounts canary readable
-    outside, each chosen login file's hash, and the other accounts' classes. It holds no secret."""
-    write_canary(ctx.layout.oa_canary)
+    """The probes' input: each chosen login file's hash and the other accounts' classes. It holds no
+    secret. The caller holds the canaries (`held_canaries`) around it and the probe run."""
     chosen = [{"path": str(b.target), "sha256": hashlib.sha256(b.source.read_bytes()).hexdigest()}
               for b in ctx.spec.logins]
     return {"path": path, "real_home_canary": str(ctx.real_home_canary),
@@ -178,16 +226,20 @@ class OpenShellSelfTest:
             raise SelfTestFailed(", ".join(missing))
 
     def exec_path(self, ctx: ProbeContext) -> None:
-        write_canary(ctx.real_home_canary)
-        if ctx.backend.network_mode(ctx.spec.name) != "none":
-            raise SelfTestFailed("outer-fence-network-none")
-        data = json.dumps(probe_config(ctx, "exec")).encode()
-        since = self.wall()
-        try:
-            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, ["python3", "-I", str(PROBES_INSIDE)],
-                                 input=data, timeout=PROBE_SECONDS)
-        except BackendError:
-            raise SelfTestFailed("probes-timeout") from None
+        with held_canaries(ctx) as (home, oa):
+            if ctx.backend.network_mode(ctx.spec.name) != "none":
+                raise SelfTestFailed("outer-fence-network-none")
+            data = json.dumps(probe_config(ctx, "exec")).encode()
+            home.verify("canary-precondition")
+            oa.verify("canary-precondition")
+            since = self.wall()
+            try:
+                r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, ["python3", "-I", str(PROBES_INSIDE)],
+                                     input=data, timeout=PROBE_SECONDS)
+            except BackendError:
+                raise SelfTestFailed("probes-timeout") from None
+            home.verify("real-home-canary-changed")
+            oa.verify("other-accounts-canary-changed")
         _results(r.returncode, r.stdout, EXEC_CHECKS)
         self._logs(ctx, since, "exec")
 
