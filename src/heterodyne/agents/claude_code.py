@@ -35,7 +35,9 @@ def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str
     if isinstance(model, str) and model:
         argv += ["--model", model]
     if isolated:
-        argv += ["--setting-sources", ""]
+        # One token, never an empty argument: an empty one is lost wherever argv is joined into a command
+        # line. Every 2.1.286 parser (its eager scan, commander) reads `--opt=` as the empty value.
+        argv += ["--setting-sources="]
     argv += ["--permission-mode", "bypassPermissions", "--settings", str(settings_file), "--name", name]
     args = profile.get("args", [])
     if isinstance(args, list):

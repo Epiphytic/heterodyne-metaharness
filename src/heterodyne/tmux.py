@@ -123,6 +123,14 @@ class Tmux:
         proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_dead}")
         return proc.stdout.decode().strip() != "0"
 
+    def pane_info(self, name: str) -> tuple[str, int]:
+        """The ID (`%N`) and process PID of the session's pane. Raises TmuxError if there is none."""
+        proc = self._run("display-message", "-p", "-t", f"={name}:", "#{pane_id} #{pane_pid}")
+        pane, _, pid = proc.stdout.decode("utf-8", "replace").strip().partition(" ")
+        if not re.fullmatch(r"%[0-9]+", pane) or not pid.isdigit():
+            raise TmuxError(f"tmux reported no pane for {name!r}")
+        return pane, int(pid)
+
     def paste(self, name: str, text: str) -> None:
         """Paste `text` and submit it. Only a failure of the `load-buffer` step, strictly before anything
         reaches the pane, raises a plain TmuxError (definitely not delivered, so a retry is safe). A failure

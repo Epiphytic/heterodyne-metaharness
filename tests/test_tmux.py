@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from tmux_guard import new_test_tmux
 
-from heterodyne.tmux import Tmux
+from heterodyne.tmux import Tmux, TmuxError
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
@@ -74,3 +74,12 @@ def test_multiline_paste_is_one_bracketed_paste(tmux: Tmux, tmp_path: Path) -> N
     wait_for(lambda: out.exists() and out.stat().st_size > 0)
     # tmux turns LF into CR inside the paste
     assert out.read_bytes() == b"\x1b[200~line one\rline two\rline three\x1b[201~\r"
+
+
+def test_pane_info_reports_the_pane_id_and_pid(tmux: Tmux, tmp_path: Path) -> None:
+    tmux.new_session("pi", tmp_path, ["sh", "-c", "sleep 30"])
+    pane, pid = tmux.pane_info("pi")
+    assert pane.startswith("%") and pid > 1
+    tmux.kill("pi")
+    with pytest.raises(TmuxError):
+        tmux.pane_info("pi")

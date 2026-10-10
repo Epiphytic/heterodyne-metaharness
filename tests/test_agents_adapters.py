@@ -250,7 +250,7 @@ def test_tui_argv(tmp_path: Path) -> None:
     first = ClaudeCode().tui_argv(claude, {"model": "m-1"}, native_id=ID, resume=False, label="bd-1 · coder")
     assert first[1:3] == ["--session-id", ID] and first[-2:] == ["--name", "bd-1 · coder"]
     assert str(RUN_INSIDE / SETTINGS_FILE) in first
-    assert first[first.index("--setting-sources") + 1] == ""     # no user, project or local settings
+    assert "--setting-sources=" in first and "" not in first     # no user, project or local settings
     assert ClaudeCode().tui_argv(claude, {}, native_id=ID, resume=True, label="x")[1:3] == ["--resume", ID]
     assert Codex().tui_argv(codex, {}, native_id=None, resume=False, label="x") == [
         str(codex.binary), "--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox"]

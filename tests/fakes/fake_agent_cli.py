@@ -134,8 +134,12 @@ def claude_hooks() -> dict[str, list[str]]:
     """As Claude Code 2.1.286 merges them: the user, project and local settings that --setting-sources
     allows (all three by default), then --settings; `disableAllHooks` in any of them turns every hook
     off (there is no managed policy here)."""
-    allowed = (ARGS[ARGS.index("--setting-sources") + 1].split(",") if "--setting-sources" in ARGS
-               else ["user", "project", "local"])
+    allowed = ["user", "project", "local"]
+    for i, arg in enumerate(ARGS):                  # both forms, as its argv parsers read them
+        if arg.startswith("--setting-sources="):
+            allowed = arg.partition("=")[2].split(",")
+        elif arg == "--setting-sources" and i + 1 < len(ARGS):
+            allowed = ARGS[i + 1].split(",")
     files = {"user": Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json",
              "project": Path.cwd() / ".claude" / "settings.json",
              "local": Path.cwd() / ".claude" / "settings.local.json"}
