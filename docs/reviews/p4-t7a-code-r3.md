@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 61bbefe. Verdict: REVISE.
+
+Controller adjudication (cycle 3, final): the single finding is reclassified NON-BLOCKING and deferred. Its only route is an operator-written system or global core.hooksPath/core.fsmonitor that names an absolute path inside an agent-writable worktree. The agent cannot write system or global config, and operator config is trusted per the accepted trust split under ADR r15 section 7. The full fix, isolated config for unpinned btq consumers, is a beads-task-queue change that needs Liam's sign-off. Cycle 1 and 2 findings confirmed fixed by the reviewer.
+
+1. [BLOCKING] `src/heterodyne/wsd/gitwip.py:147–150` — Absolute and `~`-prefixed global/system hooks and fsmonitor paths bypass refusal, even when they name agent-writable files. For example, global `core.hooksPath=/path/to/bead-worktree/.githooks` passes `_check_config`; the agent can plant `post-checkout` there, and btq’s unpinned `worktree add` (`~/repos/beads-task-queue/bin/btq:730`) executes it on the host. Trusted config does not make its writable target trusted. Read-only checks confirmed both absolute hooks and fsmonitor paths pass. **Fix:** isolate configuration and disable hooks/fsmonitor for unpinned consumers, or reject settings whose targets are agent-writable, including symlink routes. Add an adversarial absolute-path test exercising worktree creation. The previous findings otherwise appear fixed; pytest could not run because scratch writes were denied.
+
+REVISE
