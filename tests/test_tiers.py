@@ -1,9 +1,13 @@
 """The test tiers (docs/testing/efficiency-review.md): the change-based selector, the slow list and the
-JUnit parsing behind the runner. Offline; reads the repository's own files, runs no git."""
+safety guard, the JUnit parsing behind the runner, and the RAM base temp. Offline; reads the repository's
+own files, runs no git."""
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
+import basetemp
 import pytest
 import tier_marks
 
@@ -49,7 +53,8 @@ def test_a_module_named_in_a_string_counts() -> None:
 
 @pytest.mark.parametrize("changed", [
     ["tests/conftest.py"], ["tests/tmux_guard.py"], ["tests/tier_marks.py"], ["tests/slow_tests.txt"],
-    ["tests/fakes/fake_wn_agent.py"], ["tests/wsd_env.py"], ["pyproject.toml"], ["uv.lock"],
+    ["tests/fakes/fake_wn_agent.py"], ["tests/wsd_env.py"], ["tests/basetemp.py"], ["pyproject.toml"],
+    ["uv.lock"],
     [".github/workflows/ci.yml"], ["src/heterodyne/tmux.py"], ["src/heterodyne/platform.py"],
     ["src/heterodyne/config/paths.py"], ["src/heterodyne/no_such_module.py"],
     ["docs/wsd.md", "tests/conftest.py"],
@@ -68,25 +73,81 @@ def test_a_script_selects_the_tests_that_name_it() -> None:
     assert "tests/test_tiers.py" in select_tests.select(["scripts/select_tests.py"])
 
 
-def test_safety_tests_are_recognised() -> None:
-    for nodeid in ["tests/test_redaction.py::test_anything", "tests/test_sandbox_runtime.py::test_x[a]",
-                   "tests/test_admind_approvals.py::test_approve_happy_path",
-                   "tests/test_admind_daemon.py::test_member_count_latches_and_stops_all_posting",
-                   "tests/test_wsd_park.py::test_a_digest_mismatch_refuses"]:
+# Safety tests that were once on the slow list because no name matched (Codex review r1).
+NAMED_SAFETY = ["tests/test_admind_r13_replies.py::test_a_hex_value_in_a_reply_never_reaches_the_chat",
+                "tests/test_admind_r13_operators.py::test_a_stranger_is_dropped",
+                "tests/test_admind_r13_membership.py::"
+                "test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm"]
+
+
+def test_safety_is_the_default_outside_tmux_and_wsd_files() -> None:
+    for nodeid in [*NAMED_SAFETY, "tests/test_redaction.py::test_anything",
+                   "tests/test_sandbox_runtime.py::test_x[a]",
+                   "tests/test_admind_reactions.py::test_a_reaction_answers_a_question_or_merge_card",
+                   "tests/test_brand_new_file.py::test_anything",          # a new file is safety until listed
+                   "tests/test_wsd_park.py::test_a_digest_mismatch_refuses"]:  # eligible file, safety name
         assert tier_marks.is_safety(nodeid), nodeid
-    assert not tier_marks.is_safety("tests/test_admind_reactions.py::test_a_reaction_answers_a_question")
+    assert not tier_marks.is_safety("tests/test_wsd_defer.py::test_defer_and_regate_replay")
+    assert not tier_marks.is_safety("tests/test_tmux.py::test_multiline_paste_is_one_bracketed_paste[x]")
 
 
 def test_the_slow_list_names_no_safety_test() -> None:
     slow = tier_marks.load()
     assert slow, "tests/slow_tests.txt is missing or empty"
     assert not [name for name in slow if tier_marks.is_safety(name)]
+    assert not set(NAMED_SAFETY) & slow
+
+
+def collected(*args: str) -> set[str]:
+    proc = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+                           "-p", "no:xdist", *args], cwd=ROOT, capture_output=True, text=True, check=False,
+                          env={**os.environ, "PYTEST_ADDOPTS": ""})
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    return {line for line in proc.stdout.splitlines() if "::" in line}
+
+
+def test_the_fast_tier_collects_every_safety_test() -> None:
+    everything = collected("tests")
+    fast = collected("-m", "not slow", "tests")
+    safety = {nodeid for nodeid in everything if tier_marks.is_safety(nodeid)}
+    assert len(safety) > 1000
+    assert safety <= fast, sorted(safety - fast)[:20]
+    for name in NAMED_SAFETY:
+        assert any(tier_marks.function_id(nodeid) == name for nodeid in fast), name
+    assert everything - fast, "the fast tier leaves nothing out"
+
+
+class Item:
+    """The parts of a pytest.Item that tier_marks uses."""
+
+    def __init__(self, nodeid: str, *marks: str) -> None:
+        self.nodeid = nodeid
+        self.marks = set(marks)
+
+    def add_marker(self, mark: pytest.MarkDecorator) -> None:
+        self.marks.add(mark.name)
+
+    def get_closest_marker(self, name: str) -> object | None:
+        return name if name in self.marks else None
+
+
+def modify(items: list[Item]) -> None:
+    tier_marks.pytest_collection_modifyitems(pytest.Config.__new__(pytest.Config), items)  # type: ignore[arg-type]
 
 
 def test_listing_a_safety_test_as_slow_fails_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tier_marks, "load", lambda: {"tests/test_redaction.py::test_anything"})
-    with pytest.raises(pytest.UsageError, match="safety tests"):
-        tier_marks.pytest_collection_modifyitems(pytest.Config.__new__(pytest.Config), [])
+    monkeypatch.setattr(tier_marks, "load", lambda: {NAMED_SAFETY[1]})
+    with pytest.raises(pytest.UsageError, match="lists safety tests"):
+        modify([])
+
+
+def test_marking_a_safety_test_slow_by_hand_fails_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tier_marks, "load", set)
+    with pytest.raises(pytest.UsageError, match="marked slow"):
+        modify([Item(NAMED_SAFETY[0] + "[x]", "slow")])
+    ok, safe = Item("tests/test_wsd_defer.py::test_defer_and_regate_replay", "slow"), Item(NAMED_SAFETY[2])
+    modify([ok, safe])
+    assert ok.marks == {"slow"} and safe.marks == {"safety"}
 
 
 def test_junit_cases_map_to_node_ids(tmp_path: Path) -> None:
@@ -108,3 +169,39 @@ def test_junit_cases_map_to_node_ids(tmp_path: Path) -> None:
 ])
 def test_runs_are_parallel_unless_the_caller_chooses(extra: list[str], added: list[str]) -> None:
     assert run_tiers.parallel(extra) == added
+
+
+def mounts(tmp_path: Path, path: Path, fstype: str = "tmpfs") -> Path:
+    table = tmp_path / "mounts"
+    table.write_text(f"proc /proc proc rw 0 0\nshm {path} {fstype} rw,nosuid 0 0\n")
+    return table
+
+
+def test_the_ram_base_is_a_private_directory_on_a_roomy_writable_tmpfs(tmp_path: Path) -> None:
+    ram = tmp_path / "shm"
+    ram.mkdir()
+    base = basetemp.ram_base(ram, mounts(tmp_path, ram), min_free=1)
+    assert base is not None and base.parent == ram.resolve() and base.name.startswith("hz")
+
+
+@pytest.mark.parametrize("case", ["absent", "not tmpfs", "no mounts table", "unwritable", "too small",
+                                  "mkdtemp fails"])
+def test_otherwise_the_base_temp_stays_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                               case: str) -> None:
+    ram = tmp_path / "shm"
+    ram.mkdir()
+    table = mounts(tmp_path, ram, "ext4" if case == "not tmpfs" else "tmpfs")
+    min_free = 1
+    if case == "absent":
+        ram.rmdir()
+    elif case == "no mounts table":
+        table = tmp_path / "missing"
+    elif case == "unwritable":
+        monkeypatch.setattr(basetemp.os, "access", lambda path, mode: False)
+    elif case == "too small":
+        min_free = 1 << 62
+    elif case == "mkdtemp fails":
+        def refuse(**kw: object) -> str:
+            raise OSError(28, "No space left on device")
+        monkeypatch.setattr(basetemp.tempfile, "mkdtemp", refuse)
+    assert basetemp.ram_base(ram, table, min_free) is None

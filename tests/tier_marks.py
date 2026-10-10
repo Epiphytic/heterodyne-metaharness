@@ -6,9 +6,12 @@ function `slow`, and `-m "not slow"` (scripts/test-fast) leaves them out. The li
 from a timed run by `scripts/run_tiers.py slow-list REPORT.xml`; a stale entry only means a test runs
 in the full tier alone, and a new slow test stays in the fast tier until the list is regenerated.
 
-A safety test is never slow: anything in SAFETY_FILES, or whose name matches SAFETY_WORDS, stays in
-every tier. If the list names one, collection fails rather than quietly dropping it from the fast tier;
-make the test faster instead. Loaded from tests/conftest.py.
+Safety is the default. Only the files SLOW_ELIGIBLE matches (tmux and wsd mechanics) may have slow
+tests; every other test file, a new one included, is a safety file (admind auth, operators, redaction,
+latches, digests, approvals, sandbox, policy, ...), whose tests run in every tier whatever the list says.
+Inside an eligible file, a test whose name matches SAFETY_WORDS is safety too. Collection marks every
+safety test `safety`, and fails, rather than quietly dropping it from the fast tier, if the list names
+one or anything marks one `slow`: make the test faster instead. Loaded from tests/conftest.py.
 """
 
 import re
@@ -17,10 +20,7 @@ from pathlib import Path
 import pytest
 
 SLOW_LIST = Path(__file__).resolve().with_name("slow_tests.txt")
-SAFETY_FILES = re.compile(
-    r"^tests/(test_redaction|test_secret_scan|test_policy|test_sandbox_\w+|test_admind_r13_redact"
-    r"|test_admind_approvals|test_admind_socket_bounds|test_check_install_agnostic"
-    r"|live/test_isolation_offline)\.py$")
+SLOW_ELIGIBLE = re.compile(r"^tests/(test_tmux\w*|test_wsd_\w+)\.py$")
 SAFETY_WORDS = re.compile(r"redact|secret|sandbox|latch|digest|polic|leak|npub|nsec|token|auth|isolat|guard"
                           r"|pin")
 
@@ -32,7 +32,7 @@ def function_id(nodeid: str) -> str:
 
 def is_safety(nodeid: str) -> bool:
     path, _, rest = function_id(nodeid).partition("::")
-    return bool(SAFETY_FILES.match(path) or SAFETY_WORDS.search(rest.lower()))
+    return not SLOW_ELIGIBLE.match(path) or bool(SAFETY_WORDS.search(rest.lower()))
 
 
 def load(path: Path = SLOW_LIST) -> set[str]:
@@ -45,17 +45,23 @@ def load(path: Path = SLOW_LIST) -> set[str]:
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "slow: outside the fast tier (tests/slow_tests.txt)")
+    config.addinivalue_line("markers", "safety: runs in every tier; never slow (tests/tier_marks.py)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     slow = load()
-    if not slow:
-        return
     unsafe = sorted(name for name in slow if is_safety(name))
     if unsafe:
         raise pytest.UsageError(f"{SLOW_LIST.name} lists safety tests, which must stay in every tier: "
                                 + ", ".join(unsafe))
-    mark = pytest.mark.slow
+    marked: list[str] = []
     for item in items:
         if function_id(item.nodeid) in slow:
-            item.add_marker(mark)
+            item.add_marker(pytest.mark.slow)
+        if is_safety(item.nodeid):
+            item.add_marker(pytest.mark.safety)
+            if item.get_closest_marker("slow") is not None:
+                marked.append(item.nodeid)
+    if marked:
+        raise pytest.UsageError("safety tests are marked slow, which would drop them from the fast tier: "
+                                + ", ".join(marked))
