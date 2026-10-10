@@ -198,7 +198,8 @@ def test_a_thread_that_fails_to_start_refuses_only_its_connection(
     sock = tmp_path / "s.sock"
     assert refused(sock, req(TOKEN, "hook_event", {}))
     assert ask(sock, req(TOKEN, "hook_event", {})) == '{"ok": true}'
-    assert failed and server.active == 0
+    assert failed
+    wait_for(lambda: server.active == 0)        # the handler unwinds just after its reply
 
 
 def test_close_ends_held_connections_and_nothing_is_recorded_after(tmp_path: Path) -> None:

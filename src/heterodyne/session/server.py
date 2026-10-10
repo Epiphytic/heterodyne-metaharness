@@ -29,10 +29,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
+from heterodyne.session.shim import MAX_DEPTH, json_depth  # stdlib-only, shared with the shim
+
 MAX_LINE = 64 * 1024
 CLIENT_SECONDS = 5.0            # one request's whole deadline, from its accept
 MAX_HANDLERS = 32
-MAX_DEPTH = 128                 # JSON nesting: deeper is malformed, before any recursive parse
 CLOSE_SECONDS = 5.0             # how long close waits for the handlers it has woken
 OK = {"ok": True}
 FORBIDDEN = {"ok": False, "error": "forbidden"}
@@ -199,7 +200,7 @@ class SessionServer:
         return data.split(b"\n", 1)[0]
 
     def _handle(self, line: bytes) -> dict[str, Any]:
-        if _depth(line) > MAX_DEPTH:
+        if json_depth(line) > MAX_DEPTH:
             return MALFORMED
         try:
             req: Any = json.loads(line)
@@ -261,25 +262,3 @@ class SessionServer:
             with os.fdopen(fd, "ab") as fh:
                 fh.write(line)
 
-
-def _depth(line: bytes) -> int:
-    """The deepest array or object nesting in a JSON text, counted outside strings. Parsing and spooling
-    recurse, so a deep text is refused before either sees it (a handler thread's stack may be small)."""
-    depth = deepest = 0
-    in_string = escaped = False
-    for byte in line:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif byte == 0x5C:              # backslash
-                escaped = True
-            elif byte == 0x22:              # quote
-                in_string = False
-        elif byte == 0x22:
-            in_string = True
-        elif byte in (0x5B, 0x7B):          # [ {
-            depth += 1
-            deepest = max(deepest, depth)
-        elif byte in (0x5D, 0x7D):          # ] }
-            depth -= 1
-    return deepest

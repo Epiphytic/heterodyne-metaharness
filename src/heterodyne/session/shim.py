@@ -7,11 +7,18 @@ $HZ_SESSION_SOCKET; the token and `shim.json` sit beside it, never in argv (plan
 If wsd doesn't answer within `wait_seconds`, a PreToolUse is allowed only for a locally classifiable
 `worktree_edit` (an edit tool on a path inside the worktree, while that class is auto-approved), and
 denied otherwise; other events are spooled to $HOME/.hz/spool.jsonl, untrusted (plan 4 D14).
+
+The hook input, the reply and $HOME are all the agent's to shape, so the shim never trusts them to be
+well-formed or benign: `wait_seconds` bounds the whole exchange, the reply's length and every JSON text's
+nesting are capped, and the spool is written only to a regular file, never through a link or into a FIFO.
+Anything unexpected about a tool call denies it.
 """
 
 import json
+import math
 import os
 import socket
+import stat
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -26,6 +33,9 @@ EX_TEMPFAIL = 75
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 SPOOL_CAP = 1 << 20
 RETRY_SECONDS = 0.1
+MAX_REPLY = 64 * 1024
+MAX_DEPTH = 128                 # JSON nesting: deeper is malformed, before any recursive parse
+DEFAULT_WAIT = 5.0
 REQUEST_WRAPPER = '#!/bin/sh\nexec python3 -I /run/hz/shim.py request "$@"\n'
 
 Clock = Callable[[], float]
@@ -49,71 +59,136 @@ def _config(env: Mapping[str, str]) -> tuple[Path, str, dict[str, Any]] | None:
     return (Path(sock), token, cast(dict[str, Any], cfg)) if isinstance(cfg, dict) else None
 
 
+def _wait(cfg: Mapping[str, Any]) -> float:
+    wait = cfg.get("wait_seconds", DEFAULT_WAIT)
+    if isinstance(wait, int | float) and not isinstance(wait, bool) and math.isfinite(wait) and wait >= 0:
+        return float(wait)
+    return DEFAULT_WAIT
+
+
+def _exchange(sock: Path, line: bytes, end: float, clock: Clock) -> Any:
+    """One connection: send `line`, read one reply line. Every step gets only what is left of the
+    deadline, so a slow or trickling peer can't stretch it; the reply is capped in length and nesting."""
+    with socket.socket(socket.AF_UNIX) as c:
+        def arm() -> None:
+            left = end - clock()
+            if left <= 0:
+                raise TimeoutError
+            c.settimeout(left)
+
+        arm()
+        c.connect(str(sock))
+        arm()
+        c.sendall(line)
+        data = b""
+        while b"\n" not in data:
+            if len(data) > MAX_REPLY:
+                raise ValueError("reply too long")
+            arm()
+            chunk = c.recv(8192)
+            if not chunk:
+                break
+            data += chunk
+    reply = data.split(b"\n", 1)[0]
+    if len(reply) > MAX_REPLY or json_depth(reply) > MAX_DEPTH:
+        raise ValueError("reply too long or too deep")
+    return json.loads(reply)
+
+
 def _ask(sock: Path, message: dict[str, Any], wait: float, clock: Clock,
          sleep: Sleep) -> dict[str, Any] | None:
+    """wsd's reply, retried until `wait` seconds have passed in all; None if there is none by then."""
     end = clock() + wait
     line = (json.dumps(message) + "\n").encode()
     while True:
         try:
-            with socket.socket(socket.AF_UNIX) as c:
-                c.settimeout(max(0.5, wait))
-                c.connect(str(sock))
-                c.sendall(line)
-                reply: Any = json.loads(c.makefile("rb").readline())
+            reply = _exchange(sock, line, end, clock)
             return cast(dict[str, Any], reply) if isinstance(reply, dict) else None
         except (OSError, ValueError):
-            if clock() >= end:
+            left = end - clock()
+            if left <= 0:
                 return None
-            sleep(RETRY_SECONDS)
-
+            sleep(min(RETRY_SECONDS, left))
 
 def _local_edit(payload: Mapping[str, Any], cfg: Mapping[str, Any]) -> bool:
-    if payload.get("tool_name") not in EDIT_TOOLS or "worktree_edit" not in cfg.get("local_classes", []):
+    """A `worktree_edit`: an edit tool on a path whose real path is inside the worktree, while that class
+    is in `local_classes`. A relative path counts only against the hook's own absolute `cwd`."""
+    tool = payload.get("tool_name")
+    classes = cfg.get("local_classes")
+    if not isinstance(tool, str) or tool not in EDIT_TOOLS:
+        return False
+    if not isinstance(classes, list) or "worktree_edit" not in classes:
         return False
     worktree = cfg.get("worktree")
     tool_input = payload.get("tool_input")
-    if not isinstance(worktree, str) or not isinstance(tool_input, dict):
+    if not isinstance(worktree, str) or not Path(worktree).is_absolute() or not isinstance(tool_input, dict):
         return False
     fields = cast(dict[str, Any], tool_input)
     target = fields.get("file_path", fields.get("notebook_path"))
     if not isinstance(target, str) or not target:
         return False
-    root = os.path.realpath(worktree)
-    real = os.path.realpath(Path(root) / target)
-    return os.path.commonpath([real, root]) == root
-
+    if not Path(target).is_absolute():
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+            return False
+        target = str(Path(cwd) / target)
+    try:
+        root = os.path.realpath(worktree)
+        real = os.path.realpath(target)
+        return os.path.commonpath([real, root]) == root
+    except (OSError, ValueError):       # a NUL, an unresolvable path
+        return False
 
 def _spool(env: Mapping[str, str], payload: Any) -> None:
+    """Append the event to $HOME/.hz/spool.jsonl, capped, best effort. $HOME is the agent's: the file
+    is opened without following a link and without blocking, and written only if it is a regular file."""
     home = env.get("HOME")
-    if not home:
+    if not home or not Path(home).is_absolute():
         return
+    folder = Path(home) / ".hz"
     try:
-        folder = Path(home) / ".hz"
-        folder.mkdir(mode=0o700, exist_ok=True)
-        spool = folder / "spool.jsonl"
         line = (json.dumps({"spooled": True, "payload": payload}) + "\n").encode()
-        if (spool.stat().st_size if spool.exists() else 0) + len(line) <= SPOOL_CAP:
-            with spool.open("ab") as fh:
-                fh.write(line)
-    except OSError:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd = os.open("spool.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISREG(st.st_mode) and st.st_size + len(line) <= SPOOL_CAP:
+                os.write(fd, line)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
         pass
-
 
 def run_hook(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
              sleep: Sleep = time.sleep) -> tuple[int, str]:
+    """Exit 0 always; a denied tool call is the JSON decision on stdout. Input that can't be read as a
+    hook event (not JSON, nested too deeply) is denied, as is a tool call the shim fails on."""
     try:
-        payload: Any = json.loads(raw)
-    except ValueError:
-        payload = {}
-    fields = cast(dict[str, Any], payload) if isinstance(payload, dict) else {}
+        payload: Any = json.loads(raw) if json_depth(raw) <= MAX_DEPTH else None
+    except (ValueError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict):
+        return 0, _deny(DENY_REASON)
+    fields = cast(dict[str, Any], payload)
     tool_call = fields.get("hook_event_name") == "PreToolUse"
+    try:
+        return _decide(fields, tool_call, env, clock, sleep)
+    except Exception:  # noqa: BLE001 - fail closed on anything unforeseen
+        return 0, _deny(DENY_REASON) if tool_call else ""
+
+
+def _decide(fields: dict[str, Any], tool_call: bool, env: Mapping[str, str], clock: Clock,
+            sleep: Sleep) -> tuple[int, str]:
     found = _config(env)
     if found is None:
         return 0, _deny(DENY_REASON) if tool_call else ""
     sock, token, cfg = found
-    wait = cfg.get("wait_seconds", 5)
-    wait = float(wait) if isinstance(wait, int | float) and not isinstance(wait, bool) else 5.0
-    reply = _ask(sock, {"token": token, "type": "hook_event", "payload": fields}, wait, clock, sleep)
+    reply = _ask(sock, {"token": token, "type": "hook_event", "payload": fields}, _wait(cfg), clock, sleep)
     if reply is None:
         if tool_call:
             return 0, "" if _local_edit(fields, cfg) else _deny(DENY_REASON)
@@ -128,20 +203,40 @@ def run_hook(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotoni
         return 0, _deny(reason if isinstance(reason, str) and reason else REFUSED_REASON)
     return 0, ""
 
-
 def run_request(words: Sequence[str], env: Mapping[str, str], *, clock: Clock = time.monotonic,
                 sleep: Sleep = time.sleep) -> tuple[int, str]:
     found = _config(env)
     if found is None:
         return EX_TEMPFAIL, DENY_REASON
     sock, token, cfg = found
-    wait = cfg.get("wait_seconds", 5)
-    wait = float(wait) if isinstance(wait, int | float) and not isinstance(wait, bool) else 5.0
     reply = _ask(sock, {"token": token, "type": "ws_request", "payload": {"text": " ".join(words)}},
-                 wait, clock, sleep)
+                 _wait(cfg), clock, sleep)
     if reply is None:
         return EX_TEMPFAIL, DENY_REASON
     return (0 if reply.get("ok") is True else 1), json.dumps(reply)
+
+
+def json_depth(line: bytes) -> int:
+    """The deepest array or object nesting in a JSON text, counted outside strings. Parsing and spooling
+    recurse, so a deep text is refused before either sees it (a thread's stack may be small)."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for byte in line:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:              # backslash
+                escaped = True
+            elif byte == 0x22:              # quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):          # [ {
+            depth += 1
+            deepest = max(deepest, depth)
+        elif byte in (0x5D, 0x7D):          # ] }
+            depth -= 1
+    return deepest
 
 
 def hook_main() -> int:
