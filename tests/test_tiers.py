@@ -100,3 +100,11 @@ def test_junit_cases_map_to_node_ids(tmp_path: Path) -> None:
     assert run_tiers.cases(report) == [("tests/test_tiers.py::test_docs_select_nothing", 0.25, False),
                                        ("tests/test_tiers.py::test_x[a]", 1.5, True)]
     assert run_tiers.cases(tmp_path / "missing.xml") == []
+
+
+@pytest.mark.parametrize(("extra", "added"), [
+    ([], ["-n", "auto"]), (["-x"], ["-n", "auto"]), (["--no-header"], ["-n", "auto"]),
+    (["-n", "0"], []), (["-n4"], []), (["--numprocesses=2"], []), (["-p", "no:xdist"], []),
+])
+def test_runs_are_parallel_unless_the_caller_chooses(extra: list[str], added: list[str]) -> None:
+    assert run_tiers.parallel(extra) == added
