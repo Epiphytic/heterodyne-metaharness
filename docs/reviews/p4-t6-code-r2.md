@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 76f5fbc. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/session/shim.py:191` — Legitimate hooks can exceed the server’s 64 KiB request limit. A `Write` containing 64 KiB of content is necessarily larger after JSON wrapping and receives `malformed`, so the shim denies it even with healthy wsd. Large non-tool events are silently discarded at line 197; an in-memory check confirmed a 65,645-byte `Stop` produces neither a recorded stop nor a local spool. **Fix:** agree on bounded transport with the server that preserves lifecycle events and the information needed for tool decisions. Add integration tests for oversized `Write` and `Stop` events. The incompatibility originates in the plan’s sample implementation combined with Task 5’s later limits.
+
+2. [NON-BLOCKING] `src/heterodyne/session/shim.py:188` — Missing or unreadable configuration still silently discards non-tool events. The missing-home defect is fixed by parent creation and explicit coverage, but this remaining part of cycle 1 finding 5 is unchanged and inherited from the plan. **Fix:** attempt best-effort spooling before returning for non-tool events on configuration failure; test missing and unreadable configuration.
+
+REVISE
