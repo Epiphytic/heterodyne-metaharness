@@ -26,6 +26,7 @@ from test_admind_r13_replies import (
     append,
     audit_records,
     batch_arrives,
+    batch_message_id,
     configure,
     details_of,
     prompt,
@@ -415,8 +416,7 @@ def test_login_dirs_never_leave_through_the_backstop(tmp_path: Path) -> None:
         await h.say(f"{LONG} {all_forms(forms)}")
         text = await batch_arrives(h)
         assert LONG in text and LOGIN_DIR in text
-        row = h.store.db.execute("SELECT message_id FROM outbox WHERE key LIKE 'batch:%'").fetchone()
-        ordinary = await details_of(h, str(row[0]))
+        ordinary = await details_of(h, await batch_message_id(h))
         assert LONG in ordinary and LOGIN_DIR in ordinary
         assert leaks(h.texts(), forms) == []
         assert leaks([json.dumps(r) for r in audit_records(h)], forms) == []

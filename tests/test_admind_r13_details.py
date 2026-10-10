@@ -22,6 +22,7 @@ from test_admind_r13_replies import (
     TOKEN,
     append,
     audited,
+    batch_message_id,
     configure,
     prompt,
     result,
@@ -417,8 +418,7 @@ def test_details_on_a_batch_returns_every_reply_in_order(tmp_path: Path) -> None
         await wait_until(lambda: len(h.store.turns_with_status("batched")) == 2, 20)
         h.daemon.batch_seconds = 0.2
         await wait_until(lambda: any(t.startswith("⚠️ Replies batched") for t in h.texts()), 20)
-        row = h.store.db.execute("SELECT message_id FROM outbox WHERE key LIKE 'batch:%'").fetchone()
-        mid = await ask(h, "!details", reply_to=row[0])
+        mid = await ask(h, "!details", reply_to=await batch_message_id(h))
         await wait_until(lambda: delivered(h, mid), 20)
         whole = "\n".join(details_texts(h, mid))
         assert whole.count("— terminal ·") == 2
