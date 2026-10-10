@@ -255,6 +255,33 @@ class SandboxRuntime:
         if not self._end(rec, interrupt=True):
             raise RuntimeUnavailable("the session's end could not be confirmed")
 
+    def expire(self, ws: str, now: int) -> None:
+        """D13: `_end(..., lifetime=True)` makes the stop durable, lands the generation's commits and then
+        the WIP; this only decides when, and replays what a crash left owed. An unlanded session's mark
+        stays owed and is never committed here (`_settle_wip`)."""
+        margin = self.c.settings.stop_margin_seconds
+        for rec in self._records():
+            if rec.ws != ws:
+                continue
+            if rec.phase is Phase.ENDED:
+                if rec.wip_mark:
+                    try:
+                        self._settle_wip(self.layout(rec.key), rec)    # a crash came between end and commit
+                    except OSError:
+                        raise RuntimeUnavailable("the session record can't be written") from None
+                continue
+            if rec.stop_reason == "lifetime":
+                hard = True                      # a lifetime stop already begun: finish it
+            elif rec.phase is not Phase.RUNNING or now < rec.deadline - margin:
+                continue
+            else:
+                hard = now >= rec.deadline
+                server = self.servers.get(rec.key)
+                if not hard and (server is None or not server.turns().idle):
+                    continue                     # not at a turn boundary: wait for one, or the deadline
+            if not self._end(rec, interrupt=hard, lifetime=True):
+                raise RuntimeUnavailable("a session at its maximum lifetime could not be stopped")
+
     # --- the launch ---
 
     def _resume(self, adapter: Adapter, layout: SessionLayout, prev: SessionRecord | None,
