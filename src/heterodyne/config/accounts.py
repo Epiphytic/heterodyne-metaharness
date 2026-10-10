@@ -7,6 +7,7 @@ message holds the path, is never attached as `__context__`.
 
 import errno
 import hashlib
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -49,13 +50,32 @@ def _reason(exc: BaseException) -> str:
     return errno.errorcode.get(code, type(exc).__name__) if code else type(exc).__name__
 
 
+def _resolve(path: Path) -> Path:
+    """path.resolve(strict=False), failing with OSError ELOOP on a symlink loop on every Python. 3.12
+    raises RuntimeError for a loop; 3.13 and later return the loop unresolved, so stat it as 3.12 did."""
+    resolved: Path | None
+    try:
+        resolved = path.resolve(strict=False)
+    except RuntimeError:
+        resolved = None
+    if resolved is not None:
+        try:
+            resolved.stat()
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                resolved = None
+    if resolved is None:            # raised outside the handlers, so no path-bearing context is chained
+        raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
+    return resolved
+
+
 def canonical_login(name: str, adapter: str, configured_dir: str,
                     env: Mapping[str, str]) -> tuple[Path, tuple[Path, ...]]:
     """The canonical login directory and login files of an account, resolved now. Raises a path-free
     ConfigError if resolution fails (a symlink loop, an embedded NUL, an OS error)."""
     try:
-        login_dir = paths.expand(configured_dir, env).resolve(strict=False)
-        return login_dir, tuple((login_dir / f).resolve(strict=False) for f in LOGIN_FILES[adapter])
+        login_dir = _resolve(paths.expand(configured_dir, env))
+        return login_dir, tuple(_resolve(login_dir / f) for f in LOGIN_FILES[adapter])
     except (OSError, RuntimeError, ValueError) as exc:
         reason = _reason(exc)
     raise ConfigError(f"account {show(name, False)} ({adapter}): login directory can't be resolved "
