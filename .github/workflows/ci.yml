@@ -18,10 +18,51 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Platform seam matrix (ADR 0001 §11).
+        # Platform seam matrix (ADR 0001 §11), split over two jobs by runner host (see test-laptop).
         include:
           - name: linux-x64
             runner: [self-hosted, Linux, X64, bel-ci]
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      # tmux-backed tests must run, not skip: HZ_REQUIRE_TMUX fails the session if tmux is missing.
+      # The runner hosts provide tmux; CI never installs packages on them.
+      - name: tmux present
+        run: tmux -V
+      # The admind tests put a Unix socket under tmp_path, and a socket path is limited to about 100
+      # bytes. pytest's default base, $TMPDIR/pytest-of-<user>, grows with the runner's user name,
+      # so each job gets its own short, unique base instead. It is passed on pytest's command line,
+      # never through PYTEST_ADDOPTS: the tmux watchdog tests run child pytests inside the base,
+      # which would inherit it and refuse a basetemp that is a parent of their working directory.
+      - name: short pytest base
+        run: |
+          base=$(mktemp -d /tmp/hzXXXX)
+          echo "HZ_BASETEMP=$base" >> "$GITHUB_ENV"
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run pyright
+      - run: uv run pytest -q --basetemp="$HZ_BASETEMP"
+        env:
+          HZ_REQUIRE_TMUX: "1"
+      # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
+      - run: uv run python scripts/check_install_agnostic.py
+      # The runner hosts are persistent, so remove this job's pytest base whatever the outcome.
+      - name: remove pytest base
+        if: always() && env.HZ_BASETEMP != ''
+        run: rm -rf -- "$HZ_BASETEMP"
+  test-laptop:
+    # The same steps on laptop-ci. Its two VMs share one execution slot, and a job's start hook waits
+    # at most 15 minutes for it, so the two jobs run one at a time (max-parallel: 1); run together,
+    # the second one's start hook timed out while the first ran. Same runner and fork rules as test.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
           - name: linux-arm64
             runner: [self-hosted, Linux, ARM64, laptop-ci]
           - name: macos-arm64
