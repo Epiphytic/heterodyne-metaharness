@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import time
 from collections.abc import Callable, Generator, Mapping, Sequence
@@ -20,10 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from heterodyne.agents.base import Adapter
+from heterodyne.agents.base import Adapter, write_private
+from heterodyne.platform import peer_pid_checked
 from heterodyne.sandbox.backend import BackendError
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
-from heterodyne.sandbox.spec import LAUNCHER_ENV, PROBES_INSIDE, Bind
+from heterodyne.sandbox.spec import AGENT_PROBE_INSIDE, LAUNCHER_ENV, PROBES_INSIDE, Bind
 
 PROBES_SOURCE = Path(__file__).resolve().with_name("resources") / "probes.py"
 # The agent-path probe as the host requires to see it in /proc: the image's python, isolated mode (no
@@ -47,6 +49,10 @@ LOG_SETTLE_SECONDS = 3
 LIST_LIMIT = 4096                   # entries classify reads from a login's directory before "unknown"
 CANARY_BYTES = 16
 VERDICT = re.compile(r"(PASS|FAIL) (\S+) \[.*\]")
+PROMPT_SECONDS = 90
+LATE_PEER_SECONDS = 5
+POLL_SECONDS = 0.5
+AGENT_OUTPUT = "$HOME/.hz-agent-probe.out"
 DIRECT_TARGET = "1.1.1.1:443"       # install-agnostic: allow=ip-port (the probes' literal-address target)
 
 
@@ -210,10 +216,21 @@ def _results(returncode: int, stdout: bytes, checks: Sequence[str]) -> None:
 
 
 class OpenShellSelfTest:
-    def __init__(self, *, wall: Callable[[], float] = time.time,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+    def __init__(self, *, wall: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
+                 proc: Path = Path("/proc"),
+                 peer_pid: Callable[[socket.socket], int] = peer_pid_checked) -> None:
         self.wall = wall
         self.sleep = sleep
+        self.proc = proc
+        self.peer_pid = peer_pid
+
+    def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
+        end = self.wall() + seconds
+        while not pred():
+            if self.wall() >= end:
+                return False
+            self.sleep(POLL_SECONDS)
+        return True
 
     def files(self) -> Mapping[str, str]:
         return {"probes.py": PROBES_SOURCE.read_text()}
@@ -244,4 +261,40 @@ class OpenShellSelfTest:
         self._logs(ctx, since, "exec")
 
     def agent_path(self, ctx: ProbeContext) -> None:
-        raise SelfTestFailed("agent-path-not-built")      # Task 9 replaces this
+        from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier  # channel imports this module
+
+        # Both canaries are held from before the probe config is written until the probe run is over,
+        # as on the exec path: checked before the prompt is pasted, and again after the channel closes.
+        with held_canaries(ctx) as (home, oa):
+            run = ctx.layout.run(ctx.generation)
+            write_private(run / AGENT_PROBE_INSIDE.name, json.dumps(probe_config(ctx, "agent")))
+            marker = ctx.adapter.prompt_marker
+            if not self._until(lambda: marker in ctx.tmux.capture(ctx.tmux_session, 50), PROMPT_SECONDS):
+                raise SelfTestFailed("agent-prompt")
+            try:
+                workload = self.proc / str(ctx.backend.workload_pid(ctx.spec.name))
+                netns = str((workload / "ns" / "net").readlink())
+            except OSError:
+                raise SelfTestFailed("workload-netns") from None
+            verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
+                                  proc=self.proc)
+            home.verify("canary-precondition")
+            oa.verify("canary-precondition")
+            channel = ProbeChannel(ctx.layout.probe_socket(ctx.generation), verify, peer_pid=self.peer_pid)
+            channel.start()
+            try:
+                since = self.wall()
+                out = f'"{AGENT_OUTPUT}"'
+                command = f'{" ".join(PROBE_ARGV)} > {out} 2>&1; echo "probes-rc=$?" >> {out}'
+                ctx.tmux.paste(ctx.tmux_session, "Run exactly this shell command, then reply with only its "
+                                                 f"exit status: {command}")
+                self._until(channel.done, ctx.settings.agent_probe_seconds)
+                self.sleep(LATE_PEER_SECONDS)     # late peers (a forger after the probe) are still counted
+                reason = channel.verdict(AGENT_CHECKS)
+            finally:
+                channel.close()
+            home.verify("real-home-canary-changed")
+            oa.verify("other-accounts-canary-changed")
+        if reason:
+            raise SelfTestFailed(f"agent-path-channel: {reason}")
+        self._logs(ctx, since, "agent")

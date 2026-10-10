@@ -1,8 +1,12 @@
+import os
+import socket as _socket
 import subprocess
+import sys
 
 import pytest
 
 from heterodyne import platform
+from heterodyne.platform import peer_pid_checked
 
 
 def test_detect_maps_supported_platforms() -> None:
@@ -45,3 +49,18 @@ def test_boot_id_macos_sysctl_failure_raises(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(platform.subprocess, "run", fake_run)
     with pytest.raises(subprocess.CalledProcessError):
         platform.boot_id("macos")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SO_PEERCRED is Linux-only")
+def test_peer_pid_checked_reads_so_peercred() -> None:
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    with a, b:
+        assert peer_pid_checked(a) == os.getpid()
+
+
+def test_peer_pid_checked_raises_on_a_closed_socket() -> None:
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    b.close()
+    a.close()
+    with pytest.raises(OSError):
+        peer_pid_checked(a)

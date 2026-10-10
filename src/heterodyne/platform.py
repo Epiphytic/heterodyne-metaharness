@@ -57,3 +57,19 @@ def peer_pid(sock: socket.socket | None, platform: str = sys.platform) -> int | 
     except (OSError, struct.error):
         return None
     return None
+
+
+def peer_pid_checked(sock: socket.socket) -> int:
+    """The host PID of the process at the other end of a connected Unix socket, by SO_PEERCRED, for a
+    decision (the agent-path probe channel). Raises OSError on any failure and off Linux: there is no
+    fallback, and the caller treats a failure as an unverified peer."""
+    if not sys.platform.startswith("linux"):
+        raise OSError("peer credentials need Linux")
+    try:
+        cred = sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("3i"))
+        pid = int(struct.unpack("3i", cred)[0])
+    except struct.error:
+        raise OSError("peer credentials unreadable") from None
+    if pid <= 0:
+        raise OSError("no peer process")
+    return pid
