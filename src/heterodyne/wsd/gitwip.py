@@ -40,12 +40,21 @@ def git(path: Path, *args: str) -> str:
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 NO_FSMONITOR = ("-c", "core.fsmonitor=false")
+NO_SIGN = ("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false")
 # Pinned git reads the repository's own config only, never the system or global one.
 ISOLATED = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 # A program an attribute can select. The agent writes the worktree's `.gitattributes` (and any script a
 # relative command names), so with one configured, host git could run the agent's code on the host.
 DRIVER = re.compile(r"filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|merge\..+\.driver")
 INCLUDE = re.compile(r"include\.path|includeif\..+\.path")
+# A program the repository's config names: the agent can make it a script in its worktree. Pinned git
+# overrides hooks, fsmonitor and signing; the rest are refused so no host git, pinned or not, runs one.
+PROGRAM = re.compile(r"gpg\.program|gpg\.[^.]+\.program|gpg\.ssh\.defaultkeycommand|core\.(sshcommand|pager"
+                     r"|editor|askpass|hookspath|gitproxy|alternaterefscommand)|pager\..+|sequence\.editor"
+                     r"|credential\.(.+\.)?helper|diff\.external|remote\..+\.(uploadpack|receivepack)"
+                     r"|interactive\.difffilter|(merge|diff)tool\..+\.cmd|(browser|man)\..+\.cmd"
+                     r"|uploadpack\.packobjectshook")
+BOOLEAN = {"", "true", "false", "yes", "no", "on", "off", "1", "0"}
 META_LIMIT = 4096
 
 
@@ -87,9 +96,8 @@ def read_meta(path: Path, limit: int = META_LIMIT) -> str:
 
 def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
     """Pin `worktree` of `repo` on `branch`. GitFailed unless the worktree is one of the repository's own,
-    its HEAD is exactly the branch, and nothing on the way is a link. Nor may any config git reads here,
-    btq's unpinned git included, name a program an attribute can select (DRIVER), or the repository's
-    own config include another file, which could gain one after this check."""
+    its HEAD is exactly the branch, and nothing on the way is a link. See `_check_config` for what the
+    config may not hold."""
     try:
         root = repo.resolve(strict=True)
         common = no_link(root, ".git")
@@ -113,19 +121,41 @@ def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
     p = Pinned(work_tree, git_dir, common, branch)
     if pinned_git(p, "config", "--get", "extensions.worktreeConfig", ok=(0, 1)).strip():
         raise GitFailed("the repository uses per-worktree config")
-    own = pinned_git(p, "config", "--file", str(common / "config"), "--no-includes", "--name-only", "--list")
-    if any(INCLUDE.fullmatch(name) for name in own.decode().split()):
-        raise GitFailed("the repository's config includes another file")
-    every = pinned_git(p, "config", "--name-only", "--list", host_config=True)
-    if any(DRIVER.fullmatch(name) for name in every.decode().split()):
-        raise GitFailed("a git filter, diff or merge driver is configured")
+    _check_config(pinned_git(p, "config", "-z", "--show-scope", "--no-includes", "--list", host_config=True))
     return p
+
+
+def _check_config(listing: bytes) -> None:
+    """GitFailed if the config every host git reads here, btq's unpinned git included, could run code the
+    agent wrote: an include at any level (its file could gain anything after this check), a program an
+    attribute can select (DRIVER), a program the repository's config names (PROGRAM), or a hooks path or
+    fsmonitor the system or global config resolves in the worktree. The operator's own system and global
+    programs (a credential helper, a signer) are the host's and stay."""
+    fields = listing.split(b"\0")
+    if fields[-1] or len(fields) % 2 == 0:
+        raise GitFailed("git config listed malformed entries")
+    for scope, entry in zip(fields[:-1:2], fields[1:-1:2], strict=True):
+        name, _, value = entry.decode("utf-8", "replace").partition("\n")
+        name, host = name.lower(), scope in (b"system", b"global")
+        if scope == b"command":
+            continue
+        if INCLUDE.fullmatch(name):
+            raise GitFailed("the git config includes another file")
+        if DRIVER.fullmatch(name):
+            raise GitFailed("a git filter, diff or merge driver is configured")
+        fsmonitor = name == "core.fsmonitor" and value.lower() not in BOOLEAN
+        relative = not (value.startswith("~") or Path(value).is_absolute())   # git expands a leading ~
+        if not host and (PROGRAM.fullmatch(name) or fsmonitor):
+            raise GitFailed("the repository's config names a program")
+        if host and relative and (name == "core.hookspath" or fsmonitor):
+            raise GitFailed("the git config names a program in the worktree")
 
 
 def pinned_git(p: Pinned, *args: str, alternates: Path | None = None, data: bytes | None = None,
                ok: tuple[int, ...] = (0,), host_config: bool = False) -> bytes:
-    """git on the pinned directories, with no hook, no fsmonitor, no inherited GIT_* variable and only
-    the repository's own config; `host_config` reads the system and global config too, as btq's would."""
+    """git on the pinned directories, with no hook, no fsmonitor, no signing, no inherited GIT_* variable
+    and only the repository's own config; `host_config` reads the system and global config too, as btq's
+    would."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env |= {"GIT_DIR": str(p.git_dir), "GIT_COMMON_DIR": str(p.common), "GIT_WORK_TREE": str(p.work_tree)}
     if not host_config:
@@ -133,7 +163,7 @@ def pinned_git(p: Pinned, *args: str, alternates: Path | None = None, data: byte
     if alternates is not None:
         env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(alternates)
     try:
-        result = subprocess.run(["git", *NO_HOOKS, *NO_FSMONITOR, *args], cwd=p.work_tree, env=env,
+        result = subprocess.run(["git", *NO_HOOKS, *NO_FSMONITOR, *NO_SIGN, *args], cwd=p.work_tree, env=env,
                                 input=data, capture_output=True, timeout=GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitFailed(type(exc).__name__) from None
@@ -161,7 +191,7 @@ def wip_commit(p: Pinned, mark: str, summary: str) -> str:
         return found
     _text(p, "add", "--all")
     _text(p, "-c", "user.name=wsd", "-c", "user.email=wsd@localhost", "commit", "--allow-empty",
-          "--no-verify", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
+          "--no-verify", "--no-gpg-sign", "-m", f"WIP: {summary}\n\n{PARK_MARK}{mark}")
     head = _text(p, "rev-parse", "HEAD")
     if find_wip(p, mark) != head:      # the mark is what a replayed park looks for
         raise GitFailed("the WIP commit does not carry its park mark")

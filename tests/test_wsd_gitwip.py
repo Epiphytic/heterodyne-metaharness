@@ -50,10 +50,13 @@ def test_no_hook_runs_for_a_wip_commit(tmp_path: Path, configured: bool) -> None
         hook.write_text(f'#!/bin/sh\necho {name} >> "{ran}"\n'
                         + ('echo stripped > "$1"\n' if name.endswith("msg") else ""))
         hook.chmod(0o755)
-    sha = gitwip.wip_commit(pinned(repo), "op1", "parked")
+    # pin refuses a configured hooks path (plan 4 T7A r2); pinned git must still ignore one it is given
+    root = repo.resolve()
+    p = gitwip.Pinned(root, root / ".git", root / ".git", "main") if configured else pinned(repo)
+    sha = gitwip.wip_commit(p, "op1", "parked")
     assert not ran.exists()
     assert "wsd-park: op1" in gitwip.git(repo, "log", "-1", "--format=%B", sha)
-    assert gitwip.wip_commit(pinned(repo), "op1", "parked") == sha
+    assert gitwip.wip_commit(p, "op1", "parked") == sha
 
 
 def test_git_failure_is_raised(tmp_path: Path) -> None:

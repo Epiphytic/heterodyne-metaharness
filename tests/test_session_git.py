@@ -317,3 +317,91 @@ def test_oversized_metadata_fails_explicitly(tmp_path: Path) -> None:
     with pytest.raises(gitwip.GitFailed, match="too large"):
         gitwip.read_meta(big)
     assert gitwip.read_meta(big, limit=5000) == "x" * 5000
+
+
+# r2 review: signing and other programs the repository's config names, and includes at every level.
+
+
+def planted_signer(tmp_path: Path, worktree: Path) -> Path:
+    marker = tmp_path / "signed"
+    (worktree / "sign.sh").write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    (worktree / "sign.sh").chmod(0o700)
+    return marker
+
+
+def test_pin_refuses_a_repository_signing_program(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", "commit.gpgsign", "true")
+    gitwip.git(repo, "config", "gpg.program", "./sign.sh")
+    marker = planted_signer(tmp_path, worktree)
+    with pytest.raises(gitwip.GitFailed, match="program"):
+        gitwip.pin(repo, worktree, BRANCH)
+    assert not marker.exists()
+
+
+def test_a_host_wip_commit_never_signs(tmp_path: Path) -> None:
+    """Defence in depth under the pin's check: with signing on and a signer in the worktree, a host WIP
+    commit made with the check bypassed still runs no signer."""
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    gitwip.git(repo, "config", "commit.gpgsign", "true")
+    gitwip.git(repo, "config", "gpg.program", "./sign.sh")
+    marker = planted_signer(tmp_path, worktree)
+    sha = gitwip.wip_commit(p, "m1", "test")
+    assert not marker.exists() and tip(repo, BRANCH) == sha
+
+
+@pytest.mark.parametrize("key", ["gpg.ssh.program", "core.sshCommand", "core.pager", "pager.log",
+                                 "core.editor", "sequence.editor", "core.askPass", "credential.helper",
+                                 "credential.https://example.org.helper", "diff.external", "core.hooksPath",
+                                 "core.fsmonitor", "core.gitProxy", "remote.origin.uploadpack",
+                                 "remote.origin.receivepack", "gpg.ssh.defaultKeyCommand"])
+def test_pin_refuses_a_program_in_the_repository_config(tmp_path: Path, key: str) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", key, "./run.sh")
+    with pytest.raises(gitwip.GitFailed, match="program"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_a_builtin_fsmonitor_setting_is_not_a_program(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", "core.fsmonitor", "false")
+    assert gitwip.pin(repo, worktree, BRANCH).branch == BRANCH
+
+
+def global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    (home / ".gitconfig").write_text(text)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
+def test_the_host_programs_of_the_global_config_are_trusted(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's own settings (a credential helper, signing) are the host's, not the agent's."""
+    repo, worktree = linked(tmp_path)
+    global_config(tmp_path, monkeypatch, "[commit]\n\tgpgsign = true\n[credential]\n\thelper = store\n")
+    assert gitwip.pin(repo, worktree, BRANCH).branch == BRANCH
+
+
+@pytest.mark.parametrize("include", ["[include]\n\tpath = {target}\n",
+                                     "[includeIf \"gitdir:/\"]\n\tpath = {target}\n"])
+def test_pin_refuses_an_include_in_the_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     include: str) -> None:
+    """btq's unpinned `git worktree add` reads the global config: an include there could reach a file the
+    agent writes, which could later set a hooks path. Benign contents now don't make it safe."""
+    repo, worktree = linked(tmp_path)
+    target = worktree / "included.cfg"
+    target.write_text("[core]\n\tquotePath = false\n")
+    global_config(tmp_path, monkeypatch, include.format(target=target))
+    with pytest.raises(gitwip.GitFailed, match="includes"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_a_relative_global_hooks_path_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relative hooks path is resolved in the worktree, so btq's git would run the agent's hooks."""
+    repo, worktree = linked(tmp_path)
+    global_config(tmp_path, monkeypatch, "[core]\n\thooksPath = .githooks\n")
+    with pytest.raises(gitwip.GitFailed, match="program"):
+        gitwip.pin(repo, worktree, BRANCH)
