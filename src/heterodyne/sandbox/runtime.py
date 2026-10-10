@@ -260,6 +260,7 @@ class SandboxRuntime:
         the WIP; this only decides when, and replays what a crash left owed. An unlanded session's mark
         stays owed and is never committed here (`_settle_wip`)."""
         margin = self.c.settings.stop_margin_seconds
+        failed: list[str] = []                   # every session is tried; a failure is raised after the pass
         for rec in self._records():
             if rec.ws != ws:
                 continue
@@ -268,7 +269,7 @@ class SandboxRuntime:
                     try:
                         self._settle_wip(self.layout(rec.key), rec)    # a crash came between end and commit
                     except OSError:
-                        raise RuntimeUnavailable("the session record can't be written") from None
+                        failed.append("the session record can't be written")
                 continue
             if rec.stop_reason == "lifetime":
                 hard = True                      # a lifetime stop already begun: finish it
@@ -280,7 +281,9 @@ class SandboxRuntime:
                 if not hard and (server is None or not server.turns().idle):
                     continue                     # not at a turn boundary: wait for one, or the deadline
             if not self._end(rec, interrupt=hard, lifetime=True):
-                raise RuntimeUnavailable("a session at its maximum lifetime could not be stopped")
+                failed.append("a session at its maximum lifetime could not be stopped")
+        if failed:
+            raise RuntimeUnavailable(failed[0])
 
     # --- the launch ---
 

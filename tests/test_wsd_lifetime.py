@@ -5,6 +5,7 @@ import types
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from sandbox_env import RuntimeRig, launch_spec, runtime_rig, short_dir
@@ -192,6 +193,22 @@ def test_a_failed_wip_commit_is_recorded_and_retried(rig: RuntimeRig,
 
 
 @needs_tools
+def test_one_stop_that_fails_does_not_keep_the_next_from_stopping(rig: RuntimeRig) -> None:
+    """T11 r1: every session of the workstream is tried; the failure is raised after the pass."""
+    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(one)
+    rig.runtime.launch(two)
+    deadline = max(record(rig, one.session_key).deadline, record(rig, two.session_key).deadline)
+    rig.backend.delete_unconfirmed = 1                      # whichever is tried first can't be confirmed
+    with pytest.raises(RuntimeUnavailable):
+        rig.runtime.expire("alpha", deadline)
+    phases = sorted(record(rig, s.session_key).phase for s in (one, two))
+    assert phases == sorted([Phase.ENDED, Phase.STOPPING])
+    rig.runtime.expire("alpha", deadline)
+    assert {record(rig, s.session_key).phase for s in (one, two)} == {Phase.ENDED}
+
+
+@needs_tools
 def test_a_lifetime_stop_whose_landing_fails_makes_no_host_wip(rig: RuntimeRig) -> None:
     """D26: a host WIP would diverge from the commits that could not be landed, so the mark stays owed and
     nothing is committed, however often expire runs."""
@@ -214,14 +231,20 @@ def host_log(rig: RuntimeRig) -> str:
                           capture_output=True, text=True, check=True).stdout
 
 
+class Killed(Exception):
+    """wsd kills the reaper's process: the only way it ends."""
+
+
 def test_the_reaper_waits_for_the_deadline_then_kills_and_deletes_until_confirmed() -> None:
     now = [1000.0]
     slept: list[float] = []
     tries: list[float] = []
     kills: list[float] = []
-    answers: list[bool | None] = [None, False, True]        # None: the backend is down
+    answers: list[bool | None] = [None, False, True, True]        # None: the backend is down
 
     def sleep(seconds: float) -> None:
+        if not answers:
+            raise Killed
         slept.append(seconds)
         now[0] += seconds
 
@@ -237,8 +260,10 @@ def test_the_reaper_waits_for_the_deadline_then_kills_and_deletes_until_confirme
         assert name == "box"
         kills.append(now[0])
 
-    reaper.reap("box", 1075, delete, kill, clock=lambda: now[0], sleep=sleep)
-    assert slept[:3] == [30, 30, 15] and tries[0] == kills[0] == 1075 and len(tries) == len(kills) == 3
+    with pytest.raises(Killed):
+        reaper.reap("box", 1075, delete, kill, clock=lambda: now[0], sleep=sleep)
+    assert slept[:3] == [30, 30, 15] and tries[0] == kills[0] == 1075 and len(tries) == len(kills) == 4
+    assert slept[3:] == [5, 5, 30]       # retried until confirmed, then it keeps watching at the slower poll
 
 
 def test_the_reaper_outlasts_any_outage_then_deletes() -> None:
@@ -250,6 +275,8 @@ def test_the_reaper_outlasts_any_outage_then_deletes() -> None:
     kills: list[float] = []
 
     def sleep(seconds: float) -> None:
+        if now[0] >= outage:
+            raise Killed
         now[0] += seconds
 
     def delete(name: str) -> bool:
@@ -263,8 +290,42 @@ def test_the_reaper_outlasts_any_outage_then_deletes() -> None:
         if len(kills) % 2:
             raise BackendError("podman kill timed out")         # a failed kill is retried too
 
-    reaper.reap("box", 0, delete, kill, clock=lambda: now[0], sleep=sleep)
+    with pytest.raises(Killed):
+        reaper.reap("box", 0, delete, kill, clock=lambda: now[0], sleep=sleep)
     assert kills[0] == 0 and tries[-1] >= outage and len(tries) > 60          # 60: r2's old budget
+
+
+def test_the_reaper_outlives_a_create_that_comes_after_its_deadline() -> None:
+    """T11 r1: wsd starts the reaper before the sandbox exists. If wsd stalls until past the deadline (or a
+    create completes late), the reaper first finds nothing to delete; it must still be there to kill and
+    delete the sandbox once it appears, even if wsd then crashes."""
+    now = [0.0]
+    boxes: set[str] = set()
+    killed: list[float] = []
+    deleted: list[float] = []
+    sleeps = [0]
+
+    def sleep(seconds: float) -> None:
+        sleeps[0] += 1
+        if sleeps[0] == 4:
+            boxes.add("box")                    # wsd resumes and creates, then dies
+        if deleted:
+            raise Killed
+        now[0] += seconds
+
+    def delete(name: str) -> bool:
+        if name in boxes:
+            boxes.discard(name)
+            deleted.append(now[0])
+        return True                             # absent: confirmed, which says nothing about later
+
+    def kill(name: str) -> None:
+        if name in boxes:
+            killed.append(now[0])
+
+    with pytest.raises(Killed):
+        reaper.reap("box", 0, delete, kill, clock=lambda: now[0], sleep=sleep)
+    assert killed == deleted == [now[0]] and now[0] == 4 * reaper.POLL_SECONDS and boxes == set()
 
 
 def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,13 +336,15 @@ def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyP
     assert argv[module - 2:module] == ["-I", "-m"]
     seen: list[tuple[str, int, str, str, str]] = []
 
-    def reap(name: str, deadline: int, delete: object, kill: object) -> None:
+    def reap(name: str, deadline: int, delete: object, kill: object) -> NoReturn:
         assert isinstance(delete, types.MethodType) and isinstance(delete.__self__, OpenShellBackend)
         backend = delete.__self__
         seen.append((name, deadline, backend.openshell, backend.podman, backend.image))
+        raise Killed
 
     monkeypatch.setattr(reaper, "reap", reap)
-    assert reaper.main(argv[module + 1:]) == 0
+    with pytest.raises(Killed):
+        reaper.main(argv[module + 1:])
     assert seen == [("box", 1075, "/x/openshell", "/x/podman", "img:1")]
 
 
