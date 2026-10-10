@@ -102,9 +102,9 @@ def test_session_absent_is_only_tmuxs_own_word_for_it(tmux: Tmux, tmp_path: Path
     assert tmux.session_absent("s")
 
 
-def test_a_socket_no_server_listens_on_is_absence(tmp_path: Path) -> None:
-    path = tmp_path / "stale"
+def test_a_socket_no_server_listens_on_is_absence(tmux: Tmux) -> None:
+    assert tmux.socket_path is not None
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    stale.bind(str(path))
+    stale.bind(str(tmux.socket_path))                      # a crashed server's socket, before any start
     stale.close()
-    assert Tmux("unused", socket_path=path).session_absent("s")
+    assert tmux.session_absent("s")
