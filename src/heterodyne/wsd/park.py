@@ -353,7 +353,8 @@ class Parker:
                     self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record names the worktree")
                     return BeadState.STUCK
                 worktree = self.d.beads.verify_worktree(ws, bead, Path(rec.repo), Path(rec.worktree))
-                sha = gitwip.wip_commit(worktree, op.op_id, f"parked {bead}")
+                sha = gitwip.wip_commit(gitwip.pin(Path(rec.repo), worktree, f"btq/{bead}"), op.op_id,
+                                       f"parked {bead}")
                 self.d.cp("park.committed!")
                 op = j.op_step(op.op_id, "committed", {"sha": sha})
                 self.d.cp("park.committed")
@@ -472,7 +473,8 @@ class Parker:
                     self.escalate_from(op, Reason.LAUNCH_UNRECORDED, "no session record names the worktree")
                     return BeadState.STUCK
                 worktree = self.d.beads.verify_worktree(ws, bead, Path(rec.repo), Path(rec.worktree))
-                sha = gitwip.wip_commit(worktree, f"defer:{key}:{n}", f"deferred {bead}")
+                sha = gitwip.wip_commit(gitwip.pin(Path(rec.repo), worktree, f"btq/{bead}"),
+                                       f"defer:{key}:{n}", f"deferred {bead}")
                 self.d.cp(f"{kind}.defer.committed!")
                 op = j.op_step(op.op_id, "defer.committed", {"sha": sha})
                 self.d.cp(f"{kind}.defer.committed")
@@ -1157,7 +1159,7 @@ class Parker:
         spec = LaunchSpec(ws, op.bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
                           worktree, resume=op.kind is OpKind.RESUME, ref=op.data.get("ref") or None,
                           generation=entry.generation, native_id=native, account=entry.account,
-                          model=entry.model_passed)
+                          model=entry.model_passed, repo=Path(rec.repo))
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)

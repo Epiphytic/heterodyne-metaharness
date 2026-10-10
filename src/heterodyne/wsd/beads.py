@@ -573,11 +573,10 @@ class BeadsAdapter:
             raise WorktreeConflict("repository missing") from None
         bases = self.show(ws, bead).bases(worker, str(repo), str(worktree))
         try:
+            pinned = gitwip.pin(repo, worktree, f"btq/{bead}")
             ok = (bool(bases) and worktree.is_dir() and not worktree.is_symlink()
-                  and gitwip.toplevel(worktree) == worktree.resolve()
-                  and gitwip.branch(worktree) == f"btq/{bead}"
-                  and gitwip.common_dir(worktree) == gitwip.common_dir(repo)
-                  and all(FULL_SHA.fullmatch(base) and gitwip.descends_from(worktree, base)
+                  and pinned.work_tree == worktree.resolve()
+                  and all(FULL_SHA.fullmatch(base) and gitwip.descends_from(pinned, base)
                           for base in bases))
         except (OSError, gitwip.GitFailed):
             ok = False

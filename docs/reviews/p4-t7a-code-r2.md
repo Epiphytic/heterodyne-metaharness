@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: d1052e8. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/wsd/gitwip.py:120` and `:163` — Host WIP commits still permit agent-controlled signing code. Repository config containing `commit.gpgsign=true` and `gpg.program=./sign.sh` passes the driver refusal. The agent can modify `sign.sh` in its worktree; park, defer, or lifetime WIP then executes it outside the sandbox. Disabling hooks and fsmonitor does not disable signing. This defect is inherited from the plan. **Fix:** explicitly disable signing on host WIP commits (`--no-gpg-sign`), and add an adversarial signing-script test.
+
+2. [BLOCKING] `src/heterodyne/wsd/gitwip.py:116–120` — The include refusal covers repository config only. A global `include.path` pointing into the writable bead worktree passes when its contents are benign. The agent can subsequently configure `core.hooksPath` there and plant a hook. Pinned Git ignores global config, but btq’s unpinned `worktree add` (`~/repos/beads-task-queue/bin/btq:730`) rereads it and executes `post-checkout` on the host before the new worktree is pinned. The read-only `.git` pointer does not prevent this. **Fix:** protect unpinned consumers with isolated configuration and disabled hooks/fsmonitor, or refuse system/global includes that can reach agent-writable files. Add a test that changes an included file after pinning and exercises the actual btq creation path.
+
+REVISE

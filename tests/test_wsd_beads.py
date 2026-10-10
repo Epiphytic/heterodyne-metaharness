@@ -392,7 +392,7 @@ def test_same_branch_with_unrelated_history_is_a_conflict(world: World, tmp_path
     gitwip.git(path, *ident, "commit", "-q", "--allow-empty", "-m", "unrelated")
     gitwip.git(path, "branch", "-q", "-D", "btq/btq-1")
     gitwip.git(path, "branch", "-q", "-m", "btq/btq-1")
-    assert gitwip.branch(path) == "btq/btq-1"
+    assert gitwip.git(path, "rev-parse", "--abbrev-ref", "HEAD") == "btq/btq-1"
     with pytest.raises(WorktreeConflict):
         adapter.verify_worktree(WS, "btq-1", repo, path)
     with pytest.raises(WorktreeConflict):
@@ -483,7 +483,7 @@ def test_a_worktree_ahead_of_its_base_is_verified(world: World, tmp_path: Path) 
     adapter = BeadsAdapter(factory(world))
     adapter.claim(WS, "btq-1")
     path = adapter.worktree(WS, "btq-1", repo)
-    gitwip.wip_commit(path, "op1", "parked btq-1")
+    gitwip.wip_commit(gitwip.pin(repo, path, "btq/btq-1"), "op1", "parked btq-1")
     assert adapter.verify_worktree(WS, "btq-1", repo, path) == path
 
 
