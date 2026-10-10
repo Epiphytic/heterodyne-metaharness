@@ -38,19 +38,22 @@ def both(request: pytest.FixtureRequest) -> Iterator[Both]:
     with short_dir() as root:
         tmux = new_test_tmux()
         rig = make_rig(root / "w", limits=limits)
-        rt = runtime_rig(root / "x", tmux, rig.clock)
-        rig.deps = replace(rig.deps, runtime=rt.runtime)
-        rig.parker = Parker(rig.ws, rig.deps)
-        rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
-        try:
-            yield Both(rig, rt)
+        try:            # the Journal closes whatever fails below: an open one breaks test_wsd_gate's fd count
+            rt = runtime_rig(root / "x", tmux, rig.clock)
+            rig.deps = replace(rig.deps, runtime=rt.runtime)
+            rig.parker = Parker(rig.ws, rig.deps)
+            rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
+            try:
+                yield Both(rig, rt)
+            finally:
+                for key in list(rt.runtime.servers):
+                    with contextlib.suppress(RuntimeUnavailable):
+                        rt.runtime.stop(key)
+                tmux.kill_server()
+                assert tmux.socket_path is not None
+                tmux.socket_path.unlink(missing_ok=True)
         finally:
-            for key in list(rt.runtime.servers):
-                with contextlib.suppress(RuntimeUnavailable):
-                    rt.runtime.stop(key)
-            tmux.kill_server()
-            assert tmux.socket_path is not None
-            tmux.socket_path.unlink(missing_ok=True)
+            rig.journal.close()
 
 
 def refusal(rig: Rig, bead: str, generation: int) -> str:
