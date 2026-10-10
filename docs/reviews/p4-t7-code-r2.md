@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: c1e3f1f. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/agents/base.py:29` — Cycle 1 finding #2 is only partially fixed. The wrapper converts **Python’s** failure to exit 2, but cannot convert its own failure. An agent-owned background process can SIGKILL the `sh -c` wrapper; Claude then receives a nonblocking hook error and proceeds under `bypassPermissions`. This is separate from the explicitly accepted timeout risk. [Claude’s failure semantics](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails) require CLI-level handling to cover a killed hook process. **Fix:** use a verified CLI-level blocking failure mechanism, with an approved version-pin change if necessary, and test killing the wrapper itself.
+
+2. [NON-BLOCKING] `tests/fakes/fake_agent_cli.py:133` — Cycle 1 finding #6 remains partially unresolved: payloads now include `cwd`, but `fire()` still discards hook output and exit status, and the TUI never fires `PreToolUse`. Consequently, these integration tests cannot establish that a shim denial or wrapper failure prevents a tool operation. **Fix:** implement a fake tool operation that consumes the real hook decision and status; test allowed edits, denied operations, and wrapper termination. Tests could not run here because the filesystem sandbox also refused temporary writes under `/tmp`.
+
+REVISE
