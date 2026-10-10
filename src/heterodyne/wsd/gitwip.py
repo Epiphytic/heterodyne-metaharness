@@ -40,6 +40,13 @@ def git(path: Path, *args: str) -> str:
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 NO_FSMONITOR = ("-c", "core.fsmonitor=false")
+# Pinned git reads the repository's own config only, never the system or global one.
+ISOLATED = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+# A program an attribute can select. The agent writes the worktree's `.gitattributes` (and any script a
+# relative command names), so with one configured, host git could run the agent's code on the host.
+DRIVER = re.compile(r"filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|merge\..+\.driver")
+INCLUDE = re.compile(r"include\.path|includeif\..+\.path")
+META_LIMIT = 4096
 
 
 @dataclass(frozen=True)
@@ -61,19 +68,28 @@ def no_link(base: Path, *parts: str) -> Path:
     return path
 
 
-def read_meta(path: Path) -> str:
+def read_meta(path: Path, limit: int = META_LIMIT) -> str:
+    """The whole of a regular file, never through a link. GitFailed if it holds more than `limit` bytes:
+    metadata is never truncated."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise GitFailed("git metadata is not a regular file")
-        return os.read(fd, 4096).decode("utf-8", "replace")
+        data = b""
+        while chunk := os.read(fd, min(1 << 16, limit + 1 - len(data))):
+            data += chunk
+            if len(data) > limit:
+                raise GitFailed("git metadata is too large")
+        return data.decode("utf-8", "replace")
     finally:
         os.close(fd)
 
 
 def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
     """Pin `worktree` of `repo` on `branch`. GitFailed unless the worktree is one of the repository's own,
-    its HEAD is exactly the branch, and nothing on the way is a link."""
+    its HEAD is exactly the branch, and nothing on the way is a link. Nor may any config git reads here,
+    btq's unpinned git included, name a program an attribute can select (DRIVER), or the repository's
+    own config include another file, which could gain one after this check."""
     try:
         root = repo.resolve(strict=True)
         common = no_link(root, ".git")
@@ -97,14 +113,23 @@ def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
     p = Pinned(work_tree, git_dir, common, branch)
     if pinned_git(p, "config", "--get", "extensions.worktreeConfig", ok=(0, 1)).strip():
         raise GitFailed("the repository uses per-worktree config")
+    own = pinned_git(p, "config", "--file", str(common / "config"), "--no-includes", "--name-only", "--list")
+    if any(INCLUDE.fullmatch(name) for name in own.decode().split()):
+        raise GitFailed("the repository's config includes another file")
+    every = pinned_git(p, "config", "--name-only", "--list", host_config=True)
+    if any(DRIVER.fullmatch(name) for name in every.decode().split()):
+        raise GitFailed("a git filter, diff or merge driver is configured")
     return p
 
 
 def pinned_git(p: Pinned, *args: str, alternates: Path | None = None, data: bytes | None = None,
-               ok: tuple[int, ...] = (0,)) -> bytes:
-    """git on the pinned directories, with no hook, no fsmonitor and no inherited GIT_* variable."""
+               ok: tuple[int, ...] = (0,), host_config: bool = False) -> bytes:
+    """git on the pinned directories, with no hook, no fsmonitor, no inherited GIT_* variable and only
+    the repository's own config; `host_config` reads the system and global config too, as btq's would."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env |= {"GIT_DIR": str(p.git_dir), "GIT_COMMON_DIR": str(p.common), "GIT_WORK_TREE": str(p.work_tree)}
+    if not host_config:
+        env |= ISOLATED
     if alternates is not None:
         env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(alternates)
     try:

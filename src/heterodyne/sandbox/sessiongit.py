@@ -16,6 +16,7 @@ from heterodyne.sandbox.spec import Bind
 from heterodyne.wsd.gitwip import FULL_SHA, GitFailed, Pinned, no_link, pinned_git, read_meta
 
 SNAPSHOT = ("refs/heads", "refs/remotes", "refs/tags")
+PACKED_LIMIT = 64 << 20         # packed-refs larger than this fails the landing; it is never truncated
 
 
 def _write(directory: Path, name: str, text: str) -> None:
@@ -125,7 +126,7 @@ def _tip(private: Path, branch: str) -> str:
             no_link(private, "refs", "heads", *owner.split("/"))
             text = read_meta(loose).strip()
         else:
-            packed = read_meta(private / "packed-refs").splitlines()
+            packed = read_meta(private / "packed-refs", PACKED_LIMIT).splitlines()
             text = next((line.split()[0] for line in packed if line.endswith(f" refs/heads/{branch}")), "")
     except OSError:
         raise GitFailed("the session's bead branch can't be read") from None
@@ -135,7 +136,8 @@ def _tip(private: Path, branch: str) -> str:
 
 
 def land(p: Pinned, private: Path) -> str | None:
-    """Import the session's bead-branch tip. The new tip, or None when it didn't move. Idempotent."""
+    """Import the session's bead-branch tip, a fast-forward of the landed one. The new tip, or None when
+    it didn't move. Idempotent."""
     _pointer(p)                                 # defence in depth: the bind kept it read-only
     _trusted_alternates(p, private)
     objects = private / "objects"                   # checked above: a plain directory, no link below it
@@ -145,6 +147,12 @@ def land(p: Pinned, private: Path) -> str | None:
         return None
     if pinned_git(p, "cat-file", "-t", tip, alternates=objects).decode().strip() != "commit":
         raise GitFailed("the session's bead branch is not a commit")
+    # A fast-forward only: the landed tip (which descends from the bead's base) is never rewound or
+    # replaced by an unrelated history. The session may rewrite only its own, unlanded commits.
+    try:
+        pinned_git(p, "merge-base", "--is-ancestor", old, tip, alternates=objects)
+    except GitFailed:
+        raise GitFailed("the session's bead branch does not descend from its landed tip") from None
     names = pinned_git(p, "rev-list", "--objects", tip, "--not", "--all", alternates=objects)
     if names.strip():
         pack = pinned_git(p, "pack-objects", "--stdout", alternates=objects, data=names)

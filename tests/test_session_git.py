@@ -200,3 +200,120 @@ def test_landing_into_a_vanished_worktree_is_a_git_failure(tmp_path: Path) -> No
     shutil.rmtree(worktree)
     with pytest.raises(gitwip.GitFailed):
         sessiongit.land(p, private)
+
+
+# r1 review: drivers the agent's .gitattributes can select, landing that isn't a fast-forward, and a
+# packed-refs file larger than one read.
+
+
+def planted_filter(tmp_path: Path, worktree: Path) -> Path:
+    """The agent's side of a filter attack: an attribute selecting the driver, and the script it runs."""
+    marker = tmp_path / "ran"
+    (worktree / "clean.sh").write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    (worktree / "clean.sh").chmod(0o700)
+    (worktree / ".gitattributes").write_text("* filter=conv\n")
+    (worktree / "work.txt").write_text("work")
+    return marker
+
+
+def test_pin_refuses_a_configured_filter_driver(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", "filter.conv.clean", "./clean.sh")      # trusted config, agent's script
+    marker = planted_filter(tmp_path, worktree)
+    with pytest.raises(gitwip.GitFailed, match="driver"):
+        gitwip.pin(repo, worktree, BRANCH)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("key", ["diff.conv.textconv", "merge.conv.driver", "filter.conv.process"])
+def test_pin_refuses_every_attribute_driver(tmp_path: Path, key: str) -> None:
+    repo, worktree = linked(tmp_path)
+    gitwip.git(repo, "config", key, "./clean.sh")
+    with pytest.raises(gitwip.GitFailed, match="driver"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_pin_refuses_a_driver_in_the_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """btq's git reads the global config too, and follows the worktree's attributes."""
+    repo, worktree = linked(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[filter \"conv\"]\n\tclean = ./clean.sh\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    with pytest.raises(gitwip.GitFailed, match="driver"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_pin_refuses_an_include_in_the_repository_config(tmp_path: Path) -> None:
+    """An included file could gain a driver after the check, so the repository's config includes none."""
+    repo, worktree = linked(tmp_path)
+    (tmp_path / "extra.cfg").write_text("[core]\n\tquotePath = false\n")
+    gitwip.git(repo, "config", "include.path", str(tmp_path / "extra.cfg"))
+    with pytest.raises(gitwip.GitFailed, match="includes"):
+        gitwip.pin(repo, worktree, BRANCH)
+
+
+def test_pinned_git_never_reads_system_or_global_config(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defence in depth under the pin's check: a driver only the global config defines never runs in a
+    host WIP commit, even with the check bypassed."""
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(f"[filter \"conv\"]\n\tclean = {worktree / 'clean.sh'}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    marker = planted_filter(tmp_path, worktree)
+    gitwip.wip_commit(p, "m1", "test")
+    assert not marker.exists()
+
+
+def test_landing_refuses_an_unrelated_history(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    before = tip(repo, BRANCH)
+    inside(private, worktree, "checkout", "-q", "--orphan", "other")
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "unrelated")
+    unrelated = inside(private, worktree, "rev-parse", "HEAD")
+    inside(private, worktree, "update-ref", f"refs/heads/{BRANCH}", unrelated)
+    with pytest.raises(gitwip.GitFailed, match="descend"):
+        sessiongit.land(p, private)
+    assert tip(repo, BRANCH) == before
+
+
+def test_landing_refuses_a_rewind(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    landed = gitwip.wip_commit(p, "m1", "an earlier generation's work")
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    inside(private, worktree, "update-ref", f"refs/heads/{BRANCH}", tip(repo, "main"))   # below the base
+    with pytest.raises(gitwip.GitFailed, match="descend"):
+        sessiongit.land(p, private)
+    assert tip(repo, BRANCH) == landed
+
+
+def test_a_bead_branch_packed_past_one_read_still_lands(tmp_path: Path) -> None:
+    repo, worktree = linked(tmp_path)
+    for i in range(120):                                # sorted before btq/: the bead entry is far in
+        gitwip.git(repo, "branch", f"a-{i:03}-{'x' * 20}", "main")
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "agent work")
+    inside(private, worktree, "pack-refs", "--all")
+    packed = (private / "packed-refs").read_text()
+    assert packed.index(f"refs/heads/{BRANCH}") > 4096 and not (private / "refs/heads/btq/btq-1").exists()
+    assert sessiongit.land(p, private) == tip(repo, BRANCH)
+
+
+def test_oversized_metadata_fails_explicitly(tmp_path: Path) -> None:
+    big = tmp_path / "big"
+    big.write_text("x" * 5000)
+    with pytest.raises(gitwip.GitFailed, match="too large"):
+        gitwip.read_meta(big)
+    assert gitwip.read_meta(big, limit=5000) == "x" * 5000
