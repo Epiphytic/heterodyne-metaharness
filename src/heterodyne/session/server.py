@@ -29,9 +29,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.session.shim import MAX_DEPTH, json_depth  # stdlib-only, shared with the shim
+from heterodyne.session.shim import MAX_DEPTH, MAX_LINE, json_depth  # stdlib-only, shared with the shim
 
-MAX_LINE = 64 * 1024
 CLIENT_SECONDS = 5.0            # one request's whole deadline, from its accept
 MAX_HANDLERS = 32
 CLOSE_SECONDS = 5.0             # how long close waits for the handlers it has woken

@@ -7,10 +7,11 @@ import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from heterodyne.session import shim
+from heterodyne.session import server, shim
 from heterodyne.session.server import SessionServer
 
 TOKEN = "fake-session-token"  # noqa: S105 (test value)
@@ -306,3 +307,89 @@ def test_a_relative_path_counts_only_against_an_absolute_cwd(run: Path, tmp_path
     assert edit(cwd=str(tmp_path / "wt")) == (0, "")
     for cwd in ({"cwd": str(tmp_path)}, {"cwd": "wt"}, {}, {"cwd": 3}):
         assert denied(edit(**cwd)[1]) == shim.DENY_REASON
+
+
+# r2 review: an event larger than the server's request limit, and a config the shim can't read.
+
+
+def sent(run: Path) -> list[dict[str, object]]:
+    """The payloads the server accepted, from its events file."""
+    events = run.parent / "events.jsonl"
+    if not events.exists():
+        return []
+    return [json.loads(line)["payload"] for line in events.read_text().splitlines()]
+
+
+def big_write(path: str) -> dict[str, object]:
+    return {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Write",
+            "tool_input": {"file_path": path, "content": "x" * shim.MAX_LINE}}
+
+
+def test_an_oversized_write_is_checked_by_its_projection(run: Path, live: SessionServer,
+                                                         tmp_path: Path) -> None:
+    outside = str(tmp_path / "elsewhere.py")       # not a local edit: only wsd's answer allows it
+    assert hook(run, big_write(outside)) == (0, "")
+    [payload] = sent(run)
+    assert payload["hook_event_name"] == "PreToolUse" and payload["tool_name"] == "Write"
+    tool_input = cast(dict[str, object], payload["tool_input"])
+    assert tool_input["file_path"] == outside and tool_input["truncated"] is True
+    assert "content" not in tool_input and cast(int, tool_input["bytes"]) > shim.MAX_LINE
+
+
+def test_an_oversized_stop_records_a_stop(run: Path, live: SessionServer) -> None:
+    stop: dict[str, object] = {"hook_event_name": "Stop", "session_id": "s1",
+                               "last_assistant_message": "x" * shim.MAX_LINE}
+    assert hook(run, stop) == (0, "")
+    assert live.turns().stops == 1
+    [payload] = sent(run)
+    assert payload["session_id"] == "s1"
+    assert cast(dict[str, object], payload["last_assistant_message"])["truncated"] is True
+
+
+def test_an_event_too_large_even_projected_is_denied_unsent(run: Path, live: SessionServer) -> None:
+    wide = {**bash(), **{f"field{i}": "y" * 1000 for i in range(100)}}    # short fields, too many
+    assert denied(hook(run, wide)[1]) == shim.TOO_LARGE_REASON
+    assert sent(run) == []
+
+
+def test_an_oversized_event_is_spooled_projected(run: Path) -> None:
+    stop: dict[str, object] = {"hook_event_name": "Stop", "last_assistant_message": "x" * (2 * shim.MAX_LINE)}
+    assert hook(run, stop) == (0, "")
+    line = (run.parent / "home" / ".hz" / "spool.jsonl").read_bytes()
+    assert len(line) <= shim.MAX_LINE
+    payload = json.loads(line)["payload"]
+    assert payload["hook_event_name"] == "Stop" and payload["last_assistant_message"]["truncated"] is True
+
+
+def test_an_oversized_local_edit_is_decided_on_its_full_fields(run: Path, tmp_path: Path) -> None:
+    assert hook(run, big_write(str(tmp_path / "wt" / "a.py"))) == (0, "")
+    assert denied(hook(run, big_write(str(tmp_path / "elsewhere.py")))[1]) == shim.DENY_REASON
+
+
+def test_the_server_and_the_shim_agree_on_the_line_limit() -> None:
+    assert server.MAX_LINE == shim.MAX_LINE
+
+
+def break_token(run: Path) -> None:
+    (run / "token").unlink()
+    (run / "token").mkdir()
+
+
+@pytest.mark.parametrize("breakage", [lambda run: (run / "shim.json").unlink(),
+                                      lambda run: (run / "shim.json").write_text("{not json"),
+                                      lambda run: (run / "shim.json").write_text("[]"),
+                                      break_token],
+                         ids=["missing", "not-json", "not-an-object", "unreadable-token"])
+def test_a_broken_config_still_spools_other_events(run: Path, breakage: Callable[[Path], None]) -> None:
+    breakage(run)
+    assert hook(run, {"hook_event_name": "Stop"}) == (0, "")
+    spool = run.parent / "home" / ".hz" / "spool.jsonl"
+    assert json.loads(spool.read_text())["payload"]["hook_event_name"] == "Stop"
+    assert denied(hook(run, bash())[1]) == shim.DENY_REASON
+
+
+def test_no_socket_variable_still_spools_other_events(run: Path) -> None:
+    t = FakeTime()
+    env = {"HOME": str(run.parent / "home")}
+    assert shim.run_hook(b'{"hook_event_name": "Stop"}', env, clock=t.clock, sleep=t.sleep) == (0, "")
+    assert (run.parent / "home" / ".hz" / "spool.jsonl").exists()

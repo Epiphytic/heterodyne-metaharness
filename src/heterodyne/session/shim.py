@@ -12,6 +12,12 @@ The hook input, the reply and $HOME are all the agent's to shape, so the shim ne
 well-formed or benign: `wait_seconds` bounds the whole exchange, the reply's length and every JSON text's
 nesting are capped, and the spool is written only to a regular file, never through a link or into a FIFO.
 Anything unexpected about a tool call denies it.
+
+An event too large for one request line (the server's MAX_LINE) is sent, and spooled, as its projection:
+its short top-level scalars, the short path fields of its `tool_input`, and a `{"truncated": true,
+"bytes": N}` marker in place of everything else. The server keeps turn state from the event name and
+session ID alone, so lifecycle events survive; the local `worktree_edit` check still reads the full
+event. A tool call too large even projected is denied; another such event is dropped.
 """
 
 import json
@@ -27,6 +33,7 @@ from typing import Any, cast
 
 DENY_REASON = "control plane unavailable; retry shortly"
 REFUSED_REASON = "the control plane refused this hook"
+TOO_LARGE_REASON = "this tool call is too large for the control plane to check"
 TOKEN_FILE = "token"  # noqa: S105 (a file name)
 CONFIG_FILE = "shim.json"
 EX_TEMPFAIL = 75
@@ -35,6 +42,9 @@ SPOOL_CAP = 1 << 20
 RETRY_SECONDS = 0.1
 MAX_REPLY = 64 * 1024
 MAX_DEPTH = 128                 # JSON nesting: deeper is malformed, before any recursive parse
+MAX_LINE = 64 * 1024            # one request line, at most (ADR 0001 §7); the server's limit too
+MAX_FIELD = 4096                # a scalar kept in a projection: a path, a name, an ID
+PATH_FIELDS = ("file_path", "path", "notebook_path")
 DEFAULT_WAIT = 5.0
 REQUEST_WRAPPER = '#!/bin/sh\nexec python3 -I /run/hz/shim.py request "$@"\n'
 
@@ -99,7 +109,7 @@ def _ask(sock: Path, message: dict[str, Any], wait: float, clock: Clock,
          sleep: Sleep) -> dict[str, Any] | None:
     """wsd's reply, retried until `wait` seconds have passed in all; None if there is none by then."""
     end = clock() + wait
-    line = (json.dumps(message) + "\n").encode()
+    line = _encode(message) + b"\n"
     while True:
         try:
             reply = _exchange(sock, line, end, clock)
@@ -109,6 +119,44 @@ def _ask(sock: Path, message: dict[str, Any], wait: float, clock: Clock,
             if left <= 0:
                 return None
             sleep(min(RETRY_SECONDS, left))
+
+def _encode(value: Any) -> bytes:
+    return json.dumps(value).encode()
+
+
+def _short(value: Any) -> bool:
+    return value is None or isinstance(value, bool | int | float) or (isinstance(value, str)
+                                                                    and len(value) <= MAX_FIELD)
+
+
+def _marker(value: Any) -> dict[str, Any]:
+    return {"truncated": True, "bytes": len(_encode(value))}
+
+
+def _project(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """The event's short top-level scalars and `tool_input` paths; a marker for everything else."""
+    out: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "tool_input" and isinstance(value, dict):
+            tool_input = cast(dict[str, Any], value)
+            paths = {name: tool_input[name] for name in PATH_FIELDS
+                     if isinstance(tool_input.get(name), str) and _short(tool_input[name])}
+            out[key] = {**paths, **_marker(value)}
+        else:
+            out[key] = value if _short(value) else _marker(value)
+    return out
+
+
+def _bounded(wrap: Callable[[dict[str, Any]], dict[str, Any]],
+             fields: dict[str, Any]) -> dict[str, Any] | None:
+    """The message `wrap` makes of the event, or of its projection if the event's is too long for one
+    line; None if even that is."""
+    for payload in (fields, _project(fields)):
+        message = wrap(payload)
+        if len(_encode(message)) <= MAX_LINE:
+            return message
+    return None
+
 
 def _local_edit(payload: Mapping[str, Any], cfg: Mapping[str, Any]) -> bool:
     """A `worktree_edit`: an edit tool on a path whose real path is inside the worktree, while that class
@@ -139,15 +187,19 @@ def _local_edit(payload: Mapping[str, Any], cfg: Mapping[str, Any]) -> bool:
     except (OSError, ValueError):       # a NUL, an unresolvable path
         return False
 
-def _spool(env: Mapping[str, str], payload: Any) -> None:
-    """Append the event to $HOME/.hz/spool.jsonl, capped, best effort. $HOME is the agent's: the file
-    is opened without following a link and without blocking, and written only if it is a regular file."""
+def _spool(env: Mapping[str, str], payload: dict[str, Any]) -> None:
+    """Append the event (or its projection) to $HOME/.hz/spool.jsonl, capped, best effort. $HOME is the
+    agent's: the file is opened without following a link and without blocking, and written only if it is a
+    regular file."""
     home = env.get("HOME")
     if not home or not Path(home).is_absolute():
         return
     folder = Path(home) / ".hz"
     try:
-        line = (json.dumps({"spooled": True, "payload": payload}) + "\n").encode()
+        message = _bounded(lambda p: {"spooled": True, "payload": p}, payload)
+        if message is None:
+            return
+        line = _encode(message) + b"\n"
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
@@ -186,9 +238,15 @@ def _decide(fields: dict[str, Any], tool_call: bool, env: Mapping[str, str], clo
             sleep: Sleep) -> tuple[int, str]:
     found = _config(env)
     if found is None:
-        return 0, _deny(DENY_REASON) if tool_call else ""
+        if tool_call:
+            return 0, _deny(DENY_REASON)
+        _spool(env, fields)
+        return 0, ""
     sock, token, cfg = found
-    reply = _ask(sock, {"token": token, "type": "hook_event", "payload": fields}, _wait(cfg), clock, sleep)
+    message = _bounded(lambda p: {"token": token, "type": "hook_event", "payload": p}, fields)
+    if message is None:
+        return 0, _deny(TOO_LARGE_REASON) if tool_call else ""
+    reply = _ask(sock, message, _wait(cfg), clock, sleep)
     if reply is None:
         if tool_call:
             return 0, "" if _local_edit(fields, cfg) else _deny(DENY_REASON)
