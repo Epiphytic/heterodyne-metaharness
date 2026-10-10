@@ -83,21 +83,29 @@ The bridge sends the normalised input, plus the raw merged record for the audit 
 | **Allow** (auto-approve, or the gatekeeper allows) | `selected` the `allow_once` option | Treated as a deny (next rows), recorded as "no one-time allow offered" | Same as the previous column |
 | **Deny** (escalate, hard deny, unclassifiable, or `wsd` unreachable) | No reject option: cancel (below) | `selected` the `reject_once` option | Cancel (below) |
 
-**Cancel** means: the bridge sends `session/cancel`, and answers this request and every other pending permission request of the session with `cancelled`. It never selects an option the request didn't offer, and never invents an `optionId`. A request with an empty `options` list is a protocol error: the bridge cancels the same way, and `wsd` stops the session.
+**Cancel** means *cancellation requested*: the bridge sends `session/cancel` (once per turn), and answers this request and every other pending permission request of the session with `cancelled`. Until the turn completes, it answers any further permission request with `cancelled` at once. It never selects an option the request didn't offer, and never invents an `optionId`. A request with an empty `options` list is a protocol error: the bridge cancels the same way, and `wsd` stops the session.
+
+**Cancellation requested is not turn completed.** `session/cancel` is a notification: the agent may go on sending updates and running operations until it answers the original `session/prompt`. So the bridge tracks three states per turn, and the steps below wait for the one they need:
+
+1. **Cancel requested:** `session/cancel` sent, and pending permissions answered `cancelled`.
+2. **Turn completed:** the original `session/prompt` has returned (with `stopReason` `cancelled`, or any other). Only then may the bridge send another `session/prompt`.
+3. **Quiescent:** the turn has completed and the agent process tree has been stopped, with its exit confirmed. Only then may `wsd` commit WIP. Turn completion alone isn't enough, because a tool can leave a child process that still writes to the worktree; and no tool-call record still `pending` or `in_progress` can be trusted as proof either, because those updates are the agent's own.
+
+**Bounded wait.** If the turn hasn't completed within `acp.cancel_timeout` (a fixed default, for example 30s, set in host config) of the cancel request, the runtime terminates the sandbox's process tree: first a polite signal, then a kill after a short grace. `wsd` then confirms the exit from the runtime's own process state (the launch receipt's pane PID and the sandbox runtime's report), not from anything the bridge or agent says. If the exit can't be confirmed, the bead is held, escalated `unexpected_state`, and no WIP is committed (§4.3).
 
 What happens after a deny:
 
 | Reason for the deny | Then |
 |---|---|
-| Operator-only (escalate and park), including unclassifiable input | If the turn isn't already cancelled, the bridge sends `session/cancel`. `wsd` then runs the §5.3 step 3 escalation (approval bead, §5.9 gate, cards) and the §4.3 park sequence. The WIP commit is `wsd`'s own park step, so it doesn't depend on the agent obeying a message. |
-| Hard deny | After the turn ends (it ended already if the deny was a cancel), `wsd` sends a fixed `session/prompt` with the reason. Nothing is escalated. |
+| Operator-only (escalate and park), including unclassifiable input | If the turn isn't already cancel-requested, the bridge requests cancellation. `wsd` can record the escalation (approval bead, §5.9 gate, cards; §5.3 step 3) at once, because that touches no worktree. The §4.3 park sequence waits for **quiescence**: turn completed (or the bounded wait expired and the process tree was terminated), then the session stopped with its exit confirmed. Only then does `wsd` commit WIP, as its own park step, so it doesn't depend on the agent obeying a message. |
+| Hard deny | `wsd` waits for **turn completed** (after a `reject_once`, the turn usually goes on; after a cancel, the original prompt still has to return), then sends a fixed `session/prompt` with the reason. Nothing is escalated. If the bounded wait expires instead, the process tree is terminated and the session is handled as an agent crash (§10): reconcile resumes it, and the reason is the first prompt after resume. |
 | Grey zone | The request stays open while the gatekeeper decides (60s timebox). Its answer is then an allow or one of the deny rows above; timeout or unavailable escalates, as today. |
 | `wsd` unreachable | The request stays open for the §10 hook-shim wait (5s), then is denied as above. This fails closed, like the hook shim. The bridge may allow §10's narrow local-only class itself, from its cached copy of the auto-approve tier, as the shim does today, but only for a normalised record (step 3 above applies first). |
 
 Rules:
 - **Never `allow_always` or `reject_always`.** A remembered choice lives in the agent's own state, so later calls would skip `wsd`. When those are the only kinds offered, the decision table above applies: an allow becomes a deny, and a deny is a cancel.
 - **There is no reason field.** Neither v1.25.0 nor v2.0.0-alpha.8 has a way to return a reason with a rejection: the outcome is only `selected` or `cancelled` (v2 adds an open `other`), and `_meta` must not be interpreted by the agent. So "deny with a reason" is a rejection or cancel followed by a `session/prompt` that carries the reason, and the park message of §5.3 step 3 ("Parked pending operator approval…") becomes that prompt, where one is sent at all.
-- **Cancellation.** After any `session/cancel`, whoever sent it, the client must answer every pending request with `cancelled`. The bridge does this before it reports the turn's end, and drops the session's tool-call records only after the turn has ended.
+- **Cancellation.** After any `session/cancel`, whoever triggered it, the client must answer every pending request with `cancelled`. The bridge does this as soon as it sends the cancel, reports *cancel requested* and *turn completed* to `wsd` as separate events, and drops the session's tool-call records only after the turn has completed.
 - `ws-request` is unchanged: the agent runs it through its own shell tool. That raises a permission request, which the normaliser maps to a command and the tier file auto-approves.
 
 ### 3.2 Why it is stronger than `PreToolUse`, and where it is not
@@ -129,8 +137,8 @@ What replaces each interactive feature:
 | `PostToolUse` hook | `tool_call_update` with `completed` or `failed` | Untrusted |
 | `Stop` hook | The `session/prompt` response's `stopReason` (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`) | Untrusted |
 | `Notification` (waiting for input) | Implicit: between turns, the agent is waiting by definition. | n/a |
-| Steering: Claude `send-keys` or channels, Codex `codex queue` | A `session/prompt`, held by the bridge until the current turn ends. An urgent steer is `session/cancel` then the prompt. v1.25.0 has no stable way to inject into a running turn. | n/a |
-| `/stop` interrupt (§6.3) | `session/cancel`, then the park sequence | n/a |
+| Steering: Claude `send-keys` or channels, Codex `codex queue` | A `session/prompt`, held by the bridge until the current turn completes. An urgent steer requests cancellation, then sends the prompt once the original prompt has returned (§3.1, bounded wait included). v1.25.0 has no stable way to inject into a running turn. | n/a |
+| `/stop` interrupt (§6.3) | Cancellation requested, then the park sequence once the session is quiescent (§3.1) | n/a |
 | Resume as the same session (§4.1) | `session/load` (if `loadSession`), or `session/resume` (if `sessionCapabilities.resume`), with the recorded `sessionId`. Without either, the §4.1 deterministic handoff into a fresh session. | n/a |
 | Fixed session ID (Claude `--session-id`) | None: the agent assigns `sessionId`. Recorded on the bead right after launch, as for Codex thread IDs (§4.2). | Untrusted, as Codex's |
 | Launch receipt (§4.4 D2) | Unchanged: the runtime's spawn result for the tmux session and sandbox, journaled by `wsd` on the host | Trusted |
@@ -182,7 +190,7 @@ The terms rule is G3 (§4.4): the operator reads each provider's terms before an
 
 **A spike (S-ACP) before any implementation**, on the reference host, for each harness taken forward:
 - `initialize` and `session/new` through a bridge inside the §7 sandbox, with the agent pinned to a version, and the protocol version recorded;
-- which tool kinds raise `session/request_permission` in the asking mode; which `toolCall` fields and option kinds each request actually carries; and that `reject_once`, where offered, and `session/cancel` each stop the call;
+- which tool kinds raise `session/request_permission` in the asking mode; which `toolCall` fields and option kinds each request actually carries; that `reject_once`, where offered, and `session/cancel` each stop the call; and how long each harness takes from `session/cancel` to the prompt's return, to set `acp.cancel_timeout`;
 - recorded permission requests for the normaliser's golden tests (§3.1), including the shapes of shell commands, file edits and `git push`;
 - that a `wsd` restart doesn't end the turn, and that `wsd` reconnects to the bridge;
 - `session/load` or `session/resume` after the agent process restarts;
