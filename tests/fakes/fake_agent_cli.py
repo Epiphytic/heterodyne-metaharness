@@ -12,6 +12,7 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   every hook gets the TUI's cwd), fires SessionStart (Claude at start, Codex on the first prompt, as
   the real CLIs do), and for each line typed fires UserPromptSubmit and Stop, keeping a transcript
   (Claude) or a rollout (Codex) where the real CLI keeps it, so resume can find it.
+  HZ_FAKE_NO_SESSION_START=1 suppresses SessionStart.
 """
 
 import contextlib
@@ -134,8 +135,12 @@ def claude_hooks() -> dict[str, list[str]]:
     """As Claude Code 2.1.286 merges them: the user, project and local settings that --setting-sources
     allows (all three by default), then --settings; `disableAllHooks` in any of them turns every hook
     off (there is no managed policy here)."""
-    allowed = (ARGS[ARGS.index("--setting-sources") + 1].split(",") if "--setting-sources" in ARGS
-               else ["user", "project", "local"])
+    allowed = ["user", "project", "local"]
+    for i, arg in enumerate(ARGS):                  # both forms, as its argv parsers read them
+        if arg.startswith("--setting-sources="):
+            allowed = arg.partition("=")[2].split(",")
+        elif arg == "--setting-sources" and i + 1 < len(ARGS):
+            allowed = ARGS[i + 1].split(",")
     files = {"user": Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json",
              "project": Path.cwd() / ".claude" / "settings.json",
              "local": Path.cwd() / ".claude" / "settings.local.json"}
@@ -150,6 +155,11 @@ def claude_hooks() -> dict[str, list[str]]:
     return commands
 
 
+def session_start(commands: dict[str, list[str]]) -> list[str]:
+    """HZ_FAKE_NO_SESSION_START=1 drops the event, as a CLI that never reports its session would."""
+    return [] if os.environ.get("HZ_FAKE_NO_SESSION_START") == "1" else commands.get("SessionStart", [])
+
+
 def tui() -> None:
     if ADAPTER == "claude":
         commands = claude_hooks()
@@ -158,7 +168,7 @@ def tui() -> None:
         log = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / slug / f"{session}.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.touch()
-        fire(commands.get("SessionStart", []), "SessionStart", session, source="startup")
+        fire(session_start(commands), "SessionStart", session, source="startup")
     else:
         commands = {}
         trusted = codex_trusted()
@@ -178,7 +188,7 @@ def tui() -> None:
             day.mkdir(parents=True, exist_ok=True)
             log = day / f"rollout-2026-10-09T00-00-00-{session}.jsonl"
             log.touch()
-            fire(commands.get("SessionStart", []), "SessionStart", session, source="startup")
+            fire(session_start(commands), "SessionStart", session, source="startup")
             started = True
         fire(commands.get("UserPromptSubmit", []), "UserPromptSubmit", session, prompt=line)
         if log is not None:

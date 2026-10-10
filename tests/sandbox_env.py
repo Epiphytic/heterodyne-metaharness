@@ -3,14 +3,25 @@
 import base64
 import contextlib
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
-from wsd_env import login_home
+from fakes.fake_backend import FakeBackend
+from fakes.scripted_selftest import ScriptedSelfTest
+from wsd_env import Clock, accounts_at, git_repo, login_home
+
+from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime
+from heterodyne.sandbox.settings import sandbox_settings
+from heterodyne.tmux import Tmux
+from heterodyne.wsd import ids
+from heterodyne.wsd.runtime import LaunchSpec
 
 BASE_HOST = """
 [profiles.p-one]
@@ -87,3 +98,45 @@ def fresh_logins(home: Path, expires_at: int) -> None:
     (home / ".claude" / ".credentials.json").write_text(json.dumps(
         {"claudeAiOauth": {"expiresAt": expires_at * 1000, "accessToken": "fake-not-a-token"}}))
     (home / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": fake_jwt(expires_at)}}))
+
+
+@dataclass
+class RuntimeRig:
+    root: Path
+    runtime: SandboxRuntime
+    backend: FakeBackend
+    selftest: ScriptedSelfTest
+    tmux: Tmux
+    clock: Clock
+    worktree: Path
+    home: Path
+    repo: Path
+
+
+def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> RuntimeRig:
+    """A SandboxRuntime on the fake backend, the scripted self-test and a guarded tmux, with both fake
+    CLIs at their pins and default logins valid for a day. `root` must be short (short_dir)."""
+    env = config_env(root / "c", host)
+    home = Path(env["HOME"])
+    fresh_logins(home, clock() + 86_400)
+    claude, codex = install_fake_cli(root / "i", "claude-code"), install_fake_cli(root / "i", "codex")
+    backend, selftest = FakeBackend(), ScriptedSelfTest()
+    config = RuntimeConfig(
+        sessions=root / "s", settings=sandbox_settings(env), accounts=accounts_at(home), real_home=home,
+        real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
+        tmux=tmux, path=os.pathsep.join((str(claude.parent), str(codex.parent))), clock=clock)
+    runtime = SandboxRuntime(config, backend, selftest)
+    repo, worktree = git_repo(root / "r"), root / "w"          # a linked worktree, as btq makes them
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "btq/btq-1", str(worktree)],
+                   check=True, capture_output=True)
+    return RuntimeRig(root, runtime, backend, selftest, tmux, clock, worktree, home, repo)
+
+
+def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: str = "default",
+                resume: bool = False) -> LaunchSpec:
+    """A first launch, as plan 3's guard builds it: Claude's native ID is the session key, Codex's is
+    unknown until its thread starts."""
+    key = ids.role_session(bead, "coder", profile)
+    native = key if profile == "p-one" else None
+    return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
+                      native_id=native, account=account, repo=rig.repo)

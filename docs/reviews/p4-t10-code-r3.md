@@ -1,0 +1,9 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: cb4ec27. Verdict: REVISE.
+
+Controller adjudication (cycle 3, final): the single finding is deferred to Task 12 (wiring wsd to the sandbox runtime) as a required item, not fixed in Task 10. Park and defer reach this runtime only through Task 12. No commit is lost: the private tip is preserved, and relaunch is refused while unlanded. The remaining harm is a divergent host WIP commit, which is recoverable. Task 12 must make an unlanded record a durable hold that is visible to park and defer, through sessions() and stop(), so that no host WIP commit is made until landing is resolved. It must also add integration tests, including a restart. The reviewer confirmed the cycle 1 and cycle 2 fixes hold.
+
+1. [BLOCKING] **Park and defer can commit before failed landing is resolved** — `src/heterodyne/sandbox/runtime.py:187`, `:253`, `:513`. `_end` returns success after recording `unlanded=True`; `sessions()` omits the ended record, and subsequent `stop()` calls return immediately. Consequently, Parker proceeds to host WIP commits at `src/heterodyne/wsd/park.py:356` and `:476`. Those commits diverge from the preserved private tip, preventing its later fast-forward landing. In-memory injection confirmed `_end=True` and `sessions=[]` for an unlanded generation. Cycle 1’s lifetime WIP fix protects only `_settle_wip`; this broader defect is copied from the plan. **Fix:** expose unresolved landing as a durable hold through both listing and stopping, preventing park/defer WIP commits until resolution. Add integration tests asserting unchanged host history and preserved private commits after rejected landing, including restart.
+
+The other prior fixes hold under static review. Test execution was blocked because the execution sandbox also makes `/tmp` read-only.
+
+REVISE
