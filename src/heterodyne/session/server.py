@@ -84,9 +84,10 @@ class SessionServer:
         self.path.chmod(0o777)
         sock.listen(16)
         self._sock = sock
-        self._acceptor = threading.Thread(target=self._accept, args=(sock,),
-                                          name=f"session-{self.path.parent.name}", daemon=True)
-        self._acceptor.start()
+        acceptor = threading.Thread(target=self._accept, args=(sock,),
+                                    name=f"session-{self.path.parent.name}", daemon=True)
+        acceptor.start()
+        self._acceptor = acceptor           # only a started thread is ever joined
 
     def close(self) -> None:
         """Stop admitting, wake every connection, and wait (bounded) for its handler. Once this returns,
@@ -102,12 +103,14 @@ class SessionServer:
         for conn in handlers:
             with contextlib.suppress(OSError):
                 conn.shutdown(socket.SHUT_RDWR)
-        end = time.monotonic() + CLOSE_SECONDS
-        for thread in [self._acceptor, *handlers.values()]:
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(max(0.0, end - time.monotonic()))
-        with contextlib.suppress(FileNotFoundError):
-            self.path.unlink()
+        try:
+            end = time.monotonic() + CLOSE_SECONDS
+            for thread in [self._acceptor, *handlers.values()]:
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(max(0.0, end - time.monotonic()))
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                self.path.unlink()
 
     @property
     def active(self) -> int:
@@ -138,17 +141,20 @@ class SessionServer:
             return
         thread = threading.Thread(target=self._serve, args=(conn,),
                                   name=f"session-{self.path.parent.name}-conn", daemon=True)
+        # Started and registered under the lock, so close sees a handler only once it runs (the handler's
+        # own cleanup waits for the lock too). A thread that fails to start is never registered.
         with self._lock:
-            admitted = not self._closed.is_set()
-            if admitted:
-                self._handlers[conn] = thread
-        if admitted:
-            try:
-                thread.start()
-                return
-            except RuntimeError:            # no thread to be had: refuse this one, keep accepting
-                with self._lock:
-                    self._handlers.pop(conn, None)
+            started = False
+            if not self._closed.is_set():
+                try:
+                    thread.start()
+                    started = True
+                except RuntimeError:        # no thread to be had: refuse this one, keep accepting
+                    pass
+                else:
+                    self._handlers[conn] = thread
+        if started:
+            return
         self._slots.release()
         conn.close()
 

@@ -233,3 +233,34 @@ def test_a_token_that_cannot_be_encoded_is_forbidden(server: SessionServer, tmp_
     raw = b'{"token": "\\ud800", "type": "hook_event", "payload": {}}\n'
     assert ask(tmp_path / "s.sock", raw) == '{"ok": false, "error": "forbidden"}'
     assert server.turns() == TurnState()
+
+
+def test_close_during_a_failed_thread_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r2 review: close() runs while a connection's thread is failing to start. It returns normally,
+    joins nothing unstarted, and still removes the socket."""
+    sock = tmp_path / "s.sock"
+    s = SessionServer(sock, TOKEN, tmp_path / "e.jsonl")
+    s.start()
+    real = threading.Thread.start
+    errors: list[BaseException] = []
+
+    def closing() -> None:
+        try:
+            s.close()
+        except BaseException as exc:    # recorded for the assertion below
+            errors.append(exc)
+
+    closer = threading.Thread(target=closing)
+
+    def flaky(self: threading.Thread) -> None:
+        if self.name.endswith("-conn"):
+            real(closer)
+            closer.join(1)              # bounded: an unsynchronised close finishes (and fails) here
+            raise RuntimeError("can't start new thread")
+        real(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky)
+    assert refused(sock, req(TOKEN, "hook_event", {}))
+    closer.join(10)
+    assert not closer.is_alive() and errors == []
+    assert not sock.exists() and s.active == 0
