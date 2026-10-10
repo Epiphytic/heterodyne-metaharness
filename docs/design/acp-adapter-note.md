@@ -28,7 +28,7 @@ Everything below about message shapes is from the v1.25.0 schema unless it says 
 
 - **What ACP is.** JSON-RPC 2.0 over the agent process's stdio. The *client* (here: the harness) starts the agent, calls `initialize`, `session/new` or `session/load`, and sends `session/prompt`. The agent streams `session/update` notifications (message chunks, `tool_call`, `tool_call_update`, `plan`, `usage_update`, …), and calls back into the client with `session/request_permission` and, only if the client advertises them, `fs/*` and `terminal/*`.
 - **Recommendation.** An ACP adapter is worth having **only for harnesses that have no interactive-CLI adapter**: Gemini CLI and OpenCode are the realistic first candidates. For Claude Code and Codex it adds nothing that justifies losing §2's properties, and for Claude it would lose subscription login (§4.1).
-- **Policy.** `session/request_permission` is a better *policy* point than `PreToolUse`: it is in-protocol, every gated tool waits for the answer, and it is the same for every harness. It is **not a security boundary**, because the agent decides which calls it asks about. The §7 outer sandbox stays the only boundary, unchanged.
+- **Policy.** `session/request_permission` is a better *policy* point than `PreToolUse`: it is in-protocol, every gated tool waits for the answer, and it is one protocol for every harness (though each harness needs its own input normaliser, §3.1). It is **not a security boundary**, because the agent decides which calls it asks about. The §7 outer sandbox stays the only boundary, unchanged.
 - **Headless.** An ACP session is headless, so it is an exception to §2 point 2, of the same kind as `codex exec` in §5.3: allowed only inside the outer sandbox. Section 3 says what replaces `tmux attach` and each hook.
 - **Accounts.** D1 applies only where a harness keeps its login in files under a directory that an environment variable can point at, and only after an S7-style spike shows the login file set. API-key credentials are not a D1 account and would need their own amendment.
 
@@ -38,7 +38,7 @@ Everything below about message shapes is from the v1.25.0 schema unless it says 
 
 §4.1 says the code knows one adapter type per harness CLI. An ACP adapter breaks that one-to-one: one protocol, several harnesses. Two shapes:
 
-- **(a) One `acp` adapter type, with a closed registry of harness descriptors in code** (command line, config-directory variable, login file set, egress hosts, the mode to start in, which capabilities S7-style runs demonstrated). A profile names `adapter = "acp"` plus `harness = "<name>"`. Adding a harness is a new descriptor and a spike, not a new adapter. This fits AU-14's driver-registry review.
+- **(a) One `acp` adapter type, with a closed registry of harness descriptors in code** (command line, config-directory variable, login file set, egress hosts, the mode to start in, the permission-input normaliser of §3.1, which capabilities S7-style runs demonstrated). A profile names `adapter = "acp"` plus `harness = "<name>"`. Adding a harness is a new descriptor and a spike, not a new adapter. This fits AU-14's driver-registry review.
 - **(b) One adapter type per harness** (`gemini-acp`, `opencode-acp`), sharing an ACP client library. This keeps §4.1's wording, and the `unavailable` status (AU-14) is per type.
 
 Lean: (a). The descriptor is exactly the per-harness data D7, D9 and §7 already need, and §4.1's lint (no model names in source) still holds, because a descriptor names a harness, not a model. Either way, a harness that isn't in the registry can't be configured.
@@ -68,29 +68,43 @@ The bridge is in the same sandbox as the agent, so a compromised agent can compr
 
 ### 3.1 The mapping
 
-`session/request_permission` carries `sessionId`, a `toolCall` (`toolCallId`, `title`, `kind` ∈ {read, edit, delete, move, search, execute, think, fetch, switch_mode, other}, `rawInput`, `locations`) and `options`. Each option has an `optionId`, a `name` and a `kind` ∈ {`allow_once`, `allow_always`, `reject_once`, `reject_always`}. The response is `selected` (with an `optionId`) or `cancelled`.
+`session/request_permission` carries `sessionId`, a `toolCall` and `options`. In schema-v1.25.0 the `toolCall` is a **partial** `ToolCallUpdate`: only `toolCallId` is required, and `title`, `kind` (∈ {read, edit, delete, move, search, execute, think, fetch, switch_mode, other}), `rawInput` and `locations` are all optional. `rawInput` is any JSON value, with no common schema across harnesses. Each option has an `optionId`, a `name` and a `kind` ∈ {`allow_once`, `allow_always`, `reject_once`, `reject_always`}. ACP doesn't require any particular kind to be offered. The response is `selected` (with one of the offered `optionId`s) or `cancelled`.
 
-The bridge forwards each request to `wsd` on the session socket as a `permission` event: the tool kind, title, `rawInput`, locations and working directory, just as the `PreToolUse` hook sends tool and input today (§5.3 step 1). The policy engine runs the tier file unchanged, and the bridge answers:
+So a request can't go to the policy engine as it arrives. The bridge builds the input first:
 
-| §5.3 tier | ACP answer | Then |
-|---|---|---|
-| Auto-approve | `selected` the `allow_once` option | The tool runs. |
-| Operator-only (escalate and park) | `selected` the `reject_once` option | The bridge sends `session/cancel`. `wsd` runs the §5.3 step 3 escalation (approval bead, §5.9 gate, cards) and the §4.3 park sequence; the park's WIP commit is `wsd`'s own step, so it doesn't depend on the agent obeying a message. |
-| Hard deny | `selected` the `reject_once` option | After the turn ends, `wsd` sends a fixed `session/prompt` with the reason. Nothing is escalated. |
-| Grey zone | Held open while the gatekeeper decides (60s timebox) | Then one of the rows above; timeout or unavailable escalates, as today. |
-| Request arrives while `wsd` is unreachable | Held, then `reject_once` after the §10 hook-shim wait (5s) | Fails closed, like the hook shim. §10's narrow local-only class could be auto-approved by the bridge itself, as the shim does today. |
+1. **Tool-call state.** The bridge keeps one record per (session, `toolCallId`). It starts with the `tool_call` notification and merges every later `tool_call_update`, then the `toolCall` in the permission request, field by field: a field that is present replaces the earlier value, and a field that is absent keeps it. The permission request is evaluated against the merged record.
+2. **Per-harness normalisation.** The harness descriptor (§2.1) includes a normaliser: a pure function from the merged record to the policy engine's **existing** input (tool, input and working directory, the shape the `PreToolUse` hook sends in §5.3 step 1). For example, it says which `rawInput` field holds a shell command, or which holds a file path. That is what lets the existing tiers match, and lets `wsd` turn, say, a `git push origin main` into the typed `push_branch` request of §5.3 step 3. Each normaliser is pinned to the harness version, and golden tests built from recorded requests check it.
+3. **Unclassifiable input escalates.** A record that the normaliser can't map completely is never auto-approved and never sent to the gatekeeper as if it were complete. It escalates as operator-only, and the card says the input couldn't be classified. Examples: no `kind`, an unknown `kind`, an `execute` with no command, an edit with no path, or a `rawInput` that doesn't match the normaliser's schema. The same holds for a request whose `toolCallId` has no earlier record and no usable fields of its own.
+
+The bridge sends the normalised input, plus the raw merged record for the audit trail, to `wsd` on the session socket as a `permission` event. The policy engine runs the tier file unchanged and returns allow or deny. The bridge answers according to which option kinds the request offers:
+
+| Decision | `allow_once` offered | `reject_once` offered | Neither offered |
+|---|---|---|---|
+| **Allow** (auto-approve, or the gatekeeper allows) | `selected` the `allow_once` option | Treated as a deny (next rows), recorded as "no one-time allow offered" | Same as the previous column |
+| **Deny** (escalate, hard deny, unclassifiable, or `wsd` unreachable) | No reject option: cancel (below) | `selected` the `reject_once` option | Cancel (below) |
+
+**Cancel** means: the bridge sends `session/cancel`, and answers this request and every other pending permission request of the session with `cancelled`. It never selects an option the request didn't offer, and never invents an `optionId`. A request with an empty `options` list is a protocol error: the bridge cancels the same way, and `wsd` stops the session.
+
+What happens after a deny:
+
+| Reason for the deny | Then |
+|---|---|
+| Operator-only (escalate and park), including unclassifiable input | If the turn isn't already cancelled, the bridge sends `session/cancel`. `wsd` then runs the §5.3 step 3 escalation (approval bead, §5.9 gate, cards) and the §4.3 park sequence. The WIP commit is `wsd`'s own park step, so it doesn't depend on the agent obeying a message. |
+| Hard deny | After the turn ends (it ended already if the deny was a cancel), `wsd` sends a fixed `session/prompt` with the reason. Nothing is escalated. |
+| Grey zone | The request stays open while the gatekeeper decides (60s timebox). Its answer is then an allow or one of the deny rows above; timeout or unavailable escalates, as today. |
+| `wsd` unreachable | The request stays open for the §10 hook-shim wait (5s), then is denied as above. This fails closed, like the hook shim. The bridge may allow §10's narrow local-only class itself, from its cached copy of the auto-approve tier, as the shim does today, but only for a normalised record (step 3 above applies first). |
 
 Rules:
-- **Never `allow_always` or `reject_always`.** A remembered choice lives in the agent's own state, so later calls would skip `wsd`. If a request offers no `allow_once`, the bridge treats it as a deny (`reject_once`) and records why; if it offers no `reject_once` either, the bridge cancels the turn. A request with no options at all is a protocol error and the session is stopped.
-- **There is no reason field.** Neither v1.25.0 nor v2.0.0-alpha.8 has a way to return a reason with a rejection: the outcome is only `selected` or `cancelled` (v2 adds an open `other`), and `_meta` must not be interpreted by the agent. So "deny with a reason" is a rejection followed by a `session/prompt` that carries the reason, and the park message of §5.3 step 3 ("Parked pending operator approval…") becomes that prompt, where one is sent at all.
-- **Cancellation.** After `session/cancel`, the client must answer every pending request with `cancelled`. The bridge does this before it reports the turn's end.
-- `ws-request` is unchanged: the agent runs it through its own shell tool, which raises a permission request that the tier file auto-approves.
+- **Never `allow_always` or `reject_always`.** A remembered choice lives in the agent's own state, so later calls would skip `wsd`. When those are the only kinds offered, the decision table above applies: an allow becomes a deny, and a deny is a cancel.
+- **There is no reason field.** Neither v1.25.0 nor v2.0.0-alpha.8 has a way to return a reason with a rejection: the outcome is only `selected` or `cancelled` (v2 adds an open `other`), and `_meta` must not be interpreted by the agent. So "deny with a reason" is a rejection or cancel followed by a `session/prompt` that carries the reason, and the park message of §5.3 step 3 ("Parked pending operator approval…") becomes that prompt, where one is sent at all.
+- **Cancellation.** After any `session/cancel`, whoever sent it, the client must answer every pending request with `cancelled`. The bridge does this before it reports the turn's end, and drops the session's tool-call records only after the turn has ended.
+- `ws-request` is unchanged: the agent runs it through its own shell tool. That raises a permission request, which the normaliser maps to a command and the tier file auto-approves.
 
 ### 3.2 Why it is stronger than `PreToolUse`, and where it is not
 
 Stronger:
 - **It blocks by construction.** The agent can't run a gated tool until the client answers. If the bridge dies, the agent's stdio closes and the call never runs. A hook that crashes or times out depends on how each CLI treats hook failure.
-- **One mechanism for every harness**, with a typed tool kind and a structured input. There is no per-CLI hook schema or hook-trust step, which are the open questions for Codex in §4.2.
+- **One protocol for every harness.** There is no per-CLI hook configuration or hook-trust step, which are the open questions for Codex in §4.2. The input is still harness-specific (§3.1): each harness needs its own normaliser.
 - **It covers harnesses with no hook system at all.**
 
 Not stronger:
@@ -168,7 +182,8 @@ The terms rule is G3 (§4.4): the operator reads each provider's terms before an
 
 **A spike (S-ACP) before any implementation**, on the reference host, for each harness taken forward:
 - `initialize` and `session/new` through a bridge inside the §7 sandbox, with the agent pinned to a version, and the protocol version recorded;
-- which tool kinds raise `session/request_permission` in the asking mode, and that `reject_once` actually stops the call;
+- which tool kinds raise `session/request_permission` in the asking mode; which `toolCall` fields and option kinds each request actually carries; and that `reject_once`, where offered, and `session/cancel` each stop the call;
+- recorded permission requests for the normaliser's golden tests (§3.1), including the shapes of shell commands, file edits and `git push`;
 - that a `wsd` restart doesn't end the turn, and that `wsd` reconnects to the bridge;
 - `session/load` or `session/resume` after the agent process restarts;
 - the login file set, the config-directory variable, token expiry readable on the host, and a working login with read-only login files (the D7 and D8 preconditions);
