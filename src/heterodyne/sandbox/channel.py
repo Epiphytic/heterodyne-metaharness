@@ -5,10 +5,12 @@ and /proc showing the image's python running the read-only probes as PROBE_ARGV,
 workload container's netns, inside the environment allowlist, with the CLI binary as an ancestor inside
 that netns. Any other peer is rejected, and a rejected peer alone fails the gate.
 
-The peer is pinned by a pidfd taken right after SO_PEERCRED: it must still be alive (the pidfd not
-readable) before and after the /proc reads, at accept and again at `done`, so the reads saw that process
-and not a successor with its PID. After the check at `done` the host sends ACK, which the probe waits for
-before it exits. The transcript is exact: one result per check, one integer `done`, nothing after it.
+The peer is pinned by its SO_PEERPIDFD pidfd, the connecting process itself: it must still be alive (the
+pidfd not readable) before and after the /proc reads, at accept and again at `done`, so the reads saw that
+process and not a successor with its PID. After the check at `done` the host sends ACK, which the probe
+waits for before it exits. The transcript is exact: one result per check, one integer `done`, nothing
+after it, the ACK delivered, then a clean end of stream. `done` is stamped on a monotonic clock, for
+the deadline.
 Reads, connections and the time per connection are bounded, and `close` finishes every worker before the
 verdict is read.
 """
@@ -24,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from heterodyne.platform import peer_pid_checked
+from heterodyne.platform import peer_pidfd_checked
 from heterodyne.sandbox.openshell_selftest import PROBE_ARGV, PROBE_EXE
 
 MAX_LINE = 64 << 10
@@ -90,19 +92,21 @@ class _Run:
     pid: int
     checks: dict[str, bool] = field(default_factory=dict[str, bool])
     done: int | None = None
-    finished: bool = False      # `done`, the check at `done`, the ACK, and then the peer's end of stream
+    done_at: float | None = None    # the channel's clock when `done` arrived
+    finished: bool = False      # `done`, the check at `done`, the ACK sent, then the peer's clean EOF
+    end: str = ""               # how the connection ended: eof, timeout, error, shutdown, ack-failed
     changed: bool = False
     malformed: bool = False
 
 
 class ProbeChannel:
     def __init__(self, path: Path, verify: Callable[[int], str], *,
-                 peer_pid: Callable[[socket.socket], int] = peer_pid_checked,
-                 pidfd_open: Callable[[int], int] = os.pidfd_open, seconds: float = 900.0) -> None:
+                 peer: Callable[[socket.socket], tuple[int, int]] = peer_pidfd_checked,
+                 clock: Callable[[], float] = time.monotonic, seconds: float = 900.0) -> None:
         self.path = path
         self.verify = verify
-        self.peer_pid = peer_pid
-        self.pidfd_open = pidfd_open
+        self.peer = peer                       # (pid, pidfd); the channel owns and closes the pidfd
+        self.clock = clock
         self.seconds = seconds                 # each connection's deadline, from its accept
         self.runs: list[_Run] = []
         self.rejected: list[str] = []          # reasons, kept for the audit
@@ -165,7 +169,8 @@ class ProbeChannel:
         with self._lock:
             return bool(self.rejected) or any(r.finished or r.changed or r.malformed for r in self.runs)
 
-    def verdict(self, expected: Sequence[str]) -> str:
+    def verdict(self, expected: Sequence[str], *, by: float | None = None) -> str:
+        """"" on a pass, else the reason. `by`: the deadline on the channel's clock that `done` must meet."""
         with self._lock:
             if not self._closed:
                 raise RuntimeError("the verdict is read only after close()")
@@ -184,6 +189,8 @@ class ProbeChannel:
                 return "the probe changed before it finished"
             if not run.finished:
                 return "the probe did not finish cleanly"
+            if by is not None and (run.done_at is None or run.done_at > by):
+                return "the probe did not finish in time"
             unexpected = sorted(set(run.checks) - set(expected))
             failed = [c for c in expected if run.checks.get(c) is False]
             missing = [c for c in expected if c not in run.checks]
@@ -238,8 +245,7 @@ class ProbeChannel:
         try:
             with conn:
                 try:
-                    pid = self.peer_pid(conn)
-                    pidfd = self.pidfd_open(pid)
+                    pid, pidfd = self.peer(conn)
                 except OSError:
                     with self._lock:
                         self.rejected.append("peer credentials unreadable")
@@ -261,7 +267,7 @@ class ProbeChannel:
         run = _Run(pid)
         with self._lock:
             self.runs.append(run)
-        deadline = time.monotonic() + self.seconds
+        deadline = self.clock() + self.seconds
         buf = b""
         while True:
             line, sep, rest = buf.partition(b"\n")
@@ -276,9 +282,11 @@ class ProbeChannel:
                 with self._lock:
                     run.malformed = True
                 return
-            chunk = self._recv(conn, deadline, MAX_LINE + 1 - len(buf))
-            if not chunk:
-                return                         # end of stream, a deadline or close(): no `done`
+            chunk, end = self._recv(conn, deadline, MAX_LINE + 1 - len(buf))
+            if end:
+                with self._lock:
+                    run.end = end              # no `done`: the run is unfinished, however it ended
+                return
             buf += chunk
         why = self._pinned(pidfd, pid)         # the same process, still alive and untraced, at completion
         if why:
@@ -288,23 +296,31 @@ class ProbeChannel:
         try:
             conn.sendall(ACK)
         except OSError:
-            pass
-        trailing = buf or self._recv(conn, deadline, 1)
+            with self._lock:
+                run.end = "ack-failed"
+            return
+        trailing, end = (buf, "") if buf else self._recv(conn, deadline, 1)
         with self._lock:
             if trailing:
                 run.malformed = True           # nothing may follow `done`
-            else:
-                run.finished = True
+            run.end = end
+            run.finished = not trailing and end == "eof"
 
-    def _recv(self, conn: socket.socket, deadline: float, n: int) -> bytes:
-        left = deadline - time.monotonic()
+    def _recv(self, conn: socket.socket, deadline: float, n: int) -> tuple[bytes, str]:
+        """(data, "") or (b"", how the stream ended): eof, timeout, error or shutdown (close())."""
+        left = deadline - self.clock()
         if left <= 0:
-            return b""
+            return b"", "timeout"
         conn.settimeout(left)
         try:
-            return conn.recv(n)
+            data = conn.recv(n)
+        except TimeoutError:
+            return b"", "timeout"
         except OSError:
-            return b""
+            return b"", "shutdown" if self._stop.is_set() else "error"
+        if data:
+            return data, ""
+        return b"", "shutdown" if self._stop.is_set() else "eof"
 
     def _record(self, run: _Run, line: bytes) -> bool:
         """One message, to the exact schema; False on anything else (the run is then malformed)."""
@@ -316,6 +332,7 @@ class ProbeChannel:
         with self._lock:
             if set(msg) == {"done"} and type(msg["done"]) is int:
                 run.done = msg["done"]
+                run.done_at = self.clock()
                 return True
             check, ok, evidence = msg.get("check"), msg.get("ok"), msg.get("evidence")
             if (set(msg) == {"check", "ok", "evidence"} and isinstance(check, str) and type(ok) is bool

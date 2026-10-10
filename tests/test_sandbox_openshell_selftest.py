@@ -438,15 +438,14 @@ def run_probe(ctx: ProbeContext, results: list[dict[str, object]]) -> None:
             pass
 
 
-def own_pidfd(pid: int) -> int:
-    """A live pidfd for the fake probe PID: this test process's own."""
-    return os.pidfd_open(os.getpid())
+def fake_peer(s: socket.socket) -> tuple[int, int]:
+    """The fake probe PID 32, with a live pidfd (this test process's own)."""
+    return 32, os.pidfd_open(os.getpid())
 
 
 def agent_selftest(proc: Path) -> OpenShellSelfTest:
     """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
-    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer_pid=lambda s: 32,
-                             pidfd_open=own_pidfd)
+    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer=fake_peer)
 
 
 def test_agent_path_passes_on_one_verified_run() -> None:
@@ -471,8 +470,8 @@ def test_agent_path_fails_without_the_prompt() -> None:
         fake_probe_proc(root / "proc", root / "codex")
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_001_000))
-        st = OpenShellSelfTest(wall=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer_pid=lambda s: 32, pidfd_open=own_pidfd)
+        st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
+                               peer=fake_peer)
         with pytest.raises(SelfTestFailed, match="agent-prompt"):
             st.agent_path(ctx)
 
@@ -483,8 +482,8 @@ def test_agent_path_fails_when_the_agent_never_runs_the_probe() -> None:
         fake_probe_proc(root / "proc", root / "codex")
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_010_000))
-        st = OpenShellSelfTest(wall=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer_pid=lambda s: 32, pidfd_open=own_pidfd)
+        st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
+                               peer=fake_peer)
         with pytest.raises(SelfTestFailed, match="agent-path-channel: no verified probe run"):
             st.agent_path(ctx)
 
@@ -525,28 +524,23 @@ def test_agent_path_a_canary_changed_before_the_prompt_fails_the_precondition(
         assert tmux.pasted == []                 # the agent was never asked to run the probe
 
 
-def test_agent_path_a_probe_finishing_after_its_deadline_fails() -> None:
-    """The verified probe completes just after agent_probe_seconds: the timeout is latched, and neither
-    the late-peer window nor the channel's verdict turns it into a pass."""
+def test_agent_path_a_probe_finishing_during_the_last_poll_fails() -> None:
+    """The verified probe sends `done` while the self-test sleeps its last poll, after the deadline: the
+    wait then sees it done, but the channel stamped `done` past the deadline, so it fails."""
     with short_dir() as root:
         tmux = StubTmux()
         ctx = agent_context(root, tmux)
         fake_probe_proc(root / "proc", root / "codex")
         ctx.layout.run(1).mkdir()
         good = [*({"check": c, "ok": True, "evidence": ""} for c in AGENT_CHECKS), {"done": 0}]
-        calls: list[int] = []
+        now = [1000.0]
 
-        def wall() -> float:
-            if tmux.pasted:
-                calls.append(1)
-                if len(calls) == 2:              # the deadline check: the probe lands as time runs out
-                    run_probe(ctx, good)
-                    time.sleep(0.2)
-                    return 1_800_100_000.0
-            return 1_800_000_000.0 + len(calls)
+        def sleep(seconds: float) -> None:
+            if tmux.pasted and now[0] == 1000.0:
+                now[0] += ctx.settings.agent_probe_seconds + 1      # the poll oversleeps the deadline ...
+                run_probe(ctx, good)                                # ... and the probe finishes meanwhile
 
-        st = OpenShellSelfTest(wall=wall, sleep=lambda s: None, proc=root / "proc", peer_pid=lambda s: 32,
-                               pidfd_open=own_pidfd)
+        st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer)
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 

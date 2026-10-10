@@ -77,9 +77,9 @@ def sock_dir() -> Iterator[Path]:
         yield d
 
 
-def own_pidfd(pid: int) -> int:
-    """A live pidfd for a fake PID: this test process's own."""
-    return os.pidfd_open(os.getpid())
+def pinned(pid: int) -> tuple[int, int]:
+    """A fake PID with a live pidfd (this test process's own), as peer_pidfd_checked returns them."""
+    return pid, os.pidfd_open(os.getpid())
 
 
 def send(path: Path, *lines: object) -> bytes:
@@ -109,8 +109,8 @@ EXPECTED = ("a", "b")
 
 
 def channel(path: Path, pids: list[int], verdicts: dict[int, str], **kw: object) -> ProbeChannel:
-    ch = ProbeChannel(path, lambda pid: verdicts.get(pid, "not the probe"), peer_pid=lambda s: pids.pop(0),
-                      pidfd_open=own_pidfd, **kw)  # type: ignore[arg-type]
+    ch = ProbeChannel(path, lambda pid: verdicts.get(pid, "not the probe"),
+                      peer=lambda s: pinned(pids.pop(0)), **kw)  # type: ignore[arg-type]
     ch.start()
     return ch
 
@@ -196,7 +196,7 @@ def test_a_peer_that_changes_before_done_fails(sock_dir: Path) -> None:
         calls.append(pid)
         return "" if len(calls) == 1 else "traced"
 
-    ch = ProbeChannel(sock_dir / "p.sock", verify, peer_pid=lambda s: 32, pidfd_open=own_pidfd)
+    ch = ProbeChannel(sock_dir / "p.sock", verify, peer=lambda s: pinned(32))
     ch.start()
     assert send(sock_dir / "p.sock", *all_pass(EXPECTED)) == b""     # no ACK for a changed probe
     assert finish(ch) == "the probe changed before it finished"
@@ -207,21 +207,11 @@ def test_no_run_at_all_fails(sock_dir: Path) -> None:
     assert finish(ch) == "no verified probe run"
 
 
-def test_a_peer_pid_failure_counts_as_rejected(sock_dir: Path) -> None:
-    def broken(s: socket.socket) -> int:
+def test_a_peer_credential_failure_counts_as_rejected(sock_dir: Path) -> None:
+    def broken(s: socket.socket) -> tuple[int, int]:
         raise OSError("no peer credentials")
 
-    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer_pid=broken, pidfd_open=own_pidfd)
-    ch.start()
-    send(sock_dir / "p.sock", *all_pass(EXPECTED))
-    assert finish(ch) == "a peer that is not the probe connected"
-
-
-def test_a_pidfd_failure_counts_as_rejected(sock_dir: Path) -> None:
-    def gone(pid: int) -> int:
-        raise ProcessLookupError(pid)
-
-    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer_pid=lambda s: 32, pidfd_open=gone)
+    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer=broken)
     ch.start()
     send(sock_dir / "p.sock", *all_pass(EXPECTED))
     assert finish(ch) == "a peer that is not the probe connected"
@@ -246,7 +236,8 @@ def test_a_peer_replaced_during_the_proc_reads_is_rejected(sock_dir: Path, when:
         return ""                            # ... and what the reads saw still looks like the probe
 
     try:
-        ch = ProbeChannel(sock_dir / "p.sock", verify, peer_pid=lambda s: original.pid)
+        ch = ProbeChannel(sock_dir / "p.sock", verify,
+                          peer=lambda s: (original.pid, os.pidfd_open(original.pid)))
         ch.start()
         send(sock_dir / "p.sock", *all_pass(EXPECTED))
         expected = ("a peer that is not the probe connected" if when == "at-accept"
@@ -257,13 +248,16 @@ def test_a_peer_replaced_during_the_proc_reads_is_rejected(sock_dir: Path, when:
         original.wait()
 
 
-def test_a_peer_already_gone_is_rejected(sock_dir: Path) -> None:
-    gone = _sleeper()
-    pidfd = os.pidfd_open(gone.pid)
-    gone.kill()
-    gone.wait()
-    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer_pid=lambda s: gone.pid,
-                      pidfd_open=lambda pid: os.dup(pidfd))
+def test_a_peer_replaced_before_pinning_is_rejected(sock_dir: Path) -> None:
+    """SO_PEERPIDFD gives the pidfd of the process that connected, even once it has exited and its PID
+    names another. Here the original is gone, a live successor holds 'its' PID and verifies, and the
+    pidfd still shows the original dead: the results can't count."""
+    original, successor = _sleeper(), _sleeper()
+    pidfd = os.pidfd_open(original.pid)
+    original.kill()
+    original.wait()
+    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "" if pid == successor.pid else "not the probe",
+                      peer=lambda s: (successor.pid, os.dup(pidfd)))
     ch.start()
     try:
         send(sock_dir / "p.sock", *all_pass(EXPECTED))
@@ -271,6 +265,68 @@ def test_a_peer_already_gone_is_rejected(sock_dir: Path) -> None:
         assert ch.rejected == ["the peer exited"]
     finally:
         os.close(pidfd)
+        successor.kill()
+        successor.wait()
+
+
+def _ended(sock_dir: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> ProbeChannel:
+    """A run that sends every check and `done`, then ends `how` instead of with a clean EOF."""
+    real_send, real_recv = socket.socket.sendall, socket.socket.recv
+    acked: list[bool] = []
+
+    def sendall(self: socket.socket, data: bytes, *args: object) -> None:
+        if data == ACK:
+            if how == "ack-failed":
+                raise BrokenPipeError(32, "injected")
+            acked.append(True)
+        real_send(self, data)
+
+    def recv(self: socket.socket, n: int, *args: object) -> bytes:
+        if how == "error" and acked and threading.current_thread() is not threading.main_thread():
+            raise ConnectionResetError(104, "injected")
+        return real_recv(self, n)
+
+    monkeypatch.setattr(socket.socket, "sendall", sendall)
+    monkeypatch.setattr(socket.socket, "recv", recv)
+    ch = channel(sock_dir / "p.sock", [32], {32: ""}, seconds=0.5 if how == "timeout" else 30.0)
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(str(sock_dir / "p.sock"))
+    s.sendall(b"".join(json.dumps(m).encode() + b"\n" for m in all_pass(EXPECTED)))
+    if how in ("timeout", "shutdown"):
+        s.settimeout(5)
+        assert s.recv(16) == ACK                 # then it neither ends its stream nor goes away
+        wait_for(lambda: how == "shutdown" or ch.runs[0].end != "")
+    else:
+        wait_for(lambda: ch.runs and ch.runs[0].end != "")
+    ch.close()
+    s.close()
+    return ch
+
+
+@pytest.mark.parametrize("how", ["timeout", "shutdown", "error", "ack-failed"])
+def test_a_run_that_does_not_end_with_a_clean_eof_fails(
+        sock_dir: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    ch = _ended(sock_dir, monkeypatch, how)
+    assert ch.runs[0].end == how and not ch.runs[0].finished
+    assert ch.verdict(EXPECTED) == "the probe did not finish cleanly"
+
+
+def test_a_clean_run_ends_with_eof(sock_dir: Path) -> None:
+    ch = channel(sock_dir / "p.sock", [32], {32: ""})
+    send(sock_dir / "p.sock", *all_pass(EXPECTED))
+    wait_for(ch.done)
+    assert finish(ch) == "" and ch.runs[0].end == "eof"
+
+
+def test_done_after_the_deadline_fails_on_its_stamp(sock_dir: Path) -> None:
+    now = [100.0]
+    ch = channel(sock_dir / "p.sock", [32], {32: ""}, clock=lambda: now[0])
+    send(sock_dir / "p.sock", *all_pass(EXPECTED))
+    wait_for(ch.done)
+    ch.close()
+    assert ch.runs[0].done_at == 100.0
+    assert ch.verdict(EXPECTED, by=100.0) == ""                       # at the deadline: in time
+    assert ch.verdict(EXPECTED, by=99.5) == "the probe did not finish in time"
 
 
 CLIENT = """
@@ -337,7 +393,7 @@ def test_a_stalled_peer_hits_its_deadline(sock_dir: Path) -> None:
 
 
 def test_a_connection_flood_is_capped_and_rejected(sock_dir: Path) -> None:
-    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer_pid=lambda s: 32, pidfd_open=own_pidfd)
+    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer=lambda s: pinned(32))
     ch.start()
     socks = [socket.socket(socket.AF_UNIX) for _ in range(MAX_PEERS + 4)]
     try:
@@ -374,9 +430,34 @@ def test_a_failed_start_leaves_nothing_behind(sock_dir: Path, monkeypatch: pytes
                                               "thread": (channel_module.threading.Thread, "start")}
     owner, name = targets[step]
     monkeypatch.setattr(owner, name, fail)
-    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", pidfd_open=own_pidfd)
+    ch = ProbeChannel(sock_dir / "p.sock", lambda pid: "", peer=lambda s: pinned(32))
     with pytest.raises(OSError, match="injected"):
         ch.start()
     monkeypatch.undo()
     assert not (sock_dir / "p.sock").exists()
     ch.close()
+
+
+def test_the_modules_import_without_linux_pidfds() -> None:
+    """macOS has neither os.pidfd_open nor SO_PEERPIDFD: importing the channel and the self-test must
+    still work (the runtime chooses NoRuntime after the import); only a peer check fails, closed."""
+    code = """
+import os, socket, sys
+for name in ("pidfd_open",):
+    if hasattr(os, name):
+        delattr(os, name)
+if hasattr(socket, "SO_PEERPIDFD"):
+    delattr(socket, "SO_PEERPIDFD")
+import heterodyne.sandbox.channel, heterodyne.sandbox.openshell_selftest
+from heterodyne import platform
+sys.platform = "darwin"
+a, b = socket.socketpair(socket.AF_UNIX)
+try:
+    platform.peer_pidfd_checked(a)
+except OSError:
+    print("fails closed")
+"""
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60,
+                       check=False)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "fails closed\n"
