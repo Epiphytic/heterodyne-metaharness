@@ -162,6 +162,8 @@ class OpenShellBackend:
     def logs(self, name: str, since: float) -> list[str]:
         proc = self._call([self.openshell, "logs", name, "--since", "10m", "--source", "sandbox",
                            "-n", "2000"])
+        if proc.returncode != 0:
+            raise BackendError("openshell logs failed")     # its output is no evidence
         found: list[str] = []
         for line in proc.stdout.decode("utf-8", "replace").splitlines():
             stamp, sep, _ = line[1:].partition("]")
@@ -175,7 +177,9 @@ class OpenShellBackend:
     def _container(self, name: str) -> list[str]:
         proc = self._call([self.podman, "ps", "--filter", f"name=^openshell-default--{name}-",
                            "--format", "{{.ID}}"])
-        return proc.stdout.decode("utf-8", "replace").split() if proc.returncode == 0 else []
+        if proc.returncode != 0:
+            raise BackendError("podman ps failed")          # unknown, not an empty listing
+        return proc.stdout.decode("utf-8", "replace").split()
 
     def kill(self, name: str) -> None:
         """Kill the sandbox's workload container with podman alone (D13's backstop): no OpenShell control

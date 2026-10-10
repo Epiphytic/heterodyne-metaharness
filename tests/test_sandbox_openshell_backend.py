@@ -149,3 +149,24 @@ def test_tool_env_takes_only_what_the_tools_need() -> None:
     assert tool_env(base, {"PATH": "/opt/podman5/bin:/usr/bin", "CONTAINERS_CONF": "/opt/c.conf"}) == {
         "HOME": "/h", "PATH": "/opt/podman5/bin:/usr/bin", "XDG_RUNTIME_DIR": "/run/user/1", "LANG": "C",
         "CONTAINERS_CONF": "/opt/c.conf"}
+
+
+def test_a_failed_log_query_is_an_error_even_with_matching_lines() -> None:
+    """The self-test takes these lines as the supervisor's corroboration: output from a failed query isn't."""
+    out = b"[250.0] new\n"
+    with pytest.raises(BackendError, match="openshell logs failed"):
+        backend(Script((("openshell", "logs"), 1, out),)).logs("hz0123456789abg1", 201.0)
+
+
+def test_a_failed_container_query_is_an_error_not_an_empty_listing() -> None:
+    for call in (OpenShellBackend.kill, OpenShellBackend.network_mode, OpenShellBackend.workload_pid):
+        script = Script((("podman", "ps"), 125, b""),)
+        with pytest.raises(BackendError, match="podman ps failed"):
+            call(backend(script), "hz0123456789abg1")
+        assert [c[0][:2] for c in script.calls] == [["podman", "ps"]]
+
+
+def test_kill_with_no_container_kills_nothing() -> None:
+    script = Script((("podman", "ps"), 0, b""),)
+    backend(script).kill("hz0123456789abg1")
+    assert [c[0][:2] for c in script.calls] == [["podman", "ps"]]
