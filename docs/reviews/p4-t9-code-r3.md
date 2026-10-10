@@ -1,0 +1,9 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 576dfe7. Verdict: REVISE.
+
+Controller adjudication (cycle 3 of 3, plan2-controller): finding 1 is deferred and does not block this proof of concept. The deadline is enforced against receipt of `done`. The verification of the pinned peer, the ACK and the clean EOF that follow can finish slightly after `agent_probe_seconds`. That does not let a forged, replayed, partial or foreign result pass. Every result still has to come from this generation's pinned and verified probe process (by SO_PEERPIDFD), with exactly the expected checks. `done` has to arrive by the deadline, and verification, the ACK and the EOF must all succeed. Only the strictness of the bound on post-done handshake latency is affected. Follow-up: stamp the completion after verification, the ACK and the EOF, and enforce the deadline against that stamp. Carry this into Task 9A, which touches this path.
+
+1. [BLOCKING] `src/heterodyne/sandbox/channel.py:192–193,291–307` and `src/heterodyne/sandbox/openshell_selftest.py:295–301` — The deadline covers receipt of `done`, rather than successful channel completion. Verification, ACK and clean EOF can finish after `agent_probe_seconds` and still pass, because `_until` accepts completion before checking time and the verdict checks only `done_at`. An in-memory control with `done_at=100`, deadline `101`, and clean completion at `102` returned a passing verdict. **Fix:** stamp successful completion after verification, ACK and clean EOF; enforce the deadline against that timestamp. Add a negative test where `done` arrives in time but the handshake finishes during an overshooting final poll.
+
+Full pytest execution was blocked by denied temporary-file creation, including under `/tmp`. The reproduction required no filesystem writes.
+
+REVISE
