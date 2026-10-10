@@ -429,11 +429,24 @@ def run_probe(ctx: ProbeContext, results: list[dict[str, object]]) -> None:
     with socket.socket(socket.AF_UNIX) as s:
         s.connect(str(ctx.layout.probe_socket(ctx.generation)))
         s.sendall(b"".join((json.dumps(m) + "\n").encode() for m in results))
+        s.shutdown(socket.SHUT_WR)               # all sent: as the probe exiting after the ACK
+        s.settimeout(5)
+        try:
+            while s.recv(64):
+                pass
+        except ConnectionResetError:
+            pass
+
+
+def own_pidfd(pid: int) -> int:
+    """A live pidfd for the fake probe PID: this test process's own."""
+    return os.pidfd_open(os.getpid())
 
 
 def agent_selftest(proc: Path) -> OpenShellSelfTest:
     """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
-    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer_pid=lambda s: 32)
+    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer_pid=lambda s: 32,
+                             pidfd_open=own_pidfd)
 
 
 def test_agent_path_passes_on_one_verified_run() -> None:
@@ -459,7 +472,7 @@ def test_agent_path_fails_without_the_prompt() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_001_000))
         st = OpenShellSelfTest(wall=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer_pid=lambda s: 32)
+                               peer_pid=lambda s: 32, pidfd_open=own_pidfd)
         with pytest.raises(SelfTestFailed, match="agent-prompt"):
             st.agent_path(ctx)
 
@@ -471,7 +484,7 @@ def test_agent_path_fails_when_the_agent_never_runs_the_probe() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_010_000))
         st = OpenShellSelfTest(wall=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer_pid=lambda s: 32)
+                               peer_pid=lambda s: 32, pidfd_open=own_pidfd)
         with pytest.raises(SelfTestFailed, match="agent-path-channel: no verified probe run"):
             st.agent_path(ctx)
 
@@ -510,3 +523,45 @@ def test_agent_path_a_canary_changed_before_the_prompt_fails_the_precondition(
         with pytest.raises(SelfTestFailed, match="^canary-precondition$"):
             agent_selftest(root / "proc").agent_path(ctx)
         assert tmux.pasted == []                 # the agent was never asked to run the probe
+
+
+def test_agent_path_a_probe_finishing_after_its_deadline_fails() -> None:
+    """The verified probe completes just after agent_probe_seconds: the timeout is latched, and neither
+    the late-peer window nor the channel's verdict turns it into a pass."""
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        ctx.layout.run(1).mkdir()
+        good = [*({"check": c, "ok": True, "evidence": ""} for c in AGENT_CHECKS), {"done": 0}]
+        calls: list[int] = []
+
+        def wall() -> float:
+            if tmux.pasted:
+                calls.append(1)
+                if len(calls) == 2:              # the deadline check: the probe lands as time runs out
+                    run_probe(ctx, good)
+                    time.sleep(0.2)
+                    return 1_800_100_000.0
+            return 1_800_000_000.0 + len(calls)
+
+        st = OpenShellSelfTest(wall=wall, sleep=lambda s: None, proc=root / "proc", peer_pid=lambda s: 32,
+                               pidfd_open=own_pidfd)
+        with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
+            st.agent_path(ctx)
+
+
+def test_agent_path_a_channel_that_fails_to_start_leaves_no_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected")
+
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        ctx.layout.run(1).mkdir()
+        monkeypatch.setattr(socket.socket, "listen", fail)
+        with pytest.raises(OSError, match="injected"):
+            agent_selftest(root / "proc").agent_path(ctx)
+        monkeypatch.undo()
+        assert not ctx.layout.probe_socket(1).exists() and tmux.pasted == []

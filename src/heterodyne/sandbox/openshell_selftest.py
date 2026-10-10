@@ -218,11 +218,13 @@ def _results(returncode: int, stdout: bytes, checks: Sequence[str]) -> None:
 class OpenShellSelfTest:
     def __init__(self, *, wall: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                  proc: Path = Path("/proc"),
-                 peer_pid: Callable[[socket.socket], int] = peer_pid_checked) -> None:
+                 peer_pid: Callable[[socket.socket], int] = peer_pid_checked,
+                 pidfd_open: Callable[[int], int] = os.pidfd_open) -> None:
         self.wall = wall
         self.sleep = sleep
         self.proc = proc
         self.peer_pid = peer_pid
+        self.pidfd_open = pidfd_open
 
     def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
         end = self.wall() + seconds
@@ -280,19 +282,23 @@ class OpenShellSelfTest:
                                   proc=self.proc)
             home.verify("canary-precondition")
             oa.verify("canary-precondition")
-            channel = ProbeChannel(ctx.layout.probe_socket(ctx.generation), verify, peer_pid=self.peer_pid)
-            channel.start()
+            channel = ProbeChannel(ctx.layout.probe_socket(ctx.generation), verify, peer_pid=self.peer_pid,
+                                   pidfd_open=self.pidfd_open,
+                                   seconds=ctx.settings.agent_probe_seconds + LATE_PEER_SECONDS)
             try:
+                channel.start()
                 since = self.wall()
                 out = f'"{AGENT_OUTPUT}"'
                 command = f'{" ".join(PROBE_ARGV)} > {out} 2>&1; echo "probes-rc=$?" >> {out}'
                 ctx.tmux.paste(ctx.tmux_session, "Run exactly this shell command, then reply with only its "
                                                  f"exit status: {command}")
-                self._until(channel.done, ctx.settings.agent_probe_seconds)
-                self.sleep(LATE_PEER_SECONDS)     # late peers (a forger after the probe) are still counted
-                reason = channel.verdict(AGENT_CHECKS)
+                in_time = self._until(channel.done, ctx.settings.agent_probe_seconds)
+                if in_time:
+                    self.sleep(LATE_PEER_SECONDS)     # late peers (a forger after the probe) still count
             finally:
                 channel.close()
+            # A probe past its deadline fails, whatever arrives after it.
+            reason = channel.verdict(AGENT_CHECKS) or ("" if in_time else "the probe did not finish in time")
             home.verify("real-home-canary-changed")
             oa.verify("other-accounts-canary-changed")
         if reason:
