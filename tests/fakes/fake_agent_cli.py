@@ -4,9 +4,12 @@ or `--as=codex`; install_fake_cli writes the wrapper).
 The sandbox tests run it on the host through FakeBackend, which exports HZ_FAKE_PATHS (inside path ->
 host path) so the hook commands' /run/hz paths can be translated here. Modes:
 - `codex app-server` (stdio): answers initialize and hooks/list from $CODEX_HOME's hooks.json and
-  config.toml. A hook's hash is "sha256:" + the first 16 hex digits of sha256(command).
+  config.toml, shaped as codex 0.160 answers. A hook's hash is "sha256:" + the first 16 hex digits of
+  sha256(command). HZ_FAKE_HOOKS_FAULT breaks the answer (see `faulty`).
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
-- the TUI: prints its prompt marker, fires SessionStart (Claude at start, Codex on the first prompt, as
+- the TUI: prints its prompt marker (Claude merges its settings layers as the real one does, see
+  `claude_hooks`; Codex runs only the hooks config.toml trusts at their current hash;
+  every hook gets the TUI's cwd), fires SessionStart (Claude at start, Codex on the first prompt, as
   the real CLIs do), and for each line typed fires UserPromptSubmit and Stop, keeping a transcript
   (Claude) or a rollout (Codex) where the real CLI keeps it, so resume can find it.
 """
@@ -52,9 +55,37 @@ def digest(command: str) -> str:
     return "sha256:" + hashlib.sha256(command.encode()).hexdigest()[:16]
 
 
+def camel(event: str) -> str:
+    return event[:1].lower() + event[1:]
+
+
+def faulty(result: Any, fault: str) -> Any:
+    """HZ_FAKE_HOOKS_FAULT: break a hooks/list answer the way a real failure could."""
+    entry = result["data"][0]
+    hooks = entry["hooks"]
+    if fault == "errors":
+        entry["errors"] = [{"path": "hooks.json", "message": "failed to load"}]
+    elif fault == "no-data":
+        del result["data"]
+    elif fault == "empty-data":
+        result["data"] = []
+    elif fault == "other-cwd":
+        entry["cwd"] = "/elsewhere"
+    elif fault == "unknown-status":
+        hooks[0]["trustStatus"] = "pending"
+    elif fault == "missing-hook":
+        entry["hooks"] = hooks[1:]
+    elif fault == "disabled":
+        hooks[0]["enabled"] = False
+    elif fault == "other-command":
+        hooks[0]["command"] = "true"
+    elif fault == "not-a-list":
+        entry["hooks"] = {}
+    return result
+
+
 def stdio_server() -> None:
-    state: Any = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
-    trusted = state.get("hooks", {}).get("state", {})
+    trusted = codex_trusted()
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("method") == "initialize":
@@ -64,9 +95,12 @@ def stdio_server() -> None:
             for key, event, command in codex_hooks():
                 have = trusted.get(key, {}).get("trusted_hash")
                 status = "trusted" if have == digest(command) else "modified" if have else "untrusted"
-                listed.append({"key": key, "eventName": event, "trustStatus": status,
-                               "currentHash": digest(command), "source": "user"})
-            result = {"data": [{"cwd": msg["params"]["cwds"][0], "hooks": listed, "errors": []}]}
+                listed.append({"key": key, "eventName": camel(event), "command": command, "enabled": True,
+                               "trustStatus": status, "currentHash": digest(command), "source": "user"})
+            result = {"data": [{"cwd": msg["params"]["cwds"][0], "hooks": listed, "warnings": [],
+                                "errors": []}]}
+            if fault := os.environ.get("HZ_FAKE_HOOKS_FAULT"):
+                result = faulty(result, fault)
         else:
             continue                    # a notification
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
@@ -84,16 +118,41 @@ def listen_server(url: str) -> None:
     srv.close()
 
 
+def codex_trusted() -> dict[str, Any]:
+    state: Any = tomllib.loads((Path(os.environ["CODEX_HOME"]) / "config.toml").read_text())
+    return state.get("hooks", {}).get("state", {})
+
+
 def fire(commands: list[str], event: str, session: str | None, **extra: object) -> None:
-    payload = json.dumps({"hook_event_name": event, "session_id": session, **extra}).encode()
+    payload = json.dumps({"hook_event_name": event, "session_id": session, "cwd": str(Path.cwd()),
+                          **extra}).encode()
     for command in commands:
         subprocess.run(host(command), shell=True, input=payload, check=False)  # noqa: S602
 
 
+def claude_hooks() -> dict[str, list[str]]:
+    """As Claude Code 2.1.286 merges them: the user, project and local settings that --setting-sources
+    allows (all three by default), then --settings; `disableAllHooks` in any of them turns every hook
+    off (there is no managed policy here)."""
+    allowed = (ARGS[ARGS.index("--setting-sources") + 1].split(",") if "--setting-sources" in ARGS
+               else ["user", "project", "local"])
+    files = {"user": Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json",
+             "project": Path.cwd() / ".claude" / "settings.json",
+             "local": Path.cwd() / ".claude" / "settings.local.json"}
+    layers: list[Any] = [json.loads(files[s].read_text()) for s in allowed if s and files[s].is_file()]
+    layers.append(json.loads(Path(host(ARGS[ARGS.index("--settings") + 1])).read_text()))
+    if any(layer.get("disableAllHooks") is True for layer in layers):
+        return {}
+    commands: dict[str, list[str]] = {}
+    for layer in layers:
+        for event, groups in layer.get("hooks", {}).items():
+            commands.setdefault(event, []).extend(h["command"] for g in groups for h in g["hooks"])
+    return commands
+
+
 def tui() -> None:
     if ADAPTER == "claude":
-        settings: Any = json.loads(Path(host(ARGS[ARGS.index("--settings") + 1])).read_text())
-        commands = {e: [h["command"] for g in gs for h in g["hooks"]] for e, gs in settings["hooks"].items()}
+        commands = claude_hooks()
         session: str | None = ARGS[ARGS.index("--resume" if "--resume" in ARGS else "--session-id") + 1]
         slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd()))
         log = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / slug / f"{session}.jsonl"
@@ -102,8 +161,10 @@ def tui() -> None:
         fire(commands.get("SessionStart", []), "SessionStart", session, source="startup")
     else:
         commands = {}
-        for _key, event, command in codex_hooks():
-            commands.setdefault(event, []).append(command)
+        trusted = codex_trusted()
+        for key, event, command in codex_hooks():
+            if trusted.get(key, {}).get("trusted_hash") == digest(command):   # Codex runs only these
+                commands.setdefault(event, []).append(command)
         session = ARGS[ARGS.index("resume") + 1] if "resume" in ARGS else None
         log = None
     marker = "❯" if ADAPTER == "claude" else "›"

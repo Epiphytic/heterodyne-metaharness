@@ -1,5 +1,6 @@
 """The `claude-code` adapter's interactive launch shape (ADR 0001 §4.2; Claude Code 2.1.x flags)."""
 
+import contextlib
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -12,10 +13,10 @@ from heterodyne.agents.base import (
     Cli,
     checked_id,
     find_binary,
+    has_file,
     home_dir,
     hook_group,
     install_root,
-    no_link,
     read_json,
     read_json_at,
     write_at,
@@ -24,13 +25,17 @@ from heterodyne.sandbox.spec import RUN_INSIDE, AgentFacts, SessionLayout
 
 
 def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str, resume: bool,
-                     settings_file: Path, name: str) -> list[str]:
+                     settings_file: Path, name: str, isolated: bool = False) -> list[str]:
     """Launch (or resume) an interactive session with a fixed ID, hooks from `settings_file`, and
-    permission prompts bypassed. The profile's `args` are appended verbatim."""
+    permission prompts bypassed. The profile's `args` are appended verbatim. `isolated` loads no user,
+    project or local settings, so only `settings_file` (and managed policy) applies: a worktree's
+    .claude/settings.json could otherwise disable every hook or add its own."""
     argv = [binary, "--resume" if resume else "--session-id", session_id]
     model = profile.get("model")
     if isinstance(model, str) and model:
         argv += ["--model", model]
+    if isolated:
+        argv += ["--setting-sources", ""]
     argv += ["--permission-mode", "bypassPermissions", "--settings", str(settings_file), "--name", name]
     args = profile.get("args", [])
     if isinstance(args, list):
@@ -51,6 +56,7 @@ def headless_argv(binary: str, profile: Mapping[str, Any]) -> list[str]:
 
 
 SETTINGS_FILE = "claude-settings.json"          # in the run directory: read-only inside
+REMOTE_POLICY = "remote-settings.json"          # Claude's cache of remote managed settings
 
 
 class ClaudeCode:
@@ -85,7 +91,9 @@ class ClaudeCode:
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
         conf = home_dir(layout.home, self.config_subdir)
         try:
-            write_at(conf, "settings.json", json.dumps({"skipDangerousModePermissionPrompt": True}))
+            # Remote managed settings outrank our hooks and the cache is the agent's to write.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(REMOTE_POLICY, dir_fd=conf)
             state = read_json_at(conf, ".claude.json")
             projects: Any = state.get("projects")
             projects = cast(dict[str, Any], projects) if isinstance(projects, dict) else {}
@@ -102,17 +110,13 @@ class ClaudeCode:
             os.close(conf)
 
     def run_files(self) -> Mapping[str, str]:
-        hooks = {e: [hook_group("*" if e == "PreToolUse" else None)] for e in HOOK_EVENTS}
-        return {SETTINGS_FILE: json.dumps({"hooks": hooks})}
-
-    def _projects(self, home: Path) -> Path:
-        return home / self.config_subdir / "projects"
+        hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in HOOK_EVENTS}
+        return {SETTINGS_FILE: json.dumps({"skipDangerousModePermissionPrompt": True, "hooks": hooks})}
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)
-        no_link(home, self.config_subdir)
-        projects = self._projects(home)
-        return found is not None and projects.is_dir() and any(projects.glob(f"*/{found}.jsonl"))
+        name = f"{found}.jsonl"
+        return found is not None and has_file(home, (self.config_subdir, "projects"), name.__eq__, 1)
 
     def access_expiry(self, login_files: Sequence[Path]) -> float:
         oauth: Any = read_json(login_files[0]).get("claudeAiOauth")
@@ -133,7 +137,7 @@ class ClaudeCode:
         if session is None:
             raise AdapterError("a claude-code launch needs its native ID")
         return interactive_argv(str(cli.binary), profile, session_id=session, resume=resume,
-                                settings_file=RUN_INSIDE / SETTINGS_FILE, name=label)
+                                settings_file=RUN_INSIDE / SETTINGS_FILE, name=label, isolated=True)
 
     def trust_argv(self, cli: Cli, worktree: Path) -> list[str] | None:
         return None

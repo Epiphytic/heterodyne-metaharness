@@ -16,11 +16,11 @@ from heterodyne.agents.base import (
     Cli,
     checked_id,
     find_binary,
+    has_file,
     home_dir,
     hook_group,
     install_root,
     jwt_exp,
-    no_link,
     profile_args,
     read_json,
     read_text_at,
@@ -81,13 +81,13 @@ class Codex:
             for entry in folder.iterdir():
                 if _socket(entry) or entry.is_symlink():
                     entry.unlink()
-        hooks = {e: [hook_group()] for e in HOOK_EVENTS}
+        hooks = {e: [hook_group(e)] for e in HOOK_EVENTS}
         conf = home_dir(layout.home, self.config_subdir)
         try:
             # JSON string escapes are valid TOML basic-string escapes.
             write_at(conf, "config.toml",
                      'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
-                     f"[projects.{json.dumps(str(worktree))}]\ntrust_level = \"trusted\"\n"
+                     f"[projects.{json.dumps(str(worktree))}]\ntrust_level = \"untrusted\"\n"
                      "[features]\napps = false\n")
             write_at(conf, HOOKS_FILE, json.dumps({"hooks": hooks}))
         except OSError:
@@ -98,14 +98,12 @@ class Codex:
     def run_files(self) -> Mapping[str, str]:
         return {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
 
-    def _sessions(self, home: Path) -> Path:
-        return home / self.config_subdir / "sessions"
-
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)
-        no_link(home, self.config_subdir)
-        sessions = self._sessions(home)
-        return found is not None and sessions.is_dir() and any(sessions.rglob(f"rollout-*{found}.jsonl"))
+        def rollout(name: str) -> bool:                # sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl
+            return name.startswith("rollout-") and name.endswith(f"-{found}.jsonl")
+
+        return found is not None and has_file(home, (self.config_subdir, "sessions"), rollout, 3)
 
     def access_expiry(self, login_files: Sequence[Path]) -> float:
         tokens: Any = read_json(login_files[0]).get("tokens")

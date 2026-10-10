@@ -10,7 +10,7 @@ import os
 import secrets
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -22,6 +22,13 @@ from heterodyne.session.server import UUID
 # session token is read from the file beside the socket, never from a command line.
 HOOK_COMMAND = "python3 -I /run/hz/shim.py hook"
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PreToolUse")
+# Claude Code 2.1.286 and codex-cli 0.160 block a tool only on exit 2: an interpreter that can't start,
+# crashes or is killed would otherwise let the tool run under bypass mode. PreToolUse only; also fixed,
+# so Codex's trusted hash stays valid. A hook the CLI times out is cancelled and its tool runs, so the
+# timeout (seconds) sits well above the shim's own deadline (hook_wait_seconds, at most 60).
+PRE_TOOL_COMMAND = (f"sh -c '{HOOK_COMMAND} || "
+                    '{ echo "heterodyne: the PreToolUse hook could not run" >&2; exit 2; }\'')
+PRE_TOOL_TIMEOUT = 120
 
 
 class AdapterError(Exception):
@@ -49,9 +56,11 @@ def install_root(binary: Path) -> Path:
     return binary.parent.parent if binary.parent.name == "bin" else binary.parent
 
 
-def hook_group(matcher: str | None = None) -> dict[str, Any]:
-    group: dict[str, Any] = {"hooks": [{"type": "command", "command": HOOK_COMMAND}]}
-    return group if matcher is None else {"matcher": matcher, **group}
+def hook_group(event: str, matcher: str | None = None) -> dict[str, Any]:
+    hook: dict[str, Any] = (
+        {"type": "command", "command": PRE_TOOL_COMMAND, "timeout": PRE_TOOL_TIMEOUT} if event == "PreToolUse"
+        else {"type": "command", "command": HOOK_COMMAND})
+    return {"hooks": [hook]} if matcher is None else {"matcher": matcher, "hooks": [hook]}
 
 
 def write_at(dirfd: int, name: str, text: str) -> None:
@@ -127,11 +136,46 @@ def read_json_at(dirfd: int, name: str) -> dict[str, Any]:
     return cast(dict[str, Any], data) if isinstance(data, dict) else {}
 
 
-def no_link(home: Path, subdir: str) -> None:
-    """has_state's guard: the config directory itself must not be a link (globs below it follow links,
-    but a match there only names a session the CLI then fails to resume inside)."""
-    if (home / subdir).is_symlink():
-        raise AdapterError("the synthetic home holds a path the host won't follow")
+def has_file(home: Path, parts: Sequence[str], match: Callable[[str], bool], depth: int) -> bool:
+    """has_state's search: a regular file whose name `match`es, exactly `depth` directories below
+    <home>/<parts...>. Every directory is opened relative to the one before without following a link: a
+    link on <parts> refuses the home, one met below it is not state. False if <parts> is missing; OSError
+    if a directory on the way can't be read."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        fd = os.open(home, flags)
+    except OSError:
+        raise AdapterError("the synthetic home can't be opened") from None
+    try:
+        for part in parts:
+            try:
+                inner = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise AdapterError("the synthetic home holds a path the host won't follow") from None
+                raise
+            os.close(fd)
+            fd = inner
+        return _search(fd, match, depth)
+    finally:
+        os.close(fd)
+
+
+def _search(dirfd: int, match: Callable[[str], bool], depth: int) -> bool:
+    with os.scandir(dirfd) as entries:
+        for entry in entries:
+            if depth == 0 and entry.is_file(follow_symlinks=False) and match(entry.name):
+                return True
+            if depth > 0 and entry.is_dir(follow_symlinks=False):
+                inner = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+                try:
+                    if _search(inner, match, depth - 1):
+                        return True
+                finally:
+                    os.close(inner)
+    return False
 
 
 def checked_id(native_id: str | None) -> str | None:
