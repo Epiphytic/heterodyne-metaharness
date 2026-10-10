@@ -38,6 +38,7 @@ ignore = ["S603", "S607"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
 "spikes/**" = ["S", "PTH", "B", "E501"]
+"src/heterodyne/sandbox/resources/**" = ["S", "PTH"]
 
 [tool.pyright]
 include = ["src", "tests", "scripts"]
