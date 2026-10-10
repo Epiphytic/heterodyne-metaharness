@@ -738,6 +738,34 @@ def test_an_accepted_client_cannot_start_a_job_once_stopping(tmp_path: Path,
     assert operator == []
 
 
+def test_a_timer_whose_queued_job_shutdown_cancels_still_stops(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI flake (a slow host): shutdown cancels the backstop timer's queued job and the timer in the
+    same step. The timer must end cancelled; read as Stopping, it carried on, and serve never returned."""
+    s = settings(tmp_path)
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime()))
+    inside, release, hold = held_lane(wsd, WS)
+    Recording.made = []
+    monkeypatch.setattr(daemon, "CtlServer", Recording)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(s.socket.exists)
+        holder = asyncio.create_task(wsd._run(WS, "hold", hold))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await until(inside.is_set)
+            await until(lambda: len(wsd.lanes[WS].jobs) == 2)        # a backstop pickup, queued behind
+            stop.set()
+            await until(lambda: wsd.stopping)
+        finally:
+            release.set()
+        await asyncio.wait_for(holder, 10)
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+
+
 def test_a_stopping_wsd_refuses_jobs_from_the_handler_too(tmp_path: Path) -> None:
     """Plan 6 may call handle without the socket: once shutdown began it starts nothing either."""
     s = settings(tmp_path)
