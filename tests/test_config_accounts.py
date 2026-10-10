@@ -303,11 +303,17 @@ def test_symlink_loop_errors_are_path_free(tmp_path: Path) -> None:
     loop = tmp_path / MARKER
     loop.symlink_to(tmp_path / f"{MARKER}-2")
     (tmp_path / f"{MARKER}-2").symlink_to(loop)
-    resolution_error(merged(accounts={"acct-a": acct("codex", str(loop))}), tmp_path, "RuntimeError")
+    resolution_error(merged(accounts={"acct-a": acct("codex", str(loop))}), tmp_path, "ELOOP")
     d = tmp_path / f"{MARKER}-dir"
     d.mkdir()
     (d / "auth.json").symlink_to(d / "auth.json")
-    resolution_error(merged(accounts={"acct-a": acct("codex", str(d))}), tmp_path, "RuntimeError")
+    resolution_error(merged(accounts={"acct-a": acct("codex", str(d))}), tmp_path, "ELOOP")
+
+
+def test_symlink_loop_left_unresolved_is_path_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.13 and later: a non-strict resolve returns a symlink loop as is instead of raising.
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: self)
+    test_symlink_loop_errors_are_path_free(tmp_path)
 
 
 def test_nul_in_login_dir_is_path_free(tmp_path: Path) -> None:
