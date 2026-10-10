@@ -55,6 +55,7 @@ PROGRAM = re.compile(r"gpg\.program|gpg\.[^.]+\.program|gpg\.ssh\.defaultkeycomm
                      r"|interactive\.difffilter|(merge|diff)tool\..+\.cmd|(browser|man)\..+\.cmd"
                      r"|uploadpack\.packobjectshook")
 BOOLEAN = {"", "true", "false", "yes", "no", "on", "off", "1", "0"}
+HOST_CONFIG = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL")
 META_LIMIT = 4096
 
 
@@ -128,9 +129,9 @@ def pin(repo: Path, worktree: Path, branch: str) -> Pinned:
 def _check_config(listing: bytes) -> None:
     """GitFailed if the config every host git reads here, btq's unpinned git included, could run code the
     agent wrote: an include at any level (its file could gain anything after this check), a program an
-    attribute can select (DRIVER), a program the repository's config names (PROGRAM), or a hooks path or
-    fsmonitor the system or global config resolves in the worktree. The operator's own system and global
-    programs (a credential helper, a signer) are the host's and stay."""
+    attribute can select (DRIVER) or any other program (PROGRAM) the repository's config names, or a hooks
+    path or fsmonitor the system or global config resolves in the worktree. The operator's own system and
+    global programs (a credential helper, a signer, git-lfs's filter) are the host's and stay."""
     fields = listing.split(b"\0")
     if fields[-1] or len(fields) % 2 == 0:
         raise GitFailed("git config listed malformed entries")
@@ -141,8 +142,8 @@ def _check_config(listing: bytes) -> None:
             continue
         if INCLUDE.fullmatch(name):
             raise GitFailed("the git config includes another file")
-        if DRIVER.fullmatch(name):
-            raise GitFailed("a git filter, diff or merge driver is configured")
+        if not host and DRIVER.fullmatch(name):
+            raise GitFailed("the repository's config names a filter, diff or merge driver")
         fsmonitor = name == "core.fsmonitor" and value.lower() not in BOOLEAN
         relative = not (value.startswith("~") or Path(value).is_absolute())   # git expands a leading ~
         if not host and (PROGRAM.fullmatch(name) or fsmonitor):
@@ -155,8 +156,9 @@ def pinned_git(p: Pinned, *args: str, alternates: Path | None = None, data: byte
                ok: tuple[int, ...] = (0,), host_config: bool = False) -> bytes:
     """git on the pinned directories, with no hook, no fsmonitor, no signing, no inherited GIT_* variable
     and only the repository's own config; `host_config` reads the system and global config too, as btq's
-    would."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    would, from wherever the environment locates them (HOST_CONFIG)."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") or host_config and k in HOST_CONFIG}
     env |= {"GIT_DIR": str(p.git_dir), "GIT_COMMON_DIR": str(p.common), "GIT_WORK_TREE": str(p.work_tree)}
     if not host_config:
         env |= ISOLATED

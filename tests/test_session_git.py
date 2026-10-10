@@ -13,6 +13,17 @@ BRANCH = "btq/btq-1"
 IDENT = ("-c", "user.name=agent", "-c", "user.email=agent@example.org")
 
 
+@pytest.fixture(autouse=True)
+def host_git_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No system or global config of the machine running the tests: a test that wants one plants it."""
+    home = tmp_path / "host-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("XDG_CONFIG_HOME", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def linked(tmp_path: Path) -> tuple[Path, Path]:
     repo = git_repo(tmp_path / "repo")
     worktree = tmp_path / "wt"
@@ -233,15 +244,37 @@ def test_pin_refuses_every_attribute_driver(tmp_path: Path, key: str) -> None:
         gitwip.pin(repo, worktree, BRANCH)
 
 
-def test_pin_refuses_a_driver_in_the_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """btq's git reads the global config too, and follows the worktree's attributes."""
+LFS = ('[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n'
+       '\tprocess = git-lfs filter-process\n\trequired = true\n')
+
+
+def test_a_driver_in_the_global_config_is_the_operators(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A driver the operator configured, as installing git-lfs does, is the host's: pin trusts it. Pinned
+    git never reads it anyway."""
     repo, worktree = linked(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
-    (home / ".gitconfig").write_text("[filter \"conv\"]\n\tclean = ./clean.sh\n")
+    (home / ".gitconfig").write_text(LFS)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    with pytest.raises(gitwip.GitFailed, match="driver"):
+    assert gitwip.pin(repo, worktree, BRANCH).branch == BRANCH
+
+
+def test_a_driver_in_the_system_config_is_the_operators(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, worktree = linked(tmp_path)
+    (tmp_path / "system.cfg").write_text(LFS + "[safe]\n\tdirectory = *\n")
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "system.cfg"))
+    assert gitwip.pin(repo, worktree, BRANCH).branch == BRANCH
+
+
+def test_a_system_include_is_still_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, worktree = linked(tmp_path)
+    (tmp_path / "system.cfg").write_text(f"[include]\n\tpath = {worktree / 'included.cfg'}\n")
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "system.cfg"))
+    with pytest.raises(gitwip.GitFailed, match="includes"):
         gitwip.pin(repo, worktree, BRANCH)
 
 
