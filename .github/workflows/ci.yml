@@ -36,6 +36,11 @@ jobs:
       # The runner hosts provide tmux; CI never installs packages on them.
       - name: tmux present
         run: tmux -V
+      # The admind tests put a Unix socket under tmp_path, and a socket path is limited to about 100
+      # bytes. pytest's default base, $TMPDIR/pytest-of-<user>, grows with the runner's user name,
+      # so each job gets its own short, unique base instead.
+      - name: short pytest base
+        run: echo "PYTEST_ADDOPTS=--basetemp=$(mktemp -d /tmp/hzXXXX)" >> "$GITHUB_ENV"
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run pyright
