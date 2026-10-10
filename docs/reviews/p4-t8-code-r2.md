@@ -1,0 +1,5 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 6a5948b. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/sandbox/openshell_selftest.py:87–94` — The canary fix verifies the open inode, but never verifies that the probe’s pathname still names it. Unlinking or replacing the file after `fstat` leaves `pwrite` and `pread` operating successfully on the old inode. The precondition passes while the inside probe can receive a vacuous `ENOENT`. An in-memory unlink control reproduces this; the new tests cover pre-existing links and incorrect readback, but no concurrent replacement. **Fix:** retain the anchored parent and file descriptors through the probe run; securely verify pathname-to-inode identity, link count and exact bounded content before and after probing, failing on disappearance or replacement. Add unlink, rename and replacement controls for both canaries.
+
+REVISE
