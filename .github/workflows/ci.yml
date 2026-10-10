@@ -40,7 +40,10 @@ jobs:
       # bytes. pytest's default base, $TMPDIR/pytest-of-<user>, grows with the runner's user name,
       # so each job gets its own short, unique base instead.
       - name: short pytest base
-        run: echo "PYTEST_ADDOPTS=--basetemp=$(mktemp -d /tmp/hzXXXX)" >> "$GITHUB_ENV"
+        run: |
+          base=$(mktemp -d /tmp/hzXXXX)
+          echo "HZ_BASETEMP=$base" >> "$GITHUB_ENV"
+          echo "PYTEST_ADDOPTS=--basetemp=$base" >> "$GITHUB_ENV"
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run pyright
@@ -49,6 +52,10 @@ jobs:
           HZ_REQUIRE_TMUX: "1"
       # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
       - run: uv run python scripts/check_install_agnostic.py
+      # The runner hosts are persistent, so remove this job's pytest base whatever the outcome.
+      - name: remove pytest base
+        if: always() && env.HZ_BASETEMP != ''
+        run: rm -rf -- "$HZ_BASETEMP"
   secrets:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, bel-ci]
