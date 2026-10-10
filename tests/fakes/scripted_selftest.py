@@ -25,12 +25,15 @@ class ScriptedSelfTest:
         self.exec_runs: list[str] = []
         self.agent_runs: list[str] = []
         self.during_agent: Callable[[], None] | None = None     # e.g. a test clock advanced: a slow start
+        self.during_exec: Callable[[], None] | None = None      # runs once the sandbox exists
 
     def files(self) -> Mapping[str, str]:
         return {"probes.py": "# scripted self-test: no probes\n"}
 
     def exec_path(self, ctx: ProbeContext) -> None:
         self.exec_runs.append(ctx.spec.name)
+        if self.during_exec is not None:
+            self.during_exec()
         if self.exec_fail:
             raise SelfTestFailed(self.exec_fail)
 

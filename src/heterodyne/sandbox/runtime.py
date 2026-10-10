@@ -63,6 +63,7 @@ SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
+WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 
 
 class Phase(StrEnum):
@@ -95,6 +96,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     wip_mark: str = ""                # a lifetime WIP commit still owed; cleared once it lands (Task 11)
     repo: str = ""                    # the bead's repository, as the launch named it (D26)
     unlanded: bool = False            # the session's commits could not be landed: a human looks first
+    seeded: bool = False              # this generation's private git directory exists and must be landed
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -212,14 +214,16 @@ class SandboxRuntime:
             if not self._end(prev, interrupt=False, lifetime=self._overdue(prev)):
                 raise RuntimeUnavailable("an earlier launch of this session could not be cleaned up")
             prev = read_record(layout)
+        if prev is not None and prev.unlanded:
+            raise LaunchFailed("the last generation's commits were not landed; inspect the session's git "
+                               "directory")
         if prev is not None and prev.wip_mark:
             try:
                 prev = self._settle_wip(layout, prev)   # D13: a lifetime commit a crash left owed lands first
             except OSError:
                 raise RuntimeUnavailable("the session record can't be written") from None
-        if prev is not None and prev.unlanded:
-            raise LaunchFailed("the last generation's commits were not landed; inspect the session's git "
-                               "directory")
+            if prev.wip_mark:
+                raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
         resume, native = self._resume(adapter, layout, prev, spec)
         cli = self._cli(adapter)
         protected, others = self._logins(adapter)
@@ -325,8 +329,8 @@ class SandboxRuntime:
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
         server = SessionServer(layout.socket(gen), token, layout.events(gen))
+        self.servers[spec.session_key] = server     # before start: an end closes even a half-started one
         server.start()
-        self.servers[spec.session_key] = server
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
         sp = build_spec(SpecInput(spec.session_key, gen, spec.role, layout, spec.worktree,
                                   adapter.facts(layout, cli, c.uid), protected.chosen_files, ws.extra_egress,
@@ -336,8 +340,10 @@ class SandboxRuntime:
         # D13: the lifetime runs from the moment the login can be reached, never from the end of a slow
         # start, and the hard stop is always a full margin before the checked expiry.
         exposed = c.clock()
-        rec = self._phase(layout, rec, deadline=min(exposed + c.settings.max_lifetime_seconds,
-                                                    expiry - c.settings.stop_margin_seconds))
+        # D26: from here on the private git directory may hold the agent's commits, so every end lands it.
+        rec = self._phase(layout, rec, seeded=True,
+                          deadline=min(exposed + c.settings.max_lifetime_seconds,
+                                       expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
         self.backend.create(sp, scratch)
         self._trust(adapter, cli, sp, layout)
@@ -391,15 +397,14 @@ class SandboxRuntime:
             raise _StepFailed("the agent's server did not start")
 
     def _native(self, server: SessionServer, native: str | None) -> str:
-        """D8: the native ID the agent reported, checked against the one it was started with."""
+        """D8, D24: the native ID this generation's SessionStart reported, checked against the one it was
+        started with. A resume must report it too: nothing else says which session the CLI resumed."""
         thread = server.turns().thread_id
-        if native is None:
-            if thread is None:
-                raise _StepFailed("the agent reported no session ID")
-            return thread
-        if thread is not None and thread != native:
+        if thread is None:
+            raise _StepFailed("the agent reported no session ID")
+        if native is not None and thread != native:
             raise _StepFailed("the agent reported a different session ID")
-        return native
+        return thread
 
     def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
         end = self.c.wait_clock() + seconds
@@ -416,7 +421,13 @@ class SandboxRuntime:
             reason = str(exc)
         else:
             reason = f"launch step failed ({type(exc).__name__})"
-        current = read_record(layout) if layout.record.exists() else None
+        try:
+            current = read_record(layout)
+        except RuntimeUnavailable:
+            # The record can't say what this launch reached, so nothing is landed or recorded: the sandbox
+            # and pane still go, by the identity this launch holds, and the listing stays held.
+            self._teardown(rec, interrupt=False)
+            return LaunchUncertain(reason)
         rec = msgspec.structs.replace(current or rec, error=reason)
         if self._end(rec, interrupt=False):
             return LaunchFailed(reason)
@@ -452,8 +463,12 @@ class SandboxRuntime:
         try:
             token = (layout.run(rec.generation) / shim.TOKEN_FILE).read_text().strip()
             server = SessionServer(layout.socket(rec.generation), token, layout.events(rec.generation))
+        except OSError:
+            raise RuntimeUnavailable("a live session's socket can't be served") from None
+        try:
             server.start()
         except OSError:
+            server.close()
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
 
@@ -470,11 +485,35 @@ class SandboxRuntime:
             owed = {"stop_reason": "lifetime", "wip_mark": mark}
         try:
             rec = self._phase(layout, rec, phase=Phase.STOPPING, **owed)
+            journaled = True
+        except OSError:
+            journaled = False                # stop it anyway; landing and `ended` wait for a durable record
+        if not self._teardown(rec, interrupt=interrupt) or not journaled:
+            return False                     # the reaper stays: it is the backstop until the end is confirmed
+        with contextlib.suppress(*TMUX_ERRORS):
+            self.c.tmux.kill(self.reaper_name(rec.key))
+        try:
+            rec = self._land(layout, rec)    # D26: before any host git (the lifetime WIP, a park) runs
+            rec = self._phase(layout, rec, phase=Phase.ENDED)
         except OSError:
             return False
+        with contextlib.suppress(OSError):
+            self._settle_wip(layout, rec)    # a lost record write keeps the mark; the replay is idempotent
+        return True
+
+    def _teardown(self, rec: SessionRecord, *, interrupt: bool) -> bool:
+        """Close the generation's socket, interrupt (if asked) and kill the pane, delete every sandbox of
+        the key. True only once the socket path, the pane and every listed sandbox are confirmed gone."""
         server = self.servers.pop(rec.key, None)
         if server is not None:
             server.close()
+        socket_gone = True
+        for path in (self.layout(rec.key).socket(rec.generation),
+                     self.layout(rec.key).probe_socket(rec.generation)):
+            try:
+                path.unlink(missing_ok=True)     # a crashed wsd's socket outlives its server object
+            except OSError:
+                socket_gone = False
         tmux = self.c.tmux
         try:
             if interrupt and tmux.has_session(rec.tmux_session) and not tmux.pane_dead(rec.tmux_session):
@@ -490,23 +529,14 @@ class SandboxRuntime:
             deleted = all(confirmed) and not any(n.startswith(prefix) for n in self.backend.names())
         except (BackendUnavailable, BackendError):
             deleted = False
-        if not (pane_gone and deleted):
-            return False                     # the reaper stays: it is the backstop until the end is confirmed
-        with contextlib.suppress(*TMUX_ERRORS):
-            tmux.kill(self.reaper_name(rec.key))
-        try:
-            rec = self._land(layout, rec)    # D26: before any host git (the lifetime WIP, a park) runs
-            rec = self._phase(layout, rec, phase=Phase.ENDED)
-        except OSError:
-            return False
-        with contextlib.suppress(OSError):
-            self._settle_wip(layout, rec)    # a lost record write keeps the mark; the replay is idempotent
-        return True
+        return socket_gone and pane_gone and deleted
 
     def _land(self, layout: SessionLayout, rec: SessionRecord) -> SessionRecord:
         """Land the generation's commits on the bead branch (Task 7A). Idempotent; a failure keeps the
-        private git directory and is recorded, and the next launch refuses until a human looks."""
-        if rec.unlanded or not rec.repo or not layout.git.exists():
+        private git directory and is recorded, and the next launch refuses until a human looks. Once the
+        record says the directory was seeded, a missing or unreadable one is such a failure: it may have
+        held commits."""
+        if rec.unlanded or not rec.seeded:
             return rec
         try:
             sessiongit.land(gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{rec.bead}"), layout.git)
@@ -520,15 +550,17 @@ class SandboxRuntime:
 
     def _settle_wip(self, layout: SessionLayout, rec: SessionRecord) -> SessionRecord:
         """Land the lifetime WIP commit an ended session still owes (D13), then clear the mark. The commit is
-        idempotent by its mark, so a replay after a crash before or after it lands it exactly once."""
-        if not rec.wip_mark or rec.phase is not Phase.ENDED:
+        idempotent by its mark, so a replay after a crash before or after it lands it exactly once. The
+        mark stays until the commit is made: a failure is retried by the next end or launch. Commits that
+        were not landed come first: a WIP on the host branch would diverge from them."""
+        if not rec.wip_mark or rec.phase is not Phase.ENDED or rec.unlanded:
             return rec
         try:
             pinned = gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{rec.bead}")
             gitwip.wip_commit(pinned, rec.wip_mark, "maximum lifetime reached")
         except gitwip.GitFailed:
-            return self._phase(layout, rec, wip_mark="", error="the lifetime WIP commit failed")
-        return self._phase(layout, rec, wip_mark="")
+            return self._phase(layout, rec, error=WIP_FAILED)
+        return self._phase(layout, rec, wip_mark="", error="" if rec.error == WIP_FAILED else rec.error)
 
     def _records(self) -> list[SessionRecord]:
         if not self.c.sessions.exists():

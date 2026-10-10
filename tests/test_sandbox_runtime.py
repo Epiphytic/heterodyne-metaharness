@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
@@ -12,8 +13,9 @@ from tmux_guard import new_test_tmux
 from wsd_env import Clock
 
 from heterodyne.agents.base import HOOK_EVENTS
-from heterodyne.sandbox.runtime import Phase, SessionRecord, read_record, write_record
+from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record, write_record
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name
+from heterodyne.wsd import gitwip
 from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -164,6 +166,7 @@ def test_a_home_link_planted_by_the_agent_refuses_the_relaunch(rig: RuntimeRig) 
     with pytest.raises(LaunchFailed, match="won't follow"):
         rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
     assert list(outside.iterdir()) == []
+    assert not record(rig, spec.session_key).unlanded       # it failed before its git was seeded
 
 
 def agent_git(rig: RuntimeRig, key: str, *args: str) -> str:
@@ -442,3 +445,172 @@ def test_a_worktree_gone_before_the_landing_keeps_the_commits_unlanded(rig: Runt
 def agent_git_tip(rig: RuntimeRig, key: str) -> str:
     return subprocess.run(["git", "--git-dir", str(rig.runtime.layout(key).git), "rev-parse", "btq/btq-1"],
                           capture_output=True, text=True, check=True).stdout.strip()
+
+
+# --- Codex r1: journal failures, landing evidence, the owed WIP, SessionStart, stale sockets ---
+
+
+def gone(rig: RuntimeRig, key: str, generation: int = 1) -> bool:
+    """Every physical part of the generation is gone: sandbox, pane and socket."""
+    return (rig.backend.boxes == {} and not rig.tmux.has_session(rig.runtime.tmux_name(key))
+            and not os.path.lexists(rig.runtime.layout(key).socket(generation)))
+
+
+def test_a_record_unreadable_after_create_still_cleans_up(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+
+    def corrupt() -> None:
+        rig.runtime.layout(spec.session_key).record.write_text("{not json")
+
+    rig.selftest.during_exec = corrupt
+    rig.selftest.exec_fail = "outer-fence-network-none"
+    with pytest.raises(LaunchUncertain):
+        rig.runtime.launch(spec)
+    assert gone(rig, spec.session_key)
+    with pytest.raises(RuntimeUnavailable, match="record"):
+        rig.runtime.sessions("alpha")                         # nothing is assumed: the key stays held
+
+
+def test_record_writes_lost_after_create_still_clean_up_but_never_land(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-one")
+    before = host_tip(rig, "btq/btq-1")
+    down: list[bool] = []
+
+    def journal(layout: SessionLayout, rec: SessionRecord) -> None:
+        if down:
+            raise OSError("the disk went away")
+        write_record(layout, rec)
+
+    def during() -> None:
+        agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+        down.append(True)
+
+    monkeypatch.setattr("heterodyne.sandbox.runtime.write_record", journal)
+    rig.selftest.during_exec = during
+    rig.selftest.exec_fail = "outer-fence-network-none"
+    with pytest.raises(LaunchUncertain):
+        rig.runtime.launch(spec)
+    assert gone(rig, spec.session_key)
+    assert record(rig, spec.session_key).phase is Phase.TESTING          # the last durable state
+    assert host_tip(rig, "btq/btq-1") == before                          # nothing landed unrecorded
+    made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
+    down.clear()
+    assert rig.runtime.sessions("alpha") == []                           # the next end lands it
+    assert record(rig, spec.session_key).phase is Phase.ENDED
+    assert host_tip(rig, "btq/btq-1") == made
+
+
+def test_a_private_git_dir_gone_after_seeding_is_unlanded(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    shutil.rmtree(rig.runtime.layout(spec.session_key).git)
+    rig.runtime.stop(spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
+    with pytest.raises(LaunchFailed, match="not landed"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+
+
+def wip_commits(rig: RuntimeRig) -> int:
+    log = subprocess.run(["git", "-C", str(rig.repo), "log", "--format=%B", "btq/btq-1"], capture_output=True,
+                         text=True, check=True).stdout
+    return log.count(f"{gitwip.PARK_MARK}lifetime:")
+
+
+def lifetime_end(rig: RuntimeRig, key: str) -> None:
+    """The pane died and the deadline passed: the next listing ends the session for its lifetime."""
+    rec = record(rig, key)
+    rig.tmux.kill(rec.tmux_session)
+    rig.clock.advance(rec.deadline - rig.clock.now)
+    assert rig.runtime.sessions("alpha") == []
+
+
+def test_a_lifetime_stop_whose_landing_fails_owes_its_wip_and_commits_none(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    before = host_tip(rig, "btq/btq-1")
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    (rig.worktree / "edit.txt").write_text("unsaved work\n")
+    (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
+    lifetime_end(rig, spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded, rec.stop_reason) == (Phase.ENDED, True, "lifetime")
+    assert rec.wip_mark == f"lifetime:{spec.session_key}:1"                # still owed, not dropped
+    assert host_tip(rig, "btq/btq-1") == before and wip_commits(rig) == 0
+    with pytest.raises(LaunchFailed, match="not landed"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert host_tip(rig, "btq/btq-1") == before and record(rig, spec.session_key).wip_mark
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_a_failed_lifetime_wip_is_kept_and_retried_once(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch,
+                                                        when: str) -> None:
+    """A transient failure keeps the mark; the next launch retries it. A failure after the commit was made
+    replays to the same commit (it is idempotent by its mark), so exactly one lands."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    (rig.worktree / "edit.txt").write_text("unsaved work\n")
+    real = gitwip.wip_commit
+    fails = [True]
+
+    def flaky(p: gitwip.Pinned, mark: str, summary: str) -> str:
+        if fails:
+            fails.clear()
+            if when == "after":
+                real(p, mark, summary)
+            raise gitwip.GitFailed("git timed out")
+        return real(p, mark, summary)
+
+    monkeypatch.setattr("heterodyne.wsd.gitwip.wip_commit", flaky)
+    lifetime_end(rig, spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.error) == (Phase.ENDED, WIP_FAILED) and rec.wip_mark
+    assert wip_commits(rig) == (1 if when == "after" else 0)
+    fresh_logins(rig.home, rig.clock() + 86_400)
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert wip_commits(rig) == 1
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.wip_mark, rec.error) == (Phase.RUNNING, "", "")
+
+
+def test_an_owed_wip_that_still_fails_refuses_the_relaunch(rig: RuntimeRig,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+
+    def broken(p: gitwip.Pinned, mark: str, summary: str) -> str:
+        raise gitwip.GitFailed("git timed out")
+
+    monkeypatch.setattr("heterodyne.wsd.gitwip.wip_commit", broken)
+    lifetime_end(rig, spec.session_key)
+    fresh_logins(rig.home, rig.clock() + 86_400)
+    with pytest.raises(LaunchFailed, match="still owed"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert rig.backend.created == [sandbox_name(spec.session_key, 1)]
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_resume_that_reports_no_session_start_fails(rig: RuntimeRig, profile: str) -> None:
+    """D8/D24: only the generation's own SessionStart says which session the CLI resumed."""
+    spec = launch_spec(rig, profile)
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    rig.backend.env_extra["HZ_FAKE_NO_SESSION_START"] = "1"
+    with pytest.raises(LaunchFailed, match="no session ID"):
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert rig.selftest.agent_runs[-1].endswith("g2")                  # the self-test itself passed
+    assert record(rig, spec.session_key).phase is Phase.ENDED
+
+
+def test_a_crashed_wsds_socket_path_is_removed(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rig.runtime.servers.pop(spec.session_key).close()           # wsd died ...
+    path = rig.runtime.layout(spec.session_key).socket(1)
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))                                        # ... and left its socket's path behind
+    stale.close()
+    rig.tmux.kill(record(rig, spec.session_key).tmux_session)
+    assert rig.runtime.sessions("alpha") == []
+    assert not os.path.lexists(path)

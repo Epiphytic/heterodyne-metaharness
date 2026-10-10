@@ -37,6 +37,7 @@ class FakeBackend:
     execs: list[list[str]] = field(default_factory=list[list[str]])
     ttys: list[list[str]] = field(default_factory=list[list[str]])          # each pane's argv, as asked
     reapers: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
+    env_extra: dict[str, str] = field(default_factory=dict[str, str])     # fault knobs for the fake CLI
 
     def available(self) -> bool:
         return self.up
@@ -67,6 +68,7 @@ class FakeBackend:
         env = {k: self._host(box, v) for k, v in box.spec.env.items()}
         env["PATH"] = os.pathsep.join((str(Path(sys.executable).parent), env.get("PATH", "")))
         env["HZ_FAKE_PATHS"] = json.dumps(box.paths)
+        env |= self.env_extra
         return env
 
     def _box(self, name: str) -> _Box:
