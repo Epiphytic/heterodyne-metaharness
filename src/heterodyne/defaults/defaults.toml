@@ -62,3 +62,21 @@ unknown_backoff_minutes     = 30
 untrusted_max_defer_minutes = 60    # the longest a session's own untrusted report can defer it
 min_recheck_seconds         = 60
 max_window_hours            = 192   # the longest reset horizon accepted
+
+# The agent sandbox (§7). Host only, apart from each workstream's extra_egress and extra_ro_mounts. The
+# backend is `[platform] sandbox` (written by `heterodyne setup`); without it wsd runs no agents.
+[sandbox]
+egress_approved = []
+ro_mounts_approved = []
+image = "localhost/heterodyne-agent:1"
+openshell = "openshell"
+podman = "podman"
+max_lifetime_minutes = 120
+stop_margin_minutes = 15
+probe_allowed_host = "api.openai.com"   # the self-test's allowlisted control (§7 Egress)
+probe_denied_host = "example.org"       # the self-test's refused host
+agent_probe_seconds = 240
+
+# Variables for the openshell and podman commands only (for example the PATH of a side-by-side podman).
+# Never passed into a sandbox.
+[sandbox.tool_env]
