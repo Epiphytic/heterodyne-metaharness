@@ -1,23 +1,25 @@
 # Test suite efficiency review
 
-This review covers the offline suite (`uv run pytest`, which CI runs), as of `origin/main` e07e0a2: 3213 tests. `tests/live` (HZ_LIVE=1) is out of scope. Every number here comes from a single serial run on the shared Linux development host, which was busy and had a nearly full nvme disk. Expect the numbers to move by tens of percent from run to run.
+This review covers the offline suite (`uv run pytest`, which CI runs), as of `origin/main` e07e0a2: 3213 tests. `tests/live` (HZ_LIVE=1) is out of scope. Every number here comes from the shared Linux development host (32 CPUs), which was busy and had a nearly full nvme disk. The serial numbers come from a single run each, and the parallel ones were steady over four runs. Expect serial numbers to move by tens of percent from run to run.
 
 ## Which command when
 
-| Command | Runs | Typical time (serial) | Use it |
-|---|---|---|---|
-| `scripts/test-fast` | every test except the ones in `tests/slow_tests.txt`; safety tests always run | about 3 min | while you iterate, and before you hand over every review range |
-| `scripts/test-changed [--base REF]` | `test-fast`, plus the slow tests of the files your change reaches; the full suite when the change can't be mapped | 3 to 7 min | before you ask for a review of a change |
-| `scripts/test-full` | the whole suite, the same as CI | about 7 min | before merging, after touching shared code, or whenever `test-changed` has a doubt (it falls back to this by itself) |
-| `uv run pytest tests/test_x.py` | one file | seconds | while you debug that file |
+| Command | Runs | Typical time (`-n auto`) | Serial (`-- -n 0`) | Use it |
+|---|---|---|---|---|
+| `scripts/test-fast` | every test except the ones in `tests/slow_tests.txt`; safety tests always run | about 21 s | about 3 min | while you iterate |
+| `scripts/test-changed [--base REF]` | `test-fast`, plus the slow tests of the files your change reaches; the full suite when the change can't be mapped | 35 to 45 s | 3 to 7 min | before you hand over a review range |
+| `scripts/test-full` | the whole suite (in parallel; CI runs it serially) | about 45 s | about 7 min | before merging, after touching shared code, or whenever `test-changed` has a doubt (it falls back to this by itself) |
+| `uv run pytest tests/test_x.py` | one file, serially | seconds | | while you debug that file |
 
+- The scripts run with pytest-xdist (`-n auto`, one worker per CPU). The machine is shared, so use `-- -n 8` when other suites are running, and still run only one full suite at a time.
+- **With the suite at 45 s in parallel, `scripts/test-full` is a reasonable default.** The fast and change-based tiers are worth it when you run serially, when the machine is busy, or for a quick loop on a large change.
 - All three scripts accept pytest arguments after `--` (for example, `scripts/test-fast -- -x`).
-- When a run fails, the scripts run the failing files again in full with verbose output (`-rfE -v`), slow tests included. A broad failure then comes back with the narrower tests of the same area next to it. `--no-diagnose` turns this off. The rerun never changes the exit code.
+- When a run fails, the scripts run the failing files again in full, serially and with verbose output (`-rfE -v`), slow tests included. A broad failure then comes back with the narrower tests of the same area next to it. `--no-diagnose` turns this off. The rerun never changes the exit code.
 - **CI still runs the full suite on every push and pull request.** The tiers are a way to iterate locally. They don't replace CI.
 - After a large change to test times, regenerate the slow list from a timed full run:
 
   ```sh
-  uv run pytest -q --junitxml=/tmp/hz-full.xml
+  uv run pytest -q --junitxml=/tmp/hz-full.xml        # serial: parallel times include contention
   uv run python scripts/run_tiers.py slow-list /tmp/hz-full.xml
   ```
 
@@ -51,6 +53,8 @@ Neither fix changes what a test asserts, and neither changes production code.
 
 **Full suite after both fixes: 3178 passed, 36 skipped, 0 failed, in 7 min 05 s of wall time (424 s of test time).** That is 4 times faster than before.
 
+**With pytest-xdist (`-n auto`, 32 workers): 3209 passed, 36 skipped in 44 s of wall time,** in four runs out of four (section 2d). That is 38 times faster than the baseline. Most of what remains is the slowest single tests (10.5 s, 6.6 s, 6.1 s, ...), each on its own worker.
+
 ### What is left
 
 These are the remaining costs, largest first. None is fixed in this PR.
@@ -75,7 +79,7 @@ These are the remaining costs, largest first. None is fixed in this PR.
 
 Of the 408 cases that took 0.5 s or more, 111 stay in the fast tier for this reason.
 
-The fast tier: **2905 passed, 36 skipped, 297 deselected in 2 min 56 s** (with HZ_REQUIRE_TMUX=1).
+The fast tier: **2905 passed, 36 skipped, 297 deselected in 2 min 56 s** serially (with HZ_REQUIRE_TMUX=1), and **21 s** with `-n auto`.
 
 ### (b) Change-based selection
 
@@ -110,7 +114,9 @@ What it selects today:
 | `agents/codex` | 4 files |
 | `wsd/daemon`, `cli`, `ctl`; `sandbox/openshell` | 2 files |
 
-For example, a one-line edit to `wsd/park.py` selected 18 files. The fast tier took 173 s and the slow tests of those files took 31 s (36 tests), so **3 min 25 s in total, against 7 min 05 s for the full suite**. An admind change saves less, because most admind test files reach most admind modules.
+For example, a one-line edit to `wsd/park.py` selected 18 files. The fast tier took 173 s and the slow tests of those files took 31 s (36 tests), so **3 min 25 s in total, against 7 min 05 s for the full suite**. With `-n auto`, it took 21 s plus 13 s, so 35 s against 45 s. An admind change saves less, because most admind test files reach most admind modules.
+
+**Caveat:** the selection is only as good as the dependency graph. It sees imports and module or helper names in strings. It does not see a module that reaches another through a path built at run time, a config or data file read by a test, or behaviour that changes through the environment. This is why every unmappable change and every shared module falls back to the full suite, and why CI keeps running the full suite. A wrong subset can at worst delay a failure from `test-changed` to CI. It can't hide one from CI.
 
 ### (c) "General first, specific on failure"
 
@@ -127,17 +133,18 @@ What the runner does instead: after a failure, it reruns the failing files in fu
 
 ### (d) Parallelism
 
-**pytest-xdist is not a dependency today and is not in the local uv cache.** Adding it means one `uv add --dev pytest-xdist` (pytest-xdist and execnet into `uv.lock`). After that, runs stay offline.
+pytest-xdist 3.8 (and execnet, which it needs) is now in the `dev` dependency group, hash-pinned in `uv.lock`. CI still runs `uv sync --locked`, so CI hosts install nothing new by other means, and runs stay offline. The tier scripts pass `-n auto`; a plain `uv run pytest`, which is what CI runs, is still serial.
 
-The suite looks safe to run in parallel, but this is **unverified until a full `-n` run passes**:
+**Parallel safety, checked with five full `-n auto` runs (32 workers):**
 
-- each test gets its own tmux socket from `tests/tmux_guard.py`, which already expects xdist workers;
-- every file a test writes is under `tmp_path`;
-- the `/dev/shm` base temp is created by the controller and shared with the workers, as pytest intends.
+- Each test gets its own tmux socket from `tests/tmux_guard.py`.
+- Every file a test writes is under `tmp_path`, or under a `mkdtemp` directory with a unique name.
+- The `/dev/shm` base temp is created by the controller. The workers inherit it and each gets its own `popen-gwN` directory, which is how pytest intends it.
+- The fd-count test in `test_wsd_gate.py` counts the fds of its own process, and passed in every run.
 
-Because the suite is mostly waiting, it should scale well with the number of workers, until the tmux servers and the fake agents start competing for CPU.
+The first run hit one failure, in `test_admind_au11.py`. It turned out to be a race in two tests that has nothing to do with parallelism (section 5), and it is fixed. The next four runs passed: 3209 passed, 36 skipped, in 43.4 to 43.5 s. **No test needed a separate serial pass,** so there is no `serial` marker. If one ever needs it, the runner is the place to add a second, `-n 0` pass for it.
 
-**Recommendation:** add it, run it with `-n auto` locally, and leave CI serial until it has had a week of local runs without flakes. Whether to add it is the controller's call. If it is approved, it lands as a separate commit in this PR, with measured numbers.
+**Proposal (not made in this PR):** run CI with `-n auto` as well, once the local runs have been soaking for a while. CI on the self-hosted runners took 22 min on PR #54, before the fixes in this PR. Expect about 7 min serially after them, and under a minute with `-n auto`, depending on the runner's CPUs.
 
 ### (e) One entry point
 
@@ -177,8 +184,37 @@ These need a decision first.
 - **CI stays the full suite.** One option is to run `test-changed` on pushes to feature branches and keep the full suite on pull requests and `main`. At 7 minutes, the full suite is cheap enough that I don't recommend it yet. It becomes worth it if the suite grows back past about 15 minutes.
 - **Make the paste delay configurable** (section 1, "What is left"). This is the largest remaining saving.
 - **Inject a clock into the wsd lane worker** (the 10.6 s shutdown test).
-- **pytest-xdist** (section 2d).
+- **`-n auto` on CI** (section 2d).
+- **One wait helper for the admind tests** that reports diagnostics on timeout (section 5).
 
-## 5. Flakiness
+## 5. Flakiness and wall-clock timeouts
 
-The baseline run had one failure: `test_admind_t9r7.py::test_an_audit_failure_on_a_deadline_still_holds_dispatch`. Its `read.started.wait(10)` timed out. It passed in every later run (the full run after the fixes, the coverage run and the fast tier), so it looks like a timing flake under the heavy load of the baseline, when every Harness test spent 2 s in teardown. If it shows up again, look at what sets `read.started` before raising the timeout.
+The admind tests wait with real wall-clock bounds: `Harness.until` (15 s by default, up to 40 s), `asyncio.wait_for(..., N)`, `threading.Event.wait(N)`. Against them stand production timers that the tests shorten through settings (batch windows of 0.2 to 2 s, summarizer timeouts of 1 to 5 s).
+
+**What failed:**
+
+- **`test_admind_au11.py::test_login_dirs_never_leave_through_the_backstop`** (CI on PR #54, and this PR's first parallel run). This was a race, not a bound that was too tight.
+  - `FakeWnAgent` lists a send before it replies, and the daemon records the outbox row as sent, with its message ID, only after the reply.
+  - The test read the batch's message ID as soon as the batch text appeared, so it could read NULL. `!details` then replied to "None" and waited out its 20 s.
+  - It failed alone, serially, in 1 run out of 15. With a 0.3 s delay before the fake's reply, it failed every time.
+  - `test_admind_r13_details.py::test_details_on_a_batch_returns_every_reply_in_order` had the same race.
+  - Both now wait for the recorded send (`batch_message_id` in test_admind_r13_replies.py): 0 failures in 40 runs, and they pass with the delay. Commit c4467b1.
+- **`test_admind_t9r7.py::test_an_audit_failure_on_a_deadline_still_holds_dispatch`** failed once, in the baseline run, when every Harness test spent 2 s in teardown. Its `read.started.wait(10)` timed out. It has not failed since (two serial runs, five parallel runs).
+- **`test_admind_asks_bump.py`** has flaked on CI the same way, according to the controller. I don't have the test ID or the log, and it has not failed here.
+
+**How close do the waits come to their bounds?** I recorded every `asyncio.wait_for` called from a test file over three full `-n auto` runs: 74 083 waits. The test-side waits that ended in success used at most 20% of their bound:
+
+| Wait | Bound | Slowest success |
+|---|---|---|
+| `Harness.until` | 15 s | 1.5 s |
+| `Harness.until` | 20 s | 1.1 s |
+| `Harness.until` | 30 s | 6.0 s |
+| `Harness.until` | 40 s | 2.6 s |
+
+The one exception is in `test_admind_socket_bounds.py`, whose waits time out on purpose.
+
+**So larger bounds would not have helped.** The CI failures so far were a race (au11), or a bound that 32 parallel workers never come near. A bound only costs time when a test fails, so a generous one is cheap. The useful changes are:
+
+1. **Route every wait through one helper that prints diagnostics on timeout.** `waited` in test_admind_r13_replies.py already does this. A bare `h.until` or `wait_for` fails with an empty `TimeoutError` (as au11's did on CI), and that says nothing about what was missing. This is cheap and needs no production change. I recommend it as a follow-up.
+2. **Wait for the recorded state, not the fake's view of it.** `h.fake.sent` runs ahead of the store (au11). A test that then reads the store should wait on the store.
+3. **An injected clock** for the production timers that tests shorten (batch window, backstop, summarizer and lane timeouts, the 10.5 s wsd shutdown test). This would make those tests both faster and deterministic. It is a production change for the owners to decide, and the largest structural fix for timing flakes.
