@@ -50,6 +50,7 @@ jobs:
       # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
       - run: uv run python scripts/check_install_agnostic.py
       # The runner hosts are persistent, so remove this job's pytest base whatever the outcome.
+      # Deferred (PoC): a forced kill or lost runner skips this and can leave /tmp/hz* behind.
       - name: remove pytest base
         if: always() && env.HZ_BASETEMP != ''
         run: rm -rf -- "$HZ_BASETEMP"
@@ -57,6 +58,13 @@ jobs:
     # The same steps on laptop-ci. Its two VMs share one execution slot, and a job's start hook waits
     # at most 15 minutes for it, so the two jobs run one at a time (max-parallel: 1); run together,
     # the second one's start hook timed out while the first ran. Same runner and fork rules as test.
+    # max-parallel only orders jobs within one run, so a repository-wide group, independent of ref
+    # and platform, queues laptop jobs across runs too (queue: max keeps every waiting job, not just
+    # the newest). Contention from other repositories sharing laptop-ci needs pool-level admission.
+    concurrency:
+      group: laptop-ci-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
@@ -95,6 +103,7 @@ jobs:
       # Install-agnostic check (ADR 0001 §15). No host-local leakcheck.txt exists on CI runners.
       - run: uv run python scripts/check_install_agnostic.py
       # The runner hosts are persistent, so remove this job's pytest base whatever the outcome.
+      # Deferred (PoC): a forced kill or lost runner skips this and can leave /tmp/hz* behind.
       - name: remove pytest base
         if: always() && env.HZ_BASETEMP != ''
         run: rm -rf -- "$HZ_BASETEMP"
