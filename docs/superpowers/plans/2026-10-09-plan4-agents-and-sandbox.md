@@ -56,7 +56,7 @@ The plan also draws on these sources:
 - Spike S8's open items (`docs/spikes/s8-marmot-only.md`) cover the Codex launch shape and hook trust.
 - ADR revision 15 accepts OpenShell's broker answers as §7's direct-network proof and adds the OpenShell-specific rules. The tasks that implement them are marked **[r15]** (see "ADR revision 15" below).
 
-**Status:** revision 3: the approved ADR r15 folded in, and the first cross-model review's findings addressed. **Design approval is not set.** The §17 decisions it depends on are listed below. One item needs an operator decision before the OpenShell backend is enabled on a real host: gap 15 (`kernel.yama.ptrace_scope = 2`, which the Probe protection gate needs). Gap 13 (git in a sandboxed linked worktree) is now resolved in the plan (Task 7A).
+**Status:** revision 4: the approved ADR r15 folded in, and the first and second cross-model reviews' findings addressed. **Design approval is not set.** The §17 decisions it depends on are listed below. One item needs an operator decision before the OpenShell backend is enabled on a real host: gap 15 (`kernel.yama.ptrace_scope = 2`, which the Probe protection gate needs). Gap 13 (git in a sandboxed linked worktree) is now resolved in the plan (Task 7A), btq's unpinned git included.
 
 ## Global Constraints
 
@@ -97,7 +97,7 @@ The plan also draws on these sources:
 | D10 | The credential check (§7 home isolation). | The login binds must be exactly the chosen account's login files, read-only. No other bind may equal, contain or lie inside another account's login directory (the default login's included when it isn't chosen), or equal or contain any account's login file, or equal or contain the chosen account's login directory. No bind may contain the real home. | This is §7's rule as written for other accounts. A source inside the *chosen* account's own login directory that holds no login file is allowed: codex-cli installs itself under `~/.codex/packages/`, and plan 4 launches only the default account (gap 3). |
 | D11 | Accounts in plan 4 (§4.4 D7; AU-6 binds named accounts). | Plan 4 launches only the `default` account. A launch entry pinning a named account fails with "named accounts are bound by AU-6", which spends the launch budget. The Other accounts probe already covers every configured named account of the adapter, plus the canary. | AU-6 adds named-account binding on top of this launcher. A host with named accounts must not run one silently on the default login. |
 | D12 | The freshness gate (§7, §4.4 D8). | The gate reads the chosen login's access-token expiry: Claude's `claudeAiOauth.expiresAt`, or the `exp` of Codex's `tokens.access_token`. It refuses unless more than `max_lifetime + stop_margin` remains, with defaults of 120 + 15 minutes. **Plan 4 never refreshes**, so the launch is refused. AU-6 adds the host refresh under the D8 lock. | §7 allows "refreshes on the host first, or refuses". Refusing is the half that needs no shared-token rules. |
-| D13 | The lifetime stop (§7). | **The deadline** is fixed when the login is first exposed, just before the sandbox is created: `min(exposure + max_lifetime, checked expiry − stop_margin)`. A launch that hasn't reached `running` before the stop window opens is refused. **wsd's stop:** `AgentRuntime.expire(ws, now)` is new. It runs in every pickup, just before the sweep. Once the stop window opens (`deadline − stop_margin`), a session at a turn boundary is stopped: its last turn event was a `Stop`. At the deadline, any session is stopped (Escape, then the sandbox deleted). **The backstop:** a reaper process per session, in wsd's tmux server, deletes the sandbox at the deadline whatever wsd, its queue or its reconciliation are doing. **The WIP:** the stop reason and the owed commit (`lifetime:<key>:<gen>`) are recorded with `stopping`, before anything is stopped. The commit lands after `ended`, and is replayed by `expire` and before any relaunch. The sweep in the same pickup gives the running bead a resume operation, and that relaunches it at once through the launch guard. A relaunch the gate refuses is a `LaunchFailed`, so the existing budget makes the bead `needs-human`. | This is §7's sequence, with no new journal operation: the sweep, the guard and the launch budget already exist. A slow start eats into the session's own lifetime, never into the login's margin. The reaper needs neither a pickup nor a running wsd: the tmux server is in its own systemd scope. `wip_commit` is idempotent by its mark, so a crash anywhere replays it exactly once. A missed `Stop` only makes the stop hard. |
+| D13 | The lifetime stop (§7). | **The deadline** is fixed when the login is first exposed, just before the sandbox is created: `min(exposure + max_lifetime, checked expiry − stop_margin)`. A launch that hasn't reached `running` before the stop window opens is refused. **wsd's stop:** `AgentRuntime.expire(ws, now)` is new. It runs in every pickup, just before the sweep. Once the stop window opens (`deadline − stop_margin`), a session at a turn boundary is stopped: its last turn event was a `Stop`. At the deadline, any session is stopped (Escape, then the sandbox deleted). **The backstop:** a reaper process per session, in wsd's tmux server, acts at the deadline whatever wsd, its queue or its reconciliation are doing. Until the deletion is confirmed it kills the workload's containers with podman alone, which needs no OpenShell control service, and asks OpenShell to delete the sandbox. It never gives up. **The WIP:** the stop reason and the owed commit (`lifetime:<key>:<gen>`) are recorded with `stopping`, before anything is stopped. Every record write is durable (`write_at` syncs the file before its rename and the directory after), so each transition is on disk before the step it guards. The commit lands after `ended`, and is replayed by `expire` and before any relaunch. The sweep in the same pickup gives the running bead a resume operation, and that relaunches it at once through the launch guard. A relaunch the gate refuses is a `LaunchFailed`, so the existing budget makes the bead `needs-human`. | This is §7's sequence, with no new journal operation: the sweep, the guard and the launch budget already exist. A slow start eats into the session's own lifetime, never into the login's margin. The reaper needs neither a pickup nor a running wsd: the tmux server is in its own systemd scope. `wip_commit` is idempotent by its mark, so a crash anywhere replays it exactly once. A missed `Stop` only makes the stop hard. |
 | D14 | The hook shim when wsd is down (§10). | The shim waits up to `[timeouts] hook_wait_seconds`. With no answer, a PreToolUse is allowed only for the local class `worktree_edit`, and only if that class is in the auto-approve tier: an `Edit`, `Write`, `MultiEdit` or `NotebookEdit` whose real path is inside the worktree. Everything else is denied with "control plane unavailable; retry shortly", as the JSON PreToolUse decision (S8 capability 1). Other events are never blocked; with no answer they are spooled to `$HOME/.hz/spool.jsonl`. | This is narrower than §10 allows (running tests and local git are not classified locally), so it fails closed more often, never less. |
 | D15 | Tool policy before plan 5. | While wsd answers, every `hook_event` gets `{"ok": true}`, so no tool call is denied by wsd. `ws_request` gets `{"ok": false, "error": "unsupported"}`. | Plan 5 owns the policy engine and `ws-request` processing. The sandbox is the security boundary (§5.3), and the hook is a UX layer. |
 | D16 | The self-test's allowlisted control (§7 Egress). | The probe control host (`api.openai.com`, configurable) stays allowed to `/usr/bin/curl` for the session's life. | OpenShell's policy is fixed at create time in 0.1.2. The residual is flagged below (gap 4). |
@@ -107,10 +107,10 @@ The plan also draws on these sources:
 | D20 | Where launch-time waits run. | A launch blocks the workstream's operation lock for up to about 6 minutes in the worst case: sandbox create (300 s at most), the exec probes (180 s), the agent prompt (90 s) and the agent probes (`agent_probe_seconds`, 240 s). Other workstreams are unaffected. | §5.2 serialises launches per workstream anyway. Flagged for plan 8's health checks (gap 6). |
 | D21 | Configured backends this plan does not build. | `[platform] sandbox = "bubblewrap"` or `"seatbelt"` makes `wsd run` print a notice ("… is not built yet; no agents will run") and use `NoRuntime`, as `"none"` does. Any other unknown name is a `ConfigError`. The Linux platform default becomes `"openshell"`, so `heterodyne setup` records it on new installs. | Existing configs (the live harness and admind tests carry `bubblewrap`) keep working with no agents, exactly as before plan 4. Failing them would break hosts that never asked for plan 4. |
 | D22 | The Other accounts probe with no named accounts. | It runs with an empty list of other accounts. The canary (written outside every bind just before, then read back outside) is always checked inside, so the probe never passes vacuously. | A host with only default logins is the common case, and plan 4 launches only the default. The canary is the positive control that S5's probe lacked. |
-| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A). The host requires `kernel.yama.ptrace_scope` ≥ 2, so only `CAP_SYS_PTRACE` can attach or open another process's memory. Every workload process with `NoNewPrivs: 1` (every process the agent can start) must have no effective or permitted capability. The verified probe must have `NoNewPrivs: 1` and the same user and mount namespaces as its CLI ancestor, so no agent-made namespace has a mount over its files. `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) is read-only. On every launch the probe also checks the denial from inside (`probe-tamper-denied`, `probe-files-readonly`), and the curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. Scope 2 is a host change (gap 15). |
+| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A). The host requires `kernel.yama.ptrace_scope` ≥ 2, so only `CAP_SYS_PTRACE` can attach or open another process's memory. Every workload process with `NoNewPrivs: 1` (every process the agent can start) must have no effective or permitted capability. The verified probe and its CLI ancestor must both be in the workload's own user and mount namespaces, which the host pins from a fresh supervisor-started process before the probe runs, so no agent-made namespace (with an overlay and a CLI of its own) can hold a counted probe. The probe must have `NoNewPrivs: 1`. `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) is read-only. On every launch the probe also checks the denial from inside (`probe-tamper-denied`, `probe-files-readonly`), and the curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. Scope 2 is a host change (gap 15). |
 | D24 | Codex hooks (r15 §4.2, §5.3: Codex stays headless until trust is pre-seeded without an operator step). | Codex is treated as headless. Its hooks are used only for the thread ID (D8) and the turn state (D13), never to enforce anything; the sandbox is the boundary. D6 is plan 4's trust pre-seeding, and each launch verifies it: the second `hooks/list` must be empty, and the generation's `SessionStart` must arrive. | A missed hook then only makes the lifetime stop hard or fails the launch; it never lets a tool call through that the sandbox would refuse. |
 | D25 | Host writes into the synthetic home (§7 home isolation). | The home persists and is agent-writable. Every host write into it opens each directory from the home down with `O_NOFOLLOW`, refuses a link, and writes through an exclusive (`O_EXCL`), randomly named temporary file in the anchored directory, renamed into place. Reads use the same anchoring. Codex's trust append is a read and a rewrite through the same descriptors. | An agent can replace `.claude`, `.codex` or a predictable temporary name with a link between generations. A host write that followed it would write outside the home, on the next relaunch or during trust. |
-| D26 | Git for a sandboxed linked worktree (§7: agents commit to their local `btq/<id>` branch; gap 13). | Task 7A. Host git on a worktree is pinned to the trusted repository's directories, with `HEAD` required to name `btq/<id>`, no link in its metadata, and no hooks, fsmonitor or per-worktree config. The sandbox gets a private git directory per generation at the worktree's git-directory path, with the common object store read-only. After the sandbox is confirmed gone, the bead branch's tip alone is imported (`index-pack --strict`, compare-and-swap). A failure is recorded and refuses the next launch. | The sandbox never sees anything host git trusts. The only effect its git can have on the host is the bead branch's tip, which is the agent's to move. |
+| D26 | Git for a sandboxed linked worktree (§7: agents commit to their local `btq/<id>` branch; gap 13). | Task 7A. Host git on a worktree is pinned to the trusted repository's directories, with `HEAD` required to name `btq/<id>`, no link in its metadata, and no hooks, fsmonitor or per-worktree config. The sandbox gets a private git directory per generation at the worktree's git-directory path, with the common object store read-only, and the worktree's `.git` pointer is rewritten and bound read-only over itself, so unpinned host git (btq's) always reaches the real git directory. After the sandbox is confirmed gone, the bead branch's tip alone is imported (`index-pack --strict`, compare-and-swap). A failure is recorded and refuses the next launch. | The sandbox never sees anything host git trusts. The only effect its git can have on the host is the bead branch's tip, which is the agent's to move. |
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
 
@@ -134,7 +134,8 @@ The plan also draws on these sources:
       - The sandbox gets a private git directory per generation, bound at the worktree's git-directory path, with the object store read-only.
       - After the sandbox is confirmed gone, host git imports the bead branch's tip and nothing else, with `index-pack --strict` and a compare-and-swap on `refs/heads/btq/<id>`.
       - Task 14's linked-worktree test is an ordinary passing test.
-    - **Residual (a follow-up for the btq repository, not blocking).** btq's own git calls are in the beads-task-queue repository, which this plan doesn't change. While a session runs, they follow the worktree's `.git` file as before; every end rewrites it to the trusted pointer. Hardening btq the same way is a btq change. Landing has host git parse the agent's object files, as a fetch from an untrusted remote parses its pack. Accepting broader shared-ref access (for example, letting an agent move other branches) would need the operator, and this plan does not do it.
+    - **btq's git is contained inside plan 4.** btq's own git calls are in the beads-task-queue repository, which this plan doesn't change, and they follow the worktree's `.git` file unpinned. So the agent never gets to change that file: `seed` rewrites it to the trusted pointer and binds it read-only over itself (a mount point can't be written, renamed or unlinked). At no point, while a session runs, after it ends or during failure recovery, does an unpinned host git consumer reach anything the agent wrote; landing rewrites the pointer again as defence in depth. Task 7A's `test_btq_git_never_reads_the_session_git_dir` and Task 14's live git test check it with a malicious pointer and config.
+    - **Residual (not blocking).** Landing has host git parse the agent's object files, as a fetch from an untrusted remote parses its pack. Accepting broader shared-ref access (for example, letting an agent move other branches) would need the operator, and this plan does not do it.
 14. **The live test and a running wsd.** A wsd on the OpenShell runtime finds Task 14's sandboxes in the backend's listing with no record of its own, and holds its workstreams until they are gone (Task 10's fail-closed rule). The live test therefore runs only while no wsd on the host uses OpenShell, and it deletes only the sandboxes it launched, never by name prefix.
 15. **`kernel.yama.ptrace_scope = 2` on the reference host (D23). Blocking: it needs an operator decision before the backend is enabled.** The host is at 1 today, which lets a process attach to its own descendants. The agent's own tool shell starts the probe, so it is the probe's ancestor and may attach to it. Scope 2 limits attach to `CAP_SYS_PTRACE` holders host-wide: a debugger run as the service user can no longer attach to its own processes without `sudo`. Without the change every launch fails `ptrace-scope`, closed. *Alternative:* scope 3 (no attach at all, until reboot); or §17 #12's options if neither is acceptable.
 
@@ -209,7 +210,7 @@ Where r15's items land:
 Two neutral tasks also need an [r15] one:
 
 - **Task 10 is blocked by Task 3.** It imports `Backend`, `BackendError` and `BackendUnavailable` from Task 3's `backend.py`, and `reaper_argv` is part of that protocol. `backend.py` holds no OpenShell code, and Task 10's tests use the fake backend.
-- **Task 11 is blocked by Task 4.** The reaper's `main` builds `OpenShellBackend` to delete the sandbox. Its logic (`reap`) is tested with fakes.
+- **Task 11 is blocked by Task 4.** The reaper's `main` builds `OpenShellBackend` to kill and delete the sandbox. Its logic (`reap`) is tested with fakes.
 
 Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 12 and 13, and Task 15 by 14.
 
@@ -714,10 +715,14 @@ def test_layout(tmp_path: Path) -> None:
 def test_git_binds_keep_their_modes(tmp_path: Path) -> None:
     private = Bind(tmp_path / "git", tmp_path / "repo" / ".git" / "worktrees" / "wt", False)
     objects = Bind(tmp_path / "repo" / ".git" / "objects", tmp_path / "repo" / ".git" / "objects", True)
-    spec = build_spec(spec_input(tmp_path, git_binds=(private, objects)))
-    assert {private, objects} <= set(spec.binds)
-    assert str(private.target) in spec.read_write and str(objects.target) in spec.read_only
-    assert str(objects.target) not in spec.read_write
+    i = spec_input(tmp_path)
+    pointer = Bind(i.worktree / ".git", i.worktree / ".git", True)       # a file over the writable worktree
+    spec = build_spec(replace(i, git_binds=(private, objects, pointer)))
+    assert {private, objects, pointer} <= set(spec.binds)
+    assert spec.binds.index(pointer) > spec.binds.index(Bind(i.worktree, i.worktree, False))
+    assert str(private.target) in spec.read_write
+    assert {str(objects.target), str(pointer.target)} <= set(spec.read_only)
+    assert str(objects.target) not in spec.read_write and str(pointer.target) not in spec.read_write
 
 
 def test_coder_spec(tmp_path: Path) -> None:
@@ -1017,7 +1022,7 @@ class SpecInput:
     probe_allowed_host: str
     uid: int
     gid: int
-    git_binds: tuple[Bind, ...] = ()    # Task 7A's private git directory and the read-only object store
+    git_binds: tuple[Bind, ...] = ()    # Task 7A: the private git dir, the object store and `.git`, both RO
 
 
 @dataclass(frozen=True)
@@ -1371,7 +1376,7 @@ git commit -m "plan4 T3: backend protocol and OpenShell policy compilation"
 
 **Interfaces:**
 - Consumes: Task 3's protocol and `create_argv`, `policy`; `spec.NAME`.
-- Produces: `OpenShellBackend(openshell, podman, image, env, *, runner=None, clock=time.monotonic, sleep=time.sleep)`, which implements `Backend`; `Runner = Callable[[Sequence[str], bytes | None, float], subprocess.CompletedProcess[bytes]]`; `tool_env(base, overrides) -> dict[str, str]`.
+- Produces: `OpenShellBackend(openshell, podman, image, env, *, runner=None, clock=time.monotonic, sleep=time.sleep)`, which implements `Backend`, plus `kill(name) -> None` (podman only; Task 11's reaper); `Runner = Callable[[Sequence[str], bytes | None, float], subprocess.CompletedProcess[bytes]]`; `tool_env(base, overrides) -> dict[str, str]`.
 
 Every command gets stdin from `/dev/null` unless it is given input: `openshell sandbox exec` waits on an open stdin (S5 ADR impact 7). Deletion is asynchronous, so `delete` polls `sandbox list` for up to 60 s. The workload container's name is `openshell-default--<sandbox>-…` (S5's `outer_fence`). The offline tests drive a scripted runner and a fake clock; only Task 14 runs the real commands.
 
@@ -1518,6 +1523,13 @@ def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
                         "--image", "img:1", "hz0123456789abg1"]
 
 
+def test_kill_uses_podman_alone() -> None:
+    script = Script((("podman", "ps"), 0, b"c1\n"), (("podman", "kill"), 0, b"c1\n"))
+    backend(script).kill("hz0123456789abg1")
+    assert [c[0] for c in script.calls][1] == ["podman", "kill", "c1"]
+    assert not any(c[0][0] == "openshell" for c in script.calls)
+
+
 def test_tool_env_takes_only_what_the_tools_need() -> None:
     base = {"HOME": "/h", "PATH": "/usr/bin", "XDG_RUNTIME_DIR": "/run/user/1", "SECRET_TOKEN": "x",
             "LANG": "C"}
@@ -1662,6 +1674,13 @@ class OpenShellBackend:
         proc = self._call([self.podman, "ps", "--filter", f"name=^openshell-default--{name}-",
                            "--format", "{{.ID}}"])
         return proc.stdout.decode("utf-8", "replace").split() if proc.returncode == 0 else []
+
+    def kill(self, name: str) -> None:
+        """Kill the sandbox's workload container with podman alone (D13's backstop): no OpenShell control
+        service is needed, so a sandbox stops at its deadline while the gateway is down."""
+        ids = self._container(name)
+        if ids and self._call([self.podman, "kill", *ids]).returncode != 0:
+            raise BackendError("podman kill failed")
 
     def network_mode(self, name: str) -> str:
         ids = self._container(name)
@@ -2648,7 +2667,9 @@ The wrapper names the test's Python and the fake by absolute path at run time; n
 
 ```python
 import json
+import os
 import socket
+import stat
 import subprocess
 import sys
 import tomllib
@@ -2658,7 +2679,7 @@ from pathlib import Path
 import pytest
 from sandbox_env import fake_jwt, install_fake_cli, short_dir
 
-from heterodyne.agents.base import HOOK_COMMAND, HOOK_EVENTS, AdapterError
+from heterodyne.agents.base import HOOK_COMMAND, HOOK_EVENTS, AdapterError, write_at
 from heterodyne.agents.claude_code import SETTINGS_FILE, ClaudeCode
 from heterodyne.agents.codex import APP_SOCKET, Codex
 from heterodyne.agents.registry import ADAPTERS
@@ -2815,6 +2836,46 @@ def test_linked_files_and_temp_names_are_replaced_not_followed(layout: SessionLa
     assert not (conf / name).is_symlink() and "stolen" not in (conf / name).read_text()
 
 
+def test_write_at_syncs_the_file_before_the_rename_and_the_directory_after(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        calls.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+
+    def replace(src: str, dst: str, **dir_fds: int) -> None:
+        calls.append("rename")
+        real_replace(src, dst, **dir_fds)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        write_at(fd, "record.json", "{}")
+    finally:
+        os.close(fd)
+    assert calls == ["file", "rename", "dir"] and (tmp_path / "record.json").read_text() == "{}"
+
+
+def test_a_failed_sync_leaves_the_old_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "record.json").write_text("old")
+
+    def broken(fd: int) -> None:
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError):
+            write_at(fd, "record.json", "new")
+    finally:
+        os.close(fd)
+    assert [q.name for q in tmp_path.iterdir()] == ["record.json"]
+    assert (tmp_path / "record.json").read_text() == "old"
+
+
 def test_trust_refuses_a_config_swapped_for_a_link(layout: SessionLayout, tmp_path: Path) -> None:
     codex = install_fake_cli(tmp_path, "codex")
     Codex().prepare_home(layout, tmp_path)
@@ -2929,15 +2990,21 @@ def hook_group(matcher: str | None = None) -> dict[str, Any]:
 
 
 def write_at(dirfd: int, name: str, text: str) -> None:
-    """Write `name` in the directory `dirfd` atomically, mode 0600. The temporary file is exclusive, has an
-    unpredictable name and is never reached through a link, and the rename replaces whatever `name` is (a
-    link there is replaced, not followed). Raises OSError."""
+    """Write `name` in the directory `dirfd` atomically and durably, mode 0600. The temporary file is
+    exclusive, has an unpredictable name and is never reached through a link, and the rename replaces
+    whatever `name` is (a link there is replaced, not followed). The file is synced before the rename and
+    the directory after it, so once this returns the new content survives a machine crash: the session
+    record's transitions (`stopping` with its owed WIP, `unlanded`, `ended`) are ordered on disk before the
+    step that follows them. Raises OSError."""
     tmp = f".{name}.{secrets.token_hex(8)}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        os.fsync(dirfd)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp, dir_fd=dirfd)
@@ -2945,8 +3012,9 @@ def write_at(dirfd: int, name: str, text: str) -> None:
 
 
 def write_private(path: Path, text: str) -> None:
-    """write_at in a directory only the host writes (a run directory, a session directory). Never use it
-    under a synthetic home: that is the agent's to change, and goes through home_dir."""
+    """write_at (atomic and durable) in a directory only the host writes (a run directory, a session
+    directory). Never use it under a synthetic home: that is the agent's to change, and goes through
+    home_dir."""
     fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         write_at(fd, path.name, text)
@@ -3485,7 +3553,7 @@ git commit -m "plan4 T7: claude-code and codex adapters, synthetic home, Codex h
   - `gitwip.pinned_git(p, *args, alternates=None, data=None, ok=(0,)) -> bytes`, `gitwip.no_link(base, *parts) -> Path`, `gitwip.read_meta(path) -> str` and `gitwip.FULL_SHA`;
   - `gitwip.find_wip(p, mark)`, `gitwip.wip_commit(p, mark, summary)` and `gitwip.descends_from(p, base)`, each taking a `Pinned`;
   - `LaunchSpec.repo: Path | None = None`, which the guard sets from the bead's session record;
-  - `sessiongit.seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind]` and `sessiongit.land(p: Pinned, private: Path) -> str | None`.
+  - `sessiongit.seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind, Bind]` (the private directory, the common object store, the `.git` pointer) and `sessiongit.land(p: Pinned, private: Path) -> str | None`.
 
 This is D26, and it resolves gap 13. It lands before Task 10, which uses it for every launch and every end.
 
@@ -3499,10 +3567,11 @@ This is D26, and it resolves gap 13. It lands before Task 10, which uses it for 
   - the other branches, remotes and tags are a read-only snapshot in `packed-refs`;
   - the index is a copy;
   - the common object store is reached read-only through `objects/info/alternates`.
-  It is bound read-write at the linked worktree's own git-directory path, so the worktree's `.git` file finds it unchanged. The common `objects/` is bound read-only at its own path. Whatever the agent writes there (another branch, a moved `HEAD`, a config, an alternates file) reaches nothing on the host.
+  It is bound read-write at the linked worktree's own git-directory path, so the worktree's `.git` file finds it unchanged. The common `objects/` is bound read-only at its own path.
+- **The `.git` pointer is never the agent's.** `seed` rewrites the worktree's `.git` file to the trusted pointer and binds it read-only over itself, on top of the writable worktree. A read-only bind can't be written, and as a mount point it can't be renamed or unlinked (`EBUSY`). So host git that follows the pointer without pinning, btq's included, always reaches the real git directory, which the sandbox never sees, at every point: while the session runs, after it ends and during failure recovery. This contains btq's git inside plan 4 without changing the beads-task-queue repository. Whatever the agent writes there (another branch, a moved `HEAD`, a config, an alternates file) reaches nothing on the host.
 - **Landing.** After the sandbox is confirmed gone, `land` runs:
-  1. It rewrites the worktree's `.git` file to the trusted pointer, so btq's own git calls see it too.
-  2. It refuses a private object store that holds anything but directories and regular files, and rewrites its alternates to the trusted one.
+  1. It rewrites the worktree's `.git` file to the trusted pointer again (defence in depth: the bind kept it read-only).
+  2. It refuses a private object store that is, or holds, anything but directories and regular files, and rewrites its alternates to the trusted one. Every step is relative to a descriptor for the private directory, opened without following a link, so a store or `info` swapped for a link fails instead of redirecting the write.
   3. It reads the bead branch's tip (loose or packed) and validates it as a full SHA.
   4. It copies the missing objects into the common store through `index-pack --strict`, checks that the result is connected, and moves `refs/heads/btq/<id>` alone, compare-and-swap. No other ref is ever written.
   Landing is idempotent: a tip already landed is a no-op. Task 10 records a failure and keeps the private directory, and the next launch refuses until a human looks.
@@ -3513,6 +3582,7 @@ This is D26, and it resolves gap 13. It lands before Task 10, which uses it for 
 
 ```python
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -3608,8 +3678,9 @@ def test_a_session_commit_lands_on_the_bead_branch_alone(tmp_path: Path) -> None
     repo, worktree = linked(tmp_path)
     p = gitwip.pin(repo, worktree, BRANCH)
     private = tmp_path / "private"
-    rw, objects = sessiongit.seed(p, private, read_only=False)
+    rw, objects, pointer = sessiongit.seed(p, private, read_only=False)
     assert (rw.source, rw.target, rw.read_only) == (private, p.git_dir, False)
+    assert (pointer.source, pointer.target, pointer.read_only) == (p.work_tree / ".git",) * 2 + (True,)
     assert (objects.source, objects.target, objects.read_only) == (p.common / "objects",) * 2 + (True,)
     main = tip(repo, "main")
     assert inside(private, worktree, "rev-parse", "main") == main            # the snapshot is readable
@@ -3647,6 +3718,46 @@ def test_landing_refuses_a_link_in_the_session_objects(tmp_path: Path) -> None:
     with pytest.raises(gitwip.GitFailed, match="link"):
         sessiongit.land(p, private)
     assert tip(repo, BRANCH) == before
+
+
+def test_btq_git_never_reads_the_session_git_dir(tmp_path: Path) -> None:
+    """btq's git is not pinned: it follows the worktree's `.git`. The pointer is trusted when it is bound
+    read-only, so no config, hook or fsmonitor the agent writes in its private directory runs on the host."""
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    (worktree / ".git").write_text(f"gitdir: {private}\n")              # planted in an earlier generation
+    sessiongit.seed(p, private, read_only=False)
+    assert (worktree / ".git").read_text() == f"gitdir: {p.git_dir}\n"
+    marker = tmp_path / "ran"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o700)
+    with (private / "config").open("a") as fh:                         # what the agent can write
+        fh.write(f"[core]\n\tfsmonitor = {hook}\n\thooksPath = {tmp_path}\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"], env=env, check=True,
+                   capture_output=True)                                 # as btq runs it
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("swap", ["objects", "objects/info"])
+def test_landing_refuses_a_linked_object_store_and_writes_nothing_outside(tmp_path: Path, swap: str) -> None:
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    before = tip(repo, BRANCH)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "agent work")
+    outside = tmp_path / "outside"
+    shutil.move(private / swap, outside)                  # the agent moves the store out, links it back
+    next(outside.rglob("alternates")).unlink()
+    (private / swap).symlink_to(outside)
+    files = {q: q.read_bytes() for q in outside.rglob("*") if q.is_file()}
+    with pytest.raises(gitwip.GitFailed):
+        sessiongit.land(p, private)
+    assert {q: q.read_bytes() for q in outside.rglob("*") if q.is_file()} == files
+    assert not any(outside.rglob("alternates")) and tip(repo, BRANCH) == before
 
 
 def test_landing_ignores_an_alternates_file_the_agent_rewrote(tmp_path: Path) -> None:
@@ -3821,6 +3932,7 @@ the linked worktree's git-directory path so the worktree's own `.git` file finds
 object store read-only behind `objects/info/alternates`. Once the sandbox is gone, `land` imports the
 bead branch alone, through pinned host git only."""
 
+import contextlib
 import os
 import shutil
 import stat
@@ -3842,8 +3954,21 @@ def _write(directory: Path, name: str, text: str) -> None:
         os.close(fd)
 
 
-def seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind]:
-    """Build a fresh private git directory for one generation. Returns its bind and the common store's."""
+def _pointer(p: Pinned) -> None:
+    """Rewrite the worktree's `.git` file to the trusted pointer."""
+    fd = os.open(p.work_tree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        write_at(fd, ".git", f"gitdir: {p.git_dir}\n")
+    except IsADirectoryError:
+        raise GitFailed("the worktree's .git was replaced by a directory") from None
+    finally:
+        os.close(fd)
+
+
+def seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind, Bind]:
+    """Build a fresh private git directory for one generation. Returns its bind, the common store's, and a
+    read-only bind of the worktree's `.git` pointer over itself: host git that reads the pointer (btq's)
+    then always finds the real git directory, which the sandbox never sees (D26)."""
     if p.git_dir == p.common:
         raise GitFailed("a sandbox can't hold the main worktree: its git directory is inside it")
     if os.path.lexists(private):
@@ -3863,15 +3988,55 @@ def seed(p: Pinned, private: Path, read_only: bool) -> tuple[Bind, Bind]:
         source = p.git_dir / name if name == "index" else p.common / name
         if source.is_file() and not source.is_symlink():
             shutil.copyfile(source, private / name)
-    return Bind(private, p.git_dir, read_only), Bind(p.common / "objects", p.common / "objects", True)
+    _pointer(p)                                 # trusted before it is bound read-only
+    dot_git = p.work_tree / ".git"
+    return (Bind(private, p.git_dir, read_only), Bind(p.common / "objects", p.common / "objects", True),
+            Bind(dot_git, dot_git, True))
 
 
-def _plain_tree(root: Path) -> None:
-    for top, dirs, files in os.walk(root, followlinks=False):
+def _subdir(dirfd: int, name: str) -> int:
+    """`name` in the open directory `dirfd`, opened as a directory and never through a link."""
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+
+
+def _plain_tree(objfd: int) -> None:
+    """Everything under the open object store is a plain directory or a regular file. The walk is anchored
+    at the descriptor, so a link anywhere, the store itself included, is refused rather than followed, and
+    an entry that can't be read fails the landing."""
+    def fail(_: OSError) -> None:
+        raise GitFailed("the session's git objects can't be read")
+
+    for _top, dirs, files, topfd in os.fwalk(".", dir_fd=objfd, onerror=fail):
         for name in (*dirs, *files):
-            mode = os.lstat(Path(top) / name).st_mode
+            mode = os.stat(name, dir_fd=topfd, follow_symlinks=False).st_mode
             if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise GitFailed("the session's git objects hold a link or a special file")
+
+
+def _trusted_alternates(p: Pinned, private: Path) -> None:
+    """Check the private object store and point its alternates at the common store, every step relative
+    to a descriptor opened without following a link (the sandbox is gone, so nothing changes under it)."""
+    try:
+        gitfd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        raise GitFailed("the session's git directory can't be opened") from None
+    try:
+        objfd = _subdir(gitfd, "objects")
+        try:
+            _plain_tree(objfd)
+            with contextlib.suppress(FileExistsError):
+                os.mkdir("info", 0o700, dir_fd=objfd)
+            infofd = _subdir(objfd, "info")
+            try:
+                write_at(infofd, "alternates", f"{p.common / 'objects'}\n")
+            finally:
+                os.close(infofd)
+        finally:
+            os.close(objfd)
+    except OSError:
+        raise GitFailed("the session's git objects can't be read") from None
+    finally:
+        os.close(gitfd)
 
 
 def _tip(private: Path, branch: str) -> str:
@@ -3893,19 +4058,9 @@ def _tip(private: Path, branch: str) -> str:
 
 def land(p: Pinned, private: Path) -> str | None:
     """Import the session's bead-branch tip. The new tip, or None when it didn't move. Idempotent."""
-    fd = os.open(p.work_tree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        write_at(fd, ".git", f"gitdir: {p.git_dir}\n")        # btq's own git sees the trusted pointer
-    except IsADirectoryError:
-        raise GitFailed("the worktree's .git was replaced by a directory") from None
-    finally:
-        os.close(fd)
-    objects = private / "objects"
-    try:
-        _plain_tree(objects)
-        _write(objects / "info", "alternates", f"{p.common / 'objects'}\n")
-    except OSError:
-        raise GitFailed("the session's git objects can't be read") from None
+    _pointer(p)                                 # defence in depth: the bind kept it read-only
+    _trusted_alternates(p, private)
+    objects = private / "objects"                   # checked above: a plain directory, no link below it
     tip = _tip(private, p.branch)
     old = pinned_git(p, "rev-parse", f"refs/heads/{p.branch}").decode().strip()
     if tip == old:
@@ -5544,9 +5699,10 @@ git commit -m "plan4 T9: agent-path self-test with a host-verified probe channel
 - Produces:
   - `openshell_selftest.MIN_PTRACE_SCOPE = 2`, `YAMA_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")`, `read_ptrace_scope(path: Path = YAMA_SCOPE) -> int` (`-1` when Yama is absent or the value is unreadable), `PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly")`, part of both `EXEC_CHECKS` and `AGENT_CHECKS`;
   - `OpenShellSelfTest(*, wall, sleep, proc, peer_pid, ptrace_scope: Callable[[], int] = read_ptrace_scope)`. Both paths first check `ptrace_scope() >= MIN_PTRACE_SCOPE`, raising `SelfTestFailed("ptrace-scope: …")`.
-  - `ProcVerifier(netns, cli_binary, allowed_env, *, root_pid: int, ptrace_scope: Callable[[], int], proc=Path("/proc"))`. It adds four checks to Task 9's:
+  - `openshell_selftest.NS_ARGV = ("readlink", "/proc/self/ns/user", "/proc/self/ns/mnt")`;
+  - `ProcVerifier(netns, cli_binary, allowed_env, *, namespaces: tuple[str, str], root_pid: int, ptrace_scope: Callable[[], int], proc=Path("/proc"))`. It adds four checks to Task 9's:
     - the probe has `NoNewPrivs: 1`;
-    - its user and mount namespaces are its CLI ancestor's;
+    - the probe and its CLI ancestor are both in the workload's own user and mount namespaces, `namespaces`, which the host pins;
     - Yama's scope is at least 2;
     - no workload process holds a capability.
 
@@ -5562,7 +5718,10 @@ ADR 0001 r15 §7 "Probe protection" makes this a **mandatory plan 4 acceptance c
     Processes without `no_new_privs` are OpenShell's supervisor, which is inside the trusted computing base (r15 §7 Residual risk).
 
     A process in a user namespace it created shows its capabilities in that namespace, and the check rejects it too. That fails closed: the agent can only fail its own launch.
-- **Mounts over the probe's files.** A process in a new user and mount namespace could overlay `/run/hz`. The host requires the probe's `ns/user` and `ns/mnt` to be its CLI ancestor's. Without a capability in the CLI's own user namespace, nothing can change the CLI's mount namespace.
+- **Mounts over the probe's files.** A process in a new user and mount namespace could overlay `/run/hz`, and could start the CLI, or something at the CLI's path, in there as the probe's parent. So comparing the probe with its CLI ancestor is not enough. The host pins the workload's own namespaces instead:
+  - Before the probe channel opens, the host starts a fresh `readlink /proc/self/ns/user /proc/self/ns/mnt` through `sandbox exec` (`NS_ARGV`). The supervisor starts it as it starts the CLI, outside anything the agent made, and `/usr/bin/readlink` is read-only under Landlock. Its answer must be one `user:[N]` and one `mnt:[N]`, or the launch fails `workload-namespaces`.
+  - Both the probe and its CLI ancestor must be in exactly those namespaces.
+  - No workload process holds a capability in the workload's user namespace (checked below), so none can mount there. A mount made in a child user namespace stays in that namespace's own mount namespace, which the check rejects.
 - **Configuration and result socket.**
   - The script, its configuration (`agent-probe.json`), the token and `p.sock` all live in the run directory, which is bound read-only at `/run/hz`. So none of them can be rewritten, replaced or renamed from inside.
   - The probe's open socket can be reached only through `pidfd_getfd`, which Yama scope 2 denies.
@@ -5579,17 +5738,17 @@ The first way, a supervisor-controlled probe path, is not taken. OpenShell 0.1.2
 **This needs a host change (gap 15).** The reference host runs `kernel.yama.ptrace_scope = 1` today. Until the operator sets it to 2, every launch fails `ptrace-scope`, fail-closed.
 
 The §11 adversarial controls:
-- **Offline (this task):** a traced probe, a scope below 2, a capable workload process, and a probe in another user or mount namespace each fail verification.
+- **Offline (this task):** a traced probe, a scope below 2, a capable workload process, a probe in another user or mount namespace, and a probe and CLI that are both in namespaces the agent made each fail verification, the last also through the result channel.
 - **Live (Task 15):**
   - ptrace attach and `/proc/<pid>/mem` are refused inside;
-  - a user-namespace mount can't reach the probe;
+  - an overlay over the probe from a new user and mount namespace, with a stand-in at the CLI's path as the forged probe's parent, is never counted;
   - the probe's files are read-only.
 
 If any live control shows tampering is possible, **plan 4 stops** (r15 §17 item 12), and the choice goes back to the operator.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_sandbox_channel.py`, replace `fake_proc`, `probe_tree` and `verifier` with:
+In `tests/test_sandbox_channel.py`, add `import shutil` to the imports, and replace `fake_proc`, `probe_tree` and `verifier` with:
 
 ```python
 NO_CAPS = "0000000000000000"
@@ -5621,8 +5780,13 @@ def probe_tree(root: Path, **probe: object) -> None:
     fake_proc(root, 32, **fields)  # type: ignore[arg-type]
 
 
+WORKLOAD_NS = ("user:[4026531837]", "mnt:[4026532001]")      # fake_proc's defaults
+AGENT_NS = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
+
+
 def verifier(root: Path, scope: int = 2) -> ProcVerifier:
-    return ProcVerifier(NETNS, CLI, ALLOWED, root_pid=7, ptrace_scope=lambda: scope, proc=root)
+    return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, ptrace_scope=lambda: scope,
+                        proc=root)
 ```
 
 and in `test_no_cli_ancestor_inside_the_netns_is_rejected`, pass `ppid=7` for pid 30 (the rest is unchanged). Then append:
@@ -5630,8 +5794,8 @@ and in `test_no_cli_ancestor_inside_the_netns_is_rejected`, pass `ppid=7` for pi
 ```python
 @pytest.mark.parametrize("probe, reason", [
     ({"nnp": 0}, "the probe can gain privileges"),
-    ({"mntns": "mnt:[4026533333]"}, "another user or mount namespace"),       # an overlay from a new mount ns
-    ({"userns": "user:[4026533334]"}, "another user or mount namespace"),
+    ({"mntns": "mnt:[4026533333]"}, "outside the workload's user and mount namespaces"),    # a new mount ns
+    ({"userns": "user:[4026533334]"}, "outside the workload's user and mount namespaces"),
 ])
 def test_a_probe_that_could_be_tampered_with_is_rejected(tmp_path: Path, probe: dict[str, object],
                                                           reason: str) -> None:
@@ -5655,6 +5819,23 @@ def test_capable_processes_outside_the_workload_are_ignored(tmp_path: Path) -> N
     probe_tree(tmp_path)
     fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff")
     assert verifier(tmp_path)(32) == ""
+
+
+def test_a_cli_and_probe_in_namespaces_the_agent_made_are_rejected(sock_dir: Path, tmp_path: Path) -> None:
+    """An overlay over /run/hz from a new user and mount namespace, with the CLI started in there as the
+    forged probe's parent: the two agree with each other, but not with the namespaces the host pinned."""
+    probe_tree(tmp_path, **AGENT_NS)
+    shutil.rmtree(tmp_path / "30")
+    fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=7, **AGENT_NS)
+    reason = "the probe or its CLI is outside the workload's user and mount namespaces"
+    assert verifier(tmp_path)(32) == reason
+    ch = ProbeChannel(sock_dir / "p.sock", verifier(tmp_path), peer_pid=lambda s: 32)
+    ch.start()
+    try:
+        send(sock_dir / "p.sock", *all_pass(EXPECTED))
+        wait_for(lambda: ch.verdict(EXPECTED) == "a peer that is not the probe connected")
+    finally:
+        ch.close()
 
 
 def test_a_probe_traced_after_it_connected_fails_at_completion(sock_dir: Path, tmp_path: Path) -> None:
@@ -5704,6 +5885,23 @@ def fake_probe_proc(proc: Path, cli: Path) -> None:
                                   "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
 ```
 
+- Replace `AgentBackend` with one that also answers the namespace pin, with `fake_probe_proc`'s values (add `NS_ARGV` to the `openshell_selftest` import):
+
+```python
+@dataclass
+class AgentBackend(StubBackend):
+    ns_out: bytes = b"user:[1]\nmnt:[2]\n"
+
+    def workload_pid(self, name: str) -> int:
+        return 7
+
+    def exec(self, name: str, workdir: Path, argv: Sequence[str], *, input: bytes | None = None,
+             timeout: float) -> ExecResult:
+        if tuple(argv) == NS_ARGV:
+            return ExecResult(0, self.ns_out, b"")
+        return super().exec(name, workdir, argv, input=input, timeout=timeout)
+```
+
 - Replace `agent_selftest` with:
 
 ```python
@@ -5739,6 +5937,15 @@ def test_the_agent_path_needs_ptrace_scope_2() -> None:
                                ptrace_scope=lambda: 1)
         with pytest.raises(SelfTestFailed, match="ptrace-scope: 1"):
             st.agent_path(ctx)
+
+
+@pytest.mark.parametrize("out", [b"", b"user:[1]\n", b"user:[1]\nmnt:[2]\nmnt:[3]\n", b"mnt:[2]\nuser:[1]\n"])
+def test_the_agent_path_needs_the_workload_namespaces_pinned(out: bytes) -> None:
+    with short_dir() as root:
+        ctx = agent_context(root, StubTmux())
+        cast(AgentBackend, ctx.backend).ns_out = out
+        with pytest.raises(SelfTestFailed, match="workload-namespaces"):
+            agent_selftest(root / "proc").agent_path(ctx)
 
 
 def test_read_ptrace_scope(tmp_path: Path) -> None:
@@ -5835,6 +6042,11 @@ add after `DIRECT_TARGET`:
 # §7 Probe protection (D23): with Yama at 2, only CAP_SYS_PTRACE may attach to a process or open its
 # memory, and no workload process holds a capability (checked from the host by the channel).
 MIN_PTRACE_SCOPE = 2
+# The workload's own namespaces, from a fresh process the supervisor starts (readlink is read-only).
+NS_ARGV = ("readlink", "/proc/self/ns/user", "/proc/self/ns/mnt")
+NS_SECONDS = 30
+USER_NS = re.compile(r"user:\[\d+\]")
+MNT_NS = re.compile(r"mnt:\[\d+\]")
 YAMA_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")
 
 
@@ -5859,14 +6071,30 @@ change `__init__` to:
         self.ptrace_scope = ptrace_scope
 ```
 
-add the method:
+add the methods:
 
 ```python
     def _protection(self) -> None:
         scope = self.ptrace_scope()
         if scope < MIN_PTRACE_SCOPE:
             raise SelfTestFailed(f"ptrace-scope: {scope}, probe protection needs {MIN_PTRACE_SCOPE} or more")
+
+    def _namespaces(self, ctx: ProbeContext) -> tuple[str, str]:
+        """The workload's own user and mount namespaces, pinned before the agent is asked to run the
+        probe. The supervisor starts this process as it starts the CLI, so no namespace the agent made
+        can be it (D23)."""
+        try:
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, NS_ARGV, timeout=NS_SECONDS)
+        except BackendError:
+            raise SelfTestFailed("workload-namespaces") from None
+        found = r.stdout.decode("utf-8", "replace").split()
+        if r.returncode != 0 or len(found) != 2 or not (USER_NS.fullmatch(found[0])
+                                                        and MNT_NS.fullmatch(found[1])):
+            raise SelfTestFailed("workload-namespaces")
+        return found[0], found[1]
 ```
+
+Add `import re` to the module's imports.
 
 make `self._protection()` the first statement of `exec_path` and of `agent_path` (in `agent_path`, after the local import). In `agent_path`, replace the netns lookup and the `ProcVerifier` construction with:
 
@@ -5876,7 +6104,8 @@ make `self._protection()` the first statement of `exec_path` and of `agent_path`
             netns = os.readlink(self.proc / str(root) / "ns" / "net")
         except OSError:
             raise SelfTestFailed("workload-netns") from None
-        verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"), root_pid=root,
+        verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
+                              namespaces=self._namespaces(ctx), root_pid=root,
                               ptrace_scope=self.ptrace_scope, proc=self.proc)
 ```
 
@@ -5886,11 +6115,13 @@ Change the import line to `from heterodyne.sandbox.openshell_selftest import MIN
 
 ```python
 class ProcVerifier:
-    def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *, root_pid: int,
-                 ptrace_scope: Callable[[], int], proc: Path = Path("/proc")) -> None:
+    def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *,
+                 namespaces: tuple[str, str], root_pid: int, ptrace_scope: Callable[[], int],
+                 proc: Path = Path("/proc")) -> None:
         self.netns = netns
         self.cli = cli_binary
         self.allowed = allowed_env
+        self.namespaces = namespaces         # the workload's (user, mnt), pinned by the host
         self.root = root_pid                 # the workload container's first process
         self.ptrace_scope = ptrace_scope
         self.proc = proc
@@ -5968,12 +6199,12 @@ class ProcVerifier:
         if cli is None:
             return f"no {self.cli} ancestor inside the workload netns"
         try:
-            same = all(os.readlink(p / "ns" / ns) == os.readlink(self.proc / str(cli) / "ns" / ns)
-                       for ns in ("user", "mnt"))
+            seen = {tuple(os.readlink(self.proc / str(q) / "ns" / ns) for ns in ("user", "mnt"))
+                    for q in (pid, cli)}
         except OSError:
-            same = False
-        if not same:
-            return "the probe is in another user or mount namespace than its CLI"
+            seen = set[tuple[str, ...]]()
+        if seen != {self.namespaces}:
+            return "the probe or its CLI is outside the workload's user and mount namespaces"
         scope = self.ptrace_scope()
         if scope < MIN_PTRACE_SCOPE:
             return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
@@ -6444,7 +6675,7 @@ from wsd_env import Clock
 
 from heterodyne.agents.base import HOOK_EVENTS
 from heterodyne.sandbox.runtime import Phase, SessionRecord, read_record, write_record
-from heterodyne.sandbox.spec import sandbox_name
+from heterodyne.sandbox.spec import SessionLayout, sandbox_name
 from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -6609,6 +6840,7 @@ def test_the_sandbox_gets_a_private_git_dir_and_its_commits_land_on_stop(rig: Ru
     assert by_target[git_dir.resolve()].source == layout.git and not by_target[git_dir.resolve()].read_only
     assert by_target[(rig.repo / ".git" / "objects").resolve()].read_only
     assert (rig.repo / ".git").resolve() not in by_target
+    assert by_target[rig.worktree.resolve() / ".git"].read_only           # btq's git follows it on the host
     main = host_tip(rig, "main")
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
     made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
@@ -6631,6 +6863,40 @@ def test_commits_that_cant_land_refuse_the_relaunch(rig: RuntimeRig) -> None:
     with pytest.raises(LaunchFailed, match="not landed"):
         rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
     assert (rig.runtime.layout(spec.session_key).git / "objects" / "zz").is_symlink()     # kept for a human
+
+
+@pytest.mark.parametrize("lands", [True, False])
+def test_a_record_write_lost_around_landing_is_recovered(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch,
+                                                        lands: bool) -> None:
+    """The write after a landing (`ended`, or `unlanded`) never reaches the disk. The last durable state is
+    `stopping`; the next end replays the idempotent landing and records the outcome it would have."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    before = host_tip(rig, "btq/btq-1")
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
+    if not lands:
+        (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
+
+    def lost(layout: SessionLayout, rec: SessionRecord) -> None:
+        if rec.phase is Phase.ENDED or rec.unlanded:
+            raise OSError("the disk went away")
+        write_record(layout, rec)
+
+    with monkeypatch.context() as m:
+        m.setattr("heterodyne.sandbox.runtime.write_record", lost)
+        with pytest.raises(RuntimeUnavailable):
+            rig.runtime.stop(spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.STOPPING, False)
+    assert host_tip(rig, "btq/btq-1") == (made if lands else before)
+    rig.runtime.stop(spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, not lands)
+    assert host_tip(rig, "btq/btq-1") == (made if lands else before)
+    if not lands:
+        with pytest.raises(LaunchFailed, match="not landed"):
+            rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
 
 
 @pytest.mark.parametrize("change", ["no repo", "main worktree", "head moved"])
@@ -7372,11 +7638,11 @@ git commit -m "plan4 T10: SandboxRuntime, session records, the resume contract a
 - Produces:
   - `AgentRuntime.expire(ws: str, now: int) -> None`: stop every session of the workstream whose lifetime is up. Raises RuntimeUnavailable if a stop can't be confirmed.
   - `FakeRuntime.expires: list[tuple[str, int]]` and `FakeRuntime.expire_failures: int`.
-  - `heterodyne.sandbox.reaper.reap(name, deadline, delete, *, clock, sleep) -> bool` and `main(argv) -> int`, run as `python -I -m heterodyne.sandbox.reaper --deadline N --openshell P --podman P --image I <name>`.
+  - `heterodyne.sandbox.reaper.reap(name, deadline, delete, kill, *, clock, sleep) -> None`, which returns only once the deletion is confirmed, and `main(argv) -> int`, run as `python -I -m heterodyne.sandbox.reaper --deadline N --openshell P --podman P --image I <name>`.
 
 This is D13.
 
-- **The backstop.** Task 10 starts one reaper per session, in wsd's tmux server, before the sandbox exists. It sleeps until the deadline, then deletes the sandbox and retries until the backend confirms it. The tmux server runs in its own systemd scope, so the reaper outlives a wsd crash or restart, and it needs neither the queue, nor a pickup, nor reconciliation. wsd kills it only once a session's end is confirmed.
+- **The backstop.** Task 10 starts one reaper per session, in wsd's tmux server, before the sandbox exists. It sleeps until the deadline. Then, every 5 s until the backend confirms the deletion, it kills the sandbox's containers with podman alone (`OpenShellBackend.kill`, which needs no OpenShell control service) and asks the backend to delete the sandbox. It never gives up: with the gateway down, the workload is still killed at the deadline, and the sandbox is deleted once the gateway is back. The tmux server runs in its own systemd scope, so the reaper outlives a wsd crash or restart, and it needs neither the queue, nor a pickup, nor reconciliation. wsd kills it only once a session's end is confirmed.
 - **A durable stop.** Whatever ends a session for its lifetime (this task's `expire`, the cleanup in `sessions` or `launch` of a session past its deadline, or a stop already begun) writes `stop_reason = "lifetime"` and `wip_mark = lifetime:<key>:<gen>` in the same record write as `stopping`, before anything is stopped. The commit is made after `ended` is recorded, and the mark is cleared after it. `expire` replays an ended record that still holds a mark, and `launch` lands it before a relaunch. `wip_commit` is idempotent by its mark, so a crash on either side of any of these writes lands the commit exactly once.
 
 - **When it stops a session.** `expire` runs in every pickup, just before the sweep. A running session whose stop window is open (`now ≥ deadline − stop_margin`) is stopped if it is at a turn boundary: its socket's last turn event was a `Stop`. At the deadline it is stopped whatever it is doing, with Escape first.
@@ -7387,7 +7653,7 @@ This is D13.
 - **Restarts and timing.**
   - A session re-bound after a wsd restart has an empty turn state, so its stop is hard (D19).
   - Backstop pickups (every 60 s) bound how late wsd's own stop can be. Task 1 allows a stop margin down to one minute, so the window always spans at least one backstop.
-  - If pickups don't run at all, the reaper deletes the sandbox within one poll (30 s) of the deadline. The deadline was set when the login was first exposed, and capped at its checked expiry minus the margin (Task 10), so even the backstop acts a full margin before the login expires.
+  - If pickups don't run at all, the reaper kills the workload within one poll (30 s) of the deadline, and deletes the sandbox then or as soon as the backend answers. The deadline was set when the login was first exposed, and capped at its checked expiry minus the margin (Task 10), so even the backstop acts a full margin before the login expires.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7407,7 +7673,7 @@ from tmux_guard import new_test_tmux
 from wsd_env import WS, Clock, make_rig
 
 from heterodyne.sandbox import reaper
-from heterodyne.sandbox.backend import BackendUnavailable
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable
 from heterodyne.sandbox.runtime import Phase, SessionRecord, read_record
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.runtime import NoRuntime, RuntimeUnavailable
@@ -7574,10 +7840,11 @@ def test_a_failed_wip_commit_is_recorded(rig: RuntimeRig, monkeypatch: pytest.Mo
     assert (rec.phase, rec.error, rec.wip_mark) == (Phase.ENDED, "the lifetime WIP commit failed", "")
 
 
-def test_the_reaper_waits_for_the_deadline_then_deletes_until_confirmed() -> None:
+def test_the_reaper_waits_for_the_deadline_then_kills_and_deletes_until_confirmed() -> None:
     now = [1000.0]
     slept: list[float] = []
     tries: list[float] = []
+    kills: list[float] = []
     answers: list[bool | None] = [None, False, True]        # None: the backend is down
 
     def sleep(seconds: float) -> None:
@@ -7592,12 +7859,38 @@ def test_the_reaper_waits_for_the_deadline_then_deletes_until_confirmed() -> Non
             raise BackendUnavailable("down")
         return answer
 
-    assert reaper.reap("box", 1075, delete, clock=lambda: now[0], sleep=sleep)
-    assert slept[:3] == [30, 30, 15] and tries[0] == 1075 and len(tries) == 3
+    def kill(name: str) -> None:
+        assert name == "box"
+        kills.append(now[0])
+
+    reaper.reap("box", 1075, delete, kill, clock=lambda: now[0], sleep=sleep)
+    assert slept[:3] == [30, 30, 15] and tries[0] == kills[0] == 1075 and len(tries) == len(kills) == 3
 
 
-def test_a_reaper_that_never_sees_the_deletion_fails() -> None:
-    assert not reaper.reap("box", 0, lambda _: False, clock=lambda: 1.0, sleep=lambda _: None)
+def test_the_reaper_outlasts_any_outage_then_deletes() -> None:
+    """wsd is gone and the OpenShell gateway is down for a day, far past any retry budget. The reaper keeps
+    killing the workload locally and deletes the sandbox once the gateway is back."""
+    now = [0.0]
+    outage = 86_400.0
+    tries: list[float] = []
+    kills: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    def delete(name: str) -> bool:
+        tries.append(now[0])
+        if now[0] < outage:
+            raise BackendUnavailable("the gateway is down")
+        return True
+
+    def kill(name: str) -> None:
+        kills.append(now[0])
+        if len(kills) % 2:
+            raise BackendError("podman kill timed out")         # a failed kill is retried too
+
+    reaper.reap("box", 0, delete, kill, clock=lambda: now[0], sleep=sleep)
+    assert kills[0] == 0 and tries[-1] >= outage and len(tries) > 60          # 60: r2's old budget
 
 
 def test_no_runtime_expires_nothing() -> None:
@@ -7706,6 +7999,7 @@ restart and acts whether or not the queue, the pickup or reconciliation works. w
 boundary comes first; this only guarantees that nothing runs past the deadline."""
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -7716,22 +8010,24 @@ from heterodyne.sandbox.openshell import OpenShellBackend
 
 POLL_SECONDS = 30
 RETRY_SECONDS = 5
-ATTEMPTS = 60
 
 
-def reap(name: str, deadline: int, delete: Callable[[str], bool], *,
-         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep) -> bool:
-    """Wait for the deadline, then delete the sandbox until the backend confirms it. True once confirmed."""
+def reap(name: str, deadline: int, delete: Callable[[str], bool], kill: Callable[[str], None], *,
+         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep) -> None:
+    """Wait for the deadline, then, until the backend confirms the sandbox is deleted: kill its containers
+    locally, which needs no OpenShell control service, and ask the backend to delete it. It never gives up,
+    so an outage of any length ends with the workload killed meanwhile and the sandbox deleted after."""
     while (left := deadline - clock()) > 0:
         sleep(min(POLL_SECONDS, left))
-    for _ in range(ATTEMPTS):
+    while True:
+        with contextlib.suppress(BackendUnavailable, BackendError):
+            kill(name)
         try:
             if delete(name):
-                return True
+                return
         except (BackendUnavailable, BackendError):
             pass                             # retried: only a confirmed deletion ends the backstop
         sleep(RETRY_SECONDS)
-    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -7743,7 +8039,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("name")
     args = parser.parse_args(argv)
     backend = OpenShellBackend(args.openshell, args.podman, args.image, dict(os.environ))
-    return 0 if reap(args.name, args.deadline, backend.delete) else 1
+    reap(args.name, args.deadline, backend.delete, backend.kill)
+    return 0
 
 
 if __name__ == "__main__":
@@ -8304,7 +8601,7 @@ It checks what the offline suite can't:
 - **Shapes and self-test:** both managed shapes launch on the real backend, and the full self-test passes on both paths.
 - **Egress:** a non-allowlisted host is refused. From the agent's own tool, a package registry and a read-only git fetch work (r15 §7 "still to verify").
 - **No push credential:** none is inside. From the agent's own tool, a push to the very repository the fetch just read fails, and git reports the server's demand for a username it can't supply (gap 7). The fetch and the push share the host and the path, so the failure is attributable to the missing credential alone.
-- **Git (gap 13, D26):** an agent commits in a btq linked worktree; the commit lands on `btq/<id>` on the host; its move of its own `main` copy lands nowhere; the real git config isn't reachable. This runs before the network test, which also checks git first.
+- **Git (gap 13, D26):** an agent commits in a btq linked worktree; the commit lands on `btq/<id>` on the host; its move of its own `main` copy lands nowhere; the real git config isn't reachable; the worktree's `.git` can't be rewritten or moved, and a config the agent writes doesn't run in host git that follows the pointer, as btq's does. This runs before the network test, which also checks git first.
 - **The backstop:** each launch has its reaper session, and a confirmed end removes it.
 - **Read-only reviewer:** the reviewer's worktree is read-only.
 - **wsd down:** with the session socket closed, a Codex `PreToolUse` is denied with the fail-closed reason (D14, S8 capability 1).
@@ -8476,6 +8773,13 @@ def test_an_agent_commits_on_its_bead_branch_and_nothing_else_moves(live: Live) 
                         "--allow-empty", "-q", "-m", "hz-live") == 0
         assert live.run(key, "git", "update-ref", "refs/heads/main", "HEAD") == 0      # its own copy only
         assert live.run(key, "test", "!", "-e", str(live.repo / ".git" / "config")) == 0
+        dot_git, marker = spec.worktree / ".git", spec.worktree / "hz-ran"
+        pointer = dot_git.read_text()
+        assert live.run(key, "sh", "-c", f"echo 'gitdir: /tmp' > {dot_git}") != 0      # bound read-only
+        assert live.run(key, "mv", str(dot_git), "/tmp/hz-git") != 0                   # a mount point
+        assert live.run(key, "git", "config", "core.fsmonitor", f"touch {marker}") == 0  # its own config
+        git(spec.worktree, "status", "--porcelain")                     # unpinned, as btq's git runs
+        assert dot_git.read_text() == pointer and not marker.exists()
     finally:
         live.runtime.stop(key)
     assert git(live.repo, "log", "-1", "--format=%s", "btq/btq-live-3") == "hz-live"
@@ -8606,7 +8910,7 @@ This shows they recognise OpenShell's specific enforcement rather than any failu
 
 **The probe-protection controls.** Each must fail the self-test or be shown impossible:
 - **ptrace attach:** a ptrace attach to every process the workload can see is refused, and so is a write open of its memory.
-- **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. Task 9A's verifier rejects that offline, so the mount can't reach a counted probe.
+- **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. An actual overlay in such a namespace, a forged probe bound over `/run/hz/probes.py` and `/bin/sh` bound over the CLI's path, which then starts the forged probe as its child, must refuse the launch through the result channel (`agent-path-channel`), or be refused itself.
 - **probe files:** the probe's files and socket directory can't be changed.
 
 The "missing canary" control is the offline `test_an_unwritable_canary_fails_the_precondition` (Task 8). A missing canary can only arise when the precondition write fails, and that refuses the launch.
@@ -8794,6 +9098,44 @@ FILES = ("touch /run/hz/hz-new; echo $?; echo x >> /run/hz/token; echo $?; "
 NAMESPACES = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
 
 
+# The overlay attack from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
+# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces.
+NESTED = r"""
+import subprocess, sys
+cli = sys.argv[1]
+with open('/tmp/hz-forged.py', 'w') as fh:
+    fh.write(sys.stdin.read())
+inner = (f'mount --bind /tmp/hz-forged.py /run/hz/probes.py && mount --bind /bin/sh {cli} && '
+         f'{cli} -c "python3 -I /run/hz/probes.py --agent; :"')
+r = subprocess.run(['unshare', '-Urm', 'sh', '-c', inner], capture_output=True, text=True, check=False)
+print(f'nested={r.returncode} {r.stderr.strip()}')
+"""
+
+
+def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(live: Live) -> None:
+    results = b"".join((json.dumps(m) + "\n").encode() for m in
+                       [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
+    forged = ("import socket\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
+              f"s.sendall({results!r})\n")
+    out: list[str] = []
+
+    def nest(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
+                                 ["python3", "-I", "-c", NESTED, str(ctx.cli.binary)], input=forged.encode(),
+                                 timeout=EXEC_SECONDS)
+            out.append(r.stdout.decode("utf-8", "replace"))
+
+    spec = live.spec("claude", "btq-live-n9")
+    live.keys.append(spec.session_key)
+    try:
+        runtime(live, selftest=Hooked(beside_agent=nest)).launch(spec)
+    except LaunchFailed as exc:
+        assert "agent-path-channel" in str(exc), exc
+        return
+    assert out and not out[0].startswith("nested=0"), f"an overlaid probe ran and was not refused: {out}"
+
+
 def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
     spec = live.spec("claude", "btq-live-adv")
     live.launch(spec)
@@ -8845,6 +9187,6 @@ git commit -m "plan4 T15: live negative and probe-protection controls (r15 §11)
   - design approval of this plan;
   - before Tasks 14 and 15 run live: the §17 #3 host changes (settled), the agent image, and `kernel.yama.ptrace_scope = 2` (gap 15).
 - **Order:** see "Task order"; every task can start once the plan is approved.
-- **Before enabling the backend:** gap 13's resolution has landed, gap 15 is decided, and Task 15 has passed on the reference host. Only then is `[platform] sandbox = "openshell"` set on a real host.
+- **Before enabling the backend:** gap 13's resolution has landed (including the read-only `.git` pointer that contains btq's git), gap 15 is decided, and Task 15 has passed on the reference host. Only then is `[platform] sandbox = "openshell"` set on a real host.
 - **Stop rule:** if Task 15's probe-protection controls fail on the reference host, plan 4 stops (r15 §17 #12) and the choice goes back to the operator.
 - **Suite:** run the whole suite once per task, in the background with `timeout 3600`.
