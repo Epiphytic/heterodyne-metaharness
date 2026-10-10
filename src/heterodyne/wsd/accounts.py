@@ -13,6 +13,7 @@ order with their keys as of now, and the adapter's capabilities.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from heterodyne.config import Config, ConfigError, paths
@@ -81,6 +82,12 @@ class Accounts(Protocol):
         """Adoption only (D2): every login file resolves, strictly, to a regular file."""
         ...
 
+    def login_paths(self, adapter: str, account: str) -> tuple[Path, tuple[Path, ...]]:
+        """The account's login directory and login files as configured: `~` expanded, symlinks not
+        resolved. For the sandbox's credential check and Other accounts probe (§7), never hashed. Raises
+        ConfigError (path-free) for an unknown account."""
+        ...
+
     def view(self, profile: str) -> ProfileView:
         """The profile resolved now. Raises ConfigError (path-free) if the profile is gone or a listed
         account's key can't be resolved."""
@@ -135,6 +142,10 @@ class ConfiguredAccounts:
             return all((login_dir / f).resolve(strict=True).is_file() for f in LOGIN_FILES[adapter])
         except (OSError, RuntimeError, ValueError, KeyError, ConfigError):
             return False
+
+    def login_paths(self, adapter: str, account: str) -> tuple[Path, tuple[Path, ...]]:
+        login_dir = paths.expand(self._configured_dir(adapter, account), self.env)
+        return login_dir, tuple(login_dir / f for f in LOGIN_FILES[adapter])
 
     def view(self, profile: str) -> ProfileView:
         spec = self.profiles.get(profile)
