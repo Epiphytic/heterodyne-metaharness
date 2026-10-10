@@ -235,7 +235,8 @@ def wip_of(rig: Rig, rec: DeferralRow) -> str | None:
     if not shas:
         return None
     [sha] = shas
-    assert gitwip.find_wip(rig.worktree(rec.bead), f"defer:{rec.session_key}:{rec.number}") == sha
+    assert gitwip.find_wip(gitwip.pin(rig.repo, rig.worktree(rec.bead), f"btq/{rec.bead}"),
+                           f"defer:{rec.session_key}:{rec.number}") == sha
     return sha
 
 

@@ -54,6 +54,7 @@ class LaunchSpec:
     native_id: str | None = None
     account: str = "default"
     model: str = ""
+    repo: Path | None = None    # the bead's repository, as recorded: the only trusted source of its git dirs
 
 
 @dataclass(frozen=True)
