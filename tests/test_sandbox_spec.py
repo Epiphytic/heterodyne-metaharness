@@ -186,3 +186,53 @@ def test_login_binds_must_be_exactly_the_chosen_files_read_only(tmp_path: Path) 
     for logins in ((), (replace(login, read_only=False),), (login, login)):
         with pytest.raises(SpecRefused, match="login binds"):
             check_credentials(replace(spec, logins=logins), protected(tmp_path), tmp_path / "home")
+
+
+def _other_with_outward_link(tmp_path: Path) -> Path:
+    """Another account's login directory holding `packages`, a symlink out of it to an innocent directory."""
+    other = tmp_path / "home" / ".codex-b"
+    other.mkdir(parents=True)
+    (other / "auth.json").write_text("{}")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (other / "packages").symlink_to(outside)
+    return other
+
+
+def test_a_route_through_another_login_dir_is_refused_even_if_it_leads_out(tmp_path: Path) -> None:
+    """The source's own path and its canonical one both lie outside `.codex-b`, but the kernel walks
+    through it: `alias` resolves into it, and only then does `packages` lead out."""
+    other = _other_with_outward_link(tmp_path)
+    (tmp_path / "alias").symlink_to(other)
+    spec = build_spec(spec_input(tmp_path))
+    bad = replace(spec, binds=(*spec.binds, Bind(tmp_path / "alias" / "packages", Path("/mnt/x"), True)))
+    with pytest.raises(SpecRefused, match="another account's login directory"):
+        check_credentials(bad, protected(tmp_path), tmp_path / "home")
+
+
+def test_dot_dot_is_resolved_against_the_resolved_prefix(tmp_path: Path) -> None:
+    """`up/..` is `.codex-b` to the kernel, since `up` resolves into it; lexically it is `tmp_path`."""
+    other = _other_with_outward_link(tmp_path)
+    (other / "inner").mkdir()
+    (tmp_path / "up").symlink_to(other / "inner")
+    spec = build_spec(spec_input(tmp_path))
+    source = tmp_path / "up" / ".." / "packages"
+    bad = replace(spec, binds=(*spec.binds, Bind(source, Path("/mnt/x"), True)))
+    with pytest.raises(SpecRefused, match="another account's login directory"):
+        check_credentials(bad, protected(tmp_path), tmp_path / "home")
+
+
+def test_dot_dot_out_of_a_plain_directory_passes(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    spec = build_spec(spec_input(tmp_path))
+    ok = replace(spec, binds=(*spec.binds, Bind(tmp_path / "a" / ".." / "b", Path("/mnt/x"), True)))
+    check_credentials(ok, protected(tmp_path), tmp_path / "home")
+
+
+def test_a_symlink_loop_in_a_source_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    spec = build_spec(spec_input(tmp_path))
+    bad = replace(spec, binds=(*spec.binds, Bind(tmp_path / "loop", Path("/mnt/x"), True)))
+    with pytest.raises(SpecRefused, match="symbolic links"):
+        check_credentials(bad, protected(tmp_path), tmp_path / "home")

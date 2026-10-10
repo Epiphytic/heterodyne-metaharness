@@ -30,6 +30,7 @@ SYSTEM_READ_WRITE = ("/tmp", "/dev/null", "/dev/tty", "/dev/pts")  # noqa: S108 
 READ_ONLY_ROLES = frozenset({"reviewer"})
 CURL = "/usr/bin/curl"
 MAX_GENERATION = 9999
+MAX_SYMLINKS = 40               # the kernel's limit on links followed in one lookup
 MAX_SOCKET_PATH = 100           # bytes; sun_path holds 108 with its NUL, and leave room
 NAME = re.compile(r"hz[0-9a-f]{12}g[0-9]{1,4}")
 BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
@@ -224,12 +225,39 @@ def _real(path: Path) -> Path:
     return Path(os.path.realpath(path))
 
 
+def _route(path: Path) -> tuple[Path, ...]:
+    """Every path the kernel walks through to resolve `path`: each component joined to the prefix resolved
+    so far, and where that is a symlink, the components of its target in turn. `..` steps back from the
+    resolved prefix, as the kernel's does, not lexically. A component that doesn't exist is joined as is."""
+    current = Path("/")
+    pending = list(reversed((path if path.is_absolute() else Path.cwd() / path).parts[1:]))
+    route = [current]
+    links = 0
+    while pending:
+        part = pending.pop()
+        current = current.parent if part == ".." else current / part
+        route.append(current)
+        if current.is_symlink():
+            links += 1
+            if links > MAX_SYMLINKS:
+                raise SpecRefused("a bind source has too many symbolic links")
+            try:
+                target = current.readlink()
+            except OSError:
+                raise SpecRefused("a bind source can't be resolved") from None
+            current = Path("/") if target.is_absolute() else current.parent
+            pending.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    return tuple(route)
+
+
 def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) -> None:
     """D10. The login binds are exactly the chosen account's login files, read-only. No other bind's
     source, by its own path or its canonical one, equals or contains the real home, a login directory or
-    a login file, or lies inside another account's login directory (r15 §7). A source strictly inside the
-    chosen account's own login directory that holds no login file is allowed: the Codex CLI installs
-    under its default login directory, and plan 4 chooses only the default (D11)."""
+    a login file, or lies inside another account's login directory (r15 §7), by its own path or any the
+    kernel walks through to resolve it (`_route`): a symlink out of that directory doesn't excuse a route
+    into it. A source strictly inside the chosen account's own login directory that holds no login file
+    is allowed: the Codex CLI installs under its default login directory, and plan 4 chooses only the
+    default (D11)."""
     want = {_real(p) for p in protected.chosen_files}
     got = [_real(b.source) for b in spec.logins]
     if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
@@ -244,5 +272,5 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
                 raise SpecRefused("a bind would expose the real home directory")
             if any(p.is_relative_to(source) for p in guarded):
                 raise SpecRefused("a bind would expose a login directory or login file")
-            if any(source.is_relative_to(d) for d in other_dirs):
-                raise SpecRefused("a bind would reach into another account's login directory")
+        if any(q.is_relative_to(d) for q in (b.source, *_route(b.source)) for d in other_dirs):
+            raise SpecRefused("a bind would reach into another account's login directory")
