@@ -1,7 +1,0 @@
-Reviewer: gpt-6.1-sol. Reviewed commit: 8f8cbaa. Verdict: REVISE.
-
-1. [BLOCKING] `.github/workflows/ci.yml:63` — `max-parallel: 1` only serializes laptop matrix entries within one workflow run. The concurrency group at line 10 differs for each PR and for main, so separate runs can still occupy opposite laptop listeners simultaneously. A roughly 30-minute Linux job can therefore make another run’s macOS start hook exceed the documented 900-second wait. **Fix:** add a shared job-level concurrency group to `test-laptop`, independent of ref and matrix platform, with `cancel-in-progress: false`. Use `queue: max` to retain multiple waiting jobs; the default queue replaces older pending jobs. This protects this repository; contention from other repositories sharing laptop-ci requires pool-level admission control before runner assignment. [GitHub concurrency documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
-
-2. [NON-BLOCKING] `.github/workflows/ci.yml:42` and `:87` — The pytest bases live outside the runner-owned workspace. Ordinary failures reach the cleanup steps, but forced termination or runner loss can leave `/tmp/hz*` directories behind on persistent hosts; workspace cleanup does not reclaim them. **Fix:** place the short bases under an attempt-owned directory reclaimed by the supervisor, or register their exact paths for ownership-verified cleanup after process termination.
-
-REVISE
