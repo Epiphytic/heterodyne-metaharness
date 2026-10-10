@@ -5,7 +5,6 @@ import types
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import NoReturn
 
 import pytest
 from sandbox_env import RuntimeRig, launch_spec, runtime_rig, short_dir
@@ -16,8 +15,9 @@ from heterodyne.sandbox import reaper
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record
+from heterodyne.sandbox.spec import sandbox_name
 from heterodyne.wsd import gitwip
-from heterodyne.wsd.runtime import NoRuntime, RuntimeUnavailable
+from heterodyne.wsd.runtime import LaunchFailed, NoRuntime, RuntimeUnavailable
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import Reason
 
@@ -108,7 +108,7 @@ def test_an_unconfirmed_lifetime_stop_keeps_its_wip_owed(rig: RuntimeRig, retry:
     assert (owed.phase, owed.stop_reason, owed.wip_mark) == (
         Phase.STOPPING, "lifetime", f"lifetime:{spec.session_key}:1")
     assert wip_marks(rig) == []
-    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))      # the backstop stays
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))      # the backstop stays
     if retry == "expire":
         rig.runtime.expire("alpha", deadline)
     else:
@@ -128,7 +128,7 @@ def test_a_sandbox_the_reaper_deleted_ends_with_its_lifetime_wip(rig: RuntimeRig
     after = record(rig, spec.session_key)
     assert (after.phase, after.stop_reason, after.wip_mark) == (Phase.ENDED, "lifetime", "")
     assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
-    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
 
 
 @needs_tools
@@ -190,6 +190,39 @@ def test_a_failed_wip_commit_is_recorded_and_retried(rig: RuntimeRig,
     rec = record(rig, spec.session_key)
     assert (rec.error, rec.wip_mark) == ("", "")
     assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
+
+
+@needs_tools
+def test_a_create_that_times_out_keeps_its_watcher_through_cleanup(rig: RuntimeRig) -> None:
+    """T11 r2: a create that timed out may still complete. wsd's cleanup confirms the sandbox absent and
+    ends the launch, but the generation's watcher stays: if the create lands and wsd then crashes, the
+    watcher is all that stops it at its deadline."""
+    spec = launch_spec(rig, "p-one")
+    rig.backend.create_late = 1
+    with pytest.raises(LaunchFailed, match="timed out"):
+        rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.created) == (Phase.ENDED, False)
+    rig.backend.finish_creates()                         # the create lands; wsd crashes and does nothing more
+    assert rec.sandbox in rig.backend.boxes
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
+    assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]          # it watches exactly that sandbox
+
+
+@needs_tools
+def test_the_next_generation_never_removes_an_earlier_watcher(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.backend.create_late = 1
+    with pytest.raises(LaunchFailed):
+        rig.runtime.launch(spec)
+    rig.runtime.launch(replace(spec, generation=2))
+    names = [rig.runtime.reaper_name(spec.session_key, g) for g in (1, 2)]
+    assert all(rig.tmux.has_session(n) for n in names)
+    rig.backend.finish_creates()                         # generation 1's create lands after 2 launched
+    assert sandbox_name(spec.session_key, 1) in rig.backend.boxes
+    rig.runtime.stop(spec.session_key)
+    assert rig.backend.boxes == {}                       # every sandbox of the key goes with the end
+    assert rig.tmux.has_session(names[0]) and not rig.tmux.has_session(names[1])
 
 
 @needs_tools
@@ -328,6 +361,37 @@ def test_the_reaper_outlives_a_create_that_comes_after_its_deadline() -> None:
     assert killed == deleted == [now[0]] and now[0] == 4 * reaper.POLL_SECONDS and boxes == set()
 
 
+def test_a_watcher_whose_sandbox_stays_absent_exits_after_its_bound() -> None:
+    now = [0.0]
+    tries: list[float] = []
+
+    def delete(name: str) -> bool:
+        tries.append(now[0])
+        return True
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    reaper.reap("box", 100, delete, lambda _: None, clock=lambda: now[0], sleep=sleep)
+    assert tries[0] == 100 and 100 + reaper.LINGER_SECONDS <= tries[-1] < 100 + reaper.LINGER_SECONDS + 30
+
+
+def test_past_its_bound_a_watcher_still_waits_for_a_confirmed_deletion() -> None:
+    now = [0.0]
+    late = reaper.LINGER_SECONDS + 3_600.0
+
+    def delete(name: str) -> bool:
+        if now[0] < late:
+            raise BackendUnavailable("the gateway is down")
+        return True
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    reaper.reap("box", 0, delete, lambda _: None, clock=lambda: now[0], sleep=sleep)
+    assert late <= now[0] < late + 5
+
+
 def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Task 4's `reaper_argv` and `main` agree, so the backstop wsd starts is the one tested here."""
     backend = OpenShellBackend("/x/openshell", "/x/podman", "img:1", {"PATH": "/usr/bin"})
@@ -336,15 +400,13 @@ def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyP
     assert argv[module - 2:module] == ["-I", "-m"]
     seen: list[tuple[str, int, str, str, str]] = []
 
-    def reap(name: str, deadline: int, delete: object, kill: object) -> NoReturn:
+    def reap(name: str, deadline: int, delete: object, kill: object) -> None:
         assert isinstance(delete, types.MethodType) and isinstance(delete.__self__, OpenShellBackend)
         backend = delete.__self__
         seen.append((name, deadline, backend.openshell, backend.podman, backend.image))
-        raise Killed
 
     monkeypatch.setattr(reaper, "reap", reap)
-    with pytest.raises(Killed):
-        reaper.main(argv[module + 1:])
+    assert reaper.main(argv[module + 1:]) == 0
     assert seen == [("box", 1075, "/x/openshell", "/x/podman", "img:1")]
 
 
