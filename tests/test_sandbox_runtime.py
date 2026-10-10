@@ -15,6 +15,7 @@ from wsd_env import Clock
 from heterodyne.agents.base import HOOK_EVENTS
 from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record, write_record
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name
+from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
 
@@ -614,3 +615,83 @@ def test_a_crashed_wsds_socket_path_is_removed(rig: RuntimeRig) -> None:
     rig.tmux.kill(record(rig, spec.session_key).tmux_session)
     assert rig.runtime.sessions("alpha") == []
     assert not os.path.lexists(path)
+
+
+# --- Codex r2: a socket that won't close, a vanished record, a tmux server that can't be reached ---
+
+
+def test_a_socket_that_wont_close_still_cleans_up_the_rest(rig: RuntimeRig,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-one")
+    real = SessionServer.close
+    fails = [True]
+
+    def close(self: SessionServer) -> None:
+        if fails:
+            raise PermissionError("the socket can't be unlinked")
+        real(self)
+
+    monkeypatch.setattr(SessionServer, "close", close)
+    rig.selftest.exec_fail = "outer-fence-network-none"
+    with pytest.raises(LaunchUncertain):
+        rig.runtime.launch(spec)
+    assert rig.backend.boxes == {} and not rig.tmux.has_session(rig.runtime.tmux_name(spec.session_key))
+    assert record(rig, spec.session_key).phase is not Phase.ENDED       # unconfirmed, so not ended
+    assert spec.session_key in rig.runtime.servers                      # kept, so the next end closes it
+    fails.clear()
+    assert rig.runtime.sessions("alpha") == []
+    assert record(rig, spec.session_key).phase is Phase.ENDED and rig.runtime.servers == {}
+
+
+def test_a_record_that_vanishes_after_create_leaves_a_hold(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    layout = rig.runtime.layout(spec.session_key)
+
+    def vanish() -> None:
+        agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+        layout.record.unlink()
+
+    rig.selftest.during_exec = vanish
+    rig.selftest.exec_fail = "outer-fence-network-none"
+    before = host_tip(rig, "btq/btq-1")
+    with pytest.raises(LaunchUncertain):
+        rig.runtime.launch(spec)
+    assert gone(rig, spec.session_key)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)              # rewritten as a hold, never landed
+    made = agent_git_tip(rig, spec.session_key)
+    assert host_tip(rig, "btq/btq-1") == before != made
+    with pytest.raises(LaunchFailed, match="not landed"):
+        rig.runtime.launch(spec)
+    assert agent_git_tip(rig, spec.session_key) == made                  # the evidence is kept
+
+
+def test_a_git_directory_without_its_record_refuses_a_fresh_launch(rig: RuntimeRig) -> None:
+    """Even when no hold could be written: the private git directory may hold commits, and a fresh launch
+    would reseed it."""
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    made = agent_git_tip(rig, spec.session_key)
+    rig.runtime.stop(spec.session_key)
+    rig.runtime.layout(spec.session_key).record.unlink()
+    with pytest.raises(LaunchFailed, match="git directory"):
+        rig.runtime.launch(spec)
+    assert agent_git_tip(rig, spec.session_key) == made and rig.backend.created == [
+        sandbox_name(spec.session_key, 1)]
+
+
+def test_a_tmux_server_it_cant_reach_never_confirms_the_pane_gone(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert rig.tmux.socket_path is not None
+    rig.tmux.socket_path.chmod(0)
+    try:
+        with pytest.raises(RuntimeUnavailable, match="could not be confirmed"):
+            rig.runtime.stop(spec.session_key)
+        assert record(rig, spec.session_key).phase is Phase.STOPPING
+    finally:
+        rig.tmux.socket_path.chmod(0o700)
+    rig.runtime.stop(spec.session_key)
+    assert record(rig, spec.session_key).phase is Phase.ENDED
+    assert not rig.tmux.has_session(rig.runtime.tmux_name(spec.session_key))

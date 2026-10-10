@@ -22,6 +22,10 @@ LAUNCHER_FAILED = "tmux server could not be started through the launcher"
 NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 
 
+# has-session's own words for a session that isn't there (tmux 3.4).
+GONE = ("can't find session", "no server running on ", "server exited unexpectedly", "lost server")
+
+
 class TmuxError(RuntimeError):
     pass
 
@@ -65,6 +69,21 @@ class Tmux:
 
     def has_session(self, name: str) -> bool:
         return self._run("has-session", "-t", f"={name}", check=False).returncode == 0
+
+    def session_absent(self, name: str) -> bool:
+        """True only when tmux itself says there is no such session: the server can't find it, no server
+        listens on the socket (or the socket doesn't exist), or the server exited while it asked (it does
+        once its last session is killed; no session outlives it). has_session reads every failure as
+        absence; here any other failure (a socket it can't connect to, a timeout) raises TmuxError, since
+        it says nothing about the session."""
+        proc = self._run("has-session", "-t", f"={name}", check=False)
+        if proc.returncode == 0:
+            return False
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        if detail.startswith(GONE) or (
+                detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)")):
+            return True
+        raise TmuxError(f"tmux has-session failed: {detail}")
 
     def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
                     unset: Sequence[str] = ()) -> None:

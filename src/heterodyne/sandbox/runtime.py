@@ -64,6 +64,7 @@ POLL_SECONDS = 0.1
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
+RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
 
 
 class Phase(StrEnum):
@@ -208,6 +209,9 @@ class SandboxRuntime:
             raise LaunchFailed("a sandbox can't hold the main worktree: its git directory is inside it")
         layout = self.layout(spec.session_key)
         prev = read_record(layout)
+        if prev is None and os.path.lexists(layout.git):
+            # D26: a record lost after seeding; the directory may hold commits, and seeding would remove them.
+            raise LaunchFailed("the session's git directory exists but its record is gone; inspect it")
         if prev is not None and prev.phase is not Phase.ENDED:
             if prev.phase is Phase.RUNNING and self._alive(prev, self._names()):
                 return self._started(prev)              # idempotent: a live session is left alone
@@ -428,7 +432,15 @@ class SandboxRuntime:
             # and pane still go, by the identity this launch holds, and the listing stays held.
             self._teardown(rec, interrupt=False)
             return LaunchUncertain(reason)
-        rec = msgspec.structs.replace(current or rec, error=reason)
+        if current is None:
+            # The record this launch wrote is gone, so nothing says what it reached: the sandbox and pane
+            # still go, nothing is landed, and a hold takes the record's place until a human looks.
+            gone = self._teardown(rec, interrupt=False)
+            with contextlib.suppress(OSError):
+                write_record(layout, msgspec.structs.replace(
+                    rec, phase=Phase.ENDED if gone else Phase.STOPPING, unlanded=True, error=RECORD_LOST))
+            return LaunchUncertain(reason)
+        rec = msgspec.structs.replace(current, error=reason)
         if self._end(rec, interrupt=False):
             return LaunchFailed(reason)
         return LaunchUncertain(reason)
@@ -504,10 +516,15 @@ class SandboxRuntime:
     def _teardown(self, rec: SessionRecord, *, interrupt: bool) -> bool:
         """Close the generation's socket, interrupt (if asked) and kill the pane, delete every sandbox of
         the key. True only once the socket path, the pane and every listed sandbox are confirmed gone."""
-        server = self.servers.pop(rec.key, None)
-        if server is not None:
-            server.close()
+        server = self.servers.get(rec.key)
         socket_gone = True
+        if server is not None:
+            try:
+                server.close()
+            except OSError:
+                socket_gone = False             # kept, so the next end closes it again
+            else:
+                del self.servers[rec.key]
         for path in (self.layout(rec.key).socket(rec.generation),
                      self.layout(rec.key).probe_socket(rec.generation)):
             try:
@@ -519,7 +536,7 @@ class SandboxRuntime:
             if interrupt and tmux.has_session(rec.tmux_session) and not tmux.pane_dead(rec.tmux_session):
                 tmux.send_key(rec.tmux_session, "Escape")
             tmux.kill(rec.tmux_session)
-            pane_gone = not tmux.has_session(rec.tmux_session)
+            pane_gone = tmux.session_absent(rec.tmux_session)   # an unreachable server confirms nothing
         except TMUX_ERRORS:
             pane_gone = False
         prefix = f"{short_id(rec.key)}g"
