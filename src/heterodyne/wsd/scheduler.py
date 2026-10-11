@@ -193,6 +193,7 @@ class Scheduler:
         else:
             j.unhold(name, Reason.ACTIONS_UNRECONCILED)
         try:
+            self.d.runtime.expire(name, now)      # §7: a session at its lifetime ends; the sweep resumes it
             sweep(self.parker)
             for op in j.ops_open(name):
                 self.replay(op)

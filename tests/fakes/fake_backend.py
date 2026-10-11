@@ -30,6 +30,8 @@ class FakeBackend:
     boxes: dict[str, _Box] = field(default_factory=dict[str, _Box])
     extra: set[str] = field(default_factory=set[str])         # listed names the runtime didn't create
     create_failures: int = 0
+    create_late: int = 0                  # the next N creates time out; each lands at `finish_creates`
+    pending: list[SandboxSpec] = field(default_factory=list[SandboxSpec])
     delete_unconfirmed: int = 0
     list_failures: int = 0
     created: list[str] = field(default_factory=list[str])
@@ -51,12 +53,23 @@ class FakeBackend:
     def create(self, spec: SandboxSpec, scratch: Path) -> None:
         if not self.up:
             raise BackendUnavailable("the fake backend is down")
+        if self.create_late:
+            self.create_late -= 1
+            self.pending.append(spec)
+            raise BackendError("sandbox create timed out")
         paths = {str(b.target): str(b.source) for b in spec.binds if b.target != b.source}
         self.boxes[spec.name] = _Box(spec, paths)
         self.created.append(spec.name)
         if self.create_failures:
             self.create_failures -= 1
             raise BackendError("sandbox create failed")
+
+    def finish_creates(self) -> None:
+        """Creates that timed out complete now, as an outstanding OpenShell create can."""
+        for spec in self.pending:
+            self.boxes[spec.name] = _Box(spec, {str(b.target): str(b.source) for b in spec.binds
+                                                if b.target != b.source})
+        self.pending.clear()
 
     def _host(self, box: _Box, text: str) -> str:
         if not box.paths:

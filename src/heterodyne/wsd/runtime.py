@@ -109,6 +109,12 @@ class AgentRuntime(Protocol):
         Raises RuntimeUnavailable if it can't confirm the session has ended."""
         ...
 
+    def expire(self, ws: str, now: int) -> None:
+        """Stop each of the workstream's sessions whose maximum lifetime is up (§7): at a turn boundary
+        once the stop window opens, by a hard interrupt at the deadline. `now` is the scheduler's clock.
+        Raises RuntimeUnavailable if a stop can't be confirmed. The sweep then resumes the bead."""
+        ...
+
 
 class NoRuntime:
     """The runtime until plan 4: it launches nothing, and since it can't list sessions it never lets wsd
@@ -125,6 +131,9 @@ class NoRuntime:
 
     def stop(self, session_key: str) -> None:
         raise RuntimeUnavailable("no agent runtime is configured")
+
+    def expire(self, ws: str, now: int) -> None:
+        return None                  # it runs nothing
 
 
 class ActionReconciler(Protocol):

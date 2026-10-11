@@ -98,6 +98,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     repo: str = ""                    # the bead's repository, as the launch named it (D26)
     unlanded: bool = False            # the session's commits could not be landed: a human looks first
     seeded: bool = False              # this generation's private git directory exists and must be landed
+    created: bool = False             # backend.create returned: no create is outstanding (the watcher may go)
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -158,13 +159,14 @@ class SandboxRuntime:
     def tmux_name(self, key: str) -> str:
         return f"wsd-{short_id(key)}"
 
-    def reaper_name(self, key: str) -> str:
-        return f"wsd-{short_id(key)}-r"
+    def reaper_name(self, key: str, generation: int) -> str:
+        """Per generation, like the sandbox it watches (`sandbox_name`): no later launch replaces it."""
+        return f"wsd-{short_id(key)}-r{generation}"
 
     def _reaper(self, rec: SessionRecord) -> None:
         """D13's backstop: a process in wsd's tmux server (its own systemd scope, so it outlives wsd) that
         deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
-        name = self.reaper_name(rec.key)
+        name = self.reaper_name(rec.key, rec.generation)
         self.c.tmux.kill(name)
         self.c.tmux.new_session(name, self.c.sessions, self.backend.reaper_argv(rec.sandbox, rec.deadline))
 
@@ -254,6 +256,36 @@ class SandboxRuntime:
             return
         if not self._end(rec, interrupt=True):
             raise RuntimeUnavailable("the session's end could not be confirmed")
+
+    def expire(self, ws: str, now: int) -> None:
+        """D13: `_end(..., lifetime=True)` makes the stop durable, lands the generation's commits and then
+        the WIP; this only decides when, and replays what a crash left owed. An unlanded session's mark
+        stays owed and is never committed here (`_settle_wip`)."""
+        margin = self.c.settings.stop_margin_seconds
+        failed: list[str] = []                   # every session is tried; a failure is raised after the pass
+        for rec in self._records():
+            if rec.ws != ws:
+                continue
+            if rec.phase is Phase.ENDED:
+                if rec.wip_mark:
+                    try:
+                        self._settle_wip(self.layout(rec.key), rec)    # a crash came between end and commit
+                    except OSError:
+                        failed.append("the session record can't be written")
+                continue
+            if rec.stop_reason == "lifetime":
+                hard = True                      # a lifetime stop already begun: finish it
+            elif rec.phase is not Phase.RUNNING or now < rec.deadline - margin:
+                continue
+            else:
+                hard = now >= rec.deadline
+                server = self.servers.get(rec.key)
+                if not hard and (server is None or not server.turns().idle):
+                    continue                     # not at a turn boundary: wait for one, or the deadline
+            if not self._end(rec, interrupt=hard, lifetime=True):
+                failed.append("a session at its maximum lifetime could not be stopped")
+        if failed:
+            raise RuntimeUnavailable(failed[0])
 
     # --- the launch ---
 
@@ -350,6 +382,7 @@ class SandboxRuntime:
                                        expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
         self.backend.create(sp, scratch)
+        rec = self._phase(layout, rec, created=True)
         self._trust(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,
@@ -502,8 +535,9 @@ class SandboxRuntime:
             journaled = False                # stop it anyway; landing and `ended` wait for a durable record
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
-        with contextlib.suppress(*TMUX_ERRORS):
-            self.c.tmux.kill(self.reaper_name(rec.key))
+        if rec.created:              # a create that failed or timed out may still land: its watcher stays
+            with contextlib.suppress(*TMUX_ERRORS):
+                self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
         try:
             rec = self._land(layout, rec)    # D26: before any host git (the lifetime WIP, a park) runs
             rec = self._phase(layout, rec, phase=Phase.ENDED)

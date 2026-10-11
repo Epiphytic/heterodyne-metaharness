@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: e3a274a. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/sandbox/reaper.py:32–33` — **The backstop can exit before its sandbox is created.** Task 10 starts the reaper before calling `backend.create`. If wsd pauses there until the deadline, the reaper finds no sandbox, confirms deletion and returns. When wsd resumes, it creates the sandbox without a backstop; a subsequent crash leaves that workload running past its deadline. An outstanding asynchronous create has the same race. This defect is copied from the plan. **Fix:** retain the generation’s backstop until creation is conclusively quiesced and teardown is acknowledged; absence alone cannot authorize exit. Add a delayed-create/crash regression test.
+
+2. [NON-BLOCKING] `src/heterodyne/sandbox/runtime.py:282–283` — **One failed stop prevents expiry of every subsequent session in that workstream.** With two overdue records and `_end` returning false for the first, an in-memory reproduction attempted only the first. Repeated failure also prevents later idle sessions from receiving their soft stop, leaving enforcement to their reapers. This contradicts the interface’s “stop every session” contract and is also copied from the plan. **Fix:** continue processing independent records, collect failures, then raise `RuntimeUnavailable` after the pass. Test that a failing first stop still permits the second stop and that pickup remains held.
+
+REVISE
