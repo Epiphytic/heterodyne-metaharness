@@ -1,0 +1,7 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 8f5ac6e. Verdict: REVISE.
+
+1. [BLOCKING] `tests/tier_marks.py:20–35` — Name matching misses existing safety tests that are already slow-listed: `test_a_hex_value_in_a_reply_never_reaches_the_chat` checks redaction, `test_a_stranger_is_dropped` checks authorization, and `test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm` checks latch enforcement. Both abbreviated tiers can skip them. Renaming a safety test also defeats the guard. **Fix:** classify safety tests explicitly with markers, remove these entries from `slow_tests.txt`, and reject any collected safety item marked slow. Add regression tests using these actual cases; the current regex examples do not establish the claimed guarantee.
+
+2. [NON-BLOCKING] `tests/conftest.py:40–41,48–53` — The committed tmpfs check tests writability but ignores available capacity. A small or nearly full `/dev/shm` is selected automatically, causing fixture writes and SQLite commits to fail with space errors despite available disk storage. **Fix:** require a conservative free-space threshold, fall back if directory creation fails, and test absent, unwritable, and insufficient-capacity cases. A capacity check appeared in the working tree during review, but is absent from `8f5ac6e`.
+
+REVISE
