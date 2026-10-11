@@ -135,6 +135,7 @@ def test_lost_race_tries_the_next_bead(tmp_path: Path) -> None:
     assert rig.state("btq-1") == "dropped" and rig.state("btq-2") == "running"
 
 
+@pytest.mark.safety
 def test_routing_change_is_never_executed(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
@@ -147,6 +148,7 @@ def test_routing_change_is_never_executed(tmp_path: Path) -> None:
     assert [s.bead for s in rig.runtime.launches] == ["btq-2"]
 
 
+@pytest.mark.safety
 def test_unknown_repository_is_stuck_not_guessed(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1", metadata={"repo": "elsewhere"})
@@ -213,6 +215,7 @@ def test_no_runtime_never_spends_launch_budget(tmp_path: Path) -> None:
     assert rig.state("btq-1") == "running" and rig.journal.holds(WS) == {}
 
 
+@pytest.mark.safety
 @pytest.mark.parametrize("change", ["routing", "design"])
 def test_replayed_pickup_revalidates_before_launch(tmp_path: Path, change: str) -> None:
     """Findings 5 and 6: between the claim and a replayed launch the bead moved to another workstream or
@@ -254,6 +257,7 @@ def renamed(rig: Rig, role: str = "builder") -> None:
     rig.restart()
 
 
+@pytest.mark.safety
 @pytest.mark.parametrize("liveness", [Liveness.LIVE, Liveness.UNKNOWN])
 def test_role_rename_never_frees_the_role_beside_an_old_session(tmp_path: Path, liveness: Liveness) -> None:
     """r2 finding 1: btq-1's session was launched as `coder`; the role is now `builder`. Live or unknown,
@@ -440,6 +444,7 @@ def test_unsettled_action_holds_pickup(tmp_path: Path) -> None:
     assert rig.world.claims == []
 
 
+@pytest.mark.safety
 def test_one_coder_session_at_a_time(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     for n in range(3):
@@ -452,6 +457,7 @@ def test_one_coder_session_at_a_time(tmp_path: Path) -> None:
     assert rig.state("btq-0") == "closed" and rig.runtime.coders() == ["btq-1"]
 
 
+@pytest.mark.safety
 def test_lost_claim_stops_the_session(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
@@ -474,6 +480,7 @@ def test_dead_session_is_relaunched_as_the_same_session(tmp_path: Path) -> None:
     assert rig.world.claims == ["btq-1"]
 
 
+@pytest.mark.safety
 def test_unknown_liveness_never_starts_a_second_session(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")
@@ -925,6 +932,7 @@ def test_runtime_hold_stays_until_the_runtime_lists_sessions(tmp_path: Path) -> 
     assert rig.journal.holds(WS) == {}
 
 
+@pytest.mark.safety
 def test_another_beads_uncertain_launch_refuses_new_claims(tmp_path: Path) -> None:
     """Task 6 note 2: while any LAUNCH_UNCERTAIN hold is left, nothing new is claimed (the guard alone
     would only refuse the launch, after the claim)."""
@@ -935,6 +943,7 @@ def test_another_beads_uncertain_launch_refuses_new_claims(tmp_path: Path) -> No
     assert rig.world.claims == [] and rig.journal.ops_open() == []
 
 
+@pytest.mark.safety
 def test_replayed_pickup_never_makes_a_worktree_for_a_lost_claim(tmp_path: Path) -> None:
     """Task 6 r1: ownership is checked again before the worktree is made (btq's `worktree` runs `owned`
     first), so a claim lost between the claim step and the replay ends the pickup with no worktree."""
@@ -1405,6 +1414,7 @@ def test_replay_after_a_repository_change_uses_the_recorded_placement(tmp_path: 
 # --- the pause flag can't be read ---
 
 
+@pytest.mark.safety
 def test_unreadable_pause_flag_is_paused_not_unreachable(tmp_path: Path) -> None:
     """Codex r1 finding 5: the workstream worker's state directory can't be read. paused() fails closed
     (paused) while ready() would raise: pickup claims nothing and reports the workstream PAUSED."""

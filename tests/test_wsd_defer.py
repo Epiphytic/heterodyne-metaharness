@@ -540,6 +540,7 @@ def test_the_lower_id_starts_first_and_the_other_once_the_role_frees(tmp_path: P
     claimed(rig, high)
 
 
+@pytest.mark.safety
 def test_a_deferred_bead_with_no_row_is_journal_lost_and_never_launched(tmp_path: Path) -> None:
     rig = rig_for(tmp_path)
     deferred(rig)
@@ -553,6 +554,7 @@ def test_a_deferred_bead_with_no_row_is_journal_lost_and_never_launched(tmp_path
     assert rig.runtime.calls == 1 and rig.state(B) == "stuck"
 
 
+@pytest.mark.safety
 @pytest.mark.parametrize(("hint", "after"), [(None, 30 * 60), (1, 60), (10**6, 60 * 60), (600, 600)])
 def test_an_untrusted_until_is_clamped(tmp_path: Path, hint: int | None, after: int) -> None:
     rig = rig_for(tmp_path)
@@ -672,6 +674,7 @@ def test_releasing_a_held_or_stuck_deferred_bead(tmp_path: Path, label: str, rea
     assert HELD not in clean.rig.world.beads[B].labels and NEEDS_HUMAN not in clean.rig.world.beads[B].labels
 
 
+@pytest.mark.safety
 def test_a_regated_release_never_launches_beside_another_coder(tmp_path: Path) -> None:
     rig = rig_for(tmp_path)
     deferred(rig, ACCOUNT_CHANGED)

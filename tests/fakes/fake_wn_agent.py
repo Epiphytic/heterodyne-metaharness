@@ -41,13 +41,18 @@ class FakeWnAgent:
         self._keys: dict[str, str] = {}
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._server: asyncio.Server | None = None
+        self._handlers: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         self._server = await asyncio.start_unix_server(self._handle, path=str(self.socket_path))
 
     async def stop(self) -> None:
+        """Stop listening and end every open connection. A subscription stream never ends by itself and
+        `wait_closed` waits for it, so without the cancel every stop would sit out the 2-second bound."""
         if self._server is not None:
             self._server.close()
+            for task in list(self._handlers):
+                task.cancel()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._server.wait_closed(), 2)
 
@@ -93,6 +98,9 @@ class FakeWnAgent:
         await writer.drain()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self._handlers.add(task)
         try:
             line = await reader.readline()
             if not line:
@@ -136,6 +144,7 @@ class FakeWnAgent:
                 await self._reply(writer, rid, {"type": "error", "code": "unsupported",
                                                 "message": str(kind), "retryable": False})
         finally:
+            self._handlers.discard(task)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

@@ -53,7 +53,7 @@ uv run heterodyne setup && uv run heterodyne config check
 
 `HETERODYNE_CONFIG_DIR` is exported so that both commands use the same directory. Written as a prefix (`HETERODYNE_CONFIG_DIR=… uv run heterodyne setup && uv run heterodyne config check`), it would apply to `setup` only, and `config check` would read your real host config directory.
 
-Before committing, run the repository checks: `uv run ruff check`, `uv run pyright`, `uv run pytest -q`, `python3 scripts/check_install_agnostic.py` and `uvx pre-commit run --all-files`.
+Before committing, run the repository checks: `uv run ruff check`, `uv run pyright`, `uv run pytest -q` (or `scripts/test-fast` / `scripts/test-changed` while iterating; see [docs/testing/efficiency-review.md](docs/testing/efficiency-review.md#which-command-when)), `python3 scripts/check_install_agnostic.py` and `uvx pre-commit run --all-files`.
 
 ## Configuration in one minute
 

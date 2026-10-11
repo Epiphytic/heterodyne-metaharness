@@ -86,6 +86,7 @@ def test_pane_info_reports_the_pane_id_and_pid(tmux: Tmux, tmp_path: Path) -> No
         tmux.pane_info("pi")
 
 
+@pytest.mark.safety
 def test_session_absent_is_only_tmuxs_own_word_for_it(tmux: Tmux, tmp_path: Path) -> None:
     assert tmux.socket_path is not None
     assert tmux.session_absent("s")                       # no server has started on the socket yet

@@ -192,6 +192,7 @@ def _trigger():  # noqa: ANN202
     return Trigger(TriggerKind.BACKSTOP)
 
 
+@pytest.mark.safety
 def test_corrupt_journal_refuses_to_start(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     s = settings(tmp_path)
     s.state_dir.mkdir(parents=True, mode=0o700)
@@ -202,6 +203,7 @@ def test_corrupt_journal_refuses_to_start(tmp_path: Path, capsys: pytest.Capture
     assert "left in place" in capsys.readouterr().err
 
 
+@pytest.mark.safety
 def test_second_instance_refuses(tmp_path: Path) -> None:
     s = settings(tmp_path)
     fd = instance_lock(s.instance_lock)
@@ -312,6 +314,7 @@ def hold_exclusively(path: Path) -> sqlite3.Connection:
     return other
 
 
+@pytest.mark.safety
 def test_busy_journal_at_open_exits_1_and_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                           capsys: pytest.CaptureFixture[str]) -> None:
     """Task 3: a journal another process holds is not a configuration error. wsd exits 1 (the unit
@@ -536,6 +539,7 @@ def test_idle_status_has_no_attention(tmp_path: Path) -> None:
                                  ctl.CtlRequest("status", job="pickup"),
                                  ctl.CtlRequest("tick", job="pickup", all=True),
                                  ctl.CtlRequest("reload", ws=WS), ctl.CtlRequest("reload", job="pickup")])
+@pytest.mark.safety
 def test_handler_refuses_what_the_socket_refuses(tmp_path: Path, req: ctl.CtlRequest) -> None:
     """Called directly (plan 6 may), a pause or resume without a workstream, or a tick without a job, is
     refused rather than read as a pickup of every workstream."""
@@ -781,6 +785,7 @@ def test_a_stopping_wsd_refuses_jobs_from_the_handler_too(tmp_path: Path) -> Non
     assert world.claims == []
 
 
+@pytest.mark.safety
 def test_a_closing_socket_refuses_requests_it_has_not_read(tmp_path: Path) -> None:
     calls: list[ctl.CtlRequest] = []
 
@@ -837,6 +842,7 @@ def test_close_does_not_leave_a_handler_running(tmp_path: Path, monkeypatch: pyt
     asyncio.run(scenario())
 
 
+@pytest.mark.safety
 def test_run_closes_the_journal_then_releases_the_lock(tmp_path: Path,
                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     """r1 review: run closes the journal itself, on a clean stop as on a failed startup."""
@@ -879,6 +885,7 @@ def test_a_failed_startup_closes_the_journal(tmp_path: Path, monkeypatch: pytest
     os.close(instance_lock(s.instance_lock))
 
 
+@pytest.mark.safety
 def test_undrained_jobs_end_the_process_holding_the_journal_and_lock(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A job still running after the drain must not see its journal closed, nor a second wsd start: the
@@ -930,6 +937,7 @@ def test_a_reply_over_64_kib_arrives_whole(tmp_path: Path) -> None:
     assert reply.result == "ok" and reply.data == big
 
 
+@pytest.mark.safety
 def test_a_reply_over_the_maximum_is_refused_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ctl, "MAX_REPLY", 70_000)
 
@@ -2037,6 +2045,7 @@ def reload(wsd: Wsd) -> ctl.CtlReply:
     return asyncio.run(wsd.handle(ctl.CtlRequest("reload")))
 
 
+@pytest.mark.safety
 def test_an_invalid_config_is_refused_and_the_old_settings_stay(tmp_path: Path) -> None:
     wsd = reload_wsd(tmp_path, settings(tmp_path), [ConfigError("config.toml: bad value")])
     s, ws = wsd.s, wsd.parts.schedulers[WS].ws
@@ -2065,6 +2074,7 @@ def restart_only(s: WsdSettings, change: str, tmp_path: Path) -> WsdSettings:
     ("coder_role", f"{WS}.coder_role"), ("repo", f"{WS}.repos"), ("coder_profile", f"{WS}.coder_profile"),
     ("btq_locations", "btq_locations"), ("backstop", "backstop_seconds"),
     ("reconcile", "reconcile_seconds"), ("added", "workstreams"), ("removed", "workstreams")])
+@pytest.mark.safety
 def test_a_change_outside_the_supported_set_needs_a_restart(tmp_path: Path, change: str, field: str) -> None:
     s = settings(tmp_path)
     wsd = reload_wsd(tmp_path, s, [restart_only(s, change, tmp_path)])
