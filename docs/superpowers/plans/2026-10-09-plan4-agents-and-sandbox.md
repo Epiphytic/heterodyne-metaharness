@@ -6920,7 +6920,7 @@ Codex's second review of Amendment 1 found that what the probe reads from curl t
 
 **Files:**
 - Modify:
-  - `src/heterodyne/sandbox/resources/probes.py`: `CURL`, `CAPTURE_SECONDS`, `captured`; `curl` and section 2 read through `captured`; sections 6 and 6b require a complete HTTP status.
+  - `src/heterodyne/sandbox/resources/probes.py`: `CURL`, `CAPTURE_SECONDS`, `captured`; `curl` and section 2 read through `captured`; section 6, and 6b on the agent path, require a complete, nonzero HTTP status.
   - `src/heterodyne/sandbox/runtime.py`: the exec path runs before the hook-trust step.
 - Test: `tests/test_sandbox_probes.py`, `tests/test_sandbox_runtime.py`
 
@@ -6961,7 +6961,7 @@ The probe runs no other program: every `subprocess.run` is curl, which the offli
 | `probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`, `cgroupfs-readonly` | system call results | in-process | The host's `ProcVerifier` checks the filters, the scope and the namespaces |
 | every other check | files, sockets, the environment | in-process | Per Tasks 8 and 9 |
 
-So the supervisor log corroborates the authorization decisions, and the issuer and HTTP status rest on the socket pair. This replaces Task 9A's sentence that every curl result is corroborated from outside. Sections 6 and 6b also require the status line to be a complete `http=<digits>`. An empty or cut-off output then fails, where the old check passed anything without `http=000`.
+So the supervisor log corroborates the authorization decisions, and the issuer and HTTP status rest on the socket pair. This replaces Task 9A's sentence that every curl result is corroborated from outside. Section 6, and section 6b on the agent path (where the model host must be reached), also require the status line to be a complete `http=<digits>` other than `http=000`. An empty or cut-off output then fails, where the old section 6 passed anything without `http=000` and the old 6b didn't look at the status.
 
 **What this does not cover.** A process the agent starts can still read the probe's memory at scope 1 (Task 9B's residual confidentiality), and that discloses nothing new. It can't write into the probe or its children (9B). It can signal them, which only fails its own launch.
 
@@ -6969,7 +6969,7 @@ The §11 controls:
 - **Offline (this task):**
   - every program the probe runs is `/usr/bin/curl -q`, with no input and its output on the socket pair;
   - a reopen of the capture socket through `/proc/<pid>/fd` is refused with `ENXIO`, while the same reopen of a pipe succeeds, so the test can tell the two apart;
-  - an allowlisted reach with no HTTP status fails;
+  - an allowlisted reach with no HTTP status fails, and so does the model host's agent-path reach with a missing, malformed or `http=000` status;
   - nothing runs in the sandbox before the exec path's probe, for both CLIs.
 - **Live (Task 15):** while the agent-path probe runs, a separate workload process finds each curl the probe starts, and requires both of its output descriptors to be sockets whose write open is refused.
 
@@ -7052,6 +7052,18 @@ def test_every_program_the_probe_runs_reports_on_a_socket(world: World,
         assert r["argv"][:2] == ["/usr/bin/curl", "-q"], r          # -q first: no curlrc is read
         assert r["stdout"] in world.ends and r["stderr"] == r["stdout"], r
         assert r["stdin"] == subprocess.DEVNULL and "capture_output" not in r, r
+
+
+@pytest.mark.parametrize("status", ["", "http=2x0", "http=000"], ids=["missing", "malformed", "zero"])
+def test_the_model_host_needs_an_http_status_on_the_agent_path(
+        world: World, run: Callable[[World], Results], status: str) -> None:
+    """Task 9C: reached through the proxy, but with a missing, malformed or zero HTTP status."""
+    world.path = "agent"
+    world.env["CODEX_THREAD_ID"] = "fake-thread"
+    world.curl[MODEL] = (0, status, PROXY_CA)
+    rc, results = run(world)
+    assert rc == 1
+    assert {name for name, ok in results.items() if not ok} == {"model-host-agent-path"}
 
 
 def probe_function(name: str) -> Callable[..., Any]:
@@ -7172,7 +7184,7 @@ ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() an
 check('allowlisted-host-reachable', ok, f"curl rc={cu_rc} {status} issuer='{issuer}'")
 ```
 
-In section 6b, make the call `cu_rc, cu_out, issuer, status = curl(cfg['model_host'])`. The agent branch becomes `ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer`, and the other `ok = cu_rc == 7 and 'Permission denied' in cu_out`. The evidence's first line becomes `f"{cfg['model_host']}: curl rc={cu_rc} {status} issuer='{issuer}' "`.
+In section 6b, make the call `cu_rc, cu_out, issuer, status = curl(cfg['model_host'])`. The agent branch becomes `ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'`, as in section 6, and the other `ok = cu_rc == 7 and 'Permission denied' in cu_out`. The evidence's first line becomes `f"{cfg['model_host']}: curl rc={cu_rc} {status} issuer='{issuer}' "`.
 
 - [ ] **Step 4: The exec path first, in `runtime.py`**
 
