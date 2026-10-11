@@ -39,7 +39,12 @@ from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.environ.get("HZ_LIVE_SANDBOX") != "1",
                                 reason="live sandbox checks: set HZ_LIVE_SANDBOX=1 (and HZ_LIVE=1)")
-PROFILES = {"claude": "p-one", "codex": "p-two"}
+# Test-only, for cost (Liam, T14): a cheap model with a small context on every live launch, never the
+# operator's default. Overridable by environment; production defaults are untouched.
+PROFILES = {"claude": "p-one", "codex": "p-live-codex"}
+MODELS = {"claude": os.environ.get("HZ_LIVE_SANDBOX_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
+          "codex": os.environ.get("HZ_LIVE_SANDBOX_CODEX_MODEL", "gpt-6-luna")}
+CODEX_EFFORT = 'model_reasoning_effort="low"'
 PROMPT_SECONDS = 180
 EXEC_SECONDS = 60
 
@@ -66,7 +71,8 @@ class Live:
         profile = PROFILES[cli]
         key = ids.role_session(bead, role, profile)
         return LaunchSpec("alpha", bead, role, profile, key, f"{bead} · {role}", self.worktree(bead),
-                          resume=False, native_id=key if cli == "claude" else None, repo=self.repo)
+                          resume=False, native_id=key if cli == "claude" else None, model=MODELS[cli],
+                          repo=self.repo)
 
     def launch(self, spec: LaunchSpec) -> Started:
         self.keys.append(spec.session_key)
@@ -102,8 +108,20 @@ def host_config() -> str:
         tool_env["CONTAINERS_CONF"] = os.environ["HZ_LIVE_SANDBOX_CONTAINERS_CONF"]
     pairs = ", ".join(f'{k} = "{v}"' for k, v in tool_env.items())
     image = os.environ["HZ_LIVE_SANDBOX_IMAGE"]
-    return (f'\n[platform]\nsandbox = "openshell"\n\n[sandbox]\nimage = "{image}"\n'
+    return (f'\n[profiles.p-live-codex]\nadapter = "codex"\nargs = ["-c", {CODEX_EFFORT!r}]\n'
+            f'\n[platform]\nsandbox = "openshell"\n\n[sandbox]\nimage = "{image}"\n'
             f'egress_approved = ["github.com", "pypi.org"]\ntool_env = {{ {pairs} }}\n')
+
+
+def tiny_repo(path: Path) -> Path:
+    """The scratch repository, kept small for the agents' context: a README and one file, and no
+    instructions file (AGENTS.md, CLAUDE.md)."""
+    git_repo(path)
+    (path / "README.md").write_text("hz live scratch\n")
+    (path / "hello.txt").write_text("hello\n")
+    git(path, "add", "README.md", "hello.txt")
+    git(path, "-c", "user.name=t", "-c", "user.email=t@example.org", "commit", "-q", "-m", "files")
+    return path
 
 
 @pytest.fixture(scope="module")
@@ -122,7 +140,7 @@ def live() -> Iterator[Live]:
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, OpenShellSelfTest()), backend, tmux,
-                    git_repo(root / "r"))
+                    tiny_repo(root / "r"))
         try:
             yield live
         finally:
