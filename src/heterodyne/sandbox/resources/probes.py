@@ -250,4 +250,11 @@ for c in cfg['chosen']:
 check('other-accounts', ok and bool(cfg['chosen']), '; '.join(ev))
 print(f'DONE {rc}', flush=True)     # the host passes only output that ends here
 report({'done': rc})
+if AGENT:
+    # The host checks this process again at done, by its pidfd: stay alive until it acknowledges.
+    channel.settimeout(10)
+    try:
+        channel.recv(16)
+    except OSError:
+        pass
 sys.exit(rc)

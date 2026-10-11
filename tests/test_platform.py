@@ -1,8 +1,13 @@
+import os
+import socket as _socket
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from heterodyne import platform
+from heterodyne.platform import peer_pid_checked, peer_pidfd_checked, pidfd_pid
 
 
 def test_detect_maps_supported_platforms() -> None:
@@ -45,3 +50,83 @@ def test_boot_id_macos_sysctl_failure_raises(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(platform.subprocess, "run", fake_run)
     with pytest.raises(subprocess.CalledProcessError):
         platform.boot_id("macos")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SO_PEERCRED is Linux-only")
+def test_peer_pid_checked_reads_so_peercred() -> None:
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    with a, b:
+        assert peer_pid_checked(a) == os.getpid()
+
+
+def test_peer_pid_checked_raises_on_a_closed_socket() -> None:
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    b.close()
+    a.close()
+    with pytest.raises(OSError):
+        peer_pid_checked(a)
+
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="pidfds are Linux-only")
+
+
+@linux_only
+def test_peer_pidfd_checked_pins_the_connecting_process() -> None:
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    with a, b:
+        pid, pidfd = peer_pidfd_checked(a)
+        try:
+            assert pid == os.getpid() and pidfd_pid(pidfd) == os.getpid()
+        finally:
+            os.close(pidfd)
+
+
+@linux_only
+def test_peer_pidfd_checked_refuses_a_peer_that_has_exited(tmp_path: Path) -> None:
+    """The peer connects and exits before the host looks: its pidfd shows it gone (Pid: -1)."""
+    path = tmp_path / "s"
+    with _socket.socket(_socket.AF_UNIX) as srv:
+        srv.bind(str(path))
+        srv.listen(1)
+        client = "import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])"
+        subprocess.run([sys.executable, "-I", "-c", client, str(path)], check=True, timeout=30)
+        conn, _ = srv.accept()
+        with conn, pytest.raises(OSError):
+            peer_pidfd_checked(conn)
+
+
+@linux_only
+def test_peer_pidfd_checked_refuses_disagreeing_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "peer_pid_checked", lambda s: os.getpid() + 1)
+    before = len(os.listdir("/proc/self/fd"))  # noqa: PTH208
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    with a, b, pytest.raises(OSError, match="disagree"):
+        peer_pidfd_checked(a)
+    assert len(os.listdir("/proc/self/fd")) == before  # noqa: PTH208 - the pidfd was closed
+
+
+def test_peer_pidfd_checked_refuses_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    a, b = _socket.socketpair(_socket.AF_UNIX)
+    with a, b, pytest.raises(OSError):
+        peer_pidfd_checked(a)
+
+
+@pytest.mark.parametrize("machine, ok", [("x86_64", True), ("aarch64", True), ("mips64", False),
+                                          ("parisc64", False), ("sparc64", False)])
+def test_so_peerpidfd_falls_back_to_77_only_on_generic_architectures(
+        monkeypatch: pytest.MonkeyPatch, machine: str, ok: bool) -> None:
+    monkeypatch.delattr(_socket, "SO_PEERPIDFD", raising=False)
+    monkeypatch.setattr(platform.os, "uname", lambda: os.uname_result(("Linux", "h", "r", "v", machine)))
+    if ok:
+        assert platform._so_peerpidfd() == 77  # noqa: SLF001
+    else:
+        with pytest.raises(OSError):
+            platform._so_peerpidfd()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("text", ["pos:\t0\nPid:\t-1\n", "pos:\t0\n", "pos:\t0\nPid:\tx\n"])
+def test_pidfd_pid_refuses_a_gone_or_unreadable_pidfd(tmp_path: Path, text: str) -> None:
+    (tmp_path / "9").write_text(text)
+    with pytest.raises(OSError):
+        pidfd_pid(9, fdinfo=tmp_path)

@@ -60,6 +60,7 @@ class World:
         default_factory=lambda: {"approve": FORBIDDEN, "hook_event": '{"ok": true}'})
     curl: dict[str, tuple[int, str, str]] = field(default_factory=dict[str, tuple[int, str, str]])
     reported: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    acks: list[int] = field(default_factory=list[int])      # len(reported) at each wait for the ACK
 
     def at(self, path: str | os.PathLike[str]) -> Path:
         return self.root / str(path).lstrip("/")
@@ -119,6 +120,11 @@ def fake_socket(world: World) -> type:
             self.sent += data
             if self.peer.endswith("p.sock"):
                 world.reported += [json.loads(ln) for ln in data.splitlines()]
+
+        def recv(self, n: int) -> bytes:
+            if self.peer.endswith("p.sock"):
+                world.acks.append(len(world.reported))     # the probe waits for the host's ACK
+            return b"ack\n"
 
         def makefile(self) -> io.StringIO:
             return io.StringIO(world.replies[json.loads(self.sent)["type"]] + "\n")
@@ -187,8 +193,10 @@ def test_the_agent_path_allows_the_cli_tool_env_and_reports_every_result(
     world.env["CODEX_THREAD_ID"] = "fake-thread"
     rc, results = run(world)
     assert rc == 0 and set(AGENT_CHECKS) <= results.keys() and all(results.values())
-    assert {r["check"] for r in world.reported if "check" in r} == results.keys()
+    assert sorted(r["check"] for r in world.reported if "check" in r) == sorted(AGENT_CHECKS)
+    assert results.keys() == set(AGENT_CHECKS)
     assert world.reported[-1] == {"done": 0}
+    assert world.acks == [len(world.reported)]           # done, then one wait for the ACK, then the exit
 
 
 def _env(**extra: str) -> Callable[[World], None]:
