@@ -56,12 +56,13 @@ The plan also draws on these sources:
 - Spike S8's open items (`docs/spikes/s8-marmot-only.md`) cover the Codex launch shape and hook trust.
 - ADR revision 15 accepts OpenShell's broker answers as §7's direct-network proof and adds the OpenShell-specific rules. The tasks that implement them are marked **[r15]** (see "ADR revision 15" below).
 
-**Status:** revision 5, **Amendment 1 (D23: seccomp and Landlock, ptrace_scope = 1)**. Revision 4 folded in the approved ADR r15 and addressed the first and second cross-model reviews. **Revision 4 is design-approved:** btq-c9mml, approved by Liam through Marmot ask dh3g, pinned at plan4 `9eab619` under ADR r15 `28e3df4`. The tasks built so far (9A and 12 among them) follow it. **Amendment 1's design approval is not set**, and Task 9B waits for it. The §17 decisions the plan depends on are listed below. Gap 13 (git in a sandboxed linked worktree) is resolved in the plan (Task 7A), btq's unpinned git included.
+**Status:** revision 5, **Amendment 1 (D23: seccomp and Landlock, ptrace_scope = 1)**. Revision 4 folded in the approved ADR r15 and addressed the first and second cross-model reviews. **Revision 4 is design-approved:** btq-c9mml, approved by Liam through Marmot ask dh3g, pinned at plan4 `9eab619` under ADR r15 `28e3df4`. The tasks built so far (9A and 12 among them) follow it. **Amendment 1's design approval is not set**, and Tasks 9B and 9C wait for it. The §17 decisions the plan depends on are listed below. Gap 13 (git in a sandboxed linked worktree) is resolved in the plan (Task 7A), btq's unpinned git included.
 
 *Amendment 1 (2026-10-11).* Revision 4 required `kernel.yama.ptrace_scope = 2` (gap 15). OpenShell 0.1.2 can't run there: the workload's first process runs a required same-UID task-memory probe before it starts any workload (`crates/openshell-sandbox/src/main.rs:197`, `task_memory::probe_child_access`), and with every capability required to be zero (`main.rs:171`) nothing can let it pass at 2 or 3. v0.1.3 and v0.1.4-pre.2 keep both (v0.1.3 `main.rs:123`, `:149-151`), and no setting skips the probe (`crates/openshell-core/src/sandbox_env.rs`). The operator chose to keep the reference host at 1. The amendment changes:
 - **D23** now rests on OpenShell's child seccomp filter and Landlock, with Yama at exactly 1;
 - **gap 15** and its §17 row: 1 is required, 0 is refused, and 2 or 3 fail before the sandbox is created;
 - **Task 9B** (new) amends the merged Task 9A code: the scope rule, a seccomp check on every workload task, `/proc` read-only and no GPU, and exact denial answers in `probe-tamper-denied`;
+- **Task 9C** (new, from the second cross-model review of the amendment): what the probe reads from curl comes back on a socket pair, not a pipe, and the exec path runs first in a new sandbox;
 - Task 9A's prose (its merged code is unchanged here), the Task order, Tasks 14 and 15, and the §7 and §11 coverage rows.
 
 **The ADR stays r15.** r15 §7 requires tamper denial, checked on every launch. It names Yama only as a candidate. The text at design-repo `28e3df4` (`docs/adr/0001-workstreams-v2.md:673`) reads: "deny the workload every way to tamper with the probe during its run (ptrace, `/proc/<pid>/mem`, mounts over the probe's files), and have the self-test check that denial each time. Candidates include a Yama `ptrace_scope` setting and a probe the workload's processes can't trace; S5 measured none of them." This is the only mention of Yama or `ptrace_scope` in r15. Amendment 1 still denies each of the three ways and checks the denial on every launch. It only changes the mechanism, which r15 leaves to the plan, so no r16 is needed. §11's adversarial controls (`:957-961`) are unchanged (Task 15).
@@ -86,7 +87,7 @@ The plan also draws on these sources:
 - **The pre-commit install-agnostic hook rejects absolute `/home` paths** in committed files. Tests build paths from `tmp_path`.
 - **Long commands** use `timeout`. The full suite runs in the background with `timeout 3600` (about 27 minutes). Each task's own tests run in the foreground.
 - **Review rule:** every task ends with a review by a **different LLM than the implementer** (cross-model), or by a fresh-context adversarial agent when only one LLM is available. The brief names the diff range and the ADR sections, and asks for `[BLOCKING]`/`[NON-BLOCKING]` findings. Every blocking finding is fixed or rebutted. Review runs at most three cycles; the third asks whether the result is good enough for this stage. Close evidence includes `Code-Review: reviewer=<model> author=<model> mode=<cross-model|adversarial> range=<BASE>..<HEAD>`.
-- **Beads** (workstream `heterodyne`): Tasks 1–15, 9A and 9B are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=28e3df4` and a blocking dependency on the approval bead. For Task 9B the approval bead is Amendment 1's own. The dependency order is in "Task order" below.
+- **Beads** (workstream `heterodyne`): Tasks 1–15, 9A, 9B and 9C are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=28e3df4` and a blocking dependency on the approval bead. For Tasks 9B and 9C the approval bead is Amendment 1's own. The dependency order is in "Task order" below.
 - **Branches:** integration branch `plan-4-agents` in `$HZ`, from `main`, at or after the merge of AU-4/AU-11 (PR #35). Make one commit or more per task. Merge `origin/main`, never rebase, and never amend a pushed commit.
 
 ---
@@ -117,7 +118,7 @@ The plan also draws on these sources:
 | D20 | Where launch-time waits run. | A launch blocks the workstream's operation lock for up to about 6 minutes in the worst case: sandbox create (300 s at most), the exec probes (180 s), the agent prompt (90 s) and the agent probes (`agent_probe_seconds`, 240 s). Other workstreams are unaffected. | §5.2 serialises launches per workstream anyway. Flagged for plan 8's health checks (gap 6). |
 | D21 | Configured backends this plan does not build. | `[platform] sandbox = "bubblewrap"` or `"seatbelt"` makes `wsd run` print a notice ("… is not built yet; no agents will run") and use `NoRuntime`, as `"none"` does. Any other unknown name is a `ConfigError`. The Linux platform default becomes `"openshell"`, so `heterodyne setup` records it on new installs. | Existing configs (the live harness and admind tests carry `bubblewrap`) keep working with no agents, exactly as before plan 4. Failing them would break hosts that never asked for plan 4. |
 | D22 | The Other accounts probe with no named accounts. | It runs with an empty list of other accounts. The canary (written outside every bind just before, then read back outside) is always checked inside, so the probe never passes vacuously. | A host with only default logins is the common case, and plan 4 launches only the default. The canary is the positive control that S5's probe lacked. |
-| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A, with Amendment 1's Task 9B). The mechanism per §11 adversarial control, with the OpenShell v0.1.2 source as evidence: **(1) ptrace attach, and the other ways into a process.** OpenShell installs its child hardening filter on every process it starts in the workload (`crates/openshell-isolation-interface/src/linux/child_seccomp.rs:3-8`, `:99-163`). It is installed after Landlock and before the main filter (`crates/openshell-sandbox/src/sandbox/linux/mod.rs:86-98`) on every spawn path: `process.rs:604`, `boundary_exec.rs:221` and `:333`, and `pty.rs:61`, `:96` and `:125`. It denies `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `pidfd_send_signal` and `kcmp` with `EPERM` (`child_seccomp.rs:120-125`, `:232`), and `pidfd_open` gives `ENOSYS` (`:169`), so no workload process gets a pidfd at all. The main filter denies the same calls again (`crates/openshell-sandbox/src/sandbox/linux/seccomp.rs:223-233`). Seccomp filters are inherited and can't be removed, so this holds for every process the agent can start. **(2) A `/proc/<pid>/mem` write.** Landlock keeps `/proc` read-only: our spec lists it in `SYSTEM_READ_ONLY`, and nothing writable may be at, under or above it (Task 9B). Opening any `/proc` file for writing gives `EACCES` before Yama is even asked. OpenShell makes `/proc` writable only for a GPU request (`crates/openshell-sandbox/src/boundary_server.rs:88-99`, `:150-159`), and `create_argv` never makes one. **(3) Mounts over the probe's files.** The child filter denies `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `chroot` and the new mount API (`child_seccomp.rs:128-139`). It also denies a `clone` with any namespace flag and makes `clone3` give `ENOSYS` (`:168-170`). So no workload process can make a user or mount namespace. 9A's pinned namespaces and capability check stay as a second layer. **(4) The configuration and result socket.** `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) stays bound read-only. The probe's open socket can't be reopened through `/proc/<pid>/fd`, and `pidfd_getfd` is denied (1). **Checked on every launch.** From the host, at both of 9A's verification points: Yama is at exactly 1. Every workload task but the first process's has `NoNewPrivs: 1`, no capability, `Seccomp: 2` and at least `SECCOMP_FILTERS` (6) filters (9B). The count is a consistency check on the inspected OpenShell artifact, which is a precondition (9B), not proof of which filters are present. The probe and its CLI are in the workload's pinned user and mount namespaces. From the probe (`probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`): the exact enforcing answers (Task 9B). The curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. **Why not Yama 2 (revision 4's choice):** OpenShell can't run at 2. Before it starts any workload, the workload's first process (the broker) proves that it can read and write a same-UID child's memory: `qualify_runtime` (`main.rs:158`) calls `task_memory::probe_child_access` (`main.rs:197`; `task_memory.rs:156-161`). The broker needs that access to read seccomp-notification arguments from the notifying task (`task_memory.rs:4-8`, `:25`). At 2 only `CAP_SYS_PTRACE` passes, and `qualify_runtime` requires every capability to be zero (`main.rs:171`). This is the same in v0.1.3 and v0.1.4-pre.2, and there is no setting to skip it. **Why not 0:** at 0, any same-UID process could attach to a process that never got the child filter. Yama at 1 limits that to descendants, and the filter covers every descendant. **What is left at 1:** the agent's shell is the probe's ancestor, so the agent can *read* the probe's memory (`/proc/<pid>/mem` opened read-only). r15 §7 forbids changes to the probe, not reads. Task 9B shows that the probe holds nothing the agent can't already read. |
+| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A, with Amendment 1's Task 9B). The mechanism per §11 adversarial control, with the OpenShell v0.1.2 source as evidence: **(1) ptrace attach, and the other ways into a process.** OpenShell installs its child hardening filter on every process it starts in the workload (`crates/openshell-isolation-interface/src/linux/child_seccomp.rs:3-8`, `:99-163`). It is installed after Landlock and before the main filter (`crates/openshell-sandbox/src/sandbox/linux/mod.rs:86-98`) on every spawn path: `process.rs:604`, `boundary_exec.rs:221` and `:333`, and `pty.rs:61`, `:96` and `:125`. It denies `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `pidfd_send_signal` and `kcmp` with `EPERM` (`child_seccomp.rs:120-125`, `:232`), and `pidfd_open` gives `ENOSYS` (`:169`), so no workload process gets a pidfd at all. The main filter denies the same calls again (`crates/openshell-sandbox/src/sandbox/linux/seccomp.rs:223-233`). Seccomp filters are inherited and can't be removed, so this holds for every process the agent can start. **(2) A `/proc/<pid>/mem` write.** Landlock keeps `/proc` read-only: our spec lists it in `SYSTEM_READ_ONLY`, and nothing writable may be at, under or above it (Task 9B). Opening any `/proc` file for writing gives `EACCES` before Yama is even asked. OpenShell makes `/proc` writable only for a GPU request (`crates/openshell-sandbox/src/boundary_server.rs:88-99`, `:150-159`), and `create_argv` never makes one. **(3) Mounts over the probe's files.** The child filter denies `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `chroot` and the new mount API (`child_seccomp.rs:128-139`). It also denies a `clone` with any namespace flag and makes `clone3` give `ENOSYS` (`:168-170`). So no workload process can make a user or mount namespace. 9A's pinned namespaces and capability check stay as a second layer. **(4) The configuration and result socket.** `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) stays bound read-only. The probe's open socket can't be reopened through `/proc/<pid>/fd`, and `pidfd_getfd` is denied (1). **(5) The probe's subprocess output.** A pipe can be reopened through `/proc/<pid>/fd` by any process with the workload's UID: that needs only a `PTRACE_MODE_READ` check, which Yama doesn't govern, and neither Landlock nor the filters cover pipes. So what the probe reads from curl comes back on a socket pair, which can't be reopened (`ENXIO`); curl runs by its absolute path, with `-q` and no input. The exec path is the first thing run in the new sandbox, so nothing the agent started can reach the pipes `sandbox exec` uses (Task 9C). **Checked on every launch.** From the host, at both of 9A's verification points: Yama is at exactly 1. Every workload task but the first process's has `NoNewPrivs: 1`, no capability, `Seccomp: 2` and at least `SECCOMP_FILTERS` (6) filters (9B). The count is a consistency check on the inspected OpenShell artifact, which is a precondition (9B), not proof of which filters are present. The probe and its CLI are in the workload's pinned user and mount namespaces. From the probe (`probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`): the exact enforcing answers (Task 9B). The supervisor's log corroborates curl's authorization decisions, not the issuer or HTTP status it prints (Task 9C). | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. **Why not Yama 2 (revision 4's choice):** OpenShell can't run at 2. Before it starts any workload, the workload's first process (the broker) proves that it can read and write a same-UID child's memory: `qualify_runtime` (`main.rs:158`) calls `task_memory::probe_child_access` (`main.rs:197`; `task_memory.rs:156-161`). The broker needs that access to read seccomp-notification arguments from the notifying task (`task_memory.rs:4-8`, `:25`). At 2 only `CAP_SYS_PTRACE` passes, and `qualify_runtime` requires every capability to be zero (`main.rs:171`). This is the same in v0.1.3 and v0.1.4-pre.2, and there is no setting to skip it. **Why not 0:** at 0, any same-UID process could attach to a process that never got the child filter. Yama at 1 limits that to descendants, and the filter covers every descendant. **What is left at 1:** the agent's shell is the probe's ancestor, so the agent can *read* the probe's memory (`/proc/<pid>/mem` opened read-only). r15 §7 forbids changes to the probe, not reads. Task 9B shows that the probe holds nothing the agent can't already read. |
 | D24 | Codex hooks (r15 §4.2, §5.3: Codex stays headless until trust is pre-seeded without an operator step). | Codex is treated as headless. Its hooks are used only for the thread ID (D8) and the turn state (D13), never to enforce anything; the sandbox is the boundary. D6 is plan 4's trust pre-seeding, and each launch verifies it: the second `hooks/list` must be empty, and the generation's `SessionStart` must arrive. | A missed hook then only makes the lifetime stop hard or fails the launch; it never lets a tool call through that the sandbox would refuse. |
 | D25 | Host writes into the synthetic home (§7 home isolation). | The home persists and is agent-writable. Every host write into it opens each directory from the home down with `O_NOFOLLOW`, refuses a link, and writes through an exclusive (`O_EXCL`), randomly named temporary file in the anchored directory, renamed into place. Reads use the same anchoring. Codex's trust append is a read and a rewrite through the same descriptors. | An agent can replace `.claude`, `.codex` or a predictable temporary name with a link between generations. A host write that followed it would write outside the home, on the next relaunch or during trust. |
 | D26 | Git for a sandboxed linked worktree (§7: agents commit to their local `btq/<id>` branch; gap 13). | Task 7A. Host git on a worktree is pinned to the trusted repository's directories, with `HEAD` required to name `btq/<id>`, no link in its metadata, and no hooks, fsmonitor or per-worktree config. The sandbox gets a private git directory per generation at the worktree's git-directory path, with the common object store read-only, and the worktree's `.git` pointer is rewritten and bound read-only over itself, so unpinned host git (btq's) always reaches the real git directory. After the sandbox is confirmed gone, the bead branch's tip alone is imported (`index-pack --strict`, compare-and-swap). A failure is recorded and refuses the next launch. | The sandbox never sees anything host git trusts. The only effect its git can have on the host is the bead branch's tip, which is the agent's to move. |
@@ -184,6 +185,7 @@ r15 is approved (`btq-9r2w3`), so nothing waits for it. **[r15]** marks the task
 - **Task 9** (the agent-path self-test and its verified result channel);
 - **Task 9A** (Probe protection, the mandatory acceptance gate);
 - **Task 9B** (Amendment 1: Probe protection on OpenShell's seccomp and Landlock);
+- **Task 9C** (Amendment 1: the probe's subprocess output);
 - **Task 12** (`openshell` becomes the Linux default, and `wsd run` uses the sandbox runtime);
 - **Task 14** (the live test);
 - **Task 15** (the live negative and adversarial controls).
@@ -201,14 +203,14 @@ Where r15's items land:
 | the turn-boundary lifetime stop and the relaunch | D13, Task 10 (the exposure deadline, the reaper), Task 11 |
 | agents commit to their local `btq/<id>` branch (§7) | D26, Task 7A, Task 10, Task 14 |
 | §7 Result channel (peer credentials, exe/argv, untraced, netns, environment, CLI ancestor) | Task 9 |
-| §7 Probe protection | D23, Task 9A, Task 9B, Task 15 |
+| §7 Probe protection | D23, Task 9A, Task 9B, Task 9C, Task 15 |
 | §7 Environment: OpenShell's injected set, per-version tool variables | D4, Task 8 (`env_allowed`) |
 | §11 negative controls: missing canary | Task 8 (`canary-precondition` for both canaries, offline) |
 | canary inside a mount, wrong pinned hash, leaked variable (including a tool-only one), dead socket, failed outer fence | Task 8 (`test_sandbox_probes.py`: the real probes against a scripted world, offline); Task 15 (live) |
 | failure after a pass | Task 15 |
 | probes without the runtime (`--network=none`, a connected network) | Task 15 |
 | agent path: a forged result, a variable only on the tool path | Task 9 (a forged result, offline); Task 15 (both, live) |
-| §11 adversarial controls (ptrace, `/proc/<pid>/mem`, a user-namespace mount, the configuration or socket) | Tasks 9A and 9B (offline), Task 15 (live) |
+| §11 adversarial controls (ptrace, `/proc/<pid>/mem`, a user-namespace mount, the configuration or socket, the probe's subprocess output) | Tasks 9A, 9B and 9C (offline), Task 15 (live) |
 | §7 still to verify: package-registry egress, read-only git fetch | Task 14 (through the agent's own tool, with an attributable push refusal) |
 | the reviewer's read-only bind | Task 14 |
 | Codex's diagnostic-log warning | **Not addressed.** It is non-fatal, and r15 lists its cause as still to verify. Task 14's run record notes whether it appears. |
@@ -224,14 +226,14 @@ Where r15's items land:
 
 ## Task order
 
-1 → 2 → 5 → 6 → 7 → 7A → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 → 9A → 9B are **[r15]**: Task 3 is blocked by Task 2, Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol), 9A by 9, and 9B by 9A, Task 12 (already merged; it changed the backend 9B amends) and Amendment 1's approval.
+1 → 2 → 5 → 6 → 7 → 7A → 10 → 11 → 13 are backend-neutral; each is blocked by the one before. 3 → 4 → 8 → 9 → 9A → 9B → 9C are **[r15]**: Task 3 is blocked by Task 2, Tasks 8 and 9 are also blocked by Tasks 7 and 10 (they implement Task 10's `SelfTest` protocol), 9A by 9, and 9B by 9A, Task 12 (already merged; it changed the backend 9B amends) and Amendment 1's approval. 9C is blocked by 9B.
 
 Two neutral tasks also need an [r15] one:
 
 - **Task 10 is blocked by Task 3.** It imports `Backend`, `BackendError` and `BackendUnavailable` from Task 3's `backend.py`, and `reaper_argv` is part of that protocol. `backend.py` holds no OpenShell code, and Task 10's tests use the fake backend.
 - **Task 11 is blocked by Task 4.** The reaper's `main` builds `OpenShellBackend` to kill and delete the sandbox. Its logic (`reap`) is tested with fakes.
 
-Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 9B, 12 and 13, and Task 15 by 14.
+Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the fake backend). Task 14 is blocked by 9C, 12 and 13, and Task 15 by 14.
 
 ## File map
 
@@ -250,12 +252,12 @@ Task 12 is blocked by 4, 9A and 11. Task 13 is blocked by 11 only (it uses the f
 | `src/heterodyne/sandbox/resources/codex_trust.py` | 7 | in-sandbox hook-trust lister |
 | `src/heterodyne/wsd/gitwip.py`, `src/heterodyne/wsd/beads.py`, `src/heterodyne/wsd/park.py`, `src/heterodyne/wsd/runtime.py` (plan 3) | 7A | `Pinned`, `pin`, `pinned_git`; pinned WIP commits; `LaunchSpec.repo` |
 | `src/heterodyne/sandbox/sessiongit.py` | 7A | the private session git dir: `seed`, `land` |
-| `src/heterodyne/sandbox/resources/probes.py` | 8, 9A, 9B | in-sandbox probes (port of `spikes/s5/probes.py`) **[r15]** |
+| `src/heterodyne/sandbox/resources/probes.py` | 8, 9A, 9B, 9C | in-sandbox probes (port of `spikes/s5/probes.py`) **[r15]**; 9C: `captured` |
 | `src/heterodyne/sandbox/openshell_selftest.py` | 8, 9, 9A, 9B | `OpenShellSelfTest` **[r15]**; 9B: `PTRACE_SCOPE`, `SECCOMP_FILTERS`, `ptrace_scope_refusal` |
 | `src/heterodyne/sandbox/channel.py`, `src/heterodyne/platform.py` | 9, 9A, 9B | `ProbeChannel`, `ProcVerifier` (9A: the protection checks; 9B: the seccomp check); `peer_pid_checked` **[r15]** |
 | `src/heterodyne/tmux.py` | 10 | `pane_info` |
 | `src/heterodyne/sandbox/selftest.py` | 10 | `SelfTest`, `ProbeContext`, `SelfTestFailed` |
-| `src/heterodyne/sandbox/runtime.py` | 10, 11 | `SandboxRuntime`, `SessionRecord`, `Phase`, `RuntimeConfig` |
+| `src/heterodyne/sandbox/runtime.py` | 10, 11, 9C | `SandboxRuntime`, `SessionRecord`, `Phase`, `RuntimeConfig`; 9C: the exec path runs first |
 | `src/heterodyne/sandbox/reaper.py` | 11 | the per-session lifetime backstop |
 | `src/heterodyne/wsd/runtime.py`, `scheduler.py` | 11 | `AgentRuntime.expire`; pickup calls it |
 | `src/heterodyne/sandbox/build.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/platform.py`, `examples/config.toml`, `packaging/sandbox/*`, `docs/wsd.md`, `docs/configuration.md`, `docs/install.md`, `docs/security-model.md` | 12 | wiring, the Linux default, the image, docs **[r15]** |
@@ -5759,7 +5761,7 @@ ADR 0001 r15 §7 "Probe protection" makes this a **mandatory plan 4 acceptance c
       `ENOSYS` and a `mem` `EPERM`, which 9A accepted, now fail. A `/proc/self/comm` write open (`proc-readonly`) must give `EACCES`. Yama doesn't govern `comm`, so only Landlock can give that answer.
     - `ESRCH` (the child is gone) fails the check, because it shows nothing about the denial.
   - So a process outside OpenShell's filters, a writable `/proc`, or a workload that kept a capability fails the self-test from inside as well as from outside.
-- **curl results are corroborated from outside.** A tool the probe starts (curl) is a separate process, and the same denial covers it. Every curl result on the agent path is also corroborated by this run's supervisor log line, read by the host (Task 9's needles), so a changed report alone could never pass.
+- **What the probe reads from curl** (corrected by Amendment 1, Task 9C). curl is a separate process, and the same denial covers it. This run's supervisor log line, read by the host (Task 9's needles), corroborates each curl request's authorization decision. It doesn't corroborate the TLS issuer or the HTTP status the probe reads from curl's output. That output came back on pipes, which any same-UID process can reopen through `/proc/<pid>/fd`. Task 9C moves it to a socket pair, which can't be reopened that way, and runs the exec path first in a new sandbox.
 
 The first way, a supervisor-controlled probe path, is not taken. OpenShell 0.1.2 has no way to start a process that is both outside the agent's reach and a descendant of the CLI, which the per-binary policy needs (r15 §7).
 
@@ -5770,7 +5772,8 @@ The §11 adversarial controls:
 - **Live (Task 15):**
   - ptrace attach and `/proc/<pid>/mem` are refused inside;
   - an overlay over the probe from a new user and mount namespace, with a stand-in at the CLI's path as the forged probe's parent, is never counted;
-  - the probe's files are read-only.
+  - the probe's files are read-only;
+  - the output descriptors of each curl the probe runs can't be reopened (Task 9C).
 
 If any live control shows tampering is possible, **plan 4 stops** (r15 §17 item 12), and the choice goes back to the operator.
 
@@ -6909,6 +6912,293 @@ git add src/heterodyne/sandbox/channel.py src/heterodyne/sandbox/openshell_selft
   tests/test_sandbox_probes.py tests/test_sandbox_openshell_backend.py tests/test_sandbox_spec.py \
   tests/test_sandbox_openshell_policy.py
 git commit -m "plan4 T9B: probe protection on OpenShell's seccomp and Landlock (Amendment 1)"
+```
+
+### Task 9C [r15]: The probe's subprocess output (Amendment 1)
+
+Codex's second review of Amendment 1 found that what the probe reads from curl travels over pipes. Any process with the workload's UID can reopen a pipe through `/proc/<pid>/fd/<n>` and write into it. Neither of D23's mechanisms covers that: Landlock doesn't govern pipes, and OpenShell's filters deny neither `openat` nor a pipe write. The reopen needs only a `PTRACE_MODE_READ` access check, and Yama governs only attach, so revision 4's scope 2 had the same gap. This task closes it for the probe's own reads, and Task 15 adds the live control. It amends merged code (Task 8's probes, Task 10's launch order), and is gated on Amendment 1's design approval, as 9B is.
+
+**Files:**
+- Modify:
+  - `src/heterodyne/sandbox/resources/probes.py`: `CURL`, `CAPTURE_SECONDS`, `captured`; `curl` and section 2 read through `captured`; sections 6 and 6b require a complete HTTP status.
+  - `src/heterodyne/sandbox/runtime.py`: the exec path runs before the hook-trust step.
+- Test: `tests/test_sandbox_probes.py`, `tests/test_sandbox_runtime.py`
+
+**Interfaces:**
+- Consumes: Task 8's probes.py and its scripted-world harness; Task 10's `SandboxRuntime.launch` and `RuntimeRig`.
+- Produces (in probes.py): `captured(argv) -> (rc, output)`. It runs argv with no input, and its stdout and stderr on one end of a `socket.socketpair()`; it returns the exit status and everything argv wrote. `curl(host)` returns `(rc, output, issuer, status)`.
+- Produces (elsewhere): in `SandboxRuntime.launch`, `selftest.exec_path` is the first thing run in a new sandbox; `_trust` follows it.
+
+**Why a socket pair.** Opening `/proc/<pid>/fd/<n>` for a socket fails with `ENXIO` (sockfs has no `open`), whatever the caller's credentials. That is a kernel property, so it needs no host change and no OpenShell setting. The other candidates fail:
+- *A nondumpable step.* `exec` sets the dumpable flag back to 1 for a readable binary, so curl would be dumpable again whatever its parent did. OpenShell also requires workload processes to stay dumpable: its supervisor fails a sandbox whose workload child is still nondumpable after exec (`crates/openshell-sandbox/src/main.rs:1306-1309`, v0.1.2), and its seccomp-notify broker reads each notifying task's memory (`task_memory.rs:4-8`). And a nondumpable probe protects only the probe's own descriptors, not curl's. D23's earlier rejection of a nondumpable interpreter, which was about the host's peer check reading `environ`, still stands too.
+- *A supervisor-owned capture path.* OpenShell 0.1.2's `sandbox exec` returns output on pipes it creates for the exec child (`boundary_exec.rs:209-215`, `Stdio::piped`). It has no capture the workload can't reach, and no way to start a program outside the workload's reach as a descendant of the CLI (r15 §7's first way, D23).
+- *A cryptographic binding.* The probe holds no value the agent can't read (Task 9B's rule, needed at scope 1), so there is no key with which to sign a result. A binding would first need that rule's mitigation and a D23 amendment.
+
+**The probe's channels, each checked for the same reopen.**
+
+| Channel | What it is | Reachable through `/proc/<pid>/fd`? |
+|---|---|---|
+| curl's stdout and stderr | a socket pair (`captured`) | No: `ENXIO` |
+| curl's stdin | `/dev/null` | Reopening it gives another `/dev/null` |
+| the result socket `p.sock`, the session socket `s.sock` (its replies), and name lookups | sockets | No: `ENXIO` |
+| `/run/hz` (script, configuration, token), the chosen login | read-only binds, Landlock `read_only` | A write open gives `EROFS` or `EACCES` |
+| the canaries | only opened, never read | n/a |
+| section 11's child | the probe reads nothing from it | n/a |
+| the agent path's own stdout (`$HOME/.hz-agent-probe.out`) | the agent's file | Yes, but it's never counted: the host counts only what arrives on `p.sock` from the verified probe |
+| the exec path's stdin (configuration) and stdout (results) | pipes from `sandbox exec` | Only from a process in the sandbox while the exec path runs, and none exists then (below) |
+
+The probe runs no other program: every `subprocess.run` is curl, which the offline test pins. curl is run by its absolute path (`/usr/bin/curl`, read-only under Landlock), so the agent's `PATH` can't substitute a program. It is run with `-q` first, so no `.curlrc` in the agent-writable home applies. The probe is started as `python3 -I`, so no user site or `PYTHON*` variable applies.
+
+**The exec path runs first.** The sandbox is new on every launch: its name is per generation (Task 2's `sandbox_name`). Until now the hook-trust step ran first. It's harmless, but it is a program run in the workload, so it moves after the exec path. That leaves only OpenShell's own processes and the create's `sleep infinity` in the sandbox while the exec path runs. Nothing the agent started can then reach the pipes `sandbox exec` uses. A persistent home holds files, not processes, and the exec path runs nothing from it.
+
+**What each counted check reads, and from where.** "In-process" means the probe's own system call. The kernel's waitpid status is out of reach of any other process.
+
+| Check | What the probe reads | Source after this task | Corroborated outside the workload |
+|---|---|---|---|
+| `non-allowlisted-host-blocked` | the connect `errno`; curl's exit status; `Permission denied` in curl's output | in-process; waitpid; the socket pair | The supervisor log's `DENIED` line (the decision only) |
+| `allowlisted-host-reachable` | curl's exit status; the issuer; `http=<code>` | waitpid; the socket pair | The `ALLOWED` line (the decision only, not the issuer or the HTTP code) |
+| `model-host-<path>-path` | the same | the same | The `ALLOWED`/`DENIED` line with the CLI ancestry (the decision only) |
+| `probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`, `cgroupfs-readonly` | system call results | in-process | The host's `ProcVerifier` checks the filters, the scope and the namespaces |
+| every other check | files, sockets, the environment | in-process | Per Tasks 8 and 9 |
+
+So the supervisor log corroborates the authorization decisions, and the issuer and HTTP status rest on the socket pair. This replaces Task 9A's sentence that every curl result is corroborated from outside. Sections 6 and 6b also require the status line to be a complete `http=<digits>`. An empty or cut-off output then fails, where the old check passed anything without `http=000`.
+
+**What this does not cover.** A process the agent starts can still read the probe's memory at scope 1 (Task 9B's residual confidentiality), and that discloses nothing new. It can't write into the probe or its children (9B). It can signal them, which only fails its own launch.
+
+The §11 controls:
+- **Offline (this task):**
+  - every program the probe runs is `/usr/bin/curl -q`, with no input and its output on the socket pair;
+  - a reopen of the capture socket through `/proc/<pid>/fd` is refused with `ENXIO`, while the same reopen of a pipe succeeds, so the test can tell the two apart;
+  - an allowlisted reach with no HTTP status fails;
+  - nothing runs in the sandbox before the exec path's probe, for both CLIs.
+- **Live (Task 15):** while the agent-path probe runs, a separate workload process finds each curl the probe starts, and requires both of its output descriptors to be sockets whose write open is refused.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_sandbox_probes.py`, add `import ast` and `import threading` to the imports, and `from sandbox_env import wait_for` after `import pytest`. Add two fields to `World`, after `reported`:
+
+```python
+    runs: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])    # each subprocess.run's kwargs
+    ends: dict[int, "FakeEnd"] = field(default_factory=dict[int, "FakeEnd"])    # capture ends, by fd
+```
+
+Before `CHILD = 4242`, add:
+
+```python
+class FakeEnd:
+    """One end of the probe's capture socket pair: what the fake program writes, the probe reads."""
+
+    def __init__(self, data: list[bytes], fd: int) -> None:
+        self.data, self.fd = data, fd
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def __enter__(self) -> "FakeEnd":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def write(self, text: str) -> None:
+        self.data.append(text.encode())
+
+    def recv(self, n: int) -> bytes:
+        return self.data.pop(0) if self.data else b""
+
+
+def fake_socketpair(world: World) -> Callable[[], tuple[FakeEnd, FakeEnd]]:
+    def socketpair() -> tuple[FakeEnd, FakeEnd]:
+        data: list[bytes] = []
+        n = 1000 + 2 * len(world.ends)
+        ours, theirs = FakeEnd(data, n), FakeEnd(data, n + 1)
+        world.ends[theirs.fd] = theirs
+        return ours, theirs
+    return socketpair
+```
+
+In the `run` fixture, the fake curl writes to the end it was given instead of returning its output, and `socket.socketpair` is faked:
+
+```python
+        def curl(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            world.runs.append({"argv": argv, **kwargs})
+            rc, out, err = world.answer(argv[-1].removeprefix("https://").rstrip("/"))
+            end = world.ends.get(kwargs.get("stdout", -1))
+            if end is not None:
+                end.write(f"{err}\n{out}\n")
+            return subprocess.CompletedProcess(argv, rc)
+
+        monkeypatch.setattr(subprocess, "run", curl)
+        monkeypatch.setattr(socket, "socketpair", fake_socketpair(world))
+```
+
+Add to `NEGATIVE_CONTROLS`, after "the control reached around the proxy":
+
+```python
+    ("the control reached with no HTTP status", lambda w: w.curl.update({ALLOWED: (0, "", PROXY_CA)}),
+     {"allowlisted-host-reachable"}),
+```
+
+Append:
+
+```python
+def test_every_program_the_probe_runs_reports_on_a_socket(world: World,
+                                                          run: Callable[[World], Results]) -> None:
+    """D23 (Amendment 1): curl, by its path and with no curlrc, its output on the capture socket pair and no
+    input."""
+    rc, _ = run(world)
+    assert rc == 0 and len(world.runs) == 3
+    for r in world.runs:
+        assert r["argv"][:2] == ["/usr/bin/curl", "-q"], r          # -q first: no curlrc is read
+        assert r["stdout"] in world.ends and r["stderr"] == r["stdout"], r
+        assert r["stdin"] == subprocess.DEVNULL and "capture_output" not in r, r
+
+
+def probe_function(name: str) -> Callable[..., Any]:
+    """One function from the probe script, defined on its own: the script runs its checks when loaded."""
+    tree = ast.parse(PROBES.read_text())
+    [fn] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+    scope: dict[str, Any] = {"socket": socket, "subprocess": subprocess, "CAPTURE_SECONDS": 30}
+    exec(compile(ast.Module([fn], []), str(PROBES), "exec"), scope)  # noqa: S102 - the probe's own code
+    return scope[name]
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs Linux's /proc")
+def test_another_process_cannot_reopen_a_captured_output(tmp_path: Path) -> None:
+    """The reopen through /proc/<pid>/fd that a pipe allows is refused for the capture socket (ENXIO). The
+    same reopen of a pipe succeeds, so this test can tell the two apart."""
+    captured = probe_function("captured")
+    pid, go = tmp_path / "pid", tmp_path / "go"
+    os.mkfifo(go)
+    child = [sys.executable, "-I", "-c", f"import os; open({str(pid)!r}, 'w').write(str(os.getpid())); "
+             f"print('from-the-child', flush=True); open({str(go)!r}).read()"]
+    result: list[tuple[int, str]] = []
+    t = threading.Thread(target=lambda: result.append(captured(child)))
+    t.start()
+    try:
+        wait_for(lambda: pid.exists() and pid.read_text() != "")
+        with pytest.raises(OSError) as refused:
+            os.close(os.open(f"/proc/{pid.read_text()}/fd/1", os.O_WRONLY | os.O_NONBLOCK))
+    finally:
+        with go.open("w"):
+            pass
+        t.join()
+    assert refused.value.errno == errno.ENXIO
+    assert result == [(0, "from-the-child\n")]
+    with subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as p:
+        os.close(os.open(f"/proc/{p.pid}/fd/1", os.O_WRONLY | os.O_NONBLOCK))   # a pipe: reopened
+        p.communicate(b"")
+```
+
+The reopen opens and closes the descriptor; it never writes. The child waits on a FIFO until the reopen has been tried, so the test needs no sleep.
+
+In `tests/test_sandbox_runtime.py`, after `test_a_codex_launch_reports_its_thread_and_trusts_its_hooks`:
+
+```python
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_the_exec_path_is_the_first_run_in_a_new_sandbox(rig: RuntimeRig, profile: str) -> None:
+    """D23 (Amendment 1): nothing runs in the sandbox before the exec path's probe, so no process but
+    OpenShell's own can reach the pipes its `sandbox exec` uses."""
+    before: list[list[list[str]]] = []
+    rig.selftest.during_exec = lambda: before.append(list(rig.backend.execs))
+    rig.runtime.launch(launch_spec(rig, profile))
+    assert before == [[]]
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 600 uv run pytest tests/test_sandbox_probes.py tests/test_sandbox_runtime.py -q`
+
+Expected: FAIL.
+- Every scripted-world probe test fails: the old probe reads `capture_output` text that the fake no longer returns.
+- `test_another_process_cannot_reopen_a_captured_output` fails: probes.py has no `captured`.
+- `test_the_exec_path_is_the_first_run_in_a_new_sandbox[p-two]` fails: Codex's hook trust runs first. `[p-one]` passes, since Claude's trust runs nothing in the sandbox.
+
+- [ ] **Step 3: `captured` in `probes.py`**
+
+At the end of the module docstring's first paragraph, after "the input holds no secret.", add: "What the probe reads from a program it runs comes back on a socket, never a pipe (see `captured`)."
+
+After `RUN = '/run/hz'`, add:
+
+```python
+CURL = '/usr/bin/curl'      # by path: the agent's PATH can't put another program in its place
+# Every curl run starts with -q, so no .curlrc applies: the home is the agent's, and a curlrc there could
+# change what curl does or prints.
+CAPTURE_SECONDS = 30
+```
+
+Replace `def curl(host)` with:
+
+```python
+def captured(argv):
+    """Run argv; return its exit status and its stdout and stderr together. The output comes back on a
+    socket pair, never a pipe: any process with this UID can reopen a pipe through /proc/<pid>/fd and
+    write into it, and a socket can't be reopened that way (ENXIO). So what this returns is only what
+    argv wrote (D23, Amendment 1). Its output is a few kilobytes, well inside the socket's buffer."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        with theirs:
+            fd = theirs.fileno()
+            rc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, timeout=CAPTURE_SECONDS,
+                                check=False).returncode
+        return rc, b''.join(iter(lambda: ours.recv(65536), b'')).decode('utf-8', 'replace')
+
+
+def curl(host):
+    rc, out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '10',
+                        '-w', '\nhttp=%{http_code}\n', f'https://{host}/'])
+    issuer = next((ln.split('issuer:')[1].strip() for ln in out.splitlines() if 'issuer:' in ln), '')
+    status = next((ln for ln in out.splitlines() if ln.startswith('http=')), 'http=none')
+    return rc, out, issuer, status
+```
+
+The inner `with` closes the probe's copy of curl's end when curl exits, so the read ends at curl's last byte.
+
+In section 2, replace the `cu = subprocess.run(…)` call and the `ok` line with:
+
+```python
+cu_rc, cu_out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '8', f'https://{host}/'])
+ok = marker and c == 'EACCES' and cu_rc == 7 and 'Permission denied' in cu_out
+```
+
+and `curl rc={cu.returncode}` in its evidence with `curl rc={cu_rc}`.
+
+Replace section 6's three lines after its comment with:
+
+```python
+cu_rc, cu_out, issuer, status = curl(cfg['allowed'])
+ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'
+check('allowlisted-host-reachable', ok, f"curl rc={cu_rc} {status} issuer='{issuer}'")
+```
+
+In section 6b, make the call `cu_rc, cu_out, issuer, status = curl(cfg['model_host'])`. The agent branch becomes `ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer`, and the other `ok = cu_rc == 7 and 'Permission denied' in cu_out`. The evidence's first line becomes `f"{cfg['model_host']}: curl rc={cu_rc} {status} issuer='{issuer}' "`.
+
+- [ ] **Step 4: The exec path first, in `runtime.py`**
+
+In `SandboxRuntime.launch`, remove `self._trust(adapter, cli, sp, layout)` from before the `Phase.TESTING` record, and replace `self.selftest.exec_path(ctx)` with:
+
+```python
+        # D23 (Amendment 1): the exec path is the first thing run in the new sandbox, so no process but
+        # OpenShell's own exists to reach the pipes `sandbox exec` gives the probe.
+        self.selftest.exec_path(ctx)
+        self._trust(adapter, cli, sp, layout)
+```
+
+The trust step still comes before the app server and the TUI, which need it.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `timeout 600 uv run pytest tests/test_sandbox_probes.py tests/test_sandbox_runtime.py -q && timeout 300 uv run pyright src/heterodyne/sandbox tests/test_sandbox_probes.py tests/test_sandbox_runtime.py && timeout 300 uv run ruff check src tests`
+
+Expected: PASS and clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/heterodyne/sandbox/resources/probes.py src/heterodyne/sandbox/runtime.py \
+  tests/test_sandbox_probes.py tests/test_sandbox_runtime.py
+git commit -m "plan4 T9C: the probe reads its subprocess output on a socket pair; the exec path runs first (Amendment 1)"
 ```
 
 ### Task 10: The sandbox runtime
@@ -9532,10 +9822,12 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
   - Task 14's `Live` fixture and helpers;
   - Task 8's `probe_config`, `env_allowed`, `AGENT_CHECKS`;
   - Task 9A's `read_ptrace_scope` and Task 9B's `ptrace_scope_refusal`;
+  - Task 9C's capture of curl's output (the output-channel control checks it);
   - Task 10's `SandboxRuntime`, `RuntimeConfig`;
   - plan 3's `LaunchFailed`.
 - Produces:
-  - in `tests/probe_verdicts.py`, `memory_access_refused(rc, out) -> str`, `file_writes_refused(rc, out) -> str` and `separate_mount_namespace(rc, out) -> str`, each `""` on a pass and the reason otherwise;
+  - in `tests/probe_verdicts.py`, `memory_access_refused(rc, out) -> str`, `file_writes_refused(rc, out) -> str`, `separate_mount_namespace(rc, out) -> str` and `outputs_unreachable(rc, out) -> str`, each `""` on a pass and the reason otherwise;
+  - `overlay_outcome(rc, out) -> str`: `"refused"` or `"ran"` for a complete overlay check, and otherwise the reason it is incomplete;
   - the live tests.
 
 This task covers r15 §11, "Sandbox runtime".
@@ -9561,15 +9853,16 @@ This shows they recognise OpenShell's specific enforcement rather than any failu
 
 **The probe-protection controls.** Each must fail the self-test or be shown impossible:
 - **ptrace attach:** a ptrace attach and a `process_vm_writev` to every process the workload can see are refused, by OpenShell's seccomp filter (Amendment 1). A write open of its memory is refused too, by Landlock's read-only `/proc`. Yama, at 1, allows the attack's own child; the test attacks that child as well.
-- **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. An actual overlay in such a namespace, a forged probe bound over `/run/hz/probes.py` and `/bin/sh` bound over the CLI's path, which then starts the forged probe as its child, must refuse the launch through the result channel (`agent-path-channel`), or be refused itself.
+- **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. An actual overlay in such a namespace, a forged probe bound over `/run/hz/probes.py` and `/bin/sh` bound over the CLI's path, which then starts the forged probe as its child, must refuse the launch through the result channel (`agent-path-channel`), or be refused itself. The check reports each step it reached, so a refusal can be told apart from a check that never ran (`overlay_outcome`). A refused overlay must leave the launch passing; a launch failure for another reason fails the control.
 - **probe files:** the probe's files and socket directory can't be changed.
+- **probe output channels** (Task 9C): while the agent-path probe runs, a separate workload process finds each curl the probe starts. Both of its output descriptors must be sockets whose write open is refused with `ENXIO`. The check never writes, and it must see at least one curl whole.
 
 **Each probe-protection check must prove it ran** (Amendment 1). A check that exits early, prints nothing, or prints something other than its expected refusals fails; silence is never a pass. The live test reads each check's exit status and output, and a pure verdict in `tests/probe_verdicts.py` passes it only when:
 - the check exited 0 and printed its closing line;
 - every operation it reports appears in the expected, complete form;
 - each one was refused (an errno name, or a nonzero status).
 
-The verdicts are tested offline with negative controls: empty, truncated, reordered, malformed and permitted output must each fail. So a broken check shows up in the normal suite, before any live run.
+The verdicts are tested offline with negative controls: empty, truncated, reordered, malformed and permitted output must each fail, as must a nonzero exit or a missing stage. So a broken check shows up in the normal suite, before any live run.
 
 The "missing canary" control is the offline `test_an_unwritable_canary_fails_the_precondition` (Task 8). A missing canary can only arise when the precondition write fails, and that refuses the launch.
 
@@ -9583,11 +9876,20 @@ The "missing canary" control is the offline `test_an_unwritable_canary_fails_the
 """Negative controls for the live probe-protection verdicts: empty, incomplete or permitted output fails."""
 
 import pytest
-from probe_verdicts import file_writes_refused, memory_access_refused, separate_mount_namespace
+from probe_verdicts import (
+    file_writes_refused,
+    memory_access_refused,
+    outputs_unreachable,
+    overlay_outcome,
+    separate_mount_namespace,
+)
 
 MEM = "child 7\nattach 1 EPERM\nvm 1 EPERM\nmem 1 EACCES\nattach 7 EPERM\nvm 7 EPERM\nmem 7 EACCES\ndone\n"
 FILES = "create=1\nappend=1\nrename=1\n"
 OWN = "mnt:[4026531841]\n"
+NO_NS = "forged=written\nunshare=1\ndone\n"
+RAN = "forged=written\nns=entered\nbind-probe=0\nbind-cli=0\nrun=0\nunshare=0\ndone\n"
+CURLS = "curl 41 socket:ENXIO socket:ENXIO\ncurl 42 gone gone\ndone\n"
 
 
 def test_complete_refusals_pass() -> None:
@@ -9595,6 +9897,17 @@ def test_complete_refusals_pass() -> None:
     assert file_writes_refused(0, FILES) == ""
     assert separate_mount_namespace(0, OWN + "refused\n") == ""
     assert separate_mount_namespace(0, OWN + "mnt:[4026532999]\n") == ""
+    assert outputs_unreachable(0, CURLS) == ""
+
+
+@pytest.mark.parametrize(("out", "outcome"), [
+    (NO_NS, "refused"),                                                          # no namespace at all
+    ("forged=written\nns=entered\nbind-probe=1\nunshare=1\ndone\n", "refused"),
+    ("forged=written\nns=entered\nbind-probe=0\nbind-cli=32\nunshare=1\ndone\n", "refused"),
+    (RAN, "ran"),
+])
+def test_a_complete_overlay_check_reports_its_outcome(out: str, outcome: str) -> None:
+    assert overlay_outcome(0, out) == outcome
 
 
 @pytest.mark.parametrize(("rc", "out"), [
@@ -9636,6 +9949,37 @@ def test_incomplete_or_permitted_file_writes_fail(rc: int, out: str) -> None:
 ])
 def test_incomplete_or_shared_mount_namespace_fails(rc: int, out: str) -> None:
     assert separate_mount_namespace(rc, out) != ""
+
+
+@pytest.mark.parametrize(("rc", "out"), [
+    (0, ""),
+    (1, NO_NS),                                             # the check itself failed: a setup failure
+    (0, NO_NS.replace("forged=written\n", "")),            # the forged file was never written
+    (0, NO_NS.replace("done\n", "")),
+    (0, NO_NS.replace("unshare=1", "unshare=0")),           # no namespace, yet no refusal either
+    (0, NO_NS.replace("unshare=1", "unshare=x")),
+    (0, RAN.replace("run=0\n", "")),                       # a missing stage
+    (0, RAN.replace("ns=entered\n", "")),
+    (0, RAN.replace("ns=entered", "ns=maybe")),
+    (0, "forged=written\nns=entered\nbind-probe=0\nunshare=1\ndone\n"),   # stopped with no refusal
+])
+def test_an_incomplete_overlay_check_fails(rc: int, out: str) -> None:
+    assert overlay_outcome(rc, out) not in ("refused", "ran")
+
+
+@pytest.mark.parametrize(("rc", "out"), [
+    (0, ""),
+    (0, "done\n"),                                          # no curl seen while the probe ran
+    (0, "curl 42 gone gone\ndone\n"),                       # none seen whole
+    (1, CURLS),
+    (0, CURLS.replace("done\n", "")),
+    (0, CURLS.replace("socket:ENXIO socket:ENXIO", "pipe:OPENED socket:ENXIO")),
+    (0, CURLS.replace("socket:ENXIO socket:ENXIO", "socket:ENXIO socket:OPENED")),
+    (0, CURLS.replace("socket:ENXIO socket:ENXIO", "pipe:EACCES pipe:EACCES")),     # not a socket
+    (0, CURLS.replace("curl 41", "curl x")),
+])
+def test_an_incomplete_or_reachable_output_check_fails(rc: int, out: str) -> None:
+    assert outputs_unreachable(rc, out) != ""
 ```
 
 `tests/probe_verdicts.py`:
@@ -9650,6 +9994,8 @@ import re
 MEMORY_OPS = ("attach", "vm", "mem")
 FILE_OPS = ("create", "append", "rename")
 MOUNT_NS = re.compile(r"mnt:\[\d+\]")
+OVERLAY_STAGES = (["unshare"], ["ns", "bind-probe", "unshare"], ["ns", "bind-probe", "bind-cli", "unshare"],
+                  ["ns", "bind-probe", "bind-cli", "run", "unshare"])
 
 
 def memory_access_refused(rc: int, out: str) -> str:
@@ -9697,10 +10043,53 @@ def separate_mount_namespace(rc: int, out: str) -> str:
     if new != "refused" and (not MOUNT_NS.fullmatch(new) or new == own):
         return "a new mount namespace must not be the workload's"
     return ""
+
+
+def overlay_outcome(rc: int, out: str) -> str:
+    """The overlay check prints `forged=written`, then, from a new user and mount namespace if one could
+    be made, `ns=entered` and the status of each step it reached (`bind-probe`, `bind-cli`, `run`), then
+    `unshare=<status>` and `done`. Returns "refused" when a step was refused (the namespace was never
+    made, or a bind failed), "ran" when every step succeeded (then only the result channel can refuse
+    it), and otherwise the reason the output is incomplete."""
+    lines = out.splitlines()
+    if rc != 0 or lines[:1] != ["forged=written"] or lines[-1:] != ["done"]:
+        return f"the overlay check did not run to completion (exit {rc})"
+    stages = [line.partition("=") for line in lines[1:-1]]
+    names = [name for name, _, _ in stages]
+    values = {name: value for name, _, value in stages}
+    statuses = [value for name, _, value in stages if name != "ns"]
+    if names not in OVERLAY_STAGES or values.get("ns", "entered") != "entered" \
+            or not all(v.isdigit() for v in statuses):
+        return f"the overlay check printed an unexpected sequence: {names}"
+    if "ns" not in values:
+        return "refused" if values["unshare"] != "0" else "a namespace was made but not reported"
+    if values["bind-probe"] != "0" or values.get("bind-cli", "0") != "0":
+        return "refused"
+    return "ran" if "run" in values else "a step stopped without a refusal"
+
+
+def outputs_unreachable(rc: int, out: str) -> str:
+    """The output-channel check prints `curl <pid> <fd 1> <fd 2>` for each curl process it saw while the
+    probe ran, each fd as `<kind>:<result of a write open>` or `gone` (the process ended first), then
+    `done`. At least one curl must have been seen whole, and every fd must be a socket that refused the
+    open (ENXIO)."""
+    lines = out.splitlines()
+    if rc != 0 or lines[-1:] != ["done"]:
+        return f"the output-channel check did not run to completion (exit {rc})"
+    whole = 0
+    for line in lines[:-1]:
+        parts = line.split()
+        if len(parts) != 4 or parts[0] != "curl" or not parts[1].isdigit():
+            return f"not a result: {line!r}"
+        fds = [fd for fd in parts[2:] if fd != "gone"]
+        if any(fd != "socket:ENXIO" for fd in fds):
+            return f"a curl output channel could be reopened or is not a socket: {line!r}"
+        whole += len(fds) == 2
+    return "" if whole else "the check saw no curl process while the probe ran"
 ```
 
 Run: `timeout 300 uv run pytest tests/test_probe_verdicts.py -q && timeout 300 uv run pyright tests/probe_verdicts.py tests/test_probe_verdicts.py && timeout 300 uv run ruff check tests/probe_verdicts.py tests/test_probe_verdicts.py`
-Expected: 24 passed; clean. (Before `tests/probe_verdicts.py` exists, the test module fails at its import.)
+Expected: 47 passed; clean. (Before `tests/probe_verdicts.py` exists, the test module fails at its import.)
 
 - [ ] **Step 2: Append the controls**
 
@@ -9715,7 +10104,9 @@ from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
     AGENT_CHECKS, OpenShellSelfTest, probe_config, ptrace_scope_refusal, read_ptrace_scope)
 from heterodyne.sandbox.selftest import ProbeContext  # noqa: E402
 from heterodyne.wsd.runtime import LaunchFailed  # noqa: E402
-from probe_verdicts import file_writes_refused, memory_access_refused, separate_mount_namespace  # noqa: E402
+from probe_verdicts import (  # noqa: E402
+    file_writes_refused, memory_access_refused, outputs_unreachable, overlay_outcome,
+    separate_mount_namespace)
 ```
 
 (`OpenShellSelfTest` moves into this import; drop its separate line.) Then append:
@@ -9893,17 +10284,22 @@ FILE_CHECK = ("touch /run/hz/hz-new; echo create=$?; echo x >> /run/hz/token; ec
 NAMESPACE_CHECK = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
 
 
-# The overlay attack from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
-# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces.
+# The overlay check from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
+# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces. It
+# reports each step's status on stdout, so a refusal can be told from a check that never ran.
 NESTED = r"""
 import subprocess, sys
 cli = sys.argv[1]
 with open('/tmp/hz-forged.py', 'w') as fh:
     fh.write(sys.stdin.read())
-inner = (f'mount --bind /tmp/hz-forged.py /run/hz/probes.py && mount --bind /bin/sh {cli} && '
-         f'{cli} -c "python3 -I /run/hz/probes.py --agent; :"')
-r = subprocess.run(['unshare', '-Urm', 'sh', '-c', inner], capture_output=True, text=True, check=False)
-print(f'nested={r.returncode} {r.stderr.strip()}')
+print('forged=written', flush=True)
+inner = ('echo ns=entered; mount --bind /tmp/hz-forged.py /run/hz/probes.py; s=$?; echo bind-probe=$s; '
+         f'[ $s -eq 0 ] || exit 1; mount --bind /bin/sh {cli}; s=$?; echo bind-cli=$s; '
+         f'[ $s -eq 0 ] || exit 1; {cli} -c "python3 -I /run/hz/probes.py --agent; :"; echo run=$?')
+r = subprocess.run(['unshare', '-Urm', 'sh', '-c', inner], stderr=subprocess.PIPE, text=True, check=False)
+print(f'unshare={r.returncode}', flush=True)
+print('done', flush=True)
+sys.stderr.write(r.stderr)
 """
 
 
@@ -9912,23 +10308,92 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(live
                        [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
     forged = ("import socket\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
               f"s.sendall({results!r})\n")
-    out: list[str] = []
+    out: list[tuple[int, str, str]] = []
 
     def nest(ctx: ProbeContext) -> None:
         if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
             r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
                                  ["python3", "-I", "-c", NESTED, str(ctx.cli.binary)], input=forged.encode(),
                                  timeout=EXEC_SECONDS)
-            out.append(r.stdout.decode("utf-8", "replace"))
+            out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
+                        r.stderr.decode("utf-8", "replace")))
 
     spec = live.spec("claude", "btq-live-n9")
     live.keys.append(spec.session_key)
+    failed = ""
     try:
         runtime(live, selftest=Hooked(beside_agent=nest)).launch(spec)
     except LaunchFailed as exc:
-        assert "agent-path-channel" in str(exc), exc
-        return
-    assert out and not out[0].startswith("nested=0"), f"an overlaid probe ran and was not refused: {out}"
+        failed = str(exc)
+    assert wait_until(lambda: bool(out), EXEC_SECONDS), f"the overlay check never reported; launch: {failed}"
+    rc, stdout, stderr = out[0]
+    outcome = overlay_outcome(rc, stdout)
+    assert outcome in ("refused", "ran"), f"{outcome}\n{stdout}\n{stderr}"
+    if outcome == "ran":
+        assert "agent-path-channel" in failed, f"an overlaid probe ran and was counted: {failed or 'passed'}"
+    else:
+        assert not failed, f"the overlay was refused, but the launch failed for another reason: {failed}"
+
+
+# Finds each curl the probe starts while it runs, and reports what its output descriptors are and whether a
+# write open of each is refused. It never writes: an open that succeeds is closed at once.
+OUTPUT_CHECK = r"""
+import errno, os, sys, time
+deadline = time.monotonic() + float(sys.argv[1])
+seen, whole_at = set(), None
+
+def state(pid, fd):
+    path = f'/proc/{pid}/fd/{fd}'
+    try:
+        kind = os.readlink(path).partition(':')[0]
+    except OSError:
+        return 'gone'
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        return f'{kind}:OPENED'
+    except OSError as e:
+        return 'gone' if e.errno == errno.ENOENT else f'{kind}:{errno.errorcode.get(e.errno, "?")}'
+
+while time.monotonic() < (deadline if whole_at is None else min(deadline, whole_at + 15)):
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or pid in seen:
+            continue
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+                argv0 = fh.read().split(b'\0')[0]
+        except OSError:
+            continue
+        if argv0 == b'/usr/bin/curl':
+            seen.add(pid)
+            fds = [state(pid, 1), state(pid, 2)]
+            print('curl', pid, *fds, flush=True)
+            if 'gone' not in fds and whole_at is None:
+                whole_at = time.monotonic()
+print('done', flush=True)
+"""
+
+
+def test_a_running_probe_s_output_channels_cannot_be_reopened(live: Live) -> None:
+    """Task 9C: while the agent-path probe runs, a separate workload process finds each curl the probe
+    starts. Both of its output descriptors must be sockets whose write open is refused (ENXIO)."""
+    out: list[tuple[int, str, str]] = []
+
+    def watch(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
+                                 ["python3", "-I", "-c", OUTPUT_CHECK, str(PROMPT_SECONDS)],
+                                 timeout=PROMPT_SECONDS + EXEC_SECONDS)
+            out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
+                        r.stderr.decode("utf-8", "replace")))
+
+    spec = live.spec("claude", "btq-live-n10")
+    live.keys.append(spec.session_key)
+    runtime(live, selftest=Hooked(beside_agent=watch)).launch(spec)
+    reported = wait_until(lambda: bool(out), PROMPT_SECONDS + EXEC_SECONDS)
+    assert reported, "the output-channel check never reported"
+    rc, stdout, stderr = out[0]
+    why = outputs_unreachable(rc, stdout)
+    assert why == "", f"{why}\n{stdout}\n{stderr}"
 
 
 def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
@@ -9952,6 +10417,8 @@ Add `from typing import Any` to the imports.
 
 The memory check covers every process the workload can see, its own child included. That child is the case Yama's scope 1 allows, so only OpenShell's filter and Landlock stand in the way (Amendment 1). The test fails unless each check ran to completion and every operation it reports was refused; on failure, the assertion prints the reason and the check's whole output.
 
+The output-channel check runs beside the agent path, as the forged-result control does, and polls `/proc` until 15 seconds after it has seen a curl whole, or for at most `PROMPT_SECONDS`. That is a bound, not a wait for something to happen. It opens each descriptor for writing and closes it at once, writing nothing.
+
 - [ ] **Step 3: Check it offline**
 
 Run: `timeout 300 uv run pytest tests/live/test_live_sandbox.py -q && timeout 300 uv run pyright tests/live/test_live_sandbox.py && timeout 300 uv run ruff check tests/live`
@@ -9963,7 +10430,7 @@ Expected:
 - every test passes;
 - `openshell sandbox list` shows none of the module's sandboxes afterwards.
 
-If `test_nothing_in_the_workload_can_tamper_with_a_probe` fails, or `test_host_ptrace_scope_allows_probe_protection` fails on a host at 1, stop: that is r15 §17 item 12. Any launch that fails at `workload process <pid> has <n> seccomp filters` is the live risk Task 9B names: stop and return to design.
+If `test_nothing_in_the_workload_can_tamper_with_a_probe`, `test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted` or `test_a_running_probe_s_output_channels_cannot_be_reopened` fails, or `test_host_ptrace_scope_allows_probe_protection` fails on a host at 1, stop: that is r15 §17 item 12. Any launch that fails at `workload process <pid> has <n> seccomp filters` is the live risk Task 9B names: stop and return to design.
 
 - [ ] **Step 5: Commit**
 
@@ -9978,7 +10445,7 @@ git commit -m "plan4 T15: live negative and probe-protection controls (r15 §11)
 
 - **Approach:** subagent-driven (superpowers:subagent-driven-development), one fresh implementer per task, with a review before each task's close. The review is cross-model, at most 3 cycles.
 - **Prerequisites:**
-  - design approval of this plan (revision 4: btq-c9mml), and of Amendment 1 for Task 9B;
+  - design approval of this plan (revision 4: btq-c9mml), and of Amendment 1 for Tasks 9B and 9C;
   - before Tasks 14 and 15 run live: the §17 #3 host changes (settled), the agent image, and `kernel.yama.ptrace_scope = 1` (gap 15; the reference host's value already, Amendment 1).
 - **Order:** see "Task order"; every task can start once the plan is approved.
 - **Before enabling the backend:** gap 13's resolution has landed (including the read-only `.git` pointer that contains btq's git), gap 15 is settled (Amendment 1), and Task 15 has passed on the reference host. Only then is `[platform] sandbox = "openshell"` set on a real host.
