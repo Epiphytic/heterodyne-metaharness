@@ -1,18 +1,18 @@
 # Test suite efficiency review
 
-This review covers the offline suite (`uv run pytest`, which CI runs), as of `origin/main` e07e0a2: 3213 tests. `tests/live` (HZ_LIVE=1) is out of scope. Every number here comes from the shared Linux development host (32 CPUs), which was busy and had a nearly full nvme disk. The serial numbers come from a single run each, and the parallel ones were steady over four runs. Expect serial numbers to move by tens of percent from run to run.
+This review covers the offline suite (`uv run pytest`, which CI runs), as of `origin/main` e07e0a2: 3213 tests. `tests/live` (HZ_LIVE=1) is out of scope. Every number here comes from the shared Linux development host (32 CPUs), which was busy and had a nearly full nvme disk. The serial numbers come from a single run each, and the parallel ones were steady over repeated runs. Expect serial numbers to move by tens of percent from run to run.
 
 ## Which command when
 
-| Command | Runs | Typical time (`-n auto`) | Serial (`-- -n 0`) | Use it |
+| Command | Runs | Time (parallel, the default) | Time (serial, `-- -n 0`) | Use it |
 |---|---|---|---|---|
-| `scripts/test-fast` | every test except the ones in `tests/slow_tests.txt`; safety tests always run | about 21 s | about 3 min | while you iterate |
-| `scripts/test-changed [--base REF]` | `test-fast`, plus the slow tests of the files your change reaches; the full suite when the change can't be mapped | 35 to 45 s | 3 to 7 min | before you hand over a review range |
-| `scripts/test-full` | the whole suite (in parallel; CI runs it serially) | about 45 s | about 7 min | before merging, after touching shared code, or whenever `test-changed` has a doubt (it falls back to this by itself) |
+| `scripts/test-full` | the whole suite (CI runs the same tests, serially) | about 25 s | about 7 min | **by default**: while you iterate, before you hand over a review range, before merging |
+| `scripts/test-fast` | every test except the 14 tmux and wsd functions in `tests/slow_tests.txt`; every safety test | about 24 s | about 6.5 min (estimated) | serially, or on a busy machine with a few workers |
+| `scripts/test-changed [--base REF]` | `test-fast`, plus the slow tests of the files your change reaches; the full suite when the change can't be mapped | about 25 s | 6.5 to 7 min | the same |
 | `uv run pytest tests/test_x.py` | one file, serially | seconds | | while you debug that file |
 
-- The scripts run with pytest-xdist (`-n auto`, one worker per CPU). The machine is shared, so use `-- -n 8` when other suites are running, and still run only one full suite at a time.
-- **With the suite at 45 s in parallel, `scripts/test-full` is a reasonable default.** The fast and change-based tiers are worth it when you run serially, when the machine is busy, or for a quick loop on a large change.
+- **Use `scripts/test-full`.** In parallel it takes 25 s, and the abbreviated tiers save almost nothing on top of that: safety tests always run, and they are 83% of the suite's time (section 2a). The abbreviated tiers save about 10% in a serial run.
+- The scripts run with pytest-xdist (`-n auto --dist worksteal`, one worker per CPU). The machine is shared, so use `-- -n 8` when other suites are running, and still run only one full suite at a time.
 - All three scripts accept pytest arguments after `--` (for example, `scripts/test-fast -- -x`).
 - When a run fails, the scripts run the failing files again in full, serially and with verbose output (`-rfE -v`), slow tests included. A broad failure then comes back with the narrower tests of the same area next to it. `--no-diagnose` turns this off. The rerun never changes the exit code.
 - **CI still runs the full suite on every push and pull request.** The tiers are a way to iterate locally. They don't replace CI.
@@ -53,7 +53,7 @@ Neither fix changes what a test asserts, and neither changes production code.
 
 **Full suite after both fixes: 3178 passed, 36 skipped, 0 failed, in 7 min 05 s of wall time (424 s of test time).** That is 4 times faster than before.
 
-**With pytest-xdist (`-n auto`, 32 workers): 3209 passed, 36 skipped in 44 s of wall time,** in four runs out of four (section 2d). That is 38 times faster than the baseline. Most of what remains is the slowest single tests (10.5 s, 6.6 s, 6.1 s, ...), each on its own worker.
+**With pytest-xdist (`-n auto --dist worksteal`, 32 workers): 3220 passed, 36 skipped in 25 s of wall time,** in three runs out of three. That is 67 times faster than the baseline. With the default `--dist load` it took 44 s (section 2d). Most of what remains is the slowest single tests (10.5 s, 6.6 s, 6.1 s, ...), each on its own worker.
 
 ### What is left
 
@@ -69,17 +69,22 @@ These are the remaining costs, largest first. None is fixed in this PR.
 
 ### (a) The fast tier
 
-`tests/slow_tests.txt` lists 179 test functions (297 cases) that took 0.5 s or more in the run after the fixes. `tests/tier_marks.py`, loaded from `tests/conftest.py`, marks them `slow`, and `scripts/test-fast` runs `-m "not slow"`.
+`tests/slow_tests.txt` lists the test functions that `scripts/test-fast` leaves out. `tests/tier_marks.py`, loaded from `tests/conftest.py`, marks them `slow`, and `scripts/test-fast` runs `-m "not slow"`. The list is generated from a timed run: every function with a case of 0.5 s or more, except safety tests.
 
-**No safety test is ever slow.** A test counts as safety if its file is in `SAFETY_FILES` (redaction, secret scanning, policy, every `test_sandbox_*`, r13 redaction, approvals, socket bounds, the install-agnostic checker and the offline isolation test) or its name contains one of `SAFETY_WORDS` (redact, secret, sandbox, latch, digest, polic, leak, npub, nsec, token, auth, isolat, guard, pin).
+**Safety is the default.**
 
-- If the slow list names a safety test, collection fails with a usage error rather than quietly dropping the test from the fast tier.
-- `slow-list` never writes safety tests into the list.
-- `tests/test_tiers.py` checks both.
+- Only the files that `SLOW_ELIGIBLE` matches (`test_tmux*` and `test_wsd_*`: tmux and wsd mechanics) may have slow tests.
+- Every other test file is a safety file, a new one included, and its tests run in every tier, whatever the list says. The safety files cover admind auth, operators, redaction, latches, digests, approvals, sandbox, policy and so on.
+- Inside an eligible file, a test whose name matches `SAFETY_WORDS` (redact, secret, sandbox, latch, digest, polic, leak, npub, nsec, token, auth, isolat, guard, pin) is safety too.
+- Collection marks every safety test `safety`. It fails with a usage error, rather than quietly dropping the test from the fast tier, if the list names a safety test or anything marks one `slow`.
+- `tests/test_tiers.py` loads the real list and collects the real suite. It checks that `-m "not slow"` collects every safety test, by name the three that an earlier, name-based version of this guard missed:
+  - `test_a_hex_value_in_a_reply_never_reaches_the_chat` (redaction);
+  - `test_a_stranger_is_dropped` (authorisation);
+  - `test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm` (latch).
 
-Of the 408 cases that took 0.5 s or more, 111 stay in the fast tier for this reason.
+Under this rule the list holds 14 functions (44 cases), about 40 s of the 422 s of serial test time. **Safety tests take 351 s of it (83%),** so a fast tier that keeps them all can't be much faster than the full suite. In parallel, the fast tier took 24 s and the full suite 25 s; serially it saves about 10%.
 
-The fast tier: **2905 passed, 36 skipped, 297 deselected in 2 min 56 s** serially (with HZ_REQUIRE_TMUX=1), and **21 s** with `-n auto`.
+The honest conclusion is that tiering doesn't pay in this suite. The speed came from making every test cheaper (section 1) and from running them in parallel (section 2d). The tiers stay, because they cost nothing, and they will matter if the eligible files grow.
 
 ### (b) Change-based selection
 
@@ -89,7 +94,7 @@ The fast tier: **2905 passed, 36 skipped, 297 deselected in 2 min 56 s** seriall
 - heterodyne module names that appear in strings (`-m heterodyne.x`, `monkeypatch.setattr("heterodyne.x.y", ...)`);
 - test-side helpers whose file name appears in a string (`fakes / "fake_claude.py"`, run as a subprocess).
 
-`scripts/test-changed` runs the fast tier, then the slow tests of the selected files.
+`scripts/test-changed` runs the fast tier and the slow tests of the selected files in one pytest run. It passes the selected files in `HZ_TIER_KEEP`, and `tier_marks` leaves their tests unmarked.
 
 **It falls back to the full suite whenever it can't be sure:**
 
@@ -114,7 +119,7 @@ What it selects today:
 | `agents/codex` | 4 files |
 | `wsd/daemon`, `cli`, `ctl`; `sandbox/openshell` | 2 files |
 
-For example, a one-line edit to `wsd/park.py` selected 18 files. The fast tier took 173 s and the slow tests of those files took 31 s (36 tests), so **3 min 25 s in total, against 7 min 05 s for the full suite**. With `-n auto`, it took 21 s plus 13 s, so 35 s against 45 s. An admind change saves less, because most admind test files reach most admind modules.
+For example, a one-line edit to `wsd/park.py` selected 18 files. With the earlier, name-based slow list (297 cases), that took 3 min 25 s serially, against 7 min 05 s for the full suite. Under the safety-first list it costs about the same as the full suite, whether serial or parallel (section 2a). Selection would only pay again if many more tests became eligible.
 
 **Caveat:** the selection is only as good as the dependency graph. It sees imports and module or helper names in strings. It does not see a module that reaches another through a path built at run time, a config or data file read by a test, or behaviour that changes through the environment. This is why every unmappable change and every shared module falls back to the full suite, and why CI keeps running the full suite. A wrong subset can at worst delay a failure from `test-changed` to CI. It can't hide one from CI.
 
@@ -133,18 +138,20 @@ What the runner does instead: after a failure, it reruns the failing files in fu
 
 ### (d) Parallelism
 
-pytest-xdist 3.8 (and execnet, which it needs) is now in the `dev` dependency group, hash-pinned in `uv.lock`. CI still runs `uv sync --locked`, so CI hosts install nothing new by other means, and runs stay offline. The tier scripts pass `-n auto`; a plain `uv run pytest`, which is what CI runs, is still serial.
+pytest-xdist 3.8 (and execnet, which it needs) is now in the `dev` dependency group, hash-pinned in `uv.lock`. CI still runs `uv sync --locked`, so CI hosts install nothing new by other means, and runs stay offline. The tier scripts pass `-n auto --dist worksteal`. A plain `uv run pytest`, which is what CI runs, is still serial.
 
-**Parallel safety, checked with five full `-n auto` runs (32 workers):**
+`--dist worksteal` matters. With the default `--dist load`, the full suite took 44 s, because a worker that had been handed a run of slow Harness tests set the wall time. With `worksteal`, idle workers take queued tests from busy ones, and the suite takes 25 s.
+
+**Parallel safety, checked with nine full parallel runs (32 workers: five with `load`, four with `worksteal`):**
 
 - Each test gets its own tmux socket from `tests/tmux_guard.py`.
 - Every file a test writes is under `tmp_path`, or under a `mkdtemp` directory with a unique name.
 - The `/dev/shm` base temp is created by the controller. The workers inherit it and each gets its own `popen-gwN` directory, which is how pytest intends it.
 - The fd-count test in `test_wsd_gate.py` counts the fds of its own process, and passed in every run.
 
-The first run hit one failure, in `test_admind_au11.py`. It turned out to be a race in two tests that has nothing to do with parallelism (section 5), and it is fixed. The next four runs passed: 3209 passed, 36 skipped, in 43.4 to 43.5 s. **No test needed a separate serial pass,** so there is no `serial` marker. If one ever needs it, the runner is the place to add a second, `-n 0` pass for it.
+Only the first run failed, once, in `test_admind_au11.py`. It was a race in two tests that has nothing to do with parallelism (section 5), and it is fixed. Every run since has passed. **No test needed a separate serial pass,** so there is no `serial` marker. If one ever needs it, the runner is the place to add a second, `-n 0` pass for it.
 
-**Proposal (not made in this PR):** run CI with `-n auto` as well, once the local runs have been soaking for a while. CI on the self-hosted runners took 22 min on PR #54, before the fixes in this PR. Expect about 7 min serially after them, and under a minute with `-n auto`, depending on the runner's CPUs.
+**Proposal (not made in this PR):** run CI with `-n auto --dist worksteal` as well, after a soak period of local runs. CI on the self-hosted runners took 22 min on PR #54, before the fixes in this PR. Expect about 7 min serially after them, and well under a minute in parallel, depending on the runner's CPUs.
 
 ### (e) One entry point
 
@@ -184,7 +191,7 @@ These need a decision first.
 - **CI stays the full suite.** One option is to run `test-changed` on pushes to feature branches and keep the full suite on pull requests and `main`. At 7 minutes, the full suite is cheap enough that I don't recommend it yet. It becomes worth it if the suite grows back past about 15 minutes.
 - **Make the paste delay configurable** (section 1, "What is left"). This is the largest remaining saving.
 - **Inject a clock into the wsd lane worker** (the 10.6 s shutdown test).
-- **`-n auto` on CI** (section 2d).
+- **`-n auto --dist worksteal` on CI** (section 2d).
 - **One wait helper for the admind tests** that reports diagnostics on timeout (section 5).
 
 ## 5. Flakiness and wall-clock timeouts
