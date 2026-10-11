@@ -56,12 +56,24 @@ The shipped defaults define the known adapters (`claude-code`, `codex`), the rev
 See `examples/config.toml` for a commented sample.
 
 - **No policy keys.** A top-level key that belongs in `policy.toml` (`approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor`, `policy`) is an error: "belong in policy.toml".
-- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `bubblewrap` on Linux, `launchd` and `seatbelt` on macOS (ADR 0001 §3.2). They are recorded once, at setup, and not re-probed. `bubblewrap` is the default that setup records today; ADR revision 14's Linux runtime is OpenShell, gated on spike S5, with bubblewrap only if S5 fails (ADR 0001 §7). No sandbox runs yet (plan 4).
+- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `openshell` on Linux, `launchd` and `seatbelt` on macOS (ADR 0001 §3.2). They are recorded once, at setup, and not re-probed. `wsd run` builds its agent runtime from `sandbox` (ADR 0001 §7):
+  - `openshell`: the OpenShell runtime (plan 4; see [packaging/sandbox/README.md](../packaging/sandbox/README.md));
+  - missing or `none`: no runtime, so wsd holds every workstream;
+  - `bubblewrap` or `seatbelt`: no runtime either, with a one-line notice when wsd starts. Every Linux setup before plan 4 recorded `bubblewrap`, so such a host runs no agents until `sandbox` is changed to `openshell`;
+  - anything else: a configuration error, and `wsd run` exits with 78.
 - **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string.
 - **`[roles]`:** role name to profile name.
-- **`[sandbox]`** must be a table, and holds two host allowlists:
+- **`[sandbox]`** must be a table. It holds two host allowlists:
   - `egress_approved`: a list of hosts a workstream may add as extra egress.
   - `ro_mounts_approved`: a list of **absolute** directory paths a workstream may add as extra read-only mounts. A missing or empty list allows none.
+
+  It also holds the OpenShell runtime's settings, read once when wsd starts. Any other key is an error. Errors name the key, never its value.
+  - `image` (default `localhost/heterodyne-agent:1`): the workload image, built from `packaging/sandbox/Containerfile`.
+  - `openshell` and `podman` (defaults `openshell`, `podman`): the commands wsd runs.
+  - `tool_env`: a table of extra environment variables for those two commands only, for example the `PATH` and `CONTAINERS_CONF` of a side-by-side podman 5. It is never passed into a sandbox. `HOME`, `USER`, `LANG` and `TERM` can't be set.
+  - `max_lifetime_minutes` (10 to 1440, default 120) and `stop_margin_minutes` (1 to 120, default 15, less than the lifetime): a session is stopped at a turn boundary inside the margin before its deadline, or at the deadline, and then resumed (D13). The deadline is the earlier of the lifetime and the login's expiry less the margin.
+  - `probe_allowed_host` and `probe_denied_host` (defaults `api.openai.com`, `example.org`): the self-test's egress controls.
+  - `agent_probe_seconds` (30 to 900, default 240): how long the agent-path self-test may take.
 - **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. `wsd` reads `[integrations.beads]` (see [wsd.md](wsd.md#1-configuration)); nothing reads `[integrations.marmot]` yet.
 - **`[wsd]`:** the workstream daemon's timers and limits; see [wsd.md](wsd.md#1-configuration).
 - **`[accounts.<name>]`** (ADR 0001 §4.4 D1): a named login for one adapter, with exactly two keys:
@@ -206,7 +218,7 @@ timeouts.gatekeeper_seconds = 60    (defaults)
 tiers.escalate = ['push_branch', 'open_pr', 'merge_pr', 'deploy', 'notify', 'new_egress_host']    (defaults)
 platform.os = 'linux'    (host:config.toml)
 platform.service_manager = 'systemd'    (host:config.toml)
-platform.sandbox = 'bubblewrap'    (host:config.toml)
+platform.sandbox = 'openshell'    (host:config.toml)
 profiles.coder.adapter = 'codex'    (host:config.toml)
 sandbox.ro_mounts_approved = []    (host:config.toml)
 integrations.marmot.auth_token = {'command': '<command-that-prints-the-token>'}    (host:config.toml)
@@ -214,8 +226,6 @@ paths.config_dir = '<config-dir>'    (env:HETERODYNE_CONFIG_DIR)
 policy: approvers=['<approver-name>']  (policy.toml)
 note: only one model configured; reviews will be adversarial (two LLMs recommended, §11.1)
 ```
-
-`platform.sandbox = 'bubblewrap'` is the default setup records today, not the revision 14 target (see `[platform]` above).
 
 - A reference is printed as the reference, never resolved.
 - The `tiers.*` lines are the built-in defaults as merged values, not the effective tiers.

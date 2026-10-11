@@ -11,7 +11,7 @@ from typing import Literal
 OsName = Literal["linux", "macos"]
 
 _BACKENDS: dict[OsName, dict[str, str]] = {
-    "linux": {"service_manager": "systemd", "sandbox": "bubblewrap"},
+    "linux": {"service_manager": "systemd", "sandbox": "openshell"},
     "macos": {"service_manager": "launchd", "sandbox": "seatbelt"},
 }
 

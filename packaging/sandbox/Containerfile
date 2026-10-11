@@ -1,0 +1,15 @@
+# The heterodyne agent workload image for the OpenShell backend (ADR 0001 §7; spike S5). The agent CLIs
+# are not baked in: the runtime binds the host's pinned install read-only at its host path. The probes
+# and hooks need python3 (3.12: the probe channel checks /usr/bin/python3.12), curl and git.
+FROM nvcr.io/nvidia/base/ubuntu:24.04
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl python3 git iproute2 procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && (getent group "${AGENT_GID}" || groupadd -g "${AGENT_GID}" agent) \
+ && (getent passwd "${AGENT_UID}" && userdel -f "$(getent passwd "${AGENT_UID}" | cut -d: -f1)" || true) \
+ && useradd -u "${AGENT_UID}" -g "${AGENT_GID}" -M -d /sandbox -s /bin/bash agent
+USER ${AGENT_UID}:${AGENT_GID}
+WORKDIR /sandbox
