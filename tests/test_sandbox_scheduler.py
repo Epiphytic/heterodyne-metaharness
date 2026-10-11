@@ -1,4 +1,5 @@
 import contextlib
+import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -9,12 +10,15 @@ from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Rig, make_rig, on_profile
 
-from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record
+from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SandboxRuntime, SessionRecord, read_record
+from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import NEEDS_HUMAN
 from heterodyne.wsd.park import Parker
+from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import Liveness, RuntimeUnavailable
 from heterodyne.wsd.scheduler import Outcome, Scheduler
+from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.workstream import Limits
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -184,19 +188,100 @@ def test_a_lifetime_wip_that_keeps_failing_holds_the_relaunch(both: Both,
     assert rt.runtime.sessions(WS) == []
 
 
+def agent_commit(both: Both, bead: str) -> str:
+    """A commit the agent makes inside: in the session's private git directory, never the host's."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {"GIT_DIR": str(both.rt.runtime.layout(both.rig.key(bead)).git),
+            "GIT_WORK_TREE": str(both.rig.worktree(bead))}
+    git = ["git", "-c", "user.name=agent", "-c", "user.email=agent@example.org"]
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "agent work"], env=env, check=True,
+                   capture_output=True)
+    return subprocess.run([*git, "rev-parse", "HEAD"], env=env, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def host_log(both: Both, bead: str) -> str:
+    return subprocess.run(["git", "-C", str(both.rig.worktree(bead)), "log", "--format=%H %s", f"btq/{bead}"],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def private_tip(both: Both, bead: str) -> str:
+    git = both.rt.runtime.layout(both.rig.key(bead)).git
+    return subprocess.run(["git", "--git-dir", str(git), "rev-parse", f"btq/{bead}"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def unlandable(both: Both, bead: str) -> str:
+    """The agent commits, then its private git directory can no longer be landed. Returns the commit."""
+    made = agent_commit(both, bead)
+    (both.rt.runtime.layout(both.rig.key(bead)).git / "objects" / "zz").symlink_to(both.rt.root)
+    return made
+
+
+def restart(both: Both) -> None:
+    """A new runtime, parker and scheduler over the same journal, session directory and backend."""
+    rig, rt = both.rig, both.rt
+    rt.runtime = SandboxRuntime(rt.runtime.c, rt.backend, rt.selftest)
+    rig.deps = replace(rig.deps, runtime=rt.runtime)
+    rig.parker = Parker(rig.ws, rig.deps)
+    rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
+
+
+def assert_held_unlanded(both: Both, bead: str, host_before: str, made: str) -> None:
+    rig = both.rig
+    detail = rig.journal.holds(WS).get(Reason.RUNTIME_UNAVAILABLE, "")
+    sid = short_id(rig.key(bead))
+    assert f"session {sid} generation 1" in detail and f" s/{sid}/git " in detail     # the rig's is s/
+    assert host_log(both, bead) == host_before and lifetime_marks(rig, bead) == []   # no host WIP
+    assert private_tip(both, bead) == made                                        # kept for a human
+    assert rig.journal.receipt(rig.key(bead), 2) is None                          # no generation 2
+    assert NEEDS_HUMAN not in rig.world.beads[bead].labels                        # no budget spent
+
+
 @pytest.mark.parametrize("both", [Limits(launch_failures_before_human=1)], indirect=True)
-def test_an_unlanded_lifetime_stop_makes_no_wip_and_needs_a_human(both: Both) -> None:
-    """D26: commits that could not be landed come before any host WIP, and the relaunch refuses."""
+def test_an_unlanded_lifetime_stop_makes_no_wip_and_holds_the_workstream(both: Both) -> None:
+    """D26, T12 (B): commits that could not be landed hold the workstream before any host WIP or relaunch;
+    it stays held through a restart, with the session and its git directory named for the operator."""
     rig, rt = both.rig, both.rt
     rig.world.add("btq-1")
     assert rig.pickup() is Outcome.STARTED
     first = stop_window(both, "btq-1")
-    shutil.rmtree(rt.runtime.layout(first.key).git)       # the seeded private git directory is lost
-    rig.pickup()
+    before = host_log(both, "btq-1")
+    made = unlandable(both, "btq-1")
+    assert rig.pickup() is Outcome.HELD
     rec = both.record("btq-1")
     assert (rec.phase, rec.generation, rec.unlanded) == (Phase.ENDED, 1, True)
     assert rec.wip_mark == f"lifetime:{rig.key('btq-1')}:1"     # still owed, never committed over it
-    assert lifetime_marks(rig, "btq-1") == [] and rt.backend.created == [first.sandbox]
-    assert "not landed" in refusal(rig, "btq-1", 2)
-    assert rig.state("btq-1") == "stuck" and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
-    assert rt.runtime.sessions(WS) == []
+    assert rt.backend.created == [first.sandbox]
+    assert_held_unlanded(both, "btq-1", before, made)
+    restart(both)
+    assert recover(rig.sched).ok is False and rig.pickup() is Outcome.HELD
+    assert_held_unlanded(both, "btq-1", before, made)
+    assert rt.backend.created == [first.sandbox]
+
+
+@pytest.mark.parametrize("how", ["park", "defer"])
+def test_a_park_or_defer_over_unlanded_commits_makes_no_wip(both: Both, how: str) -> None:
+    """T10 r3: the stop ends the session but its commits can't land, so the park or defer holds at its
+    stop step: no host WIP, the host branch unchanged, the private commits kept, through a restart."""
+    rig, rt = both.rig, both.rt
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    assert rig.pickup() is Outcome.STARTED
+    before = host_log(both, "btq-1")
+    made = unlandable(both, "btq-1")
+    if how == "park":
+        state = rig.parker.park("btq-1", ("btq-2",))
+    else:
+        state = rig.parker.defer("btq-1", "account_changed", None)
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (state, row.state, row.reason) == (BeadState.PARKING, BeadState.PARKING,
+                                                                   Reason.STOP_UNCONFIRMED)
+    rec = both.record("btq-1")
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True) and rt.backend.boxes == {}
+    assert_held_unlanded(both, "btq-1", before, made)
+    [op] = rig.journal.ops_open(WS)
+    restart(both)
+    assert recover(rig.sched).ok is False and rig.pickup() is Outcome.HELD
+    assert [o.op_id for o in rig.journal.ops_open(WS)] == [op.op_id]       # still open at its stop step
+    assert_held_unlanded(both, "btq-1", before, made)

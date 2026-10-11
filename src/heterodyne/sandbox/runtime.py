@@ -193,6 +193,11 @@ class SandboxRuntime:
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.LIVE))
             elif not self._end(rec, interrupt=False, lifetime=self._overdue(rec)):
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.UNKNOWN))
+        # T10 r3: commits that were not landed hold the whole workstream, so neither a park nor a defer
+        # makes a host WIP over them. Read again: an end above may have just recorded one.
+        for rec in self._records():
+            if rec.ws == ws and rec.unlanded:
+                raise self._unlanded(rec)
         return listed
 
     def launch(self, spec: LaunchSpec) -> Started:
@@ -251,11 +256,16 @@ class SandboxRuntime:
             raise self._fail(layout, rec, exc) from None
 
     def stop(self, session_key: str) -> None:
-        rec = read_record(self.layout(session_key))
-        if rec is None or rec.phase is Phase.ENDED:
+        layout = self.layout(session_key)
+        rec = read_record(layout)
+        if rec is None:
             return
-        if not self._end(rec, interrupt=True):
-            raise RuntimeUnavailable("the session's end could not be confirmed")
+        if rec.phase is not Phase.ENDED:
+            if not self._end(rec, interrupt=True):
+                raise RuntimeUnavailable("the session's end could not be confirmed")
+            rec = read_record(layout)
+        if rec is not None and rec.unlanded:
+            raise self._unlanded(rec)            # ended, but its caller must not commit over it
 
     def expire(self, ws: str, now: int) -> None:
         """D13: `_end(..., lifetime=True)` makes the stop durable, lands the generation's commits and then
@@ -603,6 +613,14 @@ class SandboxRuntime:
         except (gitwip.GitFailed, OSError):
             return self._phase(layout, rec, unlanded=True, error="the session's commits could not be landed")
         return rec
+
+    def _unlanded(self, rec: SessionRecord) -> RuntimeUnavailable:
+        """The hold's detail names the session and its private git directory, relative to the state
+        directory: never a home path."""
+        git = self.layout(rec.key).git.relative_to(self.c.sessions.parent)
+        return RuntimeUnavailable(f"session {short_id(rec.key)} generation {rec.generation}: its commits "
+                                  f"were not landed; land them from {git} in wsd's state directory by hand "
+                                  "(docs/wsd.md §5)")
 
     def _overdue(self, rec: SessionRecord) -> bool:
         """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""

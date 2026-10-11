@@ -422,7 +422,7 @@ def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
     assert rig.runtime.expires == [(WS, rig.clock())]
     rig.runtime.expire_failures = 1
     assert rig.pickup() is Outcome.HELD
-    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: ""}
+    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: "lifetime stop not confirmed"}
 
 
 @needs_tools

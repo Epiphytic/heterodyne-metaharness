@@ -224,10 +224,11 @@ class Parker:
         found = self.d.runtime.sessions(self.ws.name)
         return [s for s in found if bead is None or s.bead == bead]
 
-    def _runtime_hold(self, op: Op, reason: Reason = Reason.RUNTIME_UNAVAILABLE) -> BeadState:
+    def _runtime_hold(self, op: Op, reason: Reason = Reason.RUNTIME_UNAVAILABLE,
+                      exc: RuntimeUnavailable | None = None) -> BeadState:
         """Hold the workstream; the operation stays open at its step and uses no failure budget."""
         j = self.d.journal
-        j.hold(self.ws.name, Reason.RUNTIME_UNAVAILABLE)
+        j.hold(self.ws.name, Reason.RUNTIME_UNAVAILABLE, "" if exc is None else str(exc))
         row = j.state(self.ws.name, op.bead)
         if row is None:
             return BeadState.STUCK
@@ -387,8 +388,8 @@ class Parker:
         except WorktreeConflict as exc:
             self.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
             return BeadState.STUCK
-        except RuntimeUnavailable:
-            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        except RuntimeUnavailable as exc:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED, exc)
         except gitwip.GitFailed as exc:
             if self._spend(op, self.ws.limits.park_attempts_before_human, Reason.PARK_FAILED, str(exc)):
                 return BeadState.STUCK
@@ -501,8 +502,8 @@ class Parker:
         except WorktreeConflict as exc:
             self.escalate_from(op, Reason.WORKTREE_FAILED, str(exc))
             return BeadState.STUCK
-        except RuntimeUnavailable:
-            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        except RuntimeUnavailable as exc:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED, exc)
         except gitwip.GitFailed as exc:
             if self._spend(op, self.ws.limits.park_attempts_before_human, Reason.PARK_FAILED, str(exc)):
                 return BeadState.STUCK
@@ -809,8 +810,8 @@ class Parker:
         except (LaunchConflict, LaunchesUnreadable, EntryConflict) as exc:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"adoption still unverified: {exc}")
             return BeadState.STUCK
-        except RuntimeUnavailable:
-            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED)
+        except RuntimeUnavailable as exc:
+            return self._runtime_hold(op, Reason.STOP_UNCONFIRMED, exc)
         with j.transaction():
             j.op_finish(op.op_id, OpStatus.DONE)
             nxt = j.op_open(OpKind.RESUME, ws, bead, {"ref": op.data.get("ref", "")})
@@ -936,8 +937,8 @@ class Parker:
             return Launch.WAIT
         try:
             listed = self._sessions()
-        except RuntimeUnavailable:
-            j.hold(ws, Reason.RUNTIME_UNAVAILABLE)
+        except RuntimeUnavailable as exc:
+            j.hold(ws, Reason.RUNTIME_UNAVAILABLE, str(exc))
             return Launch.WAIT
         if any(s.bead != bead for s in listed):
             return Launch.WAIT               # one coder session at a time (§4.3)
@@ -1050,7 +1051,7 @@ class Parker:
         if receipt.refusal == "unavailable":
             with j.transaction():
                 j.op_forget(op.op_id, "generation")
-                self._runtime_hold(op)
+                self._runtime_hold(op, exc=RuntimeUnavailable(receipt.error or ""))
             return Launch.WAIT
         if self._spend(op, self.ws.limits.launch_failures_before_human, Reason.LAUNCH_FAILED,
                        receipt.error or "", forget=("generation",)):

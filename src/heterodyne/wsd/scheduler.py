@@ -178,10 +178,10 @@ class Scheduler:
         self.d.cp("usage.clamped")
         try:
             if not self.d.runtime.available():
-                raise RuntimeUnavailable("not available")
+                raise RuntimeUnavailable("the runtime is not available")
             self.d.runtime.sessions(name)
-        except RuntimeUnavailable:
-            j.hold(name, Reason.RUNTIME_UNAVAILABLE)
+        except RuntimeUnavailable as exc:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE, str(exc))
             return Outcome.HELD
         # Only pickup clears this hold (the park stop, release and the guard set it): the runtime has
         # answered both questions every launch needs, so nothing waits on it any more.
@@ -200,8 +200,8 @@ class Scheduler:
             if j.holds(name):
                 return Outcome.HELD
             coder = self.d.runtime.sessions(name)
-        except RuntimeUnavailable:
-            j.hold(name, Reason.RUNTIME_UNAVAILABLE)
+        except RuntimeUnavailable as exc:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE, str(exc))
             return Outcome.HELD
         if coder:
             return Outcome.BUSY
@@ -215,8 +215,8 @@ class Scheduler:
         try:            # an uncertain launch above may have left its session listed: the role is taken
             if self.d.runtime.sessions(name):
                 return self._stalled()
-        except RuntimeUnavailable:
-            j.hold(name, Reason.RUNTIME_UNAVAILABLE)
+        except RuntimeUnavailable as exc:
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE, str(exc))
             return Outcome.HELD
         return Outcome.DEFERRED
 
