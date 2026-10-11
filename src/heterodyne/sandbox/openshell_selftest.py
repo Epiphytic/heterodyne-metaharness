@@ -303,7 +303,8 @@ class OpenShellSelfTest:
         self._logs(ctx, since, "exec")
 
     def agent_path(self, ctx: ProbeContext) -> None:
-        from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier  # channel imports this module
+        # channel imports this module
+        from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier, start_time
 
         self._protection()
         # Both canaries are held from before the probe config is written until the probe run is over,
@@ -317,10 +318,11 @@ class OpenShellSelfTest:
             try:
                 root = ctx.backend.workload_pid(ctx.spec.name)
                 netns = str((self.proc / str(root) / "ns" / "net").readlink())
-            except OSError:
+                root_start = start_time(self.proc, root)     # the one task exempt from the scan, pinned
+            except (OSError, IndexError, ValueError):
                 raise SelfTestFailed("workload-netns") from None
             verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
-                                  namespaces=self._namespaces(ctx), root_pid=root,
+                                  namespaces=self._namespaces(ctx), root_pid=root, root_start=root_start,
                                   ptrace_scope=self.ptrace_scope, proc=self.proc)
             home.verify("canary-precondition")
             oa.verify("canary-precondition")

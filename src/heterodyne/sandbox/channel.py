@@ -14,7 +14,8 @@ is stamped on a monotonic clock, for the deadline.
 Reads, connections and the time per connection are bounded, and `close` finishes every worker before the
 verdict is read.
 It also checks, at both points, that nothing in the workload can tamper with the probe while it runs (§7
-Probe protection, D23).
+Probe protection, D23): every thread of every workload process but its first has no_new_privs and no
+capability, and a scan it can't complete or resolve fails.
 """
 
 import json
@@ -34,20 +35,56 @@ from heterodyne.sandbox.openshell_selftest import MIN_PTRACE_SCOPE, PROBE_ARGV, 
 MAX_LINE = 64 << 10
 MAX_PEERS = 16              # connections served at once; any more is closed at once, and rejected
 NO_CAPS = "0000000000000000"
+SCAN_LIMIT = 1 << 17        # /proc entries (processes and threads) one workload scan may read
+SCAN_SECONDS = 10.0         # and the time it may take; past either, the scan fails
+GONE = (FileNotFoundError, ProcessLookupError)      # the process or thread exited while it was read
 ACK = b"ack\n"              # sent after the check at `done`; the probe waits for it before exiting
 ACCEPT_POLL = 0.05          # how often the accept loop looks for close()
 JOIN_SECONDS = 2.0          # close() waits this long for each worker
 
 
+class _ScanFailed(Exception):
+    pass
+
+
+class _Budget:
+    """One scan's bound: SCAN_LIMIT entries and `seconds` on `clock`. Per scan, as workers verify at once."""
+    def __init__(self, clock: Callable[[], float], seconds: float) -> None:
+        self.clock = clock
+        self.end = clock() + seconds
+        self.entries = 0
+
+    def tick(self) -> None:
+        self.entries += 1
+        if self.entries > SCAN_LIMIT or self.clock() > self.end:
+            raise _ScanFailed("the workload scan did not finish")
+
+
+def _stat(d: Path) -> tuple[int, int]:
+    """(ppid, start time) from /proc/<pid>/stat: one read, so both are the same process's. The comm,
+    in parentheses, may itself hold ") "."""
+    fields = (d / "stat").read_text().rpartition(")")[2].split()
+    return int(fields[1]), int(fields[19])
+
+
+def start_time(proc: Path, pid: int) -> int:
+    """A process's start time, in clock ticks since boot: with its pid, its identity."""
+    return _stat(proc / str(pid))[1]
+
+
 class ProcVerifier:
     def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *,
-                 namespaces: tuple[str, str], root_pid: int, ptrace_scope: Callable[[], int],
-                 proc: Path = Path("/proc")) -> None:
+                 namespaces: tuple[str, str], root_pid: int, root_start: int,
+                 ptrace_scope: Callable[[], int], proc: Path = Path("/proc"),
+                 clock: Callable[[], float] = time.monotonic, budget: float = SCAN_SECONDS) -> None:
         self.netns = netns
         self.cli = cli_binary
         self.allowed = allowed_env
         self.namespaces = namespaces         # the workload's (user, mnt), pinned by the host
-        self.root = root_pid                 # the workload container's first process
+        self.root = root_pid                 # the workload container's first process, the one task
+        self.root_start = root_start         # exempt, pinned by its start time against pid reuse
+        self.clock = clock
+        self.budget = budget
         self.ptrace_scope = ptrace_scope
         self.proc = proc
 
@@ -71,32 +108,87 @@ class ProcVerifier:
                 return None
         return None
 
-    def _capable(self) -> str:
-        """The first workload process (a descendant of the container's first process, under no_new_privs)
-        holding any permitted or effective capability, else "". Entries that vanish mid-scan ended."""
-        children: dict[int, list[int]] = {}
-        held: dict[int, bool] = {}
+    def _scan(self) -> str:
+        """"" when no workload task but the first process can gain or holds a capability, else why not.
+
+        Workload members: the descendants of the first process, and every process in the workload's
+        mount namespace (one reparented away from the tree, say). Each process's parent and start time
+        come from one read of its stat, so a parent must exist and have started first; else its pid was
+        reused, or it exited mid-scan, and membership is unresolved. Every member's every thread must
+        have no_new_privs and no permitted or effective capability: capabilities are per thread. A
+        process created after the listing inherits no_new_privs from its parent, and under it can gain
+        no capability on exec. Any evidence missing, malformed, or changed between reads fails the
+        scan, as does running past SCAN_LIMIT entries or the budget."""
+        try:
+            budget = _Budget(self.clock, self.budget)
+            procs, mounted = self._list(budget)
+            if procs.get(self.root, (0, -1))[1] != self.root_start:
+                return "the workload's first process changed"
+            members = mounted | {pid for pid in procs if self._descends(pid, procs)}
+            members.discard(self.root)
+            for pid in sorted(members):
+                why = self._tasks(pid, procs[pid], budget)
+                if why:
+                    return why
+        except _ScanFailed as exc:
+            return str(exc)
+        return ""
+
+    def _list(self, budget: _Budget) -> tuple[dict[int, tuple[int, int]], set[int]]:
+        """Every listed process's (ppid, start time), and those in the workload's mount namespace."""
+        procs: dict[int, tuple[int, int]] = {}
+        mounted: set[int] = set()
         for d in self.proc.iterdir():
             if not d.name.isdigit():
                 continue
+            budget.tick()
             try:
-                status = (d / "status").read_text()
-                ppid = int(self._field(status, "PPid"))
-                nnp = self._field(status, "NoNewPrivs") == "1"
-                caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+                procs[int(d.name)] = _stat(d)
+            except GONE:
+                continue                     # exited: its children, if any, then name a missing parent
             except (OSError, IndexError, ValueError):
-                continue
-            children.setdefault(ppid, []).append(int(d.name))
-            held[int(d.name)] = nnp and caps != {NO_CAPS}
-        todo, seen = list(children.get(self.root, [])), set[int]()
-        while todo:
-            pid = todo.pop()
-            if pid in seen:
-                continue
-            seen.add(pid)
-            if held.get(pid):
-                return str(pid)
-            todo.extend(children.get(pid, []))
+                raise _ScanFailed("workload process evidence unreadable") from None
+            try:
+                if str((d / "ns" / "mnt").readlink()) == self.namespaces[1]:
+                    mounted.add(int(d.name))
+            except OSError:
+                pass                         # another user's, or gone: its membership rests on ancestry
+        return procs, mounted
+
+    def _descends(self, pid: int, procs: dict[int, tuple[int, int]]) -> bool:
+        q, steps = pid, 0
+        while q != self.root:
+            ppid, start = procs[q]
+            if ppid == 0:
+                return False
+            if ppid not in procs or procs[ppid][1] > start or steps > len(procs):
+                raise _ScanFailed("the workload process list is unresolved")
+            q, steps = ppid, steps + 1
+        return q != pid
+
+    def _tasks(self, pid: int, seen: tuple[int, int], budget: _Budget) -> str:
+        d = self.proc / str(pid)
+        try:
+            tids = sorted(int(t.name) for t in (d / "task").iterdir() if t.name.isdigit())
+            for tid in tids:
+                budget.tick()
+                try:
+                    status = (d / "task" / str(tid) / "status").read_text()
+                except GONE:
+                    continue                 # the thread exited
+                nnp = self._field(status, "NoNewPrivs")
+                caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+                who = f"workload process {pid}" + ("" if tid == pid else f" (thread {tid})")
+                if nnp != "1":
+                    return f"{who} can gain privileges"
+                if caps != {NO_CAPS}:
+                    return f"{who} holds capabilities"
+            if _stat(d) != seen:
+                raise _ScanFailed("the workload process list is unresolved")   # reused or reparented
+        except GONE:
+            return ""                        # exited before or while its threads were read
+        except (OSError, IndexError, ValueError):
+            raise _ScanFailed("workload process evidence unreadable") from None
         return ""
 
     def __call__(self, pid: int) -> str:
@@ -133,10 +225,7 @@ class ProcVerifier:
         scope = self.ptrace_scope()
         if scope < MIN_PTRACE_SCOPE:
             return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
-        holder = self._capable()
-        if holder:
-            return f"workload process {holder} holds capabilities"
-        return ""
+        return self._scan()
 
 
 def alive(pidfd: int) -> bool:

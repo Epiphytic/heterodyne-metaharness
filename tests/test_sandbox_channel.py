@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sandbox_env import short_dir, wait_for
@@ -24,24 +25,49 @@ ALLOWED = frozenset({"HOME", "PATH"})
 NO_CAPS = "0000000000000000"
 
 
+HOST_NS: dict[str, Any] = {"userns": "user:[4026531837]", "mntns": "mnt:[4026531841]"}
+
+
+def status_text(ppid: int, *, tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS) -> str:
+    return (f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n"
+            f"NoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
+
+
+def stat_text(pid: int, ppid: int, start: int) -> str:
+    """/proc/<pid>/stat: ppid is field 4, the start time field 22; the comm may hold ") "."""
+    return f"{pid} (a) b) S {ppid} " + "0 " * 17 + f"{start} 0 0\n"
+
+
+def fake_thread(root: Path, pid: int, tid: int, *, ppid: int, nnp: int = 1, caps: str = NO_CAPS) -> None:
+    t = root / str(pid) / "task" / str(tid)
+    t.mkdir(parents=True)
+    (t / "status").write_text(status_text(ppid, nnp=nnp, caps=caps))
+
+
 def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: int, netns: str = NETNS,
               env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
-              userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]") -> None:
+              userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]",
+              start: int | None = None) -> None:
+    """A process, its leader thread alike; it started at `start` (its pid unless given, so a parent
+    started first)."""
     d = root / str(pid)
     (d / "ns").mkdir(parents=True)
+    (d / "stat").write_text(stat_text(pid, ppid, pid if start is None else start))
+    fake_thread(root, pid, pid, ppid=ppid, nnp=nnp, caps=caps)
     (d / "exe").symlink_to(exe)
     (d / "ns" / "net").symlink_to(netns)
     (d / "ns" / "user").symlink_to(userns)
     (d / "ns" / "mnt").symlink_to(mntns)
     (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
     (d / "environ").write_bytes(b"".join(e.encode() + b"\0" for e in env))
-    (d / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n"
-                              f"NoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
+    (d / "status").write_text(status_text(ppid, tracer=tracer, nnp=nnp, caps=caps))
 
 
 def probe_tree(root: Path, **probe: object) -> None:
-    """pid 7: the workload's first process (the supervisor: no no_new_privs, capable), 30: the CLI,
-    31: a shell, 32: the probe."""
+    """pid 1: the host's init, 7: the workload's first process (the supervisor: no no_new_privs,
+    capable), 30: the CLI, 31: a shell, 32: the probe."""
+    fake_proc(root, 1, exe="/usr/lib/systemd/systemd", argv=("systemd",), ppid=0, nnp=0,
+              caps="000001ffffffffff", **HOST_NS)
     fake_proc(root, 7, exe="/opt/openshell/bin/supervisor", argv=("supervisor",), ppid=1, nnp=0,
               caps="000001ffffffffff")
     fake_proc(root, 30, exe=CLI, argv=("codex",), ppid=7)
@@ -51,12 +77,12 @@ def probe_tree(root: Path, **probe: object) -> None:
 
 
 WORKLOAD_NS = ("user:[4026531837]", "mnt:[4026532001]")      # fake_proc's defaults
-AGENT_NS = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
+AGENT_NS: dict[str, Any] = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
 
 
 def verifier(root: Path, scope: int = 2) -> ProcVerifier:
-    return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, ptrace_scope=lambda: scope,
-                        proc=root)
+    return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, root_start=7,
+                        ptrace_scope=lambda: scope, proc=root)
 
 
 def test_the_real_probe_verifies(tmp_path: Path) -> None:
@@ -525,7 +551,8 @@ def test_a_capable_workload_process_is_rejected(tmp_path: Path) -> None:
 
 def test_capable_processes_outside_the_workload_are_ignored(tmp_path: Path) -> None:
     probe_tree(tmp_path)
-    fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff")
+    fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff", nnp=0,
+              **HOST_NS)
     assert verifier(tmp_path)(32) == ""
 
 
@@ -558,3 +585,145 @@ def test_a_probe_traced_after_it_connected_fails_at_completion(sock_dir: Path, t
         s.sendall(b'{"done": 0}\n')
         wait_for(ch.done)
     assert finish(ch) == "the probe changed before it finished"
+
+
+SYS_PTRACE = "0000000000080000"
+
+
+def extra(root: Path, pid: int, ppid: int, **fields: object) -> None:
+    """Another workload task: a python, by default under no_new_privs with no capability."""
+    fake_proc(root, pid, exe="/usr/bin/python3.12", argv=("python3",), ppid=ppid, **fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("pid, ppid, fields", [
+    (30, 7, {"nnp": 0, "caps": SYS_PTRACE}),        # the CLI itself, launched capable
+    (40, 31, {"nnp": 0, "caps": SYS_PTRACE}),       # a tool the agent ran, capable
+    (40, 31, {"nnp": 0}),                           # under no no_new_privs, it can still gain them
+])
+def test_only_the_workloads_first_process_may_go_without_no_new_privs(
+        tmp_path: Path, pid: int, ppid: int, fields: dict[str, object]) -> None:
+    probe_tree(tmp_path)
+    shutil.rmtree(tmp_path / str(pid), ignore_errors=True)
+    if pid == 30:
+        fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=7, **fields)  # type: ignore[arg-type]
+    else:
+        extra(tmp_path, pid, ppid, **fields)
+    assert verifier(tmp_path)(32) == f"workload process {pid} can gain privileges"
+
+
+def test_a_capable_thread_behind_a_harmless_leader_is_rejected(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    fake_thread(tmp_path, 40, 41, ppid=31, caps=SYS_PTRACE)
+    assert verifier(tmp_path)(32) == "workload process 40 (thread 41) holds capabilities"
+
+
+def test_a_workload_process_outside_the_tree_is_still_a_member(tmp_path: Path) -> None:
+    """Reparented away from the workload's first process, it is still in the workload's mount namespace."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 60, 1, caps=SYS_PTRACE)
+    assert verifier(tmp_path)(32) == "workload process 60 holds capabilities"
+
+
+def test_a_workload_process_in_a_namespace_it_made_is_still_a_member(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
+    assert verifier(tmp_path)(32) == "workload process 40 holds capabilities"
+
+
+def unreadable(path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file whatever its mode")
+    path.chmod(0)
+
+
+@pytest.mark.parametrize("hide", ["stat", "task-status", "task-dir"])
+def test_unreadable_evidence_fails_closed(tmp_path: Path, hide: str) -> None:
+    """The plan's scan skipped an unreadable process, and with it the capable child it can't link: here
+    the shell (31), with a capable child (40) in a namespace the agent made."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
+    target = {"stat": tmp_path / "31" / "stat", "task-status": tmp_path / "31" / "task" / "31" / "status",
+              "task-dir": tmp_path / "31" / "task"}[hide]
+    unreadable(target)
+    try:
+        assert verifier(tmp_path)(32) == "workload process evidence unreadable"
+    finally:
+        target.chmod(0o755)
+
+
+@pytest.mark.parametrize("status", ["Name:\tx\nPPid:\t31\n", "Name:\tx\nPPid:\t31\nNoNewPrivs:\t1\n"])
+def test_malformed_evidence_fails_closed(tmp_path: Path, status: str) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    (tmp_path / "40" / "task" / "40" / "status").write_text(status)
+    assert verifier(tmp_path)(32) == "workload process evidence unreadable"
+
+
+def test_a_parent_that_vanished_mid_scan_fails_closed(tmp_path: Path) -> None:
+    """The shell (31) is listed but gone by the time it's read; its capable child (40) still names it,
+    so its membership can't be resolved."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
+    (tmp_path / "31" / "stat").unlink()
+    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
+
+
+def test_a_reused_parent_pid_fails_closed(tmp_path: Path) -> None:
+    """The shell's pid names a process started after its child: the child's real parent is gone and its
+    pid reused, so the ancestry read from the numbers is not the child's."""
+    probe_tree(tmp_path)
+    shutil.rmtree(tmp_path / "31")
+    fake_proc(tmp_path, 31, exe="/usr/bin/bash", argv=("bash",), ppid=30, start=90)
+    extra(tmp_path, 40, 31, caps=SYS_PTRACE, start=50, **AGENT_NS)
+    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
+
+
+def test_a_process_that_changed_while_it_was_read_fails_closed(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its pid was reused between the scan's listing and the read of its threads."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    stat = tmp_path / "40" / "stat"
+    reads = [0]
+    real = Path.read_text
+
+    def read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == stat:
+            reads[0] += 1
+            if reads[0] > 1:
+                return stat_text(40, 31, 99)
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
+
+
+@pytest.mark.parametrize("start", [None, 8])
+def test_a_replaced_first_process_fails_closed(tmp_path: Path, start: int | None) -> None:
+    probe_tree(tmp_path)
+    if start is None:
+        shutil.rmtree(tmp_path / "7")              # gone: the CLI's parent is then unresolved too
+    else:
+        (tmp_path / "7" / "stat").write_text(stat_text(7, 1, start))
+    assert verifier(tmp_path)(32) == "the workload's first process changed"
+
+
+def test_a_scan_past_its_budget_fails_closed(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    ticks = iter(range(1000))
+    v = ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, root_start=7,
+                     ptrace_scope=lambda: 2, proc=tmp_path, clock=lambda: float(next(ticks)), budget=3.0)
+    assert v(32) == "the workload scan did not finish"
+
+
+def test_a_scan_past_its_entry_limit_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe_tree(tmp_path)
+    monkeypatch.setattr(channel_module, "SCAN_LIMIT", 4)
+    assert verifier(tmp_path)(32) == "the workload scan did not finish"
+
+
+def test_start_time_reads_the_stat_field(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    assert channel_module.start_time(tmp_path, 31) == 31
+    assert channel_module.start_time(Path("/proc"), os.getpid()) > 0

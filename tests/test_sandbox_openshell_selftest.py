@@ -401,18 +401,25 @@ class StubTmux:
 
 
 def fake_probe_proc(proc: Path, cli: Path) -> None:
-    for pid, exe, argv, ppid in ((7, "/opt/openshell/bin/supervisor", ("supervisor",), 1),
+    """1: the host's init, 7: the workload's first process (the supervisor), 30: the CLI, 32: the probe."""
+    for pid, exe, argv, ppid in ((1, "/usr/lib/systemd/systemd", ("systemd",), 0),
+                                 (7, "/opt/openshell/bin/supervisor", ("supervisor",), 1),
                                  (30, str(cli), ("codex",), 7), (32, PROBE_EXE, PROBE_ARGV, 30)):
         d = proc / str(pid)
-        (d / "ns").mkdir(parents=True)
+        (d / "task" / str(pid)).mkdir(parents=True)
+        (d / "ns").mkdir()
         (d / "exe").symlink_to(exe)
-        for ns, value in (("net", "net:[4026531999]"), ("user", "user:[1]"), ("mnt", "mnt:[2]")):
+        mnt = "mnt:[2]" if pid > 1 else "mnt:[3]"                           # init: the host's
+        for ns, value in (("net", "net:[4026531999]"), ("user", "user:[1]"), ("mnt", mnt)):
             (d / "ns" / ns).symlink_to(value)
         (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
         (d / "environ").write_bytes(b"HOME=/s/home\0")
-        nnp = 0 if pid == 7 else 1
-        (d / "status").write_text(f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
-                                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
+        (d / "stat").write_text(f"{pid} (x) S {ppid} " + "0 " * 17 + f"{pid} 0\n")   # started in pid order
+        nnp = 0 if pid in (1, 7) else 1
+        status = (f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
+                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
+        (d / "status").write_text(status)
+        (d / "task" / str(pid) / "status").write_text(status)
 
 
 @dataclass
