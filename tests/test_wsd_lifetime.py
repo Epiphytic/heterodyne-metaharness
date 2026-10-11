@@ -1,4 +1,5 @@
 import contextlib
+import json
 import shutil
 import subprocess
 import types
@@ -422,3 +423,56 @@ def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
     rig.runtime.expire_failures = 1
     assert rig.pickup() is Outcome.HELD
     assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: ""}
+
+
+@needs_tools
+def test_a_launch_stalled_past_its_deadline_creates_nothing(rig: RuntimeRig,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """T11 r3: wsd stalls after starting the watcher and before the create, longer than the watcher's
+    linger. The create is never submitted, so no sandbox can land after the watcher has gone."""
+    spec = launch_spec(rig, "p-one")
+    real = rig.runtime._reaper  # pyright: ignore[reportPrivateUsage]
+
+    def stalled(rec: SessionRecord) -> None:
+        real(rec)
+        rig.clock.advance(rec.deadline - rig.clock.now + reaper.LINGER_SECONDS + 1)
+
+    monkeypatch.setattr(rig.runtime, "_reaper", stalled)
+    with pytest.raises(LaunchFailed, match="stalled past its deadline"):
+        rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.created) == (Phase.ENDED, False)
+    assert rig.backend.created == [] and rig.backend.pending == [] and rig.backend.boxes == {}
+
+
+@needs_tools
+@pytest.mark.parametrize("replay", ["expire", "launch"])
+def test_a_record_from_before_created_replays_and_keeps_its_watcher(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, replay: str) -> None:
+    """T11: a record written before `created` existed reads it as False, the safe side. Its lifetime stop
+    replays to the end and lands the WIP once, and its watcher is never removed (LINGER_SECONDS bounds it)."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    deadline = record(rig, spec.session_key).deadline
+    rig.clock.advance(deadline - rig.clock.now)
+
+    def crash(*_: object) -> None:
+        raise Crash
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.backend, "names", crash)          # `stopping` is written; the sandbox is not gone
+        with pytest.raises(Crash):
+            rig.runtime.expire("alpha", deadline)
+    path = rig.runtime.layout(spec.session_key).record
+    data = json.loads(path.read_text())
+    assert data.pop("created") is True
+    path.write_text(json.dumps(data))                 # as a record from before the field was written
+    assert record(rig, spec.session_key).created is False
+    if replay == "expire":
+        rig.runtime.expire("alpha", deadline)
+        assert record(rig, spec.session_key).phase is Phase.ENDED
+    else:
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+        assert record(rig, spec.session_key).generation == 2
+    assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))

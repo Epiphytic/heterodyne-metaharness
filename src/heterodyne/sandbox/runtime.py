@@ -381,6 +381,11 @@ class SandboxRuntime:
                           deadline=min(exposed + c.settings.max_lifetime_seconds,
                                        expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
+        if c.clock() >= rec.deadline:
+            # T11 r3: a stall here could outlast the watcher's linger, and a create submitted after it would
+            # land unwatched. Past the deadline nothing is created; only a stall between this read and the
+            # create's submission remains, and it would have to last LINGER_SECONDS.
+            raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
         self._trust(adapter, cli, sp, layout)
