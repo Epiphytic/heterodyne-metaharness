@@ -303,9 +303,9 @@ def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: R
     assert rec.started_at == t0 + s.stop_margin_seconds + 60
     assert rec.deadline == t0 + s.max_lifetime_seconds           # not started_at + the lifetime
     assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]
-    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
     rig.runtime.stop(spec.session_key)
-    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
 
 
 def test_a_launch_that_outlasts_its_window_is_refused_and_cleaned_up(rig: RuntimeRig) -> None:
@@ -316,7 +316,7 @@ def test_a_launch_that_outlasts_its_window_is_refused_and_cleaned_up(rig: Runtim
         rig.runtime.launch(spec)
     assert rig.backend.boxes == {}
     assert record(rig, spec.session_key).phase is Phase.ENDED
-    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key))
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
 
 
 @pytest.mark.parametrize("fail", ["exec", "agent", "create"])

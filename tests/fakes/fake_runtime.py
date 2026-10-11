@@ -25,6 +25,8 @@ class FakeRuntime:
         self.failing_beads: set[str] = set()     # every launch for these beads fails, confirmed
         self.uncertain_beads: set[str] = set()   # the first launch for each of these beads is uncertain
         self.stop_failures = 0
+        self.expires: list[tuple[str, int]] = []
+        self.expire_failures = 0
         self.list_failures = 0
         self.calls = 0                # every launch() call, whatever it did
         self.raise_after_start: BaseException | None = None    # raised once, after the session started
@@ -75,6 +77,12 @@ class FakeRuntime:
             raise RuntimeUnavailable("stop not confirmed")
         self.stops.append(session_key)
         self.listed.pop(session_key, None)
+
+    def expire(self, ws: str, now: int) -> None:
+        self.expires.append((ws, now))
+        if self.expire_failures:
+            self.expire_failures -= 1
+            raise RuntimeUnavailable("lifetime stop not confirmed")
 
     # --- test controls ---
 
