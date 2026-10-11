@@ -343,7 +343,7 @@ def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: R
     rec = record(rig, spec.session_key)
     assert rec.started_at == t0 + s.stop_margin_seconds + 60
     assert rec.deadline == t0 + s.max_lifetime_seconds           # not started_at + the lifetime
-    assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]
+    assert rig.backend.reapers == [(rec.sandbox, rec.deadline, rig.runtime.layout(rec.key).record)]
     assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
     rig.runtime.stop(spec.session_key)
     assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))

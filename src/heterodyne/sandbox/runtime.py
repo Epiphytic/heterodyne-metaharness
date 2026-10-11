@@ -99,6 +99,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     unlanded: bool = False            # the session's commits could not be landed: a human looks first
     seeded: bool = False              # this generation's private git directory exists and must be landed
     created: bool = False             # backend.create returned: no create is outstanding (the watcher may go)
+    create_started: bool = False      # written before the create is submitted: the watcher stays (r1 #2)
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -168,7 +169,8 @@ class SandboxRuntime:
         deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
         name = self.reaper_name(rec.key, rec.generation)
         self.c.tmux.kill(name)
-        self.c.tmux.new_session(name, self.c.sessions, self.backend.reaper_argv(rec.sandbox, rec.deadline))
+        argv = self.backend.reaper_argv(rec.sandbox, rec.deadline, self.layout(rec.key).record)
+        self.c.tmux.new_session(name, self.c.sessions, argv)
 
     # --- AgentRuntime ---
 
@@ -396,6 +398,9 @@ class SandboxRuntime:
             # land unwatched. Past the deadline nothing is created; only a stall between this read and the
             # create's submission remains, and it would have to last LINGER_SECONDS.
             raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
+        # Codex T12 r1 #2: durable before the submission, so a wsd that dies inside the create leaves a
+        # record its watcher reads as outstanding (`reaper.settled`), past any linger.
+        rec = self._phase(layout, rec, create_started=True)
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
         if c.clock() >= rec.deadline:

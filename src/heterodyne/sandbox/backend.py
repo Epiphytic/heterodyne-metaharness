@@ -71,8 +71,8 @@ class Backend(Protocol):
         """The environment `tty_argv` gives the host command."""
         ...
 
-    def reaper_argv(self, name: str, deadline: int) -> list[str]:
+    def reaper_argv(self, name: str, deadline: int, record: Path) -> list[str]:
         """A host command, run outside wsd (D13's backstop), that waits until `deadline` (UTC epoch
-        seconds) and then deletes the sandbox until the backend no longer lists it. It carries its own
-        environment, as `tty_argv` does."""
+        seconds) and then deletes the sandbox until the backend no longer lists it. It reads the session
+        `record` before it goes (`reaper.settled`). It carries its own environment, as `tty_argv` does."""
         ...

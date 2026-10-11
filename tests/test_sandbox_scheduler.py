@@ -113,7 +113,9 @@ def test_the_lifetime_stop_relaunches_the_same_session(both: Both, profile: str)
     assert (first.created, second.created) == (True, True)
     assert not rt.tmux.has_session(rt.runtime.reaper_name(first.key, 1))
     assert rt.tmux.has_session(rt.runtime.reaper_name(second.key, 2))
-    assert rt.backend.reapers == [(first.sandbox, first.deadline), (second.sandbox, second.deadline)]
+    path = rt.runtime.layout(first.key).record
+    assert rt.backend.reapers == [(first.sandbox, first.deadline, path),
+                                  (second.sandbox, second.deadline, path)]
 
 
 @pytest.mark.parametrize("both", [Limits(launch_failures_before_human=1)], indirect=True)
