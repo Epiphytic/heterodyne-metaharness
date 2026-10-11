@@ -21,7 +21,7 @@ def test_detect_rejects_unsupported() -> None:
 
 
 def test_backends_per_platform() -> None:
-    assert platform.backends("linux") == {"service_manager": "systemd", "sandbox": "openshell"}
+    assert platform.backends("linux") == {"service_manager": "systemd", "sandbox": "bubblewrap"}
     assert platform.backends("macos") == {"service_manager": "launchd", "sandbox": "seatbelt"}
 
 

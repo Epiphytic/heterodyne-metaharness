@@ -4,7 +4,7 @@
 [platform]
 os = "<linux-or-macos>"          # written by `heterodyne setup`
 service_manager = "<service-manager>"   # systemd or launchd; written by `heterodyne setup` (§3.2)
-sandbox = "<sandbox-backend>"   # openshell (Linux), or none; written by `heterodyne setup` (§3.2, §7)
+sandbox = "<sandbox-backend>"   # setup writes bubblewrap (no agents) or seatbelt; set openshell to run agents (§3.2, §7)
 
 # Profiles: adapter + model + launch options (§4.1). One profile is enough; two different
 # models are recommended so reviews are cross-model rather than adversarial (§11.1).

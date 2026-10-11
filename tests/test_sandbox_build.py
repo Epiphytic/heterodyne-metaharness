@@ -5,6 +5,7 @@ import pytest
 from sandbox_env import config_env
 from wsd_env import accounts_at
 
+from heterodyne import platform
 from heterodyne.config import ConfigError
 from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_runtime
 from heterodyne.sandbox.openshell import OpenShellBackend
@@ -56,6 +57,18 @@ def test_openshell_builds_the_sandbox_runtime(tmp_path: Path) -> None:
     assert c.real_home_canary == c.real_home / CANARY
     assert c.tmux.socket_name == TMUX_SOCKET and c.tmux.launcher is not None
     assert c.tmux.launcher()[1:4] == ("--user", "--scope", "--collect")
+
+
+def test_setup_records_no_runtime_until_the_operator_selects_openshell(tmp_path: Path) -> None:
+    """Plan 3 P1 (btq-g08sd): crash-loop accounting must land before setup enables the runtime, so what
+    setup records on Linux runs no agents; only an explicit `openshell` builds the sandbox runtime."""
+    recorded = platform.backends("linux")
+    host = "".join(f'{k} = "{v}"\n' for k, v in recorded.items())
+    runtime, notices = build(tmp_path, f"[platform]\n{host}")
+    assert isinstance(runtime, NoRuntime) and len(notices) == 1 and "openshell" in notices[0]
+    edited = host.replace(f'sandbox = "{recorded["sandbox"]}"', 'sandbox = "openshell"')
+    runtime, notices = build(tmp_path, f"[platform]\n{edited}")
+    assert notices == [] and isinstance(runtime, SandboxRuntime)
 
 
 def test_openshell_without_systemd_starts_tmux_directly(tmp_path: Path) -> None:

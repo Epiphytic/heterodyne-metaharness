@@ -56,10 +56,10 @@ The shipped defaults define the known adapters (`claude-code`, `codex`), the rev
 See `examples/config.toml` for a commented sample.
 
 - **No policy keys.** A top-level key that belongs in `policy.toml` (`approvers`, `identities`, `operators`, `tiers`, `hard_deny_rules`, `action_registry`, `tier_floor`, `policy`) is an error: "belong in policy.toml".
-- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `openshell` on Linux, `launchd` and `seatbelt` on macOS (ADR 0001 §3.2). They are recorded once, at setup, and not re-probed. `wsd run` builds its agent runtime from `sandbox` (ADR 0001 §7):
+- **`[platform]`:** `os`, `service_manager` and `sandbox`. `heterodyne setup` writes them from the detected platform: `systemd` and `bubblewrap` on Linux, `launchd` and `seatbelt` on macOS (ADR 0001 §3.2). They are recorded once, at setup, and not re-probed. `wsd run` builds its agent runtime from `sandbox` (ADR 0001 §7):
   - `openshell`: the OpenShell runtime (plan 4; see [packaging/sandbox/README.md](../packaging/sandbox/README.md));
   - missing or `none`: no runtime, so wsd holds every workstream;
-  - `bubblewrap` or `seatbelt`: no runtime either, with a one-line notice when wsd starts. Every Linux setup before plan 4 recorded `bubblewrap`, so such a host runs no agents until `sandbox` is changed to `openshell`;
+  - `bubblewrap` or `seatbelt`: no runtime either, with a one-line notice when wsd starts. Setup records `bubblewrap` on Linux until persistent crash-loop accounting lands (plan 3's P1, btq-g08sd), so a Linux host runs no agents until the operator changes `sandbox` to `openshell` (see [wsd.md](wsd.md) §5);
   - anything else: a configuration error, and `wsd run` exits with 78.
 - **`[profiles.<name>]`:** a profile is an `adapter` plus an optional `model`. The `adapter` must be one of `adapters.known`. `model`, if present, must be a string.
 - **`[roles]`:** role name to profile name.
@@ -218,7 +218,7 @@ timeouts.gatekeeper_seconds = 60    (defaults)
 tiers.escalate = ['push_branch', 'open_pr', 'merge_pr', 'deploy', 'notify', 'new_egress_host']    (defaults)
 platform.os = 'linux'    (host:config.toml)
 platform.service_manager = 'systemd'    (host:config.toml)
-platform.sandbox = 'openshell'    (host:config.toml)
+platform.sandbox = 'bubblewrap'    (host:config.toml)
 profiles.coder.adapter = 'codex'    (host:config.toml)
 sandbox.ro_mounts_approved = []    (host:config.toml)
 integrations.marmot.auth_token = {'command': '<command-that-prints-the-token>'}    (host:config.toml)

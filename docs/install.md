@@ -9,7 +9,7 @@ heterodyne-metaharness is in development. Today you can install it from a source
 | Linux | **Supported in v1** | systemd user units | OpenShell (plan 4); see [packaging/sandbox/README.md](../packaging/sandbox/README.md) |
 | macOS | **Phase 2**, not supported in v1 | launchd agents | Seatbelt (`sandbox-exec`) |
 
-The platform is detected once, when `heterodyne setup` runs, and the chosen backends are recorded in the host config (ADR 0001 §3.2). On macOS, `heterodyne platform` and `setup` already recognise the platform and record `launchd` and `seatbelt`, and the CI matrix includes macOS. Nothing has been run on a macOS host yet, and the backends themselves are phase-2 work. Any other platform is refused. `setup` records `openshell` on Linux. A host set up before plan 4 recorded `bubblewrap`, and runs no agents until that is changed to `openshell` (see `[platform]` in [configuration](configuration.md)).
+The platform is detected once, when `heterodyne setup` runs, and the chosen backends are recorded in the host config (ADR 0001 §3.2). On macOS, `heterodyne platform` and `setup` already recognise the platform and record `launchd` and `seatbelt`, and the CI matrix includes macOS. Nothing has been run on a macOS host yet, and the backends themselves are phase-2 work. Any other platform is refused. `setup` records `bubblewrap` on Linux, which runs no agents. The operator enables OpenShell by changing it to `openshell`, and should wait for crash-loop accounting (btq-g08sd) first (see `[platform]` in [configuration](configuration.md) and [wsd.md](wsd.md) §5).
 
 ## Prerequisites
 
