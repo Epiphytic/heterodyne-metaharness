@@ -484,6 +484,8 @@ TESTS = Path(__file__).resolve().parent
 BUDGET = 90.0 if sys.platform == "darwin" else 60.0     # watchdog deadline (30 s) plus CI margin
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
+# test_tmux.py, which children import, carries tier_marks' `safety` marker; a child does not load tier_marks.
+CHILD_INI = "[pytest]\nmarkers =\n    safety: registered by tests/tier_marks.py in the parent suite\n"
 CHILD_PRELUDE = '''
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
@@ -549,7 +551,7 @@ class Child:
     def __init__(self, tmp_path: Path, body: str, env: dict[str, str] | None = None) -> None:
         self.dir = tmp_path / "child"
         self.dir.mkdir()
-        (self.dir / "pytest.ini").write_text("[pytest]\n")
+        (self.dir / "pytest.ini").write_text(CHILD_INI)
         (self.dir / "test_child.py").write_text(CHILD_PRELUDE + body)
         self.hand_path = tmp_path / "hand.json"
         self.out = tmp_path / "child.out"
@@ -862,7 +864,7 @@ def main_script(tmp_path: Path, slow: bool,
     """Test 7's body. `run` is a seam for the timeout test; the short base goes whatever happens."""
     child_dir = tmp_path / "child"
     child_dir.mkdir()
-    (child_dir / "pytest.ini").write_text("[pytest]\n")
+    (child_dir / "pytest.ini").write_text(CHILD_INI)
     mark = f"hz-mark-{uuid.uuid4().hex}"
     leak = "    new_test_tmux().new_session('l', tmp_path, PANE)\n"
     leak = leak if slow else ""

@@ -85,17 +85,27 @@ def test_safety_is_the_default_outside_tmux_and_wsd_files() -> None:
                    "tests/test_sandbox_runtime.py::test_x[a]",
                    "tests/test_admind_reactions.py::test_a_reaction_answers_a_question_or_merge_card",
                    "tests/test_brand_new_file.py::test_anything",          # a new file is safety until listed
-                   "tests/test_wsd_park.py::test_a_digest_mismatch_refuses"]:  # eligible file, safety name
+                   "tests/test_tmux_watchdog.py::test_sigkill_of_pytest_kills_its_servers_and_panes",
+                   "tests/test_wsd_park.py::test_anything",
+                   "tests/test_wsd_defer.py::test_a_digest_mismatch_refuses"]:  # eligible file, safety name
         assert tier_marks.is_safety(nodeid), nodeid
     assert not tier_marks.is_safety("tests/test_wsd_defer.py::test_defer_and_regate_replay")
     assert not tier_marks.is_safety("tests/test_tmux.py::test_multiline_paste_is_one_bracketed_paste[x]")
+
+
+# Safety tests in eligible files whose names SAFETY_WORDS misses: only the explicit mark keeps them in.
+MARKED_SAFETY = ["tests/test_wsd_daemon.py::test_corrupt_journal_refuses_to_start",
+                 "tests/test_wsd_pickup.py::test_one_coder_session_at_a_time",
+                 "tests/test_wsd_defer.py::test_a_deferred_bead_with_no_row_is_journal_lost_and_never_launched"]
 
 
 def test_the_slow_list_names_no_safety_test() -> None:
     slow = tier_marks.load()
     assert slow, "tests/slow_tests.txt is missing or empty"
     assert not [name for name in slow if tier_marks.is_safety(name)]
-    assert not set(NAMED_SAFETY) & slow
+    marked = run_tiers.marked_safety()
+    assert not tier_marks.is_safety(MARKED_SAFETY[0]) and set(MARKED_SAFETY) <= marked
+    assert not (set(NAMED_SAFETY) | marked) & slow
 
 
 def collected(*args: str) -> set[str]:
@@ -112,8 +122,10 @@ def test_the_fast_tier_collects_every_safety_test() -> None:
     safety = {nodeid for nodeid in everything if tier_marks.is_safety(nodeid)}
     assert len(safety) > 1000
     assert safety <= fast, sorted(safety - fast)[:20]
-    for name in NAMED_SAFETY:
-        assert any(tier_marks.function_id(nodeid) == name for nodeid in fast), name
+    marked = collected("-m", "safety", "tests")      # file, name and explicit marks alike
+    assert safety <= marked and marked <= fast, sorted(marked - fast)[:20]
+    for name in [*NAMED_SAFETY, *MARKED_SAFETY]:
+        assert any(tier_marks.function_id(nodeid) == name for nodeid in marked), name
     assert everything - fast, "the fast tier leaves nothing out"
 
 
@@ -148,6 +160,24 @@ def test_marking_a_safety_test_slow_by_hand_fails_collection(monkeypatch: pytest
     ok, safe = Item("tests/test_wsd_defer.py::test_defer_and_regate_replay", "slow"), Item(NAMED_SAFETY[2])
     modify([ok, safe])
     assert ok.marks == {"slow"} and safe.marks == {"safety"}
+
+
+def test_a_renamed_safety_test_keeps_its_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A safety test in an eligible file whose name has lost every SAFETY_WORDS hit is still safety by its
+    explicit mark: the list cannot name it, even for a file test-changed keeps (Codex review r2)."""
+    renamed = "tests/test_wsd_daemon.py::test_a_bad_journal_refuses_to_start"
+    assert not tier_marks.is_safety(renamed)
+    monkeypatch.setattr(tier_marks, "load", lambda: {renamed})
+    for keep in ["", "tests/test_wsd_daemon.py"]:
+        monkeypatch.setenv(tier_marks.KEEP_ENV, keep)
+        with pytest.raises(pytest.UsageError, match="lists tests marked safety"):
+            modify([Item(renamed + "[x]", "safety")])
+
+
+def test_an_item_marked_both_safety_and_slow_fails_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tier_marks, "load", set)
+    with pytest.raises(pytest.UsageError, match="marked slow"):
+        modify([Item("tests/test_wsd_defer.py::test_defer_and_regate_replay", "safety", "slow")])
 
 
 def test_junit_cases_map_to_node_ids(tmp_path: Path) -> None:

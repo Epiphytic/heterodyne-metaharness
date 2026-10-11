@@ -6,12 +6,14 @@ function `slow`, and `-m "not slow"` (scripts/test-fast) leaves them out. The li
 from a timed run by `scripts/run_tiers.py slow-list REPORT.xml`; a stale entry only means a test runs
 in the full tier alone, and a new slow test stays in the fast tier until the list is regenerated.
 
-Safety is the default. Only the files SLOW_ELIGIBLE matches (tmux and wsd mechanics) may have slow
-tests; every other test file, a new one included, is a safety file (admind auth, operators, redaction,
-latches, digests, approvals, sandbox, policy, ...), whose tests run in every tier whatever the list says.
-Inside an eligible file, a test whose name matches SAFETY_WORDS is safety too. Collection marks every
-safety test `safety`, and fails, rather than quietly dropping it from the fast tier, if the list names
-one or anything marks one `slow`: make the test faster instead. Loaded from tests/conftest.py.
+Safety is the default. Only the four files SLOW_ELIGIBLE names (tmux pane mechanics and wsd scheduling)
+may have slow tests; every other test file, a new one included, is a safety file (admind auth, operators,
+redaction, latches, digests, approvals, sandbox, policy, the tmux launch lock and watchdog, ...), whose
+tests run in every tier whatever the list says. Inside an eligible file, a test carrying an explicit
+`@pytest.mark.safety` is safety, and so, as an extra net, is one whose name matches SAFETY_WORDS; the
+explicit mark is what counts, since a rename can drop the words. Collection marks every safety test
+`safety`, and fails, rather than quietly dropping it from the fast tier, if the list names one or
+anything marks one `slow`: make the test faster instead. Loaded from tests/conftest.py.
 
 scripts/test-changed sets HZ_TIER_KEEP to the files a change reaches; their listed tests are not marked
 slow, so one `-m "not slow"` run covers the fast tier and those files whole.
@@ -25,7 +27,7 @@ import pytest
 
 SLOW_LIST = Path(__file__).resolve().with_name("slow_tests.txt")
 KEEP_ENV = "HZ_TIER_KEEP"     # os.pathsep-separated test files whose slow tests stay in (test-changed)
-SLOW_ELIGIBLE = re.compile(r"^tests/(test_tmux\w*|test_wsd_\w+)\.py$")
+SLOW_ELIGIBLE = re.compile(r"^tests/test_(tmux|wsd_daemon|wsd_defer|wsd_pickup)\.py$")
 SAFETY_WORDS = re.compile(r"redact|secret|sandbox|latch|digest|polic|leak|npub|nsec|token|auth|isolat|guard"
                           r"|pin")
 
@@ -60,14 +62,22 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         raise pytest.UsageError(f"{SLOW_LIST.name} lists safety tests, which must stay in every tier: "
                                 + ", ".join(unsafe))
     keep = {path for path in os.environ.get(KEEP_ENV, "").split(os.pathsep) if path}
+    listed: list[str] = []
     marked: list[str] = []
     for item in items:
-        if function_id(item.nodeid) in slow and item.nodeid.partition("::")[0] not in keep:
-            item.add_marker(pytest.mark.slow)
         if is_safety(item.nodeid):
             item.add_marker(pytest.mark.safety)
-            if item.get_closest_marker("slow") is not None:
-                marked.append(item.nodeid)
+        safety = item.get_closest_marker("safety") is not None
+        if function_id(item.nodeid) in slow:
+            if safety:
+                listed.append(item.nodeid)
+            elif item.nodeid.partition("::")[0] not in keep:
+                item.add_marker(pytest.mark.slow)
+        if safety and item.get_closest_marker("slow") is not None:
+            marked.append(item.nodeid)
+    if listed:
+        raise pytest.UsageError(f"{SLOW_LIST.name} lists tests marked safety, which must stay in every tier: "
+                                + ", ".join(listed))
     if marked:
         raise pytest.UsageError("safety tests are marked slow, which would drop them from the fast tier: "
                                 + ", ".join(marked))

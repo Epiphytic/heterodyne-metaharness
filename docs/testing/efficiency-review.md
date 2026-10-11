@@ -7,7 +7,7 @@ This review covers the offline suite (`uv run pytest`, which CI runs), as of `or
 | Command | Runs | Time (parallel, the default) | Time (serial, `-- -n 0`) | Use it |
 |---|---|---|---|---|
 | `scripts/test-full` | the whole suite (CI runs the same tests, serially) | about 25 s | about 7 min | **by default**: while you iterate, before you hand over a review range, before merging |
-| `scripts/test-fast` | every test except the 14 tmux and wsd functions in `tests/slow_tests.txt`; every safety test | about 24 s | about 6.5 min (estimated) | serially, or on a busy machine with a few workers |
+| `scripts/test-fast` | every test except the 11 tmux and wsd functions in `tests/slow_tests.txt`; every safety test | about 24 s | about 6.5 min (estimated) | serially, or on a busy machine with a few workers |
 | `scripts/test-changed [--base REF]` | `test-fast`, plus the slow tests of the files your change reaches; the full suite when the change can't be mapped | about 25 s | 6.5 to 7 min | the same |
 | `uv run pytest tests/test_x.py` | one file, serially | seconds | | while you debug that file |
 
@@ -73,16 +73,16 @@ These are the remaining costs, largest first. None is fixed in this PR.
 
 **Safety is the default.**
 
-- Only the files that `SLOW_ELIGIBLE` matches (`test_tmux*` and `test_wsd_*`: tmux and wsd mechanics) may have slow tests.
-- Every other test file is a safety file, a new one included, and its tests run in every tier, whatever the list says. The safety files cover admind auth, operators, redaction, latches, digests, approvals, sandbox, policy and so on.
-- Inside an eligible file, a test whose name matches `SAFETY_WORDS` (redact, secret, sandbox, latch, digest, polic, leak, npub, nsec, token, auth, isolat, guard, pin) is safety too.
-- Collection marks every safety test `safety`. It fails with a usage error, rather than quietly dropping the test from the fast tier, if the list names a safety test or anything marks one `slow`.
-- `tests/test_tiers.py` loads the real list and collects the real suite. It checks that `-m "not slow"` collects every safety test, by name the three that an earlier, name-based version of this guard missed:
+- Only the four files that `SLOW_ELIGIBLE` names may have slow tests: `test_tmux.py` (pane mechanics) and `test_wsd_daemon.py`, `test_wsd_defer.py` and `test_wsd_pickup.py` (wsd scheduling).
+- Every other test file is a safety file, a new one included, and its tests run in every tier, whatever the list says. The safety files cover admind auth, operators, redaction, latches, digests, approvals, sandbox, policy, the tmux launch lock, scan and watchdog, and so on.
+- Inside an eligible file, the safety tests carry an explicit `@pytest.mark.safety`: journal integrity, single-instance and lock handling, socket refusals, config validation, one coder per session, lost claims, untrusted input. The mark is what counts, because a rename can drop any keyword. As an extra net, a test whose name matches `SAFETY_WORDS` (redact, secret, sandbox, latch, digest, polic, leak, npub, nsec, token, auth, isolat, guard, pin) is safety too.
+- Collection marks every safety test `safety`. It fails with a usage error, rather than quietly dropping the test from the fast tier, if the list names a safety test, or if any test carries both `safety` and `slow`, wherever either mark came from. `scripts/run_tiers.py slow-list` leaves explicitly marked tests out when it regenerates the list.
+- `tests/test_tiers.py` loads the real list and collects the real suite. It checks that `-m "not slow"` collects every test marked `safety`. It also checks a renamed safety test and a test carrying both marks, and three explicitly marked tests by name, along with the three that an earlier, name-based version of this guard missed:
   - `test_a_hex_value_in_a_reply_never_reaches_the_chat` (redaction);
   - `test_a_stranger_is_dropped` (authorisation);
   - `test_a_revoked_operators_queued_message_is_not_acted_on_after_a_rearm` (latch).
 
-Under this rule the list holds 14 functions (44 cases), about 40 s of the 422 s of serial test time. **Safety tests take 351 s of it (83%),** so a fast tier that keeps them all can't be much faster than the full suite. In parallel, the fast tier took 24 s and the full suite 25 s; serially it saves about 10%.
+Under this rule the list holds 11 functions (36 cases), 27 s of the 422 s of serial test time. **Safety tests take more than 351 s of it (83%),** so a fast tier that keeps them all can't be much faster than the full suite. In parallel, the fast tier took 24 s and the full suite 25 s; serially it saves about 10%.
 
 The honest conclusion is that tiering doesn't pay in this suite. The speed came from making every test cheaper (section 1) and from running them in parallel (section 2d). The tiers stay, because they cost nothing, and they will matter if the eligible files grow.
 
