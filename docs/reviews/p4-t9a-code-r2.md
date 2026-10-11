@@ -1,0 +1,13 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 9177543. Verdict: REVISE.
+
+Note (plan2-controller): cycle 2 reviewed c75c54f..9177543. Commit 18bffb1 landed after it started; cycle 3 reviewed the whole range c75c54f..e7c807e. After this cycle the controller directed a change of mechanism, to cgroup membership with a freeze.
+
+1. [BLOCKING] `src/heterodyne/sandbox/channel.py:151–155` — Unreadable mount-namespace evidence still fails open. A process outside the root’s ancestry is excluded when its namespace cannot be read, even though that namespace could establish workload membership. An in-memory control with a reparented capable PID 60 and `PermissionError` on its namespace returned `""`; PID 60’s capabilities were never checked. Cycle 1 finding 1 remains partially unresolved. **Fix:** establish membership through independently trusted evidence, such as the workload’s container cgroup, and reject unresolved membership. Add a reparented, capable, namespace-unreadable control.
+
+2. [BLOCKING] `src/heterodyne/sandbox/channel.py:172–189` — Treating disappeared processes and threads as safe leaves a fork race. After the process snapshot, an unchecked capable process can fork a capable child and exit. `_tasks()` then returns success for the vanished parent, while the child is absent from the snapshot. An in-memory control reproduced a passing scan. The inheritance argument at lines 119–120 only holds when the parent’s security state was established. Cycle 1 findings 1 and 3 therefore remain partially unresolved. **Fix:** reject disappearance before security evidence is established and use a membership snapshot/reconciliation mechanism that accounts for newly created tasks. Add fork-and-exit and capable-thread replacement controls. This race follows the plan’s treatment of vanished entries.
+
+3. [NON-BLOCKING] `src/heterodyne/sandbox/channel.py:127,158–172` — The budget does not bound the complete scan. Ancestry traversal has no clock or cancellation checks and can take quadratic work; thread enumeration and sorting finish before their entries are charged. Shutdown cannot interrupt these phases. Cycle 1 finding 4 is only partially fixed. **Fix:** check budget and cancellation during traversal and enumeration, memoize ancestry, and enforce the deadline before returning success. Test exhaustion during these phases.
+
+The completion-stamp deferral is fixed, with meaningful late-verification and late-EOF controls. Cycle 1 finding 2’s blanket NNP exemption is replaced, and static capable-worker coverage is present. Targeted pytest execution was blocked by denied cache creation under `/tmp`.
+
+REVISE
