@@ -388,6 +388,10 @@ class SandboxRuntime:
             raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
+        if c.clock() >= rec.deadline:
+            # T11 r3: the check above leaves a window up to the create's submission, so a sandbox that
+            # exists only at or past its deadline is ended at once, by this launch, not left to the watcher.
+            raise _StepFailed("the sandbox was created past its deadline; it was destroyed")
         self._trust(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,

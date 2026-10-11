@@ -445,6 +445,32 @@ def test_a_launch_stalled_past_its_deadline_creates_nothing(rig: RuntimeRig,
     assert rig.backend.created == [] and rig.backend.pending == [] and rig.backend.boxes == {}
 
 
+def test_a_create_that_returns_past_its_deadline_is_destroyed_at_once(rig: RuntimeRig,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """T11 r3: the check before the create leaves a window up to its submission. A create that returns at
+    or past the deadline is destroyed and its record ended at once, never left to the watcher."""
+    spec = launch_spec(rig, "p-one")
+    real = rig.backend.create
+    trusted: list[object] = []
+
+    def slow(*args: object, **kwargs: object) -> None:
+        real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        rec = record(rig, spec.session_key)
+        rig.clock.advance(rec.deadline - rig.clock.now)
+
+    def trust(*args: object) -> None:
+        trusted.append(args)
+
+    monkeypatch.setattr(rig.backend, "create", slow)
+    monkeypatch.setattr(rig.runtime, "_trust", trust)
+    with pytest.raises(LaunchFailed, match="sandbox was created past its deadline"):
+        rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.created) == (Phase.ENDED, True)
+    assert len(rig.backend.created) == 1 and rig.backend.boxes == {} and trusted == []
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
+
+
 @needs_tools
 @pytest.mark.parametrize("replay", ["expire", "launch"])
 def test_a_record_from_before_created_replays_and_keeps_its_watcher(
