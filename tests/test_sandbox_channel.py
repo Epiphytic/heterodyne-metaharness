@@ -244,6 +244,7 @@ def test_a_forger_after_the_probe_fails_the_gate(sock_dir: Path) -> None:
 def test_bad_results_fail(sock_dir: Path, lines: list[object], reason: str) -> None:
     ch = channel(sock_dir / "p.sock", [32], {32: ""})
     send(sock_dir / "p.sock", *lines)
+    wait_for(lambda: ch.done() or any(r.end for r in ch.runs))   # else close() may cut the wait for EOF
     assert finish(ch) == reason
 
 
