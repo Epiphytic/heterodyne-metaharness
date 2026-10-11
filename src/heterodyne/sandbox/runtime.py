@@ -99,6 +99,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     unlanded: bool = False            # the session's commits could not be landed: a human looks first
     seeded: bool = False              # this generation's private git directory exists and must be landed
     created: bool = False             # backend.create returned: no create is outstanding (the watcher may go)
+    create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -168,7 +169,8 @@ class SandboxRuntime:
         deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
         name = self.reaper_name(rec.key, rec.generation)
         self.c.tmux.kill(name)
-        self.c.tmux.new_session(name, self.c.sessions, self.backend.reaper_argv(rec.sandbox, rec.deadline))
+        argv = self.backend.reaper_argv(rec.sandbox, rec.deadline, self.layout(rec.key).record)
+        self.c.tmux.new_session(name, self.c.sessions, argv)
 
     # --- AgentRuntime ---
 
@@ -193,6 +195,11 @@ class SandboxRuntime:
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.LIVE))
             elif not self._end(rec, interrupt=False, lifetime=self._overdue(rec)):
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.UNKNOWN))
+        # T10 r3: commits that were not landed hold the whole workstream, so neither a park nor a defer
+        # makes a host WIP over them. Read again: an end above may have just recorded one.
+        for rec in self._records():
+            if rec.ws == ws and rec.unlanded:
+                raise self._unlanded(rec)
         return listed
 
     def launch(self, spec: LaunchSpec) -> Started:
@@ -251,11 +258,16 @@ class SandboxRuntime:
             raise self._fail(layout, rec, exc) from None
 
     def stop(self, session_key: str) -> None:
-        rec = read_record(self.layout(session_key))
-        if rec is None or rec.phase is Phase.ENDED:
+        layout = self.layout(session_key)
+        rec = read_record(layout)
+        if rec is None:
             return
-        if not self._end(rec, interrupt=True):
-            raise RuntimeUnavailable("the session's end could not be confirmed")
+        if rec.phase is not Phase.ENDED:
+            if not self._end(rec, interrupt=True):
+                raise RuntimeUnavailable("the session's end could not be confirmed")
+            rec = read_record(layout)
+        if rec is not None and rec.unlanded:
+            raise self._unlanded(rec)            # ended, but its caller must not commit over it
 
     def expire(self, ws: str, now: int) -> None:
         """D13: `_end(..., lifetime=True)` makes the stop durable, lands the generation's commits and then
@@ -377,12 +389,23 @@ class SandboxRuntime:
         # start, and the hard stop is always a full margin before the checked expiry.
         exposed = c.clock()
         # D26: from here on the private git directory may hold the agent's commits, so every end lands it.
-        rec = self._phase(layout, rec, seeded=True,
+        # Codex T12 r1 #2, r2: a create is possible from here, and the record says so before the watcher
+        # starts, so the watcher never reads it as settled while this launch could still submit one, however
+        # long it stalls (`reaper.settled`).
+        rec = self._phase(layout, rec, seeded=True, create_started=True,
                           deadline=min(exposed + c.settings.max_lifetime_seconds,
                                        expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
+        if c.clock() >= rec.deadline:
+            # T11 r3: past the deadline nothing is created, and the record says so before the launch ends.
+            rec = self._phase(layout, rec, create_started=False)
+            raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
+        if c.clock() >= rec.deadline:
+            # T11 r3: the check above leaves a window up to the create's submission, so a sandbox that
+            # exists only at or past its deadline is ended at once, by this launch, not left to the watcher.
+            raise _StepFailed("the sandbox was created past its deadline; it was destroyed")
         self._trust(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,
@@ -594,6 +617,14 @@ class SandboxRuntime:
         except (gitwip.GitFailed, OSError):
             return self._phase(layout, rec, unlanded=True, error="the session's commits could not be landed")
         return rec
+
+    def _unlanded(self, rec: SessionRecord) -> RuntimeUnavailable:
+        """The hold's detail names the session and its private git directory, relative to the state
+        directory: never a home path."""
+        git = self.layout(rec.key).git.relative_to(self.c.sessions.parent)
+        return RuntimeUnavailable(f"session {short_id(rec.key)} generation {rec.generation}: its commits "
+                                  f"were not landed; land them from {git} in wsd's state directory by hand "
+                                  "(docs/wsd.md §5)")
 
     def _overdue(self, rec: SessionRecord) -> bool:
         """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""

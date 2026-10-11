@@ -1,0 +1,9 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: e6877a7. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/sandbox/build.py:66` — **The backend receives only environment overrides.** With default `tool_env = {}`, OpenShell and podman run with an empty environment. The host’s `PATH`, `HOME`, and `XDG_RUNTIME_DIR` are dropped, so executables installed on the configured PATH cannot be found and rootless runtime configuration is unavailable. An in-memory check confirmed `runtime.backend.env == {}`. This defect is copied verbatim from Task 12’s plan. **Fix:** pass `tool_env(env, settings.tool_env)` using the existing helper in `sandbox/openshell.py`. Add a build regression asserting that allowlisted host variables survive, overrides apply, and unrelated secrets are excluded.
+
+2. [NON-BLOCKING] `src/heterodyne/sandbox/runtime.py:394–401`, `src/heterodyne/sandbox/reaper.py:45–46` — **The carried late-create race remains.** wsd can pause after the final deadline read, resume after the watcher’s 72-hour linger expires, create a sandbox, and crash before recording `created=True` or executing cleanup. That sandbox then remains past its deadline without a watcher until recovery. The new tests cover a stall before the clock check and a slow create followed by successful cleanup; neither covers this crash window. This retains the prior proof-of-concept deferral’s severity, but the requested “no window” guarantee is unmet. **Fix:** retain the generation’s watcher until durable evidence establishes creation completion or cancellation and confirmed teardown; add a late-create/crash regression beyond the linger limit.
+
+Targeted pytest execution was blocked by denied temporary-file creation, including under `/tmp`; in-memory checks succeeded.
+
+REVISE

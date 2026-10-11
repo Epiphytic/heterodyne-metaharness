@@ -4,7 +4,7 @@
 [platform]
 os = "<linux-or-macos>"          # written by `heterodyne setup`
 service_manager = "<service-manager>"   # systemd or launchd; written by `heterodyne setup` (§3.2)
-sandbox = "<sandbox-backend>"   # bubblewrap or seatbelt; written by `heterodyne setup` (§3.2)
+sandbox = "<sandbox-backend>"   # setup writes bubblewrap (no agents) or seatbelt; set openshell to run agents (§3.2, §7)
 
 # Profiles: adapter + model + launch options (§4.1). One profile is enough; two different
 # models are recommended so reviews are cross-model rather than adversarial (§11.1).
@@ -35,6 +35,11 @@ egress_approved = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"]
 # Directory trees a workstream may add as read-only mounts (absolute paths; a subpath of an
 # entry is allowed, a sibling like <entry>-other is not). Empty means none.
 ro_mounts_approved = []
+# The OpenShell runtime (§7; packaging/sandbox/README.md). Defaults apply to whatever is left out.
+# image = "<workload-image>"            # built from packaging/sandbox/Containerfile
+# max_lifetime_minutes = <minutes>      # a session is stopped and resumed at this age (D13)
+# stop_margin_minutes = <minutes>       # the stop window, and the margin kept before a login expires
+# tool_env = { PATH = "<podman-5-bin>:<the rest of PATH>" }   # the environment openshell and podman run with
 
 [integrations.beads]
 btq = "<path-to-btq-checkout>"           # wsd loads <checkout>/bin/btq

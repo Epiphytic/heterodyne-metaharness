@@ -138,10 +138,10 @@ class OpenShellBackend:
     def pane_env(self) -> Mapping[str, str]:
         return dict(self.env)
 
-    def reaper_argv(self, name: str, deadline: int) -> list[str]:
+    def reaper_argv(self, name: str, deadline: int, record: Path) -> list[str]:
         return ["env", "-i", *(f"{k}={v}" for k, v in self.env.items()), sys.executable, "-I", "-m",
                 "heterodyne.sandbox.reaper", "--deadline", str(deadline), "--openshell", self.openshell,
-                "--podman", self.podman, "--image", self.image, name]
+                "--podman", self.podman, "--image", self.image, "--record", str(record), name]
 
     def delete(self, name: str) -> bool:
         try:

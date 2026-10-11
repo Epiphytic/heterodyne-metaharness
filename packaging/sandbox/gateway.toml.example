@@ -1,0 +1,16 @@
+# OpenShell gateway configuration for the podman compute driver (spike S5). Install it as
+# ~/.config/openshell/gateway.toml and point OPENSHELL_GATEWAY_CONFIG at it in gateway.env.
+[openshell]
+version = 2
+
+[openshell.gateway]
+compute_driver = "podman"
+
+[openshell.drivers.podman]
+socket_path = "<rootless podman 5 user socket>"
+allow_driver_config = true
+enable_bind_mounts = true
+userns = "keep-id"                 # the workload's uid is the host uid, so bound files keep their owner
+
+[openshell.drivers.podman.resource_admission]
+enabled = false                    # with admission on, the gateway refuses bind mounts

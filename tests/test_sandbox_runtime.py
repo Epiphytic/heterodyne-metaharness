@@ -13,8 +13,15 @@ from tmux_guard import new_test_tmux
 from wsd_env import Clock
 
 from heterodyne.agents.base import HOOK_EVENTS
-from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record, write_record
-from heterodyne.sandbox.spec import SessionLayout, sandbox_name
+from heterodyne.sandbox.runtime import (
+    WIP_FAILED,
+    Phase,
+    SandboxRuntime,
+    SessionRecord,
+    read_record,
+    write_record,
+)
+from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
@@ -203,13 +210,19 @@ def test_the_sandbox_gets_a_private_git_dir_and_its_commits_land_on_stop(rig: Ru
     assert host_tip(rig, "btq/btq-1") == made and host_tip(rig, "main") == main
 
 
+def stop_unlanded(rig: RuntimeRig, key: str) -> None:
+    """The stop ends the session, then refuses: its caller must not commit over unlanded work."""
+    with pytest.raises(RuntimeUnavailable, match="were not landed"):
+        rig.runtime.stop(key)
+
+
 def test_commits_that_cant_land_refuse_the_relaunch(rig: RuntimeRig) -> None:
     spec = launch_spec(rig, "p-one")
     first = rig.runtime.launch(spec)
     before = host_tip(rig, "btq/btq-1")
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
     (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
-    rig.runtime.stop(spec.session_key)
+    stop_unlanded(rig, spec.session_key)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
     assert rec.error == "the session's commits could not be landed"
@@ -217,6 +230,31 @@ def test_commits_that_cant_land_refuse_the_relaunch(rig: RuntimeRig) -> None:
     with pytest.raises(LaunchFailed, match="not landed"):
         rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
     assert (rig.runtime.layout(spec.session_key).git / "objects" / "zz").is_symlink()     # kept for a human
+
+
+def test_unlanded_commits_hold_the_workstream_and_name_where_to_look(rig: RuntimeRig) -> None:
+    """T10 r3: an unlanded record makes `sessions()` and `stop()` raise, durably and across a restart, so
+    no park or defer makes a host WIP over it. The detail names the session and its private git
+    directory relative to the state directory, never a home or absolute path."""
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
+    (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
+    stop_unlanded(rig, spec.session_key)
+    restarted = SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
+    for runtime in (rig.runtime, restarted):
+        with pytest.raises(RuntimeUnavailable) as listed:
+            runtime.sessions("alpha")
+        with pytest.raises(RuntimeUnavailable) as stopped:
+            runtime.stop(spec.session_key)
+        sid = short_id(spec.session_key)
+        for exc in (listed.value, stopped.value):
+            assert str(exc) == (f"session {sid} generation 1: its commits were not landed; land them from "
+                                f"s/{sid}/git in wsd's state directory by hand (docs/wsd.md §5)")
+            assert str(rig.root) not in str(exc) and str(rig.home) not in str(exc)
+        assert runtime.sessions("beta") == []                         # another workstream is not held
+    assert agent_git_tip(rig, spec.session_key) == made               # the private commits are kept
 
 
 @pytest.mark.parametrize("lands", [True, False])
@@ -244,7 +282,10 @@ def test_a_record_write_lost_around_landing_is_recovered(rig: RuntimeRig, monkey
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.STOPPING, False)
     assert host_tip(rig, "btq/btq-1") == (made if lands else before)
-    rig.runtime.stop(spec.session_key)
+    if lands:
+        rig.runtime.stop(spec.session_key)
+    else:
+        stop_unlanded(rig, spec.session_key)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.ENDED, not lands)
     assert host_tip(rig, "btq/btq-1") == (made if lands else before)
@@ -302,7 +343,7 @@ def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: R
     rec = record(rig, spec.session_key)
     assert rec.started_at == t0 + s.stop_margin_seconds + 60
     assert rec.deadline == t0 + s.max_lifetime_seconds           # not started_at + the lifetime
-    assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]
+    assert rig.backend.reapers == [(rec.sandbox, rec.deadline, rig.runtime.layout(rec.key).record)]
     assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
     rig.runtime.stop(spec.session_key)
     assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
@@ -419,7 +460,7 @@ def test_a_pin_refused_at_the_end_keeps_the_commits_unlanded(rig: RuntimeRig) ->
     before = host_tip(rig, "btq/btq-1")
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
     subprocess.run(["git", "-C", str(rig.repo), "config", "filter.x.clean", "cat"], check=True)
-    rig.runtime.stop(spec.session_key)
+    stop_unlanded(rig, spec.session_key)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
     assert host_tip(rig, "btq/btq-1") == before
@@ -436,7 +477,7 @@ def test_a_worktree_gone_before_the_landing_keeps_the_commits_unlanded(rig: Runt
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
     made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
     shutil.rmtree(rig.worktree)
-    rig.runtime.stop(spec.session_key)
+    stop_unlanded(rig, spec.session_key)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
     assert host_tip(rig, "btq/btq-1") != made
@@ -506,7 +547,7 @@ def test_a_private_git_dir_gone_after_seeding_is_unlanded(rig: RuntimeRig) -> No
     spec = launch_spec(rig, "p-one")
     first = rig.runtime.launch(spec)
     shutil.rmtree(rig.runtime.layout(spec.session_key).git)
-    rig.runtime.stop(spec.session_key)
+    stop_unlanded(rig, spec.session_key)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
     with pytest.raises(LaunchFailed, match="not landed"):
@@ -519,12 +560,16 @@ def wip_commits(rig: RuntimeRig) -> int:
     return log.count(f"{gitwip.PARK_MARK}lifetime:")
 
 
-def lifetime_end(rig: RuntimeRig, key: str) -> None:
+def lifetime_end(rig: RuntimeRig, key: str, *, unlanded: bool = False) -> None:
     """The pane died and the deadline passed: the next listing ends the session for its lifetime."""
     rec = record(rig, key)
     rig.tmux.kill(rec.tmux_session)
     rig.clock.advance(rec.deadline - rig.clock.now)
-    assert rig.runtime.sessions("alpha") == []
+    if unlanded:
+        with pytest.raises(RuntimeUnavailable, match="were not landed"):
+            rig.runtime.sessions("alpha")
+    else:
+        assert rig.runtime.sessions("alpha") == []
 
 
 def test_a_lifetime_stop_whose_landing_fails_owes_its_wip_and_commits_none(rig: RuntimeRig) -> None:
@@ -534,7 +579,7 @@ def test_a_lifetime_stop_whose_landing_fails_owes_its_wip_and_commits_none(rig: 
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
     (rig.worktree / "edit.txt").write_text("unsaved work\n")
     (rig.runtime.layout(spec.session_key).git / "objects" / "zz").symlink_to(rig.root)
-    lifetime_end(rig, spec.session_key)
+    lifetime_end(rig, spec.session_key, unlanded=True)
     rec = record(rig, spec.session_key)
     assert (rec.phase, rec.unlanded, rec.stop_reason) == (Phase.ENDED, True, "lifetime")
     assert rec.wip_mark == f"lifetime:{spec.session_key}:1"                # still owed, not dropped

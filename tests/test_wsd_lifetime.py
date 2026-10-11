@@ -1,8 +1,9 @@
 import contextlib
+import json
 import shutil
 import subprocess
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -206,7 +207,7 @@ def test_a_create_that_times_out_keeps_its_watcher_through_cleanup(rig: RuntimeR
     rig.backend.finish_creates()                         # the create lands; wsd crashes and does nothing more
     assert rec.sandbox in rig.backend.boxes
     assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
-    assert rig.backend.reapers == [(rec.sandbox, rec.deadline)]          # it watches exactly that sandbox
+    assert rig.backend.reapers == [(rec.sandbox, rec.deadline, rig.runtime.layout(rec.key).record)]
 
 
 @needs_tools
@@ -392,21 +393,78 @@ def test_past_its_bound_a_watcher_still_waits_for_a_confirmed_deletion() -> None
     assert late <= now[0] < late + 5
 
 
+def write_json(path: Path, data: object) -> None:
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize(("record", "settled"), [
+    (None, True),                                                          # removed after its end
+    ({"sandbox": "box", "phase": "creating", "create_started": True}, False),      # a create in flight
+    ({"sandbox": "box", "phase": "creating", "create_started": True, "created": True}, True),
+    ({"sandbox": "box", "phase": "stopping", "create_started": True}, False),
+    ({"sandbox": "box", "phase": "ended", "create_started": True}, True),
+    ({"sandbox": "box", "phase": "creating"}, True),                       # the create never began
+    ({"sandbox": "boxg2", "phase": "creating", "create_started": True}, True),     # a later generation
+    ("not json", False),
+    ([1], False),
+])
+def test_the_watcher_reads_its_record_before_it_may_go(tmp_path: Path, record: object, settled: bool) -> None:
+    """Codex T12 r1 #2: a create submitted before wsd crashed is outstanding until the record says it
+    returned or the session ended. Unreadable evidence keeps the watcher."""
+    path = tmp_path / "session.json"
+    if isinstance(record, str):
+        path.write_text(record)
+    elif record is not None:
+        write_json(path, record)
+    assert reaper.settled(path, "box") is settled
+
+
+def test_a_create_in_flight_when_wsd_crashed_keeps_its_watcher_past_the_linger(tmp_path: Path) -> None:
+    """Codex T12 r1 #2: wsd submits the create and dies before `created` is recorded. The sandbox appears
+    long after LINGER_SECONDS; the watcher is still there to delete it, and goes only once the record
+    (recovery's end) says nothing is outstanding."""
+    path = tmp_path / "session.json"
+    write_json(path, {"sandbox": "box", "phase": "creating", "create_started": True})
+    late = reaper.LINGER_SECONDS * 2.0
+    now, boxes, deleted = [0.0], set[str](), list[float]()
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if now[0] >= late and not deleted:
+            boxes.add("box")                               # the create lands, unwatched by wsd
+        if deleted and now[0] >= late + 600:
+            write_json(path, {"sandbox": "box", "phase": "ended", "create_started": True})
+
+    def delete(name: str) -> bool:
+        if name in boxes:
+            boxes.discard(name)
+            deleted.append(now[0])
+        return True
+
+    reaper.reap("box", 0, delete, lambda _: None, clock=lambda: now[0], sleep=sleep,
+                settled=lambda: reaper.settled(path, "box"))
+    assert deleted and deleted[0] >= late and boxes == set() and now[0] >= late + 600
+
+
 def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Task 4's `reaper_argv` and `main` agree, so the backstop wsd starts is the one tested here."""
     backend = OpenShellBackend("/x/openshell", "/x/podman", "img:1", {"PATH": "/usr/bin"})
-    argv = backend.reaper_argv("box", 1075)
+    argv = backend.reaper_argv("box", 1075, Path("/x/s/hz1/session.json"))
     module = argv.index("heterodyne.sandbox.reaper")
     assert argv[module - 2:module] == ["-I", "-m"]
     seen: list[tuple[str, int, str, str, str]] = []
+    checked: list[tuple[Path, str]] = []
 
-    def reap(name: str, deadline: int, delete: object, kill: object) -> None:
+    def reap(name: str, deadline: int, delete: object, kill: object, *, settled: Callable[[], bool]) -> None:
         assert isinstance(delete, types.MethodType) and isinstance(delete.__self__, OpenShellBackend)
         backend = delete.__self__
         seen.append((name, deadline, backend.openshell, backend.podman, backend.image))
+        assert settled() is True
 
     monkeypatch.setattr(reaper, "reap", reap)
+    monkeypatch.setattr(reaper, "settled", lambda path, name: checked.append((path, name)) or True)
     assert reaper.main(argv[module + 1:]) == 0
+    assert checked == [(Path("/x/s/hz1/session.json"), "box")]
     assert seen == [("box", 1075, "/x/openshell", "/x/podman", "img:1")]
 
 
@@ -421,4 +479,149 @@ def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
     assert rig.runtime.expires == [(WS, rig.clock())]
     rig.runtime.expire_failures = 1
     assert rig.pickup() is Outcome.HELD
-    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: ""}
+    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: "lifetime stop not confirmed"}
+
+
+@needs_tools
+def test_a_launch_stalled_past_its_deadline_creates_nothing(rig: RuntimeRig,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """T11 r3: wsd stalls after starting the watcher and before the create, longer than the watcher's
+    linger. The create is never submitted, so no sandbox can land after the watcher has gone."""
+    spec = launch_spec(rig, "p-one")
+    real = rig.runtime._reaper  # pyright: ignore[reportPrivateUsage]
+
+    def stalled(rec: SessionRecord) -> None:
+        real(rec)
+        rig.clock.advance(rec.deadline - rig.clock.now + reaper.LINGER_SECONDS + 1)
+
+    monkeypatch.setattr(rig.runtime, "_reaper", stalled)
+    with pytest.raises(LaunchFailed, match="stalled past its deadline"):
+        rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.created, rec.create_started) == (Phase.ENDED, False, False)   # none was submitted
+    assert rig.backend.created == [] and rig.backend.pending == [] and rig.backend.boxes == {}
+
+
+def test_a_crash_during_the_create_leaves_a_watcher_that_waits_for_the_record(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T12 r1 #2: `create_started` is durable before the create is submitted, so a wsd that dies
+    inside it leaves a record the watcher reads as outstanding, however long the create takes to land."""
+    spec = launch_spec(rig, "p-one")
+    seen: list[SessionRecord] = []
+
+    def crash(*_: object) -> None:
+        seen.append(record(rig, spec.session_key))
+        raise Crash
+
+    monkeypatch.setattr(rig.backend, "create", crash)
+    with pytest.raises(Crash):
+        rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    [during] = seen
+    assert (during.phase, during.create_started, during.created) == (Phase.CREATING, True, False)
+    name = during.sandbox
+    assert rig.backend.reapers[-1] == (name, during.deadline, layout.record)
+    assert reaper.settled(layout.record, name) is False
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
+    monkeypatch.undo()
+    assert rig.runtime.sessions("alpha") == []                 # the restarted wsd ends the record
+    assert reaper.settled(layout.record, name) is True
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))   # it lingers, then goes
+
+
+def test_a_stall_after_the_deadline_check_never_lets_the_watcher_go(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T12 r2 path 1: the create is marked possible before the watcher starts, so wsd pausing after
+    its deadline check, past LINGER_SECONDS, then creating and dying, leaves a watcher that still reads
+    the create as outstanding and deletes the late sandbox."""
+    spec = launch_spec(rig, "p-one")
+    layout = rig.runtime.layout(spec.session_key)
+    real_reaper, real_create = rig.runtime._reaper, rig.backend.create  # pyright: ignore[reportPrivateUsage]
+    at_start: list[bool] = []
+
+    def reaper_starts(rec: SessionRecord) -> None:
+        at_start.append(reaper.settled(layout.record, rec.sandbox))     # what the watcher first reads
+        real_reaper(rec)
+
+    def paused_then_dies(*args: object, **kwargs: object) -> None:
+        rec = record(rig, spec.session_key)
+        rig.clock.advance(rec.deadline - rig.clock.now + 2 * reaper.LINGER_SECONDS)
+        real_create(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        raise Crash
+
+    monkeypatch.setattr(rig.runtime, "_reaper", reaper_starts)
+    monkeypatch.setattr(rig.backend, "create", paused_then_dies)
+    with pytest.raises(Crash):
+        rig.runtime.launch(spec)
+    name = record(rig, spec.session_key).sandbox
+    assert at_start == [False] and name in rig.backend.boxes
+    now = [float(rig.clock.now)]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if name not in rig.backend.boxes:
+            raise Killed                         # deleted: the watcher has done its job, still unsettled
+
+    with pytest.raises(Killed):
+        reaper.reap(name, record(rig, spec.session_key).deadline, rig.backend.delete, lambda _: None,
+                    clock=lambda: now[0], sleep=sleep, settled=lambda: reaper.settled(layout.record, name))
+    assert name not in rig.backend.boxes and reaper.settled(layout.record, name) is False
+
+
+def test_a_create_that_returns_past_its_deadline_is_destroyed_at_once(rig: RuntimeRig,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """T11 r3: the check before the create leaves a window up to its submission. A create that returns at
+    or past the deadline is destroyed and its record ended at once, never left to the watcher."""
+    spec = launch_spec(rig, "p-one")
+    real = rig.backend.create
+    trusted: list[object] = []
+
+    def slow(*args: object, **kwargs: object) -> None:
+        real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        rec = record(rig, spec.session_key)
+        rig.clock.advance(rec.deadline - rig.clock.now)
+
+    def trust(*args: object) -> None:
+        trusted.append(args)
+
+    monkeypatch.setattr(rig.backend, "create", slow)
+    monkeypatch.setattr(rig.runtime, "_trust", trust)
+    with pytest.raises(LaunchFailed, match="sandbox was created past its deadline"):
+        rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.created) == (Phase.ENDED, True)
+    assert len(rig.backend.created) == 1 and rig.backend.boxes == {} and trusted == []
+    assert not rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))
+
+
+@needs_tools
+@pytest.mark.parametrize("replay", ["expire", "launch"])
+def test_a_record_from_before_created_replays_and_keeps_its_watcher(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, replay: str) -> None:
+    """T11: a record written before `created` existed reads it as False, the safe side. Its lifetime stop
+    replays to the end and lands the WIP once, and its watcher is never removed (LINGER_SECONDS bounds it)."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    deadline = record(rig, spec.session_key).deadline
+    rig.clock.advance(deadline - rig.clock.now)
+
+    def crash(*_: object) -> None:
+        raise Crash
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.backend, "names", crash)          # `stopping` is written; the sandbox is not gone
+        with pytest.raises(Crash):
+            rig.runtime.expire("alpha", deadline)
+    path = rig.runtime.layout(spec.session_key).record
+    data = json.loads(path.read_text())
+    assert data.pop("created") is True
+    path.write_text(json.dumps(data))                 # as a record from before the field was written
+    assert record(rig, spec.session_key).created is False
+    if replay == "expire":
+        rig.runtime.expire("alpha", deadline)
+        assert record(rig, spec.session_key).phase is Phase.ENDED
+    else:
+        rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+        assert record(rig, spec.session_key).generation == 2
+    assert wip_marks(rig) == [f"wsd-park: lifetime:{spec.session_key}:1"]
+    assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))

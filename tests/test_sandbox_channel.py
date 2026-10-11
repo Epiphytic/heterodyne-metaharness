@@ -869,6 +869,35 @@ def test_a_scan_past_its_budget_fails_closed(tmp_path: Path, monkeypatch: pytest
     assert freeze_state(tmp_path) == "0"
 
 
+def test_a_final_status_read_past_the_budget_fails_closed(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """9A r3: the budget is checked before each read and once more after the last, so a scan whose final
+    status read runs past it never returns success. The clock jumps only during that read."""
+    probe_tree(tmp_path)
+    now = [0.0]
+    walked = [False]
+    real_members, real_read = ProcVerifier._members, Path.read_text
+    last = tmp_path / "32" / "status"            # the probe's thread sorts last
+
+    def members(self: ProcVerifier, budget: Any) -> Any:
+        try:
+            return real_members(self, budget)
+        finally:
+            walked[0] = True
+
+    def read_text(self: Path, *args: Any, **kw: Any) -> str:
+        text = real_read(self, *args, **kw)
+        if walked[0] and self == last:
+            now[0] = 100.0                       # the read itself took past the budget
+        return text
+
+    monkeypatch.setattr(ProcVerifier, "_members", members)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    v = verifier(tmp_path, clock=lambda: now[0], sleep=lambda s: None, budget=10.0)
+    assert v(32) == "the workload scan did not finish"
+    assert now[0] == 100.0 and freeze_state(tmp_path) == "0"
+
+
 def test_a_scan_past_its_entry_limit_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     probe_tree(tmp_path)
     monkeypatch.setattr(channel_module, "SCAN_LIMIT", 4)

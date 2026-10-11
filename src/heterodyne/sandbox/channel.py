@@ -58,6 +58,9 @@ class _Budget:
 
     def tick(self) -> None:
         self.entries += 1
+        self.check()
+
+    def check(self) -> None:
         if self.entries > SCAN_LIMIT or self.clock() > self.end:
             raise _ScanFailed("the workload scan did not finish")
 
@@ -246,7 +249,10 @@ class ProcVerifier:
     def _frozen(self, pid: int, budget: _Budget) -> str:
         try:
             self._freeze(budget)
-            return self._identity(pid, budget) or self._threads(pid, budget)
+            why = self._identity(pid, budget) or self._threads(pid, budget)
+            if not why:
+                budget.check()              # 9A r3: the last read may itself have run past the budget
+            return why
         except _ScanFailed as exc:
             return str(exc)
 

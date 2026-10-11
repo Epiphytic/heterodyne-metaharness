@@ -421,7 +421,7 @@ def test_no_runtime_holds_without_claiming(tmp_path: Path) -> None:
     rig.runtime.up = False
     assert rig.pickup() is Outcome.HELD
     assert rig.world.claims == []
-    assert rig.journal.snapshot(WS).holds == {Reason.RUNTIME_UNAVAILABLE: ""}
+    assert rig.journal.snapshot(WS).holds == {Reason.RUNTIME_UNAVAILABLE: "the runtime is not available"}
 
 
 def test_beads_down_holds_and_never_reads_as_idle(tmp_path: Path) -> None:
@@ -926,7 +926,7 @@ def test_runtime_hold_stays_until_the_runtime_lists_sessions(tmp_path: Path) -> 
     rig.runtime.list_failures = 1
     rig.world.down = True
     assert rig.pickup() is Outcome.HELD
-    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: ""}
+    assert rig.journal.holds(WS) == {Reason.RUNTIME_UNAVAILABLE: "can't list sessions"}  # its reason
     rig.world.down = False
     assert rig.pickup() is Outcome.STARTED
     assert rig.journal.holds(WS) == {}

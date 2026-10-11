@@ -129,11 +129,11 @@ def test_tty_argv_carries_its_own_environment() -> None:
 
 
 def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
-    argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200)
+    argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200, Path("/s/hz0/session.json"))
     assert argv[:3] == ["env", "-i", "PATH=/usr/bin"]
     assert argv[4:7] == ["-I", "-m", "heterodyne.sandbox.reaper"]
     assert argv[7:] == ["--deadline", "1800007200", "--openshell", "openshell", "--podman", "podman",
-                        "--image", "img:1", "hz0123456789abg1"]
+                        "--image", "img:1", "--record", "/s/hz0/session.json", "hz0123456789abg1"]
 
 
 def test_kill_uses_podman_alone() -> None:

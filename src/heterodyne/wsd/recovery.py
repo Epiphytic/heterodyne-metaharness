@@ -67,7 +67,7 @@ def recover(sched: Scheduler) -> Recovered:
             j.hold(name, Reason.BEADS_UNREACHABLE, type(exc).__name__)
             result = Recovered(name, ok=False)
         except RuntimeUnavailable as exc:
-            j.hold(name, Reason.RUNTIME_UNAVAILABLE, type(exc).__name__)
+            j.hold(name, Reason.RUNTIME_UNAVAILABLE, str(exc))
             result = Recovered(name, ok=False)
         else:
             j.unhold(name, Reason.BEADS_UNREACHABLE)

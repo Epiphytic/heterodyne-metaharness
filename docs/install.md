@@ -6,10 +6,10 @@ heterodyne-metaharness is in development. Today you can install it from a source
 
 | Platform | Status | Service manager | Sandbox backend |
 |---|---|---|---|
-| Linux | **Supported in v1** | systemd user units | OpenShell, gated on spike S5; bubblewrap only if S5 is closed as failed (ADR 0001 §7) |
+| Linux | **Supported in v1** | systemd user units | OpenShell (plan 4); see [packaging/sandbox/README.md](../packaging/sandbox/README.md) |
 | macOS | **Phase 2**, not supported in v1 | launchd agents | Seatbelt (`sandbox-exec`) |
 
-The platform is detected once, when `heterodyne setup` runs, and the chosen backends are recorded in the host config (ADR 0001 §3.2). On macOS, `heterodyne platform` and `setup` already recognise the platform and record `launchd` and `seatbelt`, and the CI matrix includes macOS. Nothing has been run on a macOS host yet, and the backends themselves are phase-2 work. Any other platform is refused. The sandbox backend that `setup` records today is `bubblewrap` on Linux (see `[platform]` in [configuration](configuration.md)); that is the current setup default, not the v1 target above, and no sandbox runs yet (plan 4).
+The platform is detected once, when `heterodyne setup` runs, and the chosen backends are recorded in the host config (ADR 0001 §3.2). On macOS, `heterodyne platform` and `setup` already recognise the platform and record `launchd` and `seatbelt`, and the CI matrix includes macOS. Nothing has been run on a macOS host yet, and the backends themselves are phase-2 work. Any other platform is refused. `setup` records `bubblewrap` on Linux, which runs no agents. The operator enables OpenShell by changing it to `openshell`, and should wait for crash-loop accounting (btq-g08sd) first (see `[platform]` in [configuration](configuration.md) and [wsd.md](wsd.md) §5).
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@ The platform is detected once, when `heterodyne setup` runs, and the chosen back
 | Python 3.12 or newer | everything | yes |
 | [uv](https://docs.astral.sh/uv/) | dependencies, running and testing | yes |
 | git | the repository checks | yes (the install-agnostic checker lists tracked files with git) |
-| OpenShell, or bubblewrap if S5 fails (Linux) | the agent sandbox | not yet (plan 4) |
+| OpenShell 0.1.2, rootless podman 5 and the workload image (Linux) | the agent sandbox | by `wsd`, when `[platform] sandbox = "openshell"`; see [packaging/sandbox/README.md](../packaging/sandbox/README.md) |
 | btq, the Beads task-queue client | beads integration | by `wsd`, from `config.toml` `[integrations.beads]` (`btq` is the checkout) |
 | `wn-agent`, the Marmot client | the Marmot surface; `admind` runs its own private copy | by `admind`; the `wsd` surface goes in `config.toml` `[integrations.marmot]` later |
 | tmux, `claude` | the `admind` admin agent | yes |

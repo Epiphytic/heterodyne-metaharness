@@ -28,12 +28,13 @@ import sys
 from collections.abc import Callable, Sequence
 
 from heterodyne.config import ConfigError
+from heterodyne.sandbox.build import build_runtime
 from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
-from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
+from heterodyne.wsd.runtime import AgentRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
@@ -140,7 +141,7 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
     try:
         s = _settings()
         if args.cmd == "run":
-            return run(s, _factory(s), NoRuntime())
+            return run(s, _factory(s), build_runtime(s, os.environ))
     except ConfigError as exc:
         print(f"wsd: {exc}", file=sys.stderr)
         return EX_CONFIG
