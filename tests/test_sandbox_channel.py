@@ -625,6 +625,24 @@ def test_a_workload_process_outside_the_tree_is_still_a_member(tmp_path: Path) -
     assert verifier(tmp_path)(32) == "workload process 60 holds capabilities"
 
 
+@pytest.mark.parametrize("caps, reason", [
+    (NO_CAPS, ""), (SYS_PTRACE, "workload process 60 holds capabilities")])
+def test_a_member_whose_parent_is_out_of_the_snapshot_is_judged_on_its_own(
+        tmp_path: Path, caps: str, reason: str) -> None:
+    """In the workload's mount namespace, a member needs no ancestry: its parent (999, outside, say
+    started it in there and exited) is unlisted, which fails only a process that needs ancestry."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 60, 999, caps=caps)
+    assert verifier(tmp_path)(32) == reason
+
+
+def test_a_child_of_a_member_outside_the_tree_is_a_member(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 60, 999)
+    extra(tmp_path, 61, 60, caps=SYS_PTRACE, **AGENT_NS)
+    assert verifier(tmp_path)(32) == "workload process 61 holds capabilities"
+
+
 def test_a_workload_process_in_a_namespace_it_made_is_still_a_member(tmp_path: Path) -> None:
     probe_tree(tmp_path)
     extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)

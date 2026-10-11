@@ -111,10 +111,11 @@ class ProcVerifier:
     def _scan(self) -> str:
         """"" when no workload task but the first process can gain or holds a capability, else why not.
 
-        Workload members: the descendants of the first process, and every process in the workload's
-        mount namespace (one reparented away from the tree, say). Each process's parent and start time
-        come from one read of its stat, so a parent must exist and have started first; else its pid was
-        reused, or it exited mid-scan, and membership is unresolved. Every member's every thread must
+        Workload members: every process in the workload's mount namespace (one reparented away from the
+        tree, or started into it from outside, say), and every descendant of the first process or of
+        such a member. A process outside the namespace needs its ancestry for that: each parent and start
+        time come from one read of its stat, so a parent must exist and have started first; else its pid
+        was reused, or it exited mid-scan, and membership is unresolved. Every member's every thread must
         have no_new_privs and no permitted or effective capability: capabilities are per thread. A
         process created after the listing inherits no_new_privs from its parent, and under it can gain
         no capability on exec. Any evidence missing, malformed, or changed between reads fails the
@@ -124,7 +125,8 @@ class ProcVerifier:
             procs, mounted = self._list(budget)
             if procs.get(self.root, (0, -1))[1] != self.root_start:
                 return "the workload's first process changed"
-            members = mounted | {pid for pid in procs if self._descends(pid, procs)}
+            outside = (pid for pid in procs if pid not in mounted)
+            members = mounted | {pid for pid in outside if self._descends(pid, procs, mounted)}
             members.discard(self.root)
             for pid in sorted(members):
                 why = self._tasks(pid, procs[pid], budget)
@@ -155,16 +157,17 @@ class ProcVerifier:
                 pass                         # another user's, or gone: its membership rests on ancestry
         return procs, mounted
 
-    def _descends(self, pid: int, procs: dict[int, tuple[int, int]]) -> bool:
+    def _descends(self, pid: int, procs: dict[int, tuple[int, int]], mounted: set[int]) -> bool:
+        """Whether a process outside the mount namespace descends from the first process or a member."""
         q, steps = pid, 0
-        while q != self.root:
+        while q != self.root and q not in mounted:
             ppid, start = procs[q]
             if ppid == 0:
                 return False
             if ppid not in procs or procs[ppid][1] > start or steps > len(procs):
                 raise _ScanFailed("the workload process list is unresolved")
             q, steps = ppid, steps + 1
-        return q != pid
+        return True
 
     def _tasks(self, pid: int, seen: tuple[int, int], budget: _Budget) -> str:
         d = self.proc / str(pid)
