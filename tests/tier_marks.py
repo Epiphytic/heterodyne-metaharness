@@ -12,14 +12,19 @@ latches, digests, approvals, sandbox, policy, ...), whose tests run in every tie
 Inside an eligible file, a test whose name matches SAFETY_WORDS is safety too. Collection marks every
 safety test `safety`, and fails, rather than quietly dropping it from the fast tier, if the list names
 one or anything marks one `slow`: make the test faster instead. Loaded from tests/conftest.py.
+
+scripts/test-changed sets HZ_TIER_KEEP to the files a change reaches; their listed tests are not marked
+slow, so one `-m "not slow"` run covers the fast tier and those files whole.
 """
 
+import os
 import re
 from pathlib import Path
 
 import pytest
 
 SLOW_LIST = Path(__file__).resolve().with_name("slow_tests.txt")
+KEEP_ENV = "HZ_TIER_KEEP"     # os.pathsep-separated test files whose slow tests stay in (test-changed)
 SLOW_ELIGIBLE = re.compile(r"^tests/(test_tmux\w*|test_wsd_\w+)\.py$")
 SAFETY_WORDS = re.compile(r"redact|secret|sandbox|latch|digest|polic|leak|npub|nsec|token|auth|isolat|guard"
                           r"|pin")
@@ -54,9 +59,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if unsafe:
         raise pytest.UsageError(f"{SLOW_LIST.name} lists safety tests, which must stay in every tier: "
                                 + ", ".join(unsafe))
+    keep = {path for path in os.environ.get(KEEP_ENV, "").split(os.pathsep) if path}
     marked: list[str] = []
     for item in items:
-        if function_id(item.nodeid) in slow:
+        if function_id(item.nodeid) in slow and item.nodeid.partition("::")[0] not in keep:
             item.add_marker(pytest.mark.slow)
         if is_safety(item.nodeid):
             item.add_marker(pytest.mark.safety)

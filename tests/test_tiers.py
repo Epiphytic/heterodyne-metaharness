@@ -205,3 +205,13 @@ def test_otherwise_the_base_temp_stays_on_disk(tmp_path: Path, monkeypatch: pyte
             raise OSError(28, "No space left on device")
         monkeypatch.setattr(basetemp.tempfile, "mkdtemp", refuse)
     assert basetemp.ram_base(ram, table, min_free) is None
+
+
+def test_the_files_a_change_reaches_keep_their_slow_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    listed = "tests/test_wsd_defer.py::test_defer_and_regate_replay"
+    other = "tests/test_tmux.py::test_multiline_paste_is_one_bracketed_paste"
+    monkeypatch.setattr(tier_marks, "load", lambda: {listed, other})
+    monkeypatch.setenv(tier_marks.KEEP_ENV, os.pathsep.join(["tests/test_wsd_defer.py", "tests/test_x.py"]))
+    kept, dropped = Item(listed + "[a]"), Item(other)
+    modify([kept, dropped])
+    assert kept.marks == set() and dropped.marks == {"slow"}

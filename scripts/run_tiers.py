@@ -6,7 +6,8 @@ Usage: run_tiers.py {fast|changed|full} [--base REF] [--no-diagnose] [-- pytest 
 
 - fast: every test not marked `slow` (tests/slow_tests.txt). Safety tests are never marked slow.
 - changed: fast, plus every test, slow ones included, in the files scripts/select_tests.py maps the
-  change to. When the selector cannot map the change, this is the full suite.
+  change to, in one run (tier_marks.KEEP_ENV). When the selector cannot map the change, this is the
+  full suite.
 - full: the whole suite, as CI runs it.
 - slow-list: rewrite tests/slow_tests.txt from a JUnit report of a full run (`pytest --junitxml=...`):
   every test function with a case taking THRESHOLD seconds or more (default 0.5), safety tests excepted.
@@ -20,6 +21,7 @@ verbose output, so a broad failure comes back with the narrower tests of the sam
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,13 +48,15 @@ def parallel(extra: list[str]) -> list[str]:
     return [] if chosen else ["-n", "auto"]
 
 
-def pytest(args: list[str]) -> tuple[int, set[str]]:
-    """Run pytest; return its exit code and the test files with a failed or erroring test."""
+def pytest(args: list[str], keep: list[str] | None = None) -> tuple[int, set[str]]:
+    """Run pytest; return its exit code and the test files with a failed or erroring test. The slow tests
+    of the `keep` files stay in a `-m "not slow"` run."""
     with tempfile.TemporaryDirectory(prefix="hz-tiers") as tmp:
         report = Path(tmp) / "junit.xml"
         cmd = [sys.executable, "-m", "pytest", *args]
         print("+ " + " ".join(cmd[1:]), file=sys.stderr, flush=True)
-        code = subprocess.run([*cmd, f"--junitxml={report}"], cwd=ROOT, check=False).returncode
+        env = {**os.environ, tier_marks.KEEP_ENV: os.pathsep.join(keep or [])}
+        code = subprocess.run([*cmd, f"--junitxml={report}"], cwd=ROOT, env=env, check=False).returncode
         return code, {nodeid.partition("::")[0] for nodeid, _, bad in cases(report) if bad}
 
 
@@ -108,30 +112,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.report is not None:
         extra.insert(0, str(args.report))       # a bare path after the tier is a pytest argument
 
+    keep: list[str] = []
     if args.tier == "full":
-        runs = [["-q", *workers, *extra]]
+        run = ["-q", *workers, *extra]
     elif args.tier == "fast":
-        runs = [["-q", *workers, "-m", "not slow", *extra]]
+        run = ["-q", *workers, "-m", "not slow", *extra]
     else:
         try:
-            files = select_tests.select(select_tests.changed_files(args.base), explain=True)
+            keep = select_tests.select(select_tests.changed_files(args.base), explain=True)
         except select_tests.Full as exc:
             print(f"full suite: {exc}", file=sys.stderr)
-            runs = [["-q", *workers, *extra]]
+            run = ["-q", *workers, *extra]
         else:
-            print(f"selected {len(files)} test file(s) for the change", file=sys.stderr)
-            runs = [["-q", *workers, "-m", "not slow", *extra]]
-            if files:                      # what the fast run left out of the selected files
-                runs.append(["-q", *workers, "-m", "slow", *extra, *files])
+            print(f"selected {len(keep)} test file(s) for the change", file=sys.stderr)
+            run = ["-q", *workers, "-m", "not slow", *extra]
 
-    code = 0
-    failed: set[str] = set()
-    for run in runs:
-        rc, files = pytest(run)
-        if rc == 5 and "slow" in run and "not slow" not in run:
-            rc = 0                         # the selected files have no slow tests
-        failed |= files
-        code = code or rc
+    code, failed = pytest(run, keep)
     if code != 0 and failed and not args.no_diagnose:
         print(f"diagnosis: rerunning {len(failed)} failing file(s) in full", file=sys.stderr)
         serial = [] if workers or "no:xdist" in extra else ["-n", "0"]     # the last -n wins
