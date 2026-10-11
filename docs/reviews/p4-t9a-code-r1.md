@@ -1,0 +1,13 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 9dd2173. Verdict: REVISE.
+
+1. [BLOCKING] `src/heterodyne/sandbox/channel.py:82–99` — The capability scan fails open on unreadable, malformed or disappearing entries. Skipping an intermediate ancestor also disconnects its readable descendants: an in-memory control with unreadable PID 30 and capable child PID 40 returned `""`. The numeric PID/PPid snapshot has no identity or reparenting checks, so process churn can cause the same omission. **Fix:** establish workload membership independently of this partial ancestry snapshot, validate process identities, and reject unresolved membership or unreadable security evidence. Add permission-error, disappearing-parent and PID-reuse controls. This defect is copied from the plan.
+
+2. [BLOCKING] `src/heterodyne/sandbox/channel.py:85–90` — Every descendant with `NoNewPrivs != 1` is exempted, without establishing that it is a trusted supervisor. A CLI or tool accidentally launched with `NoNewPrivs: 0` and `CAP_SYS_PTRACE` therefore passes this scan and can tamper with the verified probe. An in-memory control confirmed that this capable descendant returns `""`. **Fix:** identify trusted supervisor processes explicitly; require every other workload task to have `NoNewPrivs: 1` and empty permitted/effective capabilities. Add a capable CLI and a capable non-supervisor descendant as negative controls. This defect is copied from the plan.
+
+3. [BLOCKING] `src/heterodyne/sandbox/channel.py:79–86` — Only thread-group leaders are inspected. Linux capabilities are per-thread, so a leader with empty capability sets can conceal a capable worker thread; that worker can still perform the forbidden operations. [Linux thread documentation](https://www.man7.org/linux/man-pages/man7/pthreads.7.html) confirms this distinction. **Fix:** inspect every workload thread through `/proc/<pid>/task/<tid>/status`, with identity and disappearance handling, and test a harmless leader with a capable worker. This omission is inherited from the plan.
+
+4. [NON-BLOCKING] `src/heterodyne/sandbox/channel.py:79` — Both verification points scan all host processes without an entry limit, deadline or cancellation check. The channel’s receive timeout does not bound this work, and socket shutdown cannot interrupt it. **Fix:** give verification a monotonic budget and cancellation mechanism; reject an incomplete scan and test budget exhaustion.
+
+The completion stamp now follows verification, ACK and clean EOF, with meaningful late-handshake controls. Targeted pytest execution was blocked by denied temporary-file creation, including under `/tmp`.
+
+REVISE

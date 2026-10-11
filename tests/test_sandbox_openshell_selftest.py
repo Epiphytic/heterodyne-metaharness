@@ -21,8 +21,10 @@ from heterodyne.sandbox.backend import Backend, BackendError, ExecResult
 from heterodyne.sandbox.openshell_selftest import (
     AGENT_CHECKS,
     EXEC_CHECKS,
+    NS_ARGV,
     PROBE_ARGV,
     PROBE_EXE,
+    PROTECTION_CHECKS,
     OpenShellSelfTest,
     classify,
     env_allowed,
@@ -30,6 +32,7 @@ from heterodyne.sandbox.openshell_selftest import (
     log_needles,
     other_accounts,
     probe_config,
+    read_ptrace_scope,
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
 from heterodyne.sandbox.settings import sandbox_settings
@@ -93,15 +96,16 @@ def passing_logs(ctx: ProbeContext) -> list[str]:
     return [f"[1800000000.0] [ocsf] {needle} ..." for _, needle in log_needles(ctx, "exec")]
 
 
-def selftest() -> OpenShellSelfTest:
-    return OpenShellSelfTest(wall=lambda: 1_800_000_000.0, sleep=lambda s: None)
+def selftest(scope: int = 2) -> OpenShellSelfTest:
+    return OpenShellSelfTest(wall=lambda: 1_800_000_000.0, sleep=lambda s: None, ptrace_scope=lambda: scope)
 
 
 def test_probes_file_is_stdlib_only_and_names_every_check() -> None:
     tree = ast.parse(PROBES.read_text())
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
-    assert imported <= {"errno", "hashlib", "ipaddress", "json", "os", "socket", "stat", "subprocess", "sys"}
+    assert imported <= {"ctypes", "errno", "hashlib", "ipaddress", "json", "os", "socket", "stat",
+                        "subprocess", "sys"}
     literals = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
     for check in {*AGENT_CHECKS, *EXEC_CHECKS} - {"model-host-agent-path", "model-host-exec-path"}:
         assert check in literals
@@ -397,24 +401,52 @@ class StubTmux:
 
 
 def fake_probe_proc(proc: Path, cli: Path) -> None:
-    for pid, exe, argv, ppid in ((30, str(cli), ("codex",), 1), (32, PROBE_EXE, PROBE_ARGV, 30)):
+    """1: the host's init, 7: the workload's first process (the supervisor), 30: the CLI, 32: the probe."""
+    for pid, exe, argv, ppid in ((1, "/usr/lib/systemd/systemd", ("systemd",), 0),
+                                 (7, "/opt/openshell/bin/supervisor", ("supervisor",), 1),
+                                 (30, str(cli), ("codex",), 7), (32, PROBE_EXE, PROBE_ARGV, 30)):
         d = proc / str(pid)
-        (d / "ns").mkdir(parents=True)
+        (d / "task" / str(pid)).mkdir(parents=True)
+        (d / "ns").mkdir()
         (d / "exe").symlink_to(exe)
-        (d / "ns" / "net").symlink_to("net:[4026531999]")
+        mnt = "mnt:[2]" if pid > 1 else "mnt:[3]"                           # init: the host's
+        for ns, value in (("net", "net:[4026531999]"), ("user", "user:[1]"), ("mnt", mnt)):
+            (d / "ns" / ns).symlink_to(value)
         (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
         (d / "environ").write_bytes(b"HOME=/s/home\0")
-        (d / "status").write_text(f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\n")
-    (proc / "7").mkdir()
-    (proc / "7" / "ns").mkdir()
-    (proc / "7" / "ns" / "net").symlink_to("net:[4026531999]")            # the workload's first process
+        (d / "stat").write_text(f"{pid} (x) S {ppid} " + "0 " * 17 + f"{pid} 0\n")   # started in pid order
+        nnp = 0 if pid in (1, 7) else 1
+        status = (f"Name:\tx\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
+                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
+        (d / "status").write_text(status)
+        (d / "task" / str(pid) / "status").write_text(status)
+        (d / "cgroup").write_text("0::/init.scope\n" if pid == 1 else f"0::{WORKLOAD_CG}\n")
+    (proc / "self").mkdir()
+    (proc / "self" / "cgroup").write_text("0::/user.slice/scanner.scope\n")
+    cg = proc.parent / "cgroupfs" / WORKLOAD_CG.lstrip("/")
+    cg.mkdir(parents=True)
+    (cg / "cgroup.threads").write_text("7\n30\n32\n")
+    (cg / "cgroup.freeze").write_text("0\n")
+    (cg / "cgroup.events").write_text("populated 1\nfrozen 1\n")
+
+
+WORKLOAD_CG = "/user.slice/libpod-x.scope"
 
 
 @dataclass
 class AgentBackend(StubBackend):
+    """Also answers the workload namespace pin, with `fake_probe_proc`'s values."""
+    ns_out: bytes = b"user:[1]\nmnt:[2]\n"
+
     def workload_pid(self, name: str) -> int:
         self.before()
         return 7
+
+    def exec(self, name: str, workdir: Path, argv: Sequence[str], *, input: bytes | None = None,
+             timeout: float) -> ExecResult:
+        if tuple(argv) == NS_ARGV:
+            return ExecResult(0, self.ns_out, b"")
+        return super().exec(name, workdir, argv, input=input, timeout=timeout)
 
 
 def agent_context(root: Path, tmux: StubTmux) -> ProbeContext:
@@ -445,7 +477,8 @@ def fake_peer(s: socket.socket) -> tuple[int, int]:
 
 def agent_selftest(proc: Path) -> OpenShellSelfTest:
     """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
-    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer=fake_peer)
+    return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer=fake_peer,
+                             ptrace_scope=lambda: 2, cgroupfs=proc.parent / "cgroupfs")
 
 
 def test_agent_path_passes_on_one_verified_run() -> None:
@@ -464,6 +497,23 @@ def test_agent_path_passes_on_one_verified_run() -> None:
         assert not ctx.layout.probe_socket(1).exists()
 
 
+@pytest.mark.parametrize("cgroup", ["0::/user.slice/scanner.scope\n", "0::/\n", "1:cpu:/x\n", None])
+def test_agent_path_fails_without_a_cgroup_of_the_workloads_own(cgroup: str | None) -> None:
+    """The scanner's own cgroup, the root, cgroup v1, or none readable: nothing to freeze and enumerate."""
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        if cgroup is None:
+            (root / "proc" / "7" / "cgroup").unlink()
+        else:
+            (root / "proc" / "7" / "cgroup").write_text(cgroup)
+        ctx.layout.run(1).mkdir()
+        with pytest.raises(SelfTestFailed, match="^workload-cgroup$"):
+            agent_selftest(root / "proc").agent_path(ctx)
+        assert tmux.pasted == []
+
+
 def test_agent_path_fails_without_the_prompt() -> None:
     with short_dir() as root:
         ctx = agent_context(root, StubTmux(screen="loading"))
@@ -471,7 +521,8 @@ def test_agent_path_fails_without_the_prompt() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_001_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer)
+                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-prompt"):
             st.agent_path(ctx)
 
@@ -483,7 +534,8 @@ def test_agent_path_fails_when_the_agent_never_runs_the_probe() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_010_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer)
+                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-path-channel: no verified probe run"):
             st.agent_path(ctx)
 
@@ -540,7 +592,8 @@ def test_agent_path_a_probe_finishing_during_the_last_poll_fails() -> None:
                 now[0] += ctx.settings.agent_probe_seconds + 1      # the poll oversleeps the deadline ...
                 run_probe(ctx, good)                                # ... and the probe finishes meanwhile
 
-        st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer)
+        st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
+                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 
@@ -559,3 +612,83 @@ def test_agent_path_a_channel_that_fails_to_start_leaves_no_socket(monkeypatch: 
             agent_selftest(root / "proc").agent_path(ctx)
         monkeypatch.undo()
         assert not ctx.layout.probe_socket(1).exists() and tmux.pasted == []
+
+
+def test_agent_path_a_handshake_finishing_after_the_deadline_fails() -> None:
+    """The probe sends `done` in time, but the self-test's last poll oversleeps the deadline before the
+    probe takes the ACK and closes: the run completes late, so it fails although `done` was in time."""
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        ctx.layout.run(1).mkdir()
+        good = [*({"check": c, "ok": True, "evidence": ""} for c in AGENT_CHECKS), {"done": 0}]
+        now = [1000.0]
+        sent = threading.Event()
+        late = threading.Event()
+
+        def probe() -> None:
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(str(ctx.layout.probe_socket(ctx.generation)))
+                s.sendall(b"".join((json.dumps(m) + "\n").encode() for m in good))
+                assert s.recv(64)                   # the ACK
+                sent.set()
+                late.wait(5)                        # the clean EOF only after the deadline has passed
+
+        def sleep(seconds: float) -> None:
+            if sent.is_set() and not late.is_set():
+                now[0] += ctx.settings.agent_probe_seconds + 1
+                late.set()
+            time.sleep(min(seconds, 0.02))
+
+        tmux.on_paste.append(probe)
+        st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
+                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
+        with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
+            st.agent_path(ctx)
+
+
+def test_both_paths_run_the_protection_checks() -> None:
+    assert set(PROTECTION_CHECKS) <= set(EXEC_CHECKS) and set(PROTECTION_CHECKS) <= set(AGENT_CHECKS)
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 1])
+def test_the_exec_path_needs_ptrace_scope_2(tmp_path: Path, scope: int) -> None:
+    backend = StubBackend()
+    ctx = context(tmp_path, backend)
+    with pytest.raises(SelfTestFailed, match=f"^ptrace-scope: {scope}, probe protection needs 2 or more$"):
+        selftest(scope).exec_path(ctx)
+    assert backend.calls == []
+
+
+def test_the_agent_path_needs_ptrace_scope_2() -> None:
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        ctx.layout.run(1).mkdir()
+        st = OpenShellSelfTest(sleep=lambda s: None, proc=root / "proc", peer=fake_peer,
+                               ptrace_scope=lambda: 1)
+        with pytest.raises(SelfTestFailed, match="^ptrace-scope: 1, probe protection needs 2 or more$"):
+            st.agent_path(ctx)
+        assert tmux.pasted == []
+
+
+@pytest.mark.parametrize("out", [b"", b"user:[1]\n", b"user:[1]\nmnt:[2]\nmnt:[3]\n", b"mnt:[2]\nuser:[1]\n"])
+def test_the_agent_path_needs_the_workload_namespaces_pinned(out: bytes) -> None:
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        ctx.layout.run(1).mkdir()
+        cast(AgentBackend, ctx.backend).ns_out = out
+        with pytest.raises(SelfTestFailed, match="^workload-namespaces$"):
+            agent_selftest(root / "proc").agent_path(ctx)
+        assert tmux.pasted == []
+
+
+def test_read_ptrace_scope(tmp_path: Path) -> None:
+    (tmp_path / "scope").write_text("2\n")
+    (tmp_path / "junk").write_text("x")
+    assert (read_ptrace_scope(tmp_path / "scope"), read_ptrace_scope(tmp_path / "junk"),
+            read_ptrace_scope(tmp_path / "missing")) == (2, -1, -1)

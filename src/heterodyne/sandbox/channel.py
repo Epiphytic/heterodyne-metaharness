@@ -9,10 +9,13 @@ The peer is pinned by its SO_PEERPIDFD pidfd, the connecting process itself: it 
 pidfd not readable) before and after the /proc reads, at accept and again at `done`, so the reads saw that
 process and not a successor with its PID. After the check at `done` the host sends ACK, which the probe
 waits for before it exits. The transcript is exact: one result per check, one integer `done`, nothing
-after it, the ACK delivered, then a clean end of stream. `done` is stamped on a monotonic clock, for
-the deadline.
+after it, the ACK delivered, then a clean end of stream. The run's completion, after that end of stream,
+is stamped on a monotonic clock, for the deadline.
 Reads, connections and the time per connection are bounded, and `close` finishes every worker before the
 verdict is read.
+It also checks, at both points, that nothing in the workload can tamper with the probe while it runs (§7
+Probe protection, D23). With the workload's cgroup frozen, every thread its cgroup tree lists, but its
+first process's, has no_new_privs and no capability; a check it can't freeze, complete or thaw fails.
 """
 
 import json
@@ -27,28 +30,187 @@ from pathlib import Path
 from typing import cast
 
 from heterodyne.platform import peer_pidfd_checked
-from heterodyne.sandbox.openshell_selftest import PROBE_ARGV, PROBE_EXE
+from heterodyne.sandbox.openshell_selftest import MIN_PTRACE_SCOPE, PROBE_ARGV, PROBE_EXE
 
 MAX_LINE = 64 << 10
 MAX_PEERS = 16              # connections served at once; any more is closed at once, and rejected
+NO_CAPS = "0000000000000000"
+SCAN_LIMIT = 1 << 17        # cgroup directory entries, threads and reads one verification may make
+SCAN_SECONDS = 10.0         # and the time it may take, the freeze included; past either, it fails
+FREEZE_POLL = 0.01          # how often the freeze is looked for in cgroup.events
+GONE = (FileNotFoundError, ProcessLookupError)      # the process or thread ended while it was read
 ACK = b"ack\n"              # sent after the check at `done`; the probe waits for it before exiting
 ACCEPT_POLL = 0.05          # how often the accept loop looks for close()
 JOIN_SECONDS = 2.0          # close() waits this long for each worker
 
 
+class _ScanFailed(Exception):
+    pass
+
+
+class _Budget:
+    """One verification's bound: SCAN_LIMIT entries and `seconds` on `clock`. Per verification, as the
+    channel's workers verify at once."""
+    def __init__(self, clock: Callable[[], float], seconds: float) -> None:
+        self.clock = clock
+        self.end = clock() + seconds
+        self.entries = 0
+
+    def tick(self) -> None:
+        self.entries += 1
+        if self.entries > SCAN_LIMIT or self.clock() > self.end:
+            raise _ScanFailed("the workload scan did not finish")
+
+
+def start_time(proc: Path, pid: int) -> int:
+    """A process's start time, in clock ticks since boot: with its pid, its identity. The comm, in
+    parentheses, may itself hold ") "."""
+    return int((proc / str(pid) / "stat").read_text().rpartition(")")[2].split()[19])
+
+
+def _cgroup_path(text: str) -> str:
+    """The path in a /proc/<pid>/cgroup: cgroup v2 only, as exactly one `0::/...` line."""
+    lines = text.splitlines()
+    if len(lines) != 1 or not lines[0].startswith("0::/") or ".." in lines[0][3:].split("/"):
+        raise ValueError("not one cgroup v2 path")
+    return lines[0][3:]
+
+
+def workload_cgroup(proc: Path, pid: int) -> str:
+    """The workload's cgroup, pinned with its first process: that process's cgroup v2 path. It must not
+    hold this process, which freezing it would freeze too."""
+    path = _cgroup_path((proc / str(pid) / "cgroup").read_text())
+    own = _cgroup_path((proc / "self" / "cgroup").read_text())
+    if own == path or own.startswith(path.rstrip("/") + "/"):
+        raise ValueError("the workload's cgroup holds this process")
+    return path
+
+
+def _write(path: Path, value: bytes) -> None:
+    """Write to an existing control file, never creating one."""
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        os.write(fd, value)
+    finally:
+        os.close(fd)
+
+
 class ProcVerifier:
+    """Verifies a peer as the probe. Every /proc read happens with the workload's cgroup frozen, so no
+    workload task can start, end, fork or change while it is checked; the cgroup is thawed after, on
+    every path. The workload's tasks are the threads its cgroup tree lists, and nothing else."""
+
     def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *,
-                 proc: Path = Path("/proc")) -> None:
+                 namespaces: tuple[str, str], root_pid: int, root_start: int, cgroup: str,
+                 ptrace_scope: Callable[[], int], proc: Path = Path("/proc"),
+                 cgroupfs: Path = Path("/sys/fs/cgroup"), clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep, budget: float = SCAN_SECONDS) -> None:
         self.netns = netns
         self.cli = cli_binary
         self.allowed = allowed_env
+        self.namespaces = namespaces         # the workload's (user, mnt), pinned by the host
+        self.root = root_pid                 # the workload container's first process, the one task
+        self.root_start = root_start         # exempt, pinned by its start time against pid reuse
+        self.cgroup = cgroupfs / cgroup.lstrip("/")     # the workload's cgroup, pinned with the root
+        self.ptrace_scope = ptrace_scope
         self.proc = proc
+        self.clock = clock
+        self.sleep = sleep
+        self.budget = budget
+        self._lock = threading.Lock()        # one freeze at a time: the channel's workers verify at once
+
+    @staticmethod
+    def _field(status: str, name: str) -> str:
+        return status.split(f"\n{name}:\t", 1)[1].split("\n", 1)[0]
 
     def _ppid(self, pid: int) -> int:
-        status = (self.proc / str(pid) / "status").read_text()
-        return int(status.split("\nPPid:\t", 1)[1].split("\n", 1)[0])
+        return int(self._field((self.proc / str(pid) / "status").read_text(), "PPid"))
 
-    def __call__(self, pid: int) -> str:
+    def _cli_ancestor(self, pid: int, budget: _Budget) -> int | None:
+        q = pid
+        while q > 1:
+            budget.tick()
+            try:
+                q = self._ppid(q)
+                if str((self.proc / str(q) / "ns" / "net").readlink()) != self.netns:
+                    return None
+                if str((self.proc / str(q) / "exe").readlink()) == self.cli:
+                    return q
+            except (OSError, IndexError, ValueError):
+                return None
+        return None
+
+    def _freeze(self, budget: _Budget) -> None:
+        try:
+            _write(self.cgroup / "cgroup.freeze", b"1")
+            while "frozen 1" not in (self.cgroup / "cgroup.events").read_text().splitlines():
+                if self.clock() > budget.end:
+                    raise _ScanFailed("the workload could not be frozen")
+                self.sleep(FREEZE_POLL)
+        except OSError:
+            raise _ScanFailed("the workload could not be frozen") from None
+
+    def _thaw(self) -> bool:
+        try:
+            _write(self.cgroup / "cgroup.freeze", b"0")
+        except OSError:
+            return False
+        return True
+
+    def _members(self, budget: _Budget) -> set[int]:
+        """Every thread in the workload's cgroup tree, frozen."""
+        tids: set[int] = set()
+        todo = [self.cgroup]
+        try:
+            while todo:
+                d = todo.pop()
+                budget.tick()
+                for line in (d / "cgroup.threads").read_text().splitlines():
+                    budget.tick()
+                    tids.add(int(line))
+                with os.scandir(d) as entries:
+                    for e in entries:
+                        budget.tick()
+                        if e.is_dir(follow_symlinks=False):
+                            todo.append(Path(e.path))
+        except (OSError, ValueError):
+            raise _ScanFailed("workload process evidence unreadable") from None
+        return tids
+
+    def _threads(self, pid: int, budget: _Budget) -> str:
+        """"" when no workload thread outside the first process can gain or holds a capability (they are
+        per thread), else why not."""
+        try:
+            if start_time(self.proc, self.root) != self.root_start:
+                return "the workload's first process changed"
+        except (OSError, IndexError, ValueError):
+            return "the workload's first process changed"
+        tids = self._members(budget)
+        if pid not in tids:
+            return "the probe is outside the workload's cgroup"
+        for tid in sorted(tids):
+            budget.tick()
+            try:
+                status = (self.proc / str(tid) / "status").read_text()
+                tgid, own = int(self._field(status, "Tgid")), int(self._field(status, "Pid"))
+                nnp = self._field(status, "NoNewPrivs")
+                caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+            except GONE:
+                return "a workload thread ended while the workload was frozen"
+            except (OSError, IndexError, ValueError):
+                return "workload process evidence unreadable"
+            if own != tid:
+                return "workload process evidence unreadable"
+            if tgid == self.root:
+                continue
+            who = f"workload process {tgid}" + ("" if tid == tgid else f" (thread {tid})")
+            if nnp != "1":
+                return f"{who} can gain privileges"
+            if caps != {NO_CAPS}:
+                return f"{who} holds capabilities"
+        return ""
+
+    def _identity(self, pid: int, budget: _Budget) -> str:
         p = self.proc / str(pid)
         try:
             exe = str((p / "exe").readlink())
@@ -61,23 +223,43 @@ class ProcVerifier:
             return f"/proc/{pid} unreadable ({exc.strerror})"
         if exe != PROBE_EXE or argv != PROBE_ARGV:
             return "not the probe"
-        if "TracerPid:\t0\n" not in status:
+        if "\nTracerPid:\t0\n" not in status:
             return "traced"
+        if "\nNoNewPrivs:\t1\n" not in status:
+            return "the probe can gain privileges"
         if netns != self.netns:
             return "netns is not the workload container's"
         if env - self.allowed:
             return f"environment beyond the allowlist: {' '.join(sorted(env - self.allowed))}"
-        q = pid
-        while q > 1:
+        cli = self._cli_ancestor(pid, budget)
+        if cli is None:
+            return f"no {self.cli} ancestor inside the workload netns"
+        try:
+            seen = {tuple(str((self.proc / str(q) / "ns" / ns).readlink()) for ns in ("user", "mnt"))
+                    for q in (pid, cli)}
+        except OSError:
+            seen = set[tuple[str, ...]]()
+        if seen != {self.namespaces}:
+            return "the probe or its CLI is outside the workload's user and mount namespaces"
+        return ""
+
+    def _frozen(self, pid: int, budget: _Budget) -> str:
+        try:
+            self._freeze(budget)
+            return self._identity(pid, budget) or self._threads(pid, budget)
+        except _ScanFailed as exc:
+            return str(exc)
+
+    def __call__(self, pid: int) -> str:
+        scope = self.ptrace_scope()
+        if scope < MIN_PTRACE_SCOPE:
+            return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
+        with self._lock:
             try:
-                q = self._ppid(q)
-                if str((self.proc / str(q) / "ns" / "net").readlink()) != self.netns:
-                    break
-                if str((self.proc / str(q) / "exe").readlink()) == self.cli:
-                    return ""
-            except (OSError, IndexError, ValueError):
-                break
-        return f"no {self.cli} ancestor inside the workload netns"
+                why = self._frozen(pid, _Budget(self.clock, self.budget))
+            finally:
+                thawed = self._thaw()
+        return why if thawed else why or "the workload could not be thawed"
 
 
 def alive(pidfd: int) -> bool:
@@ -92,7 +274,7 @@ class _Run:
     pid: int
     checks: dict[str, bool] = field(default_factory=dict[str, bool])
     done: int | None = None
-    done_at: float | None = None    # the channel's clock when `done` arrived
+    finished_at: float | None = None    # the channel's clock when the run finished (the stamp for `by`)
     finished: bool = False      # `done`, the check at `done`, the ACK sent, then the peer's clean EOF
     end: str = ""               # how the connection ended: eof, timeout, error, shutdown, ack-failed
     changed: bool = False
@@ -170,7 +352,8 @@ class ProbeChannel:
             return bool(self.rejected) or any(r.finished or r.changed or r.malformed for r in self.runs)
 
     def verdict(self, expected: Sequence[str], *, by: float | None = None) -> str:
-        """"" on a pass, else the reason. `by`: the deadline on the channel's clock that `done` must meet."""
+        """"" on a pass, else the reason. `by`: the deadline on the channel's clock that the run's
+        completion (after the check at `done`, the ACK and the clean end of stream) must meet."""
         with self._lock:
             if not self._closed:
                 raise RuntimeError("the verdict is read only after close()")
@@ -189,7 +372,7 @@ class ProbeChannel:
                 return "the probe changed before it finished"
             if not run.finished:
                 return "the probe did not finish cleanly"
-            if by is not None and (run.done_at is None or run.done_at > by):
+            if by is not None and (run.finished_at is None or run.finished_at > by):
                 return "the probe did not finish in time"
             unexpected = sorted(set(run.checks) - set(expected))
             failed = [c for c in expected if run.checks.get(c) is False]
@@ -305,6 +488,8 @@ class ProbeChannel:
                 run.malformed = True           # nothing may follow `done`
             run.end = end
             run.finished = not trailing and end == "eof"
+            if run.finished:
+                run.finished_at = self.clock()
 
     def _recv(self, conn: socket.socket, deadline: float, n: int) -> tuple[bytes, str]:
         """(data, "") or (b"", how the stream ended): eof, timeout, error or shutdown (close())."""
@@ -332,7 +517,6 @@ class ProbeChannel:
         with self._lock:
             if set(msg) == {"done"} and type(msg["done"]) is int:
                 run.done = msg["done"]
-                run.done_at = self.clock()
                 return True
             check, ok, evidence = msg.get("check"), msg.get("ok"), msg.get("evidence")
             if (set(msg) == {"check", "ok", "evidence"} and isinstance(check, str) and type(ok) is bool

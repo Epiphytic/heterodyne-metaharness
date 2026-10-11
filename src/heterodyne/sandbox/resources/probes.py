@@ -15,6 +15,7 @@ Usage: python3 -I /run/hz/probes.py < input        (exec path)
        python3 -I /run/hz/probes.py --agent        (agent path)
 Standard library only.
 """
+import ctypes
 import errno
 import hashlib
 import ipaddress
@@ -248,6 +249,51 @@ for c in cfg['chosen']:
     ok &= same is True and w in ('EROFS', 'EACCES', 'EPERM')
     ev.append(f"chosen:{c['path']} sha256-match={same} write->{w}")
 check('other-accounts', ok and bool(cfg['chosen']), '; '.join(ev))
+# 11. Probe protection (§7, D23). Nothing in the workload may trace this probe or write its memory: a
+#     child of this probe (the case Yama's scope 1 would allow) can't be attached to and its memory
+#     can't be opened for writing. The probe's own files are read-only. The host checks the same
+#     denial from outside (Yama's scope, no capability anywhere in the workload).
+PTRACE_ATTACH, PTRACE_DETACH = 16, 17
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+try:
+    if libc.ptrace(PTRACE_ATTACH, child.pid, None, None) == 0:
+        attach = 'ATTACHED'
+        libc.ptrace(PTRACE_DETACH, child.pid, None, None)
+    else:
+        attach = errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+    mem = open_result(f'/proc/{child.pid}/mem', 'r+b')
+finally:
+    child.kill()
+    child.wait()
+check('probe-tamper-denied', attach in ('EPERM', 'EACCES', 'ENOSYS') and mem in ('EACCES', 'EPERM'),
+      f'ptrace(ATTACH, own child) -> {attach}; open(/proc/<child>/mem, rw) -> {mem}')
+own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-probe.json']
+res = {p: open_result(p, 'ab') for p in own}
+check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res.values()),
+      ' '.join(f'{p}->{v}' for p, v in res.items()))
+# The host freezes the workload's cgroup to check its tasks: the workload must not be able to thaw it,
+# nor move a task out of it. Its cgroupfs is absent or mounted read-only, and its controls can't be
+# opened for writing (r+, so a missing control is never created).
+CGROUPFS = '/sys/fs/cgroup'
+try:
+    mount = 'read-only' if os.statvfs(CGROUPFS).f_flag & os.ST_RDONLY else 'READ-WRITE'
+except FileNotFoundError:
+    mount = 'absent'
+except OSError as e:
+    mount = f'error {errname(e)}'
+ctl = {}
+for name in ('cgroup.freeze', 'cgroup.procs'):
+    try:
+        open(f'{CGROUPFS}/{name}', 'r+b').close()
+        ctl[name] = 'OPENED'
+    except OSError as e:
+        ctl[name] = errname(e)
+check('cgroupfs-readonly', mount in ('absent', 'read-only')
+      and all(v in ('EROFS', 'EACCES', 'ENOENT') for v in ctl.values()),
+      f'{CGROUPFS}: {mount}; ' + ' '.join(f'{n}->{v}' for n, v in ctl.items()))
 print(f'DONE {rc}', flush=True)     # the host passes only output that ends here
 report({'done': rc})
 if AGENT:
