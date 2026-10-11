@@ -71,6 +71,21 @@ def test_setup_records_no_runtime_until_the_operator_selects_openshell(tmp_path:
     assert notices == [] and isinstance(runtime, SandboxRuntime)
 
 
+def test_the_backend_runs_with_wsds_tool_environment_plus_its_overrides(tmp_path: Path) -> None:
+    """Codex T12 r1 (copied from the plan): the clients need wsd's PATH, HOME and XDG_RUNTIME_DIR, and only
+    those of wsd's variables; `tool_env` adds to them and wins."""
+    env = config_env(tmp_path, '[platform]\nsandbox = "openshell"\n'
+                               '[sandbox]\ntool_env = { PATH = "/opt/podman5/bin:/usr/bin", '
+                               'CONTAINERS_CONF = "/opt/podman5/containers.conf" }\n')
+    env |= {"PATH": "/usr/bin", "XDG_RUNTIME_DIR": "/run/user/1000", "WN_TOKEN": "fake-secret",
+            "SSH_AUTH_SOCK": "/run/user/1000/agent.sock"}
+    runtime = build_runtime(settings(tmp_path, env), env, notice=lambda _: None)
+    assert isinstance(runtime, SandboxRuntime) and isinstance(runtime.backend, OpenShellBackend)
+    assert runtime.backend.env == {"HOME": env["HOME"], "XDG_RUNTIME_DIR": "/run/user/1000",
+                                   "PATH": "/opt/podman5/bin:/usr/bin",
+                                   "CONTAINERS_CONF": "/opt/podman5/containers.conf"}
+
+
 def test_openshell_without_systemd_starts_tmux_directly(tmp_path: Path) -> None:
     runtime, _ = build(tmp_path, '[platform]\nsandbox = "openshell"\nservice_manager = "launchd"\n'
                                  '[sandbox]\nimage = "localhost/heterodyne-agent:1"\n')

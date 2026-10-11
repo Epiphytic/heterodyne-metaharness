@@ -11,7 +11,7 @@ from pathlib import Path
 
 from heterodyne.config import ConfigError, load
 from heterodyne.config.layers import table_at
-from heterodyne.sandbox.openshell import OpenShellBackend
+from heterodyne.sandbox.openshell import OpenShellBackend, tool_env
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime
 from heterodyne.sandbox.settings import sandbox_settings
@@ -63,5 +63,6 @@ def build_runtime(s: WsdSettings, env: Mapping[str, str], *,
         real_home_canary=real_home / CANARY, wsd_socket=s.socket, uid=os.getuid(), gid=os.getgid(),
         tmux=Tmux(TMUX_SOCKET, launcher=_launcher(service_manager)), path=env.get("PATH", os.defpath),
         clock=utc_now)
-    backend = OpenShellBackend(settings.openshell, settings.podman, settings.image, settings.tool_env)
+    backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
+                               tool_env(env, settings.tool_env))
     return SandboxRuntime(config, backend, OpenShellSelfTest())
