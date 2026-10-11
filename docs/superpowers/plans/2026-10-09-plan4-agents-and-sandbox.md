@@ -66,7 +66,7 @@ The plan also draws on these sources:
 
 **The ADR stays r15.** r15 §7 requires tamper denial, checked on every launch. It names Yama only as a candidate. The text at design-repo `28e3df4` (`docs/adr/0001-workstreams-v2.md:673`) reads: "deny the workload every way to tamper with the probe during its run (ptrace, `/proc/<pid>/mem`, mounts over the probe's files), and have the self-test check that denial each time. Candidates include a Yama `ptrace_scope` setting and a probe the workload's processes can't trace; S5 measured none of them." This is the only mention of Yama or `ptrace_scope` in r15. Amendment 1 still denies each of the three ways and checks the denial on every launch. It only changes the mechanism, which r15 leaves to the plan, so no r16 is needed. §11's adversarial controls (`:957-961`) are unchanged (Task 15).
 
-*Not part of this amendment:* the move to OpenShell 0.1.3. It keeps the probe and the zero-capability rule, so it can't change the scope decision. It does change the workload's start: the workload runs as its UID from the start, with no added capabilities. That may change the seccomp filter count Task 9B pins, so the upgrade needs its own note, with `SECCOMP_FILTERS` re-derived and measured.
+*Not part of this amendment:* the move to OpenShell 0.1.3. It keeps the probe and the zero-capability rule, so it can't change the scope decision. It does change the workload's start: the workload runs as its UID from the start, with no added capabilities. **D23's mechanism is evidenced only for the inspected OpenShell artifact** (Task 9B's precondition). Any change to the OpenShell version, its runtime image or its driver configuration, 0.1.3 included, needs a renewed review of D23 and Task 9B, with the enforcement re-read from that release's source and `SECCOMP_FILTERS` re-derived and measured. That holds whatever the resulting filter count.
 
 ## Global Constraints
 
@@ -117,7 +117,7 @@ The plan also draws on these sources:
 | D20 | Where launch-time waits run. | A launch blocks the workstream's operation lock for up to about 6 minutes in the worst case: sandbox create (300 s at most), the exec probes (180 s), the agent prompt (90 s) and the agent probes (`agent_probe_seconds`, 240 s). Other workstreams are unaffected. | §5.2 serialises launches per workstream anyway. Flagged for plan 8's health checks (gap 6). |
 | D21 | Configured backends this plan does not build. | `[platform] sandbox = "bubblewrap"` or `"seatbelt"` makes `wsd run` print a notice ("… is not built yet; no agents will run") and use `NoRuntime`, as `"none"` does. Any other unknown name is a `ConfigError`. The Linux platform default becomes `"openshell"`, so `heterodyne setup` records it on new installs. | Existing configs (the live harness and admind tests carry `bubblewrap`) keep working with no agents, exactly as before plan 4. Failing them would break hosts that never asked for plan 4. |
 | D22 | The Other accounts probe with no named accounts. | It runs with an empty list of other accounts. The canary (written outside every bind just before, then read back outside) is always checked inside, so the probe never passes vacuously. | A host with only default logins is the common case, and plan 4 launches only the default. The canary is the positive control that S5's probe lacked. |
-| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A, with Amendment 1's Task 9B). The mechanism per §11 adversarial control, with the OpenShell v0.1.2 source as evidence: **(1) ptrace attach, and the other ways into a process.** OpenShell installs its child hardening filter on every process it starts in the workload (`crates/openshell-isolation-interface/src/linux/child_seccomp.rs:3-8`, `:99-163`). It is installed after Landlock and before the main filter (`crates/openshell-sandbox/src/sandbox/linux/mod.rs:86-98`) on every spawn path: `process.rs:604`, `boundary_exec.rs:221` and `:333`, and `pty.rs:61`, `:96` and `:125`. It denies `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `pidfd_send_signal` and `kcmp` with `EPERM` (`child_seccomp.rs:120-125`, `:232`), and `pidfd_open` gives `ENOSYS` (`:169`), so no workload process gets a pidfd at all. The main filter denies the same calls again (`crates/openshell-sandbox/src/sandbox/linux/seccomp.rs:223-233`). Seccomp filters are inherited and can't be removed, so this holds for every process the agent can start. **(2) A `/proc/<pid>/mem` write.** Landlock keeps `/proc` read-only: our spec lists it in `SYSTEM_READ_ONLY`, and nothing writable may be at, under or above it (Task 9B). Opening any `/proc` file for writing gives `EACCES` before Yama is even asked. OpenShell makes `/proc` writable only for a GPU request (`crates/openshell-sandbox/src/boundary_server.rs:88-99`, `:150-159`), and `create_argv` never makes one. **(3) Mounts over the probe's files.** The child filter denies `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `chroot` and the new mount API (`child_seccomp.rs:128-139`). It also denies a `clone` with any namespace flag and makes `clone3` give `ENOSYS` (`:168-170`). So no workload process can make a user or mount namespace. 9A's pinned namespaces and capability check stay as a second layer. **(4) The configuration and result socket.** `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) stays bound read-only. The probe's open socket can't be reopened through `/proc/<pid>/fd`, and `pidfd_getfd` is denied (1). **Checked on every launch.** From the host, at both of 9A's verification points: Yama is at exactly 1. Every workload task but the first process's has `NoNewPrivs: 1`, no capability, `Seccomp: 2` and at least `SECCOMP_FILTERS` (6) filters (9B). The probe and its CLI are in the workload's pinned user and mount namespaces. From the probe (`probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`): the exact enforcing answers (Task 9B). The curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. **Why not Yama 2 (revision 4's choice):** OpenShell can't run at 2. Before it starts any workload, the workload's first process (the broker) proves that it can read and write a same-UID child's memory: `qualify_runtime` (`main.rs:158`) calls `task_memory::probe_child_access` (`main.rs:197`; `task_memory.rs:156-161`). The broker needs that access to read seccomp-notification arguments from the notifying task (`task_memory.rs:4-8`, `:25`). At 2 only `CAP_SYS_PTRACE` passes, and `qualify_runtime` requires every capability to be zero (`main.rs:171`). This is the same in v0.1.3 and v0.1.4-pre.2, and there is no setting to skip it. **Why not 0:** at 0, any same-UID process could attach to a process that never got the child filter. Yama at 1 limits that to descendants, and the filter covers every descendant. **What is left at 1:** the agent's shell is the probe's ancestor, so the agent can *read* the probe's memory (`/proc/<pid>/mem` opened read-only). r15 §7 forbids changes to the probe, not reads. Task 9B shows that the probe holds nothing the agent can't already read. |
+| D23 | How Probe protection is met (r15 §7: a supervisor-run probe, or tamper denial checked on every launch). | **Tamper denial** (Task 9A, with Amendment 1's Task 9B). The mechanism per §11 adversarial control, with the OpenShell v0.1.2 source as evidence: **(1) ptrace attach, and the other ways into a process.** OpenShell installs its child hardening filter on every process it starts in the workload (`crates/openshell-isolation-interface/src/linux/child_seccomp.rs:3-8`, `:99-163`). It is installed after Landlock and before the main filter (`crates/openshell-sandbox/src/sandbox/linux/mod.rs:86-98`) on every spawn path: `process.rs:604`, `boundary_exec.rs:221` and `:333`, and `pty.rs:61`, `:96` and `:125`. It denies `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `pidfd_send_signal` and `kcmp` with `EPERM` (`child_seccomp.rs:120-125`, `:232`), and `pidfd_open` gives `ENOSYS` (`:169`), so no workload process gets a pidfd at all. The main filter denies the same calls again (`crates/openshell-sandbox/src/sandbox/linux/seccomp.rs:223-233`). Seccomp filters are inherited and can't be removed, so this holds for every process the agent can start. **(2) A `/proc/<pid>/mem` write.** Landlock keeps `/proc` read-only: our spec lists it in `SYSTEM_READ_ONLY`, and nothing writable may be at, under or above it (Task 9B). Opening any `/proc` file for writing gives `EACCES` before Yama is even asked. OpenShell makes `/proc` writable only for a GPU request (`crates/openshell-sandbox/src/boundary_server.rs:88-99`, `:150-159`), and `create_argv` never makes one. **(3) Mounts over the probe's files.** The child filter denies `unshare`, `setns`, `mount`, `umount2`, `pivot_root`, `chroot` and the new mount API (`child_seccomp.rs:128-139`). It also denies a `clone` with any namespace flag and makes `clone3` give `ENOSYS` (`:168-170`). So no workload process can make a user or mount namespace. 9A's pinned namespaces and capability check stay as a second layer. **(4) The configuration and result socket.** `/run/hz` (the script, its configuration, the token and `p.sock`'s directory) stays bound read-only. The probe's open socket can't be reopened through `/proc/<pid>/fd`, and `pidfd_getfd` is denied (1). **Checked on every launch.** From the host, at both of 9A's verification points: Yama is at exactly 1. Every workload task but the first process's has `NoNewPrivs: 1`, no capability, `Seccomp: 2` and at least `SECCOMP_FILTERS` (6) filters (9B). The count is a consistency check on the inspected OpenShell artifact, which is a precondition (9B), not proof of which filters are present. The probe and its CLI are in the workload's pinned user and mount namespaces. From the probe (`probe-tamper-denied`, `proc-readonly`, `probe-files-readonly`): the exact enforcing answers (Task 9B). The curl results are corroborated by the supervisor's log. | The supervisor-run option is not available: OpenShell 0.1.2 can't start a process that is out of the agent's reach and still a descendant of the CLI, which the per-binary policy needs. A non-dumpable probe interpreter was rejected because the host could then no longer read the probe's environment, which r15's peer check requires. **Why not Yama 2 (revision 4's choice):** OpenShell can't run at 2. Before it starts any workload, the workload's first process (the broker) proves that it can read and write a same-UID child's memory: `qualify_runtime` (`main.rs:158`) calls `task_memory::probe_child_access` (`main.rs:197`; `task_memory.rs:156-161`). The broker needs that access to read seccomp-notification arguments from the notifying task (`task_memory.rs:4-8`, `:25`). At 2 only `CAP_SYS_PTRACE` passes, and `qualify_runtime` requires every capability to be zero (`main.rs:171`). This is the same in v0.1.3 and v0.1.4-pre.2, and there is no setting to skip it. **Why not 0:** at 0, any same-UID process could attach to a process that never got the child filter. Yama at 1 limits that to descendants, and the filter covers every descendant. **What is left at 1:** the agent's shell is the probe's ancestor, so the agent can *read* the probe's memory (`/proc/<pid>/mem` opened read-only). r15 §7 forbids changes to the probe, not reads. Task 9B shows that the probe holds nothing the agent can't already read. |
 | D24 | Codex hooks (r15 §4.2, §5.3: Codex stays headless until trust is pre-seeded without an operator step). | Codex is treated as headless. Its hooks are used only for the thread ID (D8) and the turn state (D13), never to enforce anything; the sandbox is the boundary. D6 is plan 4's trust pre-seeding, and each launch verifies it: the second `hooks/list` must be empty, and the generation's `SessionStart` must arrive. | A missed hook then only makes the lifetime stop hard or fails the launch; it never lets a tool call through that the sandbox would refuse. |
 | D25 | Host writes into the synthetic home (§7 home isolation). | The home persists and is agent-writable. Every host write into it opens each directory from the home down with `O_NOFOLLOW`, refuses a link, and writes through an exclusive (`O_EXCL`), randomly named temporary file in the anchored directory, renamed into place. Reads use the same anchoring. Codex's trust append is a read and a rewrite through the same descriptors. | An agent can replace `.claude`, `.codex` or a predictable temporary name with a link between generations. A host write that followed it would write outside the home, on the next relaunch or during trust. |
 | D26 | Git for a sandboxed linked worktree (§7: agents commit to their local `btq/<id>` branch; gap 13). | Task 7A. Host git on a worktree is pinned to the trusted repository's directories, with `HEAD` required to name `btq/<id>`, no link in its metadata, and no hooks, fsmonitor or per-worktree config. The sandbox gets a private git directory per generation at the worktree's git-directory path, with the common object store read-only, and the worktree's `.git` pointer is rewritten and bound read-only over itself, so unpinned host git (btq's) always reaches the real git directory. After the sandbox is confirmed gone, the bead branch's tip alone is imported (`index-pack --strict`, compare-and-swap). A failure is recorded and refuses the next launch. | The sandbox never sees anything host git trusts. The only effect its git can have on the host is the bead branch's tip, which is the agent's to move. |
@@ -6346,7 +6346,14 @@ Filters are inherited across `fork` and `exec` and can't be removed. A new filte
 
   The backend checks before `openshell sandbox create`, so a host at 2 gets this text, not "the sandbox did not become ready" after `READY_SECONDS`. The self-test and the channel keep their own checks, as 9A's do. The sysctl can change between create and the probe.
 
-**The filter count (`SECCOMP_FILTERS = 6`).** Every workload process OpenShell starts gets six filters:
+**Precondition: the inspected OpenShell artifact.** D23's mechanism and this task's checks are evidenced for one artifact and its configuration:
+- OpenShell 0.1.2, from the `openshell 0.1.2-1` package;
+- the podman compute driver (`OPENSHELL_COMPUTE_DRIVER=podman`), with no image or supervisor-binary override in the gateway configuration, so the supervisor comes from the default runtime image `ghcr.io/nvidia/openshell/sandbox:0.1.2` (`crates/openshell-core/src/config.rs:94-116`). That image is pinned by tag; Task 14 records its digest on the first live run;
+- podman's default seccomp profile, which the driver leaves in place.
+
+A change to any of these needs a renewed review of D23 and of this task before a launch relies on it, whatever the filter count then is. The checks below stay as they are, but they don't replace that review.
+
+**The filter count (`SECCOMP_FILTERS = 6`) is a consistency check.** On the inspected artifact, every workload process OpenShell starts gets six filters:
 - three it inherits:
   - podman's default profile (the podman driver clears `seccomp_profile_path`, `crates/openshell-driver-podman/src/container.rs:1545`, so podman's default applies; OpenShell's test is at `:2360`);
   - the supervisor prelude (`seccomp.rs:64`, `apply_supervisor_prelude`, TSYNC);
@@ -6354,9 +6361,10 @@ Filters are inherited across `fork` and `exec` and can't be removed. A new filte
 - three `enforce_capability_free` adds in the child before `exec`: child hardening (`child_seccomp.rs:55`), then the compatibility filter (`ENOSYS`) and the main filter (`EPERM`), both from `seccomp.rs:71`.
 
 S5 measured `Seccomp_filters: 6` on the probe itself (`spikes/s5/evidence/direct-network-mechanism.txt:20`).
-- *At least, not exactly.* A seventh filter, whether from a tool, a sandbox runtime inside the sandbox or a future podman, only restricts further. It can't lift the six, and the main filter refuses it in any case.
+- *What it shows.* The count is a quantity, not the filters' identities. Six or more filters on a task is consistent with the six above, but it doesn't prove those six are present: an artifact that dropped one and added an unrelated one would pass. That is why the artifact is a precondition, and why the probe also checks the denials themselves from inside (`probe-tamper-denied`).
+- *At least, not exactly.* A seventh filter, whether from a tool, a sandbox runtime inside the sandbox or a future podman, can only restrict further; an added filter can't weaken an existing one. The main filter refuses new filters from the workload in any case.
 - *Fewer than 6* means a workload process skipped `enforce_capability_free`, which is the one thing this check exists to catch. The launch fails `workload process <pid> has <n> seccomp filters; OpenShell gives every workload process 6`.
-- *If OpenShell changes the count*, every launch fails closed at that message, and nothing passes silently. That covers a release that merges the compatibility and main filters, or a podman driver that stops applying the default profile. The fix is to re-derive the count from that release's source and a live measurement, and to change `SECCOMP_FILTERS` in a reviewed commit. The 0.1.3 upgrade note says so.
+- *If an OpenShell change lowers the count*, every launch fails closed at that message. That covers, for example, a release that merges the compatibility and main filters, or a podman driver that stops applying the default profile. A change that keeps or raises the count passes this check, so the check is not what catches a change in enforcement: the precondition's renewed review is. That review re-derives the count from the release's source and a live measurement, and changes `SECCOMP_FILTERS` in a reviewed commit.
 - The count, not just `Seccomp: 2`, is checked, because `Seccomp: 2` alone is true of the supervisor's own children before `enforce_capability_free` runs: they carry the podman profile and the prelude.
 
 **`/proc` is read-only by Landlock, not by mount.** Podman mounts the container's procfs read-write, apart from its masked and read-only paths such as `/proc/sys`, and OpenShell's driver doesn't change that. The control is Landlock's `read_only` rule for `/proc` under `hard_requirement`. So 9B checks it from both sides:
@@ -6722,7 +6730,8 @@ PTRACE_SCOPE = 1
 # The seccomp filters on every workload process OpenShell 0.1.2 starts (S5 measured 6): podman's default
 # profile, the supervisor prelude and the broker's listener, inherited, then the child hardening, the
 # compatibility and the main filter. More only restrict further; fewer means a process skipped
-# OpenShell's enforcement. Re-derive on every OpenShell upgrade.
+# OpenShell's enforcement. A consistency check on that artifact, not proof of which filters are present:
+# any OpenShell version, runtime image or driver configuration change needs a renewed review of D23.
 SECCOMP_FILTERS = 6
 ```
 
@@ -6887,7 +6896,7 @@ In `docs/wsd.md`, replace "Every launch fails closed unless `kernel.yama.ptrace_
 
 - [ ] **Step 9: Run the tests to verify they pass**
 
-Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py tests/test_sandbox_openshell_backend.py tests/test_sandbox_spec.py tests/test_sandbox_openshell_policy.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests && command grep -rn "MIN_PTRACE_SCOPE" src tests; test $? -eq 1`
+Run: `timeout 300 uv run pytest tests/test_sandbox_channel.py tests/test_sandbox_openshell_selftest.py tests/test_sandbox_probes.py tests/test_sandbox_openshell_backend.py tests/test_sandbox_spec.py tests/test_sandbox_openshell_policy.py -q && timeout 300 uv run pyright src/heterodyne/sandbox && timeout 300 uv run ruff check src tests && { command grep -rn "MIN_PTRACE_SCOPE" src tests; test $? -eq 1; }`
 
 Expected: PASS and clean, with no `MIN_PTRACE_SCOPE` left anywhere.
 
@@ -9214,6 +9223,7 @@ This is the roadmap's plan 4 live gate. It is **[r15]** because its pass criteri
 **What the host needs:**
 - the S5 host changes (§17 #3);
 - `kernel.yama.ptrace_scope = 1` (gap 15, Amendment 1), which is the reference host's value already; at 0, 2 or 3 every launch fails `ptrace-scope` before the sandbox is created;
+- the OpenShell artifact Task 9B's precondition names: `openshell --version` reports 0.1.2, the gateway uses the podman driver with no image override, and the runtime image is `ghcr.io/nvidia/openshell/sandbox:0.1.2`. On anything else, stop: that needs D23's renewed review first;
 - the agent image (`packaging/sandbox/README.md`);
 - both pinned CLIs on `PATH`;
 - a valid default login for each.
@@ -9502,7 +9512,7 @@ Expected:
 - every test passes;
 - `openshell sandbox list` shows none of the module's sandboxes afterwards.
 
-Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions, the pass line, and whether Codex printed its warning about saving diagnostic logs (r15 §7 still to verify). Paste no output that holds a path under the home directory.
+Record the run in `docs/wsd.md`'s Runtime section: the date, the CLI versions, `openshell --version`, the digest of the runtime image the run used (later runs compare against it), the pass line, and whether Codex printed its warning about saving diagnostic logs (r15 §7 still to verify). Paste no output that holds a path under the home directory.
 
 - [ ] **Step 4: Commit**
 
@@ -9514,6 +9524,7 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
 ### Task 15 [r15]: The live negative and adversarial controls
 
 **Files:**
+- Create: `tests/probe_verdicts.py`, `tests/test_probe_verdicts.py` (Amendment 1: offline, in the normal suite)
 - Modify: `tests/live/test_live_sandbox.py` (append; still the only change under `tests/live/`)
 
 **Interfaces:**
@@ -9523,7 +9534,9 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
   - Task 9A's `read_ptrace_scope` and Task 9B's `ptrace_scope_refusal`;
   - Task 10's `SandboxRuntime`, `RuntimeConfig`;
   - plan 3's `LaunchFailed`.
-- Produces: nothing (a live test).
+- Produces:
+  - in `tests/probe_verdicts.py`, `memory_access_refused(rc, out) -> str`, `file_writes_refused(rc, out) -> str` and `separate_mount_namespace(rc, out) -> str`, each `""` on a pass and the reason otherwise;
+  - the live tests.
 
 This task covers r15 §11, "Sandbox runtime".
 
@@ -9551,11 +9564,145 @@ This shows they recognise OpenShell's specific enforcement rather than any failu
 - **user-namespace mount:** a process in a new user and mount namespace is in a different mount namespace from the workload's. An actual overlay in such a namespace, a forged probe bound over `/run/hz/probes.py` and `/bin/sh` bound over the CLI's path, which then starts the forged probe as its child, must refuse the launch through the result channel (`agent-path-channel`), or be refused itself.
 - **probe files:** the probe's files and socket directory can't be changed.
 
+**Each probe-protection check must prove it ran** (Amendment 1). A check that exits early, prints nothing, or prints something other than its expected refusals fails; silence is never a pass. The live test reads each check's exit status and output, and a pure verdict in `tests/probe_verdicts.py` passes it only when:
+- the check exited 0 and printed its closing line;
+- every operation it reports appears in the expected, complete form;
+- each one was refused (an errno name, or a nonzero status).
+
+The verdicts are tested offline with negative controls: empty, truncated, reordered, malformed and permitted output must each fail. So a broken check shows up in the normal suite, before any live run.
+
 The "missing canary" control is the offline `test_an_unwritable_canary_fails_the_precondition` (Task 8). A missing canary can only arise when the precondition write fails, and that refuses the launch.
 
 **If any probe-protection control fails, plan 4 stops** (r15 §17 item 12). Don't loosen the test. Report the output to the operator, who chooses among r15's options.
 
-- [ ] **Step 1: Append the controls**
+- [ ] **Step 1: Write the verdicts and their negative controls**
+
+`tests/test_probe_verdicts.py`:
+
+```python
+"""Negative controls for the live probe-protection verdicts: empty, incomplete or permitted output fails."""
+
+import pytest
+from probe_verdicts import file_writes_refused, memory_access_refused, separate_mount_namespace
+
+MEM = "child 7\nattach 1 EPERM\nvm 1 EPERM\nmem 1 EACCES\nattach 7 EPERM\nvm 7 EPERM\nmem 7 EACCES\ndone\n"
+FILES = "create=1\nappend=1\nrename=1\n"
+OWN = "mnt:[4026531841]\n"
+
+
+def test_complete_refusals_pass() -> None:
+    assert memory_access_refused(0, MEM) == ""
+    assert file_writes_refused(0, FILES) == ""
+    assert separate_mount_namespace(0, OWN + "refused\n") == ""
+    assert separate_mount_namespace(0, OWN + "mnt:[4026532999]\n") == ""
+
+
+@pytest.mark.parametrize(("rc", "out"), [
+    (0, ""),
+    (1, MEM),                                               # did not exit cleanly
+    (0, MEM.replace("done\n", "")),                         # stopped early
+    (0, MEM.replace("child 7\n", "")),                      # no child named
+    (0, MEM.replace("attach 7", "attach 8")),               # its child not covered by every operation
+    (0, MEM.replace("vm 1 EPERM\n", "")),                   # a process missing an operation
+    (0, MEM.replace("attach 7 EPERM", "attach 7 ATTACHED")),
+    (0, MEM.replace("mem 1 EACCES", "mem 1 ?")),            # not a recognised refusal
+    (0, MEM.replace("mem 1 EACCES", "mem 1 EACCES extra")),
+])
+def test_incomplete_or_permitted_memory_access_fails(rc: int, out: str) -> None:
+    assert memory_access_refused(rc, out) != ""
+
+
+@pytest.mark.parametrize(("rc", "out"), [
+    (0, ""),
+    (0, "create=1\nappend=1\n"),
+    (0, FILES + "extra=1\n"),
+    (0, "append=1\ncreate=1\nrename=1\n"),
+    (0, FILES.replace("append=1", "append=x")),
+    (0, FILES.replace("append=1", "append=")),
+    (0, FILES.replace("rename=1", "rename=0")),
+    (1, FILES),
+])
+def test_incomplete_or_permitted_file_writes_fail(rc: int, out: str) -> None:
+    assert file_writes_refused(rc, out) != ""
+
+
+@pytest.mark.parametrize(("rc", "out"), [
+    (0, ""),
+    (0, OWN),
+    (0, OWN + OWN),                                         # the same namespace
+    (0, "x\nrefused\n"),
+    (0, OWN + "something\n"),
+    (1, OWN + "refused\n"),
+])
+def test_incomplete_or_shared_mount_namespace_fails(rc: int, out: str) -> None:
+    assert separate_mount_namespace(rc, out) != ""
+```
+
+`tests/probe_verdicts.py`:
+
+```python
+"""Verdicts on the live probe-protection checks (Task 15). Each takes a check's exit status and output, and
+returns "" only when the check ran to completion and every operation it reports was refused; otherwise
+it returns the reason. Kept apart from the live module so the normal suite can test them offline."""
+
+import re
+
+MEMORY_OPS = ("attach", "vm", "mem")
+FILE_OPS = ("create", "append", "rename")
+MOUNT_NS = re.compile(r"mnt:\[\d+\]")
+
+
+def memory_access_refused(rc: int, out: str) -> str:
+    """The memory check prints `child <pid>`, then `<op> <pid> <errno name>` for each operation on each
+    process it can see, then `done`. Every visible process, its own child included, must have all three
+    operations refused."""
+    lines = out.splitlines()
+    if rc != 0 or not lines or lines[-1] != "done":
+        return f"the memory check did not run to completion (exit {rc})"
+    first = lines[0].split()
+    if len(first) != 2 or first[0] != "child" or not first[1].isdigit():
+        return "the memory check did not name its child"
+    seen: dict[str, set[str]] = {}
+    for line in lines[1:-1]:
+        parts = line.split()
+        well_formed = len(parts) == 3 and parts[0] in MEMORY_OPS and parts[1].isdigit()
+        if not well_formed or not parts[2].startswith("E"):            # an errno name: refused
+            return f"not a refusal: {line!r}"
+        seen.setdefault(parts[1], set()).add(parts[0])
+    if first[1] not in seen:
+        return "the memory check did not cover its own child"
+    if any(ops != set(MEMORY_OPS) for ops in seen.values()):
+        return "a process was not checked by every operation"
+    return ""
+
+
+def file_writes_refused(rc: int, out: str) -> str:
+    """The file check prints `<op>=<status>` for exactly its three operations, in order; each status must
+    be numeric and nonzero."""
+    results = [line.partition("=") for line in out.splitlines()]
+    if rc != 0 or [name for name, _, _ in results] != list(FILE_OPS):
+        return f"the file check did not report exactly {FILE_OPS} (exit {rc})"
+    if not all(code.isdigit() and code != "0" for _, _, code in results):
+        return f"a file operation was not refused: {out!r}"
+    return ""
+
+
+def separate_mount_namespace(rc: int, out: str) -> str:
+    """The namespace check prints the workload's mount namespace, then either `refused` or the namespace a
+    new user and mount namespace got, which must differ from the workload's."""
+    lines = out.splitlines()
+    if rc != 0 or len(lines) != 2 or not MOUNT_NS.fullmatch(lines[0]):
+        return f"the namespace check did not run to completion (exit {rc})"
+    own, new = lines
+    if new != "refused" and (not MOUNT_NS.fullmatch(new) or new == own):
+        return "a new mount namespace must not be the workload's"
+    return ""
+```
+
+Run: `timeout 300 uv run pytest tests/test_probe_verdicts.py -q && timeout 300 uv run pyright tests/probe_verdicts.py tests/test_probe_verdicts.py && timeout 300 uv run ruff check tests/probe_verdicts.py tests/test_probe_verdicts.py`
+Expected: 24 passed; clean. (Before `tests/probe_verdicts.py` exists, the test module fails at its import.)
+
+- [ ] **Step 2: Append the controls**
 
 Add to the imports of `tests/live/test_live_sandbox.py`:
 
@@ -9568,6 +9715,7 @@ from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
     AGENT_CHECKS, OpenShellSelfTest, probe_config, ptrace_scope_refusal, read_ptrace_scope)
 from heterodyne.sandbox.selftest import ProbeContext  # noqa: E402
 from heterodyne.wsd.runtime import LaunchFailed  # noqa: E402
+from probe_verdicts import file_writes_refused, memory_access_refused, separate_mount_namespace  # noqa: E402
 ```
 
 (`OpenShellSelfTest` moves into this import; drop its separate line.) Then append:
@@ -9712,7 +9860,7 @@ def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
     refused(live, runtime(live), live.spec("claude", "btq-live-n8"), "agent-path-channel")
 
 
-ATTACK = r"""
+MEMORY_CHECK = r"""
 import ctypes, errno, os, subprocess, sys
 libc = ctypes.CDLL(None, use_errno=True)
 libc.ptrace.restype = ctypes.c_long
@@ -9721,6 +9869,7 @@ libc.process_vm_writev.restype = ctypes.c_ssize_t
 libc.process_vm_writev.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
                                    ctypes.c_ulong, ctypes.c_ulong]
 child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+print(f'child {child.pid}')
 for pid in sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.getpid()}):
     if libc.ptrace(16, pid, None, None) == 0:
         print(f'attach {pid} ATTACHED')
@@ -9737,10 +9886,11 @@ for pid in sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.get
     except OSError as e:
         print(f'mem {pid} {errno.errorcode.get(e.errno, "?")}')
 child.kill()
+print('done')
 """
-FILES = ("touch /run/hz/hz-new; echo $?; echo x >> /run/hz/token; echo $?; "
-         "mv /run/hz/token /run/hz/token2; echo $?")
-NAMESPACES = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
+FILE_CHECK = ("touch /run/hz/hz-new; echo create=$?; echo x >> /run/hz/token; echo append=$?; "
+              "mv /run/hz/token /run/hz/token2; echo rename=$?")
+NAMESPACE_CHECK = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
 
 
 # The overlay attack from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
@@ -9786,30 +9936,28 @@ def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
     live.launch(spec)
     rec = live.record(spec.session_key)
     try:
-        def run(*argv: str) -> str:
-            r = live.backend.exec(rec.sandbox, Path(rec.worktree), list(argv), timeout=EXEC_SECONDS)
-            return r.stdout.decode("utf-8", "replace")
-
-        attacks = run("python3", "-I", "-c", ATTACK)
-        assert "attach " in attacks and "vm " in attacks, attacks
-        assert not {"ATTACHED", "ALLOWED", "OPENED"} & set(attacks.split()), attacks
-        assert all(rc != "0" for rc in run("sh", "-c", FILES).split()), "the probe's files changed"
-        own, new = (run("sh", "-c", NAMESPACES).splitlines() + ["", ""])[:2]
-        assert new == "refused" or (new and new != own), "a new mount namespace must not be the workload's"
+        checks = ((memory_access_refused, ["python3", "-I", "-c", MEMORY_CHECK]),
+                  (file_writes_refused, ["sh", "-c", FILE_CHECK]),
+                  (separate_mount_namespace, ["sh", "-c", NAMESPACE_CHECK]))
+        for verdict, argv in checks:
+            r = live.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=EXEC_SECONDS)
+            out = r.stdout.decode("utf-8", "replace")
+            why = verdict(r.returncode, out)
+            assert why == "", f"{why}\n{out}\n{r.stderr.decode('utf-8', 'replace')}"
     finally:
         live.runtime.stop(spec.session_key)
 ```
 
 Add `from typing import Any` to the imports.
 
-The adversarial test attacks every process it can see, its own child included. That child is the case Yama's scope 1 allows, so only OpenShell's filter and Landlock stand in the way (Amendment 1). If any attach, `process_vm_writev` or memory open succeeds, the assertion prints the whole list.
+The memory check covers every process the workload can see, its own child included. That child is the case Yama's scope 1 allows, so only OpenShell's filter and Landlock stand in the way (Amendment 1). The test fails unless each check ran to completion and every operation it reports was refused; on failure, the assertion prints the reason and the check's whole output.
 
-- [ ] **Step 2: Check it offline**
+- [ ] **Step 3: Check it offline**
 
 Run: `timeout 300 uv run pytest tests/live/test_live_sandbox.py -q && timeout 300 uv run pyright tests/live/test_live_sandbox.py && timeout 300 uv run ruff check tests/live`
 Expected: every test skipped; clean.
 
-- [ ] **Step 3: Run it live, with Task 14's command and conditions**
+- [ ] **Step 4: Run it live, with Task 14's command and conditions**
 
 Expected:
 - every test passes;
@@ -9817,10 +9965,10 @@ Expected:
 
 If `test_nothing_in_the_workload_can_tamper_with_a_probe` fails, or `test_host_ptrace_scope_allows_probe_protection` fails on a host at 1, stop: that is r15 §17 item 12. Any launch that fails at `workload process <pid> has <n> seccomp filters` is the live risk Task 9B names: stop and return to design.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/live/test_live_sandbox.py
+git add tests/probe_verdicts.py tests/test_probe_verdicts.py tests/live/test_live_sandbox.py
 git commit -m "plan4 T15: live negative and probe-protection controls (r15 §11)"
 ```
 
