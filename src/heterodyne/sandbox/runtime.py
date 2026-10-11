@@ -99,7 +99,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     unlanded: bool = False            # the session's commits could not be landed: a human looks first
     seeded: bool = False              # this generation's private git directory exists and must be landed
     created: bool = False             # backend.create returned: no create is outstanding (the watcher may go)
-    create_started: bool = False      # written before the create is submitted: the watcher stays (r1 #2)
+    create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -389,18 +389,17 @@ class SandboxRuntime:
         # start, and the hard stop is always a full margin before the checked expiry.
         exposed = c.clock()
         # D26: from here on the private git directory may hold the agent's commits, so every end lands it.
-        rec = self._phase(layout, rec, seeded=True,
+        # Codex T12 r1 #2, r2: a create is possible from here, and the record says so before the watcher
+        # starts, so the watcher never reads it as settled while this launch could still submit one, however
+        # long it stalls (`reaper.settled`).
+        rec = self._phase(layout, rec, seeded=True, create_started=True,
                           deadline=min(exposed + c.settings.max_lifetime_seconds,
                                        expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
         if c.clock() >= rec.deadline:
-            # T11 r3: a stall here could outlast the watcher's linger, and a create submitted after it would
-            # land unwatched. Past the deadline nothing is created; only a stall between this read and the
-            # create's submission remains, and it would have to last LINGER_SECONDS.
+            # T11 r3: past the deadline nothing is created, and the record says so before the launch ends.
+            rec = self._phase(layout, rec, create_started=False)
             raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
-        # Codex T12 r1 #2: durable before the submission, so a wsd that dies inside the create leaves a
-        # record its watcher reads as outstanding (`reaper.settled`), past any linger.
-        rec = self._phase(layout, rec, create_started=True)
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
         if c.clock() >= rec.deadline:

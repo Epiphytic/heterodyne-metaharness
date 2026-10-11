@@ -498,7 +498,7 @@ def test_a_launch_stalled_past_its_deadline_creates_nothing(rig: RuntimeRig,
     with pytest.raises(LaunchFailed, match="stalled past its deadline"):
         rig.runtime.launch(spec)
     rec = record(rig, spec.session_key)
-    assert (rec.phase, rec.created) == (Phase.ENDED, False)
+    assert (rec.phase, rec.created, rec.create_started) == (Phase.ENDED, False, False)   # none was submitted
     assert rig.backend.created == [] and rig.backend.pending == [] and rig.backend.boxes == {}
 
 
@@ -527,6 +527,45 @@ def test_a_crash_during_the_create_leaves_a_watcher_that_waits_for_the_record(
     assert rig.runtime.sessions("alpha") == []                 # the restarted wsd ends the record
     assert reaper.settled(layout.record, name) is True
     assert rig.tmux.has_session(rig.runtime.reaper_name(spec.session_key, 1))   # it lingers, then goes
+
+
+def test_a_stall_after_the_deadline_check_never_lets_the_watcher_go(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T12 r2 path 1: the create is marked possible before the watcher starts, so wsd pausing after
+    its deadline check, past LINGER_SECONDS, then creating and dying, leaves a watcher that still reads
+    the create as outstanding and deletes the late sandbox."""
+    spec = launch_spec(rig, "p-one")
+    layout = rig.runtime.layout(spec.session_key)
+    real_reaper, real_create = rig.runtime._reaper, rig.backend.create  # pyright: ignore[reportPrivateUsage]
+    at_start: list[bool] = []
+
+    def reaper_starts(rec: SessionRecord) -> None:
+        at_start.append(reaper.settled(layout.record, rec.sandbox))     # what the watcher first reads
+        real_reaper(rec)
+
+    def paused_then_dies(*args: object, **kwargs: object) -> None:
+        rec = record(rig, spec.session_key)
+        rig.clock.advance(rec.deadline - rig.clock.now + 2 * reaper.LINGER_SECONDS)
+        real_create(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        raise Crash
+
+    monkeypatch.setattr(rig.runtime, "_reaper", reaper_starts)
+    monkeypatch.setattr(rig.backend, "create", paused_then_dies)
+    with pytest.raises(Crash):
+        rig.runtime.launch(spec)
+    name = record(rig, spec.session_key).sandbox
+    assert at_start == [False] and name in rig.backend.boxes
+    now = [float(rig.clock.now)]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if name not in rig.backend.boxes:
+            raise Killed                         # deleted: the watcher has done its job, still unsettled
+
+    with pytest.raises(Killed):
+        reaper.reap(name, record(rig, spec.session_key).deadline, rig.backend.delete, lambda _: None,
+                    clock=lambda: now[0], sleep=sleep, settled=lambda: reaper.settled(layout.record, name))
+    assert name not in rig.backend.boxes and reaper.settled(layout.record, name) is False
 
 
 def test_a_create_that_returns_past_its_deadline_is_destroyed_at_once(rig: RuntimeRig,
