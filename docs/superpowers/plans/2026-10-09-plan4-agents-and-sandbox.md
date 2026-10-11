@@ -56,7 +56,7 @@ The plan also draws on these sources:
 - Spike S8's open items (`docs/spikes/s8-marmot-only.md`) cover the Codex launch shape and hook trust.
 - ADR revision 15 accepts OpenShell's broker answers as §7's direct-network proof and adds the OpenShell-specific rules. The tasks that implement them are marked **[r15]** (see "ADR revision 15" below).
 
-**Status:** revision 5, **Amendment 1 (D23: seccomp and Landlock, ptrace_scope ≥ 1)**. Revision 4 folded in the approved ADR r15 and addressed the first and second cross-model reviews; the tasks built so far (9A and 12 among them) follow it. **Amendment 1's design approval is not set**, and Task 9B waits for it. The §17 decisions the plan depends on are listed below. Gap 13 (git in a sandboxed linked worktree) is resolved in the plan (Task 7A), btq's unpinned git included.
+**Status:** revision 5, **Amendment 1 (D23: seccomp and Landlock, ptrace_scope = 1)**. Revision 4 folded in the approved ADR r15 and addressed the first and second cross-model reviews. **Revision 4 is design-approved:** btq-c9mml, approved by Liam through Marmot ask dh3g, pinned at plan4 `9eab619` under ADR r15 `28e3df4`. The tasks built so far (9A and 12 among them) follow it. **Amendment 1's design approval is not set**, and Task 9B waits for it. The §17 decisions the plan depends on are listed below. Gap 13 (git in a sandboxed linked worktree) is resolved in the plan (Task 7A), btq's unpinned git included.
 
 *Amendment 1 (2026-10-11).* Revision 4 required `kernel.yama.ptrace_scope = 2` (gap 15). OpenShell 0.1.2 can't run there: the workload's first process runs a required same-UID task-memory probe before it starts any workload (`crates/openshell-sandbox/src/main.rs:197`, `task_memory::probe_child_access`), and with every capability required to be zero (`main.rs:171`) nothing can let it pass at 2 or 3. v0.1.3 and v0.1.4-pre.2 keep both (v0.1.3 `main.rs:123`, `:149-151`), and no setting skips the probe (`crates/openshell-core/src/sandbox_env.rs`). The operator chose to keep the reference host at 1. The amendment changes:
 - **D23** now rests on OpenShell's child seccomp filter and Landlock, with Yama at exactly 1;
@@ -9830,7 +9830,7 @@ git commit -m "plan4 T15: live negative and probe-protection controls (r15 §11)
 
 - **Approach:** subagent-driven (superpowers:subagent-driven-development), one fresh implementer per task, with a review before each task's close. The review is cross-model, at most 3 cycles.
 - **Prerequisites:**
-  - design approval of this plan;
+  - design approval of this plan (revision 4: btq-c9mml), and of Amendment 1 for Task 9B;
   - before Tasks 14 and 15 run live: the §17 #3 host changes (settled), the agent image, and `kernel.yama.ptrace_scope = 1` (gap 15; the reference host's value already, Amendment 1).
 - **Order:** see "Task order"; every task can start once the plan is approved.
 - **Before enabling the backend:** gap 13's resolution has landed (including the read-only `.git` pointer that contains btq's git), gap 15 is settled (Amendment 1), and Task 15 has passed on the reference host. Only then is `[platform] sandbox = "openshell"` set on a real host.
