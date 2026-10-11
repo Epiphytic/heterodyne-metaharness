@@ -16,6 +16,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import IO, Any
 
 import pytest
@@ -27,6 +28,7 @@ from heterodyne.sandbox.spec import LAUNCHER_ENV
 PROBES = Path(__file__).resolve().parents[1] / "src" / "heterodyne" / "sandbox" / "resources" / "probes.py"
 CODE = compile(PROBES.read_text(), str(PROBES), "exec")
 RUN = "/run/hz"
+CGROUPFS = "/sys/fs/cgroup"
 CHOSEN = "/sandbox/home/.codex/auth.json"
 LOGIN = '{"fake": "not-a-token"}'
 REAL_HOME_CANARY = "/outside/real-home/.heterodyne-canary"
@@ -50,12 +52,13 @@ class World:
     root: Path
     path: str = "exec"
     env: dict[str, str] = field(default_factory=dict[str, str])
-    readonly: tuple[str, ...] = (RUN, CHOSEN)
+    readonly: tuple[str, ...] = (RUN, CHOSEN, CGROUPFS)
     denied: dict[str, int] = field(default_factory=dict[str, int])   # paths whose open gives this errno
     inet: int = errno.EACCES               # the broker's answer to an INET connect()
     udp_send: int = errno.EDESTADDRREQ     # ... to a non-DNS UDP sendto()
     raw: int = errno.EPROTONOSUPPORT       # ... to a raw or ICMP socket(); 0 creates it
     attach: int = errno.EPERM              # ptrace(PTRACE_ATTACH) on the probe's child; 0 attaches
+    cgroupfs: str = "ro"                   # how /sys/fs/cgroup is mounted: "ro", "rw", or an errno's name
     resolve: str = SYNTHETIC
     session_socket: bool = True
     replies: dict[str, str] = field(
@@ -140,6 +143,17 @@ def fake_socket(world: World) -> type:
 CHILD = 4242
 
 
+def fake_statvfs(world: World) -> Callable[[str], SimpleNamespace]:
+    def statvfs(path: str) -> SimpleNamespace:
+        if not world.at(path).exists():
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+        if world.cgroupfs not in ("ro", "rw"):
+            code = getattr(errno, world.cgroupfs)
+            raise OSError(code, os.strerror(code), path)
+        return SimpleNamespace(f_flag=os.ST_RDONLY if world.cgroupfs == "ro" else 0)
+    return statvfs
+
+
 class FakeChild:
     pid = CHILD
 
@@ -179,6 +193,8 @@ def world(tmp_path: Path) -> World:
     w.put("/proc/self/status", STATUS)
     w.put(f"/proc/{CHILD}/mem", "")                     # Yama at 2: the child's memory can't be opened
     w.denied[f"/proc/{CHILD}/mem"] = errno.EACCES
+    w.put(f"{CGROUPFS}/cgroup.freeze", "0\n")              # the container's own, mounted read-only
+    w.put(f"{CGROUPFS}/cgroup.procs", "1\n")
     return w
 
 
@@ -194,6 +210,7 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
         monkeypatch.setattr(os, "environ", dict(world.env))
         monkeypatch.setattr(os, "listdir", lambda p: listdir(world.at(p)))
         monkeypatch.setattr(os, "lstat", lambda p: lstat(world.at(p)))
+        monkeypatch.setattr(os, "statvfs", fake_statvfs(world))
         monkeypatch.setattr(socket, "socket", fake_socket(world))
         monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *a: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", (world.resolve, port))])
@@ -244,12 +261,23 @@ def _replace(path: str, old: str, new: str) -> Callable[[World], None]:
     return lambda w: w.put(path, w.at(path).read_text().replace(old, new))
 
 
+def _cgroupfs_rw(*, writable: bool) -> Callable[[World], None]:
+    """A cgroupfs mounted read-write: its controls writable, or each refused with EACCES."""
+    def go(w: World) -> None:
+        w.cgroupfs = "rw"
+        if writable:
+            w.readonly = (RUN, CHOSEN)
+        else:
+            w.denied.update({f"{CGROUPFS}/{n}": errno.EACCES for n in ("cgroup.freeze", "cgroup.procs")})
+    return go
+
+
 NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
     ("a mounted real-home canary", lambda w: w.put(REAL_HOME_CANARY, "x"), {"real-home-canary-unreadable"}),
     ("a mounted other-accounts canary", lambda w: w.put(OA_CANARY, "x"), {"other-accounts"}),
     ("another account's login reachable", lambda w: w.put(OTHER_LOGIN, LOGIN), {"other-accounts"}),
     ("a wrong login hash", lambda w: w.put(CHOSEN, '{"fake": "another"}'), {"other-accounts"}),
-    ("a writable login", lambda w: setattr(w, "readonly", (RUN,)), {"other-accounts"}),
+    ("a writable login", lambda w: setattr(w, "readonly", (RUN, CGROUPFS)), {"other-accounts"}),
     ("a leaked variable", _env(GITHUB_TOKEN="fake"), {"host-env-not-inherited"}),  # noqa: S106
     ("a leaked user-environment variable",
      _env(OPENSHELL_USER_ENVIRONMENT=json.dumps({"ANTHROPIC_API_KEY": "fake"})), {"host-env-not-inherited"}),
@@ -289,7 +317,18 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
     ("the attach refused only because the child is gone", lambda w: setattr(w, "attach", errno.ESRCH),
      {"probe-tamper-denied"}),
     ("the child's memory writable", lambda w: w.denied.clear(), {"probe-tamper-denied"}),
-    ("the run directory writable", lambda w: setattr(w, "readonly", (CHOSEN,)), {"probe-files-readonly"}),
+    ("the run directory writable", lambda w: setattr(w, "readonly", (CHOSEN, CGROUPFS)),
+     {"probe-files-readonly"}),
+    ("the cgroupfs mounted read-write", _cgroupfs_rw(writable=True),
+     {"cgroupfs-readonly"}),
+    ("the cgroupfs read-write but its controls denied", _cgroupfs_rw(writable=False),
+     {"cgroupfs-readonly"}),
+    ("a freeze control writable on a read-only mount", lambda w: setattr(w, "readonly", (RUN, CHOSEN)),
+     {"cgroupfs-readonly"}),
+    ("a control refused for another reason",
+     lambda w: w.denied.update({f"{CGROUPFS}/cgroup.procs": errno.EPERM}),
+     {"cgroupfs-readonly"}),
+    ("the cgroupfs mount unreadable", lambda w: setattr(w, "cgroupfs", "EACCES"), {"cgroupfs-readonly"}),
 ]
 
 
@@ -302,3 +341,12 @@ def test_each_broken_rule_fails_its_own_check_only(
     rc, results = run(world)
     assert rc == 1
     assert {name for name, ok in results.items() if not ok} == failing
+
+
+def test_an_absent_cgroupfs_passes(world: World, run: Callable[[World], Results]) -> None:
+    for name in ("cgroup.freeze", "cgroup.procs"):
+        world.at(f"{CGROUPFS}/{name}").unlink()
+    world.at(CGROUPFS).rmdir()
+    rc, results = run(world)
+    assert rc == 0 and results["cgroupfs-readonly"]
+    assert not world.at(f"{CGROUPFS}/cgroup.freeze").exists()     # r+: nothing is created

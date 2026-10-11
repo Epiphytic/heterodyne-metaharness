@@ -274,6 +274,26 @@ own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-pro
 res = {p: open_result(p, 'ab') for p in own}
 check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res.values()),
       ' '.join(f'{p}->{v}' for p, v in res.items()))
+# The host freezes the workload's cgroup to check its tasks: the workload must not be able to thaw it,
+# nor move a task out of it. Its cgroupfs is absent or mounted read-only, and its controls can't be
+# opened for writing (r+, so a missing control is never created).
+CGROUPFS = '/sys/fs/cgroup'
+try:
+    mount = 'read-only' if os.statvfs(CGROUPFS).f_flag & os.ST_RDONLY else 'READ-WRITE'
+except FileNotFoundError:
+    mount = 'absent'
+except OSError as e:
+    mount = f'error {errname(e)}'
+ctl = {}
+for name in ('cgroup.freeze', 'cgroup.procs'):
+    try:
+        open(f'{CGROUPFS}/{name}', 'r+b').close()
+        ctl[name] = 'OPENED'
+    except OSError as e:
+        ctl[name] = errname(e)
+check('cgroupfs-readonly', mount in ('absent', 'read-only')
+      and all(v in ('EROFS', 'EACCES', 'ENOENT') for v in ctl.values()),
+      f'{CGROUPFS}: {mount}; ' + ' '.join(f'{n}->{v}' for n, v in ctl.items()))
 print(f'DONE {rc}', flush=True)     # the host passes only output that ends here
 report({'done': rc})
 if AGENT:

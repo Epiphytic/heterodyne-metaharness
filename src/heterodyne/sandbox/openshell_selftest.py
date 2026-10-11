@@ -40,7 +40,7 @@ OPENSHELL_ENV = frozenset({"OPENSHELL_SANDBOX", "OPENSHELL_USER_ENVIRONMENT", "S
 SHELL_ENV = frozenset({"PWD", "SHLVL", "_", "OLDPWD"})
 COMMON_CHECKS = ("real-home-canary-unreadable", "non-allowlisted-host-blocked", "direct-network-blocked",
                  "control-op-rejected", "wsd-socket-absent", "allowlisted-host-reachable")
-PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly")
+PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly", "cgroupfs-readonly")
 TAIL_CHECKS = ("hook-event-accepted", "host-env-not-inherited", "openshell-control-material-unreadable",
                "other-accounts", *PROTECTION_CHECKS)
 EXEC_CHECKS = (*COMMON_CHECKS, "model-host-exec-path", *TAIL_CHECKS)
