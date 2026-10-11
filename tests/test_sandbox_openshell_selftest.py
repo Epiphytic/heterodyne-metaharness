@@ -416,10 +416,21 @@ def fake_probe_proc(proc: Path, cli: Path) -> None:
         (d / "environ").write_bytes(b"HOME=/s/home\0")
         (d / "stat").write_text(f"{pid} (x) S {ppid} " + "0 " * 17 + f"{pid} 0\n")   # started in pid order
         nnp = 0 if pid in (1, 7) else 1
-        status = (f"Name:\tx\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
+        status = (f"Name:\tx\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
                   "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
         (d / "status").write_text(status)
         (d / "task" / str(pid) / "status").write_text(status)
+        (d / "cgroup").write_text("0::/init.scope\n" if pid == 1 else f"0::{WORKLOAD_CG}\n")
+    (proc / "self").mkdir()
+    (proc / "self" / "cgroup").write_text("0::/user.slice/scanner.scope\n")
+    cg = proc.parent / "cgroupfs" / WORKLOAD_CG.lstrip("/")
+    cg.mkdir(parents=True)
+    (cg / "cgroup.threads").write_text("7\n30\n32\n")
+    (cg / "cgroup.freeze").write_text("0\n")
+    (cg / "cgroup.events").write_text("populated 1\nfrozen 1\n")
+
+
+WORKLOAD_CG = "/user.slice/libpod-x.scope"
 
 
 @dataclass
@@ -467,7 +478,7 @@ def fake_peer(s: socket.socket) -> tuple[int, int]:
 def agent_selftest(proc: Path) -> OpenShellSelfTest:
     """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
     return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer=fake_peer,
-                             ptrace_scope=lambda: 2)
+                             ptrace_scope=lambda: 2, cgroupfs=proc.parent / "cgroupfs")
 
 
 def test_agent_path_passes_on_one_verified_run() -> None:
@@ -486,6 +497,23 @@ def test_agent_path_passes_on_one_verified_run() -> None:
         assert not ctx.layout.probe_socket(1).exists()
 
 
+@pytest.mark.parametrize("cgroup", ["0::/user.slice/scanner.scope\n", "0::/\n", "1:cpu:/x\n", None])
+def test_agent_path_fails_without_a_cgroup_of_the_workloads_own(cgroup: str | None) -> None:
+    """The scanner's own cgroup, the root, cgroup v1, or none readable: nothing to freeze and enumerate."""
+    with short_dir() as root:
+        tmux = StubTmux()
+        ctx = agent_context(root, tmux)
+        fake_probe_proc(root / "proc", root / "codex")
+        if cgroup is None:
+            (root / "proc" / "7" / "cgroup").unlink()
+        else:
+            (root / "proc" / "7" / "cgroup").write_text(cgroup)
+        ctx.layout.run(1).mkdir()
+        with pytest.raises(SelfTestFailed, match="^workload-cgroup$"):
+            agent_selftest(root / "proc").agent_path(ctx)
+        assert tmux.pasted == []
+
+
 def test_agent_path_fails_without_the_prompt() -> None:
     with short_dir() as root:
         ctx = agent_context(root, StubTmux(screen="loading"))
@@ -493,7 +521,8 @@ def test_agent_path_fails_without_the_prompt() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_001_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer, ptrace_scope=lambda: 2)
+                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-prompt"):
             st.agent_path(ctx)
 
@@ -505,7 +534,8 @@ def test_agent_path_fails_when_the_agent_never_runs_the_probe() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_010_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer, ptrace_scope=lambda: 2)
+                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-path-channel: no verified probe run"):
             st.agent_path(ctx)
 
@@ -563,7 +593,7 @@ def test_agent_path_a_probe_finishing_during_the_last_poll_fails() -> None:
                 run_probe(ctx, good)                                # ... and the probe finishes meanwhile
 
         st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
-                               ptrace_scope=lambda: 2)
+                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 
@@ -613,7 +643,7 @@ def test_agent_path_a_handshake_finishing_after_the_deadline_fails() -> None:
 
         tmux.on_paste.append(probe)
         st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
-                               ptrace_scope=lambda: 2)
+                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 

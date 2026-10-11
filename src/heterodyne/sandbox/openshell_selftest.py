@@ -238,13 +238,15 @@ class OpenShellSelfTest:
                  proc: Path = Path("/proc"),
                  peer: Callable[[socket.socket], tuple[int, int]] = peer_pidfd_checked,
                  clock: Callable[[], float] = time.monotonic,
-                 ptrace_scope: Callable[[], int] = read_ptrace_scope) -> None:
+                 ptrace_scope: Callable[[], int] = read_ptrace_scope,
+                 cgroupfs: Path = Path("/sys/fs/cgroup")) -> None:
         self.wall = wall
         self.sleep = sleep
         self.proc = proc
         self.peer = peer
         self.clock = clock                   # deadlines; `wall` only dates the supervisor log query
         self.ptrace_scope = ptrace_scope
+        self.cgroupfs = cgroupfs
 
     def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
         end = self.clock() + seconds
@@ -304,7 +306,7 @@ class OpenShellSelfTest:
 
     def agent_path(self, ctx: ProbeContext) -> None:
         # channel imports this module
-        from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier, start_time
+        from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier, start_time, workload_cgroup
 
         self._protection()
         # Both canaries are held from before the probe config is written until the probe run is over,
@@ -321,9 +323,14 @@ class OpenShellSelfTest:
                 root_start = start_time(self.proc, root)     # the one task exempt from the scan, pinned
             except (OSError, IndexError, ValueError):
                 raise SelfTestFailed("workload-netns") from None
+            try:
+                cgroup = workload_cgroup(self.proc, root)       # the workload's tasks, frozen to be read
+            except (OSError, ValueError):
+                raise SelfTestFailed("workload-cgroup") from None
             verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
                                   namespaces=self._namespaces(ctx), root_pid=root, root_start=root_start,
-                                  ptrace_scope=self.ptrace_scope, proc=self.proc)
+                                  cgroup=cgroup, ptrace_scope=self.ptrace_scope, proc=self.proc,
+                                  cgroupfs=self.cgroupfs)
             home.verify("canary-precondition")
             oa.verify("canary-precondition")
             channel = ProbeChannel(ctx.layout.probe_socket(ctx.generation), verify, peer=self.peer,

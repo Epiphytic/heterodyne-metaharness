@@ -23,14 +23,15 @@ ALLOWED = frozenset({"HOME", "PATH"})
 
 
 NO_CAPS = "0000000000000000"
-
-
 HOST_NS: dict[str, Any] = {"userns": "user:[4026531837]", "mntns": "mnt:[4026531841]"}
+WORKLOAD_CG = "/user.slice/user-1001.slice/user-session.slice/libpod-hz.scope"
+SELF_CG = "/user.slice/user-1001.slice/user-session.slice/tmux-spawn-hz.scope"      # the scanner's
+HOST_CG = "/init.scope"
 
 
-def status_text(ppid: int, *, tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS) -> str:
-    return (f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n"
-            f"NoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
+def status_text(tgid: int, tid: int, ppid: int, *, tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS) -> str:
+    return (f"Name:\tpython3\nTgid:\t{tgid}\nPid:\t{tid}\nPPid:\t{ppid}\nTracerPid:\t{tracer}\n"
+            f"Uid:\t1000\nNoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
 
 
 def stat_text(pid: int, ppid: int, start: int) -> str:
@@ -38,36 +39,57 @@ def stat_text(pid: int, ppid: int, start: int) -> str:
     return f"{pid} (a) b) S {ppid} " + "0 " * 17 + f"{start} 0 0\n"
 
 
-def fake_thread(root: Path, pid: int, tid: int, *, ppid: int, nnp: int = 1, caps: str = NO_CAPS) -> None:
-    t = root / str(pid) / "task" / str(tid)
-    t.mkdir(parents=True)
-    (t / "status").write_text(status_text(ppid, nnp=nnp, caps=caps))
+def cgroup_dir(root: Path, path: str) -> Path:
+    """A cgroup v2 directory under the fake cgroupfs, thawed, which freezes at once when asked."""
+    d = root / "cgroupfs" / path.lstrip("/")
+    if not (d / "cgroup.threads").exists():
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "cgroup.threads").write_text("")
+        (d / "cgroup.freeze").write_text("0\n")
+        (d / "cgroup.events").write_text("populated 1\nfrozen 1\n")
+    return d
+
+
+def join(root: Path, cgroup: str | None, tid: int) -> None:
+    if cgroup is not None:
+        with (cgroup_dir(root, cgroup) / "cgroup.threads").open("a") as f:
+            f.write(f"{tid}\n")
+
+
+def fake_thread(root: Path, pid: int, tid: int, *, ppid: int, nnp: int = 1, caps: str = NO_CAPS,
+                cgroup: str | None = WORKLOAD_CG) -> None:
+    """A thread of `pid` other than its leader: /proc/<tid> shows its own status."""
+    (root / str(tid)).mkdir()
+    (root / str(tid) / "status").write_text(status_text(pid, tid, ppid, nnp=nnp, caps=caps))
+    join(root, cgroup, tid)
 
 
 def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: int, netns: str = NETNS,
               env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
               userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]",
-              start: int | None = None) -> None:
-    """A process, its leader thread alike; it started at `start` (its pid unless given, so a parent
-    started first)."""
+              start: int | None = None, cgroup: str | None = WORKLOAD_CG) -> None:
+    """A process, its leader thread listed in `cgroup`; it started at `start` (its pid unless given)."""
     d = root / str(pid)
     (d / "ns").mkdir(parents=True)
     (d / "stat").write_text(stat_text(pid, ppid, pid if start is None else start))
-    fake_thread(root, pid, pid, ppid=ppid, nnp=nnp, caps=caps)
+    (d / "cgroup").write_text(f"0::{cgroup or HOST_CG}\n")
     (d / "exe").symlink_to(exe)
     (d / "ns" / "net").symlink_to(netns)
     (d / "ns" / "user").symlink_to(userns)
     (d / "ns" / "mnt").symlink_to(mntns)
     (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
     (d / "environ").write_bytes(b"".join(e.encode() + b"\0" for e in env))
-    (d / "status").write_text(status_text(ppid, tracer=tracer, nnp=nnp, caps=caps))
+    (d / "status").write_text(status_text(pid, pid, ppid, tracer=tracer, nnp=nnp, caps=caps))
+    join(root, cgroup, pid)
 
 
 def probe_tree(root: Path, **probe: object) -> None:
     """pid 1: the host's init, 7: the workload's first process (the supervisor: no no_new_privs,
-    capable), 30: the CLI, 31: a shell, 32: the probe."""
+    capable), 30: the CLI, 31: a shell, 32: the probe. The scanner runs in a cgroup of its own."""
+    (root / "self").mkdir(exist_ok=True)
+    (root / "self" / "cgroup").write_text(f"0::{SELF_CG}\n")
     fake_proc(root, 1, exe="/usr/lib/systemd/systemd", argv=("systemd",), ppid=0, nnp=0,
-              caps="000001ffffffffff", **HOST_NS)
+              caps="000001ffffffffff", cgroup=None, **HOST_NS)
     fake_proc(root, 7, exe="/opt/openshell/bin/supervisor", argv=("supervisor",), ppid=1, nnp=0,
               caps="000001ffffffffff")
     fake_proc(root, 30, exe=CLI, argv=("codex",), ppid=7)
@@ -80,9 +102,15 @@ WORKLOAD_NS = ("user:[4026531837]", "mnt:[4026532001]")      # fake_proc's defau
 AGENT_NS: dict[str, Any] = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
 
 
-def verifier(root: Path, scope: int = 2) -> ProcVerifier:
+def verifier(root: Path, scope: int = 2, **kw: Any) -> ProcVerifier:
+    cgroup_dir(root, WORKLOAD_CG)
     return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, root_start=7,
-                        ptrace_scope=lambda: scope, proc=root)
+                        cgroup=WORKLOAD_CG, ptrace_scope=lambda: scope, proc=root,
+                        cgroupfs=root / "cgroupfs", **kw)
+
+
+def freeze_state(root: Path) -> str:
+    return (cgroup_dir(root, WORKLOAD_CG) / "cgroup.freeze").read_text().strip()
 
 
 def test_the_real_probe_verifies(tmp_path: Path) -> None:
@@ -552,7 +580,7 @@ def test_a_capable_workload_process_is_rejected(tmp_path: Path) -> None:
 def test_capable_processes_outside_the_workload_are_ignored(tmp_path: Path) -> None:
     probe_tree(tmp_path)
     fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff", nnp=0,
-              **HOST_NS)
+              cgroup=None, **HOST_NS)
     assert verifier(tmp_path)(32) == ""
 
 
@@ -601,14 +629,14 @@ def extra(root: Path, pid: int, ppid: int, **fields: object) -> None:
     (40, 31, {"nnp": 0}),                           # under no no_new_privs, it can still gain them
 ])
 def test_only_the_workloads_first_process_may_go_without_no_new_privs(
-        tmp_path: Path, pid: int, ppid: int, fields: dict[str, object]) -> None:
+        tmp_path: Path, pid: int, ppid: int, fields: dict[str, Any]) -> None:
     probe_tree(tmp_path)
-    shutil.rmtree(tmp_path / str(pid), ignore_errors=True)
     if pid == 30:
-        fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=7, **fields)  # type: ignore[arg-type]
+        (tmp_path / "30" / "status").write_text(status_text(30, 30, 7, **fields))
     else:
         extra(tmp_path, pid, ppid, **fields)
     assert verifier(tmp_path)(32) == f"workload process {pid} can gain privileges"
+    assert freeze_state(tmp_path) == "0"
 
 
 def test_a_capable_thread_behind_a_harmless_leader_is_rejected(tmp_path: Path) -> None:
@@ -618,35 +646,77 @@ def test_a_capable_thread_behind_a_harmless_leader_is_rejected(tmp_path: Path) -
     assert verifier(tmp_path)(32) == "workload process 40 (thread 41) holds capabilities"
 
 
-def test_a_workload_process_outside_the_tree_is_still_a_member(tmp_path: Path) -> None:
-    """Reparented away from the workload's first process, it is still in the workload's mount namespace."""
+def test_the_first_processs_threads_are_exempt(tmp_path: Path) -> None:
     probe_tree(tmp_path)
-    extra(tmp_path, 60, 1, caps=SYS_PTRACE)
+    fake_thread(tmp_path, 7, 8, ppid=1, nnp=0, caps="000001ffffffffff")
+    assert verifier(tmp_path)(32) == ""
+
+
+@pytest.mark.parametrize("ns", [True, False])
+def test_a_reparented_capable_process_is_a_member_by_its_cgroup(tmp_path: Path, ns: bool) -> None:
+    """Reparented to the host's init, in namespaces it made or with its namespaces unreadable (the r2
+    control): its cgroup still lists it."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 60, 1, caps=SYS_PTRACE, **AGENT_NS)
+    if not ns:
+        shutil.rmtree(tmp_path / "60" / "ns")
     assert verifier(tmp_path)(32) == "workload process 60 holds capabilities"
 
 
-@pytest.mark.parametrize("caps, reason", [
-    (NO_CAPS, ""), (SYS_PTRACE, "workload process 60 holds capabilities")])
-def test_a_member_whose_parent_is_out_of_the_snapshot_is_judged_on_its_own(
-        tmp_path: Path, caps: str, reason: str) -> None:
-    """In the workload's mount namespace, a member needs no ancestry: its parent (999, outside, say
-    started it in there and exited) is unlisted, which fails only a process that needs ancestry."""
+def test_a_capable_process_in_a_child_cgroup_is_a_member(tmp_path: Path) -> None:
     probe_tree(tmp_path)
-    extra(tmp_path, 60, 999, caps=caps)
-    assert verifier(tmp_path)(32) == reason
-
-
-def test_a_child_of_a_member_outside_the_tree_is_a_member(tmp_path: Path) -> None:
-    probe_tree(tmp_path)
-    extra(tmp_path, 60, 999)
-    extra(tmp_path, 61, 60, caps=SYS_PTRACE, **AGENT_NS)
-    assert verifier(tmp_path)(32) == "workload process 61 holds capabilities"
-
-
-def test_a_workload_process_in_a_namespace_it_made_is_still_a_member(tmp_path: Path) -> None:
-    probe_tree(tmp_path)
-    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
+    extra(tmp_path, 40, 31, caps=SYS_PTRACE, cgroup=WORKLOAD_CG + "/agent-made")
     assert verifier(tmp_path)(32) == "workload process 40 holds capabilities"
+
+
+def test_a_probe_outside_the_workloads_cgroup_is_rejected(tmp_path: Path) -> None:
+    probe_tree(tmp_path, cgroup="/user.slice/elsewhere.scope")
+    assert verifier(tmp_path)(32) == "the probe is outside the workload's cgroup"
+
+
+def test_a_thread_that_ends_while_frozen_fails_closed(tmp_path: Path) -> None:
+    """Fork and exit: the listed parent is gone though the cgroup was frozen (a SIGKILL from outside, or a
+    freeze that didn't hold), so the scan can't vouch for what it did before it ended."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    extra(tmp_path, 41, 40, caps=SYS_PTRACE)
+    (tmp_path / "40" / "status").unlink()
+    assert verifier(tmp_path)(32) == "a workload thread ended while the workload was frozen"
+
+
+def test_every_workload_read_happens_while_frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A capable thread can't replace a checked one, nor a child appear unlisted: no workload read is made
+    before the freeze holds or after the thaw."""
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    fake_thread(tmp_path, 40, 41, ppid=31)
+    v = verifier(tmp_path)
+    freeze = cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.freeze"
+    thawed_reads: list[str] = []
+    real_text, real_bytes, real_link = Path.read_text, Path.read_bytes, Path.readlink
+
+    def watch(path: Path) -> None:
+        if path != freeze and path.name != "cgroup.events" and real_text(freeze).strip() != "1":
+            thawed_reads.append(path.name)
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        watch(self)
+        return real_text(self, *args, **kwargs)
+
+    def read_bytes(self: Path) -> bytes:
+        watch(self)
+        return real_bytes(self)
+
+    def readlink(self: Path) -> Path:
+        watch(self)
+        return real_link(self)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "readlink", readlink)
+    assert v(32) == ""
+    monkeypatch.undo()
+    assert thawed_reads == [] and freeze_state(tmp_path) == "0"
 
 
 def unreadable(path: Path) -> None:
@@ -655,84 +725,147 @@ def unreadable(path: Path) -> None:
     path.chmod(0)
 
 
-@pytest.mark.parametrize("hide", ["stat", "task-status", "task-dir"])
-def test_unreadable_evidence_fails_closed(tmp_path: Path, hide: str) -> None:
-    """The plan's scan skipped an unreadable process, and with it the capable child it can't link: here
-    the shell (31), with a capable child (40) in a namespace the agent made."""
+@pytest.mark.parametrize("what", ["missing", "unwritable"])
+def test_a_workload_that_cant_be_frozen_fails_closed(tmp_path: Path, what: str) -> None:
     probe_tree(tmp_path)
-    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
-    target = {"stat": tmp_path / "31" / "stat", "task-status": tmp_path / "31" / "task" / "31" / "status",
-              "task-dir": tmp_path / "31" / "task"}[hide]
+    v = verifier(tmp_path)
+    freeze = cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.freeze"
+    if what == "missing":
+        freeze.unlink()
+    else:
+        unreadable(freeze)
+    assert v(32) == "the workload could not be frozen"
+    if what == "missing":
+        assert not freeze.exists()                  # the write never creates a control file
+
+
+def test_a_freeze_that_never_holds_times_out_and_thaws(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    (cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    v = verifier(tmp_path, clock=lambda: now[0], sleep=sleep, budget=1.0)
+    assert v(32) == "the workload could not be frozen"
+    assert 1.0 < now[0] < 1.1 and freeze_state(tmp_path) == "0"
+
+
+def test_the_workload_is_thawed_when_the_check_raises(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    probe_tree(tmp_path)
+    v = verifier(tmp_path)
+
+    def fail(self: ProcVerifier, pid: int, budget: object) -> str:
+        assert freeze_state(tmp_path) == "1"
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(ProcVerifier, "_threads", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        v(32)
+    assert freeze_state(tmp_path) == "0"
+
+
+def test_a_thaw_that_fails_fails_the_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe_tree(tmp_path)
+    v = verifier(tmp_path)
+    monkeypatch.setattr(ProcVerifier, "_thaw", lambda self: False)
+    assert v(32) == "the workload could not be thawed"
+
+
+def test_a_low_ptrace_scope_never_freezes(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    v = verifier(tmp_path, scope=1)
+    (cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.freeze").unlink()
+    assert v(32).startswith("kernel.yama.ptrace_scope is 1")
+
+
+@pytest.mark.parametrize("hide", ["threads", "status", "subdir"])
+def test_unreadable_evidence_fails_closed(tmp_path: Path, hide: str) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, cgroup=WORKLOAD_CG + "/child")
+    target = {"threads": cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.threads",
+              "status": tmp_path / "40" / "status",
+              "subdir": cgroup_dir(tmp_path, WORKLOAD_CG + "/child")}[hide]
     unreadable(target)
     try:
         assert verifier(tmp_path)(32) == "workload process evidence unreadable"
     finally:
         target.chmod(0o755)
+    assert freeze_state(tmp_path) == "0"
 
 
-@pytest.mark.parametrize("status", ["Name:\tx\nPPid:\t31\n", "Name:\tx\nPPid:\t31\nNoNewPrivs:\t1\n"])
+@pytest.mark.parametrize("status", [
+    "Name:\tx\nTgid:\t40\nPid:\t40\n",                                       # no NoNewPrivs or caps
+    status_text(40, 41, 31),                                                 # another thread's status
+])
 def test_malformed_evidence_fails_closed(tmp_path: Path, status: str) -> None:
     probe_tree(tmp_path)
     extra(tmp_path, 40, 31)
-    (tmp_path / "40" / "task" / "40" / "status").write_text(status)
+    (tmp_path / "40" / "status").write_text(status)
     assert verifier(tmp_path)(32) == "workload process evidence unreadable"
 
 
-def test_a_parent_that_vanished_mid_scan_fails_closed(tmp_path: Path) -> None:
-    """The shell (31) is listed but gone by the time it's read; its capable child (40) still names it,
-    so its membership can't be resolved."""
+def test_a_malformed_cgroup_thread_list_fails_closed(tmp_path: Path) -> None:
     probe_tree(tmp_path)
-    extra(tmp_path, 40, 31, caps=SYS_PTRACE, **AGENT_NS)
-    (tmp_path / "31" / "stat").unlink()
-    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
-
-
-def test_a_reused_parent_pid_fails_closed(tmp_path: Path) -> None:
-    """The shell's pid names a process started after its child: the child's real parent is gone and its
-    pid reused, so the ancestry read from the numbers is not the child's."""
-    probe_tree(tmp_path)
-    shutil.rmtree(tmp_path / "31")
-    fake_proc(tmp_path, 31, exe="/usr/bin/bash", argv=("bash",), ppid=30, start=90)
-    extra(tmp_path, 40, 31, caps=SYS_PTRACE, start=50, **AGENT_NS)
-    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
-
-
-def test_a_process_that_changed_while_it_was_read_fails_closed(tmp_path: Path,
-                                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    """Its pid was reused between the scan's listing and the read of its threads."""
-    probe_tree(tmp_path)
-    extra(tmp_path, 40, 31)
-    stat = tmp_path / "40" / "stat"
-    reads = [0]
-    real = Path.read_text
-
-    def read_text(self: Path, *args: object, **kwargs: object) -> str:
-        if self == stat:
-            reads[0] += 1
-            if reads[0] > 1:
-                return stat_text(40, 31, 99)
-        return real(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "read_text", read_text)
-    assert verifier(tmp_path)(32) == "the workload process list is unresolved"
+    (cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.threads").write_text("7\nx\n")
+    assert verifier(tmp_path)(32) == "workload process evidence unreadable"
 
 
 @pytest.mark.parametrize("start", [None, 8])
 def test_a_replaced_first_process_fails_closed(tmp_path: Path, start: int | None) -> None:
     probe_tree(tmp_path)
     if start is None:
-        shutil.rmtree(tmp_path / "7")              # gone: the CLI's parent is then unresolved too
+        (tmp_path / "7" / "stat").unlink()
     else:
         (tmp_path / "7" / "stat").write_text(stat_text(7, 1, start))
     assert verifier(tmp_path)(32) == "the workload's first process changed"
 
 
-def test_a_scan_past_its_budget_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("phase", ["freeze", "subdirs", "threads"])
+def test_a_scan_past_its_budget_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                             phase: str) -> None:
+    """The clock runs out in each phase in turn: waiting for the freeze, walking the cgroup tree, or
+    reading the threads (every clock read is a second). A first, unbounded run finds the phases."""
     probe_tree(tmp_path)
-    ticks = iter(range(1000))
-    v = ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, root_start=7,
-                     ptrace_scope=lambda: 2, proc=tmp_path, clock=lambda: float(next(ticks)), budget=3.0)
-    assert v(32) == "the workload scan did not finish"
+    for i in range(20):
+        extra(tmp_path, 100 + i, 31, cgroup=f"{WORKLOAD_CG}/sub{i}")
+    if phase == "freeze":
+        (cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.events").write_text("frozen 0\n")
+    now = [0.0]
+
+    def clock() -> float:
+        now[0] += 1.0
+        return now[0]
+
+    marks: list[tuple[str, float]] = []
+    real = ProcVerifier._members
+
+    def members(self: ProcVerifier, budget: Any) -> Any:
+        marks.append(("walk", now[0]))
+        try:
+            return real(self, budget)
+        finally:
+            marks.append(("walked", now[0]))
+
+    monkeypatch.setattr(ProcVerifier, "_members", members)
+    if phase == "freeze":
+        budget = 5.0
+    else:
+        assert verifier(tmp_path, clock=clock, sleep=lambda s: None, budget=1e9)(32) == ""
+        (_, start), (_, walked) = marks
+        assert walked - start > 20 and now[0] - walked > 20          # both phases tick every entry
+        budget = (start + walked) / 2 if phase == "subdirs" else (walked + now[0]) / 2
+        marks.clear()
+        now[0] = 0.0
+    v = verifier(tmp_path, clock=clock, sleep=lambda s: None, budget=budget)
+    if phase == "freeze":
+        assert v(32) == "the workload could not be frozen" and marks == []
+    else:
+        assert v(32) == "the workload scan did not finish"
+        assert len(marks) == 2 and (marks[1][1] < now[0] - 1) == (phase == "threads")
+    assert freeze_state(tmp_path) == "0"
 
 
 def test_a_scan_past_its_entry_limit_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -741,7 +874,55 @@ def test_a_scan_past_its_entry_limit_fails_closed(tmp_path: Path, monkeypatch: p
     assert verifier(tmp_path)(32) == "the workload scan did not finish"
 
 
+def test_verifications_never_overlap_their_freezes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe_tree(tmp_path)
+    v = verifier(tmp_path)
+    inside, most = [0], [0]
+    real = ProcVerifier._freeze
+
+    def freeze(self: ProcVerifier, budget: Any) -> None:
+        inside[0] += 1
+        most[0] = max(most[0], inside[0])
+        real(self, budget)
+
+    def thaw(self: ProcVerifier) -> bool:
+        time.sleep(0.01)                            # widen the window another worker could overlap in
+        inside[0] -= 1
+        return real_thaw(self)
+
+    real_thaw = ProcVerifier._thaw
+    monkeypatch.setattr(ProcVerifier, "_freeze", freeze)
+    monkeypatch.setattr(ProcVerifier, "_thaw", thaw)
+    workers = [threading.Thread(target=v, args=(32,)) for _ in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    assert most[0] == 1 and freeze_state(tmp_path) == "0"
+
+
 def test_start_time_reads_the_stat_field(tmp_path: Path) -> None:
     probe_tree(tmp_path)
     assert channel_module.start_time(tmp_path, 31) == 31
     assert channel_module.start_time(Path("/proc"), os.getpid()) > 0
+
+
+@pytest.mark.parametrize("cgroup, ok", [
+    (f"0::{WORKLOAD_CG}\n", True),
+    (f"0::{WORKLOAD_CG}\n1:name=systemd:/x\n", False),     # a cgroup v1 hierarchy too
+    ("1:name=systemd:/x\n", False),
+    (f"0::{SELF_CG}\n", False),                             # the scanner's own
+    ("0::/user.slice\n", False),                            # an ancestor of it
+    ("0::/\n", False),
+    ("0::/user.slice/../x\n", False),
+])
+def test_the_workload_cgroup_is_pinned_only_when_safe(tmp_path: Path, cgroup: str, ok: bool) -> None:
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "cgroup").write_text(cgroup)
+    (tmp_path / "self").mkdir()
+    (tmp_path / "self" / "cgroup").write_text(f"0::{SELF_CG}\n")
+    if ok:
+        assert channel_module.workload_cgroup(tmp_path, 7) == WORKLOAD_CG
+    else:
+        with pytest.raises(ValueError, match="cgroup"):
+            channel_module.workload_cgroup(tmp_path, 7)
