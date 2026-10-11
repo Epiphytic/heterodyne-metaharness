@@ -6,6 +6,7 @@ Run it only while no wsd on this host uses the OpenShell runtime: that wsd would
 without a record and hold its workstreams until they are gone."""
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from heterodyne.sandbox.runtime import (  # noqa: E402
     SessionRecord,
     read_record,
 )
+from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed  # noqa: E402
 from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
@@ -45,6 +47,8 @@ PROFILES = {"claude": "p-one", "codex": "p-live-codex"}
 MODELS = {"claude": os.environ.get("HZ_LIVE_SANDBOX_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
           "codex": os.environ.get("HZ_LIVE_SANDBOX_CODEX_MODEL", "gpt-6-luna")}
 CODEX_EFFORT = 'model_reasoning_effort="low"'
+CLIS = {profile: cli for cli, profile in PROFILES.items()}
+PIN_SECONDS = 90
 PROMPT_SECONDS = 180
 EXEC_SECONDS = 60
 
@@ -76,7 +80,16 @@ class Live:
 
     def launch(self, spec: LaunchSpec) -> Started:
         self.keys.append(spec.session_key)
-        return self.runtime.launch(spec)
+        started = self.runtime.launch(spec)
+        self.pinned(spec, started)
+        return started
+
+    def pinned(self, spec: LaunchSpec, started: Started) -> None:
+        """Every model call so far in this session, the self-test's included, ran on the pinned model."""
+        cli = CLIS[spec.profile]
+        assert started.native_id is not None
+        used = models_used(self.runtime.layout(spec.session_key).home, cli, started.native_id)
+        assert used == {MODELS[cli]}, f"{cli} ran on {sorted(used)}, not the pinned {MODELS[cli]}"
 
     def record(self, key: str) -> SessionRecord:
         rec = read_record(self.runtime.layout(key))
@@ -100,6 +113,37 @@ def wait_until(pred: Callable[[], bool], seconds: float) -> bool:
             return False
         time.sleep(1)
     return True
+
+
+def models_used(home: Path, cli: str, native_id: str) -> set[str]:
+    """The models a session's own log in its synthetic home records: Codex's rollout turn contexts, or
+    Claude's assistant messages (less its local "<synthetic>" ones). Nothing recorded fails the pin."""
+    if cli == "codex":
+        logs = (home / ".codex" / "sessions").glob(f"*/*/*/rollout-*-{native_id}.jsonl")
+        kind, holder = "turn_context", "payload"
+    else:
+        logs = (home / ".claude" / "projects").glob(f"*/{native_id}.jsonl")
+        kind, holder = "assistant", "message"
+    used: set[str] = set()
+    for log in logs:
+        for line in log.read_text().splitlines():
+            entry = json.loads(line) if line.strip() else {}
+            if isinstance(entry, dict) and entry.get("type") == kind and isinstance(entry.get(holder), dict):
+                model = entry[holder].get("model")
+                used |= {model} if isinstance(model, str) and model != "<synthetic>" else set()
+    return used
+
+
+class PinnedSelfTest(OpenShellSelfTest):
+    """Test-only: the self-test's own prompt is each launch's first model call, and Codex's app-server is
+    started without the TUI's --model. So the model the TUI's header shows for the thread, as the server
+    configured it, is required before that prompt is pasted: a mismatch fails the launch with no call."""
+
+    def agent_path(self, ctx: ProbeContext) -> None:
+        if ctx.adapter.name == "codex" and not wait_until(
+                lambda: MODELS["codex"] in ctx.tmux.capture(ctx.tmux_session, 50), PIN_SECONDS):
+            raise SelfTestFailed("live-model-pin")
+        super().agent_path(ctx)
 
 
 def host_config() -> str:
@@ -139,7 +183,7 @@ def live() -> Iterator[Live]:
             sessions=root / "s", settings=settings, accounts=accounts_at(real_home), real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
-        live = Live(root, SandboxRuntime(config, backend, OpenShellSelfTest()), backend, tmux,
+        live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
                     tiny_repo(root / "r"))
         try:
             yield live
@@ -154,7 +198,7 @@ def live() -> Iterator[Live]:
 @pytest.mark.parametrize("cli", ["claude", "codex"])
 def test_both_shapes_launch_through_the_full_self_test(live: Live, cli: str) -> None:
     spec = live.spec(cli, "btq-live-1")
-    started = live.launch(spec)
+    started = live.launch(spec)                 # the model pin is checked first: no later prompt without it
     live.first[cli] = (spec, started)
     rec = live.record(spec.session_key)
     assert rec.phase is Phase.RUNNING and started.native_id is not None
@@ -242,7 +286,9 @@ def test_codex_tool_calls_fail_closed_while_wsd_is_down(live: Live) -> None:
 def test_a_new_generation_resumes_the_same_session(live: Live, cli: str) -> None:
     spec, first = live.first[cli]
     live.runtime.stop(spec.session_key)
-    second = live.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    resumed = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    second = live.runtime.launch(resumed)
+    live.pinned(resumed, second)
     assert second.native_id == first.native_id
     assert live.record(spec.session_key).sandbox.endswith("g2")
 
