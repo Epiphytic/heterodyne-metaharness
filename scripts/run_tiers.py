@@ -12,8 +12,8 @@ Usage: run_tiers.py {fast|changed|full} [--base REF] [--no-diagnose] [-- pytest 
 - slow-list: rewrite tests/slow_tests.txt from a JUnit report of a full run (`pytest --junitxml=...`):
   every test function with a case taking THRESHOLD seconds or more (default 0.5), safety tests excepted.
 
-Runs are parallel (pytest-xdist, `-n auto`) unless the pytest args choose: `-- -n 0` runs serially,
-`-- -n 8` uses eight workers. CI runs the suite serially.
+Runs are parallel (pytest-xdist, `-n auto --dist worksteal`) unless the pytest args choose: `-- -n 0`
+runs serially, `-- -n 8` uses eight workers. CI runs the suite serially.
 
 When a run fails, the files that failed are run again in full (their slow tests too), serially and with
 verbose output, so a broad failure comes back with the narrower tests of the same area next to it. Use
@@ -45,7 +45,7 @@ def parallel(extra: list[str]) -> list[str]:
     """`-n auto`, unless the caller's pytest args already pick a worker count or turn xdist off."""
     chosen = any(arg in ("-n", "--numprocesses", "no:xdist") or arg.startswith(("-n", "--numprocesses="))
                  for arg in extra)
-    return [] if chosen else ["-n", "auto"]
+    return [] if chosen else ["-n", "auto", "--dist", "worksteal"]    # 25 s against 44 s with --dist load
 
 
 def pytest(args: list[str], keep: list[str] | None = None) -> tuple[int, set[str]]:
