@@ -40,8 +40,9 @@ OPENSHELL_ENV = frozenset({"OPENSHELL_SANDBOX", "OPENSHELL_USER_ENVIRONMENT", "S
 SHELL_ENV = frozenset({"PWD", "SHLVL", "_", "OLDPWD"})
 COMMON_CHECKS = ("real-home-canary-unreadable", "non-allowlisted-host-blocked", "direct-network-blocked",
                  "control-op-rejected", "wsd-socket-absent", "allowlisted-host-reachable")
+PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly")
 TAIL_CHECKS = ("hook-event-accepted", "host-env-not-inherited", "openshell-control-material-unreadable",
-               "other-accounts")
+               "other-accounts", *PROTECTION_CHECKS)
 EXEC_CHECKS = (*COMMON_CHECKS, "model-host-exec-path", *TAIL_CHECKS)
 AGENT_CHECKS = (*COMMON_CHECKS, "model-host-agent-path", *TAIL_CHECKS)
 PROBE_SECONDS = 180
@@ -54,6 +55,23 @@ LATE_PEER_SECONDS = 5
 POLL_SECONDS = 0.5
 AGENT_OUTPUT = "$HOME/.hz-agent-probe.out"
 DIRECT_TARGET = "1.1.1.1:443"       # install-agnostic: allow=ip-port (the probes' literal-address target)
+# §7 Probe protection (D23): with Yama at 2, only CAP_SYS_PTRACE may attach to a process or open its
+# memory, and no workload process holds a capability (checked from the host by the channel).
+MIN_PTRACE_SCOPE = 2
+# The workload's own namespaces, from a fresh process the supervisor starts (readlink is read-only).
+NS_ARGV = ("readlink", "/proc/self/ns/user", "/proc/self/ns/mnt")
+NS_SECONDS = 30
+USER_NS = re.compile(r"user:\[\d+\]")
+MNT_NS = re.compile(r"mnt:\[\d+\]")
+YAMA_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")
+
+
+def read_ptrace_scope(path: Path = YAMA_SCOPE) -> int:
+    """The host's kernel.yama.ptrace_scope; -1 when Yama is absent or the value is unreadable."""
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return -1
 
 
 def classify(path: Path) -> str:
@@ -219,12 +237,14 @@ class OpenShellSelfTest:
     def __init__(self, *, wall: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                  proc: Path = Path("/proc"),
                  peer: Callable[[socket.socket], tuple[int, int]] = peer_pidfd_checked,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 ptrace_scope: Callable[[], int] = read_ptrace_scope) -> None:
         self.wall = wall
         self.sleep = sleep
         self.proc = proc
         self.peer = peer
         self.clock = clock                   # deadlines; `wall` only dates the supervisor log query
+        self.ptrace_scope = ptrace_scope
 
     def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
         end = self.clock() + seconds
@@ -233,6 +253,25 @@ class OpenShellSelfTest:
                 return False
             self.sleep(POLL_SECONDS)
         return True
+
+    def _protection(self) -> None:
+        scope = self.ptrace_scope()
+        if scope < MIN_PTRACE_SCOPE:
+            raise SelfTestFailed(f"ptrace-scope: {scope}, probe protection needs {MIN_PTRACE_SCOPE} or more")
+
+    def _namespaces(self, ctx: ProbeContext) -> tuple[str, str]:
+        """The workload's own user and mount namespaces, pinned before the agent is asked to run the
+        probe. The supervisor starts this process as it starts the CLI, so no namespace the agent made
+        can be it (D23)."""
+        try:
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, NS_ARGV, timeout=NS_SECONDS)
+        except BackendError:
+            raise SelfTestFailed("workload-namespaces") from None
+        found = r.stdout.decode("utf-8", "replace").split()
+        if r.returncode != 0 or len(found) != 2 or not (USER_NS.fullmatch(found[0])
+                                                        and MNT_NS.fullmatch(found[1])):
+            raise SelfTestFailed("workload-namespaces")
+        return found[0], found[1]
 
     def files(self) -> Mapping[str, str]:
         return {"probes.py": PROBES_SOURCE.read_text()}
@@ -245,6 +284,7 @@ class OpenShellSelfTest:
             raise SelfTestFailed(", ".join(missing))
 
     def exec_path(self, ctx: ProbeContext) -> None:
+        self._protection()
         with held_canaries(ctx) as (home, oa):
             if ctx.backend.network_mode(ctx.spec.name) != "none":
                 raise SelfTestFailed("outer-fence-network-none")
@@ -265,6 +305,7 @@ class OpenShellSelfTest:
     def agent_path(self, ctx: ProbeContext) -> None:
         from heterodyne.sandbox.channel import ProbeChannel, ProcVerifier  # channel imports this module
 
+        self._protection()
         # Both canaries are held from before the probe config is written until the probe run is over,
         # as on the exec path: checked before the prompt is pasted, and again after the channel closes.
         with held_canaries(ctx) as (home, oa):
@@ -274,12 +315,13 @@ class OpenShellSelfTest:
             if not self._until(lambda: marker in ctx.tmux.capture(ctx.tmux_session, 50), PROMPT_SECONDS):
                 raise SelfTestFailed("agent-prompt")
             try:
-                workload = self.proc / str(ctx.backend.workload_pid(ctx.spec.name))
-                netns = str((workload / "ns" / "net").readlink())
+                root = ctx.backend.workload_pid(ctx.spec.name)
+                netns = str((self.proc / str(root) / "ns" / "net").readlink())
             except OSError:
                 raise SelfTestFailed("workload-netns") from None
             verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
-                                  proc=self.proc)
+                                  namespaces=self._namespaces(ctx), root_pid=root,
+                                  ptrace_scope=self.ptrace_scope, proc=self.proc)
             home.verify("canary-precondition")
             oa.verify("canary-precondition")
             channel = ProbeChannel(ctx.layout.probe_socket(ctx.generation), verify, peer=self.peer,
@@ -297,7 +339,8 @@ class OpenShellSelfTest:
                     self.sleep(LATE_PEER_SECONDS)     # late peers (a forger after the probe) still count
             finally:
                 channel.close()
-            # A probe past its deadline fails, whatever arrives after it: `done` carries the channel's stamp.
+            # A probe past its deadline fails, whatever arrives after it: the channel stamps the run when it
+            # completes (after the check at `done`, the ACK and the clean end of stream).
             reason = channel.verdict(AGENT_CHECKS, by=deadline)
             home.verify("real-home-canary-changed")
             oa.verify("other-accounts-canary-changed")

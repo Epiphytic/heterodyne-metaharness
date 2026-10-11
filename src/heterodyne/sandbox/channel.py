@@ -9,10 +9,12 @@ The peer is pinned by its SO_PEERPIDFD pidfd, the connecting process itself: it 
 pidfd not readable) before and after the /proc reads, at accept and again at `done`, so the reads saw that
 process and not a successor with its PID. After the check at `done` the host sends ACK, which the probe
 waits for before it exits. The transcript is exact: one result per check, one integer `done`, nothing
-after it, the ACK delivered, then a clean end of stream. `done` is stamped on a monotonic clock, for
-the deadline.
+after it, the ACK delivered, then a clean end of stream. The run's completion, after that end of stream,
+is stamped on a monotonic clock, for the deadline.
 Reads, connections and the time per connection are bounded, and `close` finishes every worker before the
 verdict is read.
+It also checks, at both points, that nothing in the workload can tamper with the probe while it runs (§7
+Probe protection, D23).
 """
 
 import json
@@ -27,10 +29,11 @@ from pathlib import Path
 from typing import cast
 
 from heterodyne.platform import peer_pidfd_checked
-from heterodyne.sandbox.openshell_selftest import PROBE_ARGV, PROBE_EXE
+from heterodyne.sandbox.openshell_selftest import MIN_PTRACE_SCOPE, PROBE_ARGV, PROBE_EXE
 
 MAX_LINE = 64 << 10
 MAX_PEERS = 16              # connections served at once; any more is closed at once, and rejected
+NO_CAPS = "0000000000000000"
 ACK = b"ack\n"              # sent after the check at `done`; the probe waits for it before exiting
 ACCEPT_POLL = 0.05          # how often the accept loop looks for close()
 JOIN_SECONDS = 2.0          # close() waits this long for each worker
@@ -38,15 +41,63 @@ JOIN_SECONDS = 2.0          # close() waits this long for each worker
 
 class ProcVerifier:
     def __init__(self, netns: str, cli_binary: str, allowed_env: frozenset[str], *,
+                 namespaces: tuple[str, str], root_pid: int, ptrace_scope: Callable[[], int],
                  proc: Path = Path("/proc")) -> None:
         self.netns = netns
         self.cli = cli_binary
         self.allowed = allowed_env
+        self.namespaces = namespaces         # the workload's (user, mnt), pinned by the host
+        self.root = root_pid                 # the workload container's first process
+        self.ptrace_scope = ptrace_scope
         self.proc = proc
 
+    @staticmethod
+    def _field(status: str, name: str) -> str:
+        return status.split(f"\n{name}:\t", 1)[1].split("\n", 1)[0]
+
     def _ppid(self, pid: int) -> int:
-        status = (self.proc / str(pid) / "status").read_text()
-        return int(status.split("\nPPid:\t", 1)[1].split("\n", 1)[0])
+        return int(self._field((self.proc / str(pid) / "status").read_text(), "PPid"))
+
+    def _cli_ancestor(self, pid: int) -> int | None:
+        q = pid
+        while q > 1:
+            try:
+                q = self._ppid(q)
+                if str((self.proc / str(q) / "ns" / "net").readlink()) != self.netns:
+                    return None
+                if str((self.proc / str(q) / "exe").readlink()) == self.cli:
+                    return q
+            except (OSError, IndexError, ValueError):
+                return None
+        return None
+
+    def _capable(self) -> str:
+        """The first workload process (a descendant of the container's first process, under no_new_privs)
+        holding any permitted or effective capability, else "". Entries that vanish mid-scan ended."""
+        children: dict[int, list[int]] = {}
+        held: dict[int, bool] = {}
+        for d in self.proc.iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                status = (d / "status").read_text()
+                ppid = int(self._field(status, "PPid"))
+                nnp = self._field(status, "NoNewPrivs") == "1"
+                caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(d.name))
+            held[int(d.name)] = nnp and caps != {NO_CAPS}
+        todo, seen = list(children.get(self.root, [])), set[int]()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            if held.get(pid):
+                return str(pid)
+            todo.extend(children.get(pid, []))
+        return ""
 
     def __call__(self, pid: int) -> str:
         p = self.proc / str(pid)
@@ -61,23 +112,31 @@ class ProcVerifier:
             return f"/proc/{pid} unreadable ({exc.strerror})"
         if exe != PROBE_EXE or argv != PROBE_ARGV:
             return "not the probe"
-        if "TracerPid:\t0\n" not in status:
+        if "\nTracerPid:\t0\n" not in status:
             return "traced"
+        if "\nNoNewPrivs:\t1\n" not in status:
+            return "the probe can gain privileges"
         if netns != self.netns:
             return "netns is not the workload container's"
         if env - self.allowed:
             return f"environment beyond the allowlist: {' '.join(sorted(env - self.allowed))}"
-        q = pid
-        while q > 1:
-            try:
-                q = self._ppid(q)
-                if str((self.proc / str(q) / "ns" / "net").readlink()) != self.netns:
-                    break
-                if str((self.proc / str(q) / "exe").readlink()) == self.cli:
-                    return ""
-            except (OSError, IndexError, ValueError):
-                break
-        return f"no {self.cli} ancestor inside the workload netns"
+        cli = self._cli_ancestor(pid)
+        if cli is None:
+            return f"no {self.cli} ancestor inside the workload netns"
+        try:
+            seen = {tuple(str((self.proc / str(q) / "ns" / ns).readlink()) for ns in ("user", "mnt"))
+                    for q in (pid, cli)}
+        except OSError:
+            seen = set[tuple[str, ...]]()
+        if seen != {self.namespaces}:
+            return "the probe or its CLI is outside the workload's user and mount namespaces"
+        scope = self.ptrace_scope()
+        if scope < MIN_PTRACE_SCOPE:
+            return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
+        holder = self._capable()
+        if holder:
+            return f"workload process {holder} holds capabilities"
+        return ""
 
 
 def alive(pidfd: int) -> bool:
@@ -92,7 +151,7 @@ class _Run:
     pid: int
     checks: dict[str, bool] = field(default_factory=dict[str, bool])
     done: int | None = None
-    done_at: float | None = None    # the channel's clock when `done` arrived
+    finished_at: float | None = None    # the channel's clock when the run finished (the stamp for `by`)
     finished: bool = False      # `done`, the check at `done`, the ACK sent, then the peer's clean EOF
     end: str = ""               # how the connection ended: eof, timeout, error, shutdown, ack-failed
     changed: bool = False
@@ -170,7 +229,8 @@ class ProbeChannel:
             return bool(self.rejected) or any(r.finished or r.changed or r.malformed for r in self.runs)
 
     def verdict(self, expected: Sequence[str], *, by: float | None = None) -> str:
-        """"" on a pass, else the reason. `by`: the deadline on the channel's clock that `done` must meet."""
+        """"" on a pass, else the reason. `by`: the deadline on the channel's clock that the run's
+        completion (after the check at `done`, the ACK and the clean end of stream) must meet."""
         with self._lock:
             if not self._closed:
                 raise RuntimeError("the verdict is read only after close()")
@@ -189,7 +249,7 @@ class ProbeChannel:
                 return "the probe changed before it finished"
             if not run.finished:
                 return "the probe did not finish cleanly"
-            if by is not None and (run.done_at is None or run.done_at > by):
+            if by is not None and (run.finished_at is None or run.finished_at > by):
                 return "the probe did not finish in time"
             unexpected = sorted(set(run.checks) - set(expected))
             failed = [c for c in expected if run.checks.get(c) is False]
@@ -305,6 +365,8 @@ class ProbeChannel:
                 run.malformed = True           # nothing may follow `done`
             run.end = end
             run.finished = not trailing and end == "eof"
+            if run.finished:
+                run.finished_at = self.clock()
 
     def _recv(self, conn: socket.socket, deadline: float, n: int) -> tuple[bytes, str]:
         """(data, "") or (b"", how the stream ended): eof, timeout, error or shutdown (close())."""
@@ -332,7 +394,6 @@ class ProbeChannel:
         with self._lock:
             if set(msg) == {"done"} and type(msg["done"]) is int:
                 run.done = msg["done"]
-                run.done_at = self.clock()
                 return True
             check, ok, evidence = msg.get("check"), msg.get("ok"), msg.get("evidence")
             if (set(msg) == {"check", "ok", "evidence"} and isinstance(check, str) and type(ok) is bool

@@ -4,6 +4,7 @@ Each test runs the real resources/probes.py against a scripted sandbox world: ev
 mapped under a temporary root, and the broker's answers, the session sockets, the environment and curl
 are fakes. A probe that passed a world which doesn't enforce a rule fails one of these tests.
 """
+import ctypes
 import errno
 import hashlib
 import io
@@ -54,6 +55,7 @@ class World:
     inet: int = errno.EACCES               # the broker's answer to an INET connect()
     udp_send: int = errno.EDESTADDRREQ     # ... to a non-DNS UDP sendto()
     raw: int = errno.EPROTONOSUPPORT       # ... to a raw or ICMP socket(); 0 creates it
+    attach: int = errno.EPERM              # ptrace(PTRACE_ATTACH) on the probe's child; 0 attaches
     resolve: str = SYNTHETIC
     session_socket: bool = True
     replies: dict[str, str] = field(
@@ -135,6 +137,36 @@ def fake_socket(world: World) -> type:
     return FakeSocket
 
 
+CHILD = 4242
+
+
+class FakeChild:
+    pid = CHILD
+
+    def __init__(self, argv: list[str]) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return -9
+
+
+class FakeLibc:
+    def __init__(self, world: World) -> None:
+        self.world = world
+        self.restype: object = None
+        self.argtypes: object = None
+
+    @property
+    def ptrace(self) -> "FakeLibc":
+        return self
+
+    def __call__(self, request: int, pid: int, addr: object, data: object) -> int:
+        return 0 if self.world.attach == 0 else -1
+
+
 @pytest.fixture
 def world(tmp_path: Path) -> World:
     w = World(tmp_path, env={"HOME": "/sandbox/home", "PWD": "/sandbox/work", "OPENSHELL_SANDBOX": "1",
@@ -145,6 +177,8 @@ def world(tmp_path: Path) -> World:
     w.put("/proc/net/route", "Iface\tDestination\tGateway\n")
     w.put("/proc/net/ipv6_route", "00000000000000000000000000000001 80 0 0 0 0 0 0 0 lo\n")
     w.put("/proc/self/status", STATUS)
+    w.put(f"/proc/{CHILD}/mem", "")                     # Yama at 2: the child's memory can't be opened
+    w.denied[f"/proc/{CHILD}/mem"] = errno.EACCES
     return w
 
 
@@ -169,6 +203,9 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
             return subprocess.CompletedProcess(argv, rc, out, err)
 
         monkeypatch.setattr(subprocess, "run", curl)
+        monkeypatch.setattr(subprocess, "Popen", FakeChild)
+        monkeypatch.setattr(ctypes, "CDLL", lambda name, use_errno=False: FakeLibc(world))
+        monkeypatch.setattr(ctypes, "get_errno", lambda: world.attach)
         try:
             exec(CODE, {"__name__": "__main__", "open": world.open})  # noqa: S102 - the probe script itself
             rc = -1                                    # the probe always ends with sys.exit
@@ -248,6 +285,11 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
      {"openshell-control-material-unreadable"}),
     ("a readable secrets directory", lambda w: w.put("/run/secrets/actual.jwt", "fake"),
      {"openshell-control-material-unreadable"}),
+    ("the probe's child attachable", lambda w: setattr(w, "attach", 0), {"probe-tamper-denied"}),
+    ("the attach refused only because the child is gone", lambda w: setattr(w, "attach", errno.ESRCH),
+     {"probe-tamper-denied"}),
+    ("the child's memory writable", lambda w: w.denied.clear(), {"probe-tamper-denied"}),
+    ("the run directory writable", lambda w: setattr(w, "readonly", (CHOSEN,)), {"probe-files-readonly"}),
 ]
 
 

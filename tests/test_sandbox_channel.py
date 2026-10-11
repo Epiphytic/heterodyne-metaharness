@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,27 +21,42 @@ CLI = "/opt/codex/bin/codex"
 ALLOWED = frozenset({"HOME", "PATH"})
 
 
+NO_CAPS = "0000000000000000"
+
+
 def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: int, netns: str = NETNS,
-              env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0) -> None:
+              env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
+              userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]") -> None:
     d = root / str(pid)
     (d / "ns").mkdir(parents=True)
     (d / "exe").symlink_to(exe)
     (d / "ns" / "net").symlink_to(netns)
+    (d / "ns" / "user").symlink_to(userns)
+    (d / "ns" / "mnt").symlink_to(mntns)
     (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
     (d / "environ").write_bytes(b"".join(e.encode() + b"\0" for e in env))
-    (d / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n")
+    (d / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t1000\n"
+                              f"NoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
 
 
 def probe_tree(root: Path, **probe: object) -> None:
-    """pid 30: the CLI (in the workload netns), 31: a shell, 32: the probe."""
-    fake_proc(root, 30, exe=CLI, argv=("codex",), ppid=1)
+    """pid 7: the workload's first process (the supervisor: no no_new_privs, capable), 30: the CLI,
+    31: a shell, 32: the probe."""
+    fake_proc(root, 7, exe="/opt/openshell/bin/supervisor", argv=("supervisor",), ppid=1, nnp=0,
+              caps="000001ffffffffff")
+    fake_proc(root, 30, exe=CLI, argv=("codex",), ppid=7)
     fake_proc(root, 31, exe="/usr/bin/bash", argv=("bash", "-c", "..."), ppid=30)
     fields = {"exe": PROBE_EXE, "argv": PROBE_ARGV, "ppid": 31, **probe}
     fake_proc(root, 32, **fields)  # type: ignore[arg-type]
 
 
-def verifier(root: Path) -> ProcVerifier:
-    return ProcVerifier(NETNS, CLI, ALLOWED, proc=root)
+WORKLOAD_NS = ("user:[4026531837]", "mnt:[4026532001]")      # fake_proc's defaults
+AGENT_NS = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
+
+
+def verifier(root: Path, scope: int = 2) -> ProcVerifier:
+    return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, ptrace_scope=lambda: scope,
+                        proc=root)
 
 
 def test_the_real_probe_verifies(tmp_path: Path) -> None:
@@ -61,7 +77,7 @@ def test_a_wrong_peer_is_rejected(tmp_path: Path, probe: dict[str, object], reas
 
 
 def test_no_cli_ancestor_inside_the_netns_is_rejected(tmp_path: Path) -> None:
-    fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=1, netns="net:[1]")   # the CLI, but outside
+    fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=7, netns="net:[1]")   # the CLI, but outside
     fake_proc(tmp_path, 31, exe="/usr/bin/bash", argv=("bash",), ppid=30)
     fake_proc(tmp_path, 32, exe=PROBE_EXE, argv=PROBE_ARGV, ppid=31)
     assert "no /opt/codex/bin/codex ancestor" in verifier(tmp_path)(32)
@@ -318,15 +334,36 @@ def test_a_clean_run_ends_with_eof(sock_dir: Path) -> None:
     assert finish(ch) == "" and ch.runs[0].end == "eof"
 
 
-def test_done_after_the_deadline_fails_on_its_stamp(sock_dir: Path) -> None:
+def test_the_deadline_applies_to_completion(sock_dir: Path) -> None:
     now = [100.0]
     ch = channel(sock_dir / "p.sock", [32], {32: ""}, clock=lambda: now[0])
     send(sock_dir / "p.sock", *all_pass(EXPECTED))
     wait_for(ch.done)
     ch.close()
-    assert ch.runs[0].done_at == 100.0
+    assert ch.runs[0].finished_at == 100.0
     assert ch.verdict(EXPECTED, by=100.0) == ""                       # at the deadline: in time
     assert ch.verdict(EXPECTED, by=99.5) == "the probe did not finish in time"
+
+
+def test_done_in_time_with_a_late_handshake_fails(sock_dir: Path) -> None:
+    """`done` arrives before the deadline, but the check at `done`, the ACK and the clean EOF finish
+    after it: the run is stamped when it completes, so it is late."""
+    now = [100.0]
+    calls: list[int] = []
+
+    def verify(pid: int) -> str:
+        calls.append(pid)
+        if len(calls) == 2:
+            now[0] = 200.0                       # the check at `done` overruns the deadline
+        return ""
+
+    ch = ProbeChannel(sock_dir / "p.sock", verify, peer=lambda s: pinned(32), clock=lambda: now[0])
+    ch.start()
+    assert send(sock_dir / "p.sock", *all_pass(EXPECTED)) == ACK
+    wait_for(ch.done)
+    ch.close()
+    assert ch.runs[0].finished_at == 200.0
+    assert ch.verdict(EXPECTED, by=150.0) == "the probe did not finish in time"
 
 
 CLIENT = """
@@ -461,3 +498,63 @@ except OSError:
                        check=False)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "fails closed\n"
+
+
+@pytest.mark.parametrize("probe, reason", [
+    ({"nnp": 0}, "the probe can gain privileges"),
+    ({"mntns": "mnt:[4026533333]"}, "outside the workload's user and mount namespaces"),    # a new mount ns
+    ({"userns": "user:[4026533334]"}, "outside the workload's user and mount namespaces"),
+])
+def test_a_probe_that_could_be_tampered_with_is_rejected(tmp_path: Path, probe: dict[str, object],
+                                                          reason: str) -> None:
+    probe_tree(tmp_path, **probe)
+    assert reason in verifier(tmp_path)(32)
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 1])
+def test_a_ptrace_scope_below_2_is_rejected(tmp_path: Path, scope: int) -> None:
+    probe_tree(tmp_path)
+    assert f"kernel.yama.ptrace_scope is {scope}" in verifier(tmp_path, scope)(32)
+
+
+def test_a_capable_workload_process_is_rejected(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    fake_proc(tmp_path, 40, exe="/usr/bin/python3.12", argv=("python3",), ppid=30, caps="0000000000080000")
+    assert verifier(tmp_path)(32) == "workload process 40 holds capabilities"
+
+
+def test_capable_processes_outside_the_workload_are_ignored(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    fake_proc(tmp_path, 50, exe="/usr/sbin/sshd", argv=("sshd",), ppid=1, caps="000001ffffffffff")
+    assert verifier(tmp_path)(32) == ""
+
+
+def test_a_cli_and_probe_in_namespaces_the_agent_made_are_rejected(sock_dir: Path, tmp_path: Path) -> None:
+    """An overlay over /run/hz from a new user and mount namespace, with the CLI started in there as the
+    forged probe's parent: the two agree with each other, but not with the namespaces the host pinned."""
+    probe_tree(tmp_path, **AGENT_NS)
+    shutil.rmtree(tmp_path / "30")
+    fake_proc(tmp_path, 30, exe=CLI, argv=("codex",), ppid=7, userns=AGENT_NS["userns"],
+              mntns=AGENT_NS["mntns"])
+    reason = "the probe or its CLI is outside the workload's user and mount namespaces"
+    assert verifier(tmp_path)(32) == reason
+    ch = ProbeChannel(sock_dir / "p.sock", verifier(tmp_path), peer=lambda s: pinned(32))
+    ch.start()
+    send(sock_dir / "p.sock", *all_pass(EXPECTED))
+    assert finish(ch) == "a peer that is not the probe connected"
+    assert ch.rejected == [reason]
+
+
+def test_a_probe_traced_after_it_connected_fails_at_completion(sock_dir: Path, tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    ch = ProbeChannel(sock_dir / "p.sock", verifier(tmp_path), peer=lambda s: pinned(32))
+    ch.start()
+    with socket.socket(socket.AF_UNIX) as s:
+        s.connect(str(sock_dir / "p.sock"))
+        s.sendall(b"".join((json.dumps(m) + "\n").encode() for m in all_pass(EXPECTED)[:-1]))
+        wait_for(lambda: bool(ch.runs) and len(ch.runs[0].checks) == len(EXPECTED))
+        status = tmp_path / "32" / "status"
+        status.write_text(status.read_text().replace("TracerPid:\t0", "TracerPid:\t31"))
+        s.sendall(b'{"done": 0}\n')
+        wait_for(ch.done)
+    assert finish(ch) == "the probe changed before it finished"
