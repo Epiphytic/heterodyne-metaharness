@@ -5,11 +5,12 @@ real model calls: one per launch, plus one prompt. It prints nothing from any lo
 Run it only while no wsd on this host uses the OpenShell runtime: that wsd would see these sandboxes
 without a record and hold its workstreams until they are gone."""
 
-import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -20,9 +21,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
-from sandbox_env import config_env, short_dir  # noqa: E402
+from sandbox_env import config_env  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
+from heterodyne.sandbox.backend import BackendUnavailable  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest  # noqa: E402
 from heterodyne.sandbox.runtime import (  # noqa: E402
@@ -37,7 +39,7 @@ from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
-from heterodyne.wsd.runtime import LaunchSpec, Liveness, RuntimeUnavailable, Started  # noqa: E402
+from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started  # noqa: E402
 from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.environ.get("HZ_LIVE_SANDBOX") != "1",
@@ -191,11 +193,37 @@ def tiny_repo(path: Path) -> Path:
     return path
 
 
+def teardown(live: Live) -> list[str]:
+    """Stop every session the module launched, each tried whatever the others do, then confirm with
+    `openshell sandbox list` that none of their sandboxes is left. What is uncertain, or nothing."""
+    uncertain: list[str] = []
+    sandboxes: set[str] = set()
+    for key in dict.fromkeys(live.keys):
+        try:
+            for when in ("before", "after"):
+                rec = read_record(live.runtime.layout(key))
+                sandboxes |= {rec.sandbox} if rec is not None else set()
+                if when == "before":
+                    live.runtime.stop(key)
+        except Exception as exc:  # noqa: BLE001 - every session is tried; each failure is reported
+            uncertain.append(f"session {key}: {type(exc).__name__}: {exc}")
+    try:
+        left = sorted(sandboxes & live.backend.names())
+    except BackendUnavailable as exc:
+        uncertain.append(f"the sandbox list: {exc}")
+    else:
+        if left:
+            uncertain.append(f"sandboxes still listed: {', '.join(left)}")
+    return uncertain
+
+
 @pytest.fixture(scope="module")
 def live() -> Iterator[Live]:
     real_home = Path.home()
     canary = real_home / ".heterodyne-live-canary"
-    with short_dir() as root:
+    root = Path(tempfile.mkdtemp(prefix="hz", dir=tempfile.gettempdir()))   # short_dir's, kept when unsure
+    live: Live | None = None
+    try:
         env = config_env(root / "c", host_config(),
                          {"alpha": '[sandbox]\nextra_egress = ["github.com", "pypi.org"]\n'})
         settings = sandbox_settings(env)
@@ -210,14 +238,16 @@ def live() -> Iterator[Live]:
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
                     tiny_repo(root / "r"))
-        try:
-            yield live
-        finally:
-            for key in live.keys:
-                with contextlib.suppress(RuntimeUnavailable):
-                    live.runtime.stop(key)
-            tmux.kill_server()
-            canary.unlink(missing_ok=True)
+        yield live
+    finally:
+        uncertain = teardown(live) if live is not None else []
+        if uncertain:      # the records, the reapers' tmux server and the scratch stay for recovery
+            pytest.fail(f"live teardown is uncertain; kept the scratch {root} and tmux server "
+                        f"{live.tmux.socket_name if live else None}: " + "; ".join(uncertain))
+        if live is not None:
+            live.tmux.kill_server()
+        canary.unlink(missing_ok=True)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
