@@ -4,6 +4,7 @@ Each test runs the real resources/probes.py against a scripted sandbox world: ev
 mapped under a temporary root, and the broker's answers, the session sockets, the environment and curl
 are fakes. A probe that passed a world which doesn't enforce a rule fails one of these tests.
 """
+import ast
 import ctypes
 import errno
 import hashlib
@@ -13,6 +14,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 from typing import IO, Any
 
 import pytest
+from sandbox_env import wait_for
 
 from heterodyne.agents.codex import Codex
 from heterodyne.sandbox.openshell_selftest import AGENT_CHECKS, EXEC_CHECKS, OPENSHELL_ENV, env_allowed
@@ -70,6 +73,8 @@ class World:
         default_factory=lambda: {"approve": FORBIDDEN, "hook_event": '{"ok": true}'})
     curl: dict[str, tuple[int, str, str]] = field(default_factory=dict[str, tuple[int, str, str]])
     reported: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    runs: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])    # each subprocess.run's kwargs
+    ends: dict[int, "FakeEnd"] = field(default_factory=dict[int, "FakeEnd"])    # capture ends, by fd
     acks: list[int] = field(default_factory=list[int])      # len(reported) at each wait for the ACK
 
     def at(self, path: str | os.PathLike[str]) -> Path:
@@ -143,6 +148,38 @@ def fake_socket(world: World) -> type:
             pass
 
     return FakeSocket
+
+
+class FakeEnd:
+    """One end of the probe's capture socket pair: what the fake program writes, the probe reads."""
+
+    def __init__(self, data: list[bytes], fd: int) -> None:
+        self.data, self.fd = data, fd
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def __enter__(self) -> "FakeEnd":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def write(self, text: str) -> None:
+        self.data.append(text.encode())
+
+    def recv(self, n: int) -> bytes:
+        return self.data.pop(0) if self.data else b""
+
+
+def fake_socketpair(world: World) -> Callable[[], tuple[FakeEnd, FakeEnd]]:
+    def socketpair() -> tuple[FakeEnd, FakeEnd]:
+        data: list[bytes] = []
+        n = 1000 + 2 * len(world.ends)
+        ours, theirs = FakeEnd(data, n), FakeEnd(data, n + 1)
+        world.ends[theirs.fd] = theirs
+        return ours, theirs
+    return socketpair
 
 
 CHILD = 4242
@@ -232,10 +269,15 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", (world.resolve, port))])
 
         def curl(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            world.runs.append({"argv": argv, **kwargs})
             rc, out, err = world.answer(argv[-1].removeprefix("https://").rstrip("/"))
-            return subprocess.CompletedProcess(argv, rc, out, err)
+            end = world.ends.get(kwargs.get("stdout", -1))
+            if end is not None:
+                end.write(f"{err}\n{out}\n")
+            return subprocess.CompletedProcess(argv, rc)
 
         monkeypatch.setattr(subprocess, "run", curl)
+        monkeypatch.setattr(socket, "socketpair", fake_socketpair(world))
         monkeypatch.setattr(subprocess, "Popen", FakeChild)
         monkeypatch.setattr(ctypes, "CDLL", lambda name, use_errno=False: FakeLibc(world))
         monkeypatch.setattr(ctypes, "get_errno", lambda: world.last_errno)
@@ -336,6 +378,8 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
     ("the control reached around the proxy",
      lambda w: w.curl.update({ALLOWED: (0, "http=200", "*  issuer: CN=R11")}),
      {"allowlisted-host-reachable"}),
+    ("the control reached with no HTTP status", lambda w: w.curl.update({ALLOWED: (0, "", PROXY_CA)}),
+     {"allowlisted-host-reachable"}),
     ("the model host reached from the exec path", lambda w: w.curl.update({MODEL: REACHED}),
      {"model-host-exec-path"}),
     ("wsd's socket reachable", lambda w: w.put(WSD_SOCKET, ""), {"wsd-socket-absent"}),
@@ -390,3 +434,64 @@ def test_an_absent_cgroupfs_passes(world: World, run: Callable[[World], Results]
     rc, results = run(world)
     assert rc == 0 and results["cgroupfs-readonly"]
     assert not world.at(f"{CGROUPFS}/cgroup.freeze").exists()     # r+: nothing is created
+
+
+def test_every_program_the_probe_runs_reports_on_a_socket(world: World,
+                                                          run: Callable[[World], Results]) -> None:
+    """D23 (Amendment 1): curl, by its path and with no curlrc, its output on the capture socket pair and no
+    input."""
+    rc, _ = run(world)
+    assert rc == 0 and len(world.runs) == 3
+    for r in world.runs:
+        assert r["argv"][:2] == ["/usr/bin/curl", "-q"], r          # -q first: no curlrc is read
+        assert r["stdout"] in world.ends and r["stderr"] == r["stdout"], r
+        assert r["stdin"] == subprocess.DEVNULL and "capture_output" not in r, r
+
+
+@pytest.mark.parametrize("status", ["", "http=2x0", "http=000"], ids=["missing", "malformed", "zero"])
+def test_the_model_host_needs_an_http_status_on_the_agent_path(
+        world: World, run: Callable[[World], Results], status: str) -> None:
+    """Task 9C: reached through the proxy, but with a missing, malformed or zero HTTP status."""
+    world.path = "agent"
+    world.env["CODEX_THREAD_ID"] = "fake-thread"
+    world.curl[MODEL] = (0, status, PROXY_CA)
+    rc, results = run(world)
+    assert rc == 1
+    assert {name for name, ok in results.items() if not ok} == {"model-host-agent-path"}
+
+
+def probe_function(name: str) -> Callable[..., Any]:
+    """One function from the probe script, defined on its own: the script runs its checks when loaded."""
+    tree = ast.parse(PROBES.read_text())
+    [fn] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+    scope: dict[str, Any] = {"socket": socket, "subprocess": subprocess, "CAPTURE_SECONDS": 30}
+    exec(compile(ast.Module([fn], []), str(PROBES), "exec"), scope)  # noqa: S102 - the probe's own code
+    return scope[name]
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs Linux's /proc")
+def test_another_process_cannot_reopen_a_captured_output(tmp_path: Path) -> None:
+    """The reopen through /proc/<pid>/fd that a pipe allows is refused for the capture socket (ENXIO). The
+    same reopen of a pipe succeeds, so this test can tell the two apart."""
+    captured = probe_function("captured")
+    pid, go = tmp_path / "pid", tmp_path / "go"
+    os.mkfifo(go)
+    child = [sys.executable, "-I", "-c", f"import os; open({str(pid)!r}, 'w').write(str(os.getpid())); "
+             f"print('from-the-child', flush=True); open({str(go)!r}).read()"]
+    result: list[tuple[int, str]] = []
+    t = threading.Thread(target=lambda: result.append(captured(child)))
+    t.start()
+    try:
+        wait_for(lambda: pid.exists() and pid.read_text() != "")
+        with pytest.raises(OSError) as refused:
+            os.close(os.open(f"/proc/{pid.read_text()}/fd/1", os.O_WRONLY | os.O_NONBLOCK))
+    finally:
+        with go.open("w"):
+            pass
+        t.join()
+    assert refused.value.errno == errno.ENXIO
+    assert result == [(0, "from-the-child\n")]
+    with subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as p:
+        os.close(os.open(f"/proc/{p.pid}/fd/1", os.O_WRONLY | os.O_NONBLOCK))   # a pipe: reopened
+        p.communicate(b"")

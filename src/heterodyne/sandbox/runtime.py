@@ -406,11 +406,13 @@ class SandboxRuntime:
             # T11 r3: the check above leaves a window up to the create's submission, so a sandbox that
             # exists only at or past its deadline is ended at once, by this launch, not left to the watcher.
             raise _StepFailed("the sandbox was created past its deadline; it was destroyed")
-        self._trust(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,
                            others, c.real_home_canary, c.wsd_socket, c.settings, server.turns)
+        # D23 (Amendment 1): the exec path is the first thing run in the new sandbox, so no process but
+        # OpenShell's own exists to reach the pipes `sandbox exec` gives the probe.
         self.selftest.exec_path(ctx)
+        self._trust(adapter, cli, sp, layout)
         self._app_server(adapter, cli, sp, layout)
         rec = self._phase(layout, rec, phase=Phase.STARTING)
         profile: dict[str, Any] = dict(c.settings.profiles.get(spec.profile, {}))

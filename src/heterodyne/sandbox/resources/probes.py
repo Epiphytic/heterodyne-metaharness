@@ -10,6 +10,7 @@ Run twice per launch: by a separate `sandbox exec` (path "exec", input on stdin)
 through its own tool (path "agent", input from the read-only /run/hz/agent-probe.json). On the agent path
 every result also goes to the host over /run/hz/p.sock, where the host verifies this process before it
 counts anything it sends. The session token is read from /run/hz/token; the input holds no secret.
+What the probe reads from a program it runs comes back on a socket, never a pipe (see `captured`).
 
 Usage: python3 -I /run/hz/probes.py < input        (exec path)
        python3 -I /run/hz/probes.py --agent        (agent path)
@@ -29,6 +30,10 @@ import subprocess
 import sys
 
 RUN = '/run/hz'
+CURL = '/usr/bin/curl'      # by path: the agent's PATH can't put another program in its place
+# Every curl run starts with -q, so no .curlrc applies: the home is the agent's, and a curlrc there could
+# change what curl does or prints.
+CAPTURE_SECONDS = 30
 AGENT = sys.argv[1:] == ['--agent']
 if AGENT:
     with open(f'{RUN}/agent-probe.json') as f:
@@ -105,11 +110,26 @@ def sock_create(fam, kind, proto):
         return errname(e)
 
 
+def captured(argv):
+    """Run argv; return its exit status and its stdout and stderr together. The output comes back on a
+    socket pair, never a pipe: any process with this UID can reopen a pipe through /proc/<pid>/fd and
+    write into it, and a socket can't be reopened that way (ENXIO). So what this returns is only what
+    argv wrote (D23, Amendment 1). Its output is a few kilobytes, well inside the socket's buffer."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        with theirs:
+            fd = theirs.fileno()
+            rc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, timeout=CAPTURE_SECONDS,
+                                check=False).returncode
+        return rc, b''.join(iter(lambda: ours.recv(65536), b'')).decode('utf-8', 'replace')
+
+
 def curl(host):
-    cu = subprocess.run(['curl', '-sv', '-o', '/dev/null', '--max-time', '10', '-w', 'http=%{http_code}',
-                         f'https://{host}/'], capture_output=True, text=True)
-    issuer = next((ln.split('issuer:')[1].strip() for ln in cu.stderr.splitlines() if 'issuer:' in ln), '')
-    return cu, issuer
+    rc, out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '10',
+                        '-w', '\nhttp=%{http_code}\n', f'https://{host}/'])
+    issuer = next((ln.split('issuer:')[1].strip() for ln in out.splitlines() if 'issuer:' in ln), '')
+    status = next((ln for ln in out.splitlines() if ln.startswith('http=')), 'http=none')
+    return rc, out, issuer, status
 
 
 # 1. Real home: the canary (readable outside just before) gives ENOENT or EACCES/EPERM here.
@@ -127,11 +147,10 @@ except OSError as e:
 v4 = [a for a in addrs if not a.startswith('resolve') and ':' not in a]
 marker = bool(v4) and len(v4) == len(addrs) and all(ipaddress.ip_address(a) in SYNTHETIC for a in v4)
 c = connect((addrs[0], 443)) if marker else 'not-tried'
-cu = subprocess.run(['curl', '-sv', '-o', '/dev/null', '--max-time', '8', f'https://{host}/'],
-                    capture_output=True, text=True)
-ok = marker and c == 'EACCES' and cu.returncode == 7 and 'Permission denied' in cu.stderr
+cu_rc, cu_out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '8', f'https://{host}/'])
+ok = marker and c == 'EACCES' and cu_rc == 7 and 'Permission denied' in cu_out
 check('non-allowlisted-host-blocked', ok,
-      f'{host} -> {",".join(addrs)} (policy-DNS synthetic={marker}) connect -> {c}; curl rc={cu.returncode}')
+      f'{host} -> {",".join(addrs)} (policy-DNS synthetic={marker}) connect -> {c}; curl rc={cu_rc}')
 
 # 3. Direct network, two layers, both required (the criterion ADR revision 15 accepts):
 #    - the kernel fence: the workload's netns has only lo and no route (podman --network none, also
@@ -191,21 +210,21 @@ check('wsd-socket-absent', gone and set(sockets) <= {'s.sock', 'p.sock'},
       f"wsd socket reachable={not gone}; sockets in {RUN}: {' '.join(sockets) or 'none'}")
 
 # 6. The allowlisted control is reachable, through OpenShell's TLS-terminating proxy (its CA issues).
-cu, issuer = curl(cfg['allowed'])
-ok = cu.returncode == 0 and 'OpenShell Sandbox CA' in issuer and 'http=000' not in cu.stdout
-check('allowlisted-host-reachable', ok, f"curl rc={cu.returncode} {cu.stdout} issuer='{issuer}'")
+cu_rc, cu_out, issuer, status = curl(cfg['allowed'])
+ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'
+check('allowlisted-host-reachable', ok, f"curl rc={cu_rc} {status} issuer='{issuer}'")
 
 # 6b. The model host's policy names only the CLI binary, and OpenShell also authorizes a binary's
 #     executable ancestors. So curl reaches it only from inside the agent's own process tree: on the
 #     agent path it must be reachable (through the proxy), on the separate exec path refused. The host
 #     checks the supervisor log for the matching ALLOWED/DENIED line.
-cu, issuer = curl(cfg['model_host'])
+cu_rc, cu_out, issuer, status = curl(cfg['model_host'])
 if PATH == 'agent':
-    ok = cu.returncode == 0 and 'OpenShell Sandbox CA' in issuer
+    ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'
 else:
-    ok = cu.returncode == 7 and 'Permission denied' in cu.stderr
+    ok = cu_rc == 7 and 'Permission denied' in cu_out
 check(f'model-host-{PATH}-path', ok,
-      f"{cfg['model_host']}: curl rc={cu.returncode} {cu.stdout} issuer='{issuer}' "
+      f"{cfg['model_host']}: curl rc={cu_rc} {status} issuer='{issuer}' "
       f"(expect {'reachable via the CLI ancestor' if PATH == 'agent' else 'refused: no CLI ancestor'})")
 
 # 7. A hook event with the valid token is accepted.
