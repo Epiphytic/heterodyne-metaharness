@@ -83,6 +83,16 @@ def test_a_codex_launch_reports_its_thread_and_trusts_its_hooks(rig: RuntimeRig)
 
 
 @pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_the_exec_path_is_the_first_run_in_a_new_sandbox(rig: RuntimeRig, profile: str) -> None:
+    """D23 (Amendment 1): nothing runs in the sandbox before the exec path's probe, so no process but
+    OpenShell's own can reach the pipes its `sandbox exec` uses."""
+    before: list[list[list[str]]] = []
+    rig.selftest.during_exec = lambda: before.append(list(rig.backend.execs))
+    rig.runtime.launch(launch_spec(rig, profile))
+    assert before == [[]]
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
 def test_the_pane_command_has_no_empty_argument(rig: RuntimeRig, profile: str) -> None:
     """An empty argument is lost wherever argv is joined into one command line (T7: Claude's isolated
     setting sources are passed as the single token `--setting-sources=`)."""

@@ -106,7 +106,7 @@ def test_probes_file_is_stdlib_only_and_names_every_check() -> None:
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     assert imported <= {"ctypes", "errno", "hashlib", "ipaddress", "json", "os", "socket", "stat",
-                        "subprocess", "sys"}
+                        "subprocess", "sys", "time"}
     literals = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
     for check in {*AGENT_CHECKS, *EXEC_CHECKS} - {"model-host-agent-path", "model-host-exec-path"}:
         assert check in literals

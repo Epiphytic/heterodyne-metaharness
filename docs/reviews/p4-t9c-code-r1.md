@@ -1,0 +1,9 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: f0e6952. Verdict: REVISE.
+
+Both findings fixed in 843521d (finding 2 was non-blocking but fixed anyway). The large-output defect was copied from the plan.
+
+1. [BLOCKING] `src/heterodyne/sandbox/resources/probes.py:122` — **Capture waits before draining the socket, so large output blocks the child.** I reproduced this using the real `captured()` function: 1 KiB returned intact; 1 MiB raised `TimeoutExpired` with the timeout reduced to 0.5 seconds. Production merely delays that failure to 30 seconds. Curl’s verbose response headers are not bounded to the claimed “few kilobytes.” The subsequent `recv()` loop also has no deadline. This defect is copied verbatim from the plan. **Fix:** drain concurrently with child execution under one monotonic deadline, close the parent’s write endpoint immediately after spawning, and kill/reap on timeout. Add real-child tests for output exceeding the socket buffer, exit-status preservation, timeout cleanup, and bounded receive completion; the unbounded-list fake cannot expose this problem.
+
+2. [NON-BLOCKING] `src/heterodyne/sandbox/resources/probes.py:131`, `:214`, `:223` — **The status rule accepts incomplete, zero, and conflicting results.** With successful exit and the expected issuer, I confirmed acceptance of unterminated `http=2`, `http=0\n`, and `http=200\nhttp=000\n`. `splitlines()` loses termination information, `isdigit()` permits arbitrary lengths, and selecting the first match ignores later conflicting statuses. Both reachability paths share this defect, copied from the plan. This demonstrates parser acceptance, not a reproduced sandbox injection. **Fix:** require exactly one complete terminal curl write-out record containing three ASCII digits with a nonzero numeric value. Add partial, alternate-zero, duplicate, and conflicting-status negative controls for both paths.
+
+REVISE
