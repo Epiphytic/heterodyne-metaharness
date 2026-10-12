@@ -1,0 +1,11 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: d7957f0. Verdict: REVISE.
+
+Controller note: the first attempt at this cycle was stopped by the reviewer's content filter. This review is the rerun, with the brief's security section reworded defensively.
+
+1. [BLOCKING] [Plan:9791](~/repos/heterodyne-metaharness-v2-p4am1/docs/superpowers/plans/2026-10-09-plan4-agents-and-sandbox.md:9791): **The live file-tampering control can pass without executing its attacks.** `run()` discards the command’s return code and stderr, and line 9796 accepts empty output because `all([])` is true. Arbitrary nonnumeric output also passes. This defect is copied from the earlier plan. **Fix:** require successful execution of the attack harness and exactly three numeric, nonzero operation results. Add a negative control showing that empty or incomplete output fails.
+
+2. [BLOCKING] [Plan:6890](~/repos/heterodyne-metaharness-v2-p4am1/docs/superpowers/plans/2026-10-09-plan4-agents-and-sandbox.md:6890): **Task 9B’s verification command masks failures.** In `pytest … && pyright … && ruff … && grep …; test $? -eq 1`, an earlier command exiting with status 1 skips the remaining checks, then makes the final `test` succeed. Ordinary test failures can therefore produce an overall successful exit. **Fix:** place the grep-status check inside a grouped final operand of the `&&` chain, so earlier failures propagate.
+
+3. [NON-BLOCKING] [Plan:6357](~/repos/heterodyne-metaharness-v2-p4am1/docs/superpowers/plans/2026-10-09-plan4-agents-and-sandbox.md:6357): **Six filters establish quantity, not the claimed filter identities.** The six-filter derivation is supported for the inspected v0.1.2 configuration, but adding an unrelated inherited filter while removing a required filter preserves the count. An increase also passes, contrary to “if OpenShell changes the count, every launch fails closed.” Additional filters cannot weaken existing filters; the count does not prove those required filters exist. **Fix:** explicitly make the inspected OpenShell artifact and inherited runtime configuration prerequisites, describe the count as a consistency check, and require renewed review for enforcement changes regardless of their resulting count.
+
+REVISE
