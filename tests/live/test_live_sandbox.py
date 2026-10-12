@@ -5,8 +5,10 @@ real model calls: one per launch, plus one prompt. It prints nothing from any lo
 Run it only while no wsd on this host uses the OpenShell runtime: that wsd would see these sandboxes
 without a record and hold its workstreams until they are gone."""
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,11 +60,22 @@ PIN_SECONDS = 90
 PROMPT_SECONDS = 180
 EXEC_SECONDS = 60
 # D23's precondition, the inspected artifact (plan 4 Task 9B): OpenShell 0.1.2 on the podman driver with no
-# image or supervisor override, so the driver runs its default images, each named by tag. Checked and
-# recorded before any launch; the driver pulls an image it lacks, so a missing one fails here first.
+# image or supervisor override, so the driver runs its default images, each named by tag. The running
+# gateway is checked and recorded before any launch, and the containers each launch runs on after it.
+# The driver pulls an image it lacks, so a missing one fails here first.
 OPENSHELL_VERSION = "openshell 0.1.2"
-DRIVER_IMAGES = ("ghcr.io/nvidia/openshell/sandbox:0.1.2", "ghcr.io/nvidia/openshell/supervisor:0.1.2")
+GATEWAY_PACKAGE = ("openshell", "0.1.2-1", "/usr/bin/openshell-gateway")
+GATEWAY_ENV = {"OPENSHELL_COMPUTE_DRIVER", "OPENSHELL_GATEWAY_CONFIG", "OPENSHELL_LOCAL_TLS_DIR"}
+SUPERVISOR_IMAGE = "ghcr.io/nvidia/openshell/supervisor:0.1.2"
+DRIVER_IMAGES = ("ghcr.io/nvidia/openshell/sandbox:0.1.2", SUPERVISOR_IMAGE)
 PREFLIGHT_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class Artifact:
+    podman: tuple[str, ...]          # podman on the running gateway's own endpoint
+    images: dict[str, str]           # image -> its ID there
+    lines: tuple[str, ...]           # the evidence: versions, key names and IDs, never a value or a path
 
 
 @dataclass
@@ -72,6 +85,7 @@ class Live:
     backend: OpenShellBackend
     tmux: Tmux
     repo: Path
+    artifact: Artifact
     keys: list[str] = field(default_factory=list[str])      # every session this module launched
     first: dict[str, tuple[LaunchSpec, Started]] = field(
         default_factory=dict[str, tuple[LaunchSpec, Started]])     # cli -> its first launch
@@ -104,7 +118,35 @@ class Live:
         assert used == {MODELS[cli]}, f"{cli} ran on {sorted(used)}, not the pinned {MODELS[cli]}"
         attempts = getattr(self.runtime.selftest, "freeze_attempts", None)
         print(f"EVIDENCE {spec.session_key} g{spec.generation} models={sorted(used)} "
-              f"freeze-attempts={attempts}")     # for docs/wsd.md
+              f"freeze-attempts={attempts} {self.ran_on(spec.session_key)}")     # for docs/wsd.md
+
+    def ran_on(self, key: str) -> str:
+        """The images the session's containers run, through the gateway's endpoint: the workload on the
+        agent image, its supervisor on the driver's supervisor image, each the ID the preflight recorded,
+        and any image the workload mounts one the preflight recorded too."""
+        name, images = self.record(key).sandbox, self.artifact.images
+
+        def podman(*argv: str) -> str:
+            return tool(self.backend.env, *self.artifact.podman, *argv)
+
+        prefix = f"openshell-default--{name}-"
+        found = podman("ps", "--filter", f"name=^{prefix}", "--format", "{{.Names}}").split()
+        assert len(found) == 1, f"{name} runs {len(found)} workload containers, not one"
+        workload = podman("container", "inspect", "--format", "{{.Image}}", found[0])
+        supervisor = podman("container", "inspect", "--format", "{{.Image}}",
+                            f"openshell-supervisor-{found[0].removeprefix(prefix)}")
+        assert workload == images[self.backend.image], f"{name}'s workload runs image {workload}"
+        assert supervisor == images[SUPERVISOR_IMAGE], f"{name}'s supervisor runs image {supervisor}"
+        mounted: list[str] = []
+        for m in json.loads(podman("container", "inspect", "--format", "{{json .Mounts}}", found[0])) or []:
+            if not isinstance(m, dict) or m.get("Type") != "image":
+                continue
+            said = {str(m.get(k, "")).removeprefix("sha256:") for k in ("Name", "Source")} - {""}
+            known = [i for i, iid in images.items()
+                     if i in said or any(len(x) >= 12 and iid.startswith(x) for x in said)]
+            assert known, f"{name} mounts an image the preflight didn't see, at {m.get('Destination')}"
+            mounted += known
+        return f"workload-image={workload[:12]} supervisor-image={supervisor[:12]} image-mounts={mounted}"
 
     def record(self, key: str) -> SessionRecord:
         rec = read_record(self.runtime.layout(key))
@@ -222,26 +264,69 @@ def keys_of(table: dict[str, object], prefix: str = "") -> list[str]:
     return found
 
 
-def preflight(settings: SandboxSettings, env: dict[str, str], real_home: Path) -> list[str]:
+def gateway_process(openshell: str, env: dict[str, str]) -> tuple[int, str]:
+    """The running gateway the CLI talks to: `openshell status` names its endpoint and the version it
+    reports, and the process listening there is found by its socket. Its PID and that version."""
+    status = dict(line.strip().split(": ", 1) for line in tool(env, openshell, "status").splitlines()
+                  if ": " in line)
+    endpoint = re.fullmatch(r"https://127\.0\.0\.1:(\d+)", status.get("Server", ""))
+    assert endpoint and status.get("Status") == "Connected", "preflight: the gateway is not up on loopback"
+    listeners = set(re.findall(r"pid=(\d+)", tool(env, "ss", "-ltnpH", f"sport = :{endpoint[1]}")))
+    assert len(listeners) == 1, f"preflight: {len(listeners)} processes listen on the gateway's endpoint"
+    return int(listeners.pop()), status.get("Version", "")
+
+
+def started_at(pid: int) -> float:
+    """A process's start, in seconds since the epoch: /proc/<pid>/stat's starttime after the boot time."""
+    ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    boot = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                if line.startswith("btime "))
+    return boot + ticks / os.sysconf("SC_CLK_TCK")
+
+
+def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
     """The artifact the launches run on, checked against D23's precondition: a mismatch fails the module
-    before any sandbox exists. Its evidence lines name versions, configuration keys (never their values)
-    and local image digests; nothing is pulled."""
+    before any sandbox exists. Every check is of the running gateway, read-only: its binary is the
+    package's, unchanged; its configuration is what it was started with (its own environment, and a
+    gateway.toml not changed since); its images are the ones in the store its podman endpoint serves.
+    Nothing is pulled, and no value or path is recorded."""
     version = tool(env, settings.openshell, "--version")
     assert version == OPENSHELL_VERSION, f"preflight: {version!r} is not the inspected {OPENSHELL_VERSION}"
-    # The gateway's user unit reads gateway.env, which names its gateway.toml.
-    conf = Path(os.environ.get("XDG_CONFIG_HOME", real_home / ".config")) / "openshell"
-    genv = dict(line.split("=", 1) for line in (conf / "gateway.env").read_text().splitlines()
-                if "=" in line and not line.lstrip().startswith("#"))
-    gateway = tomllib.loads(Path(genv.get("OPENSHELL_GATEWAY_CONFIG", conf / "gateway.toml")).read_text())
+    pid, reported = gateway_process(settings.openshell, env)
+    assert f"openshell {reported}" == OPENSHELL_VERSION, f"preflight: the gateway reports {reported!r}"
+    package, release, binary = GATEWAY_PACKAGE
+    assert tool(env, "dpkg-query", "-W", "-f", "${Version}", package) == release, \
+        f"preflight: the {package} package is not {release}"
+    sums = Path(f"/var/lib/dpkg/info/{package}.md5sums").read_text().split()
+    packaged = sums[sums.index(binary.lstrip("/")) - 1]
+    exe = Path(f"/proc/{pid}/exe")
+    digest = hashlib.md5(exe.read_bytes(), usedforsecurity=False).hexdigest()     # dpkg records md5
+    assert str(exe.readlink()) == binary and digest == packaged, \
+        f"preflight: the running gateway is not the packaged {binary}"
+    argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[:-1]
+    assert len(argv) == 1, "preflight: the gateway was started with arguments"
+    penv = dict(e.split("=", 1) for e in Path(f"/proc/{pid}/environ").read_text().split("\0") if "=" in e)
+    named = sorted(k for k in penv if k.startswith("OPENSHELL_"))
+    assert set(named) <= GATEWAY_ENV and penv.get("OPENSHELL_COMPUTE_DRIVER") == "podman", \
+        f"preflight: the gateway's environment sets {named}"
+    config = Path(penv["OPENSHELL_GATEWAY_CONFIG"])
+    unit_env = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "openshell" / "gateway.env"
+    start = started_at(pid)
+    assert all(f.stat().st_mtime < start for f in (config, unit_env)), \
+        "preflight: the gateway's configuration changed after it started"
+    gateway = tomllib.loads(config.read_text())
     keys = sorted(keys_of(gateway))
-    driver = gateway.get("openshell", {}).get("gateway", {}).get("compute_driver")
-    assert genv.get("OPENSHELL_COMPUTE_DRIVER") == "podman" and driver == "podman", \
+    assert gateway.get("openshell", {}).get("gateway", {}).get("compute_driver") == "podman", \
         "preflight: the gateway is not on the podman compute driver"
-    overrides = [k for k in [*genv, *keys] if "image" in k.lower() or "supervisor" in k.lower()]
+    overrides = [k for k in keys if "image" in k.lower() or "supervisor" in k.lower()]
     assert not overrides, f"preflight: the gateway configuration overrides {overrides}"
-    podman = tool(env, settings.podman, "--version")
-    assert podman.startswith("podman version 5."), f"preflight: {podman!r} is not podman 5"
-    lines = [f"EVIDENCE artifact {version}; gateway env {sorted(genv)}, toml keys {keys}; {podman}"]
+    socket = gateway.get("openshell", {}).get("drivers", {}).get("podman", {}).get("socket_path")
+    assert isinstance(socket, str) and socket, "preflight: the gateway names no podman socket"
+    podman = (settings.podman, "--url", f"unix://{socket}")
+    server = tool(env, *podman, "version", "--format", "{{.Server.Version}}")
+    assert server.startswith("5."), f"preflight: the gateway's podman is {server!r}, not podman 5"
+    lines = [f"EVIDENCE artifact {version}; gateway reports {reported}, the packaged {package} {release} "
+             f"binary, no arguments, environment {named}, toml keys {keys}; its podman endpoint {server}"]
     # The image carries no agent CLI: each is the host's pinned install, bound read-only into the sandbox.
     for name, adapter in sorted(REGISTRY.items()):
         cli = adapter.locate(settings.binaries[name], os.environ.get("PATH", os.defpath))
@@ -249,11 +334,12 @@ def preflight(settings: SandboxSettings, env: dict[str, str], real_home: Path) -
         assert cli.version == adapter.version_pin and adapter.version_pin in said.split(), \
             f"preflight: the {name} CLI is {cli.version} ({said!r}), not the pinned {adapter.version_pin}"
         lines.append(f"EVIDENCE artifact {name} {said}")
+    images: dict[str, str] = {}
     for image in (settings.image, *DRIVER_IMAGES):
-        found = tool(env, settings.podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}",
-                     image)
+        found = tool(env, *podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image)
+        images[image] = found.split()[0]
         lines.append(f"EVIDENCE artifact image {image} id {found}")
-    return lines
+    return Artifact(podman, images, tuple(lines))
 
 
 def teardown(live: Live) -> list[str]:
@@ -273,7 +359,8 @@ def live() -> Iterator[Live]:
         tmux = Tmux(f"hz-live-sb-{uuid.uuid4().hex[:8]}")
         backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
                                    tool_env(os.environ, settings.tool_env))     # as wsd's build_runtime
-        print("\n".join(preflight(settings, backend.env, real_home)))
+        artifact = preflight(settings, backend.env)
+        print("\n".join(artifact.lines))
         # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
         accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
         config = RuntimeConfig(
@@ -281,7 +368,7 @@ def live() -> Iterator[Live]:
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
-                    tiny_repo(root / "r"))
+                    tiny_repo(root / "r"), artifact)
         yield live
     finally:
         uncertain = teardown(live) if live is not None else []
