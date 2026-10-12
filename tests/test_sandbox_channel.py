@@ -756,13 +756,14 @@ def test_a_freeze_that_never_holds_times_out_and_thaws(tmp_path: Path) -> None:
 
     v = verifier(tmp_path, clock=lambda: now[0], sleep=sleep, budget=1.0)
     assert v(32) == "the workload could not be frozen"
-    assert 1.0 < now[0] < 1.1 and freeze_state(tmp_path) == "0"
+    assert now[0] == pytest.approx(1.0) and now[0] <= 1.0 + 1e-9 and freeze_state(tmp_path) == "0"
 
 
-def scripted_verifier(root: Path, holds_on: int | None, budget: float) -> tuple[ProcVerifier, list[float],
-                                                                                   list[tuple[float, str]]]:
+def scripted_verifier(root: Path, holds_on: int | None, budget: float,
+                      overshoot: float = 0.0) -> tuple[ProcVerifier, list[float], list[tuple[float, str]]]:
     """A verifier on a cgroup whose freeze holds only from attempt `holds_on` (never, for None), as when a
-    task waits in a seccomp user notification. Also its clock, and each sleep's (length, cgroup.freeze)."""
+    task waits in a seccomp user notification; each sleep runs `overshoot` past what it was asked. Also its
+    clock, and each sleep's (length, cgroup.freeze)."""
     events = cgroup_dir(root, WORKLOAD_CG) / "cgroup.events"
     events.write_text("populated 1\nfrozen 0\n")
     now, sleeps = [0.0], list[tuple[float, str]]()
@@ -771,7 +772,7 @@ def scripted_verifier(root: Path, holds_on: int | None, budget: float) -> tuple[
     def sleep(seconds: float) -> None:
         state = freeze_state(root)
         sleeps.append((seconds, state))
-        now[0] += seconds
+        now[0] += seconds + overshoot
         holds = state == "1" and holds_on is not None and v.freezes[-1] >= holds_on
         events.write_text(f"populated 1\nfrozen {1 if holds else 0}\n")
 
@@ -822,8 +823,18 @@ def test_a_freeze_that_never_holds_fails_at_the_budget_and_is_thawed(tmp_path: P
     v, now, sleeps = scripted_verifier(tmp_path, holds_on=None, budget=3.0)
     assert v(32) == "the workload could not be frozen"
     assert v.freezes == [3]                             # 0-1.0 s, 1.2-2.2 s, 2.4-3.0 s
-    assert 3.0 < now[0] < 3.1 and freeze_state(tmp_path) == "0"
+    assert now[0] == pytest.approx(3.0) and now[0] <= 3.0 + 1e-9    # no poll sleeps past the budget
+    assert freeze_state(tmp_path) == "0"
     assert [state for seconds, state in sleeps if seconds == channel_module.FREEZE_BACKOFF] == ["0", "0"]
+
+
+def test_a_freeze_seen_only_after_the_deadline_does_not_count(tmp_path: Path) -> None:
+    """A poll that oversleeps the budget and then reads `frozen 1` has missed it: the freeze fails and the
+    workload is thawed, nothing read from it."""
+    probe_tree(tmp_path)
+    v, now, _ = scripted_verifier(tmp_path, holds_on=1, budget=1.0, overshoot=2.0)
+    assert v(32) == "the workload could not be frozen"
+    assert v.freezes == [1] and now[0] > 1.0 and freeze_state(tmp_path) == "0"
 
 
 def test_each_verification_records_its_freeze_attempts(tmp_path: Path) -> None:

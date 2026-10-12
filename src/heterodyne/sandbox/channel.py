@@ -153,12 +153,16 @@ class ProcVerifier:
         return None
 
     def _frozen_is(self, frozen: bool, end: float) -> bool:
-        """Whether cgroup.events shows the cgroup frozen (or not) by `end`, on the verifier's clock."""
-        while ("frozen 1" in (self.cgroup / "cgroup.events").read_text().splitlines()) != frozen:
-            if self.clock() > end:
+        """Whether cgroup.events shows the cgroup frozen (or not) by `end`, on the verifier's clock. A
+        state read after `end` doesn't count, and no sleep runs past it."""
+        while True:
+            shown = "frozen 1" in (self.cgroup / "cgroup.events").read_text().splitlines()
+            left = end - self.clock()
+            if shown == frozen and left >= 0:
+                return True
+            if left <= 0:
                 return False
-            self.sleep(FREEZE_POLL)
-        return True
+            self.sleep(min(FREEZE_POLL, left))
 
     def _freeze(self, budget: _Budget) -> None:
         """Freeze the workload's cgroup, in attempts within the budget. A task blocked in a seccomp user
