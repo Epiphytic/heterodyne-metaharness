@@ -14,6 +14,8 @@ counts anything it sends. The session token is read from /run/hz/token; the inpu
 Usage: python3 -I /run/hz/probes.py < input        (exec path)
        python3 -I /run/hz/probes.py --agent        (agent path)
 Standard library only.
+The probe never holds a value the agent can't read itself (Task 9B): at Yama's scope 1 the agent may read
+this process's memory.
 """
 import ctypes
 import errno
@@ -249,27 +251,45 @@ for c in cfg['chosen']:
     ok &= same is True and w in ('EROFS', 'EACCES', 'EPERM')
     ev.append(f"chosen:{c['path']} sha256-match={same} write->{w}")
 check('other-accounts', ok and bool(cfg['chosen']), '; '.join(ev))
-# 11. Probe protection (§7, D23). Nothing in the workload may trace this probe or write its memory: a
-#     child of this probe (the case Yama's scope 1 would allow) can't be attached to and its memory
-#     can't be opened for writing. The probe's own files are read-only. The host checks the same
-#     denial from outside (Yama's scope, no capability anywhere in the workload).
+# 11. Probe protection (§7, D23, Amendment 1). Nothing in the workload may trace this probe or write its
+#     memory. OpenShell's child seccomp filter answers ptrace, process_vm_writev, pidfd_getfd and unshare
+#     with EPERM, whatever Yama allows (it allows a parent, as here). Landlock keeps /proc read-only, so
+#     writing a child's mem, or this process's own comm, gives EACCES. Only those answers pass. The host
+#     checks the filters and Yama's scope from outside.
 PTRACE_ATTACH, PTRACE_DETACH = 16, 17
 libc = ctypes.CDLL(None, use_errno=True)
 libc.ptrace.restype = ctypes.c_long
 libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+libc.process_vm_writev.restype = ctypes.c_ssize_t
+libc.process_vm_writev.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                                   ctypes.c_ulong, ctypes.c_ulong]
+
+
+def libc_call(name, *args):
+    """A libc call's outcome: OK, or the name of the errno it failed with."""
+    if getattr(libc, name)(*args) != -1:
+        return 'OK'
+    code = ctypes.get_errno()
+    return errno.errorcode.get(code, str(code))
+
+
 child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
 try:
-    if libc.ptrace(PTRACE_ATTACH, child.pid, None, None) == 0:
-        attach = 'ATTACHED'
+    attach = libc_call('ptrace', PTRACE_ATTACH, child.pid, None, None)
+    if attach == 'OK':
         libc.ptrace(PTRACE_DETACH, child.pid, None, None)
-    else:
-        attach = errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+    vm = libc_call('process_vm_writev', child.pid, None, 0, None, 0, 0)   # no iovec: writes nothing
     mem = open_result(f'/proc/{child.pid}/mem', 'r+b')
 finally:
     child.kill()
     child.wait()
-check('probe-tamper-denied', attach in ('EPERM', 'EACCES', 'ENOSYS') and mem in ('EACCES', 'EPERM'),
-      f'ptrace(ATTACH, own child) -> {attach}; open(/proc/<child>/mem, rw) -> {mem}')
+getfd = libc_call('pidfd_getfd', -1, 0, 0)        # unfiltered: EBADF
+unshare = libc_call('unshare', 0)                 # unfiltered: a no-op, OK
+check('probe-tamper-denied', {attach, vm, getfd, unshare} == {'EPERM'} and mem == 'EACCES',
+      f'ptrace(ATTACH, own child) -> {attach}; process_vm_writev -> {vm}; pidfd_getfd -> {getfd}; '
+      f'unshare(0) -> {unshare}; open(/proc/<child>/mem, rw) -> {mem}')
+comm = open_result('/proc/self/comm', 'r+b')
+check('proc-readonly', comm == 'EACCES', f'open(/proc/self/comm, rw) -> {comm}')
 own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-probe.json']
 res = {p: open_result(p, 'ab') for p in own}
 check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res.values()),

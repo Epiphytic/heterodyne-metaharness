@@ -49,3 +49,10 @@ def test_create_argv() -> None:
                          "--driver-config-json", json.dumps(driver_config(spec()))]
     assert argv[12:] == ["--no-credential-warnings", "--env", "HOME=/s/home", "--env", "PATH=/usr/bin",
                          "--", "sleep", "infinity"]
+
+
+def test_create_argv_never_requests_a_gpu() -> None:
+    """OpenShell's GPU baseline makes /proc writable (boundary_server.rs:150-159; Task 9B)."""
+    argv = create_argv("openshell", spec(), "img:1", Path("/s/r1-scratch/policy.yaml"))
+    assert not any("gpu" in a.lower() for a in argv[:argv.index("--")])
+    assert "gpu" not in json.dumps(policy(spec())).lower()

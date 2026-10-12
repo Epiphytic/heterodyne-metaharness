@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult
+from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal, read_ptrace_scope
 from heterodyne.sandbox.spec import NAME, SandboxSpec
 
 
@@ -73,7 +74,8 @@ def _runner(env: Mapping[str, str]) -> Runner:
 class OpenShellBackend:
     def __init__(self, openshell: str, podman: str, image: str, env: Mapping[str, str], *,
                  runner: Runner | None = None, clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 ptrace_scope: Callable[[], int] = read_ptrace_scope) -> None:
         self.openshell = openshell
         self.podman = podman
         self.image = image
@@ -81,6 +83,7 @@ class OpenShellBackend:
         self.run = runner if runner is not None else _runner(self.env)
         self.clock = clock
         self.sleep = sleep
+        self.ptrace_scope = ptrace_scope
 
     def _call(self, argv: Sequence[str], timeout: float = QUERY_SECONDS,
               data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -107,6 +110,9 @@ class OpenShellBackend:
         return {t for t in proc.stdout.decode("utf-8", "replace").split() if NAME.fullmatch(t)}
 
     def create(self, spec: SandboxSpec, scratch: Path) -> None:
+        why = ptrace_scope_refusal(self.ptrace_scope())     # gap 15: OpenShell can't start at 2 or 3
+        if why:
+            raise BackendError(why)
         scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         scratch.chmod(0o700)
         policy_file = scratch / "policy.yaml"            # JSON is valid YAML

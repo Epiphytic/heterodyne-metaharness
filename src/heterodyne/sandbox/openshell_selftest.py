@@ -40,7 +40,7 @@ OPENSHELL_ENV = frozenset({"OPENSHELL_SANDBOX", "OPENSHELL_USER_ENVIRONMENT", "S
 SHELL_ENV = frozenset({"PWD", "SHLVL", "_", "OLDPWD"})
 COMMON_CHECKS = ("real-home-canary-unreadable", "non-allowlisted-host-blocked", "direct-network-blocked",
                  "control-op-rejected", "wsd-socket-absent", "allowlisted-host-reachable")
-PROTECTION_CHECKS = ("probe-tamper-denied", "probe-files-readonly", "cgroupfs-readonly")
+PROTECTION_CHECKS = ("probe-tamper-denied", "proc-readonly", "probe-files-readonly", "cgroupfs-readonly")
 TAIL_CHECKS = ("hook-event-accepted", "host-env-not-inherited", "openshell-control-material-unreadable",
                "other-accounts", *PROTECTION_CHECKS)
 EXEC_CHECKS = (*COMMON_CHECKS, "model-host-exec-path", *TAIL_CHECKS)
@@ -55,9 +55,18 @@ LATE_PEER_SECONDS = 5
 POLL_SECONDS = 0.5
 AGENT_OUTPUT = "$HOME/.hz-agent-probe.out"
 DIRECT_TARGET = "1.1.1.1:443"       # install-agnostic: allow=ip-port (the probes' literal-address target)
-# §7 Probe protection (D23): with Yama at 2, only CAP_SYS_PTRACE may attach to a process or open its
-# memory, and no workload process holds a capability (checked from the host by the channel).
-MIN_PTRACE_SCOPE = 2
+# §7 Probe protection (D23, Amendment 1). OpenShell needs Yama at exactly 1: its broker's required
+# same-UID task-memory probe fails above 1 with no capability to help it (main.rs:197), and 0 lets any
+# same-UID process attach. At 1, OpenShell's child seccomp filter denies ptrace, process_vm_* and
+# pidfd_getfd to every workload process, and Landlock keeps /proc read-only. The channel checks the
+# filters from the host; the probe checks both denials from inside.
+PTRACE_SCOPE = 1
+# The seccomp filters on every workload process OpenShell 0.1.2 starts (S5 measured 6): podman's default
+# profile, the supervisor prelude and the broker's listener, inherited, then the child hardening, the
+# compatibility and the main filter. More only restrict further; fewer means a process skipped
+# OpenShell's enforcement. A consistency check on that artifact, not proof of which filters are present:
+# any OpenShell version, runtime image or driver configuration change needs a renewed review of D23.
+SECCOMP_FILTERS = 6
 # The workload's own namespaces, from a fresh process the supervisor starts (readlink is read-only).
 NS_ARGV = ("readlink", "/proc/self/ns/user", "/proc/self/ns/mnt")
 NS_SECONDS = 30
@@ -72,6 +81,18 @@ def read_ptrace_scope(path: Path = YAMA_SCOPE) -> int:
         return int(path.read_text().strip())
     except (OSError, ValueError):
         return -1
+
+
+def ptrace_scope_refusal(scope: int) -> str:
+    """"" when the host's Yama scope is the one probe protection rests on, else why not (gap 15)."""
+    if scope == PTRACE_SCOPE:
+        return ""
+    if scope < 0:
+        return f"ptrace-scope: unreadable, the sandbox needs kernel.yama.ptrace_scope = {PTRACE_SCOPE}"
+    if scope < PTRACE_SCOPE:
+        return f"ptrace-scope: {scope}, probe protection needs kernel.yama.ptrace_scope = {PTRACE_SCOPE}"
+    return (f"ptrace-scope: {scope}, OpenShell's sandbox can't start unless "
+            f"kernel.yama.ptrace_scope = {PTRACE_SCOPE}")
 
 
 def classify(path: Path) -> str:
@@ -257,9 +278,9 @@ class OpenShellSelfTest:
         return True
 
     def _protection(self) -> None:
-        scope = self.ptrace_scope()
-        if scope < MIN_PTRACE_SCOPE:
-            raise SelfTestFailed(f"ptrace-scope: {scope}, probe protection needs {MIN_PTRACE_SCOPE} or more")
+        why = ptrace_scope_refusal(self.ptrace_scope())
+        if why:
+            raise SelfTestFailed(why)
 
     def _namespaces(self, ctx: ProbeContext) -> tuple[str, str]:
         """The workload's own user and mount namespaces, pinned before the agent is asked to run the

@@ -236,3 +236,30 @@ def test_a_symlink_loop_in_a_source_is_refused(tmp_path: Path) -> None:
     bad = replace(spec, binds=(*spec.binds, Bind(tmp_path / "loop", Path("/mnt/x"), True)))
     with pytest.raises(SpecRefused, match="symbolic links"):
         check_credentials(bad, protected(tmp_path), tmp_path / "home")
+
+
+@pytest.mark.parametrize("path", [
+    "/", "/proc", "/proc/self", "/proc/1/task", "/proc/./sys/../self",
+    "//proc",                                   # POSIX keeps a leading "//"; refused, not folded
+    "/var/run/../proc",                         # /var/run -> /run in the image: the kernel reaches /proc
+    "/dev/fd/..", "/dev/fd", "/dev/fd/3", "/dev/stdin", "/dev/stderr", "/etc/mtab",   # links into /proc
+    "/w/./x", "/w//x", "/w/x/", "w/x", "",                                            # non-canonical
+])
+def test_nothing_writable_reaches_proc(tmp_path: Path, path: str) -> None:
+    """Landlock grants the union of its rules: a writable / or /proc subtree would undo /proc's read-only
+    rule, which probe protection rests on (D23, Task 9B)."""
+    agent = replace(facts(tmp_path), read_write=(path,))
+    with pytest.raises(SpecRefused, match="^a writable path would make /proc writable$"):
+        build_spec(spec_input(tmp_path, agent=agent))
+
+
+def test_proc_is_read_only(tmp_path: Path) -> None:
+    s = build_spec(spec_input(tmp_path))
+    assert "/proc" in s.read_only
+    assert not any(p == "/proc" or p.startswith("/proc/") for p in s.read_write)
+
+
+def test_canonical_writable_paths_beside_proc_are_kept(tmp_path: Path) -> None:
+    agent = replace(facts(tmp_path), read_write=("/run/hz-bridge", "/procs", "/dev/fdx", "/dev/pts"))
+    kept = build_spec(spec_input(tmp_path, agent=agent)).read_write
+    assert {"/run/hz-bridge", "/procs", "/dev/fdx"} <= set(kept)
