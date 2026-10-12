@@ -4,6 +4,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -178,3 +179,31 @@ def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str],
         if left:
             uncertain.append(f"sandboxes still listed: {', '.join(left)}")
     return uncertain
+
+
+def gateway_listener(ss: str, port: int, proc: Path = Path("/proc"), uid: int | None = None) -> int:
+    """The PID of the one process listening on the gateway's endpoint, from `ss -ltnpeH sport = :PORT`.
+    Every listener on the port counts, on any address: exactly one is allowed, on 127.0.0.1:PORT, naming
+    exactly one PID, run by this user (`uid`, else ours) and holding that socket's inode. Anything else
+    raises ValueError."""
+    rows = [line.split() for line in ss.splitlines() if line.strip()]
+    if len(rows) != 1:
+        raise ValueError(f"{len(rows)} listeners on port {port}")
+    row = rows[0]
+    if len(row) < 4 or row[3] != f"127.0.0.1:{port}":
+        raise ValueError(f"the listener on port {port} is not on 127.0.0.1")
+    users = next((field for field in row if field.startswith("users:")), "")
+    pids = set(re.findall(r"pid=(\d+)", users))
+    if len(pids) != 1:
+        raise ValueError(f"the listener on port {port} names {len(pids)} processes")
+    inode = next((field.removeprefix("ino:") for field in row if field.startswith("ino:")), "")
+    if not inode.isdigit():
+        raise ValueError(f"the listener on port {port} shows no socket inode")
+    pid = int(pids.pop())
+    ids_line = next(line for line in (proc / str(pid) / "status").read_text().splitlines()
+                    if line.startswith("Uid:"))
+    if set(ids_line.split()[1:]) != {str(os.getuid() if uid is None else uid)}:
+        raise ValueError(f"the listener on port {port} is another user's process")
+    if f"socket:[{inode}]" not in {str(fd.readlink()) for fd in (proc / str(pid) / "fd").iterdir()}:
+        raise ValueError(f"process {pid} does not hold the listener on port {port}")
+    return pid

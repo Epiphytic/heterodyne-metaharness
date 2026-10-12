@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
-from sandbox_env import config_env, sandbox_teardown  # noqa: E402
+from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
 from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
@@ -288,14 +288,18 @@ def keys_of(table: dict[str, object], prefix: str = "") -> list[str]:
 
 def gateway_process(openshell: str, env: dict[str, str]) -> tuple[int, str]:
     """The running gateway the CLI talks to: `openshell status` names its endpoint and the version it
-    reports, and the process listening there is found by its socket. Its PID and that version."""
+    reports, and the process listening there is found by its socket (gateway_listener). Its PID and that
+    version."""
     status = dict(line.strip().split(": ", 1) for line in tool(env, openshell, "status").splitlines()
                   if ": " in line)
     endpoint = re.fullmatch(r"https://127\.0\.0\.1:(\d+)", status.get("Server", ""))
     assert endpoint and status.get("Status") == "Connected", "preflight: the gateway is not up on loopback"
-    listeners = set(re.findall(r"pid=(\d+)", tool(env, "ss", "-ltnpH", f"sport = :{endpoint[1]}")))
-    assert len(listeners) == 1, f"preflight: {len(listeners)} processes listen on the gateway's endpoint"
-    return int(listeners.pop()), status.get("Version", "")
+    port = int(endpoint[1])
+    try:
+        pid = gateway_listener(tool(env, "ss", "-ltnpeH", f"sport = :{port}"), port)
+    except (OSError, ValueError) as exc:
+        pytest.fail(f"preflight: the gateway's endpoint: {exc}")
+    return pid, status.get("Version", "")
 
 
 def sha256(path: Path) -> str:
@@ -372,7 +376,8 @@ def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
              / "openshell-sandbox")
     cached = sha256(cache) if cache.is_file() else ""
     lines.append(f"EVIDENCE artifact runtime binary: bind-mounted from the driver's cache for "
-                 f"{RUNTIME_IMAGE} id {images[RUNTIME_IMAGE][:12]}, sha256 {cached or 'not yet cached'}; "
+                 f"{RUNTIME_IMAGE} id {images[RUNTIME_IMAGE][:12]}, "
+                 f"sha256 {cached[:12] or 'not yet cached'}; "
                  f"residual: {CACHE_RESIDUAL}")
     return Artifact(podman, images, cache, cached, tuple(lines))
 
