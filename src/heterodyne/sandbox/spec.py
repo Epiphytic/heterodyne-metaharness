@@ -8,6 +8,7 @@ Every host path is bound at the same path inside, except the generation's run di
 
 import hashlib
 import os
+import posixpath
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -17,6 +18,11 @@ from heterodyne.sandbox.settings import DENIED_HOSTS, HOST
 
 RUN_INSIDE = Path("/run/hz")
 PROC_INSIDE = Path("/proc")
+# Symlinks into /proc that the workload's filesystem has whatever the image: podman makes the /dev ones
+# (to /proc/self/fd...), and Ubuntu's /etc/mtab points to ../proc/self/mounts. build_spec can't resolve the
+# image's filesystem, so a writable path at or under one of these is refused by name (Task 9B).
+PROC_ALIASES = (Path("/dev/fd"), Path("/dev/stdin"), Path("/dev/stdout"), Path("/dev/stderr"),
+                Path("/etc/mtab"))
 BRIDGE_INSIDE = Path("/run/hz-bridge")
 SOCKET_INSIDE = RUN_INSIDE / "s.sock"
 PROBE_SOCKET_INSIDE = RUN_INSIDE / "p.sock"
@@ -165,6 +171,19 @@ class SandboxSpec:
     gid: int
 
 
+def _reaches_proc(path: str) -> bool:
+    """Whether a writable rule on `path` could make /proc writable inside the workload. Landlock grants
+    the union of its rules, so anything writable at or above /proc would undo its read-only rule, which
+    probe protection rests on (D23, Task 9B). The kernel resolves the path in the workload's filesystem,
+    which isn't readable here: a spelling a lexical check can't follow ("..", ".", "//", relative, as in
+    /var/run/../proc with /var/run -> /run) is refused, and so is a path through a known alias."""
+    if not path.startswith("/") or path.startswith("//") or path != posixpath.normpath(path):
+        return True
+    w = Path(path)
+    return (PROC_INSIDE.is_relative_to(w) or w.is_relative_to(PROC_INSIDE)
+            or any(w.is_relative_to(a) for a in PROC_ALIASES))
+
+
 def build_spec(i: SpecInput) -> SandboxSpec:
     name = sandbox_name(i.key, i.generation)
     for sock in (i.layout.socket(i.generation), i.layout.probe_socket(i.generation)):
@@ -198,11 +217,7 @@ def build_spec(i: SpecInput) -> SandboxSpec:
                  *(str(b.target) for b in i.git_binds if b.read_only))
     read_write = (*SYSTEM_READ_WRITE, str(i.layout.home), *(() if worktree_ro else (str(i.worktree),)),
                   *i.agent.read_write, *(str(b.target) for b in i.git_binds if not b.read_only))
-    # Landlock grants the union of its rules: anything writable at or above /proc would undo its read-only
-    # rule, which probe protection rests on (D23, Task 9B). normpath keeps POSIX's leading "//", so it is
-    # folded to one "/" first.
-    if any(PROC_INSIDE.is_relative_to(w) or w.is_relative_to(PROC_INSIDE)
-           for w in (Path(os.path.normpath("/" + p.lstrip("/"))) for p in read_write)):
+    if any(_reaches_proc(p) for p in read_write):
         raise SpecRefused("a writable path would make /proc writable")
     cli = (str(i.agent.cli_binary),)
     egress = [Egress("model", i.agent.model_hosts, cli)]
