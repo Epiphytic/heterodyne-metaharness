@@ -32,6 +32,7 @@ from heterodyne.sandbox.openshell_selftest import (
     log_needles,
     other_accounts,
     probe_config,
+    ptrace_scope_refusal,
     read_ptrace_scope,
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
@@ -96,7 +97,7 @@ def passing_logs(ctx: ProbeContext) -> list[str]:
     return [f"[1800000000.0] [ocsf] {needle} ..." for _, needle in log_needles(ctx, "exec")]
 
 
-def selftest(scope: int = 2) -> OpenShellSelfTest:
+def selftest(scope: int = 1) -> OpenShellSelfTest:
     return OpenShellSelfTest(wall=lambda: 1_800_000_000.0, sleep=lambda s: None, ptrace_scope=lambda: scope)
 
 
@@ -417,7 +418,8 @@ def fake_probe_proc(proc: Path, cli: Path) -> None:
         (d / "stat").write_text(f"{pid} (x) S {ppid} " + "0 " * 17 + f"{pid} 0\n")   # started in pid order
         nnp = 0 if pid in (1, 7) else 1
         status = (f"Name:\tx\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{ppid}\nTracerPid:\t0\nNoNewPrivs:\t{nnp}\n"
-                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n")
+                  "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n"
+                  "Seccomp:\t2\nSeccomp_filters:\t6\n")
         (d / "status").write_text(status)
         (d / "task" / str(pid) / "status").write_text(status)
         (d / "cgroup").write_text("0::/init.scope\n" if pid == 1 else f"0::{WORKLOAD_CG}\n")
@@ -478,7 +480,7 @@ def fake_peer(s: socket.socket) -> tuple[int, int]:
 def agent_selftest(proc: Path) -> OpenShellSelfTest:
     """Real time, with every wait cut to a bounded 20 ms poll (the probe 'runs' on another thread)."""
     return OpenShellSelfTest(sleep=lambda s: time.sleep(min(s, 0.02)), proc=proc, peer=fake_peer,
-                             ptrace_scope=lambda: 2, cgroupfs=proc.parent / "cgroupfs")
+                             ptrace_scope=lambda: 1, cgroupfs=proc.parent / "cgroupfs")
 
 
 def test_agent_path_passes_on_one_verified_run() -> None:
@@ -521,7 +523,7 @@ def test_agent_path_fails_without_the_prompt() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_001_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               peer=fake_peer, ptrace_scope=lambda: 1,
                                cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-prompt"):
             st.agent_path(ctx)
@@ -534,7 +536,7 @@ def test_agent_path_fails_when_the_agent_never_runs_the_probe() -> None:
         ctx.layout.run(1).mkdir()
         clock = iter(range(1_800_000_000, 1_800_010_000))
         st = OpenShellSelfTest(clock=lambda: float(next(clock)), sleep=lambda s: None, proc=root / "proc",
-                               peer=fake_peer, ptrace_scope=lambda: 2,
+                               peer=fake_peer, ptrace_scope=lambda: 1,
                                cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="agent-path-channel: no verified probe run"):
             st.agent_path(ctx)
@@ -593,7 +595,7 @@ def test_agent_path_a_probe_finishing_during_the_last_poll_fails() -> None:
                 run_probe(ctx, good)                                # ... and the probe finishes meanwhile
 
         st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
-                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
+                               ptrace_scope=lambda: 1, cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 
@@ -643,7 +645,7 @@ def test_agent_path_a_handshake_finishing_after_the_deadline_fails() -> None:
 
         tmux.on_paste.append(probe)
         st = OpenShellSelfTest(clock=lambda: now[0], sleep=sleep, proc=root / "proc", peer=fake_peer,
-                               ptrace_scope=lambda: 2, cgroupfs=root / "cgroupfs")
+                               ptrace_scope=lambda: 1, cgroupfs=root / "cgroupfs")
         with pytest.raises(SelfTestFailed, match="^agent-path-channel: the probe did not finish in time$"):
             st.agent_path(ctx)
 
@@ -652,25 +654,38 @@ def test_both_paths_run_the_protection_checks() -> None:
     assert set(PROTECTION_CHECKS) <= set(EXEC_CHECKS) and set(PROTECTION_CHECKS) <= set(AGENT_CHECKS)
 
 
-@pytest.mark.parametrize("scope", [-1, 0, 1])
-def test_the_exec_path_needs_ptrace_scope_2(tmp_path: Path, scope: int) -> None:
+@pytest.mark.parametrize("scope, why", [
+    (1, ""),
+    (-1, "ptrace-scope: unreadable, the sandbox needs kernel.yama.ptrace_scope = 1"),
+    (0, "ptrace-scope: 0, probe protection needs kernel.yama.ptrace_scope = 1"),
+    (2, "ptrace-scope: 2, OpenShell's sandbox can't start unless kernel.yama.ptrace_scope = 1"),
+    (3, "ptrace-scope: 3, OpenShell's sandbox can't start unless kernel.yama.ptrace_scope = 1"),
+])
+def test_ptrace_scope_refusal(scope: int, why: str) -> None:
+    assert ptrace_scope_refusal(scope) == why
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 2, 3])
+def test_the_exec_path_needs_ptrace_scope_1(tmp_path: Path, scope: int) -> None:
     backend = StubBackend()
     ctx = context(tmp_path, backend)
-    with pytest.raises(SelfTestFailed, match=f"^ptrace-scope: {scope}, probe protection needs 2 or more$"):
+    with pytest.raises(SelfTestFailed) as failed:
         selftest(scope).exec_path(ctx)
+    assert str(failed.value) == ptrace_scope_refusal(scope)
     assert backend.calls == []
 
 
-def test_the_agent_path_needs_ptrace_scope_2() -> None:
+def test_the_agent_path_needs_ptrace_scope_1() -> None:
     with short_dir() as root:
         tmux = StubTmux()
         ctx = agent_context(root, tmux)
         fake_probe_proc(root / "proc", root / "codex")
         ctx.layout.run(1).mkdir()
         st = OpenShellSelfTest(sleep=lambda s: None, proc=root / "proc", peer=fake_peer,
-                               ptrace_scope=lambda: 1)
-        with pytest.raises(SelfTestFailed, match="^ptrace-scope: 1, probe protection needs 2 or more$"):
+                               ptrace_scope=lambda: 2)
+        with pytest.raises(SelfTestFailed) as failed:
             st.agent_path(ctx)
+        assert str(failed.value) == ptrace_scope_refusal(2)
         assert tmux.pasted == []
 
 
@@ -688,7 +703,7 @@ def test_the_agent_path_needs_the_workload_namespaces_pinned(out: bytes) -> None
 
 
 def test_read_ptrace_scope(tmp_path: Path) -> None:
-    (tmp_path / "scope").write_text("2\n")
+    (tmp_path / "scope").write_text("1\n")
     (tmp_path / "junk").write_text("x")
     assert (read_ptrace_scope(tmp_path / "scope"), read_ptrace_scope(tmp_path / "junk"),
-            read_ptrace_scope(tmp_path / "missing")) == (2, -1, -1)
+            read_ptrace_scope(tmp_path / "missing")) == (1, -1, -1)

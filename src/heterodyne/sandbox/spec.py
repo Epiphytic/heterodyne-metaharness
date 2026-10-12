@@ -16,6 +16,7 @@ from pathlib import Path
 from heterodyne.sandbox.settings import DENIED_HOSTS, HOST
 
 RUN_INSIDE = Path("/run/hz")
+PROC_INSIDE = Path("/proc")
 BRIDGE_INSIDE = Path("/run/hz-bridge")
 SOCKET_INSIDE = RUN_INSIDE / "s.sock"
 PROBE_SOCKET_INSIDE = RUN_INSIDE / "p.sock"
@@ -197,6 +198,12 @@ def build_spec(i: SpecInput) -> SandboxSpec:
                  *(str(b.target) for b in i.git_binds if b.read_only))
     read_write = (*SYSTEM_READ_WRITE, str(i.layout.home), *(() if worktree_ro else (str(i.worktree),)),
                   *i.agent.read_write, *(str(b.target) for b in i.git_binds if not b.read_only))
+    # Landlock grants the union of its rules: anything writable at or above /proc would undo its read-only
+    # rule, which probe protection rests on (D23, Task 9B). normpath keeps POSIX's leading "//", so it is
+    # folded to one "/" first.
+    if any(PROC_INSIDE.is_relative_to(w) or w.is_relative_to(PROC_INSIDE)
+           for w in (Path(os.path.normpath("/" + p.lstrip("/"))) for p in read_write)):
+        raise SpecRefused("a writable path would make /proc writable")
     cli = (str(i.agent.cli_binary),)
     egress = [Egress("model", i.agent.model_hosts, cli)]
     if i.extra_egress:

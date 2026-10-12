@@ -46,6 +46,9 @@ NET_DEV = "Inter-|   Receive\n face |bytes    packets\n    lo: 0 0\n"
 Results = tuple[int, dict[str, bool]]
 
 
+LIBC_CALLS = ("ptrace", "process_vm_writev", "pidfd_getfd", "unshare")   # section 11's, all filtered
+
+
 @dataclass
 class World:
     """A sandbox as the probe sees it. The defaults enforce every rule."""
@@ -57,7 +60,9 @@ class World:
     inet: int = errno.EACCES               # the broker's answer to an INET connect()
     udp_send: int = errno.EDESTADDRREQ     # ... to a non-DNS UDP sendto()
     raw: int = errno.EPROTONOSUPPORT       # ... to a raw or ICMP socket(); 0 creates it
-    attach: int = errno.EPERM              # ptrace(PTRACE_ATTACH) on the probe's child; 0 attaches
+    calls: dict[str, int] = field(               # each libc call's errno; 0 succeeds
+        default_factory=lambda: dict.fromkeys(LIBC_CALLS, errno.EPERM))
+    last_errno: int = 0
     cgroupfs: str = "ro"                   # how /sys/fs/cgroup is mounted: "ro", "rw", or an errno's name
     resolve: str = SYNTHETIC
     session_socket: bool = True
@@ -167,18 +172,27 @@ class FakeChild:
         return -9
 
 
+@dataclass
+class FakeCall:
+    world: World
+    name: str
+    restype: object = None
+    argtypes: object = None
+
+    def __call__(self, *args: object) -> int:
+        self.world.last_errno = self.world.calls[self.name]
+        return -1 if self.world.last_errno else 0
+
+
 class FakeLibc:
     def __init__(self, world: World) -> None:
         self.world = world
-        self.restype: object = None
-        self.argtypes: object = None
+        self.made: dict[str, FakeCall] = {}
 
-    @property
-    def ptrace(self) -> "FakeLibc":
-        return self
-
-    def __call__(self, request: int, pid: int, addr: object, data: object) -> int:
-        return 0 if self.world.attach == 0 else -1
+    def __getattr__(self, name: str) -> FakeCall:
+        if name not in LIBC_CALLS:
+            raise AttributeError(name)
+        return self.made.setdefault(name, FakeCall(self.world, name))
 
 
 @pytest.fixture
@@ -191,8 +205,10 @@ def world(tmp_path: Path) -> World:
     w.put("/proc/net/route", "Iface\tDestination\tGateway\n")
     w.put("/proc/net/ipv6_route", "00000000000000000000000000000001 80 0 0 0 0 0 0 0 lo\n")
     w.put("/proc/self/status", STATUS)
-    w.put(f"/proc/{CHILD}/mem", "")                     # Yama at 2: the child's memory can't be opened
+    w.put(f"/proc/{CHILD}/mem", "")                     # Landlock: /proc is read-only
     w.denied[f"/proc/{CHILD}/mem"] = errno.EACCES
+    w.put("/proc/self/comm", "python3\n")
+    w.denied["/proc/self/comm"] = errno.EACCES
     w.put(f"{CGROUPFS}/cgroup.freeze", "0\n")              # the container's own, mounted read-only
     w.put(f"{CGROUPFS}/cgroup.procs", "1\n")
     return w
@@ -222,7 +238,7 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
         monkeypatch.setattr(subprocess, "run", curl)
         monkeypatch.setattr(subprocess, "Popen", FakeChild)
         monkeypatch.setattr(ctypes, "CDLL", lambda name, use_errno=False: FakeLibc(world))
-        monkeypatch.setattr(ctypes, "get_errno", lambda: world.attach)
+        monkeypatch.setattr(ctypes, "get_errno", lambda: world.last_errno)
         try:
             exec(CODE, {"__name__": "__main__", "open": world.open})  # noqa: S102 - the probe script itself
             rc = -1                                    # the probe always ends with sys.exit
@@ -272,6 +288,20 @@ def _cgroupfs_rw(*, writable: bool) -> Callable[[World], None]:
     return go
 
 
+def _call(name: str, code: int) -> Callable[[World], None]:
+    return lambda w: w.calls.update({name: code})
+
+
+def _deny(path: str, code: int | None) -> Callable[[World], None]:
+    """`path`'s open answers `code`, or succeeds when None."""
+    def go(w: World) -> None:
+        if code is None:
+            del w.denied[path]
+        else:
+            w.denied[path] = code
+    return go
+
+
 NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
     ("a mounted real-home canary", lambda w: w.put(REAL_HOME_CANARY, "x"), {"real-home-canary-unreadable"}),
     ("a mounted other-accounts canary", lambda w: w.put(OA_CANARY, "x"), {"other-accounts"}),
@@ -313,10 +343,20 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
      {"openshell-control-material-unreadable"}),
     ("a readable secrets directory", lambda w: w.put("/run/secrets/actual.jwt", "fake"),
      {"openshell-control-material-unreadable"}),
-    ("the probe's child attachable", lambda w: setattr(w, "attach", 0), {"probe-tamper-denied"}),
-    ("the attach refused only because the child is gone", lambda w: setattr(w, "attach", errno.ESRCH),
+    ("the probe's child attachable", _call("ptrace", 0), {"probe-tamper-denied"}),
+    ("the attach refused only because the child is gone", _call("ptrace", errno.ESRCH),
      {"probe-tamper-denied"}),
-    ("the child's memory writable", lambda w: w.denied.clear(), {"probe-tamper-denied"}),
+    ("ptrace missing, not denied by OpenShell's filter", _call("ptrace", errno.ENOSYS),
+     {"probe-tamper-denied"}),
+    ("process_vm_writev unfiltered", _call("process_vm_writev", 0), {"probe-tamper-denied"}),
+    ("pidfd_getfd unfiltered", _call("pidfd_getfd", errno.EBADF), {"probe-tamper-denied"}),
+    ("unshare unfiltered", _call("unshare", 0), {"probe-tamper-denied"}),
+    ("the child's memory writable", _deny(f"/proc/{CHILD}/mem", None), {"probe-tamper-denied"}),
+    ("the child's memory refused by something but Landlock", _deny(f"/proc/{CHILD}/mem", errno.EPERM),
+     {"probe-tamper-denied"}),
+    ("/proc writable", _deny("/proc/self/comm", None), {"proc-readonly"}),
+    ("/proc/self/comm refused by something but Landlock", _deny("/proc/self/comm", errno.EPERM),
+     {"proc-readonly"}),
     ("the run directory writable", lambda w: setattr(w, "readonly", (CHOSEN, CGROUPFS)),
      {"probe-files-readonly"}),
     ("the cgroupfs mounted read-write", _cgroupfs_rw(writable=True),

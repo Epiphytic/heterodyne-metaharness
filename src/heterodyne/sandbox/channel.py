@@ -15,7 +15,8 @@ Reads, connections and the time per connection are bounded, and `close` finishes
 verdict is read.
 It also checks, at both points, that nothing in the workload can tamper with the probe while it runs (§7
 Probe protection, D23). With the workload's cgroup frozen, every thread its cgroup tree lists, but its
-first process's, has no_new_privs and no capability; a check it can't freeze, complete or thaw fails.
+first process's, has no_new_privs, no capability, and OpenShell's seccomp filters (`Seccomp: 2`, at least
+SECCOMP_FILTERS of them; Amendment 1). A check it can't freeze, complete or thaw fails.
 """
 
 import json
@@ -30,7 +31,12 @@ from pathlib import Path
 from typing import cast
 
 from heterodyne.platform import peer_pidfd_checked
-from heterodyne.sandbox.openshell_selftest import MIN_PTRACE_SCOPE, PROBE_ARGV, PROBE_EXE
+from heterodyne.sandbox.openshell_selftest import (
+    PROBE_ARGV,
+    PROBE_EXE,
+    SECCOMP_FILTERS,
+    ptrace_scope_refusal,
+)
 
 MAX_LINE = 64 << 10
 MAX_PEERS = 16              # connections served at once; any more is closed at once, and rejected
@@ -181,8 +187,8 @@ class ProcVerifier:
         return tids
 
     def _threads(self, pid: int, budget: _Budget) -> str:
-        """"" when no workload thread outside the first process can gain or holds a capability (they are
-        per thread), else why not."""
+        """"" when every workload thread outside the first process runs under no_new_privs, without a
+        capability, and under OpenShell's seccomp filters (all three are per thread), else why not."""
         try:
             if start_time(self.proc, self.root) != self.root_start:
                 return "the workload's first process changed"
@@ -198,6 +204,8 @@ class ProcVerifier:
                 tgid, own = int(self._field(status, "Tgid")), int(self._field(status, "Pid"))
                 nnp = self._field(status, "NoNewPrivs")
                 caps = {self._field(status, "CapPrm"), self._field(status, "CapEff")}
+                seccomp = self._field(status, "Seccomp")
+                filters = int(self._field(status, "Seccomp_filters"))
             except GONE:
                 return "a workload thread ended while the workload was frozen"
             except (OSError, IndexError, ValueError):
@@ -211,6 +219,11 @@ class ProcVerifier:
                 return f"{who} can gain privileges"
             if caps != {NO_CAPS}:
                 return f"{who} holds capabilities"
+            if seccomp != "2":
+                return f"{who} has no seccomp filter"
+            if filters < SECCOMP_FILTERS:
+                return (f"{who} has {filters} seccomp filters; OpenShell gives every workload process "
+                        f"{SECCOMP_FILTERS}")
         return ""
 
     def _identity(self, pid: int, budget: _Budget) -> str:
@@ -257,9 +270,9 @@ class ProcVerifier:
             return str(exc)
 
     def __call__(self, pid: int) -> str:
-        scope = self.ptrace_scope()
-        if scope < MIN_PTRACE_SCOPE:
-            return f"kernel.yama.ptrace_scope is {scope}; probe protection needs {MIN_PTRACE_SCOPE} or more"
+        why = ptrace_scope_refusal(self.ptrace_scope())
+        if why:
+            return why
         with self._lock:
             try:
                 why = self._frozen(pid, _Budget(self.clock, self.budget))

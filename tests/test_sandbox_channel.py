@@ -15,7 +15,7 @@ from sandbox_env import short_dir, wait_for
 
 from heterodyne.sandbox import channel as channel_module
 from heterodyne.sandbox.channel import ACK, MAX_LINE, MAX_PEERS, ProbeChannel, ProcVerifier
-from heterodyne.sandbox.openshell_selftest import PROBE_ARGV, PROBE_EXE
+from heterodyne.sandbox.openshell_selftest import PROBE_ARGV, PROBE_EXE, ptrace_scope_refusal
 
 NETNS = "net:[4026531999]"
 CLI = "/opt/codex/bin/codex"
@@ -29,9 +29,11 @@ SELF_CG = "/user.slice/user-1001.slice/user-session.slice/tmux-spawn-hz.scope"  
 HOST_CG = "/init.scope"
 
 
-def status_text(tgid: int, tid: int, ppid: int, *, tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS) -> str:
+def status_text(tgid: int, tid: int, ppid: int, *, tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
+                seccomp: int = 2, filters: int = 6) -> str:
     return (f"Name:\tpython3\nTgid:\t{tgid}\nPid:\t{tid}\nPPid:\t{ppid}\nTracerPid:\t{tracer}\n"
-            f"Uid:\t1000\nNoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n")
+            f"Uid:\t1000\nNoNewPrivs:\t{nnp}\nCapPrm:\t{caps}\nCapEff:\t{caps}\n"
+            f"Seccomp:\t{seccomp}\nSeccomp_filters:\t{filters}\n")
 
 
 def stat_text(pid: int, ppid: int, start: int) -> str:
@@ -57,18 +59,21 @@ def join(root: Path, cgroup: str | None, tid: int) -> None:
 
 
 def fake_thread(root: Path, pid: int, tid: int, *, ppid: int, nnp: int = 1, caps: str = NO_CAPS,
-                cgroup: str | None = WORKLOAD_CG) -> None:
+                seccomp: int = 2, filters: int = 6, cgroup: str | None = WORKLOAD_CG) -> None:
     """A thread of `pid` other than its leader: /proc/<tid> shows its own status."""
     (root / str(tid)).mkdir()
-    (root / str(tid) / "status").write_text(status_text(pid, tid, ppid, nnp=nnp, caps=caps))
+    (root / str(tid) / "status").write_text(status_text(pid, tid, ppid, nnp=nnp, caps=caps, seccomp=seccomp,
+                                                        filters=filters))
     join(root, cgroup, tid)
 
 
 def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: int, netns: str = NETNS,
               env: tuple[str, ...] = ("HOME=/s/home",), tracer: int = 0, nnp: int = 1, caps: str = NO_CAPS,
+              seccomp: int = 2, filters: int = 6,
               userns: str = "user:[4026531837]", mntns: str = "mnt:[4026532001]",
               start: int | None = None, cgroup: str | None = WORKLOAD_CG) -> None:
-    """A process, its leader thread listed in `cgroup`; it started at `start` (its pid unless given)."""
+    """A process, its leader thread listed in `cgroup`; it started at `start` (its pid unless given). By
+    default it carries OpenShell's six filters (Task 9B)."""
     d = root / str(pid)
     (d / "ns").mkdir(parents=True)
     (d / "stat").write_text(stat_text(pid, ppid, pid if start is None else start))
@@ -79,7 +84,8 @@ def fake_proc(root: Path, pid: int, *, exe: str, argv: tuple[str, ...], ppid: in
     (d / "ns" / "mnt").symlink_to(mntns)
     (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
     (d / "environ").write_bytes(b"".join(e.encode() + b"\0" for e in env))
-    (d / "status").write_text(status_text(pid, pid, ppid, tracer=tracer, nnp=nnp, caps=caps))
+    (d / "status").write_text(status_text(pid, pid, ppid, tracer=tracer, nnp=nnp, caps=caps, seccomp=seccomp,
+                                          filters=filters))
     join(root, cgroup, pid)
 
 
@@ -102,7 +108,7 @@ WORKLOAD_NS = ("user:[4026531837]", "mnt:[4026532001]")      # fake_proc's defau
 AGENT_NS: dict[str, Any] = {"userns": "user:[4026533334]", "mntns": "mnt:[4026533333]"}
 
 
-def verifier(root: Path, scope: int = 2, **kw: Any) -> ProcVerifier:
+def verifier(root: Path, scope: int = 1, **kw: Any) -> ProcVerifier:
     cgroup_dir(root, WORKLOAD_CG)
     return ProcVerifier(NETNS, CLI, ALLOWED, namespaces=WORKLOAD_NS, root_pid=7, root_start=7,
                         cgroup=WORKLOAD_CG, ptrace_scope=lambda: scope, proc=root,
@@ -566,10 +572,10 @@ def test_a_probe_that_could_be_tampered_with_is_rejected(tmp_path: Path, probe: 
     assert reason in verifier(tmp_path)(32)
 
 
-@pytest.mark.parametrize("scope", [-1, 0, 1])
-def test_a_ptrace_scope_below_2_is_rejected(tmp_path: Path, scope: int) -> None:
+@pytest.mark.parametrize("scope", [-1, 0, 2, 3])
+def test_a_ptrace_scope_other_than_1_is_rejected(tmp_path: Path, scope: int) -> None:
     probe_tree(tmp_path)
-    assert f"kernel.yama.ptrace_scope is {scope}" in verifier(tmp_path, scope)(32)
+    assert verifier(tmp_path, scope)(32) == ptrace_scope_refusal(scope)
 
 
 def test_a_capable_workload_process_is_rejected(tmp_path: Path) -> None:
@@ -775,11 +781,11 @@ def test_a_thaw_that_fails_fails_the_verdict(tmp_path: Path, monkeypatch: pytest
     assert v(32) == "the workload could not be thawed"
 
 
-def test_a_low_ptrace_scope_never_freezes(tmp_path: Path) -> None:
+def test_a_wrong_ptrace_scope_never_freezes(tmp_path: Path) -> None:
     probe_tree(tmp_path)
-    v = verifier(tmp_path, scope=1)
+    v = verifier(tmp_path, scope=2)
     (cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.freeze").unlink()
-    assert v(32).startswith("kernel.yama.ptrace_scope is 1")
+    assert v(32) == ptrace_scope_refusal(2)
 
 
 @pytest.mark.parametrize("hide", ["threads", "status", "subdir"])
@@ -800,6 +806,8 @@ def test_unreadable_evidence_fails_closed(tmp_path: Path, hide: str) -> None:
 @pytest.mark.parametrize("status", [
     "Name:\tx\nTgid:\t40\nPid:\t40\n",                                       # no NoNewPrivs or caps
     status_text(40, 41, 31),                                                 # another thread's status
+    status_text(40, 40, 31).replace("Seccomp_filters:\t6\n", ""),           # no filter count
+    status_text(40, 40, 31).replace("Seccomp_filters:\t6", "Seccomp_filters:\tsix"),
 ])
 def test_malformed_evidence_fails_closed(tmp_path: Path, status: str) -> None:
     probe_tree(tmp_path)
@@ -956,3 +964,45 @@ def test_the_workload_cgroup_is_pinned_only_when_safe(tmp_path: Path, cgroup: st
     else:
         with pytest.raises(ValueError, match="cgroup"):
             channel_module.workload_cgroup(tmp_path, 7)
+
+
+FILTERS_REASON = "has {n} seccomp filters; OpenShell gives every workload process 6"
+
+
+@pytest.mark.parametrize("fields, reason", [
+    ({"seccomp": 0}, "workload process 40 has no seccomp filter"),
+    ({"seccomp": 1}, "workload process 40 has no seccomp filter"),          # strict mode
+    ({"filters": 5}, "workload process 40 " + FILTERS_REASON.format(n=5)),  # skipped the main filter
+    ({"filters": 2}, "workload process 40 " + FILTERS_REASON.format(n=2)),  # the supervisor's, inherited
+])
+def test_a_workload_process_outside_openshells_filters_is_rejected(
+        tmp_path: Path, fields: dict[str, Any], reason: str) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, **fields)
+    assert verifier(tmp_path)(32) == reason
+    assert freeze_state(tmp_path) == "0"
+
+
+def test_the_probe_itself_needs_openshells_filters(tmp_path: Path) -> None:
+    probe_tree(tmp_path, filters=5)
+    assert verifier(tmp_path)(32) == "workload process 32 " + FILTERS_REASON.format(n=5)
+
+
+def test_a_thread_with_fewer_filters_behind_a_full_leader_is_rejected(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31)
+    fake_thread(tmp_path, 40, 41, ppid=31, filters=5)
+    assert verifier(tmp_path)(32) == "workload process 40 (thread 41) " + FILTERS_REASON.format(n=5)
+
+
+def test_more_filters_than_openshells_pass(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    extra(tmp_path, 40, 31, filters=7)
+    assert verifier(tmp_path)(32) == ""
+
+
+def test_the_first_process_is_exempt_from_the_filter_check(tmp_path: Path) -> None:
+    """The supervisor carries only podman's profile and its own prelude; it is inside the TCB."""
+    probe_tree(tmp_path)
+    (tmp_path / "7" / "status").write_text(status_text(7, 7, 1, nnp=0, caps="000001ffffffffff", filters=2))
+    assert verifier(tmp_path)(32) == ""

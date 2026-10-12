@@ -236,3 +236,19 @@ def test_a_symlink_loop_in_a_source_is_refused(tmp_path: Path) -> None:
     bad = replace(spec, binds=(*spec.binds, Bind(tmp_path / "loop", Path("/mnt/x"), True)))
     with pytest.raises(SpecRefused, match="symbolic links"):
         check_credentials(bad, protected(tmp_path), tmp_path / "home")
+
+
+@pytest.mark.parametrize("path", ["/", "/proc", "/proc/self", "/proc/1/task", "/proc/./sys/../self",
+                                  "//proc"])
+def test_nothing_writable_reaches_proc(tmp_path: Path, path: str) -> None:
+    """Landlock grants the union of its rules: a writable / or /proc subtree would undo /proc's read-only
+    rule, which probe protection rests on (D23, Task 9B)."""
+    agent = replace(facts(tmp_path), read_write=(path,))
+    with pytest.raises(SpecRefused, match="^a writable path would make /proc writable$"):
+        build_spec(spec_input(tmp_path, agent=agent))
+
+
+def test_proc_is_read_only(tmp_path: Path) -> None:
+    s = build_spec(spec_input(tmp_path))
+    assert "/proc" in s.read_only
+    assert not any(p == "/proc" or p.startswith("/proc/") for p in s.read_write)

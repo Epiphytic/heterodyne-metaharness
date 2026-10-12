@@ -8,6 +8,7 @@ from test_sandbox_openshell_policy import spec
 
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable
 from heterodyne.sandbox.openshell import OpenShellBackend, policy, tool_env
+from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal
 
 
 class Script:
@@ -35,9 +36,9 @@ class Script:
         self.now += seconds
 
 
-def backend(script: Script) -> OpenShellBackend:
+def backend(script: Script, scope: int = 1) -> OpenShellBackend:
     return OpenShellBackend("openshell", "podman", "img:1", {"PATH": "/usr/bin"}, runner=script,
-                            clock=script.clock, sleep=script.sleep)
+                            clock=script.clock, sleep=script.sleep, ptrace_scope=lambda: scope)
 
 
 def test_create_writes_the_policy_privately_and_waits_until_exec_works(tmp_path: Path) -> None:
@@ -170,3 +171,13 @@ def test_kill_with_no_container_kills_nothing() -> None:
     script = Script((("podman", "ps"), 0, b""),)
     backend(script).kill("hz0123456789abg1")
     assert [c[0][:2] for c in script.calls] == [["podman", "ps"]]
+
+
+@pytest.mark.parametrize("scope", [-1, 0, 2, 3])
+def test_create_refuses_a_host_ptrace_scope_other_than_1(tmp_path: Path, scope: int) -> None:
+    """OpenShell can't start at 2 or 3; 0 leaves the probe unguarded. Nothing is written or submitted."""
+    script = Script()
+    with pytest.raises(BackendError) as failed:
+        backend(script, scope).create(spec(), tmp_path / "scratch")
+    assert str(failed.value) == ptrace_scope_refusal(scope)
+    assert script.calls == [] and not (tmp_path / "scratch").exists()
