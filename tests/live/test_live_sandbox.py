@@ -66,8 +66,16 @@ EXEC_SECONDS = 60
 OPENSHELL_VERSION = "openshell 0.1.2"
 GATEWAY_PACKAGE = ("openshell", "0.1.2-1", "/usr/bin/openshell-gateway")
 GATEWAY_ENV = {"OPENSHELL_COMPUTE_DRIVER", "OPENSHELL_GATEWAY_CONFIG", "OPENSHELL_LOCAL_TLS_DIR"}
+RUNTIME_IMAGE = "ghcr.io/nvidia/openshell/sandbox:0.1.2"
 SUPERVISOR_IMAGE = "ghcr.io/nvidia/openshell/supervisor:0.1.2"
-DRIVER_IMAGES = ("ghcr.io/nvidia/openshell/sandbox:0.1.2", SUPERVISOR_IMAGE)
+DRIVER_IMAGES = (RUNTIME_IMAGE, SUPERVISOR_IMAGE)
+# The workload's runtime binary (it applies the prelude, the broker and the child filters D23 relies on) is
+# not an image mount: on every create the driver copies /openshell-sandbox out of the runtime image into a
+# host cache keyed by the image's ID, reused once there (v0.1.2 driver.rs:1124-1134, :1895-1960), and binds
+# that file at SUPERVISOR_CONTAINER_BINARY (container.rs:1365-1375; driver_utils.rs:94-102, :906-923).
+RUNTIME_BINARY = "/opt/openshell/bin/openshell-sandbox"
+CACHE_RESIDUAL = ("the cache is host-side and same-UID, keyed by the image ID and checked only as ELF; it "
+                  "is not compared with the image's own /openshell-sandbox")
 PREFLIGHT_SECONDS = 30
 
 
@@ -75,6 +83,8 @@ PREFLIGHT_SECONDS = 30
 class Artifact:
     podman: tuple[str, ...]          # podman on the running gateway's own endpoint
     images: dict[str, str]           # image -> its ID there
+    runtime_binary: Path             # the driver's cache of the runtime image's binary
+    runtime_sha256: str              # its digest at the preflight ("" if no create has cached it yet)
     lines: tuple[str, ...]           # the evidence: versions, key names and IDs, never a value or a path
 
 
@@ -122,8 +132,9 @@ class Live:
 
     def ran_on(self, key: str) -> str:
         """The images the session's containers run, through the gateway's endpoint: the workload on the
-        agent image, its supervisor on the driver's supervisor image, each the ID the preflight recorded,
-        and any image the workload mounts one the preflight recorded too."""
+        agent image, its supervisor on the driver's supervisor image, each the ID the preflight recorded;
+        the runtime binary bound from the driver's cache for the preflight's runtime image ID, unchanged
+        through the run; and any image the workload mounts one the preflight recorded too."""
         name, images = self.record(key).sandbox, self.artifact.images
 
         def podman(*argv: str) -> str:
@@ -137,16 +148,27 @@ class Live:
                             f"openshell-supervisor-{found[0].removeprefix(prefix)}")
         assert workload == images[self.backend.image], f"{name}'s workload runs image {workload}"
         assert supervisor == images[SUPERVISOR_IMAGE], f"{name}'s supervisor runs image {supervisor}"
+        listed = json.loads(podman("container", "inspect", "--format", "{{json .Mounts}}", found[0])) or []
+        mounts = [m for m in listed if isinstance(m, dict)]
+        runtime = [m for m in mounts if m.get("Destination") == RUNTIME_BINARY]
+        assert len(runtime) == 1 and runtime[0].get("Type") == "bind", \
+            f"{name}'s runtime binary is not one bind mount at {RUNTIME_BINARY}"
+        assert runtime[0].get("Source") == str(self.artifact.runtime_binary), \
+            f"{name}'s runtime binary is not the driver's cache for the preflight's {RUNTIME_IMAGE}"
+        digest = sha256(self.artifact.runtime_binary)
+        assert digest == (self.artifact.runtime_sha256 or digest), \
+            f"{name}'s runtime binary changed in the run"
         mounted: list[str] = []
-        for m in json.loads(podman("container", "inspect", "--format", "{{json .Mounts}}", found[0])) or []:
-            if not isinstance(m, dict) or m.get("Type") != "image":
+        for m in mounts:
+            if m.get("Type") != "image":
                 continue
             said = {str(m.get(k, "")).removeprefix("sha256:") for k in ("Name", "Source")} - {""}
             known = [i for i, iid in images.items()
                      if i in said or any(len(x) >= 12 and iid.startswith(x) for x in said)]
             assert known, f"{name} mounts an image the preflight didn't see, at {m.get('Destination')}"
             mounted += known
-        return f"workload-image={workload[:12]} supervisor-image={supervisor[:12]} image-mounts={mounted}"
+        return (f"workload-image={workload[:12]} supervisor-image={supervisor[:12]} runtime-binary="
+                f"cache-of-{images[RUNTIME_IMAGE][:12]}:sha256-{digest[:12]} image-mounts={mounted}")
 
     def record(self, key: str) -> SessionRecord:
         rec = read_record(self.runtime.layout(key))
@@ -276,6 +298,10 @@ def gateway_process(openshell: str, env: dict[str, str]) -> tuple[int, str]:
     return int(listeners.pop()), status.get("Version", "")
 
 
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def started_at(pid: int) -> float:
     """A process's start, in seconds since the epoch: /proc/<pid>/stat's starttime after the boot time."""
     ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
@@ -339,7 +365,16 @@ def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
         found = tool(env, *podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image)
         images[image] = found.split()[0]
         lines.append(f"EVIDENCE artifact image {image} id {found}")
-    return Artifact(podman, images, tuple(lines))
+    # driver_utils.rs supervisor_cache_path: the gateway's XDG data directory, then the driver's subdirectory
+    # and the image ID with ':' made '-'. The gateway's own environment resolves it.
+    data = Path(penv.get("XDG_DATA_HOME") or Path(penv["HOME"]) / ".local" / "share")
+    cache = (data / "openshell" / "podman-sandbox" / images[RUNTIME_IMAGE].replace(":", "-")
+             / "openshell-sandbox")
+    cached = sha256(cache) if cache.is_file() else ""
+    lines.append(f"EVIDENCE artifact runtime binary: bind-mounted from the driver's cache for "
+                 f"{RUNTIME_IMAGE} id {images[RUNTIME_IMAGE][:12]}, sha256 {cached or 'not yet cached'}; "
+                 f"residual: {CACHE_RESIDUAL}")
+    return Artifact(podman, images, cache, cached, tuple(lines))
 
 
 def teardown(live: Live) -> list[str]:
