@@ -17,8 +17,8 @@ Linux, which runs no agents: the operator enables the runtime by editing that on
 
    and `[sandbox] image = "localhost/heterodyne-agent:1"` in the host config.
 4. The pinned agent CLIs installed on the host (`[adapters.<name>] binary`), with a default login each.
-5. `kernel.yama.ptrace_scope` at 2 or more (probe protection, §7). With a lower value every launch
-   fails closed and names the setting.
+5. `kernel.yama.ptrace_scope` at exactly 1 (probe protection, §7; plan 4 Amendment 1). At any other
+   value every launch fails closed and names the setting.
 
 Every launch runs the §7 self-test before the agent does any work; a failed check refuses the launch
 and names the check. `docs/wsd.md` describes what the runtime does.

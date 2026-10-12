@@ -6351,7 +6351,11 @@ Filters are inherited across `fork` and `exec` and can't be removed. A new filte
 
 **Precondition: the inspected OpenShell artifact.** D23's mechanism and this task's checks are evidenced for one artifact and its configuration:
 - OpenShell 0.1.2, from the `openshell 0.1.2-1` package;
-- the podman compute driver (`OPENSHELL_COMPUTE_DRIVER=podman`), with no image or supervisor-binary override in the gateway configuration, so the supervisor comes from the default runtime image `ghcr.io/nvidia/openshell/sandbox:0.1.2` (`crates/openshell-core/src/config.rs:94-116`). That image is pinned by tag; Task 14 records its digest on the first live run;
+- the podman compute driver (`OPENSHELL_COMPUTE_DRIVER=podman`), with no image or supervisor override in the gateway configuration, so the driver uses its two default images (`crates/openshell-core/src/config.rs:85-108`):
+  - the sandbox runtime image `ghcr.io/nvidia/openshell/sandbox:0.1.2`. The driver copies its `/openshell-sandbox` binary to a host cache file named by the image ID and bind-mounts it into the workload at `/opt/openshell/bin/openshell-sandbox` on every create (`crates/openshell-driver-podman/src/driver.rs:1124-1134`, `:1895-1960`; `container.rs:1365-1375`). That binary is the workload's first process, which installs the prelude and the filters below;
+  - the supervisor image `ghcr.io/nvidia/openshell/supervisor:0.1.2`, which runs `/openshell-supervisor` in its own sidecar container (`container.rs:1592`).
+
+  Both are pinned by tag. Task 14 records both image IDs, and the cached binary's path and hash, on every live run. *(Erratum from Task 14's code review: this item first named only the runtime image.)*
 - podman's default seccomp profile, which the driver leaves in place.
 
 A change to any of these needs a renewed review of D23 and of this task before a launch relies on it, whatever the filter count then is. The checks below stay as they are, but they don't replace that review.
@@ -9525,7 +9529,7 @@ This is the roadmap's plan 4 live gate. It is **[r15]** because its pass criteri
 **What the host needs:**
 - the S5 host changes (§17 #3);
 - `kernel.yama.ptrace_scope = 1` (gap 15, Amendment 1), which is the reference host's value already; at 0, 2 or 3 every launch fails `ptrace-scope` before the sandbox is created;
-- the OpenShell artifact Task 9B's precondition names: `openshell --version` reports 0.1.2, the gateway uses the podman driver with no image override, and the runtime image is `ghcr.io/nvidia/openshell/sandbox:0.1.2`. On anything else, stop: that needs D23's renewed review first;
+- the OpenShell artifact Task 9B's precondition names: `openshell --version` reports 0.1.2, the gateway uses the podman driver with no image override, and the driver's images are its defaults, `ghcr.io/nvidia/openshell/sandbox:0.1.2` (the workload's runtime binary) and `ghcr.io/nvidia/openshell/supervisor:0.1.2` (the sidecar). On anything else, stop: that needs D23's renewed review first;
 - the agent image (`packaging/sandbox/README.md`);
 - both pinned CLIs on `PATH`;
 - a valid default login for each.
