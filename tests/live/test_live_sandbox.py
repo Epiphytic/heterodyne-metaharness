@@ -12,10 +12,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -24,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, ws
 from sandbox_env import config_env  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
+from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
 from heterodyne.sandbox.backend import BackendUnavailable  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest  # noqa: E402
@@ -35,7 +38,7 @@ from heterodyne.sandbox.runtime import (  # noqa: E402
     read_record,
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed  # noqa: E402
-from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
+from heterodyne.sandbox.settings import SandboxSettings, sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
@@ -55,6 +58,12 @@ CLIS = {profile: cli for cli, profile in PROFILES.items()}
 PIN_SECONDS = 90
 PROMPT_SECONDS = 180
 EXEC_SECONDS = 60
+# D23's precondition, the inspected artifact (plan 4 Task 9B): OpenShell 0.1.2 on the podman driver with no
+# image or supervisor override, so the driver runs its default images, each named by tag. Checked and
+# recorded before any launch; the driver pulls an image it lacks, so a missing one fails here first.
+OPENSHELL_VERSION = "openshell 0.1.2"
+DRIVER_IMAGES = ("ghcr.io/nvidia/openshell/sandbox:0.1.2", "ghcr.io/nvidia/openshell/supervisor:0.1.2")
+PREFLIGHT_SECONDS = 30
 
 
 @dataclass
@@ -193,6 +202,61 @@ def tiny_repo(path: Path) -> Path:
     return path
 
 
+def tool(env: dict[str, str], *argv: str) -> str:
+    """A host tool's stdout, as the backend runs it; a failure or a timeout fails the module."""
+    try:
+        proc = subprocess.run(list(argv), stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
+                              timeout=PREFLIGHT_SECONDS, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.fail(f"preflight: {Path(argv[0]).name} {argv[1]}: {type(exc).__name__}")
+    if proc.returncode != 0:
+        pytest.fail(f"preflight: {Path(argv[0]).name} {argv[1]} exited {proc.returncode}")
+    return proc.stdout.strip()
+
+
+def keys_of(table: dict[str, object], prefix: str = "") -> list[str]:
+    found: list[str] = []
+    for key, value in table.items():
+        found.append(f"{prefix}{key}")
+        if isinstance(value, dict):
+            found += keys_of(cast(dict[str, object], value), f"{prefix}{key}.")
+    return found
+
+
+def preflight(settings: SandboxSettings, env: dict[str, str], real_home: Path) -> list[str]:
+    """The artifact the launches run on, checked against D23's precondition: a mismatch fails the module
+    before any sandbox exists. Its evidence lines name versions, configuration keys (never their values)
+    and local image digests; nothing is pulled."""
+    version = tool(env, settings.openshell, "--version")
+    assert version == OPENSHELL_VERSION, f"preflight: {version!r} is not the inspected {OPENSHELL_VERSION}"
+    # The gateway's user unit reads gateway.env, which names its gateway.toml.
+    conf = Path(os.environ.get("XDG_CONFIG_HOME", real_home / ".config")) / "openshell"
+    genv = dict(line.split("=", 1) for line in (conf / "gateway.env").read_text().splitlines()
+                if "=" in line and not line.lstrip().startswith("#"))
+    gateway = tomllib.loads(Path(genv.get("OPENSHELL_GATEWAY_CONFIG", conf / "gateway.toml")).read_text())
+    keys = sorted(keys_of(gateway))
+    driver = gateway.get("openshell", {}).get("gateway", {}).get("compute_driver")
+    assert genv.get("OPENSHELL_COMPUTE_DRIVER") == "podman" and driver == "podman", \
+        "preflight: the gateway is not on the podman compute driver"
+    overrides = [k for k in [*genv, *keys] if "image" in k.lower() or "supervisor" in k.lower()]
+    assert not overrides, f"preflight: the gateway configuration overrides {overrides}"
+    podman = tool(env, settings.podman, "--version")
+    assert podman.startswith("podman version 5."), f"preflight: {podman!r} is not podman 5"
+    lines = [f"EVIDENCE artifact {version}; gateway env {sorted(genv)}, toml keys {keys}; {podman}"]
+    # The image carries no agent CLI: each is the host's pinned install, bound read-only into the sandbox.
+    for name, adapter in sorted(REGISTRY.items()):
+        cli = adapter.locate(settings.binaries[name], os.environ.get("PATH", os.defpath))
+        said = tool(env, str(cli.binary), "--version")
+        assert cli.version == adapter.version_pin and adapter.version_pin in said.split(), \
+            f"preflight: the {name} CLI is {cli.version} ({said!r}), not the pinned {adapter.version_pin}"
+        lines.append(f"EVIDENCE artifact {name} {said}")
+    for image in (settings.image, *DRIVER_IMAGES):
+        found = tool(env, settings.podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}",
+                     image)
+        lines.append(f"EVIDENCE artifact image {image} id {found}")
+    return lines
+
+
 def teardown(live: Live) -> list[str]:
     """Stop every session the module launched, each tried whatever the others do, then confirm with
     `openshell sandbox list` that none of their sandboxes is left. What is uncertain, or nothing."""
@@ -230,6 +294,7 @@ def live() -> Iterator[Live]:
         tmux = Tmux(f"hz-live-sb-{uuid.uuid4().hex[:8]}")
         backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
                                    tool_env(os.environ, settings.tool_env))     # as wsd's build_runtime
+        print("\n".join(preflight(settings, backend.env, real_home)))
         # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
         accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
         config = RuntimeConfig(
