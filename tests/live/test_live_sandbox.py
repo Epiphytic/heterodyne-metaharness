@@ -426,7 +426,8 @@ def live() -> Iterator[Live]:
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
 def test_both_shapes_launch_through_the_full_self_test(live: Live, cli: str) -> None:
-    spec = live.spec(cli, "btq-live-1")
+    # One session per bead, as btq claims are: two on one bead branch can't both land.
+    spec = live.spec(cli, {"claude": "btq-live-1", "codex": "btq-live-4"}[cli])
     started = live.launch(spec)                 # the model pin is checked first: no later prompt without it
     live.first[cli] = (spec, started)
     rec = live.record(spec.session_key)
