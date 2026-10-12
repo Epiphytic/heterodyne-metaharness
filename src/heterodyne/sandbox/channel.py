@@ -44,6 +44,8 @@ NO_CAPS = "0000000000000000"
 SCAN_LIMIT = 1 << 17        # cgroup directory entries, threads and reads one verification may make
 SCAN_SECONDS = 10.0         # and the time it may take, the freeze included; past either, it fails
 FREEZE_POLL = 0.01          # how often the freeze is looked for in cgroup.events
+FREEZE_ATTEMPT_SECONDS = 1.0   # one freeze attempt's wait for `frozen 1`; one that misses is thawed
+FREEZE_BACKOFF = 0.2        # the pause after a thawed attempt, before the next
 GONE = (FileNotFoundError, ProcessLookupError)      # the process or thread ended while it was read
 ACK = b"ack\n"              # sent after the check at `done`; the probe waits for it before exiting
 ACCEPT_POLL = 0.05          # how often the accept loop looks for close()
@@ -126,6 +128,7 @@ class ProcVerifier:
         self.clock = clock
         self.sleep = sleep
         self.budget = budget
+        self.freezes: list[int] = []         # each verification's freeze attempts, kept for the audit
         self._lock = threading.Lock()        # one freeze at a time: the channel's workers verify at once
 
     @staticmethod
@@ -149,13 +152,32 @@ class ProcVerifier:
                 return None
         return None
 
+    def _frozen_is(self, frozen: bool, end: float) -> bool:
+        """Whether cgroup.events shows the cgroup frozen (or not) by `end`, on the verifier's clock."""
+        while ("frozen 1" in (self.cgroup / "cgroup.events").read_text().splitlines()) != frozen:
+            if self.clock() > end:
+                return False
+            self.sleep(FREEZE_POLL)
+        return True
+
     def _freeze(self, budget: _Budget) -> None:
+        """Freeze the workload's cgroup, in attempts within the budget. A task blocked in a seccomp user
+        notification (seccomp_do_user_notification: OpenShell's supervisor answering, say, its setsockopt)
+        waits killably, and the freezer can't stop it until the supervisor answers; seen live (T14), that
+        held one attempt past the whole budget. So an attempt that hasn't frozen in FREEZE_ATTEMPT_SECONDS
+        is thawed, and the next follows a pause. Nothing is read from the workload until one holds."""
+        freeze = self.cgroup / "cgroup.freeze"
+        self.freezes.append(0)
         try:
-            _write(self.cgroup / "cgroup.freeze", b"1")
-            while "frozen 1" not in (self.cgroup / "cgroup.events").read_text().splitlines():
-                if self.clock() > budget.end:
+            while True:
+                self.freezes[-1] += 1
+                _write(freeze, b"1")
+                if self._frozen_is(True, min(self.clock() + FREEZE_ATTEMPT_SECONDS, budget.end)):
+                    return
+                _write(freeze, b"0")
+                if not self._frozen_is(False, budget.end) or self.clock() + FREEZE_BACKOFF > budget.end:
                     raise _ScanFailed("the workload could not be frozen")
-                self.sleep(FREEZE_POLL)
+                self.sleep(FREEZE_BACKOFF)
         except OSError:
             raise _ScanFailed("the workload could not be frozen") from None
 
