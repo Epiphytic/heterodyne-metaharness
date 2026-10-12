@@ -35,8 +35,9 @@ CURL = '/usr/bin/curl'      # by path: the agent's PATH can't put another progra
 # Every curl run starts with -q, so no .curlrc applies: the home is the agent's, and a curlrc there could
 # change what curl does or prints.
 CAPTURE_SECONDS = 30       # one deadline for a captured run: the program and the read of its output
-CAPTURE_BYTES = 1 << 20     # the output kept, from its end: curl's write-out record comes last
+CAPTURE_BYTES = 1 << 20     # the most output a captured run may write; past it the run fails
 TIMED_OUT = 'timeout'       # a captured run's status past its deadline; it never equals an exit status
+OVERFLOW = 'overflow'       # a captured run's status when output past CAPTURE_BYTES was discarded
 AGENT = sys.argv[1:] == ['--agent']
 if AGENT:
     with open(f'{RUN}/agent-probe.json') as f:
@@ -120,9 +121,10 @@ def captured(argv, seconds=CAPTURE_SECONDS, keep=CAPTURE_BYTES):
     argv wrote (D23, Amendment 1). The output is read while argv runs, so none can fill the socket's
     buffer and stall it, and only its last `keep` bytes are kept. One deadline covers the run and the
     read: past it, argv is killed and the status is TIMED_OUT, whatever argv exited with. argv is always
-    reaped."""
+    reaped. Output discarded for the bound makes the status OVERFLOW (Codex 9C r2): what was dropped can't
+    be checked, so the run fails, though its tail is still returned as evidence."""
     deadline = time.monotonic() + seconds
-    out = b''
+    out, dropped = b'', False
     ours, theirs = socket.socketpair()
     with ours:
         with theirs:                                    # the parent's copy closes once argv has its own
@@ -137,7 +139,9 @@ def captured(argv, seconds=CAPTURE_SECONDS, keep=CAPTURE_BYTES):
                 chunk = ours.recv(65536)
                 if not chunk:
                     break
-                out = (out + chunk)[-keep:]
+                out += chunk
+                if len(out) > keep:
+                    out, dropped = out[-keep:], True
             rc = child.wait(timeout=max(deadline - time.monotonic(), 0.001))
         except (TimeoutError, subprocess.TimeoutExpired):
             rc = TIMED_OUT
@@ -145,6 +149,8 @@ def captured(argv, seconds=CAPTURE_SECONDS, keep=CAPTURE_BYTES):
             if child.poll() is None:
                 child.kill()
                 child.wait()
+    if dropped and rc != TIMED_OUT:
+        rc = OVERFLOW
     return rc, out.decode('utf-8', 'replace')
 
 
@@ -160,11 +166,26 @@ def http_status(out):
     return ''
 
 
+def issuer_of(out):
+    """The issuer in curl's verbose certificate block: the first `*  issuer:` line among the `*  ` lines
+    after the output's one `* Server certificate:` line; else ''. Response headers (`< `) and request lines
+    (`> `) are never read, so a server can't supply it (Codex 9C r2). No block, or more than one, fails."""
+    lines = out.split('\n')
+    starts = [i for i, ln in enumerate(lines) if ln == '* Server certificate:']
+    if len(starts) != 1:
+        return ''
+    for ln in lines[starts[0] + 1:]:
+        if not ln.startswith('*  '):
+            break
+        if ln.startswith('*  issuer:'):
+            return ln[len('*  issuer:'):].strip()
+    return ''
+
+
 def curl(host):
     rc, out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '10',
                         '-w', '\nhttp=%{http_code}\n', f'https://{host}/'])
-    issuer = next((ln.split('issuer:')[1].strip() for ln in out.splitlines() if 'issuer:' in ln), '')
-    return rc, out, issuer, http_status(out)
+    return rc, out, issuer_of(out), http_status(out)
 
 
 # 1. Real home: the canary (readable outside just before) gives ENOENT or EACCES/EPERM here.

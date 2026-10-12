@@ -41,7 +41,15 @@ OTHER_LOGIN = "/outside/accounts/work/auth.json"
 WSD_SOCKET = "/outside/state/wsd/ctl.sock"
 ALLOWED, DENIED, MODEL = "probe.example.org", "denied.example.org", "chatgpt.com"
 SYNTHETIC = "198.18.0.7"                       # OpenShell's policy DNS answers from 198.18.0.0/15
-PROXY_CA = "*  issuer: O=OpenShell; CN=OpenShell Sandbox CA"
+
+
+def cert(issuer: str) -> str:
+    """curl -v's certificate block, as its OpenSSL backend writes it."""
+    return (f"* Server certificate:\n*  subject: CN={ALLOWED}\n*  issuer: {issuer}\n"
+            "*  SSL certificate verify ok.")
+
+
+PROXY_CA = cert("O=OpenShell; CN=OpenShell Sandbox CA")
 REFUSED = (7, "http=000\n", "* connect to 198.18.0.7 port 443 failed: Permission denied")
 REACHED = (0, "http=200\n", PROXY_CA)        # curl -w's record ends the output
 FORBIDDEN = '{"ok": false, "error": "forbidden"}'
@@ -389,7 +397,7 @@ NEGATIVE_CONTROLS: list[tuple[str, Callable[[World], None], set[str]]] = [
      {"non-allowlisted-host-blocked"}),
     ("the denied host reached", lambda w: w.curl.update({DENIED: REACHED}), {"non-allowlisted-host-blocked"}),
     ("the control reached around the proxy",
-     lambda w: w.curl.update({ALLOWED: (0, "http=200\n", "*  issuer: CN=R11")}),
+     lambda w: w.curl.update({ALLOWED: (0, "http=200\n", cert("CN=R11"))}),
      {"allowlisted-host-reachable"}),
     ("the control reached with no HTTP status", lambda w: w.curl.update({ALLOWED: (0, "", PROXY_CA)}),
      {"allowlisted-host-reachable"}),
@@ -493,6 +501,49 @@ def test_a_reach_needs_one_complete_nonzero_http_status_last(
         "allowlisted-host-reachable" if target == "allowlisted" else "model-host-agent-path"}
 
 
+FORGED = "< issuer: CN=OpenShell Sandbox CA"      # a response header: the server writes it
+TRACE = "* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):\n" * 30000    # past CAPTURE_BYTES
+BAD_ISSUERS = {
+    "a forged header after an unrelated certificate": f"{cert('CN=R11')}\n{FORGED}",
+    "a forged header and no certificate": FORGED,
+    "a forged request line": f"{cert('CN=R11')}\n> issuer: CN=OpenShell Sandbox CA",
+    "the proxy's issuer outside the block": f"{cert('CN=R11')}\n*  issuer: CN=OpenShell Sandbox CA",
+    "two certificate blocks": f"{cert('CN=R11')}\n{PROXY_CA}",
+    "an unrelated certificate pushed out by a trace": f"{cert('CN=R11')}\n{TRACE}{FORGED}",
+}
+
+
+@pytest.mark.parametrize("err", BAD_ISSUERS.values(), ids=BAD_ISSUERS.keys())
+@pytest.mark.parametrize("target", ["allowlisted", "model host"])
+def test_a_reach_needs_the_proxy_issuer_from_the_certificate_block(
+        world: World, run: Callable[[World], Results], err: str, target: str) -> None:
+    """Codex 9C r2: curl exits 0 with a valid terminal http=200, but the proxy's issuer isn't the one in
+    curl's one certificate block, or the output was cut (the last case: Codex's 1.2 MB transcript, whose
+    tail holds only the forged header)."""
+    world.path = "agent"
+    world.env["CODEX_THREAD_ID"] = "fake-thread"
+    world.curl[ALLOWED if target == "allowlisted" else MODEL] = (0, "http=200\n", err)
+    rc, results = run(world)
+    assert rc == 1
+    assert {name for name, ok in results.items() if not ok} == {
+        "allowlisted-host-reachable" if target == "allowlisted" else "model-host-agent-path"}
+
+
+@pytest.mark.parametrize("target", ["allowlisted", "model host"])
+def test_a_full_verbose_transcript_through_the_proxy_counts_as_reached(
+        world: World, run: Callable[[World], Results], target: str) -> None:
+    """The negative controls' positive twin: a transcript shaped like curl's own, response headers and all."""
+    world.path = "agent"
+    world.env["CODEX_THREAD_ID"] = "fake-thread"
+    err = (f"*   Trying {SYNTHETIC}:443...\n* Connected to {ALLOWED} ({SYNTHETIC}) port 443\n"
+           "* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384\n"
+           f"{PROXY_CA}\n> GET / HTTP/1.1\n> Host: {ALLOWED}\n>\n< HTTP/1.1 200 OK\n"
+           "< content-type: text/html\n<\n* Connection #0 left intact")
+    world.curl[ALLOWED if target == "allowlisted" else MODEL] = (0, "http=200\n", err)
+    rc, results = run(world)
+    assert rc == 0 and all(results.values())
+
+
 @pytest.mark.parametrize("status", ["http=200\n", "http=404\n", "http=301\n"])
 def test_any_complete_nonzero_status_counts_as_reached(world: World, run: Callable[[World], Results],
                                                        status: str) -> None:
@@ -506,7 +557,8 @@ def probe_function(name: str) -> Callable[..., Any]:
     tree = ast.parse(PROBES.read_text())
     [fn] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
     scope: dict[str, Any] = {"socket": socket, "subprocess": subprocess, "time": time, "CAPTURE_SECONDS": 30,
-                             "CAPTURE_BYTES": 1 << 20, "TIMED_OUT": "timeout"}
+                             "CAPTURE_BYTES": 1 << 20, "TIMED_OUT": "timeout",
+                             "OVERFLOW": "overflow"}
     exec(compile(ast.Module([fn], []), str(PROBES), "exec"), scope)  # noqa: S102 - the probe's own code
     return scope[name]
 
@@ -543,14 +595,29 @@ def py(code: str) -> list[str]:
     return [sys.executable, "-I", "-c", code]
 
 
-def test_a_capture_larger_than_the_socket_buffer_completes_with_its_tail() -> None:
+def test_a_capture_larger_than_the_socket_buffer_completes() -> None:
     """Codex 9C r1: the output is drained while the program runs, so one past the socket's buffer can't
-    block it. What's kept is bounded, and it's the tail, where curl's write-out record is."""
+    block it. Within the bound, all of it is kept with the exit status."""
     captured = probe_function("captured")
-    rc, out = captured(py("import sys; sys.stdout.write('x' * (4 << 20)); sys.stderr.write('end\\n'); "
+    rc, out = captured(py("import sys; sys.stdout.write('x' * ((1 << 20) - 4)); sys.stderr.write('end\\n'); "
                           "sys.exit(3)"), seconds=20)
     assert rc == 3
     assert len(out) == 1 << 20 and out.endswith("xend\n")
+
+
+def test_a_capture_past_its_bound_is_drained_reaped_and_fails(tmp_path: Path) -> None:
+    """Codex 9C r2: output past the bound is discarded, and what's discarded can't be checked, so the run
+    fails even when the program exits 0 and ends with a valid write-out record. It's still drained to the
+    end (the tail is the evidence) and reaped."""
+    captured = probe_function("captured")
+    pid = tmp_path / "pid"
+    rc, out = captured(py(f"import os, sys; open({str(pid)!r}, 'w').write(str(os.getpid())); "
+                          "sys.stderr.write('x' * (4 << 20)); sys.stdout.write('\\nhttp=200\\n')"),
+                       seconds=20)
+    assert rc == "overflow"
+    assert len(out) == 1 << 20 and out.endswith("x\nhttp=200\n")
+    with pytest.raises(ChildProcessError):
+        os.waitpid(int(pid.read_text()), os.WNOHANG)
 
 
 def test_a_capture_keeps_the_exit_status_and_both_streams() -> None:
