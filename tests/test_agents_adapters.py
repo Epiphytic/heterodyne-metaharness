@@ -254,7 +254,13 @@ def test_tui_argv(tmp_path: Path) -> None:
     assert ClaudeCode().tui_argv(claude, {}, native_id=ID, resume=True, label="x")[1:3] == ["--resume", ID]
     assert Codex().tui_argv(codex, {}, native_id=None, resume=False, label="x") == [
         str(codex.binary), "--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox"]
-    assert Codex().tui_argv(codex, {}, native_id=ID, resume=True, label="x")[1:3] == ["resume", ID]
+    pinned = {"model": "m-2", "args": ["-c", "k=v"]}
+    assert Codex().tui_argv(codex, pinned, native_id=None, resume=False, label="x") == [
+        str(codex.binary), "--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox",
+        "--model", "m-2", "-c", "k=v"]
+    # A remote resume takes no permission override (0.160.0 refuses one): the thread keeps its own policy.
+    assert Codex().tui_argv(codex, {"model": "m-2"}, native_id=ID, resume=True, label="x") == [
+        str(codex.binary), "resume", ID, "--remote", APP_SOCKET, "--model", "m-2"]
     with pytest.raises(AdapterError):
         Codex().tui_argv(codex, {}, native_id=None, resume=True, label="x")
     with pytest.raises(AdapterError):

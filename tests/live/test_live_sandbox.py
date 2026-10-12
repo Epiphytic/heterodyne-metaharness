@@ -92,7 +92,9 @@ class Live:
         assert started.native_id is not None
         used = models_used(self.runtime.layout(spec.session_key).home, cli, started.native_id)
         assert used == {MODELS[cli]}, f"{cli} ran on {sorted(used)}, not the pinned {MODELS[cli]}"
-        print(f"EVIDENCE {spec.session_key} g{spec.generation} models={sorted(used)}")     # for docs/wsd.md
+        attempts = getattr(self.runtime.selftest, "freeze_attempts", None)
+        print(f"EVIDENCE {spec.session_key} g{spec.generation} models={sorted(used)} "
+              f"freeze-attempts={attempts}")     # for docs/wsd.md
 
     def record(self, key: str) -> SessionRecord:
         rec = read_record(self.runtime.layout(key))
@@ -135,6 +137,23 @@ def models_used(home: Path, cli: str, native_id: str) -> set[str]:
                 model = entry[holder].get("model")
                 used |= {model} if isinstance(model, str) and model != "<synthetic>" else set()
     return used
+
+
+BYPASSED = ("never", "danger-full-access")      # the approval and sandbox policy the first launch's flag sets
+
+
+def codex_policies(home: Path, native_id: str) -> list[tuple[str, str]]:
+    """Each Codex turn's effective (approval_policy, sandbox_policy type), from the thread's rollout."""
+    found: list[tuple[str, str]] = []
+    for log in (home / ".codex" / "sessions").glob(f"*/*/*/rollout-*-{native_id}.jsonl"):
+        for line in log.read_text().splitlines():
+            entry = json.loads(line) if line.strip() else {}
+            payload = entry.get("payload") if isinstance(entry, dict) else None
+            if entry.get("type") == "turn_context" and isinstance(payload, dict):
+                sandbox = payload.get("sandbox_policy")
+                found.append((str(payload.get("approval_policy")),
+                              str(sandbox.get("type") if isinstance(sandbox, dict) else sandbox)))
+    return found
 
 
 class PinnedSelfTest(OpenShellSelfTest):
@@ -293,12 +312,22 @@ def test_codex_tool_calls_fail_closed_while_wsd_is_down(live: Live) -> None:
 @pytest.mark.parametrize("cli", ["claude", "codex"])
 def test_a_new_generation_resumes_the_same_session(live: Live, cli: str) -> None:
     spec, first = live.first[cli]
+    assert first.native_id is not None
+    home = live.runtime.layout(spec.session_key).home
+    before = codex_policies(home, first.native_id) if cli == "codex" else []
     live.runtime.stop(spec.session_key)
     resumed = replace(spec, generation=2, resume=True, native_id=first.native_id)
     second = live.runtime.launch(resumed)
     live.pinned(resumed, second)
     assert second.native_id == first.native_id
     assert live.record(spec.session_key).sandbox.endswith("g2")
+    if cli == "codex":
+        # The remote resume carries no permission override (0.160.0 refuses one), so the resumed thread
+        # must keep the policy the first launch set: every turn, g2's self-test turn included.
+        after = codex_policies(home, first.native_id)
+        print(f"EVIDENCE codex policies g1={before} g1+g2={after}")
+        assert before and set(before) == {BYPASSED}
+        assert len(after) > len(before) and set(after) == {BYPASSED}
 
 
 def test_the_lifetime_stop_ends_a_real_sandbox(live: Live) -> None:

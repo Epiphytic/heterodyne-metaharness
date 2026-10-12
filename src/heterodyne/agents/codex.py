@@ -124,8 +124,11 @@ class Codex:
             thread = checked_id(native_id)
             if thread is None:
                 raise AdapterError("a codex resume needs its thread ID")
-            argv += ["resume", thread]
-        argv += ["--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox"]
+            # 0.160.0 refuses permission overrides on a remote resume (T14 live); the thread keeps the
+            # approval and sandbox policy it was started with, which the live gate checks on its rollout.
+            argv += ["resume", thread, "--remote", APP_SOCKET]
+        else:
+            argv += ["--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox"]
         model = profile.get("model")
         if isinstance(model, str) and model:
             argv += ["--model", model]
