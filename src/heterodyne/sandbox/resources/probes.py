@@ -28,12 +28,15 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 
 RUN = '/run/hz'
 CURL = '/usr/bin/curl'      # by path: the agent's PATH can't put another program in its place
 # Every curl run starts with -q, so no .curlrc applies: the home is the agent's, and a curlrc there could
 # change what curl does or prints.
-CAPTURE_SECONDS = 30
+CAPTURE_SECONDS = 30       # one deadline for a captured run: the program and the read of its output
+CAPTURE_BYTES = 1 << 20     # the output kept, from its end: curl's write-out record comes last
+TIMED_OUT = 'timeout'       # a captured run's status past its deadline; it never equals an exit status
 AGENT = sys.argv[1:] == ['--agent']
 if AGENT:
     with open(f'{RUN}/agent-probe.json') as f:
@@ -110,26 +113,58 @@ def sock_create(fam, kind, proto):
         return errname(e)
 
 
-def captured(argv):
+def captured(argv, seconds=CAPTURE_SECONDS, keep=CAPTURE_BYTES):
     """Run argv; return its exit status and its stdout and stderr together. The output comes back on a
     socket pair, never a pipe: any process with this UID can reopen a pipe through /proc/<pid>/fd and
     write into it, and a socket can't be reopened that way (ENXIO). So what this returns is only what
-    argv wrote (D23, Amendment 1). Its output is a few kilobytes, well inside the socket's buffer."""
+    argv wrote (D23, Amendment 1). The output is read while argv runs, so none can fill the socket's
+    buffer and stall it, and only its last `keep` bytes are kept. One deadline covers the run and the
+    read: past it, argv is killed and the status is TIMED_OUT, whatever argv exited with. argv is always
+    reaped."""
+    deadline = time.monotonic() + seconds
+    out = b''
     ours, theirs = socket.socketpair()
     with ours:
-        with theirs:
-            fd = theirs.fileno()
-            rc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, timeout=CAPTURE_SECONDS,
-                                check=False).returncode
-        return rc, b''.join(iter(lambda: ours.recv(65536), b'')).decode('utf-8', 'replace')
+        with theirs:                                    # the parent's copy closes once argv has its own
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=theirs.fileno(),
+                                     stderr=theirs.fileno())
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError
+                ours.settimeout(left)
+                chunk = ours.recv(65536)
+                if not chunk:
+                    break
+                out = (out + chunk)[-keep:]
+            rc = child.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        except (TimeoutError, subprocess.TimeoutExpired):
+            rc = TIMED_OUT
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+    return rc, out.decode('utf-8', 'replace')
+
+
+def http_status(out):
+    """curl's write-out record, http=DDD, when it is the output's one such line and its last, complete
+    (newline-terminated), three ASCII digits and nonzero; else ''. Anything else fails the reach."""
+    lines = out.split('\n')
+    records = [ln for ln in lines if ln.startswith('http=')]
+    code = records[0][5:] if len(records) == 1 else ''
+    complete = lines[-2:] == [f'http={code}', '']
+    if complete and len(code) == 3 and all(ch in '0123456789' for ch in code) and code != '000':
+        return f'http={code}'
+    return ''
 
 
 def curl(host):
     rc, out = captured([CURL, '-q', '-sv', '-o', '/dev/null', '--max-time', '10',
                         '-w', '\nhttp=%{http_code}\n', f'https://{host}/'])
     issuer = next((ln.split('issuer:')[1].strip() for ln in out.splitlines() if 'issuer:' in ln), '')
-    status = next((ln for ln in out.splitlines() if ln.startswith('http=')), 'http=none')
-    return rc, out, issuer, status
+    return rc, out, issuer, http_status(out)
 
 
 # 1. Real home: the canary (readable outside just before) gives ENOENT or EACCES/EPERM here.
@@ -211,8 +246,9 @@ check('wsd-socket-absent', gone and set(sockets) <= {'s.sock', 'p.sock'},
 
 # 6. The allowlisted control is reachable, through OpenShell's TLS-terminating proxy (its CA issues).
 cu_rc, cu_out, issuer, status = curl(cfg['allowed'])
-ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'
-check('allowlisted-host-reachable', ok, f"curl rc={cu_rc} {status} issuer='{issuer}'")
+ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status != ''
+check('allowlisted-host-reachable', ok,
+      f"curl rc={cu_rc} {status or 'no valid http= record'} issuer='{issuer}'")
 
 # 6b. The model host's policy names only the CLI binary, and OpenShell also authorizes a binary's
 #     executable ancestors. So curl reaches it only from inside the agent's own process tree: on the
@@ -220,11 +256,11 @@ check('allowlisted-host-reachable', ok, f"curl rc={cu_rc} {status} issuer='{issu
 #     checks the supervisor log for the matching ALLOWED/DENIED line.
 cu_rc, cu_out, issuer, status = curl(cfg['model_host'])
 if PATH == 'agent':
-    ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status[5:].isdigit() and status != 'http=000'
+    ok = cu_rc == 0 and 'OpenShell Sandbox CA' in issuer and status != ''
 else:
     ok = cu_rc == 7 and 'Permission denied' in cu_out
 check(f'model-host-{PATH}-path', ok,
-      f"{cfg['model_host']}: curl rc={cu_rc} {status} issuer='{issuer}' "
+      f"{cfg['model_host']}: curl rc={cu_rc} {status or 'no valid http= record'} issuer='{issuer}' "
       f"(expect {'reachable via the CLI ancestor' if PATH == 'agent' else 'refused: no CLI ancestor'})")
 
 # 7. A hook event with the valid token is accepted.
