@@ -13,24 +13,39 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
+from probe_verdicts import (  # noqa: E402
+    file_writes_refused,
+    memory_access_refused,
+    outputs_unreachable,
+    overlay_outcome,
+    separate_mount_namespace,
+)
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
 from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
+from heterodyne.sandbox import openshell_selftest  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
-from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest  # noqa: E402
+from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
+    AGENT_CHECKS,
+    OpenShellSelfTest,
+    probe_config,
+    ptrace_scope_refusal,
+    read_ptrace_scope,
+)
 from heterodyne.sandbox.runtime import (  # noqa: E402
     Phase,
     RuntimeConfig,
@@ -43,7 +58,7 @@ from heterodyne.sandbox.settings import SandboxSettings, sandbox_settings  # noq
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
-from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started  # noqa: E402
+from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, Started  # noqa: E402
 from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.environ.get("HZ_LIVE_SANDBOX") != "1",
@@ -542,3 +557,304 @@ def test_the_lifetime_stop_ends_a_real_sandbox(live: Live) -> None:
     assert live.record(spec.session_key).phase is Phase.ENDED
     assert rec.sandbox not in live.backend.names()
     assert not live.tmux.has_session(live.runtime.reaper_name(spec.session_key, rec.generation))
+
+
+class Hooked(OpenShellSelfTest):
+    """The real self-test, with an action before the exec path or beside the agent path."""
+
+    def __init__(self, before_exec: Callable[[ProbeContext], None] | None = None,
+                 beside_agent: Callable[[ProbeContext], None] | None = None) -> None:
+        super().__init__()
+        self.before_exec = before_exec
+        self.beside_agent = beside_agent
+        self.seen: list[ProbeContext] = []
+
+    def exec_path(self, ctx: ProbeContext) -> None:
+        self.seen.append(ctx)
+        if self.before_exec is not None:
+            self.before_exec(ctx)
+        super().exec_path(ctx)
+
+    def agent_path(self, ctx: ProbeContext) -> None:
+        if self.beside_agent is None:
+            super().agent_path(ctx)
+            return
+        t = threading.Thread(target=self.beside_agent, args=(ctx,), daemon=True)
+        t.start()
+        try:
+            super().agent_path(ctx)
+        finally:
+            t.join(EXEC_SECONDS)
+
+
+class FenceDown(OpenShellBackend):
+    def network_mode(self, name: str) -> str:
+        return "bridge"
+
+
+def runtime(live: Live, *, backend: OpenShellBackend | None = None, selftest: OpenShellSelfTest | None = None,
+            config: RuntimeConfig | None = None) -> SandboxRuntime:
+    return SandboxRuntime(config or live.runtime.c, backend or live.backend, selftest or OpenShellSelfTest())
+
+
+def refused(live: Live, rt: SandboxRuntime, spec: LaunchSpec, check: str) -> None:
+    live.keys.append(spec.session_key)
+    with pytest.raises(LaunchFailed, match=check):
+        rt.launch(spec)
+    assert live.record(spec.session_key).sandbox not in live.backend.names()
+
+
+def test_host_ptrace_scope_allows_probe_protection() -> None:
+    assert ptrace_scope_refusal(read_ptrace_scope()) == "", "set kernel.yama.ptrace_scope = 1 (gap 15)"
+
+
+def test_a_canary_inside_a_mount_refuses_the_launch(live: Live) -> None:
+    canary = live.runtime.c.real_home_canary
+    canary.write_text("x")
+    host = host_config() + f'ro_mounts_approved = ["{canary}"]\n'      # [sandbox] is host_config's last table
+    env = config_env(live.root / "c2", host, {"beta": f'[sandbox]\nextra_ro_mounts = ["{canary}"]\n'})
+    config = replace(live.runtime.c, settings=sandbox_settings(env))
+    spec = replace(live.spec("claude", "btq-live-n1"), ws="beta")
+    refused(live, runtime(live, config=config), spec, "real-home-canary-unreadable")
+
+
+def test_a_wrong_pinned_login_hash_refuses_the_launch(live: Live, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.probe_config
+
+    def wrong(ctx: ProbeContext, path: str) -> dict[str, Any]:
+        cfg = real(ctx, path)
+        cfg["chosen"] = [{**c, "sha256": "not-the-pinned-hash"} for c in cfg["chosen"]]
+        return cfg
+
+    monkeypatch.setattr(openshell_selftest, "probe_config", wrong)
+    refused(live, runtime(live), live.spec("claude", "btq-live-n2"), "other-accounts")
+
+
+def test_a_leaked_variable_refuses_the_launch(live: Live, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.env_allowed
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, p) - {"LANG"})
+    refused(live, runtime(live), live.spec("claude", "btq-live-n3"), "host-env-not-inherited")
+
+
+def test_a_dead_session_socket_refuses_the_launch(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-n4")
+    holder: list[SandboxRuntime] = []
+    rt = runtime(live, selftest=Hooked(before_exec=lambda ctx: holder[0].servers[spec.session_key].close()))
+    holder.append(rt)
+    refused(live, rt, spec, "hook-event-accepted")
+
+
+def test_a_failed_outer_fence_refuses_a_launch_right_after_a_pass(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-n5")
+    first = live.launch(spec)
+    live.runtime.stop(spec.session_key)
+    s = live.runtime.c.settings
+    down = FenceDown(s.openshell, s.podman, s.image, live.backend.env)     # the fixture's environment
+    again = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    refused(live, runtime(live, backend=down), again, "outer-fence-network-none")
+
+
+def test_the_probes_fail_without_the_runtime(live: Live) -> None:
+    hooked = Hooked()
+    spec = live.spec("claude", "btq-live-n6")
+    live.keys.append(spec.session_key)
+    runtime(live, selftest=hooked).launch(spec)
+    try:
+        ctx = hooked.seen[0]
+        data = json.dumps(probe_config(ctx, "exec")).encode()
+        s = live.runtime.c.settings
+        for net in (["--network=none"], []):        # no broker, then a connected network
+            argv = [s.podman, "run", "--rm", "-i", "--pull=never", "--userns=keep-id", *net,
+                    "-v", f"{ctx.layout.run(ctx.generation)}:/run/hz:ro", s.image,
+                    "python3", "-I", "/run/hz/probes.py"]
+            r = subprocess.run(argv, input=data, capture_output=True, timeout=PROMPT_SECONDS,
+                               env={**os.environ, **s.tool_env}, check=False)
+            assert r.returncode != 0 and b"FAIL direct-network-blocked" in r.stdout, net
+    finally:
+        live.runtime.stop(spec.session_key)
+
+
+FORGER = ("import socket, sys\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
+          "s.sendall(sys.stdin.buffer.read())\n")
+
+
+def test_a_forged_agent_path_result_refuses_the_launch(live: Live) -> None:
+    forged = b"".join((json.dumps(m) + "\n").encode() for m in
+                      [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
+
+    def forge(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            ctx.backend.exec(ctx.spec.name, ctx.spec.workdir, ["python3", "-I", "-c", FORGER], input=forged,
+                             timeout=EXEC_SECONDS)
+
+    refused(live, runtime(live, selftest=Hooked(beside_agent=forge)), live.spec("claude", "btq-live-n7"),
+            "agent-path-channel: a peer that is not the probe connected")
+
+
+def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    real = openshell_selftest.env_allowed
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, "exec"))
+    refused(live, runtime(live), live.spec("claude", "btq-live-n8"), "agent-path-channel")
+
+
+MEMORY_CHECK = r"""
+import ctypes, errno, os, subprocess, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+libc.process_vm_writev.restype = ctypes.c_ssize_t
+libc.process_vm_writev.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                                   ctypes.c_ulong, ctypes.c_ulong]
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+print(f'child {child.pid}')
+for pid in sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.getpid()}):
+    if libc.ptrace(16, pid, None, None) == 0:
+        print(f'attach {pid} ATTACHED')
+        libc.ptrace(17, pid, None, None)
+    else:
+        print(f'attach {pid} {errno.errorcode.get(ctypes.get_errno(), "?")}')
+    if libc.process_vm_writev(pid, None, 0, None, 0, 0) != -1:     # no iovec: writes nothing
+        print(f'vm {pid} ALLOWED')
+    else:
+        print(f'vm {pid} {errno.errorcode.get(ctypes.get_errno(), "?")}')
+    try:
+        open(f'/proc/{pid}/mem', 'r+b').close()
+        print(f'mem {pid} OPENED')
+    except OSError as e:
+        print(f'mem {pid} {errno.errorcode.get(e.errno, "?")}')
+child.kill()
+print('done')
+"""
+FILE_CHECK = ("touch /run/hz/hz-new; echo create=$?; echo x >> /run/hz/token; echo append=$?; "
+              "mv /run/hz/token /run/hz/token2; echo rename=$?")
+NAMESPACE_CHECK = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
+
+
+# The overlay check from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
+# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces. It
+# reports each step's status on stdout, so a refusal can be told from a check that never ran.
+NESTED = r"""
+import subprocess, sys
+cli = sys.argv[1]
+with open('/tmp/hz-forged.py', 'w') as fh:
+    fh.write(sys.stdin.read())
+print('forged=written', flush=True)
+inner = ('echo ns=entered; mount --bind /tmp/hz-forged.py /run/hz/probes.py; s=$?; echo bind-probe=$s; '
+         f'[ $s -eq 0 ] || exit 1; mount --bind /bin/sh {cli}; s=$?; echo bind-cli=$s; '
+         f'[ $s -eq 0 ] || exit 1; {cli} -c "python3 -I /run/hz/probes.py --agent; :"; echo run=$?')
+r = subprocess.run(['unshare', '-Urm', 'sh', '-c', inner], stderr=subprocess.PIPE, text=True, check=False)
+print(f'unshare={r.returncode}', flush=True)
+print('done', flush=True)
+sys.stderr.write(r.stderr)
+"""
+
+
+def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(live: Live) -> None:
+    results = b"".join((json.dumps(m) + "\n").encode() for m in
+                       [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
+    forged = ("import socket\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
+              f"s.sendall({results!r})\n")
+    out: list[tuple[int, str, str]] = []
+
+    def nest(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
+                                 ["python3", "-I", "-c", NESTED, str(ctx.cli.binary)], input=forged.encode(),
+                                 timeout=EXEC_SECONDS)
+            out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
+                        r.stderr.decode("utf-8", "replace")))
+
+    spec = live.spec("claude", "btq-live-n9")
+    live.keys.append(spec.session_key)
+    failed = ""
+    try:
+        runtime(live, selftest=Hooked(beside_agent=nest)).launch(spec)
+    except LaunchFailed as exc:
+        failed = str(exc)
+    assert wait_until(lambda: bool(out), EXEC_SECONDS), f"the overlay check never reported; launch: {failed}"
+    rc, stdout, stderr = out[0]
+    outcome = overlay_outcome(rc, stdout)
+    assert outcome in ("refused", "ran"), f"{outcome}\n{stdout}\n{stderr}"
+    if outcome == "ran":
+        assert "agent-path-channel" in failed, f"an overlaid probe ran and was counted: {failed or 'passed'}"
+    else:
+        assert not failed, f"the overlay was refused, but the launch failed for another reason: {failed}"
+
+
+# Finds each curl the probe starts while it runs, and reports what its output descriptors are and whether a
+# write open of each is refused. It never writes: an open that succeeds is closed at once.
+OUTPUT_CHECK = r"""
+import errno, os, sys, time
+deadline = time.monotonic() + float(sys.argv[1])
+seen, whole_at = set(), None
+
+def state(pid, fd):
+    path = f'/proc/{pid}/fd/{fd}'
+    try:
+        kind = os.readlink(path).partition(':')[0]
+    except OSError:
+        return 'gone'
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        return f'{kind}:OPENED'
+    except OSError as e:
+        return 'gone' if e.errno == errno.ENOENT else f'{kind}:{errno.errorcode.get(e.errno, "?")}'
+
+while time.monotonic() < (deadline if whole_at is None else min(deadline, whole_at + 15)):
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or pid in seen:
+            continue
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+                argv0 = fh.read().split(b'\0')[0]
+        except OSError:
+            continue
+        if argv0 == b'/usr/bin/curl':
+            seen.add(pid)
+            fds = [state(pid, 1), state(pid, 2)]
+            print('curl', pid, *fds, flush=True)
+            if 'gone' not in fds and whole_at is None:
+                whole_at = time.monotonic()
+print('done', flush=True)
+"""
+
+
+def test_a_running_probe_s_output_channels_cannot_be_reopened(live: Live) -> None:
+    """Task 9C: while the agent-path probe runs, a separate workload process finds each curl the probe
+    starts. Both of its output descriptors must be sockets whose write open is refused (ENXIO)."""
+    out: list[tuple[int, str, str]] = []
+
+    def watch(ctx: ProbeContext) -> None:
+        if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
+                                 ["python3", "-I", "-c", OUTPUT_CHECK, str(PROMPT_SECONDS)],
+                                 timeout=PROMPT_SECONDS + EXEC_SECONDS)
+            out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
+                        r.stderr.decode("utf-8", "replace")))
+
+    spec = live.spec("claude", "btq-live-n10")
+    live.keys.append(spec.session_key)
+    runtime(live, selftest=Hooked(beside_agent=watch)).launch(spec)
+    reported = wait_until(lambda: bool(out), PROMPT_SECONDS + EXEC_SECONDS)
+    assert reported, "the output-channel check never reported"
+    rc, stdout, stderr = out[0]
+    why = outputs_unreachable(rc, stdout)
+    assert why == "", f"{why}\n{stdout}\n{stderr}"
+
+
+def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
+    spec = live.spec("claude", "btq-live-adv")
+    live.launch(spec)
+    rec = live.record(spec.session_key)
+    try:
+        checks = ((memory_access_refused, ["python3", "-I", "-c", MEMORY_CHECK]),
+                  (file_writes_refused, ["sh", "-c", FILE_CHECK]),
+                  (separate_mount_namespace, ["sh", "-c", NAMESPACE_CHECK]))
+        for verdict, argv in checks:
+            r = live.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=EXEC_SECONDS)
+            out = r.stdout.decode("utf-8", "replace")
+            why = verdict(r.returncode, out)
+            assert why == "", f"{why}\n{out}\n{r.stderr.decode('utf-8', 'replace')}"
+    finally:
+        live.runtime.stop(spec.session_key)
