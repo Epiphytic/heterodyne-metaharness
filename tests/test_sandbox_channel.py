@@ -756,7 +756,95 @@ def test_a_freeze_that_never_holds_times_out_and_thaws(tmp_path: Path) -> None:
 
     v = verifier(tmp_path, clock=lambda: now[0], sleep=sleep, budget=1.0)
     assert v(32) == "the workload could not be frozen"
-    assert 1.0 < now[0] < 1.1 and freeze_state(tmp_path) == "0"
+    assert now[0] == pytest.approx(1.0) and now[0] <= 1.0 + 1e-9 and freeze_state(tmp_path) == "0"
+
+
+def scripted_verifier(root: Path, holds_on: int | None, budget: float,
+                      overshoot: float = 0.0) -> tuple[ProcVerifier, list[float], list[tuple[float, str]]]:
+    """A verifier on a cgroup whose freeze holds only from attempt `holds_on` (never, for None), as when a
+    task waits in a seccomp user notification; each sleep runs `overshoot` past what it was asked. Also its
+    clock, and each sleep's (length, cgroup.freeze)."""
+    events = cgroup_dir(root, WORKLOAD_CG) / "cgroup.events"
+    events.write_text("populated 1\nfrozen 0\n")
+    now, sleeps = [0.0], list[tuple[float, str]]()
+    v: ProcVerifier
+
+    def sleep(seconds: float) -> None:
+        state = freeze_state(root)
+        sleeps.append((seconds, state))
+        now[0] += seconds + overshoot
+        holds = state == "1" and holds_on is not None and v.freezes[-1] >= holds_on
+        events.write_text(f"populated 1\nfrozen {1 if holds else 0}\n")
+
+    v = verifier(root, clock=lambda: now[0], sleep=sleep, budget=budget)
+    return v, now, sleeps
+
+
+def test_a_freeze_that_holds_on_a_later_attempt_verifies_while_frozen(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T14 live: a freeze can miss while a task waits on OpenShell's supervisor. Each miss is thawed and
+    followed by a pause, and the verification is made only once a freeze holds, every read under it."""
+    probe_tree(tmp_path)
+    v, now, sleeps = scripted_verifier(tmp_path, holds_on=3, budget=10.0)
+    events = cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.events"
+    unfrozen_reads: list[str] = []
+    real_text, real_bytes, real_link = Path.read_text, Path.read_bytes, Path.readlink
+
+    def watch(path: Path) -> None:
+        if path.name not in ("cgroup.events", "cgroup.freeze") and "frozen 1" not in real_text(events):
+            unfrozen_reads.append(path.name)
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        watch(self)
+        return real_text(self, *args, **kwargs)
+
+    def read_bytes(self: Path) -> bytes:
+        watch(self)
+        return real_bytes(self)
+
+    def readlink(self: Path) -> Path:
+        watch(self)
+        return real_link(self)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "readlink", readlink)
+    why = v(32)
+    monkeypatch.undo()
+    assert why == "" and v.freezes == [3] and unfrozen_reads == []
+    backoffs = [state for seconds, state in sleeps if seconds == channel_module.FREEZE_BACKOFF]
+    assert backoffs == ["0", "0"]                       # each missed attempt was thawed before the pause
+    assert 2 * (channel_module.FREEZE_ATTEMPT_SECONDS + channel_module.FREEZE_BACKOFF) < now[0] < 3.0
+    assert freeze_state(tmp_path) == "0"
+
+
+def test_a_freeze_that_never_holds_fails_at_the_budget_and_is_thawed(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    v, now, sleeps = scripted_verifier(tmp_path, holds_on=None, budget=3.0)
+    assert v(32) == "the workload could not be frozen"
+    assert v.freezes == [3]                             # 0-1.0 s, 1.2-2.2 s, 2.4-3.0 s
+    assert now[0] == pytest.approx(3.0) and now[0] <= 3.0 + 1e-9    # no poll sleeps past the budget
+    assert freeze_state(tmp_path) == "0"
+    assert [state for seconds, state in sleeps if seconds == channel_module.FREEZE_BACKOFF] == ["0", "0"]
+
+
+def test_a_freeze_seen_only_after_the_deadline_does_not_count(tmp_path: Path) -> None:
+    """A poll that oversleeps the budget and then reads `frozen 1` has missed it: the freeze fails and the
+    workload is thawed, nothing read from it."""
+    probe_tree(tmp_path)
+    v, now, _ = scripted_verifier(tmp_path, holds_on=1, budget=1.0, overshoot=2.0)
+    assert v(32) == "the workload could not be frozen"
+    assert v.freezes == [1] and now[0] > 1.0 and freeze_state(tmp_path) == "0"
+
+
+def test_each_verification_records_its_freeze_attempts(tmp_path: Path) -> None:
+    probe_tree(tmp_path)
+    v, _, _ = scripted_verifier(tmp_path, holds_on=2, budget=10.0)
+    events = cgroup_dir(tmp_path, WORKLOAD_CG) / "cgroup.events"
+    assert v(32) == ""
+    events.write_text("populated 1\nfrozen 0\n")          # thawed: the fake's events change on a sleep
+    assert v(32) == ""
+    assert v.freezes == [2, 2]
 
 
 def test_the_workload_is_thawed_when_the_check_raises(tmp_path: Path,

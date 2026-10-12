@@ -268,6 +268,7 @@ class OpenShellSelfTest:
         self.clock = clock                   # deadlines; `wall` only dates the supervisor log query
         self.ptrace_scope = ptrace_scope
         self.cgroupfs = cgroupfs
+        self.freeze_attempts: list[int] = []     # the last agent path's freeze attempts, per verification
 
     def _until(self, pred: Callable[[], bool], seconds: float) -> bool:
         end = self.clock() + seconds
@@ -372,8 +373,11 @@ class OpenShellSelfTest:
             # A probe past its deadline fails, whatever arrives after it: the channel stamps the run when it
             # completes (after the check at `done`, the ACK and the clean end of stream).
             reason = channel.verdict(AGENT_CHECKS, by=deadline)
+            self.freeze_attempts = list(verify.freezes)
             home.verify("real-home-canary-changed")
             oa.verify("other-accounts-canary-changed")
         if reason:
-            raise SelfTestFailed(f"agent-path-channel: {reason}")
+            retried = any(n > 1 for n in verify.freezes)
+            attempts = f" (freeze attempts: {', '.join(map(str, verify.freezes))})" if retried else ""
+            raise SelfTestFailed(f"agent-path-channel: {reason}{attempts}")
         self._logs(ctx, since, "agent")

@@ -4,12 +4,13 @@ import base64
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from fakes.fake_backend import FakeBackend
 from fakes.scripted_selftest import ScriptedSelfTest
 from wsd_env import Clock, accounts_at, git_repo, login_home
 
-from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime
+from heterodyne.sandbox.backend import BackendUnavailable
+from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime, read_record
 from heterodyne.sandbox.settings import sandbox_settings
 from heterodyne.tmux import Tmux
 from heterodyne.wsd import ids
@@ -140,3 +142,68 @@ def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: 
     native = key if profile == "p-one" else None
     return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
                       native_id=native, account=account, repo=rig.repo)
+
+
+def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str],
+                     listed: Callable[[], set[str]]) -> list[str]:
+    """The live module's teardown: stop every session it launched, each tried whatever the others do,
+    then confirm with the sandbox list (`openshell sandbox list`) that none of their sandboxes is left.
+    A create that may still land (started, never returned, its cancellation not recorded) is uncertain
+    in any phase, `ended` included: its watcher is kept for a sandbox that may yet appear. So is any
+    generation's watcher still running once its session is stopped, which an earlier generation's late
+    create leaves behind a later record. Returns what is uncertain; the caller keeps the scratch, records
+    and tmux server unless it is empty."""
+    uncertain: list[str] = []
+    sandboxes: set[str] = set()
+    for key in dict.fromkeys(keys):
+        try:
+            rec = read_record(runtime.layout(key))
+            sandboxes |= {rec.sandbox} if rec is not None else set()
+            runtime.stop(key)
+            rec = read_record(runtime.layout(key))
+            if rec is not None:
+                sandboxes.add(rec.sandbox)
+                if rec.create_started and not rec.created:
+                    uncertain.append(f"session {key} generation {rec.generation}: its create is unresolved")
+                kept = [g for g in range(1, rec.generation + 1)
+                        if runtime.c.tmux.has_session(runtime.reaper_name(key, g))]
+                if kept:
+                    uncertain.append(f"session {key}: the watchers of generations {kept} are still running")
+        except Exception as exc:  # noqa: BLE001 - every session is tried; each failure is reported
+            uncertain.append(f"session {key}: {type(exc).__name__}: {exc}")
+    try:
+        left = sorted(sandboxes & listed())
+    except BackendUnavailable as exc:
+        uncertain.append(f"the sandbox list: {exc}")
+    else:
+        if left:
+            uncertain.append(f"sandboxes still listed: {', '.join(left)}")
+    return uncertain
+
+
+def gateway_listener(ss: str, port: int, proc: Path = Path("/proc"), uid: int | None = None) -> int:
+    """The PID of the one process listening on the gateway's endpoint, from `ss -ltnpeH sport = :PORT`.
+    Every listener on the port counts, on any address: exactly one is allowed, on 127.0.0.1:PORT, naming
+    exactly one PID, run by this user (`uid`, else ours) and holding that socket's inode. Anything else
+    raises ValueError."""
+    rows = [line.split() for line in ss.splitlines() if line.strip()]
+    if len(rows) != 1:
+        raise ValueError(f"{len(rows)} listeners on port {port}")
+    row = rows[0]
+    if len(row) < 4 or row[3] != f"127.0.0.1:{port}":
+        raise ValueError(f"the listener on port {port} is not on 127.0.0.1")
+    users = next((field for field in row if field.startswith("users:")), "")
+    pids = set(re.findall(r"pid=(\d+)", users))
+    if len(pids) != 1:
+        raise ValueError(f"the listener on port {port} names {len(pids)} processes")
+    inode = next((field.removeprefix("ino:") for field in row if field.startswith("ino:")), "")
+    if not inode.isdigit():
+        raise ValueError(f"the listener on port {port} shows no socket inode")
+    pid = int(pids.pop())
+    ids_line = next(line for line in (proc / str(pid) / "status").read_text().splitlines()
+                    if line.startswith("Uid:"))
+    if set(ids_line.split()[1:]) != {str(os.getuid() if uid is None else uid)}:
+        raise ValueError(f"the listener on port {port} is another user's process")
+    if f"socket:[{inode}]" not in {str(fd.readlink()) for fd in (proc / str(pid) / "fd").iterdir()}:
+        raise ValueError(f"process {pid} does not hold the listener on port {port}")
+    return pid
