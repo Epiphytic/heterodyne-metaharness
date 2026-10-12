@@ -23,11 +23,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
-from sandbox_env import config_env  # noqa: E402
+from sandbox_env import config_env, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
 from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
-from heterodyne.sandbox.backend import BackendUnavailable  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest  # noqa: E402
 from heterodyne.sandbox.runtime import (  # noqa: E402
@@ -258,27 +257,7 @@ def preflight(settings: SandboxSettings, env: dict[str, str], real_home: Path) -
 
 
 def teardown(live: Live) -> list[str]:
-    """Stop every session the module launched, each tried whatever the others do, then confirm with
-    `openshell sandbox list` that none of their sandboxes is left. What is uncertain, or nothing."""
-    uncertain: list[str] = []
-    sandboxes: set[str] = set()
-    for key in dict.fromkeys(live.keys):
-        try:
-            for when in ("before", "after"):
-                rec = read_record(live.runtime.layout(key))
-                sandboxes |= {rec.sandbox} if rec is not None else set()
-                if when == "before":
-                    live.runtime.stop(key)
-        except Exception as exc:  # noqa: BLE001 - every session is tried; each failure is reported
-            uncertain.append(f"session {key}: {type(exc).__name__}: {exc}")
-    try:
-        left = sorted(sandboxes & live.backend.names())
-    except BackendUnavailable as exc:
-        uncertain.append(f"the sandbox list: {exc}")
-    else:
-        if left:
-            uncertain.append(f"sandboxes still listed: {', '.join(left)}")
-    return uncertain
+    return sandbox_teardown(live.runtime, live.keys, live.backend.names)
 
 
 @pytest.fixture(scope="module")
