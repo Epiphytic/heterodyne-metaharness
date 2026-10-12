@@ -21,7 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
 from sandbox_env import config_env, short_dir  # noqa: E402
-from wsd_env import accounts_at, git_repo  # noqa: E402
+from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest  # noqa: E402
@@ -36,6 +36,7 @@ from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed  # noqa: E4
 from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
+from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
 from heterodyne.wsd.runtime import LaunchSpec, Liveness, RuntimeUnavailable, Started  # noqa: E402
 from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
@@ -47,6 +48,7 @@ PROFILES = {"claude": "p-one", "codex": "p-live-codex"}
 MODELS = {"claude": os.environ.get("HZ_LIVE_SANDBOX_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
           "codex": os.environ.get("HZ_LIVE_SANDBOX_CODEX_MODEL", "gpt-6-luna")}
 CODEX_EFFORT = 'model_reasoning_effort="low"'
+CODEX_HEADER = f"{MODELS['codex'].lower()} low"   # the TUI status line, lowercased
 CLIS = {profile: cli for cli, profile in PROFILES.items()}
 PIN_SECONDS = 90
 PROMPT_SECONDS = 180
@@ -90,6 +92,7 @@ class Live:
         assert started.native_id is not None
         used = models_used(self.runtime.layout(spec.session_key).home, cli, started.native_id)
         assert used == {MODELS[cli]}, f"{cli} ran on {sorted(used)}, not the pinned {MODELS[cli]}"
+        print(f"EVIDENCE {spec.session_key} g{spec.generation} models={sorted(used)}")     # for docs/wsd.md
 
     def record(self, key: str) -> SessionRecord:
         rec = read_record(self.runtime.layout(key))
@@ -136,12 +139,13 @@ def models_used(home: Path, cli: str, native_id: str) -> set[str]:
 
 class PinnedSelfTest(OpenShellSelfTest):
     """Test-only: the self-test's own prompt is each launch's first model call, and Codex's app-server is
-    started without the TUI's --model. So the model the TUI's header shows for the thread, as the server
-    configured it, is required before that prompt is pasted: a mismatch fails the launch with no call."""
+    started without the TUI's --model. So the model and effort the TUI's status line shows for the thread,
+    as the server configured it, are required before that prompt is pasted: a mismatch fails the launch
+    with no call. The line shows the model's display name ("GPT-6-Luna"), so it is compared lowercased."""
 
     def agent_path(self, ctx: ProbeContext) -> None:
         if ctx.adapter.name == "codex" and not wait_until(
-                lambda: MODELS["codex"] in ctx.tmux.capture(ctx.tmux_session, 50), PIN_SECONDS):
+                lambda: CODEX_HEADER in ctx.tmux.capture(ctx.tmux_session, 50).lower(), PIN_SECONDS):
             raise SelfTestFailed("live-model-pin")
         super().agent_path(ctx)
 
@@ -179,8 +183,10 @@ def live() -> Iterator[Live]:
         tmux = Tmux(f"hz-live-sb-{uuid.uuid4().hex[:8]}")
         backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
                                    tool_env(os.environ, settings.tool_env))     # as wsd's build_runtime
+        # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
+        accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
         config = RuntimeConfig(
-            sessions=root / "s", settings=settings, accounts=accounts_at(real_home), real_home=real_home,
+            sessions=root / "s", settings=settings, accounts=accounts, real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
@@ -204,6 +210,8 @@ def test_both_shapes_launch_through_the_full_self_test(live: Live, cli: str) -> 
     assert rec.phase is Phase.RUNNING and started.native_id is not None
     assert live.tmux.has_session(live.runtime.reaper_name(spec.session_key, rec.generation))  # D13's backstop
     assert {s.key: s.liveness for s in live.runtime.sessions("alpha")}[spec.session_key] is Liveness.LIVE
+    curl = live.backend.exec(rec.sandbox, Path(rec.worktree), ["curl", "-V"], timeout=EXEC_SECONDS)
+    print(f"EVIDENCE {cli} workload {curl.stdout.decode(errors='replace').splitlines()[:1]}")
 
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
