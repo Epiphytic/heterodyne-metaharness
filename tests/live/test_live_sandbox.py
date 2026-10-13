@@ -44,6 +44,7 @@ from probe_verdicts import (  # noqa: E402
     rejection_shown,
     require,
     session_socket_checks,
+    shown,
     tool_var_rejection,
 )
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
@@ -687,6 +688,11 @@ def rejections_shown(reasons: list[str], tool_vars: frozenset[str] = frozenset()
     return [rejection_shown(r, tool_vars) for r in reasons]
 
 
+def outputs_shown(outputs: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Each check's exit status, and its stdout only as `shown` renders it (Codex T15 r3)."""
+    return [(rc, shown(out)) for rc, out in outputs]
+
+
 def in_workload(ctx: ProbeContext, script: str, *args: str) -> tuple[int, str]:
     """A check script's exit status and stdout from the workload, as the probes run. Its stderr is never
     kept: it may hold paths."""
@@ -710,7 +716,7 @@ def test_a_canary_inside_a_mount_refuses_the_launch(live: Live) -> None:
     # The injection: the canary is readable inside before the probes run.
     hooked = Hooked(before_exec=lambda ctx: seen.append(in_workload(ctx, READABLE, str(canary))))
     refused(live, runtime(live, config=config, selftest=hooked), spec, "real-home-canary-unreadable")
-    assert seen == [(0, "readable")], f"the canary was not readable inside: {seen}"
+    require(seen == [(0, "readable")], f"the canary was not readable inside: {outputs_shown(seen)}")
 
 
 READABLE = "import sys\nopen(sys.argv[1], 'rb').close()\nprint('readable')"
@@ -740,7 +746,7 @@ def test_a_leaked_variable_refuses_the_launch(live: Live, monkeypatch: pytest.Mo
     hooked = Hooked(before_exec=lambda ctx: seen.append(in_workload(ctx, HAS_LANG)))   # it is there
     spec = live.spec("claude", "btq-live-n3")
     refused(live, runtime(live, selftest=hooked), spec, "host-env-not-inherited")
-    assert seen == [(0, "True")], f"LANG was not in the workload's environment: {seen}"
+    require(seen == [(0, "True")], f"LANG was not in the workload's environment: {outputs_shown(seen)}")
 
 
 def test_a_dead_session_socket_refuses_the_launch(live: Live) -> None:
@@ -863,7 +869,7 @@ def test_a_forged_agent_path_result_refuses_the_launch(live: Live, monkeypatch: 
 
     refused(live, runtime(live, selftest=Hooked(beside_agent=forge)), live.spec("claude", "btq-live-n7"),
             CHANNEL_REJECTED)
-    assert forger == [(0, "connected")], f"the forger did not reach the channel: {forger}"
+    require(forger == [(0, "connected")], f"the forger did not reach the channel: {outputs_shown(forger)}")
     require(rejections(made) == [NOT_THE_PROBE], f"the channel rejected {rejections_shown(rejections(made))}")
 
 
