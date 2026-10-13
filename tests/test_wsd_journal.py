@@ -19,6 +19,7 @@ from heterodyne.wsd.journal import (
     OpKind,
     OpStatus,
 )
+from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.states import BeadState, IllegalTransition, Reason, WsState, allowed
 
 
@@ -938,3 +939,47 @@ def test_the_clamp_never_prunes_an_over_mark(journal: Journal) -> None:
     journal.mark_over("sk-fake", 1)
     journal.clamp_deadlines(1_800_000_000)
     assert journal.is_over("sk-fake", 1)
+
+
+def _launched(generation: int, bead: str = "b1", key: str = "sk-crash") -> LaunchEntry:
+    return LaunchEntry(key, generation, "alpha", bead, "coder", "p", "default", "ck", "", False,
+                       "2026-10-13T00:00:00Z", outcome=LAUNCHED)
+
+
+def test_crash_accounting_is_once_per_generation(tmp_path: Path, journal: Journal) -> None:
+    """g08sd: one class row per launched generation, written once; the counter is per bead and moves only
+    when its row is new. `lifetime` zeroes it, `stopped` and `legacy` leave it, and a reset zeroes it and
+    accounts what is pending as `reset`, keeping every row."""
+    one, two, three = _launched(1), _launched(2), _launched(3)
+    with journal.transaction():
+        for e in (one, two, three, _launched(1, "b2", "sk-other")):
+            journal.launch_insert(e)
+    assert not journal.crash_accounted(one)
+    assert journal.crash_account("alpha", "b1", one, "died") == 1
+    assert journal.crash_account("alpha", "b1", one, "died") == 1        # the row exists: no change
+    assert journal.crash_accounted(one) and journal.crash_count("alpha", "b1") == 1
+    assert journal.crash_account("alpha", "b2", _launched(1, "b2", "sk-other"), "died") == 1   # per bead
+    assert journal.crash_account("alpha", "b1", two, "stopped") == 1
+    assert journal.crash_account("alpha", "b1", three, "legacy") == 1
+    assert journal.crash_class(two) == "stopped" and journal.crash_class(three) == "legacy"
+    four = _launched(4)
+    with journal.transaction():
+        journal.launch_insert(four)
+    assert journal.crash_account("alpha", "b1", four, "lifetime") == 0
+    with pytest.raises(ValueError, match="crash class"):
+        journal.crash_account("alpha", "b1", _launched(5), "healthy")
+    five, six = _launched(5), _launched(6)
+    with journal.transaction():
+        journal.launch_insert(five)
+        journal.launch_insert(six)
+    journal.crash_account("alpha", "b1", five, "died")
+    assert journal.crash_count("alpha", "b1") == 1
+    journal.crash_reset("alpha", "b1")
+    assert journal.crash_count("alpha", "b1") == 0 and journal.crash_class(six) == "reset"
+    assert journal.crash_class(five) == "died" and journal.crash_count("alpha", "b2") == 1
+    journal.close()
+    reopened = Journal(tmp_path / "state" / "wsd.db")            # the schema check passes with the rows
+    try:
+        assert reopened.crash_count("alpha", "b1") == 0 and reopened.crash_accounted(one)
+    finally:
+        reopened.close()
