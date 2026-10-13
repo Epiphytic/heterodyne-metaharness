@@ -14,7 +14,9 @@ from heterodyne.agents.base import (
     HOOK_EVENTS,
     AdapterError,
     Cli,
+    UsageReport,
     checked_id,
+    epoch_or_none,
     find_binary,
     has_file,
     home_dir,
@@ -27,14 +29,54 @@ from heterodyne.agents.base import (
     write_at,
 )
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, AgentFacts, Bind, SessionLayout
+from heterodyne.session.shim import MAX_DEPTH, MAX_LINE, json_depth
+from heterodyne.wsd.usage import Observation
 
 APP_SOCKET = f"unix://{BRIDGE_INSIDE}/app.sock"
 HOOKS_FILE = "hooks.json"
 TRUST_SCRIPT = RUN_INSIDE / "codex_trust.py"
 TRUST_SOURCE = Path(__file__).resolve().parents[1] / "sandbox" / "resources" / "codex_trust.py"
+USAGE_SCRIPT = RUN_INSIDE / "codex_usage.py"
+USAGE_SOURCE = Path(__file__).resolve().parents[1] / "sandbox" / "resources" / "codex_usage.py"
+IN_SESSION_SOURCE = "codex.app-server"
+HOST_SOURCE = "codex.host-read"
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 KEY_TEXT = re.compile(r'[^"\\\x00-\x1f\x7f]{1,400}')
 HASH = re.compile(r"(sha256:)?[0-9a-f]{16,64}")
+
+
+def _duration(minutes: int) -> str:
+    for unit, size in (("d", 1440), ("h", 60)):
+        if minutes % size == 0:
+            return f"{minutes // size}{unit}"
+    return f"{minutes}m"
+
+
+def parse_rate_limits(data: object, source: str) -> UsageReport | None:
+    """A `RateLimitSnapshot` (codex-cli 0.160 `account/rateLimits/read`, S7 (3)): one observation per
+    window with a positive integer duration, identified by its limit ID and duration, never its slot. A
+    `rateLimitReachedType` other than null is the limit signal (plan 4b E6); its hint is the latest reset
+    of a window at 100% or more. None if `data` is not an object."""
+    if not isinstance(data, dict):
+        return None
+    snap = cast(dict[str, Any], data)
+    limit: Any = snap.get("limitId")
+    limit_id = limit if isinstance(limit, str) else "default"
+    windows: list[Observation] = []
+    for slot in ("primary", "secondary"):
+        window: Any = snap.get(slot)
+        if not isinstance(window, dict):
+            continue
+        w = cast(dict[str, Any], window)
+        minutes: Any = w.get("windowDurationMins")
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+            continue
+        windows.append(Observation(f"codex:{limit_id}:{minutes}m", _duration(minutes), w.get("usedPercent"),
+                                   epoch_or_none(w.get("resetsAt")), source))
+    limited = snap.get("rateLimitReachedType") is not None
+    full = [o.resets_at for o in windows if o.resets_at is not None and not isinstance(o.used_percent, bool)
+            and isinstance(o.used_percent, int | float) and o.used_percent >= 100]
+    return UsageReport(tuple(windows), limited, max(full) if limited and full else None)
 
 
 def _socket(path: Path) -> bool:
@@ -96,8 +138,26 @@ class Codex:
         finally:
             os.close(conf)
 
-    def run_files(self) -> Mapping[str, str]:
-        return {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
+        files = {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
+        if usage or limits:                # the one read gives both the windows and the limit
+            files[USAGE_SCRIPT.name] = USAGE_SOURCE.read_text()
+        return files
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        return None                     # codex 0.160's hooks carry no usage (S7 (5))
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        return ["python3", "-I", str(USAGE_SCRIPT), str(cli.binary)]
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        if len(output) > MAX_LINE or json_depth(output) > MAX_DEPTH:
+            return None
+        try:
+            data: Any = json.loads(output)
+        except ValueError:
+            return None
+        return parse_rate_limits(data, IN_SESSION_SOURCE)
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)

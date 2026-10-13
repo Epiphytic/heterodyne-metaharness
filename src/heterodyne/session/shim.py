@@ -1,7 +1,7 @@
 """ws-hook and ws-request (ADR 0001 §3.1, §10): the agent's side of the per-session socket.
 
 Standard library only, with no heterodyne imports: inside the sandbox this file is run as
-`python3 -I /run/hz/shim.py hook|request` from the read-only run directory. The socket is
+`python3 -I /run/hz/shim.py hook|request|status` from the read-only run directory. The socket is
 $HZ_SESSION_SOCKET; the token and `shim.json` sit beside it, never in argv (plan 4 D5).
 
 If wsd doesn't answer within `wait_seconds`, a PreToolUse is allowed only for a locally classifiable
@@ -20,9 +20,11 @@ session ID alone, so lifecycle events survive; the local `worktree_edit` check s
 event. A tool call too large even projected is denied; another such event is dropped.
 """
 
+import hashlib
 import json
 import math
 import os
+import select
 import socket
 import stat
 import sys
@@ -274,6 +276,110 @@ def run_request(words: Sequence[str], env: Mapping[str, str], *, clock: Clock = 
     return (0 if reply.get("ok") is True else 1), json.dumps(reply)
 
 
+STATUS_FILE = "status.json"     # in $HOME/.hz: what wsd last accepted, from which launch, and when
+STATUS_WAIT = 2.0               # the status line redraws often: never hold it longer than this
+STATUS_RESEND = 30.0            # an unchanged value is sent again this often (wall seconds): well inside
+                                # the smallest stale window wsd allows (usage.stale_minutes >= 1)
+
+
+def _launch(token: str) -> str:
+    """Which launch the status was sent to, without keeping its token: each generation has its own."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _recent(sent: object, now: float) -> bool:
+    if isinstance(sent, bool) or not isinstance(sent, int | float):
+        return False
+    return 0 <= now - sent < STATUS_RESEND          # a clock that went back is never recent
+
+
+def _status_dir(env: Mapping[str, str]) -> int | None:
+    """$HOME/.hz, opened without following a link; None if $HOME isn't absolute."""
+    home = env.get("HOME")
+    if not home or not Path(home).is_absolute():
+        return None
+    folder = Path(home) / ".hz"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+
+def _last_status(env: Mapping[str, str]) -> dict[str, Any] | None:
+    try:
+        dir_fd = _status_dir(env)
+        if dir_fd is None:
+            return None
+        try:
+            fd = os.open(STATUS_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            raw = os.read(fd, MAX_LINE + 1) if stat.S_ISREG(os.fstat(fd).st_mode) else b""
+        finally:
+            os.close(fd)
+        data: Any = json.loads(raw) if raw and len(raw) <= MAX_LINE and json_depth(raw) <= MAX_DEPTH else None
+    except (OSError, ValueError):
+        return None
+    return cast(dict[str, Any], data) if isinstance(data, dict) else None
+
+
+def _save_status(env: Mapping[str, str], text: str) -> None:
+    try:
+        dir_fd = _status_dir(env)
+        if dir_fd is None:
+            return
+        try:
+            fd = os.open(STATUS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        pass
+
+
+def run_status(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
+               sleep: Sleep = time.sleep, wall: Clock = time.time) -> int:
+    """Claude's status line (plan 4b E7): send the input's `rate_limits` as a StatusLine hook event and
+    print nothing. A value is sent when it differs from what this launch's wsd last accepted, when it
+    went to another launch (a relaunch shares $HOME), or when STATUS_RESEND has passed since, so an
+    unchanged reading never goes stale in wsd's cache. A value wsd didn't accept is sent again on the
+    next redraw. Always exits 0: the status line decides nothing."""
+    try:
+        payload: Any = json.loads(raw) if len(raw) <= MAX_LINE and json_depth(raw) <= MAX_DEPTH else None
+        if not isinstance(payload, dict):
+            return 0
+        fields = cast(dict[str, Any], payload)
+        limits: Any = fields.get("rate_limits")
+        if not isinstance(limits, dict):
+            return 0                    # the first call, before any API response, has none (S7)
+        text = json.dumps(limits, sort_keys=True)
+        found = _config(env)
+        if found is None:
+            return 0
+        sock, token, cfg = found
+        launch, now = _launch(token), wall()
+        last = _last_status(env)
+        if (last is not None and last.get("launch") == launch and last.get("limits") == text
+                and _recent(last.get("sent"), now)):
+            return 0
+        event: dict[str, Any] = {"hook_event_name": "StatusLine", "session_id": fields.get("session_id"),
+                                 "rate_limits": limits}
+        message = _bounded(lambda p: {"token": token, "type": "hook_event", "payload": p}, event)
+        if message is None:
+            return 0
+        reply = _ask(sock, message, min(_wait(cfg), STATUS_WAIT), clock, sleep)
+        if reply is not None and reply.get("ok") is True:
+            _save_status(env, json.dumps({"launch": launch, "limits": text, "sent": now}))
+    except Exception:  # noqa: BLE001, S110 - a status line never fails the session
+        pass
+    return 0
+
+
 def json_depth(line: bytes) -> int:
     """The deepest array or object nesting in a JSON text, counted outside strings. Parsing and spooling
     recurse, so a deep text is refused before either sees it (a thread's stack may be small)."""
@@ -310,12 +416,36 @@ def request_main(argv: Sequence[str] | None = None) -> int:
     return rc
 
 
+def read_bounded(fd: int, limit: int, seconds: float, clock: Clock = time.monotonic) -> bytes:
+    """`fd`'s input up to its end, cut at `limit` + 1 bytes (too long to be read as one line), or b"" if
+    it hasn't ended within `seconds`: neither an endless nor a stalled stream can hold the caller."""
+    end = clock() + seconds
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    data = b""
+    while len(data) <= limit:
+        left = end - clock()
+        if left <= 0 or not poller.poll(max(1, int(left * 1000))):
+            return b""
+        chunk = os.read(fd, limit + 1 - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def status_main() -> int:
+    return run_status(read_bounded(sys.stdin.fileno(), MAX_LINE, STATUS_WAIT), os.environ)
+
+
 def main(argv: Sequence[str]) -> int:
     if argv[:1] == ["hook"]:
         return hook_main()
     if argv[:1] == ["request"]:
         return request_main(argv[1:])
-    print("usage: shim.py hook|request [text...]", file=sys.stderr)
+    if argv[:1] == ["status"]:
+        return status_main()
+    print("usage: shim.py hook|request|status [text...]", file=sys.stderr)
     return 2
 
 

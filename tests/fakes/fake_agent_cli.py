@@ -5,7 +5,14 @@ The sandbox tests run it on the host through FakeBackend, which exports HZ_FAKE_
 host path) so the hook commands' /run/hz paths can be translated here. Modes:
 - `codex app-server` (stdio): answers initialize and hooks/list from $CODEX_HOME's hooks.json and
   config.toml, shaped as codex 0.160 answers. A hook's hash is "sha256:" + the first 16 hex digits of
-  sha256(command). HZ_FAKE_HOOKS_FAULT breaks the answer (see `faulty`).
+  sha256(command). HZ_FAKE_HOOKS_FAULT breaks the answer (see `faulty`). It also answers
+  `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated`
+  notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login.
+  `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error`, `garbage` (a line that isn't JSON), `close`
+  (closes its output and waits), `exit` (exits 3 without answering), `orphan` (starts a descendant that
+  holds its output open, writes the descendant's PID to `HZ_FAKE_CHILD_PID_FILE`, and hangs) or `escaped`
+  (the same, the descendant in a session of its own). With `HZ_FAKE_PID_FILE` set, it first writes its
+  PID there, so a test can prove it is gone.
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
 - the TUI: prints its prompt marker (Claude merges its settings layers as the real one does, see
   `claude_hooks`; Codex runs only the hooks config.toml trusts at their current hash;
@@ -85,13 +92,39 @@ def faulty(result: Any, fault: str) -> Any:
     return result
 
 
+def rate_limits(msg: dict[str, Any]) -> str | None:
+    """The answer line to account/rateLimits/read, or None to never answer."""
+    fault = os.environ.get("HZ_FAKE_RATE_FAULT")
+    if fault == "hang":
+        return None
+    if fault == "garbage":
+        return "not json"
+    if fault == "close":
+        os.close(1)
+        return None
+    if fault == "exit":
+        os._exit(3)
+    if fault in ("orphan", "escaped"):  # a descendant keeps the output open, then the app-server hangs
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                                 start_new_session=fault == "escaped")
+        Path(os.environ["HZ_FAKE_CHILD_PID_FILE"]).write_text(str(child.pid))
+        return None
+    if fault == "error" or not (Path(os.environ["CODEX_HOME"]) / "auth.json").is_file():
+        return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
+            "code": -32600, "message": "codex account authentication required to read rate limits"}})
+    snapshot = json.loads(os.environ.get("HZ_FAKE_RATE_LIMITS", "null"))
+    return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"rateLimits": snapshot}})
+
+
 def stdio_server() -> None:
-    trusted = codex_trusted()
+    if pid_file := os.environ.get("HZ_FAKE_PID_FILE"):
+        Path(pid_file).write_text(str(os.getpid()))
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("method") == "initialize":
             result: Any = {"userAgent": "fake"}
         elif msg.get("method") == "hooks/list":
+            trusted = codex_trusted()
             listed = []
             for key, event, command in codex_hooks():
                 have = trusted.get(key, {}).get("trusted_hash")
@@ -102,6 +135,15 @@ def stdio_server() -> None:
                                 "errors": []}]}
             if fault := os.environ.get("HZ_FAKE_HOOKS_FAULT"):
                 result = faulty(result, fault)
+        elif msg.get("method") == "account/rateLimits/read":
+            print(json.dumps({"jsonrpc": "2.0", "method": "account/rateLimits/updated", "params": {}}),
+                  flush=True)
+            answer = rate_limits(msg)
+            if answer is None:
+                sys.stdin.read()        # hang (or, its output closed, wait) until killed
+                return
+            print(answer, flush=True)
+            continue
         else:
             continue                    # a notification
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)

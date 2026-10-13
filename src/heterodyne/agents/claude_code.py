@@ -9,9 +9,12 @@ from typing import Any, cast
 
 from heterodyne.agents.base import (
     HOOK_EVENTS,
+    STATUS_COMMAND,
     AdapterError,
     Cli,
+    UsageReport,
     checked_id,
+    epoch_or_none,
     find_binary,
     has_file,
     home_dir,
@@ -22,6 +25,7 @@ from heterodyne.agents.base import (
     write_at,
 )
 from heterodyne.sandbox.spec import RUN_INSIDE, AgentFacts, SessionLayout
+from heterodyne.wsd.usage import Observation
 
 
 def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str, resume: bool,
@@ -63,6 +67,21 @@ REMOTE_POLICY = "remote-settings.json"          # Claude's cache of remote manag
 # Claude Code 2.1.286 ends a turn that fails on an API error, a usage limit included, with StopFailure
 # instead of Stop (S7 finding 1): it must reach the session socket, or the turn never ends to wsd.
 CLAUDE_HOOK_EVENTS = (*HOOK_EVENTS, "StopFailure")
+STATUS_SOURCE = "claude.statusline"
+# The status line's windows (S7 (3)): its key, and the window's identity and label.
+CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
+
+
+def claude_windows(limits: Mapping[str, Any]) -> tuple[Observation, ...]:
+    """The status line's `rate_limits`: one observation per window it has, its values unchecked."""
+    found: list[Observation] = []
+    for key, kind in CLAUDE_WINDOWS:
+        window: Any = limits.get(key)
+        if isinstance(window, dict):
+            w = cast(dict[str, Any], window)
+            found.append(Observation(f"claude:{kind}", kind, w.get("used_percentage"),
+                                     epoch_or_none(w.get("resets_at")), STATUS_SOURCE))
+    return tuple(found)
 
 
 class ClaudeCode:
@@ -116,9 +135,31 @@ class ClaudeCode:
         finally:
             os.close(conf)
 
-    def run_files(self) -> Mapping[str, str]:
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
+        """The limit signal is the StopFailure hook, always installed, so `limits` adds nothing."""
         hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
-        return {SETTINGS_FILE: json.dumps({"skipDangerousModePermissionPrompt": True, "hooks": hooks})}
+        settings: dict[str, Any] = {"skipDangerousModePermissionPrompt": True, "hooks": hooks}
+        if usage:
+            settings["statusLine"] = {"type": "command", "command": STATUS_COMMAND}
+        return {SETTINGS_FILE: json.dumps(settings)}
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        """S7 (5): a StopFailure with `error == "rate_limit"` is the limit signal; its reset is only in
+        message text, which is never parsed. S7 (3): the status line's `rate_limits`."""
+        event = payload.get("hook_event_name")
+        if event == "StopFailure":
+            return UsageReport(limited=True) if payload.get("error") == "rate_limit" else None
+        limits: Any = payload.get("rate_limits")
+        if event != "StatusLine" or not isinstance(limits, dict):
+            return None
+        windows = claude_windows(cast(dict[str, Any], limits))
+        return UsageReport(windows) if windows else None
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        return None
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        return None
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         found = checked_id(native_id)
