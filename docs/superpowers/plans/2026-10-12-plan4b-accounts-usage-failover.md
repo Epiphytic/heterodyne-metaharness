@@ -2078,3 +2078,378 @@ git add src/heterodyne/agents/base.py src/heterodyne/agents/claude_code.py src/h
         tests/fakes/fake_agent_cli.py tests/test_agents_usage.py tests/test_session_shim.py
 git commit -m "plan4b T5: usage parsing per adapter, the status-line shim and the in-sandbox Codex read"
 ```
+
+## Task 6: named-account binding, the key check and the locked freshness gate
+
+AU-6 proper: the runtime launches on the account the entry pinned, never only `default`. Under the D8 lock it checks that the account's key is still the pinned one, then rereads the login for the freshness gate (E1, E3). The other accounts, `default` included, are protected and probed (E13). A handoff relaunch starts fresh with D7's ID (E10).
+
+**Files:**
+- Modify: `src/heterodyne/sandbox/runtime.py` (`launch`, `_resume`, `_logins`, `_fresh`, new `_pinned`; `RuntimeConfig.credlocks`)
+- Modify: `src/heterodyne/sandbox/settings.py` (`lock_wait_seconds`), `src/heterodyne/defaults/defaults.toml`
+- Modify: `src/heterodyne/sandbox/build.py` (`credlocks=s.credlock_dir`)
+- Modify: `src/heterodyne/wsd/park.py` (`_pin_and_dispatch` passes `credential_key`; one line)
+- Modify: `tests/sandbox_env.py` (`write_login`, `with_named`, `launch_spec` pins the key, the rig's `credlocks`), `tests/fakes/scripted_selftest.py` (records `ctx.others`), `tests/live/test_live_sandbox.py` (the key and `credlocks`)
+- Test: `tests/test_sandbox_runtime.py`, `tests/test_sandbox_settings.py`, `tests/test_wsd_pickup.py`
+
+**Interfaces:**
+- Consumes:
+  - `wsd.runtime.LOGIN_STALE`, `KEY_CHANGED`, `LaunchSpec.credential_key`, `LaunchSpec.handoff` (Task 1).
+  - `wsd.ids.handoff_session(session_key, generation)` (Task 1).
+  - `wsd.credlock.credential_lock(lock_dir, key, wait_seconds, *, clock, sleep)`, `CredentialBusy` (Task 2).
+  - `WsdSettings.credlock_dir` (Task 2).
+  - `SandboxSpec.cli_root` and the walk inside `check_credentials` (Task 3): it now runs for named accounts too, with no change here.
+- Produces:
+  - `RuntimeConfig.credlocks: Path`, a required field placed after `sessions`. Every construction uses keywords.
+  - `SandboxSettings.lock_wait_seconds: int`, from `[sandbox] lock_wait_seconds` (1 to 600, default 60).
+  - Refusals:
+    - an empty or changed key gives `LaunchFailed(KEY_CHANGED)`;
+    - a stale login gives `LaunchFailed(LOGIN_STALE)`, the exact text Task 10 matches;
+    - a busy or unopenable lock gives `LaunchFailed(LOCK_BUSY)` or `LaunchFailed(LOCK_FAILED)`.
+  - `SandboxRuntime._logins(adapter, account)`, which Task 7 reuses unchanged.
+
+A busy lock refuses the launch, as E2 says. It never holds the workstream: the lock's holders are short (Task 8's read, AU-10's setup), and a refused launch is retried by the next pickup. The lock covers the key check and the login read only. The bind is of the file itself, and nothing in the launch writes it.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/sandbox_env.py`, add the imports `from dataclasses import replace`, `from heterodyne.config import paths`, `from heterodyne.config.accounts import Account, canonical_login, credential_key`, `from heterodyne.wsd.accounts import ConfiguredAccounts`, and `ADAPTERS` from `wsd_env`. Then replace `fresh_logins` and `launch_spec`, add `write_login` and `with_named`, and give the rig's `RuntimeConfig` `credlocks=root / "k"`:
+
+```python
+def write_login(folder: Path, adapter: str, expires_at: int) -> None:
+    """A fake login for `adapter` in `folder` that expires at `expires_at` (epoch seconds). No credential."""
+    folder.mkdir(parents=True, exist_ok=True)
+    if adapter == "claude-code":
+        (folder / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"expiresAt": expires_at * 1000, "accessToken": "fake-not-a-token"}}))
+    else:
+        (folder / "auth.json").write_text(json.dumps({"tokens": {"access_token": fake_jwt(expires_at)}}))
+
+
+def fresh_logins(home: Path, expires_at: int) -> None:
+    """Fake default logins that expire at `expires_at` (epoch seconds). Obvious fakes, no credential."""
+    write_login(home / ".claude", "claude-code", expires_at)
+    write_login(home / ".codex", "codex", expires_at)
+
+
+def with_named(rig: "RuntimeRig", adapter: str, name: str, expires_at: int) -> Path:
+    """Configure the named account `name` for `adapter` at `~/.hz-<name>`, its fake login expiring at
+    `expires_at`, as AU-2 would resolve it, and give the runtime the accounts. Returns the directory."""
+    configured = f"~/.hz-{name}"
+    env = {"HOME": str(rig.home)}
+    write_login(paths.expand(configured, env), adapter, expires_at)
+    login_dir, files = canonical_login(name, adapter, configured, env)
+    current = rig.runtime.c.accounts
+    assert isinstance(current, ConfiguredAccounts)
+    named = {**current.named,
+             (adapter, name): Account(name, adapter, configured, login_dir, files, credential_key(adapter, files))}
+    rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(ADAPTERS, env, named))
+    return paths.expand(configured, env)
+
+
+def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: str = "default",
+                resume: bool = False) -> LaunchSpec:
+    """A first launch, as plan 3's guard builds it: Claude's native ID is the session key, Codex's is
+    unknown until its thread starts. The credential key is the account's, pinned now (AU-3)."""
+    key = ids.role_session(bead, "coder", profile)
+    native = key if profile == "p-one" else None
+    return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
+                      native_id=native, account=account, repo=rig.repo,
+                      credential_key=rig.runtime.c.accounts.current_key(ADAPTERS[profile], account))
+```
+
+`RuntimeRig` is a dataclass defined below `with_named`, so its annotation there is a string. `with_named` must not be called before the rig exists.
+
+In `tests/fakes/scripted_selftest.py`, add `self.others: list[tuple[tuple[str, Path], ...]] = []` to `__init__` (importing `Path`), and `self.others.append(ctx.others)` as the first line of `exec_path`.
+
+In `tests/test_sandbox_runtime.py`, import `errno` and `fcntl`, `from sandbox_env import with_named, write_login` (beside the existing names), `from heterodyne.wsd import ids`, `from heterodyne.wsd.accounts import ConfiguredAccounts`, `from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock`, and `KEY_CHANGED, LOGIN_STALE` from `heterodyne.wsd.runtime`. Then replace `test_a_named_account_is_refused` and `test_the_freshness_gate_refuses_a_login_that_expires_too_soon` with:
+
+```python
+DAY = 86_400
+
+
+def logins_bound(rig: RuntimeRig, key: str) -> list[Path]:
+    return [b.source for b in rig.backend.boxes[record(rig, key).sandbox].spec.logins]
+
+
+@pytest.mark.parametrize(("profile", "adapter", "login"), [("p-one", "claude-code", ".credentials.json"),
+                                                           ("p-two", "codex", "auth.json")])
+def test_a_named_account_binds_only_its_own_login(rig: RuntimeRig, profile: str, adapter: str,
+                                                  login: str) -> None:
+    folder = with_named(rig, adapter, "work", rig.clock() + DAY)
+    spec = launch_spec(rig, profile, account="work")
+    rig.runtime.launch(spec)
+    assert logins_bound(rig, spec.session_key) == [(folder / login).resolve()]
+    default = rig.home / (".claude" if adapter == "claude-code" else ".codex") / login
+    assert rig.selftest.others == [(("default", default),)]     # §7: the default login is another account
+
+
+def test_the_default_launch_still_protects_every_named_account(rig: RuntimeRig) -> None:
+    folder = with_named(rig, "codex", "work", rig.clock() + DAY)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    assert logins_bound(rig, spec.session_key) == [(rig.home / ".codex" / "auth.json").resolve()]
+    assert rig.selftest.others == [(("work", folder / "auth.json"),)]
+
+
+@pytest.mark.parametrize("pinned", ["", "ck1-" + "0" * 32])
+def test_a_key_that_is_not_the_accounts_refuses_the_launch(rig: RuntimeRig, pinned: str) -> None:
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(replace(launch_spec(rig, "p-two"), credential_key=pinned))
+    assert str(caught.value) == KEY_CHANGED
+    assert rig.backend.created == []
+
+
+def test_a_login_repointed_after_the_pin_refuses_the_launch(rig: RuntimeRig) -> None:
+    """D2: the account's configured path now resolves to other files, so its key is not the pinned one."""
+    write_login(rig.root / "login-a", "codex", rig.clock() + DAY)
+    write_login(rig.root / "login-b", "codex", rig.clock() + DAY)
+    (rig.home / ".hz-work").symlink_to(rig.root / "login-a")
+    with_named(rig, "codex", "work", rig.clock() + DAY)         # writes through the link, into login-a
+    spec = launch_spec(rig, "p-two", account="work")
+    (rig.home / ".hz-work").unlink()
+    (rig.home / ".hz-work").symlink_to(rig.root / "login-b")
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(spec)
+    assert str(caught.value) == KEY_CHANGED
+    assert rig.backend.created == []
+
+
+def test_the_key_and_the_login_are_read_under_the_accounts_lock(rig: RuntimeRig,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-two")
+    lock = rig.runtime.c.credlocks / f"{spec.credential_key}.lock"
+    held: list[int] = []
+    real = ConfiguredAccounts.current_key
+
+    def probing(self: ConfiguredAccounts, adapter: str, account: str) -> str:
+        fd = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(0)                                      # taken: the runtime did not hold it
+        except BlockingIOError as exc:
+            held.append(exc.errno)
+        finally:
+            os.close(fd)
+        return real(self, adapter, account)
+
+    monkeypatch.setattr(ConfiguredAccounts, "current_key", probing)
+    rig.runtime.launch(spec)
+    assert held == [errno.EWOULDBLOCK]
+
+
+def test_a_held_lock_refuses_the_launch_within_its_bound(rig: RuntimeRig) -> None:
+    rig.runtime.c = replace(rig.runtime.c, settings=replace(rig.runtime.c.settings, lock_wait_seconds=1))
+    spec = launch_spec(rig, "p-two")
+    with credential_lock(rig.runtime.c.credlocks, spec.credential_key, 0):
+        with pytest.raises(LaunchFailed) as caught:
+            rig.runtime.launch(spec)
+    assert str(caught.value) == LOCK_BUSY
+    assert rig.backend.created == []
+    rig.runtime.launch(spec)                                    # released: the next pickup launches
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_the_freshness_gate_refuses_a_login_that_expires_too_soon(rig: RuntimeRig, profile: str) -> None:
+    s = rig.runtime.c.settings
+    rig.clock.advance(DAY - (s.max_lifetime_seconds + s.stop_margin_seconds))
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, profile))
+    assert str(caught.value) == LOGIN_STALE
+    assert rig.backend.created == []
+
+
+def test_the_freshness_gate_reads_the_chosen_accounts_login(rig: RuntimeRig) -> None:
+    s = rig.runtime.c.settings
+    soon = rig.clock() + s.max_lifetime_seconds + s.stop_margin_seconds
+    with_named(rig, "codex", "work", soon)
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert str(caught.value) == LOGIN_STALE
+    write_login(rig.home / ".codex", "codex", soon)             # now the default is the stale one
+    write_login(rig.home / ".hz-work", "codex", rig.clock() + DAY)
+    rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert len(rig.backend.created) == 1
+
+
+def test_a_claude_handoff_starts_the_d7_session_fresh(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    second = rig.runtime.launch(replace(spec, generation=2, resume=False, handoff=True,
+                                        native_id=first.native_id))
+    assert second.native_id == ids.handoff_session(spec.session_key, 2) != first.native_id
+    pane = rig.backend.ttys[-1]
+    assert "--resume" not in pane and pane[pane.index("--session-id") + 1] == second.native_id
+
+
+def test_a_codex_handoff_starts_a_new_thread(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    second = rig.runtime.launch(replace(spec, generation=2, resume=False, handoff=True,
+                                        native_id=first.native_id))
+    assert second.native_id is not None and second.native_id != first.native_id
+    assert "resume" not in rig.backend.ttys[-1]
+```
+
+The fake Codex TUI makes a fresh `uuid4` thread ID on every start that resumes nothing (`fake_agent_cli.py`), so `test_a_codex_handoff_starts_a_new_thread` fails if the runtime passes `resume` or the old thread to it.
+
+In `tests/test_sandbox_settings.py`, add to `test_defaults`:
+
+```python
+    assert s.lock_wait_seconds == 60
+```
+
+and to the `test_bad_values_are_refused_by_key` parameters:
+
+```python
+    ("lock_wait_seconds = 0", "lock_wait_seconds"),
+    ("lock_wait_seconds = 601", "lock_wait_seconds"),
+```
+
+In `tests/test_wsd_pickup.py`, add:
+
+```python
+def test_the_launch_carries_the_pinned_credential_key(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.pickup()
+    [spec] = rig.runtime.launches
+    assert rig.ws.accounts is not None
+    assert spec.credential_key == rig.ws.accounts.current_key("claude-code", "default")
+    assert spec.handoff is False
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 900 uv run pytest tests/test_sandbox_runtime.py tests/test_sandbox_settings.py tests/test_wsd_pickup.py -q`
+Expected: FAIL. `RuntimeConfig` has no `credlocks` (a `TypeError` in the rig), `SandboxSettings` has no `lock_wait_seconds`, and the pickup test's `credential_key` is `""`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/defaults/defaults.toml`, add to `[sandbox]` after `agent_probe_seconds`:
+
+```toml
+lock_wait_seconds = 60                  # the longest a launch waits for an account's login lock (D8)
+```
+
+In `src/heterodyne/sandbox/settings.py`, add `"lock_wait_seconds"` to `HOST_KEYS`, the field after `agent_probe_seconds`:
+
+```python
+    lock_wait_seconds: int                   # D8: the longest a launch waits for an account's login lock
+```
+
+and in `from_config`, after `agent_probe_seconds=...`:
+
+```python
+        lock_wait_seconds=_int(sb, "lock_wait_seconds", 1, 600),
+```
+
+In `src/heterodyne/sandbox/runtime.py`:
+
+- import `from heterodyne.wsd import gitwip, ids` (replacing the `gitwip` import), `from heterodyne.wsd.credlock import CredentialBusy, credential_lock`, and add `KEY_CHANGED` and `LOGIN_STALE` to the `heterodyne.wsd.runtime` import;
+- add `credlocks: Path` to `RuntimeConfig` after `sessions`, with the comment `# <wsd state>/credlocks: the D8 lock directory (wsd.credlock)`;
+- in `launch`, delete the two lines that refuse a named account, and replace the two lines
+
+```python
+        protected, others = self._logins(adapter)
+        expiry = self._fresh(adapter, protected.chosen_files)
+```
+
+with:
+
+```python
+        protected, others = self._logins(adapter, spec.account)
+        expiry = self._pinned(adapter, spec, protected.chosen_files)
+```
+
+- replace `_resume`'s docstring and first line with:
+
+```python
+        """D9: (resume, native ID). Resume held state; start fresh only when the record shows no generation
+        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed. D7: a
+        handoff starts fresh whatever is held: a server-assigned ID is learned from the session, and any
+        other is the handoff's own (`ids.handoff_session`)."""
+        if spec.handoff:
+            return False, None if adapter.assigns_id else ids.handoff_session(spec.session_key, spec.generation)
+        wanted = spec.native_id or (prev.native_id if prev is not None and prev.ran else None)
+```
+
+- replace `_logins` and `_fresh` with:
+
+```python
+    def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
+        """The chosen account's login, and every other account's as configured: `default` is another
+        account whenever a named one is chosen (§7)."""
+        try:
+            chosen_dir, chosen = self.c.accounts.login_paths(adapter.name, account)
+            others: list[tuple[str, Path]] = []
+            dirs: list[Path] = []
+            for name in (DEFAULT_ACCOUNT, *self.c.accounts.configured(adapter.name)):
+                if name == account:
+                    continue
+                folder, files = self.c.accounts.login_paths(adapter.name, name)
+                dirs.append(folder)
+                others += [(name, f) for f in files]
+        except ConfigError as exc:
+            raise LaunchFailed(str(exc)) from None
+        return Protected(chosen_dir, chosen, tuple(dirs), tuple(f for _, f in others)), tuple(others)
+
+    def _pinned(self, adapter: Adapter, spec: LaunchSpec, login_files: tuple[Path, ...]) -> int:
+        """E1, D8: under the account's lock, the key the entry pinned must still be the account's, and
+        then the login is read for the freshness gate. Returns the expiry it checked."""
+        if not spec.credential_key:
+            raise LaunchFailed(KEY_CHANGED)
+        try:
+            with credential_lock(self.c.credlocks, spec.credential_key, self.c.settings.lock_wait_seconds,
+                                 clock=self.c.wait_clock, sleep=self.c.sleep):
+                try:
+                    current = self.c.accounts.current_key(adapter.name, spec.account)
+                except ConfigError as exc:
+                    raise LaunchFailed(str(exc)) from None
+                if current != spec.credential_key:
+                    raise LaunchFailed(KEY_CHANGED)
+                return self._fresh(adapter, login_files)
+        except CredentialBusy as exc:
+            raise LaunchFailed(str(exc)) from None
+
+    def _fresh(self, adapter: Adapter, login_files: tuple[Path, ...]) -> int:
+        """§7 freshness gate (D12, E3): plan 4b never refreshes, so a login that would expire within the
+        session's maximum lifetime and stop margin refuses the launch with LOGIN_STALE, which AU-8 reads
+        as "try the next account". Returns the expiry it checked."""
+        try:
+            expiry = adapter.access_expiry(login_files)
+        except AdapterError as exc:
+            raise LaunchFailed(str(exc)) from None
+        s = self.c.settings
+        if expiry - self.c.clock() <= s.max_lifetime_seconds + s.stop_margin_seconds:
+            raise LaunchFailed(LOGIN_STALE)
+        return int(expiry)
+```
+
+`credential_lock` refuses a key that isn't `ck1-` and 32 hex digits with `BAD_KEY` before it touches a path. An empty key is caught first, as `KEY_CHANGED`, because an entry with no key was never pinned. A `BAD_KEY` refusal means a malformed key reached the runtime, which only a bug can do, and it refuses the launch like any other lock failure.
+
+In `src/heterodyne/sandbox/build.py`, add `credlocks=s.credlock_dir,` after `sessions=s.state_dir / "sessions",`.
+
+In `src/heterodyne/wsd/park.py`, `_pin_and_dispatch`, add `credential_key=entry.credential_key` to the `LaunchSpec(...)` call, after `account=entry.account`. Task 10 adds `handoff` beside it.
+
+In `tests/live/test_live_sandbox.py`:
+- add `credlocks=root / "k",` to its `RuntimeConfig(...)`, after `sessions=root / "s",`;
+- in `Live.spec`, add `credential_key=self.runtime.c.accounts.current_key(self.runtime.c.accounts.adapter(profile) or "", "default")` to the `LaunchSpec(...)` call.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 900 uv run pytest tests/test_sandbox_runtime.py tests/test_sandbox_settings.py tests/test_wsd_pickup.py tests/test_sandbox_live_teardown.py tests/test_sandbox_build.py -q`
+Expected: PASS. `tests/test_sandbox_build.py` covers `build_runtime`'s new `credlocks` argument.
+
+Then: `timeout 600 uv run pyright src tests/sandbox_env.py tests/test_sandbox_runtime.py tests/live/test_live_sandbox.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/sandbox/runtime.py src/heterodyne/sandbox/settings.py src/heterodyne/defaults/defaults.toml \
+        src/heterodyne/sandbox/build.py src/heterodyne/wsd/park.py tests/sandbox_env.py \
+        tests/fakes/scripted_selftest.py tests/live/test_live_sandbox.py tests/test_sandbox_runtime.py \
+        tests/test_sandbox_settings.py tests/test_wsd_pickup.py
+git commit -m "plan4b T6: launch on the pinned account, under its lock, with the key rechecked"
+```
