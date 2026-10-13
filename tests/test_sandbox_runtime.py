@@ -7,12 +7,14 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import pytest
+from fakes.fake_btq import World, factory
 from sandbox_env import RuntimeRig, bead_worktree, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
-from wsd_env import Clock, git_repo
+from wsd_env import PROFILES, Clock, accounts_at, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
 from heterodyne.sandbox import runtime as runtime_mod
@@ -30,6 +32,9 @@ from heterodyne.sandbox.runtime import (
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip, ids
+from heterodyne.wsd.checkpoints import nothing
+from heterodyne.wsd.daemon import Wsd, assemble
+from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import (
     Action,
     LaunchFailed,
@@ -40,6 +45,8 @@ from heterodyne.wsd.runtime import (
     RuntimeUnavailable,
     UnlandedView,
 )
+from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.workstream import WorkstreamSettings
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
                                  reason="tmux and setsid are needed")
@@ -1431,3 +1438,90 @@ def test_the_hold_clears_after_resolve(rig: RuntimeRig) -> None:
     rig.runtime.finish_resolution("alpha", sid, 1)
     assert rig.runtime.sessions("alpha") == [] and not os.path.lexists(intent_path(rig, key))
     rig.runtime.finish_resolution("alpha", sid, 1)                       # idempotent
+
+
+# --- the resolve job with the real runtime and the real journal (Codex code r1) ---
+
+
+def wsd_settings(rig: RuntimeRig) -> WsdSettings:
+    repo = rig.root / "wsd" / "proj"
+    if not repo.exists():
+        git_repo(repo)
+    accounts = accounts_at(rig.home)
+    ws = WorkstreamSettings("alpha", {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
+    base = rig.root / "wsd"
+    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts)
+
+
+def journal_at(rig: RuntimeRig) -> Path:
+    return wsd_settings(rig).journal
+
+
+@contextlib.contextmanager
+def resolving_wsd(rig: RuntimeRig, runtime: SandboxRuntime, cp: Any = nothing) -> Iterator[Wsd]:
+    """A wsd on `runtime` and a journal kept under the rig's root across restarts, closed on exit (an open
+    one would fail test_wsd_gate's descriptor count)."""
+    s = wsd_settings(rig)
+    j = Journal(s.journal)
+    try:
+        yield Wsd(s, assemble(s, j, factory(World(rig.root / "wsd" / "btq-state")), runtime, cp=cp))
+    finally:
+        j.close()
+
+
+def resolved(rig: RuntimeRig) -> list[tuple[str, str | None, str | None, str]]:
+    j = Journal(journal_at(rig))
+    try:
+        return [(e.ws, e.bead, e.ref, e.detail) for e in j.events_since(0) if e.kind == "unlanded_resolved"]
+    finally:
+        j.close()
+
+
+@pytest.mark.parametrize("point", [*RESOLVE_POINTS, "resolve.resolved", "resolve.journaled"])
+def test_a_resolve_job_replays_from_each_point_with_one_journal_entry(rig: RuntimeRig, point: str) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+
+    def crash(name: str) -> None:
+        if name == point:
+            raise Crash(name)
+    rig.runtime.cp = crash
+    with resolving_wsd(rig, rig.runtime, cp=crash) as wsd, pytest.raises(Crash):
+        wsd.resolve_one("alpha", sid, 1, "keep", made)
+    assert os.path.lexists(intent_path(rig, key))
+    assert len(resolved(rig)) == (point == "resolve.journaled")
+    runtime = restarted(rig)                                # a new wsd: a new runtime, the same journal
+    with pytest.raises(RuntimeUnavailable, match="unfinished"):
+        runtime.sessions("alpha")
+    with resolving_wsd(rig, runtime) as wsd:
+        reply = wsd.resolve_one("alpha", sid, 1, "keep", made)
+        assert reply.result == "ok", reply.message
+        assert wsd.resolve_one("alpha", sid, 1, "keep", made).result == "refused"    # nothing left to resolve
+    ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
+    assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=keep tip={made} ref={ref}")]
+    assert runtime.sessions("alpha") == [] and not os.path.lexists(intent_path(rig, key))
+    assert host_tip(rig, ref) == made and not os.path.lexists(rig.runtime.layout(key).root)
+
+
+def test_a_failed_journal_entry_keeps_the_removed_intent_and_the_hold(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    with resolving_wsd(rig, rig.runtime) as wsd:
+        def busy(*args: object) -> bool:
+            raise JournalBusy("SQLITE_BUSY")
+        monkeypatch.setattr(wsd.parts.journal, "emit_once", busy)
+        reply = wsd.resolve_one("alpha", sid, 1, "land", made)
+        assert reply.result == "failed" and "JournalBusy" in reply.message
+        intent = msgspec.json.decode(intent_path(rig, key).read_bytes())
+        assert intent["step"] == "removed" and not os.path.lexists(rig.runtime.layout(key).root)
+        assert host_tip(rig, "btq/btq-1") == made
+        for runtime in (rig.runtime, restarted(rig)):
+            with pytest.raises(RuntimeUnavailable, match=f"resolve of session {sid} is unfinished"):
+                runtime.sessions("alpha")
+            with pytest.raises(RuntimeUnavailable, match="unfinished"):
+                runtime.stop(key)
+        monkeypatch.undo()
+        assert wsd.resolve_one("alpha", sid, 1, "land", made).result == "ok"
+    assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=land tip={made}")]
+    assert rig.runtime.sessions("alpha") == [] and landings(rig) == 1
