@@ -4281,3 +4281,314 @@ git commit -m "plan4b T11b: enable codex (a) login binding (S7 L1,L2 on 0.160.0;
 ```
 
 - [ ] **Step 7: Enable (c), then (e), then (b), then Codex (d), each as its own commit, as in Step 6.** Codex `failover = "next"` passes `config check` once (d) is on: the existing `config/accounts.py` check requires `trusted_read` only. S7 says more: "Codex gets `next` only once (d) and either (b) or (f) are on". Without (b) or (f), `permitted` keeps a session on its previous account (`can_switch` is false), so `"next"` moves only new sessions. This task doesn't change the check, and the open question Q9 asks whether it should.
+
+## Task 12: the live accounts test (G2-gated, after Task 11)
+
+The real-account counterpart of Tasks 6–10, run on the shipped capability table. Each test needs one capability. A test is skipped when that capability is off in `CAPABILITIES`, so the suite proves what the table claims, never more. It is opt-in: `HZ_LIVE=1` (the conftest), `HZ_LIVE_SANDBOX=1` and `HZ_LIVE_ACCOUNTS=1`. It also has the S5 host setup and the `HZ_LIVE_SANDBOX_*` variables that `tests/live/test_live_sandbox.py` reads.
+
+The operator names a second login for each adapter under test. `HZ_LIVE_ACCOUNTS_CODEX` and `HZ_LIVE_ACCOUNTS_CLAUDE` each hold a configured login directory as `config.toml` would write it, such as `~/.codex-b`. The test never opens, hashes or prints a login file. Only the runtime and the reader read them. The test checks a host login file's identity (`st_dev`, `st_ino`) and nothing else. Evidence lines carry session keys, window IDs and percentages, never a path, a model reply or a token.
+
+Model budget (testing only): `test_live_sandbox.MODELS`. That is Claude `claude-haiku-4-5-20251001`, and Codex `gpt-6-luna` through the `p-live-codex` profile at `model_reasoning_effort="low"`. Every prompt is one short line. The opportunistic (e) test runs only on an account the operator says is already at its limit (`HZ_LIVE_ACCOUNTS_LIMITED`). It never spends quota to get there.
+
+**Files:**
+- Create: `tests/live/test_live_accounts.py`
+- Modify: `docs/wsd.md` (the "Live checks" section: the variables and what each test shows)
+
+**Interfaces:**
+- Consumes:
+  - From `tests/live/test_live_sandbox.py`: `Live`, `PinnedSelfTest`, `preflight`, `host_config`, `tiny_repo`, `teardown`, `wait_until`, `MODELS`, `PROFILES` and `PROMPT_SECONDS`, imported by name. `tests/live` is on `sys.path` (the conftest), and importing by name brings in no test and no fixture.
+  - `RuntimeConfig.credlocks`, `LaunchSpec.account` and `.credential_key` (Tasks 1 and 6); `SandboxRuntime.signals` (Task 7); `HostUsageReader` (Task 8); `CAPABILITIES` (Task 11).
+- Produces: nothing later tasks use.
+
+- [ ] **Step 1: Write the live test**
+
+Create `tests/live/test_live_accounts.py`:
+
+```python
+"""Live checks of plan 4b on real accounts: a named login bound, its usage read in the session and on the
+host, and a resume on another account. Needs HZ_LIVE=1 (the conftest), HZ_LIVE_SANDBOX=1 and
+HZ_LIVE_ACCOUNTS=1, the S5 host setup, and a second login per adapter under test (HZ_LIVE_ACCOUNTS_CODEX,
+HZ_LIVE_ACCOUNTS_CLAUDE: a configured login directory, such as ~/.codex-b). Each test runs only if the
+shipped capability table enables what it checks. It makes real model calls on the live-test models, one
+short prompt each, and prints nothing from any login.
+
+Run it only while no wsd on this host uses the OpenShell runtime (see test_live_sandbox)."""
+
+import os
+import shutil
+import sys
+import tempfile
+import uuid
+from collections.abc import Iterator
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
+
+from sandbox_env import config_env  # noqa: E402
+from test_live_sandbox import (  # noqa: E402
+    MODELS,
+    PROFILES,
+    PROMPT_SECONDS,
+    Live,
+    PinnedSelfTest,
+    host_config,
+    preflight,
+    teardown,
+    tiny_repo,
+    wait_until,
+)
+
+from heterodyne.agents.codex import HOST_SOURCE  # noqa: E402
+from heterodyne.config import ConfigError  # noqa: E402
+from heterodyne.config.accounts import Account, ProfileAccounts, canonical_login, credential_key  # noqa: E402
+from heterodyne.config.capabilities import CAPABILITIES, NONE  # noqa: E402
+from heterodyne.sandbox.hostread import HostUsageReader  # noqa: E402
+from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
+from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime  # noqa: E402
+from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
+from heterodyne.tmux import Tmux  # noqa: E402
+from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
+from heterodyne.wsd.runtime import LaunchSpec, LimitSeen, Signal, Started, UsageSeen  # noqa: E402
+from heterodyne.wsd.workstream import utc_now  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("HZ_LIVE_SANDBOX") != "1" or os.environ.get("HZ_LIVE_ACCOUNTS") != "1",
+    reason="live accounts checks: set HZ_LIVE_ACCOUNTS=1 (and HZ_LIVE=1, HZ_LIVE_SANDBOX=1)")
+ADAPTER = {"claude": "claude-code", "codex": "codex"}
+SECOND = {"claude": "HZ_LIVE_ACCOUNTS_CLAUDE", "codex": "HZ_LIVE_ACCOUNTS_CODEX"}
+OTHER = "b"                                   # the second login's account name
+LOGIN_FILE = {"claude": ".credentials.json", "codex": "auth.json"}
+EXEC_SECONDS = 60
+
+
+def need(cli: str, capability: str, second: bool = False) -> None:
+    """Skip unless the shipped table enables `capability` for `cli` (and, if `second`, a second login is
+    named). A skip says which; nothing here enables a capability."""
+    if not getattr(CAPABILITIES.get(ADAPTER[cli], NONE), capability):
+        pytest.skip(f"{ADAPTER[cli]}.{capability} is off in the capability table")
+    if second and not os.environ.get(SECOND[cli]):
+        pytest.skip(f"{SECOND[cli]} names no second login")
+
+
+def named(env: dict[str, str]) -> dict[tuple[str, str], Account]:
+    """The second logins, as AU-2 resolves them. A named directory that doesn't resolve fails the module,
+    naming the variable only."""
+    found: dict[tuple[str, str], Account] = {}
+    for cli, var in SECOND.items():
+        configured = os.environ.get(var)
+        if not configured:
+            continue
+        adapter = ADAPTER[cli]
+        try:
+            login_dir, files = canonical_login(OTHER, adapter, configured, env)
+        except ConfigError:
+            pytest.fail(f"{var} doesn't resolve to a login directory")
+        if not all(f.is_file() for f in files):
+            pytest.fail(f"{var} has no {LOGIN_FILE[cli]}")
+        found[(adapter, OTHER)] = Account(OTHER, adapter, configured, login_dir, files,
+                                          credential_key(adapter, files))
+    return found
+
+
+@pytest.fixture(scope="module")
+def live() -> Iterator[Live]:
+    real_home = Path.home()
+    canary = real_home / ".heterodyne-live-canary"
+    root = Path(tempfile.mkdtemp(prefix="hz", dir=tempfile.gettempdir()))
+    live: Live | None = None
+    try:
+        env = config_env(root / "c", host_config(),
+                         {"alpha": '[sandbox]\nextra_egress = ["github.com", "pypi.org"]\n'})
+        settings = sandbox_settings(env)
+        tmux = Tmux(f"hz-live-ac-{uuid.uuid4().hex[:8]}")
+        backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
+                                   tool_env(os.environ, settings.tool_env))
+        artifact = preflight(settings, backend.env)
+        print("\n".join(artifact.lines))
+        home = {"HOME": str(real_home)}
+        logins = named(home)
+        profiles: dict[str, str | ProfileAccounts] = {
+            PROFILES[cli]: ProfileAccounts(ADAPTER[cli], ("default", OTHER) if (ADAPTER[cli], OTHER) in logins
+                                           else ("default",), "none")
+            for cli in ADAPTER}
+        accounts = ConfiguredAccounts(profiles, home, logins)       # the shipped capability table
+        config = RuntimeConfig(
+            sessions=root / "s", credlocks=root / "k", settings=settings, accounts=accounts,
+            real_home=real_home, real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(),
+            gid=os.getgid(), tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
+        live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
+                    tiny_repo(root / "r"), artifact)
+        yield live
+    finally:
+        uncertain = teardown(live) if live is not None else []
+        if uncertain:
+            pytest.fail(f"live teardown is uncertain; kept the scratch {root} and tmux server "
+                        f"{live.tmux.socket_name if live else None}: " + "; ".join(uncertain))
+        if live is not None:
+            live.tmux.kill_server()
+        canary.unlink(missing_ok=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def accounts_of(live: Live) -> ConfiguredAccounts:
+    found = live.runtime.c.accounts
+    assert isinstance(found, ConfiguredAccounts)
+    return found
+
+
+def on(live: Live, cli: str, bead: str, account: str) -> LaunchSpec:
+    """`Live.spec`, pinned to `account` under its current key, as the guard pins it."""
+    key = accounts_of(live).current_key(ADAPTER[cli], account)
+    return replace(live.spec(cli, bead), account=account, credential_key=key)
+
+
+def identity(live: Live, cli: str, account: str) -> tuple[int, int]:
+    """The host login file's device and inode: metadata only, never its contents."""
+    _, [login] = accounts_of(live).login_paths(ADAPTER[cli], account)
+    st = login.resolve(strict=True).stat()
+    return st.st_dev, st.st_ino
+
+
+def signals_for(live: Live, key: str, kind: type[Signal], seconds: float) -> list[Signal]:
+    """Drain the runtime's signals until one of `kind` arrives for `key`, or `seconds` pass."""
+    seen: list[Signal] = []
+    wait_until(lambda: bool(seen.extend(live.runtime.signals("alpha")) or
+                            any(isinstance(s, kind) and s.session_key == key for s in seen)), seconds)
+    return [s for s in seen if isinstance(s, kind) and s.session_key == key]
+
+
+def say(live: Live, key: str, text: str) -> None:
+    live.tmux.paste(live.record(key).tmux_session, text)
+
+
+@pytest.mark.parametrize("cli", ["claude", "codex"])
+def test_a_named_account_launches_on_its_own_login(live: Live, cli: str) -> None:
+    """(a), AU-6: the launch binds the named login and passes the full self-test, Other accounts
+    included. The host login file is the same file afterwards."""
+    need(cli, "login_binding", second=True)
+    before = identity(live, cli, OTHER)
+    spec = on(live, cli, f"btq-live-a{cli[0]}", OTHER)
+    started = live.launch(spec)
+    rec = live.record(spec.session_key)
+    status = (["codex", "login", "status"] if cli == "codex" else ["claude", "auth", "status", "--json"])
+    ran = live.backend.exec(rec.sandbox, Path(rec.worktree), status, timeout=EXEC_SECONDS)
+    assert ran.returncode == 0, f"{cli} reports no login inside the sandbox (status {ran.returncode})"
+    assert identity(live, cli, OTHER) == before
+    assert started.native_id is not None
+    print(f"EVIDENCE accounts (a) {cli} {spec.session_key} account={OTHER} ok")
+    live.runtime.stop(spec.session_key)
+
+
+@pytest.mark.parametrize("cli", ["claude", "codex"])
+def test_in_session_usage_arrives_as_an_attributed_signal(live: Live, cli: str) -> None:
+    """(c), AU-7: the session's own report reaches wsd's queue, attributed to its launch."""
+    need(cli, "in_session_usage")
+    spec = on(live, cli, f"btq-live-c{cli[0]}", "default")
+    live.launch(spec)
+    say(live, spec.session_key, "Reply with only the word ok.")
+    found = signals_for(live, spec.session_key, UsageSeen, PROMPT_SECONDS)
+    assert found, f"no usage signal from {cli} in {PROMPT_SECONDS}s"
+    for s in found:
+        assert isinstance(s, UsageSeen) and s.generation == spec.generation
+        assert all(0 <= o.used_percent <= 100 for o in s.observations)
+    windows = sorted({(o.window_id, o.used_percent) for s in found if isinstance(s, UsageSeen)
+                      for o in s.observations})
+    print(f"EVIDENCE accounts (c) {cli} {spec.session_key} windows={windows}")
+    live.runtime.stop(spec.session_key)
+
+
+def test_the_trusted_read_sees_each_codex_account_and_leaves_no_scratch(live: Live) -> None:
+    """(d), AU-7: the host read, under the D8 lock, on each Codex login. Its scratch home is gone after
+    each read."""
+    need("codex", "trusted_read")
+    settings = live.runtime.c.settings
+    binary = settings.binaries.get("codex")
+    assert binary, "no codex binary configured"
+    path = os.environ.get("PATH", os.defpath)
+    scratch = live.root / "hostread"
+    reader = HostUsageReader(accounts_of(live), binary, path, live.runtime.c.credlocks, scratch,
+                             settings.lock_wait_seconds,
+                             env={"PATH": path, "HOME": str(Path.home()), "LANG": "C.UTF-8"})
+    names = ["default", *([OTHER] if os.environ.get(SECOND["codex"]) else [])]
+    for account in names:
+        key = accounts_of(live).current_key("codex", account)
+        read = reader.read(PROFILES["codex"], account, key)
+        assert read is not None, f"no trusted read on codex account {account}"
+        assert read.observations and all(o.source == HOST_SOURCE for o in read.observations)
+        assert all(0 <= o.used_percent <= 100 for o in read.observations)
+        assert not scratch.exists() or list(scratch.iterdir()) == []
+        print(f"EVIDENCE accounts (d) codex account={account} limited={read.limited} "
+              f"windows={sorted((o.window_id, o.used_percent) for o in read.observations)}")
+
+
+@pytest.mark.parametrize("cli", ["claude", "codex"])
+def test_a_session_resumes_on_the_other_account(live: Live, cli: str) -> None:
+    """(b), AU-8: generation 2 on the second login resumes generation 1's native session, and the
+    conversation carries over: the model recalls a word it was given under the first login."""
+    need(cli, "cross_account_resume", second=True)
+    spec = on(live, cli, f"btq-live-b{cli[0]}", "default")
+    first: Started = live.launch(spec)
+    assert first.native_id is not None
+    word = f"hz{uuid.uuid4().hex[:6]}"
+    say(live, spec.session_key, f"Remember the word {word}. Reply with only the word ok.")
+    assert wait_until(lambda: "ok" in live.tmux.capture(live.record(spec.session_key).tmux_session, 50).lower(),
+                      PROMPT_SECONDS)
+    live.runtime.stop(spec.session_key)
+    moved = replace(spec, generation=2, resume=True, native_id=first.native_id, account=OTHER,
+                    credential_key=accounts_of(live).current_key(ADAPTER[cli], OTHER))
+    second = live.runtime.launch(moved)
+    live.pinned(moved, second)
+    assert second.native_id == first.native_id
+    say(live, spec.session_key, "Reply with only the word you were asked to remember.")
+    assert wait_until(lambda: word in live.tmux.capture(live.record(spec.session_key).tmux_session, 50),
+                      PROMPT_SECONDS), f"{cli} did not recall the word after the move to account {OTHER}"
+    print(f"EVIDENCE accounts (b) {cli} {spec.session_key} g1=default g2={OTHER} recalled")
+    live.runtime.stop(spec.session_key)
+
+
+@pytest.mark.parametrize("cli", ["claude", "codex"])
+def test_a_reached_limit_arrives_as_a_limit_signal(live: Live, cli: str) -> None:
+    """(e), AU-7, opportunistic: only on an account the operator says is already at its limit
+    (HZ_LIVE_ACCOUNTS_LIMITED=default or b). Never spend quota to get there."""
+    need(cli, "limit_signal")
+    account = os.environ.get("HZ_LIVE_ACCOUNTS_LIMITED")
+    if account not in ("default", OTHER) or (account == OTHER and not os.environ.get(SECOND[cli])):
+        pytest.skip("HZ_LIVE_ACCOUNTS_LIMITED names no account at its limit")
+    spec = on(live, cli, f"btq-live-e{cli[0]}", account)
+    live.launch(spec)
+    say(live, spec.session_key, "Reply with only the word ok.")
+    found = signals_for(live, spec.session_key, LimitSeen, PROMPT_SECONDS)
+    assert found, f"no limit signal from {cli} in {PROMPT_SECONDS}s"
+    hints = [s.reset_hint for s in found if isinstance(s, LimitSeen)]
+    print(f"EVIDENCE accounts (e) {cli} {spec.session_key} reset-hints={hints} models={MODELS[cli]}")
+    live.runtime.stop(spec.session_key)
+```
+
+- [ ] **Step 2: Check that it is skipped offline and type-checks**
+
+Run: `timeout 300 uv run pytest tests/live/test_live_accounts.py -q`
+Expected: every test is skipped (no `HZ_LIVE`), with none collected as an error.
+
+Then: `timeout 600 uv run pyright tests/live/test_live_accounts.py` and `uv run ruff check tests/live`.
+Expected: 0 errors.
+
+- [ ] **Step 3: Run it live (operator present, after Task 11's accepted commits)**
+
+```bash
+HZ_LIVE=1 HZ_LIVE_SANDBOX=1 HZ_LIVE_ACCOUNTS=1 HZ_LIVE_ACCOUNTS_CODEX='~/.codex-b' \
+  timeout 3600 uv run pytest tests/live/test_live_accounts.py -v -s
+```
+
+Expected: every test whose capability is on passes. The rest are skipped, each naming the capability or the variable it lacks. Check the `EVIDENCE` lines for paths, replies and tokens before you paste them into `docs/wsd.md`.
+
+- [ ] **Step 4: Document and commit**
+
+In `docs/wsd.md`, under "Live checks", add a paragraph naming `HZ_LIVE_ACCOUNTS`, `HZ_LIVE_ACCOUNTS_CODEX`, `HZ_LIVE_ACCOUNTS_CLAUDE` and `HZ_LIVE_ACCOUNTS_LIMITED`. It should say that each test runs only for an enabled capability and that the (e) test never spends quota. Then paste the run's `EVIDENCE` lines with the CLI versions.
+
+```bash
+git add tests/live/test_live_accounts.py docs/wsd.md
+git commit -m "plan4b T12: live accounts checks on the shipped capability table"
+```
