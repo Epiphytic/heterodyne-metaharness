@@ -2453,3 +2453,403 @@ git add src/heterodyne/sandbox/runtime.py src/heterodyne/sandbox/settings.py src
         tests/test_sandbox_settings.py tests/test_wsd_pickup.py
 git commit -m "plan4b T6: launch on the pinned account, under its lock, with the key rechecked"
 ```
+
+## Task 7: the runtime's signals
+
+The producers, wired: each session's socket counts its adapter's turn ends and hands its hook payloads to the adapter's parser. The Codex read is polled through `backend.exec`. `signals(ws)` drains what the workstream's sessions reported. Every producer is off unless the profile's capabilities enable it (E15): with every capability off, the launch shape is plan 4's except for `StopFailure` (E7).
+
+**Files:**
+- Modify: `src/heterodyne/sandbox/runtime.py` (`signals`, `_caps`, `_server`, `_report`, `_poll`; `_start` and `_rebind` use `_server`; `_start` passes `usage=`)
+- Modify: `src/heterodyne/sandbox/settings.py` (`usage_poll_seconds`), `src/heterodyne/defaults/defaults.toml`
+- Modify: `tests/fakes/fake_agent_cli.py` (the TUI's `HZ_FAKE_STOP_FAILURE` and `HZ_FAKE_STATUS_LINE`), `tests/fakes/fake_backend.py` (`host_env`), `tests/sandbox_env.py` (`with_caps`)
+- Test: `tests/test_sandbox_runtime.py`, `tests/test_sandbox_settings.py`
+
+**Interfaces:**
+- Consumes:
+  - `UsageSeen`, `LimitSeen`, `Signal`, `AgentRuntime.signals` (Task 1).
+  - `SessionServer(turn_ends=, on_event=)`, `Adapter.turn_end_events` (Task 4).
+  - `Adapter.usage_from_event`, `usage_argv`, `usage_from_read`, `run_files(usage=)`, `UsageReport` (Task 5).
+  - `SandboxRuntime._logins(adapter, account)`, `RuntimeConfig.credlocks` (Task 6).
+  - `Accounts.view(profile).capabilities` (exists).
+- Produces:
+  - `SandboxRuntime.signals(ws) -> list[Signal]`: never raises.
+  - `SandboxSettings.usage_poll_seconds: int`, from `[sandbox] usage_poll_seconds` (60 to 86400, default 600).
+  - `runtime.MAX_QUEUED = 256`: the most reports a workstream keeps between drains, the newest kept.
+  - `runtime.USAGE_SECONDS = 45`: the read's exec timeout. `codex_usage.py`'s own limit is 30.
+  - `FakeBackend.host_env(name) -> dict[str, str]`: the environment the fake runs a sandbox's commands with.
+  - `sandbox_env.with_caps(rig, adapter, caps)`.
+
+Which report becomes which signal:
+
+| Report | Capability | Signal |
+|---|---|---|
+| a status line's or a read's windows | (c) `in_session_usage` | `UsageSeen(key, generation, windows)` |
+| `StopFailure` with `error == "rate_limit"`, or a read whose `rateLimitReachedType` isn't null | (e) `limit_signal` | `LimitSeen(key, generation, hint)` |
+
+The key and generation are the ones the runtime gave the channel: the socket it served for that generation, or the sandbox it ran the read in. Nothing in a payload names them. The capabilities are read when the channel is set up (at launch or rebind), and `wsd` reads them again before it uses a signal (Task 9).
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/fakes/fake_backend.py`, add after `_env`:
+
+```python
+    def host_env(self, name: str) -> dict[str, str]:
+        """The environment this fake runs the sandbox's commands with, its paths on the host."""
+        return self._env(self._box(name))
+```
+
+In `tests/fakes/fake_agent_cli.py`, add to the module docstring's TUI item: "With `HZ_FAKE_STOP_FAILURE=<error>` (Claude), each turn ends with a StopFailure hook carrying that `error` instead of Stop. With `HZ_FAKE_STATUS_LINE=<json>` (Claude), after each turn it runs the `--settings` layer's `statusLine` command, if it has one, with `{"session_id", "rate_limits": <json>}` on stdin, as 2.1.286 runs it after an API response." Add after `claude_hooks`:
+
+```python
+def claude_status_line() -> str | None:
+    """The --settings layer's status-line command, which is where the harness puts it."""
+    layer: Any = json.loads(Path(host(ARGS[ARGS.index("--settings") + 1])).read_text())
+    status: Any = layer.get("statusLine")
+    return status.get("command") if isinstance(status, dict) else None
+```
+
+and in `tui()`, replace the line that fires Stop with:
+
+```python
+        failure = os.environ.get("HZ_FAKE_STOP_FAILURE") if ADAPTER == "claude" else None
+        if failure:
+            fire(commands.get("StopFailure", []), "StopFailure", session, error=failure,
+                 last_assistant_message="You've hit your limit · resets 12:10pm")
+        else:
+            fire(commands.get("Stop", []), "Stop", session, last_assistant_message=f"echo: {line}")
+        limits = os.environ.get("HZ_FAKE_STATUS_LINE") if ADAPTER == "claude" else None
+        status = claude_status_line() if limits else None
+        if status:
+            subprocess.run(host(status), shell=True, check=False,  # noqa: S602
+                           input=json.dumps({"session_id": session, "rate_limits": json.loads(limits or "null")}).encode())
+```
+
+In `tests/sandbox_env.py`, import `Capabilities` from `heterodyne.config.capabilities`, and add after `with_named`:
+
+```python
+def with_caps(rig: "RuntimeRig", adapter: str, caps: Capabilities) -> None:
+    """Give `adapter` these capabilities in the runtime's accounts, keeping any named accounts."""
+    current = rig.runtime.c.accounts
+    assert isinstance(current, ConfiguredAccounts)
+    rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(
+        ADAPTERS, current.env, current.named, {**current.capabilities, adapter: caps}))
+```
+
+In `tests/test_sandbox_runtime.py`, import `Capabilities`, `from sandbox_env import with_caps`, `from heterodyne.agents.codex import IN_SESSION_SOURCE`, `from heterodyne.agents.claude_code import STATUS_SOURCE`, `from heterodyne.sandbox.runtime import MAX_QUEUED`, `from heterodyne.wsd.runtime import LimitSeen, Signal, UsageSeen` and `from heterodyne.wsd.usage import Observation`, then add:
+
+```python
+USAGE = Capabilities(in_session_usage=True)
+LIMITS = Capabilities(limit_signal=True)
+BOTH = Capabilities(in_session_usage=True, limit_signal=True)
+RESET = 1_800_003_600
+STATUS = {"five_hour": {"used_percentage": 42, "resets_at": RESET}}
+SNAPSHOT = {"limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": RESET}}
+
+
+def drained(rig: RuntimeRig, want: int) -> list[Signal]:
+    """Drain until `want` signals have come, then once more to prove no more are queued."""
+    got: list[Signal] = []
+
+    def enough() -> bool:
+        got.extend(rig.runtime.signals("alpha"))
+        return len(got) >= want
+
+    wait_for(enough)
+    got.extend(rig.runtime.signals("alpha"))
+    return got
+```
+
+The tests, after `drained`:
+
+```python
+def reads(rig: RuntimeRig) -> int:
+    return sum(1 for argv in rig.backend.execs if any(a.endswith("codex_usage.py") for a in argv))
+
+
+def codex_login_inside(rig: RuntimeRig, key: str) -> None:
+    """The fake has no login bind: put a fake login where the session's CODEX_HOME is on the host."""
+    home = Path(rig.backend.host_env(record(rig, key).sandbox)["CODEX_HOME"])
+    (home / "auth.json").write_text("fake-not-a-token")
+
+
+def test_with_every_capability_off_no_producer_runs(rig: RuntimeRig) -> None:
+    rig.backend.env_extra |= {"HZ_FAKE_STATUS_LINE": json.dumps(STATUS),
+                              "HZ_FAKE_STOP_FAILURE": "rate_limit",
+                              "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
+    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(one)                                     # the self-test's turn ends on StopFailure
+    rig.runtime.launch(two)
+    settings = json.loads((rig.runtime.layout(one.session_key).run(1) / "claude-settings.json").read_text())
+    assert "statusLine" not in settings and "StopFailure" in settings["hooks"]
+    assert not (rig.runtime.layout(two.session_key).run(1) / "codex_usage.py").exists()
+    rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
+    assert rig.runtime.signals("alpha") == [] and reads(rig) == 0
+
+
+def test_a_claude_status_line_is_usage_from_its_own_session(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", USAGE)
+    rig.backend.env_extra["HZ_FAKE_STATUS_LINE"] = json.dumps(STATUS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "another turn")     # unchanged: not sent again
+    assert drained(rig, 1) == [UsageSeen(spec.session_key, 1,
+                                         (Observation("claude:5h", "5h", 42, RESET, STATUS_SOURCE),))]
+
+
+def test_a_claude_rate_limit_is_a_limit_and_ends_the_turn(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = "rate_limit"
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)                                    # the self-test waits for a turn end
+    assert rig.runtime.servers[spec.session_key].turns().idle
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+
+
+@pytest.mark.parametrize(("caps", "error"), [(USAGE, "rate_limit"), (LIMITS, "overloaded")])
+def test_a_stop_failure_is_a_limit_only_with_e_and_rate_limit(rig: RuntimeRig, caps: Capabilities,
+                                                              error: str) -> None:
+    with_caps(rig, "claude-code", caps)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = error
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "again")
+    wait_for(lambda: rig.runtime.servers[spec.session_key].turns().stops >= 2)
+    assert rig.runtime.signals("alpha") == []
+
+
+def test_the_codex_read_is_polled_when_due(rig: RuntimeRig) -> None:
+    with_caps(rig, "codex", BOTH)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    codex_login_inside(rig, spec.session_key)
+    window = Observation("codex:codex:300m", "5h", 100, RESET, IN_SESSION_SOURCE)
+    assert rig.runtime.signals("alpha") == [UsageSeen(spec.session_key, 1, (window,)),
+                                            LimitSeen(spec.session_key, 1, RESET)]
+    assert rig.runtime.signals("alpha") == [] and reads(rig) == 1      # not due again yet
+    rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
+    assert len(rig.runtime.signals("alpha")) == 2 and reads(rig) == 2
+    assert rig.runtime.signals("beta") == []                           # another workstream's: none
+
+
+@pytest.mark.parametrize("fault", ["error", "garbage", "no-login"])
+def test_a_read_that_fails_reports_nothing(rig: RuntimeRig, fault: str) -> None:
+    with_caps(rig, "codex", BOTH)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    if fault != "no-login":
+        rig.backend.env_extra["HZ_FAKE_RATE_FAULT"] = fault
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    if fault != "no-login":
+        codex_login_inside(rig, spec.session_key)
+    assert rig.runtime.signals("alpha") == []
+    assert reads(rig) == 1                                      # it ran and failed: not skipped
+
+
+def test_a_rebound_session_still_reports(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = "rate_limit"
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+    rig.runtime.servers.pop(spec.session_key).close()          # wsd died
+    rig.runtime.sessions("alpha")                              # rebinds
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "after the restart")
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+
+
+def test_a_flood_of_reports_keeps_only_the_newest(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    on_event = rig.runtime.servers[spec.session_key].on_event
+    assert on_event is not None
+    for _ in range(MAX_QUEUED + 10):
+        on_event({"hook_event_name": "StopFailure", "error": "rate_limit"})
+    assert len(rig.runtime.signals("alpha")) == MAX_QUEUED
+
+
+def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    on_event = rig.runtime.servers[spec.session_key].on_event
+    assert on_event is not None
+    on_event({"hook_event_name": "StopFailure", "error": "rate_limit"})
+
+    def unlistable() -> list[SessionRecord]:
+        raise RuntimeUnavailable("the session records can't be listed")
+
+    monkeypatch.setattr(rig.runtime, "_records", unlistable)
+    assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
+```
+
+In `tests/test_sandbox_settings.py`, add to `test_defaults`:
+
+```python
+    assert s.usage_poll_seconds == 600
+```
+
+and to the `test_bad_values_are_refused_by_key` parameters:
+
+```python
+    ("usage_poll_seconds = 59", "usage_poll_seconds"),
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 900 uv run pytest tests/test_sandbox_runtime.py tests/test_sandbox_settings.py -q`
+Expected: FAIL. `SandboxSettings` has no `usage_poll_seconds`, the runtime has no `signals` of its own (`AgentRuntime`'s protocol body returns None), `MAX_QUEUED` can't be imported, and the StopFailure self-test times out because the server doesn't yet count `StopFailure` as a turn end.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/defaults/defaults.toml`, add to `[sandbox]` after `lock_wait_seconds`:
+
+```toml
+usage_poll_seconds = 600                # how often a session's in-sandbox usage read runs, when (c) is on
+```
+
+In `src/heterodyne/sandbox/settings.py`, add `"usage_poll_seconds"` to `HOST_KEYS`, the field after `lock_wait_seconds`:
+
+```python
+    usage_poll_seconds: int                  # E5: the in-sandbox usage read's interval, when (c) is on
+```
+
+and in `from_config`, after `lock_wait_seconds=...`:
+
+```python
+        usage_poll_seconds=_int(sb, "usage_poll_seconds", 60, 86_400),
+```
+
+In `src/heterodyne/sandbox/runtime.py`:
+
+- import `threading`; `from heterodyne.agents.base import UsageReport` (beside the existing names); `from heterodyne.config.capabilities import NONE, Capabilities`; and `LimitSeen`, `Signal`, `UsageSeen` from `heterodyne.wsd.runtime`;
+- add after `RECORD_LOST`:
+
+```python
+MAX_QUEUED = 256        # reports a workstream keeps between drains: a flooding session keeps only its newest
+USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py's own limit is 30)
+```
+
+- in `SandboxRuntime.__init__`, add:
+
+```python
+        self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
+        self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
+        self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
+```
+
+- add after `expire`:
+
+```python
+    def signals(self, ws: str) -> list[Signal]:
+        """E8: what the workstream's sessions reported since the last call, oldest first. Each running
+        session's usage read is run first when it is due (E5). Never raises: a report that can't be had
+        is no report."""
+        try:
+            running = [r for r in self._records() if r.ws == ws and r.phase is Phase.RUNNING]
+        except RuntimeUnavailable:
+            running = []
+        for rec in running:
+            if rec.key in self.servers:
+                self._poll(rec)
+        with self.queue_lock:
+            return self.queued.pop(ws, [])
+```
+
+- in `_end`, after `rec = self._phase(layout, rec, phase=Phase.ENDED)`, add `self.polled = {k: v for k, v in self.polled.items() if k[0] != rec.key}`, so no poll time outlives its session;
+- add after `_app_server`:
+
+```python
+    def _caps(self, profile: str) -> Capabilities:
+        """E15: the profile's capabilities now; none if the profile can't be resolved."""
+        try:
+            return self.c.accounts.view(profile).capabilities
+        except ConfigError:
+            return NONE
+
+    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities) -> SessionServer:
+        """The generation's socket: it counts the adapter's turn ends and hands each hook payload to the
+        adapter's parser, attributed to this generation (E8, E14)."""
+        layout, key, gen = self.layout(rec.key), rec.key, rec.generation
+
+        def heard(payload: dict[str, Any]) -> None:
+            self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
+
+        return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
+                             on_event=heard)
+
+    def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
+        if report is None:
+            return
+        found: list[Signal] = []
+        if caps.in_session_usage and report.windows:
+            found.append(UsageSeen(key, gen, report.windows))
+        if caps.limit_signal and report.limited:
+            found.append(LimitSeen(key, gen, report.reset_hint))
+        if found:
+            with self.queue_lock:
+                queue = self.queued.setdefault(ws, [])
+                queue.extend(found)
+                del queue[:-MAX_QUEUED]
+
+    def _poll(self, rec: SessionRecord) -> None:
+        """E5: run the session's in-sandbox usage read if (c) is on and it is due. A read that fails
+        reports nothing and is not retried before the next interval."""
+        adapter = self.c.adapters.get(rec.adapter)
+        caps = self._caps(rec.profile)
+        if adapter is None or not caps.in_session_usage:
+            return
+        now, ident = self.c.clock(), (rec.key, rec.generation)
+        last = self.polled.get(ident)
+        if last is not None and now - last < self.c.settings.usage_poll_seconds:
+            return
+        self.polled[ident] = now
+        try:
+            argv = adapter.usage_argv(self._cli(adapter))
+            if argv is None:
+                return
+            r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)
+        except (LaunchFailed, BackendError, BackendUnavailable):
+            return
+        if r.returncode == 0:
+            self._report(rec.ws, rec.key, rec.generation, caps, adapter.usage_from_read(r.stdout))
+```
+
+- in `_start`, read the capabilities once, before the run files are written, and use them for the files and the server:
+
+```python
+        caps = self._caps(spec.profile)
+        files = {shim.TOKEN_FILE: token, SHIM_SOURCE.name: SHIM_SOURCE.read_text(),
+                 shim.CONFIG_FILE: json.dumps(shim_config), REQUEST_INSIDE.name: shim.REQUEST_WRAPPER,
+                 **adapter.run_files(usage=caps.in_session_usage), **self.selftest.files()}
+```
+
+and replace `server = SessionServer(layout.socket(gen), token, layout.events(gen))` with `server = self._server(rec, adapter, token, caps)`.
+
+- in `_rebind`, replace the `try` block's server line with:
+
+```python
+            adapter = self.c.adapters[rec.adapter]
+            server = self._server(rec, adapter, token, self._caps(rec.profile))
+```
+
+and widen its `except OSError:` to `except (OSError, KeyError):`. A record names its adapter from the same registry, so a `KeyError` means a record this build can't serve, which is a hold like an unreadable token.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 900 uv run pytest tests/test_sandbox_runtime.py tests/test_sandbox_settings.py tests/test_sandbox_live_teardown.py tests/test_session_server.py -q`
+Expected: PASS. In `test_a_read_that_fails_reports_nothing`, `reads(rig) == 1` is the negative control's proof that the read ran: a read that was skipped would pass the `== []` check too.
+
+Then: `timeout 600 uv run pyright src tests/test_sandbox_runtime.py tests/fakes` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/sandbox/runtime.py src/heterodyne/sandbox/settings.py src/heterodyne/defaults/defaults.toml \
+        tests/fakes/fake_agent_cli.py tests/fakes/fake_backend.py tests/sandbox_env.py \
+        tests/test_sandbox_runtime.py tests/test_sandbox_settings.py
+git commit -m "plan4b T7: the runtime's usage and limit signals, gated by capability"
+```
