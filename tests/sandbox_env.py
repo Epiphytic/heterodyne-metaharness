@@ -20,6 +20,7 @@ from wsd_env import ADAPTERS, Clock, accounts_at, git_repo, login_home
 
 from heterodyne.config import paths
 from heterodyne.config.accounts import Account, canonical_login, credential_key
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.sandbox.backend import BackendUnavailable
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime, read_record
 from heterodyne.sandbox.settings import sandbox_settings
@@ -125,6 +126,14 @@ def with_named(rig: "RuntimeRig", adapter: str, name: str, expires_at: int) -> P
     named = {**current.named, (adapter, name): account}
     rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(ADAPTERS, env, named))
     return paths.expand(configured, env)
+
+
+def with_caps(rig: "RuntimeRig", adapter: str, caps: Capabilities) -> None:
+    """Give `adapter` these capabilities in the runtime's accounts, keeping any named accounts."""
+    current = rig.runtime.c.accounts
+    assert isinstance(current, ConfiguredAccounts)
+    rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(
+        ADAPTERS, current.env, current.named, {**current.capabilities, adapter: caps}))
 
 
 @dataclass

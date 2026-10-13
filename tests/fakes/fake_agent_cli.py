@@ -19,7 +19,10 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   every hook gets the TUI's cwd), fires SessionStart (Claude at start, Codex on the first prompt, as
   the real CLIs do), and for each line typed fires UserPromptSubmit and Stop, keeping a transcript
   (Claude) or a rollout (Codex) where the real CLI keeps it, so resume can find it.
-  HZ_FAKE_NO_SESSION_START=1 suppresses SessionStart.
+  HZ_FAKE_NO_SESSION_START=1 suppresses SessionStart. With `HZ_FAKE_STOP_FAILURE=<error>` (Claude), each
+  turn ends with a StopFailure hook carrying that `error` instead of Stop. With `HZ_FAKE_STATUS_LINE=<json>`
+  (Claude), after each turn it runs the `--settings` layer's `statusLine` command, if it has one, with
+  `{"session_id", "rate_limits": <json>}` on stdin, as 2.1.286 runs it after an API response.
 """
 
 import contextlib
@@ -202,6 +205,13 @@ def session_start(commands: dict[str, list[str]]) -> list[str]:
     return [] if os.environ.get("HZ_FAKE_NO_SESSION_START") == "1" else commands.get("SessionStart", [])
 
 
+def claude_status_line() -> str | None:
+    """The --settings layer's status-line command, which is where the harness puts it."""
+    layer: Any = json.loads(Path(host(ARGS[ARGS.index("--settings") + 1])).read_text())
+    status: Any = layer.get("statusLine")
+    return status.get("command") if isinstance(status, dict) else None
+
+
 def tui() -> None:
     if ADAPTER == "claude":
         commands = claude_hooks()
@@ -236,7 +246,17 @@ def tui() -> None:
         if log is not None:
             with log.open("a") as fh:
                 fh.write(json.dumps({"user": line}) + "\n")
-        fire(commands.get("Stop", []), "Stop", session, last_assistant_message=f"echo: {line}")
+        failure = os.environ.get("HZ_FAKE_STOP_FAILURE") if ADAPTER == "claude" else None
+        if failure:
+            fire(commands.get("StopFailure", []), "StopFailure", session, error=failure,
+                 last_assistant_message="You've hit your limit · resets 12:10pm")
+        else:
+            fire(commands.get("Stop", []), "Stop", session, last_assistant_message=f"echo: {line}")
+        limits = os.environ.get("HZ_FAKE_STATUS_LINE") if ADAPTER == "claude" else None
+        status = claude_status_line() if limits else None
+        if status:
+            fed = json.dumps({"session_id": session, "rate_limits": json.loads(limits or "null")})
+            subprocess.run(host(status), shell=True, check=True, input=fed.encode())  # noqa: S602
         print(f"echo: {line}\n{marker} ", end="", flush=True)
 
 

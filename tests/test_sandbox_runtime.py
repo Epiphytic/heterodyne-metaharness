@@ -2,11 +2,12 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import os
 import shutil
 import socket
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from sandbox_env import (
     runtime_rig,
     short_dir,
     wait_for,
+    with_caps,
     with_named,
     write_login,
 )
@@ -29,10 +31,16 @@ from tmux_guard import new_test_tmux
 from wsd_env import PROFILES, Clock, accounts_at, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
+from heterodyne.agents.claude_code import STATUS_SOURCE
+from heterodyne.agents.codex import IN_SESSION_SOURCE
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.sandbox import reaper, sessiongit
 from heterodyne.sandbox import runtime as runtime_mod
+from heterodyne.sandbox.backend import ExecResult
 from heterodyne.sandbox.runtime import (
     BRANCH_TAKEN,
+    DIAG_USAGE_READ,
+    MAX_QUEUED,
     RESOLVE_POINTS,
     WIP_FAILED,
     Phase,
@@ -56,14 +64,19 @@ from heterodyne.wsd.runtime import (
     EndCause,
     Ended,
     LaunchFailed,
+    LaunchSpec,
     LaunchUncertain,
+    LimitSeen,
     Liveness,
     Resolution,
     ResolveRefused,
     RuntimeUnavailable,
+    Signal,
     UnlandedView,
+    UsageSeen,
 )
 from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.usage import Observation
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -2115,3 +2128,232 @@ def test_a_resolved_generation_has_no_end_to_read(rig: RuntimeRig, action: Actio
     rig.runtime.resolve_unlanded("alpha", short_id(key), 1, action, made)
     rig.runtime.finish_resolution("alpha", short_id(key), 1)
     assert rig.runtime.ended(key) is None and not os.path.lexists(layout.reaped(1))
+
+
+# --- plan 4b Task 7: the runtime's signals ---
+
+USAGE = Capabilities(in_session_usage=True)
+LIMITS = Capabilities(limit_signal=True)
+BOTH = Capabilities(in_session_usage=True, limit_signal=True)
+RESET = 1_800_003_600
+STATUS = {"five_hour": {"used_percentage": 42, "resets_at": RESET}}
+SNAPSHOT = {"limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": RESET}}
+
+
+def drained(rig: RuntimeRig, want: int) -> list[Signal]:
+    """Drain until `want` signals have come, then once more to prove no more are queued."""
+    got: list[Signal] = []
+
+    def enough() -> bool:
+        got.extend(rig.runtime.signals("alpha"))
+        return len(got) >= want
+
+    wait_for(enough)
+    got.extend(rig.runtime.signals("alpha"))
+    return got
+
+
+def reads(rig: RuntimeRig) -> int:
+    return sum(1 for argv in rig.backend.execs if any(a.endswith("codex_usage.py") for a in argv))
+
+
+def codex_login_inside(rig: RuntimeRig, key: str) -> None:
+    """The fake has no login bind: put a fake login where the session's CODEX_HOME is on the host."""
+    home = Path(rig.backend.host_env(record(rig, key).sandbox)["CODEX_HOME"])
+    (home / "auth.json").write_text("fake-not-a-token")
+
+
+def test_with_every_capability_off_no_producer_runs(rig: RuntimeRig) -> None:
+    rig.backend.env_extra |= {"HZ_FAKE_STATUS_LINE": json.dumps(STATUS),
+                              "HZ_FAKE_STOP_FAILURE": "rate_limit",
+                              "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
+    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(one)                                     # the self-test's turn ends on StopFailure
+    rig.runtime.launch(two)
+    settings = json.loads((rig.runtime.layout(one.session_key).run(1) / "claude-settings.json").read_text())
+    assert "statusLine" not in settings and "StopFailure" in settings["hooks"]
+    assert not (rig.runtime.layout(two.session_key).run(1) / "codex_usage.py").exists()
+    rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
+    assert rig.runtime.signals("alpha") == [] and reads(rig) == 0
+
+
+def test_a_claude_status_line_is_usage_from_its_own_session(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", USAGE)
+    rig.backend.env_extra["HZ_FAKE_STATUS_LINE"] = json.dumps(STATUS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    pane = record(rig, spec.session_key).tmux_session
+    rig.tmux.paste(pane, "another turn")
+    # The fake echoes only after its status line has run: the unchanged limits were not sent again.
+    wait_for(lambda: "echo: another turn" in rig.tmux.capture(pane, 50))
+    assert drained(rig, 1) == [UsageSeen(spec.session_key, 1,
+                                         (Observation("claude:5h", "5h", 42, RESET, STATUS_SOURCE),))]
+
+
+def test_a_claude_rate_limit_is_a_limit_and_ends_the_turn(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = "rate_limit"
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)                                    # the self-test waits for a turn end
+    assert rig.runtime.servers[spec.session_key].turns().idle
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+
+
+@pytest.mark.parametrize(("caps", "error"), [(USAGE, "rate_limit"), (LIMITS, "overloaded")])
+def test_a_stop_failure_is_a_limit_only_with_e_and_rate_limit(rig: RuntimeRig, caps: Capabilities,
+                                                              error: str) -> None:
+    with_caps(rig, "claude-code", caps)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = error
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "again")
+    wait_for(lambda: rig.runtime.servers[spec.session_key].turns().stops >= 2)
+    assert rig.runtime.signals("alpha") == []
+
+
+def test_the_codex_read_is_polled_when_due(rig: RuntimeRig) -> None:
+    with_caps(rig, "codex", BOTH)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    codex_login_inside(rig, spec.session_key)
+    window = Observation("codex:codex:300m", "5h", 100, RESET, IN_SESSION_SOURCE)
+    assert rig.runtime.signals("alpha") == [UsageSeen(spec.session_key, 1, (window,)),
+                                            LimitSeen(spec.session_key, 1, RESET)]
+    assert rig.runtime.signals("alpha") == [] and reads(rig) == 1      # not due again yet
+    rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
+    assert len(rig.runtime.signals("alpha")) == 2 and reads(rig) == 2
+    assert rig.runtime.signals("beta") == []                           # another workstream's: none
+
+
+@pytest.mark.parametrize(("caps", "kinds"), [(LIMITS, [LimitSeen]), (USAGE, [UsageSeen])])
+def test_the_codex_read_serves_each_capability_alone(rig: RuntimeRig, caps: Capabilities,
+                                                     kinds: list[type]) -> None:
+    """(e) without (c) still installs and polls the read; each signal comes only under its own one."""
+    with_caps(rig, "codex", caps)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    assert (rig.runtime.layout(spec.session_key).run(1) / "codex_usage.py").exists()
+    codex_login_inside(rig, spec.session_key)
+    assert [type(sig) for sig in rig.runtime.signals("alpha")] == kinds and reads(rig) == 1
+
+
+def read_failures(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(DIAG_USAGE_READ)]
+
+
+def pid_gone(pid_file: Path) -> bool:
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def failing_read(rig: RuntimeRig, fault: str | None, login: bool = True) -> tuple[LaunchSpec, Path]:
+    """A Codex session with (c) and (e) on, whose read will meet `fault`. The PID file is emptied after
+    the launch, whose own app-server writes it too, so only the read's app-server can fill it."""
+    with_caps(rig, "codex", BOTH)
+    pid_file = rig.root / "read.pid"
+    rig.backend.env_extra |= {"HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT), "HZ_FAKE_PID_FILE": str(pid_file)}
+    if fault is not None:
+        rig.backend.env_extra["HZ_FAKE_RATE_FAULT"] = fault
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    if login:
+        codex_login_inside(rig, spec.session_key)
+    pid_file.unlink(missing_ok=True)
+    return spec, pid_file
+
+
+@pytest.mark.parametrize(("fault", "login", "reason"), [
+    ("error", True, "AnswerError"), ("garbage", True, "JSONDecodeError"), ("close", True, "ClosedOutput"),
+    ("exit", True, "ExitStatus"), (None, False, "AnswerError")])
+def test_a_read_that_fails_reports_nothing_and_names_why(rig: RuntimeRig, caplog: pytest.LogCaptureFixture,
+                                                         fault: str | None, login: bool, reason: str) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_mod.__name__)
+    _, pid_file = failing_read(rig, fault, login)
+    assert rig.runtime.signals("alpha") == []
+    assert reads(rig) == 1                                      # it ran and failed: not skipped
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: {reason}"]
+    assert pid_file.is_file() and pid_gone(pid_file)           # its app-server started, and was reaped
+
+
+def test_a_read_past_its_bound_is_a_failure_and_its_server_ends(rig: RuntimeRig,
+                                                                caplog: pytest.LogCaptureFixture,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_mod.__name__)
+    monkeypatch.setattr(runtime_mod, "USAGE_SECONDS", 2)
+    _, pid_file = failing_read(rig, "hang")
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: BackendError"]
+    assert pid_file.is_file()                                   # the read's own server started
+    wait_for(lambda: pid_gone(pid_file))       # the script was killed: its server reads EOF and exits
+
+
+def test_a_read_whose_script_is_missing_is_its_exit_status(rig: RuntimeRig,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_mod.__name__)
+    spec, pid_file = failing_read(rig, None)
+    (rig.runtime.layout(spec.session_key).run(1) / "codex_usage.py").unlink()
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: exit 2"]      # python3 can't open the file
+    assert not pid_file.exists()
+
+
+@pytest.mark.parametrize(("status", "reason"), [(127, "exit 127"), (1, "exit 1"), (0, "unparsed")])
+def test_only_a_clean_exit_with_a_reading_is_a_reading(rig: RuntimeRig, caplog: pytest.LogCaptureFixture,
+                                                       monkeypatch: pytest.MonkeyPatch, status: int,
+                                                       reason: str) -> None:
+    """127 is a command that never ran, and its output is no reading, even one that parses."""
+    caplog.set_level(logging.WARNING, logger=runtime_mod.__name__)
+    failing_read(rig, None)
+    out = json.dumps(SNAPSHOT).encode() if status else b"not a reading"
+
+    def answered(name: str, workdir: Path, argv: Sequence[str], *, input: bytes | None = None,
+                 timeout: float) -> ExecResult:
+        return ExecResult(status, out, b"")
+
+    monkeypatch.setattr(rig.backend, "exec", answered)
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: {reason}"]
+
+
+def test_a_rebound_session_still_reports(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    rig.backend.env_extra["HZ_FAKE_STOP_FAILURE"] = "rate_limit"
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+    rig.runtime.servers.pop(spec.session_key).close()          # wsd died
+    rig.runtime.sessions("alpha")                              # rebinds
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "after the restart")
+    assert drained(rig, 1) == [LimitSeen(spec.session_key, 1, None)]
+
+
+def test_a_flood_of_reports_keeps_only_the_newest(rig: RuntimeRig) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    on_event = rig.runtime.servers[spec.session_key].on_event
+    assert on_event is not None
+    for _ in range(MAX_QUEUED + 10):
+        on_event({"hook_event_name": "StopFailure", "error": "rate_limit"})
+    assert len(rig.runtime.signals("alpha")) == MAX_QUEUED
+
+
+def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_caps(rig, "claude-code", LIMITS)
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    on_event = rig.runtime.servers[spec.session_key].on_event
+    assert on_event is not None
+    on_event({"hook_event_name": "StopFailure", "error": "rate_limit"})
+
+    def unlistable() -> list[SessionRecord]:
+        raise RuntimeUnavailable("the session records can't be listed")
+
+    monkeypatch.setattr(rig.runtime, "_records", unlistable)
+    assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
