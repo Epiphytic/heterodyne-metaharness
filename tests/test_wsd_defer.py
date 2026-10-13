@@ -42,7 +42,7 @@ from heterodyne.wsd.park import (
     defer_mark,
 )
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import LaunchSpec, LimitSeen, Started, UsageSeen
+from heterodyne.wsd.runtime import LOGIN_STALE, LaunchSpec, LimitSeen, Started, UsageSeen
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.sweep import sweep
@@ -1103,3 +1103,182 @@ FAILOVER = Scenario(lambda r: limited(r, Reader(reading()), two=True, cross_acco
 def test_a_crash_at_every_limit_point_replays_to_the_relaunch(tmp_path: Path) -> None:
     clean = same_end(tmp_path, FAILOVER, LIMIT_POINTS)
     assert [s.account for s in clean.rig.runtime.launches] == ["default", "spare"]
+
+
+# --- the account switch (plan 4b Task 10) ---
+
+def key_of(rig: Rig, account: str) -> str:
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    return accounts.current_key("codex", account)
+
+
+@pytest.mark.parametrize(("on", "handoff"), [
+    ({"handoff_relaunch": True}, True),
+    ({"cross_account_resume": True}, False),
+    ({"cross_account_resume": True, "handoff_relaunch": True}, False),
+], ids=["f", "b", "b-and-f"])
+def test_a_switch_without_b_is_a_handoff_and_with_b_a_resume(tmp_path: Path, on: dict[str, bool],
+                                                             handoff: bool) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, trusted_read=True, limit_signal=True, **on)
+    assert signal(rig) is Outcome.RESUMED
+    first, second = rig.runtime.launches
+    assert (first.account, first.handoff, second.account) == ("default", False, "spare")
+    assert (second.credential_key, second.handoff) == (key_of(rig, "spare"), handoff)
+    assert second.resume is (not handoff)
+    entry = rig.journal.launch(rig.key(B), 1)
+    assert entry is not None and entry.native_id is not None
+    assert second.native_id == (None if handoff else entry.native_id)
+    completed(rig)
+
+
+def test_a_relaunch_on_the_same_key_is_never_a_handoff(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), handoff_relaunch=True, trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED
+    second = rig.runtime.launches[1]
+    assert (second.handoff, second.resume, second.credential_key) == (False, True, key_of(rig, "default"))
+
+
+def fresh_only(rig: Rig, *stale: str, two: bool = True) -> None:
+    """B ready on p-two (on `default` then `spare`, able to switch, if `two`), with the runtime refusing the
+    logins of the `stale` accounts as stale."""
+    if two:
+        spare(rig)
+        caps(rig, cross_account_resume=True)
+    rig.restart(rig.cp)
+    rig.runtime.stale_keys = {key_of(rig, a) for a in stale}
+    rig.world.add(B)
+    on_profile(rig, B, "p-two")
+
+
+def pickup_ops(rig: Rig) -> list[tuple[str, dict[str, str]]]:
+    return [(status, data) for kind, _, status, data in ops(rig) if kind == "pickup"]
+
+
+def attempts(rig: Rig) -> list[int]:
+    return [r[0] for r in rig.journal.db.execute("SELECT attempts FROM ops WHERE kind = 'pickup'")]
+
+
+def test_a_stale_login_moves_on_to_the_next_account_without_spending_the_budget(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default")
+    assert rig.pickup() is Outcome.NOTHING
+    row = rig.journal.state(WS, B)
+    assert row is not None and (row.reason, row.detail) == (Reason.LAUNCH_FAILED, LOGIN_STALE)
+    [(status, data)] = pickup_ops(rig)
+    assert status == "open" and data["stale"] == key_of(rig, "default") and "generation" not in data
+    assert rig.pickup() is Outcome.BUSY
+    assert [s.account for s in rig.runtime.launches] == ["spare"] and rig.runtime.calls == 2
+    assert attempts(rig) == [0] and rig.state(B) == BeadState.RUNNING.value
+    completed(rig)
+
+
+def test_a_stale_login_with_no_other_account_needs_a_human(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default", two=False)
+    rig.pickup()
+    row = rig.journal.state(WS, B)
+    assert row is not None
+    assert (row.state, row.reason, row.detail) == (BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+    assert NEEDS_HUMAN in rig.world.beads[B].labels
+    assert rig.runtime.calls == 1 and attempts(rig) == [0] and rig.journal.ops_open(WS) == []
+
+
+def test_each_stale_login_is_tried_once_then_a_human(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default", "spare")
+    rig.pickup()
+    rig.pickup()
+    rig.pickup()
+    row = rig.journal.state(WS, B)
+    assert row is not None
+    assert (row.state, row.reason, row.detail) == (BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+    assert rig.runtime.calls == 2 and rig.runtime.launches == []
+    [(status, data)] = pickup_ops(rig)
+    assert status == "stuck"
+    assert data["stale"] == ",".join(sorted([key_of(rig, "default"), key_of(rig, "spare")]))
+
+
+def test_another_refusal_still_spends_the_budget_and_marks_nothing_stale(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig)
+    rig.runtime.launch_failures = 1
+    rig.pickup()
+    assert attempts(rig) == [1]
+    [(_, data)] = pickup_ops(rig)
+    assert "stale" not in data
+
+
+def spec_view(rig: Rig) -> list[tuple[object, ...]]:
+    """What each launch attempt asked for: the account, whether the key is that account's in this rig (keys
+    are derived from each rig's own paths, so two rigs' keys never compare equal), a handoff, a resume
+    and the native ID."""
+    return [(a.account, a.credential_key == key_of(rig, a.account), a.handoff, a.resume, a.native_id,
+             a.generation) for a in rig.runtime.attempts]
+
+
+def stale_points(tmp_path: Path, scenario: Scenario) -> tuple[str, ...]:
+    """The stale step and the outcome points around it, in the order the uncrashed run passes them."""
+    seen = run(tmp_path / "points", scenario).seen
+    points = tuple(dict.fromkeys(p for p in seen if p.rsplit(".", 1)[1] in ("outcome", "outcome!", "stale")))
+    assert any(p.endswith(".stale") for p in points)
+    return points
+
+
+def same_specs(tmp_path: Path, scenario: Scenario) -> Run:
+    """`same_end` at each stale point, and every replay attempts exactly the uncrashed run's launches."""
+    points = stale_points(tmp_path, scenario)
+    clean = same_end(tmp_path / "end", scenario, points)
+    want = spec_view(clean.rig)
+    for i, point in enumerate(points):
+        assert spec_view(run(tmp_path / f"specs-{i}", scenario, point).rig) == want, point
+    return clean
+
+
+def stale_handoff(rig: Rig) -> None:
+    """B limited on `default`, able to switch only by a handoff, and `spare`'s login stale."""
+    limited(rig, Reader(reading()), two=True, handoff_relaunch=True, trusted_read=True, limit_signal=True)
+    rig.runtime.stale_keys = {key_of(rig, "spare")}
+
+
+STALE = Scenario(lambda r: fresh_only(r, "default"), lambda r: r.pickup())
+STALE_ALONE = Scenario(lambda r: fresh_only(r, "default", two=False), lambda r: r.pickup())
+ALL_STALE = Scenario(lambda r: fresh_only(r, "default", "spare"), lambda r: [r.pickup() for _ in range(3)])
+HANDOFF_STALE = Scenario(stale_handoff, lambda r: (signal(r), r.pickup()))
+
+
+def test_a_crash_after_a_stale_refusal_replays_to_the_next_account(tmp_path: Path) -> None:
+    clean = same_specs(tmp_path, STALE)
+    assert [s.account for s in clean.rig.runtime.launches] == ["spare"]
+    assert [(a.account, a.handoff, a.resume) for a in clean.rig.runtime.attempts] == [
+        ("default", False, False), ("spare", False, False)]
+
+
+def test_a_crash_after_a_stale_refusal_with_no_other_account_still_needs_a_human(tmp_path: Path) -> None:
+    clean = same_specs(tmp_path, STALE_ALONE)
+    row = clean.rig.journal.state(WS, B)
+    assert row is not None and (row.state, row.detail) == (BeadState.STUCK, LOGIN_STALE)
+    assert [a.account for a in clean.rig.runtime.attempts] == ["default"]
+
+
+def test_a_crash_when_every_login_is_stale_tries_each_once(tmp_path: Path) -> None:
+    clean = same_specs(tmp_path, ALL_STALE)
+    assert [a.account for a in clean.rig.runtime.attempts] == ["default", "spare"]
+    assert clean.rig.runtime.launches == []
+
+
+def test_a_crash_after_a_stale_handoff_resumes_nothing(tmp_path: Path) -> None:
+    """The handoff to `spare` is refused as stale, and `default` is at its limit, so the bead waits for
+    the reset; nothing runs on `spare`. Every replay asked for the same handoff: fresh, with no resume
+    and no native ID."""
+    clean = same_specs(tmp_path, HANDOFF_STALE)
+    first, handoff = clean.rig.runtime.attempts
+    assert (first.account, first.handoff) == ("default", False)
+    assert (handoff.account, handoff.handoff, handoff.resume, handoff.native_id) == (
+        "spare", True, False, None)
+    assert [s.account for s in clean.rig.runtime.launches] == ["default"]
+    assert records(clean.rig)[-1].reason == QUOTA
