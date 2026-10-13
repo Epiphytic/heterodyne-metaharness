@@ -15,7 +15,7 @@
 - The trusted read is `HostUsageReader`, a short-lived host-side `codex app-server` over stdio. It runs in a scratch `CODEX_HOME` that holds a copy of the account's `auth.json`, under the D8 lock, and only while the access token is valid.
 - `wsd` keeps all policy: what is ingested, when a signal defers, whether a read confirms, and which account a relaunch takes. It still names no adapter.
 
-**Every capability stays off.** S7 has demonstrated nothing on a real account, so G2 has not passed and `CAPABILITIES` stays empty. Tasks 1–10 build the machinery and test it with injected `Capabilities`. Task 11 fills the table, one capability at a time, once G2 accepts each S7 finding.
+**Every capability stays off.** S7 has demonstrated nothing on a real account, so G2 has not passed and `CAPABILITIES` stays empty. Tasks 1–10 build the machinery and test it with injected `Capabilities`. Task 11 Part A adds the evidence record and the table's invariants, and enables nothing. Part B fills the table, one capability at a time, once G2 accepts each S7 finding.
 
 **Tech Stack:** Python 3.12+, `uv`, pytest, hypothesis, ruff, pyright strict, msgspec (the only runtime dependency), SQLite (the existing journal), `fcntl.flock`.
 
@@ -25,7 +25,7 @@
 - S7, `docs/spikes/s7-accounts-and-usage.md` on `main`: the client-side findings, the L1–L7 runs and the recommended D9 defaults.
 - Plan 4: D9–D13, D22, gap 3.
 
-**Status:** draft for review. It needs a cross-model design review, then operator approval (a design-approval bead) before any task starts. Tasks 11 and 12 also wait on G2.
+**Status:** draft for review. It needs a cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 11 Part B and Task 12 also wait on G2.
 
 ## Global Constraints
 
@@ -79,7 +79,7 @@
 - **Beads** (workstream `heterodyne`):
   - Tasks 1–12 are `kind:task`.
   - Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=<the approved r16 commit>` and a blocking dependency on the approval bead.
-  - Tasks 11 and 12 also block on the G2 bead.
+  - Task 11 is two beads: Part A (`kind:task`, no G2 dependency) and Part B (one bead per enabling commit, each blocking on the G2 bead). Task 12 blocks on the G2 bead and on Part B.
   - AU-6, AU-7 and AU-8 (btq-bc7yd, btq-n1ox2 and btq-flxmf) close when every task that implements them has closed: Tasks 1–3 and 6 for AU-6; 4, 5, 7, 8 and 9 for AU-7; 10 for AU-8; and 11 for all three.
 - **Branches:** each task has its own branch from `main` (`p4b-t<N>`) and its own PR, as plan 4's tasks did. Merge `origin/main`, never rebase, and never amend a pushed commit. Tasks that touch the same file merge in the order the Parallelism section gives.
 
@@ -90,7 +90,7 @@
 | # | Where the ADR or the change plan is silent or loose | Choice | Why |
 |---|---|---|---|
 | E1 | How the runtime knows the pinned credential key (§4.4 D2: "Immediately before the launch, the guard checks that the account's current credential key still equals the journaled one"). | `LaunchSpec.credential_key` carries the entry's key. Under the D8 lock, just before it reads the login, the runtime recomputes `accounts.current_key(adapter, account)`. A mismatch refuses with `KEY_CHANGED`. An empty `credential_key` is refused the same way. | The guard's step 3 check happens before dispatch. The runtime then reads files that may have been repointed in between. Rechecking under the lock closes that window for the files actually bound. |
-| E2 | The D8 lock's location and shape. | It is `<wsd state>/credlocks/<credential key>.lock`, opened by `gate.open_lock_file` (0600, no symlink, owner checked) and taken with `flock(LOCK_EX)`. The wait is bounded by `lock_wait_seconds` (default 60), polled with `LOCK_NB` and an injected clock and sleep. A wait past that bound raises `CredentialBusy(LOCK_BUSY)`. The key must match `ck1-[0-9a-f]{32}` before it is used in a path. `heterodyne setup` (AU-10) imports `credlock.credential_lock` and the same directory. | flock is per open file description, so threads in one wsd exclude each other, as `ClaimGate.locked` already relies on. The key is a digest, so the path never leaks a login path. A bounded wait turns a stuck holder into a refused launch, never a hang. |
+| E2 | The D8 lock's location and shape. | It is `<wsd state>/credlocks/<credential key>.lock`, opened by `gate.open_lock_file` (0600, no symlink, owner checked) and taken with `flock(LOCK_EX)`. The wait is bounded by `lock_wait_seconds` (default 60), polled with `LOCK_NB` and an injected clock and sleep. A wait past that bound raises `CredentialBusy(LOCK_BUSY)`. The key must match `ck1-[0-9a-f]{32}` before it is used in a path. `heterodyne setup` (AU-10) imports `credlock.credential_lock` and the same directory. | flock is per open file description, so threads in one wsd exclude each other, as `ClaimGate.locked` already relies on. The key is a digest, so the path never leaks a login path. A bounded wait turns a stuck holder into a refused launch (`LaunchFailed(LOCK_BUSY)`, a `failed` refusal that spends the launch budget, unlike E9's `LOGIN_STALE`), never a hang. |
 | E3 | Whether plan 4b refreshes on the host (§7: "the launcher refreshes on the host first, or refuses to launch"; plan 4 D12 never refreshes). | **Plan 4b still never refreshes.** Under the lock, the freshness gate rereads the login and refuses with `LOGIN_STALE` (plan 4's text, moved to `wsd/runtime.py`). AU-8 then tries the next permitted account (E9). A host refresh is added only after S7 L6 records what a refresh writes and whether it rotates the refresh token (open question Q2). | S7 has not observed a completed refresh for either CLI. A harness refresh that rotates the shared refresh token and fails to save it would break the operator's host login, which is the exact hazard §7 guards against. |
 | E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). If `auth.json` in the scratch home has changed when the read ends, the new bytes are written back to the login file. That write is atomic, under the lock, and only if the login file still holds the original bytes. Otherwise the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected, and the compare-and-swap write-back keeps a rotated token if one happens anyway. |
 | E5 | Codex's in-session usage source (§4.4 D9 (c): "`account/rateLimits/read` at launch and `account/rateLimits/updated` through the per-session app-server"). | A host-side client of the live app-server's WebSocket is not in this plan. Instead, an in-sandbox resource script, `codex_usage.py`, runs `codex app-server` over stdio in a scratch `CODEX_HOME` under `/tmp`. Its `auth.json` is a symlink to the session's read-only bound file. The script sends `account/rateLimits/read` and prints only the `rateLimits` object. The runtime runs it through `backend.exec` once the app-server has started, then every `usage_poll_seconds` (default 600) while the session runs. It runs only if the profile's capabilities enable (c). | This is the pattern `codex_trust.py` already uses: stdio JSON-RPC inside the sandbox, with the output validated on the host. The scratch home keeps the second app-server off the live one's sqlite files. The bind stays read-only, so a refresh attempt inside fails (`EROFS`), as §7 requires. Notification subscription is open question Q4. |
@@ -99,8 +99,8 @@
 | E8 | How reactive-limit signals reach `wsd` (§4.4 D6, D9). | `AgentRuntime.signals(ws) -> list[Signal]` drains the reports since the last call: `UsageSeen` and `LimitSeen`, each attributed to `(session key, generation)` by the runtime from the channel it set up. The scheduler calls it in every pickup, just after `expire` and before the sweep. `wsd` ingests a `UsageSeen` only if the profile's capabilities enable (c), and acts on a `LimitSeen` only if they enable (e). | A pull keeps `wsd` the only writer of the journal, as `expire` already does. Latency is up to one backstop interval. That is acceptable: the Claude CLI waits for the reset before it continues (S7 (5)), and the session is stopped before then. |
 | E9 | The freshness-refusal path (AU-8: "A freshness-gate refusal moves on to the next account of the same permitted list"). | The runtime refuses a stale login with exactly `LOGIN_STALE`, and the receipt records it as `refused`/`failed` with that error. `Parker._outcome` recognises it by equality with the constant. It adds the entry's key to the op's `stale` data (comma-separated) and forgets the generation. The next pin runs the gate with those keys excluded (`exclude=`). If the gate finds another permitted account, the op returns `FAILED` without spending the launch budget, and the next pickup launches on that account. If it finds none (`AccountChanged`), the op escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`, so the bead becomes `needs-human`. A `Deadline` defers as usual. | No schema change: `receipts.refusal` keeps its CHECK constraint (`'failed', 'unavailable'`). The exclusion is per operation, so a later operation tries the refreshed login again. Exclusions only grow, so the path ends after at most one try per account. |
 | E10 | The handoff relaunch (§4.4 D7). | `LaunchSpec.handoff` is set by the guard when the new entry's key differs from the last launched entry's, and the profile's capabilities have (f) but not (b). Its `resume` is then false. The runtime's `_resume` returns `(False, None)` for a server-assigned adapter (Codex), and `(False, ids.handoff_session(key, generation))` otherwise. The native ID reaches the entry through the receipt, as it already does. With (b), a switch is an ordinary resume of the latest native ID. **The handoff prompt itself** (the §4.1 deterministic handoff) **is not built here** (Q3). | The ID rule is D7's. The runtime already knows `assigns_id`, so `wsd` stays adapter-free. (f) stays off until S7 L4 passes and a real handoff works (S7's D9 table), so nothing ships a fresh session with no handoff. |
-| E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(bead, launch, hint)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.committed`. A new step, `defer.confirmed`, then asks `Deps.usage_reader`, but only if the profile has (d). **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with the step. **Unconfirmed** keeps the untrusted record. The tail then labels, comments and finishes as before. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
-| E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. That is stricter than r16, which exempts only sources inside another account's directory (the r16 follow-up commit says so). The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`, using `os.scandir` with `follow_symlinks=False`. The refusal texts are `spec.ROOT_*` constants. `check_credentials(..., install_root=...)` exempts exactly that one source from the other-account-directory rule, and only if it is canonical and bound read-only at its own path. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
+| E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(session_key, generation, hint, now)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.stopped`. Two new steps sit between it and the WIP commit (`LIMIT_STEPS`): `defer.read!`, after `Deps.usage_reader` answers (asked only if the profile has (d)), and `defer.confirmed`. **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with `defer.confirmed`. **Unconfirmed** keeps the untrusted record. The tail then commits the WIP, labels, comments and finishes as before. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
+| E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`, inside `check_credentials`, which plan 4's runtime already calls on every launch. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. That is stricter than r16, which exempts only sources inside another account's directory (the r16 follow-up commit says so). The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`, using `os.scandir` with `follow_symlinks=False`. The refusal texts are `spec.ROOT_*` constants. `check_credentials(spec, protected, real_home)` keeps its signature. It always walks `SandboxSpec.cli_root` (recorded by `build_spec`) when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account-directory rule. No caller can skip the walk or pass another root. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
 | E13 | Other accounts with a named account chosen (§7). | `_logins(adapter, account)` puts the chosen account's directory and files in `chosen_*`. Every other configured account goes in `other_*`, and the `default` login goes there too when it isn't the chosen one. `ProbeContext.others` lists the same accounts. | This is §7's rule ("the default login included"), and plan 4's probe already handles any list. |
 | E14 | A session's turn-end events (S7 finding 1). | `Adapter.turn_end_events` is `("Stop", "StopFailure")` for Claude and `("Stop",)` for Codex. `SessionServer(turn_ends=...)` counts a turn end for any of them, and `TurnState.idle` is true after one. | The server stays adapter-neutral: it is given the names, and doesn't know them. |
 | E15 | Capability gating's single source. | Every capability check reads `accounts.view(profile).capabilities`. The runtime reads it for the producers (no exec without (c), no status line without (c)). `wsd` reads it again before ingesting or acting. AU-2's `config check` already refuses accounts without (a), and `"next"` without (d). | One table, checked again by the consumer. A producer bug can't enable a capability. |
@@ -111,7 +111,7 @@
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **G2 has not passed.** S7 showed the client side only, and L1–L7 need you. AU-6, AU-7 and AU-8 are formally blocked by G2 in the change plan. | Approve building Tasks 1–10 now, gated on capabilities and tested with injected ones, so the code is ready when L1–L7 run. Task 11 (the table) and Task 12 (live) stay blocked on G2. Nothing changes on a host until Task 11 enables a capability. |
+| Q1 | **G2 has not passed.** S7 showed the client side only, and L1–L7 need you. AU-6, AU-7 and AU-8 are formally blocked by G2 in the change plan. | Approve building Tasks 1–10 now, gated on capabilities and tested with injected ones, so the code is ready when L1–L7 run. Task 11 Part A (the invariants) can merge too. Task 11 Part B (the table entries) and Task 12 (live) stay blocked on G2. Nothing changes on a host until Task 11 enables a capability. |
 | Q2 | **The host refresh** (§7 "refreshes on the host first, or refuses"). Plan 4b keeps refusing (E3). | Keep refusing in 4b. After L6, add a refresh task. For Codex, `account/read {"refreshToken": true}` in the E4 scratch home, under the lock, with the E4 write-back. For Claude there is no known host mechanism. |
 | Q3 | **The handoff prompt.** (f) needs the §4.1 deterministic handoff, and no generator exists yet (S7 L4 defers it to "the AU task that builds it"). | Build the generator with plan 5 (steering delivers the first prompt there), and keep (f) off until then. Plan 4b builds only the ID and launch mechanics (E10). |
 | Q4 | **Codex's live notifications.** E5 polls rather than subscribing to `account/rateLimits/updated` and `codexErrorInfo` on the live app-server. | Accept polling for v1. L2 should record whether `updated` fires mid-turn. If it does, a later task can add a host-side client on the bridge socket. |
@@ -152,13 +152,14 @@
 Tasks 1–5 have no dependencies on each other, and five worker sessions can build them at once. Each later task starts once everything it depends on has merged to `main`.
 
 ```
-Wave 1 (parallel):  T1 interfaces   T2 credlock   T3 install-root walk   T4 turn ends   T5 adapter parsing
-                       |  \  \          |   \           |                   |              |    \
-Wave 2 (parallel):     |   \  T9 limit  |    \          |                   |              |     \
-                       |    T10 failover |     T8 trusted read <-------------+--------------+------ (T1,T2,T5)
-                       +------------- T6 named-account binding (T1,T2,T3)
-Wave 3:                                  T7 runtime signals (T4,T5,T6)
-Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  T12 live test (T11)
+Wave 1 (parallel):  T1 interfaces, T2 credlock, T3 install-root walk, T4 turn ends, T5 adapter parsing
+Wave 2 (parallel):  T6 named-account binding (T1,T2,T3)
+                    T8 trusted read (T1,T2,T5)
+                    T9 limit flow (T1)
+Wave 3 (parallel):  T7 runtime signals (T4,T5,T6)
+                    T10 handoff and stale path (T1,T6,T9)
+Wave 2 (also):     T11a table invariants (none)
+Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test (T11b)
 ```
 
 | Task | Depends on | Can run beside | Files it shares (merge order) |
@@ -168,13 +169,14 @@ Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  
 | 3 | none | 1, 2, 4, 5 | `sandbox/spec.py` |
 | 4 | none | 1, 2, 3, 5 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
 | 5 | none | 1, 2, 3, 4 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
-| 6 | 1, 2, 3 | 8, 9, 10 | `sandbox/runtime.py`, `sandbox/build.py` |
-| 8 | 1, 2, 5 | 6, 9, 10 | `wsd/cli.py`, `sandbox/build.py` (merges after 6) |
-| 9 | 1 | 6, 8, 10 | `wsd/park.py` (`limit`, `defer_tail`), `wsd/scheduler.py` |
-| 10 | 1 | 6, 8, 9 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 9) |
+| 6 | 1, 2, 3 | 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
+| 8 | 1, 2, 5 | 6, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
+| 9 | 1 | 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
+| 10 | 1, 6, 9 | 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
 | 7 | 4, 5, 6 | none | `sandbox/runtime.py` |
-| 11 | 6–10, G2 | none | `config/capabilities.py` |
-| 12 | 11 | none | `tests/live/` |
+| 11a | none | any | `config/capabilities.py`, `tests/test_config_accounts.py` |
+| 11b | 6–10, 11a, G2 | none | `config/capabilities.py` |
+| 12 | 11b | none | `tests/live/`, `docs/wsd.md` |
 
 ## File map
 
@@ -186,8 +188,8 @@ Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  
 | `src/heterodyne/wsd/ids.py` | 1 | `handoff_session` |
 | `src/heterodyne/wsd/workstream.py` | 1 | `Deps.usage_reader` |
 | `src/heterodyne/wsd/credlock.py` (new) | 2 | the D8 lock |
-| `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`; `check_credentials(install_root=)` |
-| `src/heterodyne/session/server.py` | 4 | `turn_ends`, `on_event`, `TurnState.at_boundary` |
+| `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`, the `ROOT_*` texts and bounds; `SandboxSpec.cli_root`, walked by `check_credentials` |
+| `src/heterodyne/session/server.py` | 4 | `turn_ends`, `on_event`, `TurnState.boundary` |
 | `src/heterodyne/agents/base.py` | 4, 5 | `turn_end_events`, `UsageReport`, `usage_from_event`, `run_files(usage=)` |
 | `src/heterodyne/agents/claude_code.py` | 4, 5 | the `StopFailure` hook, the status line, parsing |
 | `src/heterodyne/agents/codex.py` | 5 | `parse_rate_limits`, `usage_argv` |
@@ -197,11 +199,16 @@ Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  
 | `src/heterodyne/sandbox/settings.py` | 6, 7 | `lock_wait_seconds`, `usage_poll_seconds` |
 | `src/heterodyne/sandbox/build.py` | 6, 8 | the lock directory; the reader |
 | `src/heterodyne/sandbox/hostread.py` (new) | 8 | `HostUsageReader` |
-| `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/daemon.py` | 8 | wiring `Deps.usage_reader` |
-| `src/heterodyne/wsd/park.py` | 9, 10 | `limit`, `defer.confirmed`, the pinned key and handoff, the stale path |
+| `src/heterodyne/wsd/cli.py` (`run`, `wsd_main`), `src/heterodyne/wsd/daemon.py` (`assemble`) | 8 | wiring `Deps.usage_reader` |
+| `src/heterodyne/wsd/park.py` | 6, 9, 10 | 6: `credential_key` on the spec; 9: `capabilities`, `limit`, `defer.confirmed`; 10: `stale_keys`, the handoff, the stale path |
 | `src/heterodyne/wsd/scheduler.py` | 9 | draining `signals` |
-| `src/heterodyne/config/capabilities.py` | 11 | the table |
-| `tests/fakes/fake_runtime.py`, `tests/fakes/fake_agent_cli.py` | 1, 5, 8 | scripted signals; the fake `app-server` stdio mode |
+| `src/heterodyne/config/capabilities.py` | 11 | `Evidence`, `EVIDENCE`, `table_problems`, then the table |
+| `tests/fakes/fake_runtime.py`, `tests/fakes/fake_agent_cli.py` | 1, 5, 8, 10 | scripted signals; the fake `app-server` stdio mode; `stale_keys` |
+| `tests/wsd_env.py` | 9 | `Rig.usage_reader`, passed to `Deps` |
+| `tests/test_sandbox_build.py`, `tests/test_wsd_daemon.py` | 8 | `build_usage_reader`; the reader reaches `Deps` |
+| `tests/test_wsd_defer.py` | 9, 10 | the limit flow; the handoff and the stale path |
+| `tests/test_config_capabilities.py` (new) | 11 | the table's invariants |
+| `docs/wsd.md` | 12 | the live accounts checks |
 | `tests/live/test_live_accounts.py` (new) | 12 | the live test |
 
 ---
@@ -502,8 +509,8 @@ In `src/heterodyne/wsd/ids.py`, after `role_session`:
 
 ```python
 def handoff_session(session_key: str, generation: int) -> str:
-    """A handoff relaunch's fresh native session ID (D7): new for each generation, recomputable. A
-    session key holds no colon-free bead, so this never equals a role_session input."""
+    """A handoff relaunch's fresh native session ID (D7): new for each generation, recomputable. Its
+    uuid5 name has one colon (`<session key>:<generation>`); role_session's has two, so they never meet."""
     return str(uuid.uuid5(NS, f"{session_key}:{generation}"))
 ```
 
