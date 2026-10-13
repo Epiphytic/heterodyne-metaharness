@@ -859,6 +859,43 @@ def test_an_end_cause_is_never_changed(rig: RuntimeRig, monkeypatch: pytest.Monk
     assert wip_commits(rig) == 1 and cause(rig, key) == first
 
 
+@pytest.mark.parametrize("how", ["stop", "expire"])
+def test_a_healthy_stop_whose_cause_cant_be_written_stops_nothing(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """Code r1: the `stopping` write carries the healthy cause. If it fails, the session is left running
+    and the stop is unconfirmed, so a restart lists it live and the retry records the healthy cause; a
+    teardown first would leave a RUNNING record with no cause, which the restart would end `died`."""
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    deadline = at_deadline(rig, key)
+    real = SandboxRuntime._phase
+
+    def failing(self: SandboxRuntime, layout: SessionLayout, rec: SessionRecord,
+                **changes: object) -> SessionRecord:
+        if changes.get("phase") is Phase.STOPPING:
+            raise OSError("disk full")
+        return real(self, layout, rec, **changes)
+
+    with monkeypatch.context() as m:
+        m.setattr(SandboxRuntime, "_phase", failing)
+        with pytest.raises(RuntimeUnavailable):
+            if how == "stop":
+                rig.runtime.stop(key)
+            else:
+                rig.runtime.expire("alpha", deadline)
+    rec = record(rig, key)
+    assert (rec.phase, rec.end_cause) == (Phase.RUNNING, "")
+    assert rig.tmux.has_session(rec.tmux_session) and rec.sandbox in rig.backend.names()
+    restarted = SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
+    assert [s.key for s in restarted.sessions("alpha")] == [key]   # still live, not ended `died`
+    if how == "stop":
+        restarted.stop(key)
+    else:
+        restarted.expire("alpha", deadline)
+    assert cause(rig, key) == {"stop": EndCause.STOPPED, "expire": EndCause.LIFETIME}[how]
+
+
 def test_delayed_discovery_after_the_deadline_is_a_death(rig: RuntimeRig) -> None:
     spec = launch_spec(rig, "p-one")
     rig.runtime.launch(spec)

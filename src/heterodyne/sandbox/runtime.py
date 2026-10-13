@@ -594,7 +594,10 @@ class SandboxRuntime:
 
         A lifetime end (D13) records its reason and the WIP commit it owes in the same write that records
         `stopping`, before anything is stopped, so a crash on either side of any later step replays it.
-        That write also records the end's cause (g08sd, `_cause`), once: a replay never changes it."""
+        That write also records the end's cause (g08sd, `_cause`), once: a replay never changes it. A
+        healthy cause is evidence only this write keeps, so if it fails nothing is stopped: the end is
+        unconfirmed and the next pass retries it (the reaper still bounds a lifetime). Any other end
+        still stops, since a restart would find the same cause."""
         layout = self.layout(rec.key)
         owed: dict[str, str] = {}
         if lifetime or rec.stop_reason == "lifetime":
@@ -606,6 +609,8 @@ class SandboxRuntime:
             rec = self._phase(layout, rec, phase=Phase.STOPPING, **owed)
             journaled = True
         except OSError:
+            if owed.get("end_cause") in (EndCause.STOPPED, EndCause.LIFETIME):
+                return False                 # code r1: never end a healthy session without its cause
             journaled = False                # stop it anyway; landing and `ended` wait for a durable record
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
