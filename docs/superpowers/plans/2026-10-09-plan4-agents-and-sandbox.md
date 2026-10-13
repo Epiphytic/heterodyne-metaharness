@@ -9869,6 +9869,7 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
 >    - sensitive comparisons run outside `assert` and fail via `pytest.fail()` with sanitised text only;
 >    - subprocess errors show only the exception's type name.
 > 15. `CHANNEL_REJECTED`'s parts and the fixed-wording tables live in `tests/probe_verdicts.py`, which imports `EXEC_CHECKS` and `AGENT_CHECKS` from `heterodyne.sandbox.openshell_selftest`. The offline tests import the private `_results` for the combined-failure case.
+> 16. `require(ok, why)` in `tests/probe_verdicts.py` fails with only `why` (`pytest.fail`, `pytrace=False`), and `tool_var_rejection()` holds n8's check. The T15 controls' checks on raw launch reasons, rejection reasons and environment names go through them, as do the T14 live checks whose operands hold a host path, environment names or command output.
 
 **Files:**
 - Create: `tests/probe_verdicts.py`, `tests/test_probe_verdicts.py` (Amendment 1: offline, in the normal suite)
