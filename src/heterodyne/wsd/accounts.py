@@ -88,6 +88,11 @@ class Accounts(Protocol):
         ConfigError (path-free) for an unknown account."""
         ...
 
+    def capabilities_of(self, profile: str) -> Capabilities:
+        """E15: the profile's adapter's capabilities, NONE if the profile is gone. Reads no login, so a
+        caller holding no account lock may ask."""
+        ...
+
     def view(self, profile: str) -> ProfileView:
         """The profile resolved now. Raises ConfigError (path-free) if the profile is gone or a listed
         account's key can't be resolved."""
@@ -146,6 +151,10 @@ class ConfiguredAccounts:
     def login_paths(self, adapter: str, account: str) -> tuple[Path, tuple[Path, ...]]:
         login_dir = paths.expand(self._configured_dir(adapter, account), self.env)
         return login_dir, tuple(login_dir / f for f in LOGIN_FILES[adapter])
+
+    def capabilities_of(self, profile: str) -> Capabilities:
+        spec = self.profiles.get(profile)
+        return NONE if spec is None else self.capabilities.get(spec.adapter, NONE)
 
     def view(self, profile: str) -> ProfileView:
         spec = self.profiles.get(profile)

@@ -77,6 +77,7 @@ probe_allowed_host = "api.openai.com"   # the self-test's allowlisted control (Â
 probe_denied_host = "example.org"       # the self-test's refused host
 agent_probe_seconds = 240
 lock_wait_seconds = 60                  # the longest a launch waits for an account's login lock (D8)
+usage_poll_seconds = 600                # how often a session's in-sandbox usage read runs, when (c) or (e) is on
 
 # Variables for the openshell and podman commands only (for example the PATH of a side-by-side podman).
 # Never passed into a sandbox.

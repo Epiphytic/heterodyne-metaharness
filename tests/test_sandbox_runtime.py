@@ -2168,7 +2168,8 @@ def test_with_every_capability_off_no_producer_runs(rig: RuntimeRig) -> None:
     rig.backend.env_extra |= {"HZ_FAKE_STATUS_LINE": json.dumps(STATUS),
                               "HZ_FAKE_STOP_FAILURE": "rate_limit",
                               "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
-    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    one = launch_spec(rig, "p-one")
+    two = replace(launch_spec(rig, "p-two", "btq-2"), worktree=bead_worktree(rig, "btq-2"))  # its own branch
     rig.runtime.launch(one)                                     # the self-test's turn ends on StopFailure
     rig.runtime.launch(two)
     settings = json.loads((rig.runtime.layout(one.session_key).run(1) / "claude-settings.json").read_text())
@@ -2225,6 +2226,27 @@ def test_the_codex_read_is_polled_when_due(rig: RuntimeRig) -> None:
     rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
     assert len(rig.runtime.signals("alpha")) == 2 and reads(rig) == 2
     assert rig.runtime.signals("beta") == []                           # another workstream's: none
+
+
+def test_draining_signals_reads_no_login(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only `_pinned` reads a login, under its lock: the capability lookup behind each due read
+    reads none."""
+    with_caps(rig, "codex", BOTH)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    codex_login_inside(rig, spec.session_key)
+    logins: list[str] = []
+
+    def reading(self: ConfiguredAccounts, adapter: str, account: str) -> str:
+        logins.append(account)
+        raise AssertionError("a login was read")
+
+    monkeypatch.setattr(ConfiguredAccounts, "current_key", reading)
+    assert len(rig.runtime.signals("alpha")) == 2 and reads(rig) == 1
+    rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
+    assert len(rig.runtime.signals("alpha")) == 2 and reads(rig) == 2
+    assert logins == []
 
 
 @pytest.mark.parametrize(("caps", "kinds"), [(LIMITS, [LimitSeen]), (USAGE, [UsageSeen])])
