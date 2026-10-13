@@ -17,11 +17,14 @@ from typing import Any, Protocol, cast
 
 from heterodyne.sandbox.spec import AgentFacts, SessionLayout
 from heterodyne.session.server import UUID
+from heterodyne.wsd.usage import Observation
 
 # One fixed hook command for every launch (plan 4 D5): Codex's trusted hash stays valid, and the
 # session token is read from the file beside the socket, never from a command line.
 HOOK_COMMAND = "python3 -I /run/hz/shim.py hook"
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PreToolUse")
+# Claude's status line, when (c) is on (plan 4b E7): fixed like the hooks, and reading nothing from argv.
+STATUS_COMMAND = "python3 -I /run/hz/shim.py status"
 # Claude Code 2.1.286 and codex-cli 0.160 block a tool only on exit 2: an interpreter that can't start,
 # crashes or is killed would otherwise let the tool run under bypass mode. PreToolUse only; also fixed,
 # so Codex's trusted hash stays valid. A hook the CLI times out is cancelled and its tool runs, so the
@@ -40,6 +43,22 @@ class Cli:
     binary: Path        # canonical
     root: Path          # the install root, bound read-only
     version: str
+
+
+@dataclass(frozen=True)
+class UsageReport:
+    """What one usage payload says, parsed by its adapter. Untrusted until wsd says otherwise; the account
+    is never read from it. Percentages and resets are passed on unchecked: ingestion validates them."""
+    windows: tuple[Observation, ...] = ()
+    limited: bool = False               # the payload says a usage limit is reached (D9 (e))
+    reset_hint: int | None = None       # the latest reset of a reached window, if the payload gave one
+
+
+def epoch_or_none(value: object) -> int | None:
+    """A payload's epoch-seconds time, or None if it is not a finite number."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if value == value and abs(value) < 1e15 else None    # NaN != NaN
 
 
 def find_binary(binary: str, path: str) -> Path:
@@ -224,8 +243,6 @@ class Adapter(Protocol):
 
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None: ...
 
-    def run_files(self) -> Mapping[str, str]: ...
-
     def has_state(self, home: Path, native_id: str | None) -> bool:
         """The synthetic home holds resumable state for this native ID. Raises AdapterError for an ID
         that is not a canonical UUID, and OSError if the home can't be read."""
@@ -244,6 +261,23 @@ class Adapter(Protocol):
 
     def apply_trust(self, layout: SessionLayout, output: bytes) -> int:
         """Trust what `trust_argv`'s output lists; return how many entries it listed."""
+        ...
+
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
+        """Files for the run directory (read-only inside). With `usage` ((c)) or `limits` ((e)), also
+        what that capability's producers need (plan 4b E5, E7)."""
+        ...
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        """What a session-socket hook payload says about usage, or None if nothing."""
+        ...
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        """The in-sandbox usage read (plan 4b E5), or None if the adapter has none."""
+        ...
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        """The in-sandbox read's stdout, or None if it doesn't parse."""
         ...
 
 

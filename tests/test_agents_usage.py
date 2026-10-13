@@ -90,6 +90,7 @@ def test_a_snapshot_gives_one_observation_per_window() -> None:
     src = IN_SESSION_SOURCE
     assert report == UsageReport((Observation("codex:codex:300m", "5h", 42, NOW + 3600, src),
                                   Observation("codex:codex:10080m", "7d", 17, NOW + 86400, src)))
+    assert report is not None
     assert all(LABEL.fullmatch(o.window_id) and LABEL.fullmatch(o.kind) for o in report.windows)
 
 
@@ -295,7 +296,8 @@ def test_an_app_server_that_cannot_be_reaped_fails_the_read(
     codex = install_fake_cli(tmp_path, "codex")
     real_wait = POPEN.wait
 
-    def stuck(self: subprocess.Popen[str], timeout: float | None = None) -> int:
+    # quoted: the `started` fixture has replaced subprocess.Popen with a function by now
+    def stuck(self: "subprocess.Popen[str]", timeout: float | None = None) -> int:
         raise subprocess.TimeoutExpired(self.args, timeout or 0)
 
     monkeypatch.setattr(POPEN, "wait", stuck)
