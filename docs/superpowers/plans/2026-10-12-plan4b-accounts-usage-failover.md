@@ -119,6 +119,7 @@
 | Q6 | **Claude's `.credentials.lock`** sits beside `.credentials.json` (S7 (1)). Under a single-file read-only bind, the CLI's lock goes into the synthetic config directory, which is writable. Whether the CLI needs it to be shared with the host is L6's question. | No change in 4b. The single-file bind already keeps the host's lock out of the sandbox. L6 records the behaviour. |
 | Q7 | **Stricter install-root walk** (E12): it also runs when the root is inside the chosen account's own directory. | Accept. The r16 follow-up commit makes the ADR say so. |
 | Q8 | **Failover for Claude.** Claude has no (d), so `failover = "next"` is refused for it, and a Claude limit always defers on its own account. | Accept, as S7 recommends. Revisit only if a CLI version adds a host-side read. |
+| Q9 | **`failover = "next"` without (b) or (f).** The config check requires only (d), and S7 recommends (d) plus (b) or (f). | Accept as it is: the gate already keeps a running session on its account without (b) or (f), so the only effect is that new sessions fail over. If you want S7's stricter rule, it is a two-line change to `config/accounts.py` in Task 11 Part B. |
 
 ### Contradictions found in the sources
 
@@ -4279,4 +4280,4 @@ git add src/heterodyne/config/capabilities.py
 git commit -m "plan4b T11b: enable codex (a) login binding (S7 L1,L2 on 0.160.0; G2 <bead id>)"
 ```
 
-- [ ] **Step 7: Enable (c), then (e), then (b), then Codex (d), each as its own commit, as in Step 6.** Codex `failover = "next"` passes `config check` only once (d) and (b) are both on (S7 "Recommended D9 defaults": "Codex gets `next` only once (d) and either (b) or (f) are on"). That rule lives in the existing `config/accounts.py` check, and this task doesn't change it.
+- [ ] **Step 7: Enable (c), then (e), then (b), then Codex (d), each as its own commit, as in Step 6.** Codex `failover = "next"` passes `config check` once (d) is on: the existing `config/accounts.py` check requires `trusted_read` only. S7 says more: "Codex gets `next` only once (d) and either (b) or (f) are on". Without (b) or (f), `permitted` keeps a session on its previous account (`can_switch` is false), so `"next"` moves only new sessions. This task doesn't change the check, and the open question Q9 asks whether it should.
