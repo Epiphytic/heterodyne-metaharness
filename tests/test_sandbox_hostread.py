@@ -1,5 +1,6 @@
 """Plan 4b Task 8: the trusted host-side read (D9 (d), E4), against the fake app-server."""
 
+import contextlib
 import errno
 import json
 import logging
@@ -255,9 +256,10 @@ def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path,
                                                                 monkeypatch: pytest.MonkeyPatch,
                                                                 logged: Callable[[], list[str]]) -> None:
     scratch = tmp_path / "hostread"
-    (scratch / "read-abc").mkdir(parents=True)
+    home = stamped(scratch)
+    home.mkdir(parents=True)
     bystander = POPEN([sys.executable, "-c", "import time; time.sleep(60)"],      # a near miss: not killed
-                      env={**os.environ, "CODEX_HOME": str(scratch / "read-abc") + "-not"})
+                      env={**os.environ, "CODEX_HOME": str(home) + "-not"})
     try:
         monkeypatch.setattr(hostread.shutil, "rmtree", lambda *_a, **_k: None)
         recover(scratch)
@@ -268,6 +270,12 @@ def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path,
         bystander.wait(10)
     recover(tmp_path / "missing")                               # nothing there: nothing done, nothing logged
     assert logged() == [DIAG_RECOVERY_KEPT]
+
+
+def stamped(scratch: Path, made_ns: int | None = None) -> Path:
+    """A home named as a read names it: this boot, and the boot clock just before it was made."""
+    made = time.clock_gettime_ns(time.CLOCK_BOOTTIME) if made_ns is None else made_ns
+    return scratch / f"{hostread.home_prefix(made)}abc"
 
 
 def open_fds() -> int:
@@ -284,7 +292,7 @@ def test_an_unconfirmed_recovery_keeps_the_homes_and_never_raises(tmp_path: Path
     only way the next start can find that app-server, leaks no pidfd and raises nothing. The next
     recover, with the fault gone, finishes the job."""
     scratch = tmp_path / "hostread"
-    home = scratch / "read-abc"
+    home = stamped(scratch)
     home.mkdir(parents=True)
     orphan = POPEN([sys.executable, "-c", "import time; time.sleep(60)"],
                    env={**os.environ, "CODEX_HOME": str(home)})
@@ -398,3 +406,109 @@ def test_a_linked_login_is_not_read(tmp_path: Path, logged: Callable[[], list[st
     assert rig.read() == WANTED                                 # the real path is read, not the link
     assert rig.login.is_symlink() and elsewhere.read_text() == rig.original
     assert logged() == []
+
+
+def started_ns(pid: int) -> int:
+    """The process's start on the boot clock, as /proc gives it, in nanoseconds."""
+    return int(hostread._stat(str(pid))[19]) * 1_000_000_000 // os.sysconf("SC_CLK_TCK")
+
+
+def unreadable(monkeypatch: pytest.MonkeyPatch, pid: int) -> None:
+    """`pid`'s environment can't be read, as a process of this user made non-dumpable."""
+    real = hostread._environ
+
+    def refused(each: str) -> bytes:
+        if each == str(pid):
+            raise PermissionError(errno.EACCES, "permission denied")
+        return real(each)
+
+    monkeypatch.setattr(hostread, "_environ", refused)
+
+
+@pytest.mark.parametrize(("after_start", "kept"), [(-60.0, True), (0.5, True), (5.0, False)])
+def test_an_unreadable_process_of_this_user_is_ruled_out_only_by_its_start(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logged: Callable[[], list[str]],
+        after_start: float, kept: bool) -> None:
+    """A process of this user whose environment can't be read may be a holder: the scan is incomplete
+    and the home kept, unless it started before the home was made. Every holder starts after its home,
+    so one that started earlier can't be one; a start up to the slack before the home still counts as
+    after it (clock-tick rounding). A home made 5 s after the process started rules it out."""
+    scratch = tmp_path / "hostread"
+    orphan = POPEN([sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ})
+    try:
+        home = stamped(scratch, started_ns(orphan.pid) + int(after_start * 1e9))
+        home.mkdir(parents=True)
+        unreadable(monkeypatch, orphan.pid)
+        recover(scratch)
+        assert logged() == [DIAG_RECOVERY_KEPT if kept else DIAG_RECOVERED]
+        assert home.exists() == kept
+        assert orphan.poll() is None                            # never killed without a match
+    finally:
+        orphan.kill()
+        orphan.wait(10)
+
+
+@pytest.mark.parametrize(("name", "kept"), [("read-abc", True), ("read-" + "0" * 32 + "-5-abc", False)])
+def test_a_home_without_this_boots_stamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                          logged: Callable[[], list[str]], name: str, kept: bool) -> None:
+    """A home whose stamp can't be read rules nothing out by its start: any unreadable process of this
+    user keeps it. A home from an earlier boot has no live holder: none outlived the boot."""
+    scratch = tmp_path / "hostread"
+    home = scratch / name
+    home.mkdir(parents=True)
+    orphan = POPEN([sys.executable, "-c", "import time; time.sleep(60)"],
+                   env={**os.environ, "CODEX_HOME": str(home)})
+    try:
+        unreadable(monkeypatch, orphan.pid)
+        recover(scratch)
+        assert logged() == [DIAG_RECOVERY_KEPT if kept else DIAG_RECOVERED]
+        assert home.exists() == kept
+    finally:
+        orphan.kill()
+        orphan.wait(10)
+
+
+def test_a_descendant_that_left_the_group_is_ended_before_the_home_goes(
+        tmp_path: Path, logged: Callable[[], list[str]]) -> None:
+    """The client kills the app-server's process group; a descendant in a session of its own outlives
+    it, holding the copy's CODEX_HOME. The read ends it before it removes the home and lets go."""
+    child = tmp_path / "child.pid"
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
+    try:
+        assert rig.read() is None
+        assert logged() == [f"{DIAG_READ_FAILED}: TimeoutError"]
+        assert not alive(int(child.read_text()))                # ended before the read returned
+        assert rig.scratch_empty() and rig.server_gone()
+        assert rig.login.read_text() == rig.original
+    finally:
+        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
+            os.kill(int(child.read_text()), signal.SIGKILL)
+
+
+def test_a_descendant_that_cant_be_ended_keeps_the_home_for_recovery(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logged: Callable[[], list[str]]) -> None:
+    child = tmp_path / "child.pid"
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
+    real_signal = signal.pidfd_send_signal
+
+    def no_kill(fd: int, sig: int) -> None:
+        if sig != signal.SIGKILL:
+            real_signal(fd, sig)
+
+    try:
+        monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
+        monkeypatch.setattr(hostread, "RECOVER_SECONDS", 0.3)
+        assert rig.read() is None
+        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError"]
+        pid = int(child.read_text())
+        assert alive(pid)
+        [home] = list(rig.scratch.iterdir())                    # kept: the next start's only record of it
+        assert (home / "auth.json").exists()
+        monkeypatch.undo()
+        recover(rig.scratch)
+        assert wait_for(lambda: not alive(pid))
+        assert rig.scratch_empty()
+        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError", DIAG_RECOVERED]
+    finally:
+        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
+            os.kill(int(child.read_text()), signal.SIGKILL)

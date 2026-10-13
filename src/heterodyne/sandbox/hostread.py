@@ -7,7 +7,9 @@ import contextlib
 import importlib.util
 import json
 import logging
+import math
 import os
+import re
 import shutil
 import signal
 import stat
@@ -31,6 +33,8 @@ ADAPTER = "codex"
 LOGIN = "auth.json"
 MAX_LOGIN = 1 << 20
 RECOVER_SECONDS = 10.0
+SLACK_SECONDS = 1.0     # start-time rounding: a process this close before a home counts as after it
+_STAMP = re.compile(r"read-([0-9a-f]{32})-([0-9]+)-.*")
 DIAG_ROTATED_DROPPED = ("a trusted usage read's app-server rewrote its copy of the login; the copy was "
                         "dropped and the account's login left as it was. If the account's next session "
                         "can't sign in, log it in again")
@@ -107,12 +111,77 @@ def _write_new(folder: Path, name: str, data: bytes) -> None:
         raise
 
 
-def _holders(marks: set[bytes]) -> list[int]:
+class _Unknown(Exception):
+    """A process of this user whose environment can't be read, and which can't be ruled out by its start
+    time: it may hold a home, so the scan is incomplete."""
+
+
+def _boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
+
+
+def home_prefix(made_ns: int, boot: str | None = None) -> str:
+    """A scratch home's name prefix: the boot and the boot clock (CLOCK_BOOTTIME, which a process's start
+    time in /proc counts on too, so a wall-clock step can't move either) just before the home is made.
+    Every process that can hold the home is started after it exists, so after `made_ns`."""
+    return f"read-{_boot_id() if boot is None else boot}-{made_ns}-"
+
+
+def _since(homes: list[Path]) -> float | None:
+    """The boot-clock time before which no holder of `homes` can have started; None if a home's stamp
+    can't be read (then no process can be ruled out by its start time). A home from an earlier boot adds
+    nothing: none of its processes outlived that boot."""
+    boot = _boot_id()
+    earliest = math.inf
+    for home in homes:
+        stamp = _STAMP.fullmatch(home.name)
+        if stamp is None:
+            return None
+        if stamp[1] == boot:
+            earliest = min(earliest, int(stamp[2]) / 1e9)
+    return earliest
+
+
+def _environ(pid: str) -> bytes:
+    with Path(f"/proc/{pid}/environ").open("rb") as f:
+        return f.read()
+
+
+def _ours(pid: str) -> bool:
+    """Whether the process runs with this user's real or effective uid. /proc/<pid>/status stays readable
+    when the environment doesn't (another user's process, or one of ours made non-dumpable)."""
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("Uid:"):
+            real, effective = (int(u) for u in line.split()[1:3])
+            return bool({real, effective} & {os.getuid(), os.geteuid()})
+    return True                 # no Uid line: not ruled out
+
+
+def _stat(pid: str) -> list[str]:
+    """/proc/<pid>/stat's fields from the state on (field 3 first): readable for any process."""
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+
+
+def _ruled_out(pid: str, since: float | None) -> bool:
+    """A process whose environment can't be read is not a holder only if it is another user's, a zombie
+    (it holds no memory or files, and its environment reads as empty or not at all), or started before
+    the earliest home was made (`since`, less the slack). Anything else may be one. The start time is
+    field 22, on the boot clock in clock ticks."""
+    if not _ours(pid):
+        return True
+    fields = _stat(pid)
+    if fields[0] in ("Z", "X"):
+        return True
+    return since is not None and int(fields[19]) / os.sysconf("SC_CLK_TCK") < since - SLACK_SECONDS
+
+
+def _holders(marks: set[bytes], since: float | None) -> list[int]:
     """pidfds of the live processes whose environment holds one of `marks`. The pidfd is opened before
-    the environment is read, and signal 0 through it afterwards proves the PID wasn't reused meanwhile.
+    the process is read, and signal 0 through it afterwards proves the PID wasn't reused meanwhile.
     A zombie's environment is empty, so a killed process stops being found once it ends. A process that
-    is gone or another user's is skipped; any other failure (a pidfd that can't be opened, `/proc` that
-    can't be listed) means the scan is incomplete, so it raises, with every pidfd it opened closed."""
+    is gone is skipped, as is one whose environment can't be read and which `_ruled_out` rules out. One
+    it can't rule out, or any other failure (a pidfd that can't be opened, `/proc` that can't be listed),
+    means the scan is incomplete, so it raises, with every pidfd it opened closed."""
     found: list[int] = []
     try:
         for entry in os.scandir("/proc"):
@@ -123,11 +192,16 @@ def _holders(marks: set[bytes]) -> list[int]:
             except ProcessLookupError:
                 continue
             try:
-                with Path(f"/proc/{entry.name}/environ").open("rb") as f:
-                    environ = set(f.read().split(b"\0"))
+                try:
+                    environ = set(_environ(entry.name).split(b"\0"))
+                except PermissionError:
+                    if not _ruled_out(entry.name, since):
+                        raise _Unknown("a process that may hold a home can't be read") from None
+                    os.close(fd)         # not a holder, whichever process it is (signal 0 may be refused)
+                    continue
                 signal.pidfd_send_signal(fd, 0)
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
-                os.close(fd)             # gone, or another user's (not this wsd's)
+            except (FileNotFoundError, ProcessLookupError):
+                os.close(fd)             # gone
                 continue
             except BaseException:
                 os.close(fd)
@@ -143,11 +217,11 @@ def _holders(marks: set[bytes]) -> list[int]:
     return found
 
 
-def _end_holders(marks: set[bytes], seconds: float) -> None:
+def _end_holders(marks: set[bytes], since: float | None, seconds: float) -> None:
     """SIGKILL, through their pidfds, the processes `marks` find, until a complete scan finds none.
     Raises TimeoutError if one is still found after `seconds`, or what a failed scan or signal raised."""
     deadline = time.monotonic() + seconds
-    while fds := _holders(marks):
+    while fds := _holders(marks, since):
         try:
             for fd in fds:
                 with contextlib.suppress(ProcessLookupError):
@@ -176,7 +250,7 @@ def recover(scratch_root: Path, *, seconds: float = RECOVER_SECONDS) -> None:
     if not homes:
         return
     try:
-        _end_holders({f"CODEX_HOME={home}".encode() for home in homes}, seconds)
+        _end_holders({f"CODEX_HOME={home}".encode() for home in homes}, _since(homes), seconds)
     except Exception:
         log.warning(DIAG_RECOVERY_KEPT)      # unconfirmed: the next start must still find its app-server
         return
@@ -232,7 +306,8 @@ class HostUsageReader:
         if cli.version != self.adapter.version_pin:
             raise _NotRead(NOT_AT_PIN)
         private_dir(self.scratch_root)
-        scratch = Path(tempfile.mkdtemp(prefix="read-", dir=self.scratch_root))
+        made_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)    # before the home: its holders start after
+        scratch = Path(tempfile.mkdtemp(prefix=home_prefix(made_ns), dir=self.scratch_root))
         try:
             _write_new(scratch, LOGIN, original)
             limits = _usage_module().read(str(cli.binary), {**self.env, "CODEX_HOME": str(scratch)},
@@ -245,7 +320,11 @@ class HostUsageReader:
             except OSError:
                 changed = True                # replaced by something that isn't a login file
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            try:            # a descendant that escaped the client's process group may still hold the copy
+                _end_holders({f"CODEX_HOME={scratch}".encode()}, made_ns / 1e9, RECOVER_SECONDS)
+                shutil.rmtree(scratch, ignore_errors=True)
+            except Exception:  # noqa: S110 - unconfirmed: kept, the next start's recover looks again
+                pass
             kept = os.path.lexists(scratch)
             if kept:
                 log.warning(DIAG_SCRATCH_KEPT)
