@@ -9859,7 +9859,7 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
 >    - rename the token;
 >    - unlink `agent-probe.json` and `s.sock`.
 > 8. The forged probe reports `connect`, `sent` and `run` without masking its status. n7 requires a connection and exactly `["not the probe"]`.
-> 9. `OUTPUT_CHECK` watches until the probe exits, attributes curls along the PPid chain, and reports `error:ERRNO`. ENOENT and ESRCH mean the process is gone; any other inspection error fails.
+> 9. `OUTPUT_CHECK` watches until the probe exits, attributes curls along the PPid chain, and reports `error:ERRNO`. ENOENT and ESRCH mean the process is gone. A descriptor counts as refused only as `socket:ENXIO`, or as `hidden:EACCES` (readlink and the write open both refused across the sandbox boundary); any other inspection error fails.
 > 10. `sandbox_teardown(..., owners)` stops each session through the runtime that launched it. `Live` carries `owners` and `uncertain`.
 > 11. `refused()` requires exactly `launch self-test failed: <reason>` (with an optional freeze-attempts suffix) and requires that no sandbox remains. `recorded_channels()` observes `.rejected`.
 > 12. n8 requires exactly one "environment beyond the allowlist" rejection, naming a non-empty subset of the agent-only tool variables. n9 has two outcomes: if it is refused, the launch passed and nothing was rejected; if it ran, the result must be `CHANNEL_REJECTED` with exactly the namespace reason.
