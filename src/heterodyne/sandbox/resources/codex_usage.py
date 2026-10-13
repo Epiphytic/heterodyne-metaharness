@@ -12,22 +12,28 @@ of its own clean exit or of the kill (anything else is ExitStatus), and the scra
 gone (ScratchKept). An error in ending the app-server or removing the scratch home replaces any
 earlier error: the cleanup's failure is the one reported.
 
+The app-server leads its own process group, and the deadline and the end kill the whole group. Its
+output is read through poll against the deadline, never a blocking read: a descendant that keeps the
+pipe open can neither hold the read past its limit nor outlive it in the group.
+
 Usage: python3 -I codex_usage.py <codex binary> [limit seconds]
 """
 
 import contextlib
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 LIMIT_SECONDS = 30.0
 END_SECONDS = 5.0           # how long a killed app-server may take to be reaped
-MAX_ANSWER = 1 << 20        # characters in one line of the app-server's output
+MAX_ANSWER = 1 << 20        # bytes in one line of the app-server's output
 ENDED = (0, -signal.SIGKILL)  # its own clean exit, or the kill
 
 
@@ -77,13 +83,14 @@ def read(codex, env, limit):
     answer has none. Raises on any failure, TimeoutError past `limit` seconds. The app-server is ended
     in a `finally` whatever happens, the timer that bounds it included. Shared with the host's trusted
     read (sandbox/hostread.py), which loads this file."""
+    deadline = time.monotonic() + limit
     proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, text=True, env=env)
+                            stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
     expired = threading.Event()
 
     def expire():
         expired.set()
-        proc.kill()
+        _kill(proc)
 
     timer = threading.Timer(limit, expire)
     started = False
@@ -92,7 +99,7 @@ def read(codex, env, limit):
         try:
             timer.start()
             started = True
-            result = _converse(proc)
+            result = _converse(proc, deadline)
         finally:
             timer.cancel()
             if started:
@@ -104,10 +111,32 @@ def read(codex, env, limit):
     return result.get("rateLimits") if isinstance(result, dict) else None
 
 
-def _converse(proc):
+def _converse(proc, deadline):
     stdin, stdout = proc.stdin, proc.stdout
     if stdin is None or stdout is None:
         raise ClosedOutput("codex app-server has no pipes")
+    fd = stdout.fileno()
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    pending = b""
+
+    def receive():
+        """The next line of output, read only as it arrives and never past the deadline."""
+        nonlocal pending
+        while b"\n" not in pending:
+            if len(pending) > MAX_ANSWER:
+                raise AnswerError("codex app-server sent an overlong line")
+            left = deadline - time.monotonic()
+            if left <= 0 or not poller.poll(max(1, int(left * 1000))):
+                raise TimeoutError("codex app-server did not answer within its limit")
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                raise ClosedOutput("codex app-server closed its output")
+            pending += chunk
+        line, pending = pending.split(b"\n", 1)
+        if len(line) > MAX_ANSWER:
+            raise AnswerError("codex app-server sent an overlong line")
+        return line
 
     def send(message):
         stdin.write(json.dumps(message) + "\n")
@@ -116,12 +145,7 @@ def _converse(proc):
     def call(id_, method, params):
         send({"jsonrpc": "2.0", "id": id_, "method": method, "params": params})
         while True:
-            line = stdout.readline(MAX_ANSWER)
-            if not line:
-                raise ClosedOutput("codex app-server closed its output")
-            if not line.endswith("\n"):
-                raise AnswerError("codex app-server sent an overlong line")
-            message = json.loads(line)
+            message = json.loads(receive())
             if not isinstance(message, dict):
                 raise AnswerError("codex app-server sent something other than an object")
             if message.get("id") == id_:
@@ -134,11 +158,18 @@ def _converse(proc):
     return call(1, "account/rateLimits/read", None)
 
 
+def _kill(proc):
+    """SIGKILL the app-server's process group, its descendants included. The group is named by the
+    app-server's own PID, which can't be reused before it is reaped here (nothing else reaps it)."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 def _end(proc):
-    """Kill the app-server by its own handle, reap it and close its pipes. NotGone if it isn't reaped
-    within END_SECONDS; ExitStatus unless it ended by its own clean exit or the kill."""
+    """Kill the app-server's group by its own handle, reap it and close its pipes. NotGone if it isn't
+    reaped within END_SECONDS; ExitStatus unless it ended by its own clean exit or the kill."""
     try:
-        proc.kill()
+        _kill(proc)
         try:
             status = proc.wait(END_SECONDS)
         except subprocess.TimeoutExpired:

@@ -1,5 +1,6 @@
 """Plan 4b Task 5: what the CLIs' usage payloads mean (S7 (3), (5)), and the in-sandbox Codex read."""
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sandbox_env import install_fake_cli
+from sandbox_env import install_fake_cli, wait_for
 
 from heterodyne.agents.base import STATUS_COMMAND, Cli, UsageReport
 from heterodyne.agents.claude_code import SETTINGS_FILE, STATUS_SOURCE, ClaudeCode
@@ -325,3 +326,25 @@ def test_a_scratch_home_that_stays_is_no_reading(tmp_path: Path, monkeypatch: py
     assert capsys.readouterr().out == ""                   # nothing that reads as an answer
     assert ended(started)
     assert len(list(scratch.iterdir())) == 1               # the home it could not remove
+
+
+@pytest.mark.parametrize("fault", ["orphan", "escaped"])
+def test_a_descendant_holding_the_output_open_never_holds_the_read(tmp_path: Path, fault: str) -> None:
+    """The deadline bounds the read itself, not just the app-server's life: a descendant that keeps the
+    output pipe open can't stretch it. One left in the app-server's group is killed with it; one that
+    left the group is outside the read's reach, but still can't hold it."""
+    (tmp_path / "codex-home").mkdir()
+    (tmp_path / "codex-home" / "auth.json").write_text("fake-not-a-token")
+    child = tmp_path / "child.pid"
+    try:
+        proc = run_usage(tmp_path, limit="1", HZ_FAKE_RATE_LIMITS=json.dumps(SNAPSHOT),
+                         HZ_FAKE_RATE_FAULT=fault, HZ_FAKE_CHILD_PID_FILE=str(child))
+        assert (proc.returncode, proc.stdout, diagnostic(proc)) == (1, b"", "TimeoutError")
+        assert gone(tmp_path / "app-server.pid")
+        assert list((tmp_path / "tmp").iterdir()) == []
+        if fault == "orphan":
+            wait_for(lambda: gone(child))           # reaped by whoever inherited it, once killed
+    finally:
+        if fault == "escaped" and child.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(child.read_text()), signal.SIGKILL)

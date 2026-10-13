@@ -9,8 +9,10 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated`
   notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login.
   `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error`, `garbage` (a line that isn't JSON), `close`
-  (closes its output and waits) or `exit` (exits 3 without answering). With `HZ_FAKE_PID_FILE` set, it
-  first writes its PID there, so a test can prove it is gone.
+  (closes its output and waits), `exit` (exits 3 without answering), `orphan` (starts a descendant that
+  holds its output open, writes the descendant's PID to `HZ_FAKE_CHILD_PID_FILE`, and hangs) or `escaped`
+  (the same, the descendant in a session of its own). With `HZ_FAKE_PID_FILE` set, it first writes its
+  PID there, so a test can prove it is gone.
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
 - the TUI: prints its prompt marker (Claude merges its settings layers as the real one does, see
   `claude_hooks`; Codex runs only the hooks config.toml trusts at their current hash;
@@ -102,6 +104,11 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
         return None
     if fault == "exit":
         os._exit(3)
+    if fault in ("orphan", "escaped"):  # a descendant keeps the output open, then the app-server hangs
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                                 start_new_session=fault == "escaped")
+        Path(os.environ["HZ_FAKE_CHILD_PID_FILE"]).write_text(str(child.pid))
+        return None
     if fault == "error" or not (Path(os.environ["CODEX_HOME"]) / "auth.json").is_file():
         return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
             "code": -32600, "message": "codex account authentication required to read rate limits"}})
