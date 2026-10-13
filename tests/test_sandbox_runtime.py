@@ -956,6 +956,21 @@ def test_a_stale_same_key_record_is_ended_before_the_check(rig: RuntimeRig) -> N
     assert record(rig, spec.session_key).phase is Phase.RUNNING
 
 
+def test_a_dead_running_same_key_session_is_ended_before_the_check(rig: RuntimeRig) -> None:
+    """Design test 6: a session of this key that ran and whose pane died, with no listing or stop since,
+    is ended by its own relaunch (landing what it owes), and the relaunch then succeeds."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    rig.tmux.send_key(rec.tmux_session, "C-d")                   # the fake CLI exits at end of input
+    wait_for(lambda: rig.tmux.pane_dead(rec.tmux_session))
+    assert record(rig, spec.session_key).phase is Phase.RUNNING
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert rec.sandbox in rig.backend.deleted
+    after = record(rig, spec.session_key)
+    assert (after.phase, after.generation) == (Phase.RUNNING, 2)
+
+
 def test_a_repo_alias_is_the_same_repo(rig: RuntimeRig) -> None:
     rig.runtime.launch(launch_spec(rig, "p-one"))
     alias = rig.root / "alias"
