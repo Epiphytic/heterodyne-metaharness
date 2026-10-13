@@ -21,7 +21,7 @@ from heterodyne.agents.base import (
     hook_group,
     write_at,
 )
-from heterodyne.agents.claude_code import SETTINGS_FILE, ClaudeCode
+from heterodyne.agents.claude_code import CLAUDE_HOOK_EVENTS, SETTINGS_FILE, ClaudeCode
 from heterodyne.agents.codex import APP_SOCKET, Codex
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, SessionLayout
@@ -69,9 +69,9 @@ def test_claude_home_merges_its_state_and_hooks_are_read_only(layout: SessionLay
     assert not (conf / "settings.json").exists()           # user settings are not loaded: see tui_argv
     flag = json.loads(ClaudeCode().run_files()[SETTINGS_FILE])
     assert flag["skipDangerousModePermissionPrompt"] is True
-    assert set(flag["hooks"]) == set(HOOK_EVENTS)
+    assert set(flag["hooks"]) == set(CLAUDE_HOOK_EVENTS) == {*HOOK_EVENTS, "StopFailure"}
     assert {e: [h["command"] for g in gs for h in g["hooks"]] for e, gs in flag["hooks"].items()} == {
-        e: [PRE_TOOL_COMMAND if e == "PreToolUse" else HOOK_COMMAND] for e in HOOK_EVENTS}
+        e: [PRE_TOOL_COMMAND if e == "PreToolUse" else HOOK_COMMAND] for e in CLAUDE_HOOK_EVENTS}
 
 
 def test_claude_drops_a_cached_remote_policy_from_the_home(layout: SessionLayout, tmp_path: Path) -> None:
@@ -485,3 +485,9 @@ def test_worktree_settings_neither_disable_nor_add_claude_hooks(layout: SessionL
     run_fake_tui(Path(argv[0]), argv[1:], work, {"CLAUDE_CONFIG_DIR": str(layout.home / ".claude"),
                                                   "HZ_FAKE_PATHS": json.dumps({str(RUN_INSIDE): str(run)})})
     assert [p.name for p in out.iterdir()] == ["ours"]
+
+
+def test_turn_end_events_per_adapter() -> None:
+    assert ClaudeCode().turn_end_events == ("Stop", "StopFailure")
+    assert Codex().turn_end_events == ("Stop",)
+    assert "StopFailure" not in HOOK_EVENTS            # Codex's trusted hook set is unchanged

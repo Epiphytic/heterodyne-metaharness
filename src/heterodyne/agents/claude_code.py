@@ -60,6 +60,10 @@ def headless_argv(binary: str, profile: Mapping[str, Any]) -> list[str]:
 SETTINGS_FILE = "claude-settings.json"          # in the run directory: read-only inside
 REMOTE_POLICY = "remote-settings.json"          # Claude's cache of remote managed settings
 
+# Claude Code 2.1.286 ends a turn that fails on an API error, a usage limit included, with StopFailure
+# instead of Stop (S7 finding 1): it must reach the session socket, or the turn never ends to wsd.
+CLAUDE_HOOK_EVENTS = (*HOOK_EVENTS, "StopFailure")
+
 
 class ClaudeCode:
     name = "claude-code"
@@ -76,6 +80,7 @@ class ClaudeCode:
         "NoDefaultCurrentDirectoryInExePath"})
     prompt_marker = "❯"
     assigns_id = False
+    turn_end_events: tuple[str, ...] = ("Stop", "StopFailure")
 
     def locate(self, binary: str, path: str) -> Cli:
         real = find_binary(binary, path)
@@ -112,7 +117,7 @@ class ClaudeCode:
             os.close(conf)
 
     def run_files(self) -> Mapping[str, str]:
-        hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in HOOK_EVENTS}
+        hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
         return {SETTINGS_FILE: json.dumps({"skipDangerousModePermissionPrompt": True, "hooks": hooks})}
 
     def has_state(self, home: Path, native_id: str | None) -> bool:

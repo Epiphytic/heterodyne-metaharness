@@ -265,3 +265,65 @@ def test_close_during_a_failed_thread_start(tmp_path: Path, monkeypatch: pytest.
     closer.join(10)
     assert not closer.is_alive() and errors == []
     assert not sock.exists() and s.active == 0
+
+
+def test_any_configured_turn_end_is_a_boundary(tmp_path: Path) -> None:
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl",
+                      turn_ends=("Stop", "StopFailure"))
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+        assert not s.turns().idle
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StopFailure", "error": "rate_limit"}))
+        t = s.turns()
+        assert (t.prompts, t.stops, t.idle, t.last_event) == (1, 1, True, "StopFailure")
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+        assert not s.turns().idle
+    finally:
+        s.close()
+
+
+def test_an_unconfigured_turn_end_is_not_a_boundary(server: SessionServer, tmp_path: Path) -> None:
+    sock = tmp_path / "s.sock"
+    ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+    ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StopFailure"}))
+    assert not server.turns().idle and server.turns().stops == 0
+
+
+def test_each_accepted_event_reaches_the_callback_and_refused_ones_never(tmp_path: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StatusLine", "rate_limits": {}}))
+        ask(sock, req("wrong", "hook_event", {"hook_event_name": "Stop"}))
+        ask(sock, req(TOKEN, "ws_request", {"text": "x"}))
+        ask(sock, req(TOKEN, "hook_event", [1]))
+        assert seen == [{"hook_event_name": "StatusLine", "rate_limits": {}}]
+    finally:
+        s.close()
+
+
+def test_a_failing_callback_drops_only_its_report(tmp_path: Path) -> None:
+    def boom(payload: dict[str, object]) -> None:
+        raise ValueError("parser bug")
+
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=boom)
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        assert ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "Stop"})) == '{"ok": true}'
+        assert s.turns().idle                   # the turn state was recorded before the callback
+    finally:
+        s.close()
+
+
+def test_nothing_reaches_the_callback_after_close(tmp_path: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=seen.append)
+    s.start()
+    s.close()
+    s._record({"hook_event_name": "Stop"})     # a handler still unwinding after close  # noqa: SLF001
+    assert seen == [] and not s.turns().idle

@@ -55,6 +55,7 @@ class Codex:
                           "GH_PAGER", "GIT_PAGER", "LC_ALL", "LC_CTYPE", "NO_COLOR", "PAGER"})
     prompt_marker = "›"
     assigns_id = True
+    turn_end_events: tuple[str, ...] = ("Stop",)
 
     def locate(self, binary: str, path: str) -> Cli:
         real = find_binary(binary, path)
