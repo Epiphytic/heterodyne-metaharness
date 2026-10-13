@@ -1,0 +1,39 @@
+Reviewer: gpt-6.1-sol. Reviewed commit: 6eb95f8f091c469fba5fdf657feacabc2ea27523. Verdict: REVISE.
+
+Note: cycle 2 of 3, the whole plan. Fixed in 6ad840c and 91c28fa.
+
+The ten cycle-1 findings are addressed in `6eb95f8`: the dependency and runtime seams, install-root traversal, login-name checks, shim deduplication, subprocess and scratch cleanup, exact diagnostics, and r16 references have corresponding fixes. The remaining findings concern the newly reviewed work.
+
+All references below are to [2026-10-12-plan4b-accounts-usage-failover.md](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md).
+
+1. **[BLOCKING] [plan:4293](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:4293) — Trusted confirmation precedes the WIP commit.**  
+   `LIMIT_STEPS` inserts confirmation after stopping but before committing WIP. Both r15 and proposed r16 D6 require the WIP commit first. If the commit subsequently fails, the implementation has already marked the account exhausted for other sessions and superseded this bead’s deferral with trusted evidence. **Fix:** put confirmation after the durable WIP-commit step, update E11, and test that a failed commit performs neither the trusted read nor shared exhaustion updates.
+
+2. **[BLOCKING] [plan:3887](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:3887) — Credential writes can truncate data and leave secret-bearing files behind.**  
+   `_write_new` calls `os.write` once and ignores its returned length. A short write can produce truncated credentials that `_save_back` installs as the real login. If writing or `fsync` raises, `_write_new` leaves its created file behind; `_save_back` has not yet entered its cleanup `try`, so a `.auth.json.hz-*` file remains in the real login directory. **Fix:** write all bytes and unlink the created file on every unsuccessful exit. Inject short writes, write failures, and `fsync` failures; verify unchanged host credentials and no temporary files.
+
+3. **[BLOCKING] [plan:3973](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:3973) — Write-back is not the promised compare-and-swap.**  
+   Between `_read_regular(login) == original` and `temp.replace(login)`, the operator’s CLI or `admind` can replace the login. D8 explicitly says those writers do not take the harness lock. The host reader then overwrites their newer credentials. The existing test changes the login before the comparison and misses this race. **Fix:** define a write-back mechanism that actually protects against concurrent external writers. If that cannot be guaranteed, conservatively refuse automatic replacement and specify recovery for the rotated credentials. Add an interleaving test that changes the login after comparison.
+
+4. **[BLOCKING] [plan:3945](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:3945) — Host-read cleanup has no daemon-crash recovery.**  
+   A process crash after copying `auth.json` leaves plaintext credentials under `hostread/read-*`. A crash while the app-server runs also loses the in-process timer and cleanup owner. The plan provides no durable ownership record, independent reaper, or startup reconciliation for these resources. **Fix:** specify recoverable ownership and bounded cleanup for abandoned host reads, including safe process identification and scratch removal. Test by terminating the reader process after credential copying and after child creation.
+
+5. **[BLOCKING] [plan:3382](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:3382) — Codex capability (e) silently depends on capability (c).**  
+   `_poll` returns when `in_session_usage` is false, and `_start` installs the read script only for that capability. A valid table enabling `limit_signal` alone therefore produces no Codex limit signals. D9 treats the capabilities separately, and Task 11 does not enforce this dependency. **Fix:** install and poll the read when either capability needs it, while emitting each signal only under its own capability. Add a Codex test with `LIMITS`, without `USAGE`.
+
+6. **[BLOCKING] [plan:4424](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:4424) — Draining signals loses limit reports on transient failures.**  
+   `runtime.signals(name)` removes the complete batch before processing. If `beads.show` raises before `Parker.limit` records an operation, that report—and subsequent reports in the batch—is lost. Claude may emit its limit hook once and then wait for reset, so another pickup need not receive replacement evidence. **Fix:** retain pending limit reports until durably handled or definitively rejected, with idempotent replay. Test a Beads outage followed by recovery without emitting another signal.
+
+7. **[BLOCKING] [plan:5289](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:5289) — The live limit test cannot reach its observation on an exhausted account.**  
+   `running()` invokes `Live.launch`, which requires the full model-based self-test to succeed and then verifies recorded model use. The selected account is already at its limit, so the self-test can fail before the test sends its prompt or inspects `LimitSeen`. **Fix:** design a dedicated observational fixture for a refused limited launch, asserting the expected refusal, attributed limit signal, model configuration, and complete cleanup; alternatively observe a previously successful session encountering a limit without deliberately consuming quota. Preserve the testing pins `claude-haiku-4-5-20251001` and `gpt-6-luna` with low reasoning.
+
+8. **[BLOCKING] [plan:160](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:160) — Task 8’s declared dependencies omit Task 6.**  
+   Task 8 consumes `SandboxSettings.lock_wait_seconds`, explicitly identified at line 3475 as coming from Task 6, but its DAG lists only Tasks 1, 2, and 5. A worker following that graph cannot complete Task 8 against its declared prerequisites. **Fix:** add Task 6 to Task 8’s dependency list and align the execution handoff and wave claims.
+
+9. **[NON-BLOCKING] [plan:4608](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:4608) — The stale-login crash oracle omits the important boundary cases and launch attributes.**  
+   The `pickup.stale` transaction retains the open operation and stale-key set, and existing recovery correctly leaves it for pickup. However, the crash scenario covers only an initial pickup with a usable spare. It does not cover no alternatives, all alternatives stale, or a stale refusal during a handoff resume. `same_end` also omits account, credential key, handoff, resume, and native ID from its equality oracle; the account assertion checks only the clean run. **Fix:** add those crash scenarios and assert the launched specifications on every replay, including the deterministic fresh Claude ID and absence of resume on handoff.
+
+10. **[NON-BLOCKING] [plan:5130](~/repos/heterodyne-metaharness-v2-plan4b/docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md:5130) — The live fixture leaks a host path and silently accepts failed cleanup.**  
+    Uncertain teardown prints the absolute scratch path in `pytest.fail`. Successful teardown calls `rmtree(ignore_errors=True)` without checking absence, so retained fixture state does not fail the run. **Fix:** use a fixed diagnostic without host paths, preserve any required recovery locator through a private mechanism, and require `lexists(root)` to be false after removal.
+
+Verdict: REVISE
