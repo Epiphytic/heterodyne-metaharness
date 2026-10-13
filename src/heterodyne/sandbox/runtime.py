@@ -643,9 +643,10 @@ class SandboxRuntime:
                 return False
             raise RuntimeUnavailable("the reaper's record can't be read") from None
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return False
             with os.fdopen(fd, "rb") as f:
-                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    return False
                 data = f.read(MARKER_BYTES)
         except OSError:
             raise RuntimeUnavailable("the reaper's record can't be read") from None
