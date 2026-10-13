@@ -11,9 +11,11 @@ from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
 from heterodyne.wsd.journal import JournalBusy, Op, OpKind
 from heterodyne.wsd.park import (
+    DEFER_STEPS,
     ESCALATE_POINTS,
     PARK_MARK,
     PARK_POINTS,
+    QUOTA,
     RELEASE_POINTS,
     RESUME_POINTS,
     UNRECEIPTED,
@@ -934,3 +936,240 @@ def test_a_park_whose_budget_is_already_spent_is_escalated_not_tried(tmp_path: P
     rig.replay_open()
     assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.PARK_FAILED
     assert wip_commits(rig) == [] and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+
+
+# --- g08sd: crash-loop accounting in the launch guard ---
+
+def picked(tmp_path: Path, cp: Recorder | None = None) -> Rig:
+    """btq-1 claimed and launched by pickup (its generation journaled), btq-2 someone else's bead."""
+    rig = make_rig(tmp_path, cp=cp)
+    rig.world.add("btq-1")
+    rig.world.add("btq-2")
+    rig.world.beads["btq-2"].labels.remove("agent:wsd")
+    assert rig.pickup().value == "started"
+    return rig
+
+
+def dies(rig: Rig) -> None:
+    rig.runtime.end(rig.key("btq-1"))
+
+
+def classes(rig: Rig) -> list[str | None]:
+    launched = [e for e in rig.journal.launches_of(WS, "btq-1") if e.outcome == "launched"]
+    return [rig.journal.crash_class(e) for e in launched]
+
+
+def crash_looped(rig: Rig, launches: int = 2) -> None:
+    assert rig.state("btq-1") == "stuck" and reason(rig) is Reason.CRASH_LOOP
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    assert len(rig.runtime.launches) == launches and rig.runtime.coders() == []
+    assert rig.journal.ops_open() == []
+
+
+def blocker(rig: Rig, name: str) -> str:
+    rig.world.add(name)
+    rig.world.beads[name].labels.remove("agent:wsd")
+    return name
+
+
+def test_a_session_that_dies_on_every_launch_escalates_before_a_third_launch(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()                                               # the sweep's resume: one death counted
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and len(rig.runtime.launches) == 2
+    dies(rig)
+    rig.pickup()
+    crash_looped(rig)
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and row.detail == "generation 2 died after 60s; 2 in a row"
+    assert classes(rig) == ["died", "died"]
+
+
+def test_a_death_consumed_by_a_park_is_counted_at_resume(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    for gate in ("btq-3", "btq-4"):
+        dies(rig)
+        rig.parker.park("btq-1", (blocker(rig, gate),))      # its own listing ends the dead session
+        assert rig.state("btq-1") == "parked" and rig.runtime.stops == []
+        rig.world.close(gate)
+        rig.pickup()
+    crash_looped(rig)
+
+
+def test_a_death_consumed_by_a_defer_is_counted_at_undefer(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    for _ in range(2):
+        dies(rig)
+        rig.parker.defer("btq-1", QUOTA, rig.clock() + 3600)
+        assert rig.state("btq-1") == "deferred"
+        rig.clock.advance(3600)
+        rig.pickup()
+    crash_looped(rig)
+
+
+@pytest.mark.parametrize("point", [*PARK_POINTS[1:], *(f"park.{s}" for s in DEFER_STEPS)])
+def test_a_crash_during_park_or_defer_replay_still_counts(tmp_path: Path, point: str) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.restart(CrashAt(point))
+    with pytest.raises(SimulatedCrash):
+        if point.startswith("park.defer."):
+            rig.parker.defer("btq-1", QUOTA, rig.clock() + 3600)
+        else:
+            rig.parker.park("btq-1", (blocker(rig, "btq-3"),))
+    rig.restart()
+    rig.replay_open()
+    rig.world.close("btq-3") if "btq-3" in rig.world.beads else rig.clock.advance(3600)
+    rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 2
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and classes(rig) == ["died", None]
+
+
+@pytest.mark.parametrize("point", ["inside", "accounted", *ESCALATE_POINTS[:2]])
+@pytest.mark.parametrize("kind", ["resume", "undefer"])
+def test_crash_at_every_accounting_point_counts_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     kind: str, point: str) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()                                               # generation 2, one death counted
+    dies(rig)
+    if kind == "undefer":
+        rig.parker.defer("btq-1", QUOTA, rig.clock() + 3600)
+        rig.clock.advance(3600)
+    if point == "inside":
+        real = rig.journal.crash_account
+
+        def torn(*args: object) -> int:
+            real(*args)  # pyright: ignore[reportArgumentType]
+            raise SimulatedCrash("inside the accounting transaction")
+
+        monkeypatch.setattr(rig.journal, "crash_account", torn)
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+        monkeypatch.undo()
+        assert rig.journal.crash_count(WS, "btq-1") == 1 and classes(rig)[-1] is None     # rolled back
+    else:
+        rig.restart(CrashAt("resume.accounted" if point == "accounted" else point))   # undefer: a RESUME op
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+    rig.restart()
+    rig.replay_open()
+    rig.pickup()
+    crash_looped(rig)
+    assert classes(rig) == ["died", "died"] and rig.journal.crash_count(WS, "btq-1") == 2
+    escalations = rig.journal.db.execute("SELECT count(*) FROM ops WHERE kind = ? AND bead = 'btq-1'",
+                                         (OpKind.ESCALATE.value,)).fetchone()
+    assert escalations == (1,)
+
+
+def test_a_new_claims_guard_has_nothing_to_account(tmp_path: Path) -> None:
+    """The third kind of operation, pickup, never reaches the accounting point: a new claim's intent
+    accounts every earlier generation `reset` before its guard runs."""
+    rig = picked(tmp_path, cp=Recorder())
+    assert isinstance(rig.cp, Recorder)
+    assert not any(p.endswith(".accounted") for p in rig.cp.seen)
+    assert classes(rig) == [None]
+
+
+def test_repeated_outage_and_death_cycles_are_bounded(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    for _ in range(2):
+        dies(rig)
+        rig.runtime.up = False
+        assert rig.pickup().value == "held"
+        rig.clock.advance(10 * 3600)                           # past the deadline, unseen
+        rig.runtime.up = True
+        rig.pickup()
+    crash_looped(rig)
+    assert "lifetime" not in classes(rig)
+
+
+def test_a_live_lifetime_stop_resets_and_an_intentional_stop_does_not(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 1
+    rig.runtime.lifetime(rig.key("btq-1"))
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 0
+    dies(rig)
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and rig.state("btq-1") == "running"
+    rig.parker.park("btq-1", (blocker(rig, "btq-3"),))       # a live stop: neither counted nor a reset
+    assert rig.runtime.stops == [rig.key("btq-1")]
+    rig.world.close("btq-3")
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 1
+    dies(rig)
+    rig.pickup()
+    crash_looped(rig, launches=5)
+    assert classes(rig) == ["died", "lifetime", "died", "stopped", "died"]
+
+
+def test_release_resets_and_accounts_pending_generations_as_reset(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    for _ in range(2):
+        dies(rig)
+        rig.pickup()
+    crash_looped(rig)
+    assert rig.parker.release("btq-1").value == "resuming"
+    assert rig.journal.crash_count(WS, "btq-1") == 0
+    rig.replay_open()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 3
+    dies(rig)
+    rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 4
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and classes(rig) == ["died", "died", "died", None]
+
+    other = picked(tmp_path / "unaccounted")
+    dies(other)
+    other.parker.escalate("btq-1", Reason.LAUNCH_FAILED)
+    other.parker.release("btq-1")
+    assert classes(other) == ["reset"] and other.journal.crash_count(WS, "btq-1") == 0
+    other.replay_open()
+    assert other.state("btq-1") == "running" and other.journal.crash_count(WS, "btq-1") == 0
+
+
+def test_refused_launches_keep_their_own_budget(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    rig.parker.park("btq-1", (blocker(rig, "btq-3"),))
+    rig.world.close("btq-3")
+    rig.runtime.launch_failures = 2
+    rig.pickup()
+    rig.pickup()
+    assert reason(rig) is Reason.LAUNCH_FAILED and NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    assert classes(rig) == ["stopped"] and rig.journal.crash_count(WS, "btq-1") == 0
+
+
+def test_generations_before_g08sd_are_legacy(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()
+    rig.journal.db.execute("DELETE FROM meta WHERE key LIKE 'crash_%'")    # as journaled before g08sd
+    assert classes(rig) == [None, None]
+    dies(rig)
+    rig.pickup()
+    assert classes(rig) == ["legacy", "died", None] and rig.journal.crash_count(WS, "btq-1") == 1
+    assert rig.state("btq-1") == "running"
+
+
+def test_the_count_survives_a_restart(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()
+    rig.restart()                                              # a new wsd over the same journal
+    dies(rig)
+    rig.pickup()
+    crash_looped(rig)
+
+
+def test_an_unreadable_end_holds_and_counts_nothing(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.runtime.ended_failures = 1
+    rig.pickup()
+    assert Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS) and len(rig.runtime.launches) == 1
+    assert classes(rig) == [None] and NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 2
+    assert classes(rig) == ["died", None]

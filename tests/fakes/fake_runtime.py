@@ -1,10 +1,13 @@
 """A recording AgentRuntime (plan 4 provides the real one). Sessions survive a simulated wsd restart,
-like real agent processes do. A session stays listed until it is stopped or `end`s on its own. A launch
+like real agent processes do. A session stays listed until it is stopped or `end`s on its own, and then
+`ended` reports how (g08sd): `stop` is STOPPED, `lifetime` LIFETIME, `end` DIED unless told. A launch
 returns a `Started` with synthetic tmux IDs; its native ID is the spec's, or a synthetic thread ID when the
 spec has none (Codex before its thread is known)."""
 
 from heterodyne.wsd.runtime import (
     Action,
+    EndCause,
+    Ended,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -39,6 +42,9 @@ class FakeRuntime:
         self.resolve_error: Exception | None = None            # raised by the next resolve
         self.intents: dict[tuple[str, int], Resolution] = {}   # resolved, not yet finished: the hold
         self.finished: list[tuple[str, str, int]] = []
+        self.ends: dict[str, Ended] = {}      # key -> its latest generation's end
+        self.generations: dict[str, int] = {}
+        self.ended_failures = 0
 
     def available(self) -> bool:
         return self.up
@@ -62,6 +68,8 @@ class FakeRuntime:
             self.launch_failures = max(0, self.launch_failures - 1)
             raise LaunchFailed("launch failed")
         self.launches.append(spec)
+        self.generations[spec.session_key] = spec.generation
+        self.ends.pop(spec.session_key, None)
         uncertain = bool(self.launch_uncertain) or spec.bead in self.uncertain_beads
         liveness = Liveness.UNKNOWN if uncertain else Liveness.LIVE
         self.listed[spec.session_key] = Session(spec.session_key, spec.ws, spec.bead, spec.role, liveness)
@@ -87,7 +95,8 @@ class FakeRuntime:
             self.stop_failures -= 1
             raise RuntimeUnavailable("stop not confirmed")
         self.stops.append(session_key)
-        self.listed.pop(session_key, None)
+        if self.listed.pop(session_key, None) is not None:
+            self._ended(session_key, EndCause.STOPPED)
 
     def expire(self, ws: str, now: int) -> None:
         self.expires.append((ws, now))
@@ -121,11 +130,27 @@ class FakeRuntime:
         self.intents.pop((sid, generation), None)
         self.finished.append((ws, sid, generation))
 
+    def ended(self, session_key: str) -> Ended | None:
+        if not self.up or self.ended_failures:
+            self.ended_failures = max(0, self.ended_failures - 1)
+            raise RuntimeUnavailable("can't read the session's end")
+        return self.ends.get(session_key)
+
+    def _ended(self, session_key: str, cause: EndCause) -> None:
+        generation = self.generations.get(session_key)
+        if generation is not None:
+            self.ends[session_key] = Ended(generation, cause, True, 60)
+
     # --- test controls ---
 
-    def end(self, session_key: str) -> None:
+    def end(self, session_key: str, cause: EndCause = EndCause.DIED) -> None:
         """The session ended on its own (the agent exited or crashed)."""
         del self.listed[session_key]
+        self._ended(session_key, cause)
+
+    def lifetime(self, session_key: str) -> None:
+        """The runtime's lifetime stop of a live session (D13): healthy evidence, which resets the count."""
+        self.end(session_key, EndCause.LIFETIME)
 
     def set(self, session_key: str, liveness: Liveness) -> None:
         old = self.listed[session_key]

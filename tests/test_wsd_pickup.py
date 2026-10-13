@@ -1245,6 +1245,23 @@ def released(rig: Rig, bead: str = "btq-1") -> None:
     rig.world.beads[bead].status, rig.world.beads[bead].assignee = "open", None
 
 
+def test_a_new_claim_resets_the_count(tmp_path: Path) -> None:
+    """g08sd: a bead handed back to the queue with one death counted starts afresh when claimed again. The
+    reset is in the claim's intent transaction; the old generations stay accounted."""
+    rig = started(tmp_path)
+    rig.runtime.end(rig.key("btq-1"))
+    rig.pickup()                                                # the sweep's resume counts the death
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and len(rig.runtime.launches) == 2
+    rig.runtime.end(rig.key("btq-1"))
+    released(rig)
+    counts: list[int] = []
+    rig.restart(At("pickup.intent", lambda: counts.append(rig.journal.crash_count(WS, "btq-1"))))
+    assert rig.pickup() is Outcome.STARTED
+    assert counts == [0] and rig.journal.crash_count(WS, "btq-1") == 0
+    launched = [e for e in rig.journal.launches_of(WS, "btq-1") if e.outcome == "launched"]
+    assert [rig.journal.crash_class(e) for e in launched] == ["died", "reset", None]
+
+
 def test_released_running_bead_is_claimed_again(tmp_path: Path) -> None:
     """Codex r1 finding 2: the session ended and the claim went back to the queue. The sweep records the
     lost claim; the bead is then ready, so it is claimed afresh rather than wedging every pickup."""

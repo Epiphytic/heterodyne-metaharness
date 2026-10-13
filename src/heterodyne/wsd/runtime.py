@@ -109,6 +109,24 @@ class ResolveFailed(Exception):
     there. Fixed wording."""
 
 
+class EndCause(StrEnum):
+    """How a generation ended (g08sd). Only a stop the runtime began on a generation it confirmed live,
+    by wsd or by the deadline's reaper, is evidence of anything but a death."""
+    DIED = "died"
+    STOPPED = "stopped"                  # wsd stopped it, confirmed live when the stop began
+    LIFETIME = "lifetime"                # the lifetime stop, confirmed live when it began
+    REFUSED = "refused"
+    LEGACY_LIFETIME = "legacy_lifetime"  # a pre-g08sd lifetime end: liveness was never checked
+
+
+@dataclass(frozen=True)
+class Ended:
+    generation: int
+    cause: EndCause
+    reached_running: bool               # this generation's start was confirmed
+    ran_seconds: int | None             # for the operator's detail only; None when either time is missing
+
+
 class RuntimeUnavailable(Exception):
     """No runtime can act right now (none configured, or its backend is down). Nothing was attempted."""
 
@@ -174,6 +192,11 @@ class AgentRuntime(Protocol):
         """Remove a finished resolve's intent, once its journal entry is committed: the hold ends here."""
         ...
 
+    def ended(self, session_key: str) -> Ended | None:
+        """The latest generation's end, once the runtime has confirmed it, or None when the runtime has
+        no ended record for the key. Raises RuntimeUnavailable if the record can't be read."""
+        ...
+
 
 class NoRuntime:
     """The runtime until plan 4: it launches nothing, and since it can't list sessions it never lets wsd
@@ -203,6 +226,8 @@ class NoRuntime:
 
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         return None
+    def ended(self, session_key: str) -> Ended | None:
+        raise RuntimeUnavailable("no agent runtime is configured")
 
 
 class ActionReconciler(Protocol):

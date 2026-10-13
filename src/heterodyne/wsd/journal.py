@@ -37,7 +37,7 @@ import msgspec
 
 from heterodyne.fsutil import private_dir
 from heterodyne.wsd.headroom import Mark, UsageCache, Window, epoch
-from heterodyne.wsd.launches import SET_ONCE, LaunchEntry, Receipt
+from heterodyne.wsd.launches import LAUNCHED, SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
 SCHEMA_VERSION = "2"
@@ -318,6 +318,15 @@ _CURRENT_DEFERRALS = (f"SELECT {_DEFERRAL} FROM deferrals d WHERE d.number = "  
 CLAMP_EXHAUSTED = "clamp:exhausted:"
 CLAMP_DEFERRAL = "clamp:deferral:"
 DEFERRAL_OVER = "deferral_over:"     # AU-4 §2.1: a re-gate marked an `account_changed` wait over
+# g08sd: how each launched generation ended, once (`crash_gen:<ws>:<bead>:<key>:<generation>`), and each
+# bead's deaths since its last reset (`crash_run:<ws>:<bead>`). Retention is plan 8's, with the journal's.
+CRASH_GEN = "crash_gen:"
+CRASH_RUN = "crash_run:"
+CRASH_CLASSES = frozenset({"died", "stopped", "lifetime", "legacy", "reset"})
+
+
+def _crash_gen(entry: LaunchEntry) -> str:
+    return f"{CRASH_GEN}{entry.ws}:{entry.bead}:{entry.session_key}:{entry.generation}"
 
 
 def _window(r: tuple[object, ...]) -> Window | None:
@@ -1062,6 +1071,50 @@ class Journal:
     @_locked
     def drop_over(self, session_key: str, number: int) -> None:
         self.db.execute("DELETE FROM meta WHERE key = ?", (f"{DEFERRAL_OVER}{session_key}:{number}",))
+
+    @_locked
+    def crash_class(self, entry: LaunchEntry) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (_crash_gen(entry),)).fetchone()
+        return None if row is None else str(row[0])
+
+    def crash_accounted(self, entry: LaunchEntry) -> bool:
+        return self.crash_class(entry) is not None
+
+    @_locked
+    def crash_count(self, ws: str, bead: str) -> int:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (f"{CRASH_RUN}{ws}:{bead}",)).fetchone()
+        return 0 if row is None else int(str(row[0]))
+
+    @_locked
+    def crash_account(self, ws: str, bead: str, entry: LaunchEntry, klass: str) -> int:
+        """g08sd: account `entry` as `klass`, once; the bead's count moves only when the row is new (a death
+        adds one, a live lifetime end zeroes it, anything else leaves it). Returns the count."""
+        if klass not in CRASH_CLASSES:
+            raise ValueError(f"unknown crash class {klass!r}")
+        with self.transaction():
+            n = self.crash_count(ws, bead)
+            cur = self.db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                                  (_crash_gen(entry), klass))
+            if cur.rowcount and klass in ("died", "lifetime"):
+                n = n + 1 if klass == "died" else 0
+                self._crash_set(ws, bead, n)
+        return n
+
+    @_locked
+    def crash_reset(self, ws: str, bead: str) -> None:
+        """An operator's reset (a release, a new claim): the count goes to 0 and every launched generation
+        not yet accounted is accounted `reset`, never counted. The rows are kept."""
+        with self.transaction():
+            for entry in self.launches_of(ws, bead):
+                if entry.outcome == LAUNCHED:
+                    self.db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, 'reset')",
+                                    (_crash_gen(entry),))
+            self._crash_set(ws, bead, 0)
+
+    def _crash_set(self, ws: str, bead: str, n: int) -> None:
+        """Unlocked: inside the callers' transactions."""
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET "
+                        "value = excluded.value", (f"{CRASH_RUN}{ws}:{bead}", str(n)))
 
     @_locked
     def clamp_deadlines(self, bound: int) -> int:

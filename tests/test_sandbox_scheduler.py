@@ -10,6 +10,7 @@ from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Rig, make_rig, on_profile
 
+from heterodyne.sandbox import reaper
 from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SandboxRuntime, SessionRecord, read_record
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import gitwip
@@ -287,3 +288,38 @@ def test_a_park_or_defer_over_unlanded_commits_makes_no_wip(both: Both, how: str
     assert recover(rig.sched).ok is False and rig.pickup() is Outcome.HELD
     assert [o.op_id for o in rig.journal.ops_open(WS)] == [op.op_id]       # still open at its stop step
     assert_held_unlanded(both, "btq-1", before, made)
+
+
+def reaper_marks_and_kills(both: Both, bead: str) -> None:
+    """The reaper's pass past the deadline: it finds the generation live, marks it, then kills and deletes."""
+    rt, rec = both.rt, both.record(bead)
+    layout = rt.runtime.layout(rec.key)
+    assert reaper.mark_live(layout.record, layout.reaped(rec.generation), rec.sandbox, rec.generation,
+                            rt.backend.names, lambda: True)
+    rt.tmux.kill(rec.tmux_session)
+    rt.backend.delete(rec.sandbox)
+
+
+@pytest.mark.parametrize("both", [Limits(launch_failures_before_human=2)], indirect=True)
+def test_a_reaped_lifetime_end_resets_the_crash_count_through_the_guard(both: Both) -> None:
+    """Code r1, design test 4 end to end: a death counts one; the next generation is reaped live at its
+    deadline and found late, so the runtime's marker makes it `lifetime` and the guard zeroes the count.
+    A later death then counts one again; without the reset it would be two, and the bead stuck."""
+    rig, rt = both.rig, both.rt
+    rig.world.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    rt.tmux.kill(both.record("btq-1").tmux_session)          # generation 1 dies
+    rig.pickup()
+    assert both.record("btq-1").generation == 2 and rig.journal.crash_count(WS, "btq-1") == 1
+    second = both.record("btq-1")
+    rig.clock.advance(second.deadline + 600 - rig.clock())    # pickup is late; the reaper is not
+    reaper_marks_and_kills(both, "btq-1")
+    rig.pickup()
+    third = both.record("btq-1")
+    assert (third.generation, third.phase) == (3, Phase.RUNNING)
+    classes = [rig.journal.crash_class(e) for e in rig.journal.launches_of(WS, "btq-1")]
+    assert classes == ["died", "lifetime", None] and rig.journal.crash_count(WS, "btq-1") == 0
+    rt.tmux.kill(third.tmux_session)                        # generation 3 dies
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and rig.state("btq-1") == "running"
+    assert both.record("btq-1").generation == 4

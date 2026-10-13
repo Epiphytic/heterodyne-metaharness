@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from test_sandbox_openshell_policy import spec
 
-from heterodyne.sandbox.backend import BackendError, BackendUnavailable
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable, Watch
 from heterodyne.sandbox.openshell import OpenShellBackend, policy, tool_env
 from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal
 
@@ -130,11 +130,17 @@ def test_tty_argv_carries_its_own_environment() -> None:
 
 
 def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
-    argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200, Path("/s/hz0/session.json"))
+    watch = Watch(3, Path("/s/hz0/reaped-r3.json"), "hz-alpha-p", "tmux", "wsd", None)
+    record = Path("/s/hz0/session.json")
+    argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200, record, watch)
     assert argv[:3] == ["env", "-i", "PATH=/usr/bin"]
     assert argv[4:7] == ["-I", "-m", "heterodyne.sandbox.reaper"]
     assert argv[7:] == ["--deadline", "1800007200", "--openshell", "openshell", "--podman", "podman",
-                        "--image", "img:1", "--record", "/s/hz0/session.json", "hz0123456789abg1"]
+                        "--image", "img:1", "--record", "/s/hz0/session.json", "--generation", "3",
+                        "--marker", "/s/hz0/reaped-r3.json", "--pane", "hz-alpha-p", "--tmux", "tmux",
+                        "--tmux-socket", "wsd", "hz0123456789abg1"]
+    pinned = Watch(3, Path("/s/m"), "p", "tmux", "wsd", Path("/run/wsd.sock"))
+    assert pinned.argv()[-2:] == ["--tmux-socket-path", "/run/wsd.sock"]
 
 
 def test_kill_uses_podman_alone() -> None:

@@ -13,7 +13,7 @@ from tmux_guard import new_test_tmux
 from wsd_env import WS, Clock, make_rig
 
 from heterodyne.sandbox import reaper
-from heterodyne.sandbox.backend import BackendError, BackendUnavailable
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable, Watch
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.sandbox.runtime import WIP_FAILED, Phase, SessionRecord, read_record
 from heterodyne.sandbox.spec import sandbox_name
@@ -150,9 +150,16 @@ def test_a_crash_around_the_lifetime_stop_replays_the_wip_exactly_once(
         real(pinned, mark, summary)
         raise Crash
 
+    listed = rig.backend.names
+
+    def crash_once_stopping() -> set[str]:     # g08sd: the liveness read before `stopping` still answers
+        if record(rig, spec.session_key).phase is Phase.STOPPING:
+            raise Crash
+        return listed()
+
     with monkeypatch.context() as m:
         if point == "stopping":
-            m.setattr(rig.backend, "names", crash)          # `stopping` is written; the sandbox is not gone
+            m.setattr(rig.backend, "names", crash_once_stopping)   # the sandbox is not gone
         else:
             m.setattr(gitwip, "wip_commit", crash if point == "ended" else commit_then_crash)
         with pytest.raises(Crash):
@@ -450,27 +457,44 @@ def test_a_create_in_flight_when_wsd_crashed_keeps_its_watcher_past_the_linger(t
 def test_the_reaper_reads_the_argv_the_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Task 4's `reaper_argv` and `main` agree, so the backstop wsd starts is the one tested here."""
     backend = OpenShellBackend("/x/openshell", "/x/podman", "img:1", {"PATH": "/usr/bin"})
-    argv = backend.reaper_argv("box", 1075, Path("/x/s/hz1/session.json"))
+    watch = Watch(4, Path("/x/s/hz1/reaped-r4.json"), "pane", "/x/tmux", "wsd", None)
+    argv = backend.reaper_argv("box", 1075, Path("/x/s/hz1/session.json"), watch)
     module = argv.index("heterodyne.sandbox.reaper")
     assert argv[module - 2:module] == ["-I", "-m"]
     seen: list[tuple[str, int, str, str, str]] = []
     checked: list[tuple[Path, str]] = []
 
-    def reap(name: str, deadline: int, delete: object, kill: object, *, settled: Callable[[], bool]) -> None:
+    marked: list[tuple[Path, Path, str, int]] = []
+
+    def reap(name: str, deadline: int, delete: object, kill: object, *, settled: Callable[[], bool],
+             mark: Callable[[], object]) -> None:
         assert isinstance(delete, types.MethodType) and isinstance(delete.__self__, OpenShellBackend)
         backend = delete.__self__
         seen.append((name, deadline, backend.openshell, backend.podman, backend.image))
         assert settled() is True
+        assert mark() is True
+
+    def mark_live(record: Path, marker: Path, name: str, generation: int, listed: object,
+                  pane_live: object) -> bool:
+        marked.append((record, marker, name, generation))
+        return True
 
     monkeypatch.setattr(reaper, "reap", reap)
     monkeypatch.setattr(reaper, "settled", lambda path, name: checked.append((path, name)) or True)
+    monkeypatch.setattr(reaper, "mark_live", mark_live)
     assert reaper.main(argv[module + 1:]) == 0
     assert checked == [(Path("/x/s/hz1/session.json"), "box")]
     assert seen == [("box", 1075, "/x/openshell", "/x/podman", "img:1")]
+    assert marked == [(Path("/x/s/hz1/session.json"), Path("/x/s/hz1/reaped-r4.json"), "box", 4)]
 
 
 def test_no_runtime_expires_nothing() -> None:
     NoRuntime().expire("alpha", 0)
+
+
+def test_no_runtime_reads_no_end() -> None:
+    with pytest.raises(RuntimeUnavailable):
+        NoRuntime().ended("k")
 
 
 def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
@@ -606,13 +630,18 @@ def test_a_record_from_before_created_replays_and_keeps_its_watcher(
     deadline = record(rig, spec.session_key).deadline
     rig.clock.advance(deadline - rig.clock.now)
 
-    def crash(*_: object) -> None:
-        raise Crash
+    listed = rig.backend.names
+
+    def crash_once_stopping() -> set[str]:     # g08sd: the liveness read before `stopping` still answers
+        if record(rig, spec.session_key).phase is Phase.STOPPING:
+            raise Crash
+        return listed()
 
     with monkeypatch.context() as m:
-        m.setattr(rig.backend, "names", crash)          # `stopping` is written; the sandbox is not gone
+        m.setattr(rig.backend, "names", crash_once_stopping)   # the sandbox is not gone
         with pytest.raises(Crash):
             rig.runtime.expire("alpha", deadline)
+    assert record(rig, spec.session_key).phase is Phase.STOPPING
     path = rig.runtime.layout(spec.session_key).record
     data = json.loads(path.read_text())
     assert data.pop("created") is True
