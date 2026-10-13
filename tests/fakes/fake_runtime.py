@@ -6,6 +6,7 @@ spec has none (Codex before its thread is known)."""
 
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd.runtime import (
+    LOGIN_STALE,
     Action,
     EndCause,
     Ended,
@@ -32,6 +33,8 @@ class FakeRuntime:
         self.launch_failures = 0      # the next N launches fail, confirmed: nothing starts
         self.launch_uncertain = 0     # the next N launches are uncertain: listed as UNKNOWN
         self.failing_beads: set[str] = set()     # every launch for these beads fails, confirmed
+        self.stale_keys: set[str] = set()        # a launch pinned to one of these keys: refused as stale
+        self.attempts: list[LaunchSpec] = []     # every spec `launch` was given, refused ones included
         self.uncertain_beads: set[str] = set()   # the first launch for each of these beads is uncertain
         self.stop_failures = 0
         self.expires: list[tuple[str, int]] = []
@@ -68,6 +71,9 @@ class FakeRuntime:
         current = self.listed.get(spec.session_key)
         if current is not None and current.liveness is Liveness.LIVE:
             return self._started(spec)
+        self.attempts.append(spec)
+        if spec.credential_key in self.stale_keys:
+            raise LaunchFailed(LOGIN_STALE)
         if self.launch_failures or spec.bead in self.failing_beads:
             self.launch_failures = max(0, self.launch_failures - 1)
             raise LaunchFailed("launch failed")

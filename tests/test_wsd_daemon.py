@@ -1823,9 +1823,9 @@ def decide_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     asked: list[str] = []
     real = park.decide
 
-    def counted(accounts: Any, journal: Any, profile: str, *rest: Any) -> Any:
+    def counted(accounts: Any, journal: Any, profile: str, *rest: Any, **named: Any) -> Any:
         asked.append(profile)
-        return real(accounts, journal, profile, *rest)
+        return real(accounts, journal, profile, *rest, **named)
 
     monkeypatch.setattr(park, "decide", counted)
     monkeypatch.setattr(scheduler, "decide", counted)

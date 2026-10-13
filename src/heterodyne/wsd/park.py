@@ -67,6 +67,7 @@ from heterodyne.wsd.launches import (
     Receipt,
 )
 from heterodyne.wsd.runtime import (
+    LOGIN_STALE,
     EndCause,
     Ended,
     LaunchFailed,
@@ -231,6 +232,11 @@ def capabilities(accounts: Accounts | None, profile: str) -> Capabilities:
         return accounts.view(profile).capabilities
     except ConfigError:
         return NONE
+
+
+def stale_keys(op: Op) -> frozenset[str]:
+    """The keys whose logins the runtime refused as stale during this operation (plan 4b E9)."""
+    return frozenset(filter(None, op.data.get("stale", "").split(",")))
 
 
 class Parker:
@@ -1181,8 +1187,36 @@ class Parker:
                 j.op_forget(op.op_id, "generation")
                 self._runtime_hold(op, exc=RuntimeUnavailable(receipt.error or ""))
             return Launch.WAIT
+        if receipt.refusal == "failed" and receipt.error == LOGIN_STALE:
+            return self._stale(op, entry)
         if self._spend(op, self.ws.limits.launch_failures_before_human, Reason.LAUNCH_FAILED,
                        receipt.error or "", forget=("generation",)):
+            return Launch.ENDED
+        return Launch.FAILED
+
+    def _stale(self, op: Op, entry: LaunchEntry) -> Launch:
+        """E9: the runtime's freshness gate refused the pinned login. Its key joins the op's `stale` keys as
+        the generation is forgotten, in one transaction with the row's reason (`{kind}.stale`), so every
+        later pin of this op gates without it. No budget is spent: another permitted account gives FAILED,
+        and the next pickup's replay pins it; none left escalates (`_pin` applies the same rule on a
+        replay)."""
+        j, ws = self.d.journal, self.ws.name
+        stale = stale_keys(op) | {entry.credential_key}
+        with j.transaction():
+            op = j.op_forget(op.op_id, "generation")
+            op = j.op_step(op.op_id, op.step, {"stale": ",".join(sorted(stale))})
+            row = j.state(ws, op.bead)
+            j.set_state(ws, op.bead, row.state if row else BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+        self.d.cp(f"{op.kind.value}.stale")
+        accounts = self.ws.accounts
+        try:
+            previous = self._previous_key(entry.session_key)
+            verdict = None if accounts is None else decide(
+                accounts, j, entry.profile, previous, self.d.clock(), self.ws.usage, exclude=stale)
+        except ConfigError:
+            verdict = None                   # the replay's pin escalates it as CONFIG_INVALID
+        if isinstance(verdict, AccountChanged):
+            self.escalate_from(op, Reason.LAUNCH_FAILED, LOGIN_STALE)
             return Launch.ENDED
         return Launch.FAILED
 
@@ -1307,7 +1341,7 @@ class Parker:
                 if isinstance(pinned, Launch):
                     return pinned
                 op, entry = pinned
-            if self._pin_holds(accounts, rec, entry):           # step 3
+            if self._pin_holds(op, accounts, rec, entry):       # step 3
                 break
             with j.transaction():
                 entry = j.launch_set(*entry.ident, "outcome", ABANDONED)
@@ -1327,15 +1361,20 @@ class Parker:
         self.d.cp(f"{kind}.dispatched")
         self._bead_write(entry, f"{kind}.dispatched!")
         launched = [e for e in j.launches(rec.session_key) if e.outcome == LAUNCHED]
+        previous = launched[-1].credential_key if launched else None
+        caps = capabilities(accounts, rec.profile)
+        # D7, plan 4b E10: a new key without (b) is a handoff, which starts fresh and resumes nothing.
+        handoff = (previous is not None and previous != entry.credential_key and caps.handoff_relaunch
+                   and not caps.cross_account_resume)
         # A resume continues the latest launched generation's native session; Claude's first launch uses
         # the session key as its native ID, and Codex's is unknown until its thread starts.
         first = rec.session_key if adapter == "claude-code" else None
-        native = launched[-1].native_id if launched else first
+        native = None if handoff else launched[-1].native_id if launched else first
         spec = LaunchSpec(ws, op.bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
-                          worktree, resume=op.kind is OpKind.RESUME, ref=op.data.get("ref") or None,
-                          generation=entry.generation, native_id=native, account=entry.account,
-                          credential_key=entry.credential_key, model=entry.model_passed,
-                          repo=Path(rec.repo))
+                          worktree, resume=op.kind is OpKind.RESUME and not handoff,
+                          ref=op.data.get("ref") or None, generation=entry.generation, native_id=native,
+                          account=entry.account, credential_key=entry.credential_key, handoff=handoff,
+                          model=entry.model_passed, repo=Path(rec.repo))
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)
@@ -1367,11 +1406,15 @@ class Parker:
         was dispatched for it, so the tail's stop only confirms that."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
+        stale = stale_keys(op)
         try:
             chosen = decide(accounts, j, rec.profile, self._previous_key(rec.session_key), self.d.clock(),
-                            self.ws.usage)
+                            self.ws.usage, exclude=stale)
         except ConfigError as exc:
             self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+            return Launch.ENDED
+        if isinstance(chosen, AccountChanged) and stale:      # E9: every permitted login was stale
+            self.escalate_from(op, Reason.LAUNCH_FAILED, LOGIN_STALE)
             return Launch.ENDED
         if isinstance(chosen, AccountChanged | Deadline):
             until = chosen.at if isinstance(chosen, Deadline) else None
@@ -1391,12 +1434,12 @@ class Parker:
         self._bead_write(entry, f"{kind}.entry!")
         return op, entry
 
-    def _pin_holds(self, accounts: Accounts, rec: SessionRecord, entry: LaunchEntry) -> bool:
+    def _pin_holds(self, op: Op, accounts: Accounts, rec: SessionRecord, entry: LaunchEntry) -> bool:
         """Step 3, immediately before dispatch: the pinned account is still permitted under its pinned key,
-        and nothing blocks it (`admits`, through the same view and cache as step 2). A key that can't be
-        resolved has changed."""
+        less the op's stale keys, and nothing blocks it (`admits`, through the same view and cache as step
+        2). A key that can't be resolved has changed."""
         return admitted(accounts, self.d.journal, self._previous_key(rec.session_key), entry, self.d.clock(),
-                        self.ws.usage)
+                        self.ws.usage, exclude=stale_keys(op))
 
     def _uncertain(self, op: Op, detail: str) -> Launch:
         """The role stays taken and the workstream holds; the next pickup's replay settles it from the
