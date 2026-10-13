@@ -15,6 +15,7 @@ def test_defaults(tmp_path: Path) -> None:
     assert (s.max_lifetime_seconds, s.stop_margin_seconds) == (7200, 900)
     assert (s.probe_allowed_host, s.probe_denied_host) == ("api.openai.com", "example.org")
     assert s.agent_probe_seconds == 240
+    assert s.lock_wait_seconds == 60
     assert s.hook_wait_seconds == 5.0
     assert s.binaries == {"claude-code": "claude", "codex": "codex"}
     assert s.profiles["p-two"]["adapter"] == "codex"
@@ -44,6 +45,8 @@ tool_env = { PATH = "/opt/podman5/bin:/usr/bin", CONTAINERS_CONF = "/opt/podman5
     ("max_lifetime_minutes = 5", "max_lifetime_minutes"),
     ("max_lifetime_minutes = 30\nstop_margin_minutes = 30", "stop_margin_minutes"),
     ("agent_probe_seconds = 10", "agent_probe_seconds"),
+    ("lock_wait_seconds = 0", "lock_wait_seconds"),
+    ("lock_wait_seconds = 601", "lock_wait_seconds"),
     ('probe_denied_host = "not a host"', "probe_denied_host"),
     ('probe_allowed_host = "mcp-proxy.anthropic.com"', "probe_allowed_host"),
     ('image = ""', "image"),

@@ -16,7 +16,7 @@ HOST = re.compile(r"(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 HOST_KEYS = frozenset({"egress_approved", "ro_mounts_approved", "image", "openshell", "podman",
                        "max_lifetime_minutes", "stop_margin_minutes", "probe_allowed_host",
-                       "probe_denied_host", "agent_probe_seconds", "tool_env"})
+                       "probe_denied_host", "agent_probe_seconds", "lock_wait_seconds", "tool_env"})
 # Variables the tools' own environment may not override: the sandbox launch sets them itself.
 RESERVED_ENV = frozenset({"HOME", "USER", "LANG", "TERM"})
 DENIED_HOSTS = frozenset({"mcp-proxy.anthropic.com"})   # §7 Connectors; spec.py enforces the same set
@@ -43,6 +43,7 @@ class SandboxSettings:
     probe_allowed_host: str
     probe_denied_host: str
     agent_probe_seconds: int
+    lock_wait_seconds: int                   # D8: the longest a launch waits for an account's login lock
     hook_wait_seconds: float
     egress_approved: tuple[str, ...]
     binaries: Mapping[str, str]              # adapter -> `[adapters.<a>].binary`, as configured
@@ -98,6 +99,7 @@ def from_config(host: Config, streams: Mapping[str, Config]) -> SandboxSettings:
         probe_allowed_host=_host(sb, "probe_allowed_host"),
         probe_denied_host=_host(sb, "probe_denied_host"),
         agent_probe_seconds=_int(sb, "agent_probe_seconds", 30, 900),
+        lock_wait_seconds=_int(sb, "lock_wait_seconds", 1, 600),
         hook_wait_seconds=float(hook_wait),
         egress_approved=approved,
         binaries=binaries,

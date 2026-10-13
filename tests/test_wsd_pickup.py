@@ -1713,3 +1713,13 @@ class Both(Recorder):
         super().__call__(name)
         for part in self.parts:
             part(name)
+
+
+def test_the_launch_carries_the_pinned_credential_key(tmp_path: Path) -> None:
+    rig = make_rig(tmp_path)
+    rig.world.add("btq-1")
+    rig.pickup()
+    [spec] = rig.runtime.launches
+    assert rig.ws.accounts is not None
+    assert spec.credential_key == rig.ws.accounts.current_key("claude-code", "default")
+    assert spec.handoff is False

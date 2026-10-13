@@ -28,6 +28,7 @@ import msgspec
 from heterodyne.agents.base import Adapter, AdapterError, Cli, write_private
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError
+from heterodyne.config.accounts import credential_key
 from heterodyne.fsutil import private_dir
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, Watch
@@ -51,10 +52,13 @@ from heterodyne.sandbox.spec import (
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import Tmux, TmuxError
-from heterodyne.wsd import gitwip
+from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
+from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
+    KEY_CHANGED,
+    LOGIN_STALE,
     Action,
     EndCause,
     Ended,
@@ -203,11 +207,36 @@ class _StepFailed(Exception):
 
 
 KNOWN_FAILURES = (SpecRefused, AdapterError, BackendError, _StepFailed, ConfigError, gitwip.GitFailed)
+LOGIN_UNRESOLVED = "the chosen account's login file is missing or unresolvable"
+
+
+@dataclass(frozen=True)
+class _Checked:
+    """What the locked check read (E1, D8): the canonical login files, each one's (st_dev, st_ino), and
+    the expiry the freshness gate passed. The bind is made from exactly these files, and once the sandbox
+    exists they are checked again (`_still_checked`), so what was bound is what was checked."""
+    files: tuple[Path, ...]
+    ids: tuple[tuple[int, int], ...]
+    expiry: int
+
+
+def _canonical(login_files: tuple[Path, ...]) -> tuple[tuple[Path, ...], tuple[tuple[int, int], ...]]:
+    """The login files resolved once, and each one's identity: a regular file, by lstat of the resolved
+    path. OSError or RuntimeError (a loop) if any can't be resolved or isn't a regular file."""
+    files = tuple(f.resolve(strict=True) for f in login_files)
+    ids: list[tuple[int, int]] = []
+    for f in files:
+        st = os.lstat(f)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        ids.append((st.st_dev, st.st_ino))
+    return files, tuple(ids)
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     sessions: Path                    # <wsd state>/sessions
+    credlocks: Path                   # <wsd state>/credlocks: the D8 lock directory (wsd.credlock)
     settings: SandboxSettings
     accounts: Accounts
     real_home: Path
@@ -291,8 +320,6 @@ class SandboxRuntime:
         adapter = self.c.adapters.get(self.c.accounts.adapter(spec.profile) or "")
         if adapter is None:
             raise LaunchFailed("the profile's adapter can't be run in a sandbox")
-        if spec.account != DEFAULT_ACCOUNT:
-            raise LaunchFailed("named accounts are bound by AU-6")
         if spec.repo is None:
             raise LaunchFailed("the launch names no repository")
         try:
@@ -325,8 +352,8 @@ class SandboxRuntime:
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
         cli = self._cli(adapter)
-        protected, others = self._logins(adapter)
-        expiry = self._fresh(adapter, protected.chosen_files)
+        protected, others = self._logins(adapter, spec.account)
+        checked = self._pinned(adapter, spec, protected.chosen_files)
         try:
             name = sandbox_name(spec.session_key, spec.generation)
         except SpecRefused as exc:
@@ -342,7 +369,7 @@ class SandboxRuntime:
                             worktree=str(spec.worktree), repo=str(spec.repo))
         write_record(layout, rec)
         try:
-            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others, expiry,
+            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others, checked,
                                pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
@@ -420,7 +447,12 @@ class SandboxRuntime:
     def _resume(self, adapter: Adapter, layout: SessionLayout, prev: SessionRecord | None,
                 spec: LaunchSpec) -> tuple[bool, str | None]:
         """D9: (resume, native ID). Resume held state; start fresh only when the record shows no generation
-        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed."""
+        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed. D7: a
+        handoff starts fresh whatever is held: a server-assigned ID is learned from the session, and any
+        other is the handoff's own (`ids.handoff_session`)."""
+        if spec.handoff:
+            fresh = None if adapter.assigns_id else ids.handoff_session(spec.session_key, spec.generation)
+            return False, fresh
         wanted = spec.native_id or (prev.native_id if prev is not None and prev.ran else None)
         try:
             # A home that was never made holds nothing; one that exists is searched anchored (a link refuses).
@@ -446,35 +478,90 @@ class SandboxRuntime:
             raise LaunchFailed(f"the {adapter.name} CLI is not the pinned version {adapter.version_pin}")
         return cli
 
-    def _logins(self, adapter: Adapter) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
+    def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
+        """The chosen account's login, and every other account's as configured: `default` is another
+        account whenever a named one is chosen (§7)."""
         try:
-            chosen_dir, chosen = self.c.accounts.login_paths(adapter.name, DEFAULT_ACCOUNT)
+            chosen_dir, chosen = self.c.accounts.login_paths(adapter.name, account)
             others: list[tuple[str, Path]] = []
             dirs: list[Path] = []
-            for account in self.c.accounts.configured(adapter.name):
-                folder, files = self.c.accounts.login_paths(adapter.name, account)
+            for name in (DEFAULT_ACCOUNT, *self.c.accounts.configured(adapter.name)):
+                if name == account:
+                    continue
+                folder, files = self.c.accounts.login_paths(adapter.name, name)
                 dirs.append(folder)
-                others += [(account, f) for f in files]
+                others += [(name, f) for f in files]
         except ConfigError as exc:
             raise LaunchFailed(str(exc)) from None
         return Protected(chosen_dir, chosen, tuple(dirs), tuple(f for _, f in others)), tuple(others)
 
+    @contextlib.contextmanager
+    def _credlock(self, key: str, failure: type[Exception]) -> Generator[None]:
+        """The account's D8 lock for the body; a lock not taken raises `failure` with its exact text."""
+        try:
+            with credential_lock(self.c.credlocks, key, self.c.settings.lock_wait_seconds,
+                                 clock=self.c.wait_clock, sleep=self.c.sleep):
+                yield
+        except CredentialBusy as exc:
+            raise failure(str(exc)) from None
+
+    def _pinned(self, adapter: Adapter, spec: LaunchSpec, login_files: tuple[Path, ...]) -> _Checked:
+        """E1, D8: under the account's lock, the key the entry pinned must still be the account's, and
+        then the login is read for the freshness gate. The files are resolved once, and the key is checked
+        against those very files, so the files read are the files the key names."""
+        if not spec.credential_key:
+            raise LaunchFailed(KEY_CHANGED)
+        with self._credlock(spec.credential_key, LaunchFailed):
+            try:
+                current = self.c.accounts.current_key(adapter.name, spec.account)
+            except ConfigError as exc:
+                raise LaunchFailed(str(exc)) from None
+            if current != spec.credential_key:
+                raise LaunchFailed(KEY_CHANGED)
+            try:
+                files, ids = _canonical(login_files)
+            except (OSError, RuntimeError):
+                raise LaunchFailed(LOGIN_UNRESOLVED) from None
+            if credential_key(adapter.name, files) != spec.credential_key:
+                raise LaunchFailed(KEY_CHANGED)
+            return _Checked(files, ids, self._fresh(adapter, files))
+
+    def _still_checked(self, adapter: Adapter, spec: LaunchSpec, login_files: tuple[Path, ...],
+                       checked: _Checked) -> None:
+        """Codex r1 (PR #74): the lock is let go before the bind is made, so once the sandbox exists the
+        login is checked again under the lock. The configured files must still resolve to the checked
+        ones (else KEY_CHANGED), each still the same file, its expiry no earlier than the one the gate
+        passed (else LOGIN_STALE). Anything swapped or rewritten in between was bound unchecked."""
+        with self._credlock(spec.credential_key, _StepFailed):
+            try:
+                files, ids = _canonical(login_files)
+            except (OSError, RuntimeError):
+                raise _StepFailed(KEY_CHANGED) from None
+            if files != checked.files:
+                raise _StepFailed(KEY_CHANGED)
+            try:
+                expiry = adapter.access_expiry(files)
+            except AdapterError:
+                raise _StepFailed(LOGIN_STALE) from None
+            if ids != checked.ids or expiry < checked.expiry:
+                raise _StepFailed(LOGIN_STALE)
+
     def _fresh(self, adapter: Adapter, login_files: tuple[Path, ...]) -> int:
-        """§7 freshness gate (D12): plan 4 never refreshes, so a login that would expire within the
-        session's maximum lifetime and stop margin refuses the launch. Returns the expiry it checked."""
+        """§7 freshness gate (D12, E3): plan 4b never refreshes, so a login that would expire within the
+        session's maximum lifetime and stop margin refuses the launch with LOGIN_STALE, which AU-8 reads
+        as "try the next account". Returns the expiry it checked."""
         try:
             expiry = adapter.access_expiry(login_files)
         except AdapterError as exc:
             raise LaunchFailed(str(exc)) from None
         s = self.c.settings
         if expiry - self.c.clock() <= s.max_lifetime_seconds + s.stop_margin_seconds:
-            raise LaunchFailed("the login expires within the session's maximum lifetime; refresh it on "
-                               "the host")
+            raise LaunchFailed(LOGIN_STALE)
         return int(expiry)
 
     def _start(self, spec: LaunchSpec, adapter: Adapter, cli: Cli, layout: SessionLayout, rec: SessionRecord,
                resume: bool, native: str | None, protected: Protected,
-               others: tuple[tuple[str, Path], ...], expiry: int, pinned: gitwip.Pinned) -> Started:
+               others: tuple[tuple[str, Path], ...], checked: _Checked, pinned: gitwip.Pinned) -> Started:
         c, gen = self.c, spec.generation
         run, scratch = layout.run(gen), layout.scratch(gen)
         for folder in (run, scratch):
@@ -497,9 +584,11 @@ class SandboxRuntime:
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
         sp = build_spec(SpecInput(spec.session_key, gen, spec.role, layout, spec.worktree,
-                                  adapter.facts(layout, cli, c.uid), protected.chosen_files, ws.extra_egress,
+                                  adapter.facts(layout, cli, c.uid), checked.files, ws.extra_egress,
                                   ws.extra_ro_mounts, c.settings.probe_allowed_host, c.uid, c.gid,
                                   git_binds))
+        if tuple(b.source for b in sp.logins) != checked.files:
+            raise _StepFailed(KEY_CHANGED)          # a file swapped since the locked check: never bound
         check_credentials(sp, protected, c.real_home)
         # D13: the lifetime runs from the moment the login can be reached, never from the end of a slow
         # start, and the hard stop is always a full margin before the checked expiry.
@@ -510,7 +599,7 @@ class SandboxRuntime:
         # long it stalls (`reaper.settled`).
         rec = self._phase(layout, rec, seeded=True, create_started=True,
                           deadline=min(exposed + c.settings.max_lifetime_seconds,
-                                       expiry - c.settings.stop_margin_seconds))
+                                       checked.expiry - c.settings.stop_margin_seconds))
         self._reaper(rec)                    # the backstop exists before the sandbox does
         if c.clock() >= rec.deadline:
             # T11 r3: past the deadline nothing is created, and the record says so before the launch ends.
@@ -518,6 +607,7 @@ class SandboxRuntime:
             raise _StepFailed("the launch stalled past its deadline before the sandbox was created")
         self.backend.create(sp, scratch)
         rec = self._phase(layout, rec, created=True)
+        self._still_checked(adapter, spec, protected.chosen_files, checked)
         if c.clock() >= rec.deadline:
             # T11 r3: the check above leaves a window up to the create's submission, so a sandbox that
             # exists only at or past its deadline is ended at once, by this launch, not left to the watcher.

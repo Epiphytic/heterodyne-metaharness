@@ -74,6 +74,7 @@ See `examples/config.toml` for a commented sample.
   - `max_lifetime_minutes` (10 to 1440, default 120) and `stop_margin_minutes` (1 to 120, default 15, less than the lifetime): a session is stopped at a turn boundary inside the margin before its deadline, or at the deadline, and then resumed (D13). The deadline is the earlier of the lifetime and the login's expiry less the margin.
   - `probe_allowed_host` and `probe_denied_host` (defaults `api.openai.com`, `example.org`): the self-test's egress controls.
   - `agent_probe_seconds` (30 to 900, default 240): how long the agent-path self-test may take.
+  - `lock_wait_seconds` (1 to 600, default 60): the longest a launch waits for its account's login lock (ADR 0001 §4.4 D8). A lock still held after that refuses the launch, and the next pickup tries again.
 - **`[integrations]`:** external tools (btq, the `wn-agent` socket and its token) are configured by location here. `wsd` reads `[integrations.beads]` (see [wsd.md](wsd.md#1-configuration)); nothing reads `[integrations.marmot]` yet.
 - **`[wsd]`:** the workstream daemon's timers and limits; see [wsd.md](wsd.md#1-configuration).
 - **`[accounts.<name>]`** (ADR 0001 §4.4 D1): a named login for one adapter, with exactly two keys:

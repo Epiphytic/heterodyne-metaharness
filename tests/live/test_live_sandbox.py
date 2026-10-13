@@ -152,7 +152,8 @@ class Live:
         key = ids.role_session(bead, role, profile)
         return LaunchSpec("alpha", bead, role, profile, key, f"{bead} · {role}", self.worktree(bead),
                           resume=False, native_id=key if cli == "claude" else None, model=MODELS[cli],
-                          repo=self.repo)
+                          repo=self.repo, credential_key=self.runtime.c.accounts.current_key(
+                              self.runtime.c.accounts.adapter(profile) or "", "default"))
 
     def launch(self, spec: LaunchSpec) -> Started:
         self.keys.append(spec.session_key)
@@ -448,7 +449,8 @@ def live() -> Iterator[Live]:
         # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
         accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
         config = RuntimeConfig(
-            sessions=root / "s", settings=settings, accounts=accounts, real_home=real_home,
+            sessions=root / "s", credlocks=root / "k",
+            settings=settings, accounts=accounts, real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,

@@ -4,6 +4,7 @@ so Codex fires SessionStart and reports its thread ID, as with the real probe pr
 
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
 
@@ -24,6 +25,7 @@ class ScriptedSelfTest:
         self.agent_fail = ""
         self.exec_runs: list[str] = []
         self.agent_runs: list[str] = []
+        self.others: list[tuple[tuple[str, Path], ...]] = []
         self.during_agent: Callable[[], None] | None = None     # e.g. a test clock advanced: a slow start
         self.during_exec: Callable[[], None] | None = None      # runs once the sandbox exists
 
@@ -31,6 +33,7 @@ class ScriptedSelfTest:
         return {"probes.py": "# scripted self-test: no probes\n"}
 
     def exec_path(self, ctx: ProbeContext) -> None:
+        self.others.append(ctx.others)
         self.exec_runs.append(ctx.spec.name)
         if self.during_exec is not None:
             self.during_exec()
