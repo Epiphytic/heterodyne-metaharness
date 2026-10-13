@@ -92,7 +92,7 @@
 | E1 | How the runtime knows the pinned credential key (§4.4 D2: "Immediately before the launch, the guard checks that the account's current credential key still equals the journaled one"). | `LaunchSpec.credential_key` carries the entry's key. Under the D8 lock, just before it reads the login, the runtime recomputes `accounts.current_key(adapter, account)`. A mismatch refuses with `KEY_CHANGED`. An empty `credential_key` is refused the same way. | The guard's step 3 check happens before dispatch. The runtime then reads files that may have been repointed in between. Rechecking under the lock closes that window for the files actually bound. |
 | E2 | The D8 lock's location and shape. | It is `<wsd state>/credlocks/<credential key>.lock`, opened by `gate.open_lock_file` (0600, no symlink, owner checked) and taken with `flock(LOCK_EX)`. The wait is bounded by `lock_wait_seconds` (default 60), polled with `LOCK_NB` and an injected clock and sleep. A wait past that bound raises `CredentialBusy(LOCK_BUSY)`. The key must match `ck1-[0-9a-f]{32}` before it is used in a path. `heterodyne setup` (AU-10) imports `credlock.credential_lock` and the same directory. | flock is per open file description, so threads in one wsd exclude each other, as `ClaimGate.locked` already relies on. The key is a digest, so the path never leaks a login path. A bounded wait turns a stuck holder into a refused launch (`LaunchFailed(LOCK_BUSY)`, a `failed` refusal that spends the launch budget, unlike E9's `LOGIN_STALE`), never a hang. |
 | E3 | Whether plan 4b refreshes on the host (§7: "the launcher refreshes on the host first, or refuses to launch"; plan 4 D12 never refreshes). | **Plan 4b still never refreshes.** Under the lock, the freshness gate rereads the login and refuses with `LOGIN_STALE` (plan 4's text, moved to `wsd/runtime.py`). AU-8 then tries the next permitted account (E9). A host refresh is added only after S7 L6 records what a refresh writes and whether it rotates the refresh token (open question Q2). | S7 has not observed a completed refresh for either CLI. A harness refresh that rotates the shared refresh token and fails to save it would break the operator's host login, which is the exact hazard §7 guards against. |
-| E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). Nothing is ever written to the account's login: if `auth.json` in the scratch home has changed when the read ends, the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. A read that a crash interrupted is cleaned up at wsd's next start, under its instance lock: its app-servers are found by the `CODEX_HOME` in their environment and killed through a pidfd, and its scratch home is removed (`hostread.recover`). | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected. A write-back can't be a compare-and-swap, because the operator's CLI and admind replace the login without the harness lock (D8), so the harness never writes the login. If a refresh does happen, the warning says so, and a login it left stale is refused at the next pickup (Task 10's `pickup.stale`). |
+| E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). Nothing is ever written to the account's login: if `auth.json` in the scratch home has changed when the read ends, the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. A read that a crash interrupted is cleaned up at wsd's next start, under its instance lock: its app-servers are found by the `CODEX_HOME` in their environment and killed through a pidfd, and its scratch home is removed once none of them is confirmed left; otherwise it is kept for the next start (`hostread.recover`). | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected. A write-back can't be a compare-and-swap, because the operator's CLI and admind replace the login without the harness lock (D8), so the harness never writes the login. If a refresh does happen, the warning says so, and a login it left stale is refused at the next pickup (Task 10's `pickup.stale`). |
 | E5 | Codex's in-session usage source (§4.4 D9 (c): "`account/rateLimits/read` at launch and `account/rateLimits/updated` through the per-session app-server"). | A host-side client of the live app-server's WebSocket is not in this plan. Instead, an in-sandbox resource script, `codex_usage.py`, runs `codex app-server` over stdio in a scratch `CODEX_HOME` under `/tmp`. Its `auth.json` is a symlink to the session's read-only bound file. The script sends `account/rateLimits/read` and prints only the `rateLimits` object. The runtime runs it through `backend.exec` once the app-server has started, then every `usage_poll_seconds` (default 600) while the session runs. It runs only if the profile's capabilities enable (c). | This is the pattern `codex_trust.py` already uses: stdio JSON-RPC inside the sandbox, with the output validated on the host. The scratch home keeps the second app-server off the live one's sqlite files. The bind stays read-only, so a refresh attempt inside fails (`EROFS`), as §7 requires. Notification subscription is open question Q4. |
 | E6 | Codex's limit-reached signal (§4.4 D9 (e)). | A `rateLimitReachedType` that isn't null in an in-session read is the limit signal (`LimitSeen`). The read runs when (c) or (e) is on, so (e) doesn't depend on (c), with the latest `resetsAt` of any window at 100% or more as its hint. `codexErrorInfo` (`usageLimitExceeded` / `rateLimitExceeded`) needs a notification stream, which E5 doesn't have (Q4). | The field is structured, and S7 (3) documents its values. Polling it needs no subscription. It is as untrusted as any in-session report, and D6's trusted read confirms it before anything beyond the bead's own defer. |
 | E7 | Claude's in-session source and signal (S7 (3), (5)). | **(c):** with (c) enabled, the Claude settings gain `"statusLine": {"type": "command", "command": "python3 -I /run/hz/shim.py status"}`. The shim's new `status` mode sends only `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}`, and only when `rate_limits` differs from the last value this launch's `wsd` accepted, when that value went to another launch (generations share `$HOME`; the launch is named by a digest of its session token, never the token), or when `STATUS_RESEND` (30 s) has passed, so an unchanged reading never goes stale (kept in `$HOME/.hz/status.json`). It prints nothing. **(e):** a `StopFailure` hook is always installed. With `error == "rate_limit"` it is the limit signal, with no structured reset (S7: only message text, which is never parsed). **Turn end:** `StopFailure` counts as a turn boundary (S7 finding 1), always. | The status line is S7's only Claude source. It is installed only when (c) is on, so the managed launch shape T14 validated doesn't change while every capability is off. The `StopFailure` boundary is needed whatever the capabilities, or a limited turn looks like a hang to the lifetime stop. |
@@ -3502,7 +3502,7 @@ D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio,
     - `hostread.DIAG_READ_FAILED`, logged as `"<DIAG_READ_FAILED>: <exception type name>"` (a warning);
     - `hostread.DIAG_NOT_READ`, logged as `"<DIAG_NOT_READ>: <reason>"` (info) when the read stops before it starts anything. The reason is `NOT_PINNED_KEY`, `TOO_CLOSE`, `NOT_AT_PIN`, or the `CredentialBusy` text (`LOCK_BUSY`, `LOCK_FAILED` or `BAD_KEY`).
   - `hostread.NoRateLimits`: the failure of an answer that held no `rateLimits`.
-  - `hostread.recover(scratch_root: Path) -> None`: kills the app-servers of any `read-*` home left under `scratch_root` and removes those homes. It never raises. `cli.run` calls it with `s.state_dir / "hostread"` once it holds the instance lock, whichever reader is configured.
+  - `hostread.recover(scratch_root: Path) -> None`: kills the app-servers of any `read-*` home left under `scratch_root` and, once none is confirmed left, removes those homes. It never raises. `cli.run` calls it with `s.state_dir / "hostread"` first thing inside the `try` whose `finally` releases the instance lock, whichever reader is configured.
   - `sandbox.build.build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader`.
   - `daemon.assemble(..., usage_reader: UsageReader | None = None)` and `cli.run(..., *, usage_reader: UsageReader | None = None)`. None means `NoUsageReader()`.
 
@@ -3519,8 +3519,9 @@ The read's steps, all inside one `credential_lock(credlocks, credential_key, ...
 A crash (wsd killed, the host losing power) can interrupt a read after step 5. The copy stays under `scratch_root`, and the app-server, once orphaned, outlives its timer. wsd is the only reader, and it holds its instance lock (`gate.instance_lock`) for its whole life, so at its next start every `read-*` home there is a crashed read's. `recover` runs before anything else can start a read:
 
 - It looks in `/proc` for the processes whose environment holds `CODEX_HOME=<that home>`. Each one is opened as a pidfd first, then its `environ` is read, then signal 0 is sent through the pidfd: if that succeeds, the environment was read from the process the pidfd holds, not from one that reused its PID. A process of another user can't be read and is skipped (it can't have been started by this wsd).
-- Each one found is sent SIGKILL through its pidfd. The scan repeats until none is left, for at most `RECOVER_SECONDS` (10). A killed orphan is reaped by init or the session's subreaper; its zombie has an empty `environ`, so it is no longer found.
-- Each home is removed with `rmtree` and checked with `lexists`. `DIAG_RECOVERED` is logged if all of them are gone and no process is left, otherwise `DIAG_RECOVERY_KEPT`. Nothing is logged when there was nothing to recover.
+- A process that is gone, or whose `environ` is another user's, is skipped. Any other failure (a pidfd that can't be opened, say at the file limit, or `/proc` that can't be listed) makes the scan incomplete: it is not taken as "none left".
+- Each one found is sent SIGKILL through its pidfd. The scan repeats until a complete scan finds none, for at most `RECOVER_SECONDS` (10). A killed orphan is reaped by init or the session's subreaper; its zombie has an empty `environ`, so it is no longer found. Every pidfd is closed, whatever fails.
+- The homes are the only record of which processes to look for. They are removed (`rmtree`, checked with `lexists`) only once a complete scan finds no process left. An incomplete scan, a failed kill or a process that outlives the deadline keeps every home and logs `DIAG_RECOVERY_KEPT`, so the next start looks again. `DIAG_RECOVERED` is logged once all the homes are gone. Nothing is logged when there was nothing to recover.
 
 Any failure is None. The log records only the exception's type name, never its text, which may hold a path. Every None but the Claude profile's logs exactly one line, so each test names the reason it expects and a read that stopped for another reason fails it.
 
@@ -3540,6 +3541,7 @@ Create `tests/test_sandbox_hostread.py`:
 ```python
 """Plan 4b Task 8: the trusted host-side read (D9 (d), E4), against the fake app-server."""
 
+import errno
 import json
 import logging
 import os
@@ -3803,6 +3805,61 @@ def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path, 
         bystander.wait(10)
     recover(tmp_path / "missing")                               # nothing there: nothing done, nothing logged
     assert logged() == [DIAG_RECOVERY_KEPT]
+
+
+def open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.parametrize("fault", ["pidfd", "proc", "signal", "deadline"])
+def test_an_unconfirmed_recovery_keeps_the_homes_and_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                  logged: Callable[[], list[str]],
+                                                                  fault: str) -> None:
+    """A pidfd that can't be opened, `/proc` that can't be listed, a kill that fails, or an app-server
+    that outlives the deadline: recover can't confirm the app-server is gone. It keeps the home, the
+    only way the next start can find that app-server, leaks no pidfd and raises nothing. The next
+    recover, with the fault gone, finishes the job."""
+    scratch = tmp_path / "hostread"
+    home = scratch / "read-abc"
+    home.mkdir(parents=True)
+    orphan = POPEN([sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ, "CODEX_HOME": str(home)})
+    try:
+        real_scandir, real_signal = os.scandir, signal.pidfd_send_signal
+
+        def no_pidfd(_pid: int) -> int:
+            raise OSError(errno.EMFILE, "too many open files")
+
+        def no_proc(path: Any) -> Any:
+            if path == "/proc":
+                raise OSError(errno.EIO, "unreadable")
+            return real_scandir(path)
+
+        def no_kill(fd: int, sig: int) -> None:
+            if sig == signal.SIGKILL:
+                if fault == "signal":
+                    raise PermissionError(errno.EPERM, "not permitted")
+                return                                          # "deadline": the kill never lands
+            real_signal(fd, sig)
+
+        if fault == "pidfd":
+            monkeypatch.setattr(hostread.os, "pidfd_open", no_pidfd)
+        elif fault == "proc":
+            monkeypatch.setattr(hostread.os, "scandir", no_proc)
+        else:
+            monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
+        before = open_fds()
+        recover(scratch, seconds=0.3)
+        assert open_fds() == before
+        assert logged() == [DIAG_RECOVERY_KEPT]
+        assert home.exists() and orphan.poll() is None
+        monkeypatch.undo()
+        recover(scratch)
+        assert orphan.wait(10) == -signal.SIGKILL
+        assert not os.path.lexists(home)
+        assert logged() == [DIAG_RECOVERY_KEPT, DIAG_RECOVERED]
+    finally:
+        orphan.kill()
+        orphan.wait(10)
 
 
 @pytest.mark.parametrize(("env", "reason"), [
@@ -4073,60 +4130,79 @@ def _write_new(folder: Path, name: str, data: bytes) -> None:
 def _holders(marks: set[bytes]) -> list[int]:
     """pidfds of the live processes whose environment holds one of `marks`. The pidfd is opened before
     the environment is read, and signal 0 through it afterwards proves the PID wasn't reused meanwhile.
-    A zombie's environment is empty, so a killed process stops being found once it ends."""
+    A zombie's environment is empty, so a killed process stops being found once it ends. A process that
+    is gone or another user's is skipped; any other failure (a pidfd that can't be opened, `/proc` that
+    can't be listed) means the scan is incomplete, so it raises, with every pidfd it opened closed."""
     found: list[int] = []
-    with contextlib.suppress(FileNotFoundError):
+    try:
         for entry in os.scandir("/proc"):
             if not entry.name.isdigit():
                 continue
             try:
                 fd = os.pidfd_open(int(entry.name))
-            except OSError:
+            except ProcessLookupError:
                 continue
             try:
                 with open(f"/proc/{entry.name}/environ", "rb") as f:
                     environ = set(f.read().split(b"\0"))
                 signal.pidfd_send_signal(fd, 0)
-            except OSError:              # gone, or another user's (not this wsd's)
-                os.close(fd)
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                os.close(fd)             # gone, or another user's (not this wsd's)
                 continue
+            except BaseException:
+                os.close(fd)
+                raise
             if marks.isdisjoint(environ):
                 os.close(fd)
             else:
                 found.append(fd)
+    except BaseException:
+        for fd in found:
+            os.close(fd)
+        raise
     return found
+
+
+def _end_holders(marks: set[bytes], seconds: float) -> None:
+    """SIGKILL, through their pidfds, the processes `marks` find, until a complete scan finds none.
+    Raises TimeoutError if one is still found after `seconds`, or what a failed scan or signal raised."""
+    deadline = time.monotonic() + seconds
+    while fds := _holders(marks):
+        try:
+            for fd in fds:
+                with contextlib.suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+        finally:
+            for fd in fds:
+                os.close(fd)
+        if time.monotonic() > deadline:
+            raise TimeoutError("an app-server outlived the recovery deadline")
+        time.sleep(0.05)
 
 
 def recover(scratch_root: Path, *, seconds: float = RECOVER_SECONDS) -> None:
     """E4: clean up the reads a crash interrupted. Called at wsd's start under its instance lock, when
     no read can be running, so every `read-*` home is a crashed read's: its app-servers (found by their
-    CODEX_HOME) are killed through a pidfd, then the home is removed. Never raises."""
+    CODEX_HOME) are killed through a pidfd, then the home is removed. The homes are the only record of
+    which processes to look for, so they are removed only once a complete scan finds none of those
+    processes left; otherwise all of them are kept for the next start. Never raises."""
     try:
         homes = [p for p in scratch_root.iterdir() if p.name.startswith("read-")]
     except FileNotFoundError:
         return
-    except OSError:
+    except Exception:
         log.warning(DIAG_RECOVERY_KEPT)
         return
     if not homes:
         return
-    marks = {f"CODEX_HOME={home}".encode() for home in homes}
-    deadline = time.monotonic() + seconds
-    left = True
-    while left:
-        fds = _holders(marks)
-        left = bool(fds)
-        for fd in fds:
-            with contextlib.suppress(ProcessLookupError):
-                signal.pidfd_send_signal(fd, signal.SIGKILL)
-            os.close(fd)
-        if left and time.monotonic() > deadline:
-            break
-        if left:
-            time.sleep(0.05)
+    try:
+        _end_holders({f"CODEX_HOME={home}".encode() for home in homes}, seconds)
+    except Exception:
+        log.warning(DIAG_RECOVERY_KEPT)      # unconfirmed: the next start must still find its app-server
+        return
     for home in homes:
         shutil.rmtree(home, ignore_errors=True)
-    kept = left or any(os.path.lexists(home) for home in homes)
+    kept = any(os.path.lexists(home) for home in homes)
     log.warning(DIAG_RECOVERY_KEPT if kept else DIAG_RECOVERED)
 
 
@@ -4231,7 +4307,7 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
 ```
 
-In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtime` and `UsageReader` from `heterodyne.wsd.usage`. Import `from heterodyne.sandbox import hostread`. Give `run` the keyword `*, usage_reader: UsageReader | None = None` after `exit_now`, and pass `usage_reader=usage_reader` to `assemble(...)`. In `run`, right after the `except AlreadyRunning:` block and before `held = False`, add `hostread.recover(s.state_dir / "hostread")` (it never raises, so the lock can't leak). It runs whichever reader is configured, so a crashed read is cleaned up even if the sandbox runtime was switched off since. In `wsd_main`, replace the `run` line with:
+In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtime` and `UsageReader` from `heterodyne.wsd.usage`. Import `from heterodyne.sandbox import hostread`. Give `run` the keyword `*, usage_reader: UsageReader | None = None` after `exit_now`, and pass `usage_reader=usage_reader` to `assemble(...)`. In `run`, add `hostread.recover(s.state_dir / "hostread")` as the first line of the `try:` that follows `held = False`, before `journal = _open(...)`. It never raises, and it sits inside the `finally` that releases the instance lock in any case. It runs whichever reader is configured, so a crashed read is cleaned up even if the sandbox runtime was switched off since. In `wsd_main`, replace the `run` line with:
 
 ```python
             return run(s, _factory(s), build_runtime(s, os.environ),
@@ -4277,9 +4353,9 @@ E8 and E11. Each pickup drains the runtime's signals just after `expire`. A `Usa
   - A PARK op opened by `limit` carries `limit_key` and `limit_gen` in its data.
   - `Rig.usage_reader` (tests): the reader the rig's `Deps` get, kept across `restart`.
 
-The confirming step sits after the WIP commit, as D6 orders it (Codex plan 4b r2). If the commit fails, the tail stops before the read: no trusted read, no `mark_exhausted`, and the bead keeps only its untrusted record. A superseding record has a new number. The WIP commit's mark (`defer:<key>:<n>`, written and never read back) names the untrusted record, while `v2:deferred` and the comment use the number current after `defer.confirmed`, so the comment names the record the bead actually waits on. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
+The confirming step sits after the WIP commit, as D6 orders it (Codex plan 4b r2). If the commit fails, the tail stops before the read: no trusted read, no `mark_exhausted`, and the bead keeps only its untrusted record. A superseding record has a new number. The WIP commit's mark (`defer:<key>:<n>`, written and never read back) names the untrusted record, and `defer.confirmed` keeps that number as `wip_defer`, while `v2:deferred` and the comment use the number current after `defer.confirmed`, so the comment names the record the bead actually waits on. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
 
-A limit report is held by the scheduler until `limit` has handled it (Codex plan 4b r2). If handling it raises, `BeadsUnavailable` for one, that report and every limit report after it in the batch stay held. The next pickup handles them first, oldest first, before anything newly drained, so a Beads outage loses no report. Claude reports its limit once and then waits for the reset (S7 (5)), so a lost report would mean no failover. Handling one again is safe: `limit` opens nothing for a launch that is no longer the bead's running one, for a bead that isn't running, or while an op is open. Once the op is opened, its replay finishes the defer. A usage report is not held: the next one replaces it. The held reports live in memory, as the runtime's queue does, so a wsd crash loses both. That loss is accepted: the session then waits for the reset itself, as it would with (e) off.
+A limit report is held by the scheduler until `limit` has handled it (Codex plan 4b r2). If handling it raises, `BeadsUnavailable` for one, that report and every limit report after it in the batch stay held. The next pickup handles them first, oldest first, before anything newly drained, so a Beads outage loses no report while at most `MAX_HELD` (256) are held. Past that, the oldest are dropped, the failed one possibly among them (Codex plan 4b r3); a workstream runs one coder session at a time, so that many reports means the outage outlasted hundreds of pickups, and it is accepted for the proof of concept. Claude reports its limit once and then waits for the reset (S7 (5)), so a lost report would mean no failover. Handling one again is safe: `limit` opens nothing for a launch that is no longer the bead's running one, for a bead that isn't running, or while an op is open. Once the op is opened, its replay finishes the defer. A usage report is not held: the next one replaces it. The held reports live in memory, as the runtime's queue does, so a wsd crash loses both. That loss is accepted: the session then waits for the reset itself, as it would with (e) off.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4297,7 +4373,22 @@ and in `Rig.restart`, replace the `Deps(...)` call with:
                          usage_reader=self.usage_reader)
 ```
 
-In `tests/test_wsd_defer.py`, add `Account`, `ConfiguredAccounts` and `ProfileAccounts` (from `heterodyne.wsd.accounts`), `Capabilities` (from `heterodyne.config.capabilities`), `LIMIT_STEPS` and `TRUSTED` (to the `heterodyne.wsd.park` import), `LimitSeen` and `UsageSeen` (to the `heterodyne.wsd.runtime` import), and `Observation` and `TrustedRead` (from `heterodyne.wsd.usage`), `contextlib`, and `Bead`, `BeadsAdapter` and `BeadsUnavailable` (from `heterodyne.wsd.beads`, where the file doesn't import them already) to the imports. Then append:
+In `tests/test_wsd_defer.py`, add `Account`, `ConfiguredAccounts` and `ProfileAccounts` (from `heterodyne.wsd.accounts`), `Capabilities` (from `heterodyne.config.capabilities`), `LIMIT_STEPS` and `TRUSTED` (to the `heterodyne.wsd.park` import), `LimitSeen` and `UsageSeen` (to the `heterodyne.wsd.runtime` import), and `Observation` and `TrustedRead` (from `heterodyne.wsd.usage`), `contextlib`, and `Bead`, `BeadsAdapter` and `BeadsUnavailable` (from `heterodyne.wsd.beads`, where the file doesn't import them already) to the imports. Replace `wip_of` with the version below: a confirmed read moves `defer` to the superseding record, while the WIP keeps the mark of the record it was committed under (`wip_defer`, Codex plan 4b r3):
+
+```python
+def wip_of(rig: Rig, rec: DeferralRow) -> str | None:
+    """The SHA a tail journaled for `rec`, checked against git: the mark it was committed under finds it."""
+    found = [(d["sha"], d.get("wip_defer", d["defer"])) for _, _, _, d in ops(rig)
+             if d.get("defer_key") == rec.session_key and d.get("defer") == str(rec.number) and "sha" in d]
+    if not found:
+        return None
+    [(sha, committed)] = found
+    assert gitwip.find_wip(gitwip.pin(rig.repo, rig.worktree(rec.bead), f"btq/{rec.bead}"),
+                           f"defer:{rec.session_key}:{committed}") == sha
+    return sha
+```
+
+Then append:
 
 ```python
 # --- the reactive limit (plan 4b Task 9) ---
@@ -4644,7 +4735,7 @@ Add after `convert_quota`:
             if (read is not None and read.limited and entry is not None and accounts is not None
                     and current is not None and current.number == n):
                 n = self._supersede(op, current, accounts, entry, read)
-            op = j.op_step(op.op_id, "defer.confirmed", {"defer": str(n)})
+            op = j.op_step(op.op_id, "defer.confirmed", {"defer": str(n), "wip_defer": op.data["defer"]})
         self.d.cp(f"{kind}.defer.confirmed")
         return op
 
@@ -4887,9 +4978,11 @@ def test_another_refusal_still_spends_the_budget_and_marks_nothing_stale(tmp_pat
 
 
 def spec_view(rig: Rig) -> list[tuple[object, ...]]:
-    """What each launch attempt asked for: the account and key, a handoff, a resume and the native ID."""
-    return [(a.account, a.credential_key, a.handoff, a.resume, a.native_id, a.generation)
-            for a in rig.runtime.attempts]
+    """What each launch attempt asked for: the account, whether the key is that account's in this rig (keys
+    are derived from each rig's own paths, so two rigs' keys never compare equal), a handoff, a resume
+    and the native ID."""
+    return [(a.account, a.credential_key == key_of(rig, a.account), a.handoff, a.resume, a.native_id,
+             a.generation) for a in rig.runtime.attempts]
 
 
 def stale_points(tmp_path: Path, scenario: Scenario) -> tuple[str, ...]:
