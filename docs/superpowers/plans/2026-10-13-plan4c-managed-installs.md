@@ -21,12 +21,12 @@
 **Tech Stack:** Python 3.12+, `uv`, pytest, hypothesis, ruff, pyright strict, msgspec (the only runtime dependency, and not used by `store_core.py`), SQLite (the existing journal), `ctypes` for `statx` and the fs-verity ioctl, `tarfile`, `hashlib`, `socket` (`SO_PEERCRED`, `SCM_RIGHTS`).
 
 **Spec:**
-- ADR 0001, revision 16 draft (design repo `hermes-workstreams-v2`, branch `adr-r16`, at `93d0e90`, on r15 `28e3df4`): §4.4 D2 and D7, §6.3 `/harness`, §7 Managed installs, Launch self-test (Managed install), §11 Managed installs controls, §12, §15, §17 items 13–15, Appendix A.3.
-- Plan 4b (`docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md`, branch `plan/4b`, at `ba51be9`): the section "Plan 4c: what plan 4b consumes", with its migration contract.
+- ADR 0001, revision 16 (design repo `hermes-workstreams-v2`, branch `adr-r16`; text at `93d0e90`, review records at `a6903c5`; approved by the operator, ask `j99v`): §4.4 D2 and D7, §6.3 `/harness`, §7 Managed installs, Launch self-test (Managed install), §11 Managed installs controls, §12, §15, §17 items 13–15, Appendix A.3.
+- Plan 4b (`docs/superpowers/plans/2026-10-12-plan4b-accounts-usage-failover.md`, branch `plan/4b`, at `e47dbf5`, approved with r16): the section "Plan 4c: what plan 4b consumes", with its migration contract.
 - Plan 4 (`docs/superpowers/plans/2026-10-09-plan4-agents-and-sandbox.md`): the runtime, the self-test, `check_credentials`.
 - admind's relay (`docs/admind.md` §10): approval asks over `ask.sock`.
 
-**Status:** draft for review. It needs a cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 12 (the host change) also waits for the operator's go on §17 item 13, separately from the plan's approval. Task 1 is research and changes nothing.
+**Status:** draft for review, revised after cross-model cycle 1. It needs the rest of its cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 12 (the host change) also waits for the operator's answer on §17 item 13 (ask `b2m6`), separately from the plan's approval. Task 1 is research and changes nothing; its findings gate Tasks 3, 6, 8 and 13 (Task 1, "Stop rules").
 
 ## Global Constraints
 
@@ -93,10 +93,10 @@ These were open while r16 was written. They were settled from the pinned binarie
 | # | Where the ADR is silent or loose | Choice | Why |
 |---|---|---|---|
 | E1 | What the helper is, and how root installs it. | `store_core.py`, one standard-library file. Task 12 copies it, at a pinned harness commit, to `/usr/local/libexec/heterodyne/store_core.py` (root, 0644) and runs it with `/usr/bin/python3 -I`. `config check` compares the installed copy's sha256 with the packaged file and reports a difference as a `HELPER_DRIFT` problem (a refusal for launches). | The service user owns the harness's virtualenv, so the helper can't import from it: any module the helper loads from there is code the service user could change. One file shared with `wsd` means one manifest implementation. |
-| E2 | The store's layout. | `<store>/<adapter>/<install>/` (0555) is the install. `<store>/<adapter>/.meta/<install>.manifest.json` and `.record.json` (0444) are its manifest and the recorded `(dev, ino, ctime_ns)` per entry. `<store>/.staging/<id>/` (0700) is a tree being built, and `<store>/.staged/<id>.json` (0444) its manifest, so `wsd` can read and summarise it without reading the tree. `<id>` is 32 random hex characters from `secrets.token_hex(16)`. | The ADR keeps the record "in the store but outside the install", and wsd needs the staged manifest to build the ask. The staging tree itself stays unreadable to the service user. |
-| E3 | The helper's protocol. | A Unix stream socket, socket-activated with `Accept=yes`: each connection is one helper process. One JSON request line (at most 1 MiB) and up to 16 fds by `SCM_RIGHTS`; one JSON reply line. `SO_PEERCRED` must give the uid in `/etc/heterodyne/store-helper.json` (root, 0644: `{"service_uid": N, "store": "..."}`), else the reply is `PEER_REFUSED` and nothing else is read. Requests: `stage`, `publish`, `verify`, `remove`, `sweep`, `list`. Every request first sweeps staging older than `staging_hours`. | Per-connection processes keep a crash in one request from affecting another, and need no daemon loop. Root-owned configuration means the service user can't change which uid the helper trusts or where it writes. |
+| E2 | The store's layout. | `<store>/<adapter>/<install>/` (0555) is the install. `<store>/<adapter>/.meta/<install>.manifest.json` and `.record.json` (0444) are its manifest and the recorded `(dev, ino, ctime_ns)` per entry and for the root. `<store>/.staging/<id>/` is a tree being built: `.staging` is 0700, and the tree inside already has its final modes (E20). `<store>/.staged/<id>.json` (0444) is its manifest, so `wsd` can read it, recompute its digest and summarise it without reading the tree. `<store>/.publishing/<id>.json` (0444) is a publish intent (E21). `<id>` is 32 random hex characters from `secrets.token_hex(16)`. | The ADR keeps the record "in the store but outside the install", and wsd needs the staged manifest to build the ask. The staging tree itself stays unreadable to the service user in helper mode. |
+| E3 | The helper's protocol. | A Unix stream socket, socket-activated with `Accept=yes`: each connection is one helper process. One JSON request line (at most 1 MiB) and up to 16 fds by `SCM_RIGHTS`; one JSON reply line. `SO_PEERCRED` must give the uid in `/etc/heterodyne/store-helper.json` (root, 0644: `{"service_uid": N, "store": "..."}`), else the reply is `PEER_REFUSED` and nothing else is read. Requests: `stage`, `publish`, `verify`, `remove`, `sweep`, `list`. Every request first runs `recover` (E21) and then sweeps staging older than `staging_hours`. | Per-connection processes keep a crash in one request from affecting another, and need no daemon loop. Root-owned configuration means the service user can't change which uid the helper trusts or where it writes. |
 | E4 | The install's parts, per adapter. | `cli/`: Codex is the package archive's tree (F3); Claude Code is the platform package's `package/` tree (F6). `content/<kind>/<name>/`: one directory per content item. `defaults/`: one file, in the CLI's own format (`config.toml` for Codex, `settings.json` for Claude Code). The entry point is recorded in the manifest as a path under `cli/`. | F2, F3 and F6. The platform package is exactly what Claude's own installer copies, without its script. |
-| E5 | Fetching and checksums. | `wsd` fetches (it has the network; the helper has none and runs with `PrivateNetwork=yes`). Codex: the package archive and `codex-package_SHA256SUMS` from the GitHub release named by the version; the archive's line in `SHA256SUMS` is the checksum. Claude Code: the registry's version document for the platform package, then its tarball; `dist.integrity` is the checksum. `wsd` passes each artifact to the helper as an fd, with the checksum and where it came from, and the helper checks its own copy. The manifest records the checksum, its origin and `signed: false`. | Checksums are what both upstreams publish and what stdlib can check. The checksum and the artifact come over TLS from the same upstream, so the control is that upstream plus the operator's digest-pinned approval, which the ask states (Q2). |
+| E5 | Fetching, checksums and signatures. | `wsd` fetches (it has the network; the helper has none and runs with `PrivateNetwork=yes`). Codex: the package archive and `codex-package_SHA256SUMS` from the GitHub release named by the version; the archive's line in `SHA256SUMS` is the checksum. Claude Code: the registry's version document for the platform package, then its tarball; `dist.integrity` is the checksum. `wsd` passes each artifact to the helper as an fd, with the checksum and where it came from, and the helper checks its own copy. Each `Source` records the checksum, its origin, and two separate facts: `signature_available` (the upstream publishes a signature for this artifact: a `.sigstore` bundle for Codex, `dist.signatures` for npm) and `signature_verified` (always `false` in v1). | Checksums are what both upstreams publish and what stdlib can check. The checksum and the artifact come over TLS from the same upstream, so the control is that upstream plus the operator's digest-pinned approval, which the ask states (Q2). Keeping the two signature facts apart lets a later plan verify signatures without changing what the manifest means. |
 | E6 | Git content sources. | A git source is `{repo, commit}` with a full commit ID, from a remote URL or a local repository outside every login directory. `wsd` runs `git` (never the helper): `git fetch` into a cache under the state directory, then `git archive --format=tar <commit>` and `git cat-file commit <commit>`, both as fds. The helper checks that the commit object hashes to the commit ID (sha1 or sha256, by its length), reads its tree ID, and rebuilds the tree ID from the archive's entries (blobs, modes 100644, 100755 and 120000, sorted trees). A mismatch, a submodule (mode 160000), or any other mode refuses. | The helper runs nothing from an artifact and has no git, yet must check the bytes against the pin. Git's object hashing is a few dozen lines of `hashlib`. |
 | E7 | What `stage` refuses. | Absolute names, `..`, empty or `.` components, names with NUL or `/` inside a component, hard links, devices, FIFOs, sockets, links whose target is absolute or that don't resolve inside the install (component by component, with loops caught by a 40-hop bound), any entry whose name equals a login name the request sends (all adapters' `login_names`, from `ADAPTERS`), the bounds (200_000 entries, depth 64; at the limit is accepted), and any tar member type other than a regular file, a directory or a symbolic link. | The ADR's list, made exact. The login names come from `wsd` because `store_core.py` knows no adapter; a test checks that `wsd` always sends the union. |
 | E8 | The walk's primitives. | `statx(dirfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS | STATX_MNT_ID)` through `ctypes`, for the mount ID and the nanosecond change time. Directories are opened with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` relative to their parent's fd, and regular files with `O_RDONLY | O_NOFOLLOW` only when hashing. A `statx` that doesn't return `STATX_MNT_ID` in `stx_mask` refuses (`NO_MOUNT_ID`). | `os.stat` has no mount ID. Linux 5.8 and later return it, and the sandbox runtime is Linux only (S5). |
@@ -104,14 +104,48 @@ These were open while r16 was written. They were settled from the pinned binarie
 | E10 | Content presentation. | Claude Code: each `content/plugins/<name>` as a `--plugin-dir`; `content/mcp/<name>.json` files merged into one launcher-written file passed with `--mcp-config` and `--strict-mcp-config`; instructions through `--append-system-prompt-file`. Codex: each `content/skills/<name>` as a read-only bind at `$CODEX_HOME/skills/<name>`; `content/mcp/<name>.toml` merged into the generated `config.toml` under `[mcp_servers]`; instructions as a read-only bind of one file at `$CODEX_HOME/AGENTS.md`. A content kind an adapter doesn't declare refuses the recipe. | F5 and F8. Each mechanism is one the CLI already has; Task 1 confirms both under the launch shapes plan 4 uses. |
 | E11 | Content that sets an owned key. | The adapter checks content in `wsd` on the fetched artifacts, before `stage`: a Claude plugin with a `hooks` directory, a `hooks` key in `plugin.json`, a `settings.json`, or an MCP server named like a launcher server refuses with `OWNS_KEY`; a Codex MCP file with any key other than its servers refuses the same way. The check runs again on the published tree at `use`. | §7: neither a default nor any content can set an owned key. The staging tree is unreadable to `wsd`, so the check runs on the bytes `wsd` hands over; the second run checks the bytes the sandbox will see. |
 | E12 | Declared versions. | `Adapter.versions: Mapping[str, Declared]`, where `Declared(tool_env: frozenset[str], presentation: frozenset[str])`. `version_pin` and `tool_env` go; `env_allowed` reads `adapter.versions[cli.version].tool_env`. Codex declares `0.160.0`, Claude Code `2.1.286` (the pins S7 ran). | §7 "Environment": the tool-path allowlist is per declared version, and the version is the manifest's. |
-| E13 | The approval. | `install` creates a btq `kind:approval` bead in `[harnesses] approval_workstream` through `wsd`'s own queue, then posts it with `AskPost(kind="approval", bead=...)` to admind's `ask.sock`. Its `metadata.ask` has the five fields; `effect` names the adapter, the install name and the grouped digest (E14); `refs` holds one `commit` ref, the harness commit that declares the version. `wsd` journals the staging ID with the bead ID. At each pickup it reads the bead and publishes only when all hold: it is closed with `decision = approve`, `approved_by` is in btq's `policy.approvers`, every `*_digest` equals btq's `ask_digest` recomputed now with no gaps, the effect's digest equals the journaled staged digest, and the journal's bead ID is this bead. Otherwise it waits, and a denial ends the install (`DENIED`). | The relay is the only Marmot approval path until plan 6. btq's `approval_valid` checks design approvals (an ADR ref and a design review), so wsd checks the subset that applies, using btq's own digest. |
-| E14 | Showing a digest on a card. | The card shows a manifest or artifact digest as `sha256:` and 16 groups of 4 hex characters, separated by spaces, and `wsd` parses that form back. The ask's text holds no 64-hex run. | admind withholds a card holding a 64-hex run (`secret_scan.IDENTIFIER_VALUES`), and an approval card must be shown whole (§5.9). The grouping is a display format for a non-secret value. Q3 asks the operator to confirm it. |
+| E13 | The approval. | See "The install approval (E13)" below the table: the exact bead `wsd` creates, the exact readout fields it requires, and what it never writes. | The relay is the only Marmot approval path until plan 6. btq's `approval_valid` checks design approvals (an ADR ref and a design review), so wsd checks the subset that applies, on the same readout admind shows, with every predicate named so none can pass vacuously. |
+| E14 | Showing a digest on a card. | Only a `ComputedDigest` is ever grouped: a SHA-256 that `wsd` itself computed over bytes it holds (the staged manifest's canonical encoding, read back from `.staged/<id>.json` and re-encoded; each fetched artifact's file). `display(d)` writes `sha256:` and 16 groups of 4 lowercase hex characters separated by spaces, and `parse_display` reads that form back. Nothing else is grouped or reformatted: an upstream checksum (a `SHA256SUMS` line or npm's sha512 `dist.integrity`) is compared, then shown only as "matches <origin>"; source names, URLs, refs and prose go into the text as they are. If admind's scanner (`config.secret_scan`) flags the composed text, `wsd` does not post it, marks the install `failed` with `ASK_UNPOSTABLE`, and never edits the text to get it through. | admind withholds a card holding a 64-hex run (`secret_scan.IDENTIFIER_VALUES`), and an approval card must be shown whole (§5.9). Grouped hex matches none of the scanner's patterns (every other pattern needs a letter outside `a`–`f` or a prefix like `sk-`), so it shows a computed value without any redaction exception, and the scanner still catches anything upstream supplied. Q3 asks the operator to confirm the format. |
 | E15 | The launch pin. | `LaunchEntry` and the journal's `launches` gain `install` and `install_digest` (journal schema 3, with an upgrade from 2). The guard reads the selection when it builds the entry and journals both in the same transaction. `LaunchSpec` gains `install` and `install_digest`. The runtime verifies exactly that pin. An entry journaled before schema 3 has empty pin fields; dispatching one refuses with `INSTALL_UNPINNED`, which the guard handles as a failed launch, so the next generation pins the current selection. | D2: the pin is set when the entry is journaled, and a replay uses it. An old entry can't be given a pin after the fact. |
 | E16 | In use. | An install is in use while any of these hold: a launch entry names it and has no outcome; a launch entry names it, its outcome is `launched` and the runtime still lists that generation; it is its adapter's selection or most recent previous selection; or a `use` or `install` op on it is open. `remove` and `prune` run under the same `wsd` lock as the guard's dispatch. | §7's definition, with the two windows a crash can leave (an entry not yet dispatched, and an op not yet finished). |
-| E17 | Taint. | The runtime re-walks each install it has a live session on, at that session's end and from `expire` when the last walk is 600 s old (injected clock). A mismatch writes a taint marker (`<state>/harness-taint/<adapter>/<install>`, 0600, atomically) before anything else, then reports one `InstallTainted(session_key, generation, install)` signal per session on it. `wsd` parks each bead with `hold=True` and the why `INSTALL_TAINTED`, writes one alert file per install, and `verified_cli` refuses a tainted install while the marker exists. Only `verify` (after a full rehash matches) or `remove` deletes the marker. | The marker makes the refusal survive a crash between the walk and `wsd`'s handling. The signal reuses plan 4b's `signals` drain, so `wsd` stays the journal's only writer. |
+| E17 | Taint. | Two paths write a taint marker (`<state>/harness-taint/<adapter>/<install>`, 0600, atomically, then the directory is fsynced) before anything else happens: `verify_pin` on an integrity refusal (E22), and the runtime's re-walk of each install it has a live session on, at that session's end and from `expire` when the last walk is 600 s old (injected clock). After the marker, the runtime reports one `InstallTainted(session_key, generation, adapter, install)` signal per live session on the install. `wsd` parks each bead with `hold=True` and the why `INSTALL_TAINTED`, writes one alert file per install, and `verified_cli` refuses a tainted install while the marker exists. Only `verify` (after a full rehash matches) or `remove` deletes the marker. | The marker makes the refusal survive a crash between the check and `wsd`'s handling. The signal reuses plan 4b's `signals` drain, so `wsd` stays the journal's only writer. |
 | E18 | Re-recording after a reboot. | If a device number changes (for example after a reboot renumbers a disk), every entry's `dev` differs and the install taints. `verify` rehashes every file; if every hash matches the manifest, the helper (or `wsd`, under the fallback, with the fallback publish ordering) writes a new record and the taint clears. | The record is what makes the fast walk sound; a full rehash is the only thing that may replace it. |
 | E19 | `/harness` through Marmot. | Plan 4c builds the `wsd` control ops and `wsctl harness`. The Marmot `/harness` command is the Marmot surface plan's (roadmap row 6), as a call to the same ops. Until it ships, an operator runs `wsctl harness` through admind's agent, and the install's approval comes through admind's relay, so no step needs a terminal. | §8.1: Marmot-only operation. `wsd` has no Marmot surface yet; building one here would duplicate plan 6. |
-| E20 | Fallback ordering at publish. | `LocalStore.publish`: record every entry's `(dev, ino, ctime_ns)`, rehash every file against the approved manifest, `statx` every entry again and refuse with `CHANGED_DURING_PUBLISH` if any recorded value moved, then set the modes, record again (the modes change the change times), and rename into place. A second comparison after the chmod pass checks that only the mode and change time moved. | §7's fallback rule, made exact: the chmod pass itself changes every change time, so the baseline is re-taken after it under the same check. |
+| E20 | Modes, and the order of publish. | `stage` sets every entry's final mode (directories 0555; files 0555 if the artifact gave any execute bit, else 0444) and the staging root's (0555) before it walks and hashes, so the staged manifest holds the published modes, and `publish` changes no mode. `publish`, in both modes: (1) record every entry and the root (`R1`); (2) rehash every file and run the structural part of `check_fast` against the approved manifest; (3) record again (`R2`) and refuse `CHANGED_DURING_PUBLISH` unless `R2 == R1`; (4) write the publish intent (E21) and rename the root into place; (5) `statx` the root by its new path: its `(dev, ino)` must equal `R2`'s, and only its `ctime_ns` may differ (a rename changes the moved directory's change time); (6) run `check_fast` against the manifest and `R2` with that one root value replaced, refusing `CHANGED_DURING_PUBLISH`; (7) write `R2` with the new root value as the record. No step after (3) can accept a changed entry: every entry's baseline is the one the rehash ran between. | Cycle 1 showed that recording again after a chmod accepts a same-size rewrite made between the rehash and the chmod. With no chmod at publish, the baseline is never re-taken after the bytes were checked, and the root's rename is the only change accepted, for the root alone. |
+| E21 | Durable publish and recovery. | Publish phases, each made durable (the file `fsync`ed, then its directory) before the next: (P1) the intent `.publishing/<id>.json` with the adapter, install name and approved digest; (P2) the rename, then both parent directories; (P3) `.meta/<install>.manifest.json` (temp file, `fsync`, rename, directory `fsync`); (P4) `.meta/<install>.record.json` the same way; (P5) remove `.staged/<id>.json`, then the intent. An install is **published** only when it has no intent, both meta files, a manifest whose digest equals the approved one, and a passing `check_fast`; `list` shows anything else as `publishing` or `broken`, never selectable. `recover` reads every intent: with the tree still in `.staging`, it restarts at E20 step 1; with the tree at its install path, it does a full rehash against `.staged/<id>.json` (whose digest must equal the intent's), takes a fresh record, and redoes P3–P5; any other state (no tree, a digest that differs, a rehash mismatch, meta files that disagree with the intent) removes the tree and its meta files and leaves `.failed/<id>.json` with the constant. `publish(id, digest)` is idempotent: called again for the same staging ID, it returns the install name once the install is published. A different staging ID whose install name already exists is `NAME_CONFLICT`. | Cycle 1: existence is not evidence. Recovery keys on the staging ID, so `wsd`'s journal and the store meet at one name, and a half-written install is never treated as published. |
+| E22 | Which refusals taint. | `verify_pin`'s integrity refusals taint the install before they return: `INSTALL_CHANGED` (any `Mismatch` from `check_fast`), `DIGEST_DIFFERS` (the meta manifest's digest is not the pin's), and `META_UNREADABLE` (a meta file that is missing, unreadable or malformed while the install tree exists). The others refuse without a taint, because the install's bytes are not in question: `NOT_SELECTED`, `NO_SUCH_INSTALL`, `INSTALL_TAINTED`, `UNDECLARED_VERSION`, `STORE_UNSAFE`, `INSTALL_UNPINNED`. A failed `wsctl harness verify` taints too. | ADR §7: a failed verification taints the install, whichever path found it. |
+| E23 | Compatibility until the launcher switches. | Until Task 8 merges, `main` keeps working exactly as before: Task 6 adds the new adapter fields beside `locate`, `version_pin` and `tool_env` and removes none; Task 7 journals a pin when the adapter has a selection and an empty one otherwise, and the runtime ignores the pin. Task 8, in one PR, switches every caller (`SandboxRuntime._cli`, `HostUsageReader`'s own lookup, `build_usage_reader`, the self-test's `env_allowed`, the test rigs) to `verified_cli`, starts refusing `NOT_SELECTED` and `INSTALL_UNPINNED`, and deletes the old fields. | Cycle 1: no intermediate merge may break a caller, and production dispatch must not depend on selection wiring that hasn't landed. |
+| E24 | The bind's options. | The install bind must be read-only, non-recursive and private. `driver_config` today emits only `type`, `source`, `target` and `read_only` per mount. Task 1's S9-8 finds which mount fields OpenShell 0.1.2 accepts and whether its Podman driver gives a non-recursive, `rprivate` bind; Task 8 emits exactly what S9-8 proves, and the Managed install probe checks the result from inside. If S9-8 shows the backend can't express it, Task 8 stops, and a backend change (for example an upstream OpenShell option) goes through its own design review first. | Cycle 1: the property is the backend's, so it is proven on the backend before the launcher depends on it. A scripted `mountinfo` test can't show it. |
+
+### The install approval (E13)
+
+**Creating the ask.** `install` creates one btq `kind:approval` bead in `[harnesses] approval_workstream`, through `wsd`'s own queue (`Queue.bd("create", ...)`), with:
+- the title and description of Task 10's readout;
+- `metadata.ask` with exactly btq's `ASK_FIELDS`, where `effect` is exactly `publish <adapter> install <install> manifest <display>` (`<display>` is `display()` of the staged manifest's `ComputedDigest`, E14) and `refs` holds one `commit` ref, the running harness commit, which declares the version;
+- `metadata.context_digest`: btq's `ask_digest` of the bead as created. A gap, or a text admind's scanner flags (E14), makes the install `failed` and nothing is posted.
+
+`wsd` journals the staging ID, the bead ID and the context digest, then posts `AskPost(kind="approval", bead=...)` to admind's `ask.sock`.
+
+**What `wsd` never writes.** After creating it, `wsd` writes nothing to the bead: no `decision`, `approved_*`, `denied_*`, `decided_*`, `via*` or `context_digest`, no edit to the title, description or ask, and no close or reopen. A bead in a wrong state is never repaired: its row becomes `failed`, and a later `install` makes a new staging and a new bead.
+
+**Reading the decision.** At each pickup `wsd` runs `approve-bead <bead> --json`, the read-only form admind uses (`admind/approvals.py`), parses it as admind's `Readout` (format 1, unknown fields forbidden), and reads the bead with `queue.show`, recomputing btq's `ask_digest` over that result. Every predicate is required; a field that is missing, null where a value is required, or of the wrong type fails its predicate:
+
+1. the reply is not `Busy` (`Busy` means wait);
+2. `id` equals the journaled bead ID;
+3. `kind_approval` is `true`;
+4. `status` is `"closed"` and `decided` is `true`;
+5. `decision` is `"approve"`, and `denied_by` and `denied_digest` are null;
+6. `digest` is a non-empty string, equals the recomputed `ask_digest`, and `gaps` is empty;
+7. `posted_digest` is a non-empty string equal to `digest` and to the journaled context digest;
+8. `approved_digest` is a non-empty string equal to `digest`;
+9. `approvers` is a non-empty list of non-empty strings and `approved_by` is a non-empty string in it;
+10. `metadata.ask.effect`, from the same `show` the digest covers, parses exactly as above, and its adapter, install name and `parse_display(<display>)` equal the journal row's adapter, install name and staged digest.
+
+**The outcome.**
+- An open bead waits, until the staging expires (`expired`).
+- A closed bead with `decision = "deny"` or any `denied_*` field present is `denied`.
+- A closed bead that fails any other predicate is `failed` with `NOT_APPROVED`, and the log names the predicate's number.
+- When all hold, `wsd` journals `approved`, then calls `publish(staging_id, staged digest)`. A restart in `approved` calls `publish` again, which is idempotent (E21).
 
 ## ADR conflicts and gaps, flagged for the operator (not silently resolved)
 
@@ -119,19 +153,19 @@ These were open while r16 was written. They were settled from the pinned binarie
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **§17 item 13: create the store owner** (the `heterodyne-store` user, `/var/lib/heterodyne/harnesses`, the helper's units), and optionally turn on ext4 `verity` on `/var/lib`'s filesystem. That is Task 12, a root host change. | Yes to both, as r16 recommends. Until then, Tasks 2–11 and 13's fallback tests run without it, and a host uses the fallback only if you set `[harnesses] fallback = true`. |
-| Q2 | **Signatures.** v1 checks the checksums both upstreams publish (E5), not Codex's sigstore bundle or npm's registry signature: stdlib can't check either, and the runtime dependency rule allows only `msgspec`. | Accept checksums for v1. The ask says "checksum from the release; signature not checked". A later plan can verify signatures with a host tool `wsd` runs before `stage`, if you want it. |
-| Q3 | **The grouped digest on cards** (E14). | Accept. The alternative is to show only the 12-hex prefix, which §5.9 forbids for content the approval binds. |
+| Q1 | **§17 item 13: create the store owner** (the `heterodyne-store` user, `/var/lib/heterodyne/harnesses`, the helper's units), and optionally turn on ext4 `verity` on `/var/lib`'s filesystem. That is Task 12, a root host change. | Yes to both, as r16 recommends (asked as `b2m6`). Until then, Tasks 2–11 and 13's fallback tests run without it, and a host uses the fallback only if you set `[harnesses] fallback = true`. A host running on the fallback has not met §7's store-owner guarantee, whatever else has closed: §7's managed-installs work stays open until Task 12 and Task 13's helper-mode tests close, or you answer "no" and record the fallback as the accepted risk. |
+| Q2 | **Signatures.** v1 checks the checksums both upstreams publish (E5), not Codex's sigstore bundle or npm's registry signature: stdlib can't check either, and the runtime dependency rule allows only `msgspec`. | Accept checksums for v1, which §7's "checksum or signature" allows. The ask shows, per source, "checksum matches <origin>; signature available, not verified" (or "no signature published"). A later plan can verify signatures with a host tool `wsd` runs before `stage`. |
+| Q3 | **The grouped digest on cards** (E14): `sha256:` and 16 groups of 4 hex, only for digests `wsd` computed. | Accept. The alternatives are the 12-hex prefix alone, which §5.9 forbids for content the approval binds, or base64url, which can by chance match a token pattern (`sk-` after a `-`) and be withheld. |
 | Q4 | **Where install approval beads live** (E13). | `[harnesses] approval_workstream = "heterodyne"`. It is a required key; `install` refuses without it. |
-| Q5 | **`[adapters.<adapter>].binary`** stays as admind's key (Contradiction 1). | Keep it for admind until §17 item 15's plan. The sandbox stops reading it in Task 8, and `config check` labels it "admind only". |
+| Q5 | **`[adapters.<adapter>].binary`** stays as admind's key (Contradiction 1). | Keep it for admind until §17 item 15's plan. The sandbox stops reading it in Task 8, and `config check` labels it "admind only". This stays an **open item for the next ADR revision**: plan 4c does not edit the ADR, and the clarification ("the launcher no longer reads it; admind keeps it until its own migration") needs your approval there. |
 | Q6 | **The Claude target.** The host runs the glibc build (F6). The musl build would match Codex. | Use `linux-x64` (glibc), what the host runs today. The recipe names the target, so a change is a new install. |
 
 ### Contradictions found in the sources
 
-1. ADR §15 says `[adapters.<adapter>].binary` "is no longer accepted", but §17 item 15 leaves admind on the CLIs it runs today, and `admind/settings.py` reads `adapters.<adapter>.binary` for its agent and summarizer. Plan 4c stops the sandbox reading it and keeps admind's use (Q5). The next ADR revision should say "no longer used by the launcher".
+1. ADR §15 says `[adapters.<adapter>].binary` "is no longer accepted", but §17 item 15 leaves admind on the CLIs it runs today, and `admind/settings.py` reads `adapters.<adapter>.binary` for its agent and summarizer. Plan 4c stops the sandbox reading it and keeps admind's use (Q5). This is not resolved by the plan: it is an open item for the next ADR revision, which should say "no longer read by the launcher; admind keeps it until §17 item 15".
 2. ADR §7 says the store helper does "four things". It also sweeps old staging (the same paragraph) and lists installs for `wsd` (`wsctl harness list` needs it). E3 adds `sweep` and `list`, which write nothing outside `.staging` and read only `.meta`.
 3. ADR §5.9's approvals are `wsd`'s own decision queue (§5.4), which isn't built. E13 uses admind's interim relay, as §5.9's interim exception allows for every approval ask until `wsd` and the gatekeeper ship.
-4. Plan 4b's contract writes `verified_cli(adapter)` with no pin. A launch must verify the entry's pin (D2), so the method takes an optional pin (Task 8); with none, it verifies the current selection, which is what the trusted read wants.
+4. Plan 4b's contract writes `verified_cli(adapter)` with no pin. A launch must verify the entry's pin (D2), so the method takes an optional pin (Task 8); with none, it verifies the current selection, which is what the trusted read wants. Plan 4b's one-argument call is unchanged, and Task 8 tests both forms (`test_verified_cli_without_a_pin_verifies_the_selection_and_with_one_verifies_the_pin`).
 
 ## What plan 4c produces for plan 4b
 
@@ -149,37 +183,55 @@ Task 8 needs plan 4b's Task 6 and Task 8 merged first, so the code it migrates e
 
 ## Parallelism
 
-Tasks 2, 5 and 7 have no dependencies on each other. Task 1 is research and can run at any time, ideally before the design review, so its findings reach the reviewers. Each later task starts once everything it depends on has merged to `main`.
+Tasks 2 and 5 have no dependencies. Task 1 is research and can run at any time; it should run first, because its findings gate Tasks 3, 6, 8 and 13 (Task 1, "Stop rules"). Each later task starts once everything it depends on has merged to `main`.
 
 ```
-Any time:          T1 spike (research, no code)
-Wave 1 (parallel): T2 manifest and walk, T5 config and selection, T7 launch pin
-Wave 2 (parallel): T3 sources and stage (T2)
-                   T6 adapters (T2, T5, T1's findings)
-Wave 3:            T4 publish, helper protocol, store clients (T3)
-Wave 4:            T8 the launcher (T4, T5, T6, T7, plan 4b T6 and T8)  <- plan 4b's "launcher bead"
-Wave 5 (parallel): T9 taint watch (T8)
-                   T10 wsd harness commands and approval (T4, T5, T7, T8)
-Wave 6:            T11 docs (T9, T10)
-Host (operator go): T12 store owner, helper units, verity (T4, and the operator's go on Q1)
-Live:              T13 live test (T9, T10, T11; its helper-mode part also T12)
+Any time (first):  T1 spike (research, no code)
+Wave 1 (parallel): T2 manifest and walk, T5 config and selection
+Wave 2 (parallel): T3 sources and stage (T1: S9-1; T2)
+                   T7 launch pin (T5)
+Wave 3 (parallel): T4 publish, recovery, helper protocol, store clients (T3)
+                   T6 adapters (T1: S9-2 to S9-7; T2, T3, T5)
+Wave 4:            T8 the launcher (T1: S9-8, S9-9; T4, T5, T6, T7, plan 4b T6 and T8)  <- plan 4b's "launcher bead"
+Wave 5:            T9 taint watch (T8)
+Wave 6:            T10 wsd harness commands and approval (T4, T5, T7, T8, T9)
+Wave 7:            T11 docs (T9, T10)
+Host:              T12 steps 1-2 (repository files, the ask) after T4; steps 3-7 (privileged) only after the
+                   host-change approval (b2m6)
+Live:              T13 live test (T1: S9-7; T9, T10, T11; its helper-mode part also T12)
 ```
 
 | Task | Depends on | Can run beside | Files it shares (merge order) |
 |---|---|---|---|
 | 1 | none | any | `docs/spikes/s9-managed-installs.md` (new) |
-| 2 | none | 5, 7 | none |
-| 3 | 2 | 5, 6, 7 | `harness/resources/store_core.py` (after 2) |
-| 4 | 3 | 6, 7 | `store_core.py` (after 3) |
-| 5 | none | 2, 3, 7 | `sandbox/settings.py` (adds `harnesses`; 8 removes `binaries`), `config/layers.py`, `scripts/check_install_agnostic.py`, `defaults/defaults.toml` |
-| 6 | 2, 5 | 3, 4, 7 | `agents/base.py`, `agents/codex.py`, `agents/claude_code.py`, `sandbox/openshell_selftest.py` (`env_allowed` only) |
-| 7 | none | 2–6 | `wsd/launches.py`, `wsd/journal.py`, `wsd/upgrade.py`, `wsd/park.py` (`_pin_and_dispatch`), `wsd/runtime.py` (`LaunchSpec`) |
-| 8 | 4, 5, 6, 7, plan 4b T6 and T8 | none | `sandbox/runtime.py`, `sandbox/spec.py`, `sandbox/settings.py`, `sandbox/build.py`, `sandbox/hostread.py`, `sandbox/selftest.py`, `sandbox/openshell_selftest.py`, `sandbox/resources/probes.py`, `tests/sandbox_env.py` |
-| 9 | 8 | 10 | `sandbox/runtime.py` (after 8), `wsd/runtime.py` (`InstallTainted`) |
-| 10 | 4, 5, 7, 8 | 9 | `wsd/ctl.py`, `wsd/cli.py`, `wsd/daemon.py`, `wsd/scheduler.py`, `wsd/park.py` (the taint park; after 9's signal type) |
+| 2 | none | 5 | none |
+| 3 | 1 (S9-1), 2 | 7 | `harness/resources/store_core.py` (after 2) |
+| 4 | 3 | 6 | `store_core.py` (after 3) |
+| 5 | none | 2, 3 | `sandbox/settings.py` (adds `harnesses`; 8 removes `binaries`), `config/layers.py`, `scripts/check_install_agnostic.py`, `defaults/defaults.toml` |
+| 6 | 1 (S9-2 to S9-7), 2, 3, 5 | 4, 7 | `agents/base.py`, `agents/registry.py`, `agents/codex.py`, `agents/claude_code.py` (adds only; 8 removes the old fields) |
+| 7 | 5 | 3, 4, 6 | `wsd/launches.py`, `wsd/journal.py`, `wsd/upgrade.py`, `wsd/park.py` (`_pin_and_dispatch`), `wsd/runtime.py` (`LaunchSpec`), `wsd/workstream.py` (`Deps`), `wsd/daemon.py` (`Deps` wiring) |
+| 8 | 1 (S9-8, S9-9), 4, 5, 6, 7, plan 4b T6 and T8 | none | `sandbox/runtime.py`, `sandbox/spec.py`, `sandbox/openshell.py`, `sandbox/settings.py`, `sandbox/build.py`, `sandbox/hostread.py`, `sandbox/selftest.py`, `sandbox/openshell_selftest.py`, `sandbox/resources/probes.py`, `agents/*.py`, `wsd/runtime.py` (`InstallTainted`), `wsd/park.py` (the `NOT_SELECTED` escalation, after 7), `tests/sandbox_env.py` |
+| 9 | 8 | none | `sandbox/runtime.py` (after 8) |
+| 10 | 4, 5, 7, 8, 9 | none | `harness/digests.py` (new), `wsd/ctl.py`, `wsd/cli.py`, `wsd/workstream.py`, `wsd/daemon.py`, `wsd/scheduler.py`, `wsd/park.py` (the taint park), `wsd/journal.py`, `wsd/upgrade.py`, `wsd/btq.py` |
 | 11 | 9, 10 | none | `docs/` |
-| 12 | 4, operator go | any | `deploy/` (new unit and setup files), host only |
-| 13 | 9, 10, 11 (helper mode: 12) | none | `tests/live/`, `docs/wsd.md` |
+| 12 | 4; steps 3-7 also the host-change approval | any | `deploy/` (new unit and setup files) |
+| 13 | 1 (S9-7), 9, 10, 11 (helper mode: 12) | none | `tests/live/`, `docs/wsd.md` |
+
+### What `main` does after each merge
+
+Every merge leaves the full suite green (`timeout 3600 uv run pytest -q`, run in the foreground before the PR merges), and changes production only as this table says.
+
+| After | Production behaviour | The full suite |
+|---|---|---|
+| T2, T3, T4 | Unchanged. `heterodyne.harness` exists, but no production path imports it. | Passes, plus the new `tests/test_harness_*.py`. |
+| T5 | Unchanged launches. `config check` parses `[harnesses]` and reports the store's problems and the fallback warning. Launches still use `[adapters.<a>].binary`. | Passes. |
+| T6 | Unchanged. The adapters gain the new fields beside `locate`, `version_pin` and `tool_env`, which stay (E23). | Passes, with the old adapter tests unchanged. |
+| T7 | Launches unchanged. The guard journals the selected pin when the adapter has a selection, and an empty pin otherwise; the runtime ignores the pin. The journal upgrades to schema 3 at start. | Passes. An existing schema-2 journal upgrades in `test_wsd_upgrade.py`. |
+| T8 | Launches and the trusted read need a selected, verified install. `NOT_SELECTED` and `INSTALL_UNPINNED` start refusing. The launcher no longer reads `[adapters.<a>].binary`. | Passes, with every rig on the store fixture. **Deployment hold:** the live run checkout is not updated past T8 until T10 has merged and an install is published and selected for each adapter in use, because before T10 there is no command that creates one. T8's PR description says so. |
+| T9 | The taint watch runs. | Passes. |
+| T10 | `wsctl harness` works; installs can be created, approved, published and selected. The deployment hold ends once the operator has selected installs. | Passes. |
+| T11, T13 | Documentation; live evidence. | Passes; the live tests skip offline. |
+| T12 | Steps 1–2 change no host. After the host-change approval, the host has the store owner and the helper. | Passes (`tests/test_deploy_store_helper.py`). |
 
 ## Beads
 
@@ -188,74 +240,95 @@ All in workstream `heterodyne`. Branches are `p4c-t<N>`.
 - **Kinds and gates:**
   - Task 1 is `kind:research`. It changes no code and needs no design approval.
   - Tasks 2–11 and 13 are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=<the approved r16 commit>`, and a blocking dependency on the approval bead.
-  - Task 12 is `kind:task` with the same metadata, plus a blocking dependency on a separate **host-change approval bead** (`kind:approval`) for §17 item 13 (Q1). The plan's approval does not authorize it.
-- **Dependencies** (each "A ← B" means B blocks on A):
+  - Task 12 is `kind:task` with the same metadata. Its repository steps (1–2) need only the plan's approval. Its privileged steps (3–7) block on a separate **host-change approval bead** (`kind:approval`, ask `b2m6`) for §17 item 13 (Q1); the plan's approval does not authorize them. Task 12's bead is split for this: `T12a` (steps 1–2) and `T12b` (steps 3–7, blocked on the host-change approval).
+- **Dependencies.** Each line is "task: blocks on". Every task 2–13 also blocks on the plan's approval bead.
 
 ```
-approval(plan 4c) ─┬─ T2 ─┬─ T3 ── T4 ─┬───────────────┐
-                   │      └─────────┐  │               │
-                   ├─ T5 ───────────┼──┼── T6 ──┐      │
-                   ├─ T7 ───────────┼──┼────────┼──────┤
-                   │                │  │        │      │
-plan 4b T6, T8 ────┼────────────────┴──┴── T8 ◄─┘      │
-                   │                        ├── T9 ──┐ │
-                   │                        └── T10 ◄┼─┘ (T10 also on T4, T5, T7)
-                   │                                 └── T11 ── T13
-approval(host change, §17 item 13) ── T12 (also on T4) ─────────┘ (helper-mode tests only)
-T1 (research): no blockers; T6 reads its findings
+T1:   (none)
+T2:   (none)
+T3:   T1, T2
+T4:   T3
+T5:   (none)
+T6:   T1, T2, T3, T5
+T7:   T5
+T8:   T1, T4, T5, T6, T7, plan 4b T6, plan 4b T8
+T9:   T8
+T10:  T4, T5, T7, T8, T9
+T11:  T9, T10
+T12a: T4
+T12b: T12a, approval(host change, §17 item 13)
+T13:  T1, T9, T10, T11   (its helper-mode tests also need T12b; without it they skip, and T13 closes with
+                          the fallback evidence and a note that the store-owner guarantee is still open)
 ```
 
 - **Plan 4b's beads that wait on plan 4c:** plan 4b Task 11b and Task 12 block on plan 4c Task 8's bead, and AU-6 (btq-bc7yd) closes only after it, as plan 4b says.
-- **The ADR items:** r16's §7 Managed installs work is closed when Tasks 2–11 and 13 have closed. Task 12's bead closes with the host evidence (Task 12, step 7).
+- **The ADR items:** r16's §7 Managed installs work closes when Tasks 2–11 and 13 have closed **and** either T12b has closed with the host evidence (Task 12, step 7) and T13's helper-mode tests have passed, or the operator has answered "no" to §17 item 13, recording the fallback as the accepted risk. Fallback-only completion does not close the store-owner guarantee.
 
 ## File map
 
 | File | Tasks | Responsibility |
 |---|---|---|
 | `src/heterodyne/harness/__init__.py` (new) | 2 | the package |
-| `src/heterodyne/harness/resources/store_core.py` (new, stdlib only) | 2, 3, 4 | the manifest, its encoding and digest; `statx`; the walk; the record and the fast verification; unpacking, checksums and git trees; `stage`, `publish`, `verify`, `remove`, `sweep`, `list`; the socket server and `main` |
-| `src/heterodyne/harness/store.py` (new) | 4 | `Store` protocol; `HelperStore` (the socket client); `LocalStore` (the fallback, E20); `open_store(settings)` |
-| `src/heterodyne/harness/settings.py` (new) | 5 | `HarnessSettings`: `store`, `fallback`, `owner`, `helper_socket`, `helper_copy`, `staging_hours`, `approval_workstream`; the recipes |
+| `src/heterodyne/harness/resources/store_core.py` (new, stdlib only) | 2, 3, 4 | the manifest, its encoding and digest; `statx`; the walk; the record and the fast verification; unpacking, checksums and git trees; final modes at stage; `stage`, `publish` (E20, E21), `recover`, `verify`, `remove`, `sweep`, `list_installs`; the socket server and `main` |
+| `src/heterodyne/harness/store.py` (new) | 4 | `Store` protocol; `HelperStore` (the socket client); `LocalStore` (the fallback); `open_store(settings)` |
+| `src/heterodyne/harness/settings.py` (new) | 5 | `HarnessSettings`: `store`, `fallback`, `owner`, `helper_socket`, `helper_copy`, `staging_hours`, `approval_workstream`, `recipes` |
 | `src/heterodyne/harness/selection.py` (new) | 5 | `harnesses.toml`: `Selection`, `InstallPin`, `load`, `write` (atomic, 0600) |
-| `src/heterodyne/harness/paths.py` (new) | 5 | `store_problems(store, logins, worktrees, state, service_uid, owner_uid)`: the location and path-component checks |
+| `src/heterodyne/harness/paths.py` (new) | 5 | `store_problems(store, *, login_dirs, worktrees, state_dir, service_uid, owner_uid, fallback)`: the location and path-component checks |
 | `src/heterodyne/harness/fetch.py` (new) | 3 | fetching artifacts and checksums; git fetch and archive; an injected opener |
-| `src/heterodyne/harness/verify.py` (new) | 8 | `VerifiedInstall`, `verify_pin(store, adapter, pin, declared, taint_dir)`, `REFUSALS` |
+| `src/heterodyne/harness/verify.py` (new) | 8 | `VerifiedInstall`, `verify_pin(store, adapter, pin, taint_dir) -> VerifiedInstall`, `REFUSALS`, `TAINTING`, `taint`, `tainted`, `clear_taint` |
+| `src/heterodyne/harness/digests.py` (new) | 10 | `ComputedDigest` (`of_manifest`, `of_fd`), `display`, `parse_display` (E14) |
 | `src/heterodyne/config/layers.py` | 5 | `[harnesses]` and `[harnesses.<adapter>]` as host-only tables |
 | `src/heterodyne/cli.py` (`config check`) | 5 | the store checks, the selection with its source, the fallback warning, `HELPER_DRIFT` |
 | `src/heterodyne/defaults/defaults.toml` | 5 | `[harnesses]` defaults; the `[adapters.*] binary` comment says "admind only" |
 | `scripts/check_install_agnostic.py` | 5 | allow exactly `/var/lib/heterodyne/harnesses` |
-| `src/heterodyne/agents/base.py` | 6, 8 | `Declared`, `InstallLayout`, `Presentation`; `Adapter.versions`, `.layout`, `.content_kinds`, `.owned_keys`, `.check_content`, `.present`; `Cli.install` and `.digest`; `locate`, `version_pin`, `tool_env`, `find_binary` and `install_root` removed |
-| `src/heterodyne/agents/codex.py`, `src/heterodyne/agents/claude_code.py` | 6 | the layouts, declared versions, presentation, owned keys, content checks, updater switches |
+| `src/heterodyne/agents/base.py` | 6, 8 | 6 adds `Declared`, `InstallLayout`, `Presentation`, `Adapter.versions`, `.install_layout`, `.content_kinds`, `.owned_keys`, `.check_content`, `.present`, and `Cli.install` and `.digest`; 8 removes `locate`, `version_pin`, `tool_env`, `find_binary` and `install_root` |
+| `src/heterodyne/agents/registry.py` | 6 | `login_names()`: the union of every adapter's `login_names` |
+| `src/heterodyne/agents/codex.py`, `src/heterodyne/agents/claude_code.py` | 6, 8 | the layouts, declared versions, presentation, owned keys, content checks, updater switches; 8 removes `locate` |
 | `src/heterodyne/wsd/launches.py`, `src/heterodyne/wsd/journal.py`, `src/heterodyne/wsd/upgrade.py` | 7, 10 | the pin fields, schema 3, the 2-to-3 upgrade; the `harness_installs` and `harness_events` tables |
-| `src/heterodyne/wsd/runtime.py` | 7, 9 | `LaunchSpec.install` and `.install_digest`, `INSTALL_UNPINNED`; `InstallTainted` in `Signal` |
+| `src/heterodyne/wsd/workstream.py`, `src/heterodyne/wsd/daemon.py` | 7, 10 | `Deps.selections` and its production wiring (7); the harness wiring (10) |
+| `src/heterodyne/wsd/runtime.py` | 7, 8 | `LaunchSpec.install` and `.install_digest`, `INSTALL_UNPINNED`, `NOT_SELECTED` (7); `InstallTainted` in `Signal` (8) |
 | `src/heterodyne/wsd/park.py` | 7, 10 | the pin in `_pin_and_dispatch`; the taint park |
-| `src/heterodyne/sandbox/runtime.py` | 8, 9 | `verified_cli`, `_cli`, the install bind; the taint watch and markers |
-| `src/heterodyne/sandbox/spec.py` | 8 | `AgentFacts.install_root`, the private non-recursive bind flag, `INSIDE_LOGIN_DIR` |
-| `src/heterodyne/sandbox/openshell.py` | 8 | the bind's `rprivate`/non-recursive options in the OpenShell policy |
+| `src/heterodyne/sandbox/runtime.py` | 8, 9 | `verified_cli`, `_cli`, the install bind, taint signals on a failed verification (8); the re-walk (9) |
+| `src/heterodyne/sandbox/spec.py` | 8 | `AgentFacts.cli_root` as the install root, `Bind`'s mount options, `INSIDE_LOGIN_DIR` |
+| `src/heterodyne/sandbox/openshell.py` | 8 | `driver_config`: the install bind's options, exactly as S9-8 proved them (E24) |
 | `src/heterodyne/sandbox/settings.py` | 5, 8 | 5: `harnesses`; 8: `binaries` removed |
-| `src/heterodyne/sandbox/build.py`, `src/heterodyne/sandbox/hostread.py` | 8 | the store wiring; plan 4b's migration |
-| `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/openshell_selftest.py`, `src/heterodyne/sandbox/resources/probes.py` | 8 | `ProbeContext.install`; the `managed-install` check |
-| `src/heterodyne/wsd/harness.py` (new) | 10 | `HarnessOps`: list, install, advance (publish on approval), verify, use, rollback, remove, prune, in use, taint |
+| `src/heterodyne/sandbox/build.py`, `src/heterodyne/sandbox/hostread.py` | 8 | the store wiring; plan 4b's migration, including `HostUsageReader`'s own lookup |
+| `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/openshell_selftest.py`, `src/heterodyne/sandbox/resources/probes.py` | 8 | `ProbeContext.install`; `env_allowed` on the declared version; the `managed-install` check |
+| `src/heterodyne/wsd/harness.py` (new) | 10 | `HarnessOps`: list, install, advance (the approval and publish), verify, use, rollback, remove, prune, in use, taint |
 | `src/heterodyne/wsd/alerts.py` (new) | 10 | the alert-file writer (admind's `alerts.py` contract) |
-| `src/heterodyne/wsd/ctl.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/daemon.py`, `src/heterodyne/wsd/scheduler.py` | 10 | the `harness` op, `wsctl harness`, the wiring, `advance` at pickup |
+| `src/heterodyne/wsd/btq.py` | 10 | `QueueLike.policy`, `QueueLike.ask_digest`, `approval_readout(bead)` (runs `approve-bead <bead> --json`) |
+| `src/heterodyne/wsd/ctl.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/scheduler.py` | 10 | the `harness` op, `wsctl harness`, `advance` at pickup |
 | `deploy/store-helper/` (new) | 12 | `heterodyne-store-helper.socket`, `heterodyne-store-helper@.service`, `setup-store.sh`, `README.md` |
-| `tests/harness_env.py` (new) | 2–4, 8 | fixture artifacts, `store_fixture(root, adapter)`, `selected_install(...)`: the store fixture plan 4b's migration uses |
-| `tests/test_harness_*.py` (new) | 2–5, 10 | per task, below |
+| `tests/harness_env.py` (new) | 2–4, 8 | fixture trees and artifacts, `sample_manifest()`, `store_fixture(root, adapter)`, `selected_install(...)`: the store fixture plan 4b's migration uses |
+| `tests/test_harness_*.py` (new) | 2–5, 8, 10 | per task, below |
+| `tests/fakes/fake_runtime.py`, `tests/fakes/fake_btq.py`, `tests/fakes/fake_approve_bead.py` (new), `tests/wsd_env.py` | 7–10 | the pin, the taint signal, the approval readout |
 | `tests/sandbox_env.py`, `tests/test_sandbox_*.py`, `tests/live/*.py` | 8 | the migration off `binaries` |
 | `docs/configuration.md`, `docs/wsd.md`, `docs/security-model.md`, `docs/install.md` | 11, 13 | the store, the commands, the fallback risk, the host setup |
 | `docs/spikes/s9-managed-installs.md` (new) | 1 | the spike's findings |
 
 ---
 
-## Task 1: spike — content and updaters on the pinned versions (research)
+## Task 1: spike — content, updaters and the backend's bind on the pinned versions (research)
 
-Settle what the help output couldn't. This task writes only `docs/spikes/s9-managed-installs.md`. It never opens a login file and never uses a real account: every run is offline or fails at authentication, which is enough to show what the CLI loads.
+Settle what the help output couldn't. This task writes only `docs/spikes/s9-managed-installs.md`. It never opens a login file and never uses a real account: every CLI run is offline or fails at authentication, which is enough to show what the CLI loads. The backend checks (S9-8, S9-9) run a disposable sandbox with no network and no login, and need the team lead's go for the Podman runs, under a `systemd-run --user --scope` as the host's Podman rule requires.
 
 **Files:**
 - Create: `docs/spikes/s9-managed-installs.md`
 
 **Interfaces:**
-- Produces: findings S9-1 to S9-7, each "confirmed", "refuted" or "changed", with the exact flag or key and the command that showed it. Task 6 implements what they say. A refuted item stops Task 6 for that content kind, and the kind is removed from the adapter's `content_kinds` until a later plan.
+- Produces: findings S9-1 to S9-9. Each finding is "confirmed", "refuted" or "changed", with the exact flag, key or field and the command that showed it.
+
+**Stop rules.** Every finding has a consumer. A result other than "confirmed" stops the consuming work as below. Nothing is dropped silently: each stop is recorded on the consuming task's bead, and work resumes only after a reviewed plan amendment.
+
+| Finding | Consumer | If refuted or changed |
+|---|---|---|
+| S9-1 (the Codex archive's layout) | Task 3 (`strip`, the layout fixtures), Task 6 (Codex's `InstallLayout`) | Task 3's Codex fixture and Task 6's Codex layout stop. An amendment defines the layout the archive actually has. Claude Code's work continues. |
+| S9-2, S9-3 (Claude plugins and MCP config under `--setting-sources=`) | Task 6 (Claude's `content_kinds` and presentation) | Task 6 stops for that content kind. An amendment either finds another presentation the CLI loads or removes the kind from `content_kinds`, with the ADR §7 consequence stated. |
+| S9-4 (Codex read-only skill binds) | Task 6 (Codex's skills presentation) | As for S9-2. |
+| S9-5, S9-6 (the updater switches) | Task 6 (`owned_keys`, the generated config), Task 13 | Task 6 stops for that adapter: §7 requires the updater off, so an adapter whose updater can't be turned off is not launched from a managed install. An amendment finds the working switch (for example, a further key, or blocking the update hosts in egress). |
+| S9-7 (where Codex writes its PATH aliases, and whether it runs them) | Task 6 (`prepare_home`), Task 13 (`test_an_updater_write_into_the_synthetic_home_is_never_run`) | Task 6 stops for Codex if the CLI runs a binary it wrote into its home. An amendment makes that path read-only or empty in the sandbox. |
+| S9-8 (the bind's options on OpenShell 0.1.2 and Podman) | Task 8 (`driver_config`, E24) | Task 8 stops. A backend change, or another way to get a non-recursive private bind, goes through its own design review before Task 8 resumes. |
+| S9-9 (the file identity seen inside the sandbox) | Task 8 (the probe's record) | Task 8's probe compares only the fields S9-9 confirmed are unchanged inside, and an amendment states what the dropped fields leave unproven. |
 
 - [ ] **Step 1: Set up a throwaway home and copies**
 
@@ -270,23 +343,25 @@ Copy the pinned releases into `$T/store` by listing and `cp -a` only `bin/`, `co
 
 | # | Check | How |
 |---|---|---|
-| S9-1 | The Codex package archive's tree equals the release directory layout (F3). | `gh release download rust-v0.160.0 -R openai/codex -p 'codex-package-x86_64-unknown-linux-musl.tar.gz' -p 'codex-package_SHA256SUMS'`, check the sum with `sha256sum -c --ignore-missing`, then `tar -tzf` and compare with the release directory's `find`. Record the archive's top-level prefix (the `strip` value). |
+| S9-1 | The Codex package archive's tree equals the release directory layout (F3). | `gh release download rust-v0.160.0 -R openai/codex -p 'codex-package-x86_64-unknown-linux-musl.tar.gz' -p 'codex-package_SHA256SUMS'`, check the sum with `sha256sum -c --ignore-missing`, then `tar -tzvf` and compare names, types and modes with the release directory's `find -printf '%y %m %P\n'`. Record the archive's top-level prefix (the `strip` value) and any member type other than a file, a directory or a link. |
 | S9-2 | Claude Code loads `--plugin-dir` under `--setting-sources=`. | A plugin with one command; `claude --setting-sources= --plugin-dir "$T/p" -p "/help" </dev/null` and the `--debug` output's plugin lines. A login failure after loading is fine. |
 | S9-3 | Claude Code's `--mcp-config` with `--strict-mcp-config` under `--setting-sources=`, and that `ENABLE_CLAUDEAI_MCP_SERVERS=false` still holds. | `claude mcp list` with the flags, in the temp home. |
 | S9-4 | Codex loads a skill bound read-only at `$CODEX_HOME/skills/<name>`, and still writes its `.system` skills beside it. | `chmod -R a-w` the skill directory, run `codex exec --skip-git-repo-check 'list your skills' </dev/null` (the login failure ends it), then list `$CODEX_HOME/skills`. |
 | S9-5 | Codex's updater keys silence the startup check. | Run with and without `-c check_for_update_on_startup=false -c features.in_app_updates=false` under `strace -f -e trace=connect` (no network allowed: `unshare -rn`), and compare the attempts. |
 | S9-6 | Claude Code's `DISABLE_AUTOUPDATER=1` and `"autoUpdates": false`. | The same comparison, with `--debug`. |
-| S9-7 | Where Codex puts its PATH aliases in a home outside `/tmp` (F10), and whether it runs them. | `CODEX_HOME=$HOME/.codex` under a home made with `mktemp -d -p "$XDG_RUNTIME_DIR"`; list what it creates. |
+| S9-7 | Where Codex puts its PATH aliases in a home outside `/tmp` (F10), and whether it runs them. | `CODEX_HOME=$HOME/.codex` under a home made with `mktemp -d -p "$XDG_RUNTIME_DIR"`; list what it creates, and `strace -f -e trace=execve` for any exec of a path under it. |
+| S9-8 | Which mount fields OpenShell 0.1.2's `--driver-config-json` accepts, what it passes to Podman, and whether the result is a read-only, non-recursive, `rprivate` bind. | Read OpenShell's driver schema (`openshell --help`, its docs and, if needed, its source at the pinned version) for the mount object's fields. Then create a disposable sandbox with no network whose only extra mount is a test tree with a submount inside it (a `tmpfs` mounted on a subdirectory, made in a user and mount namespace), once for each candidate field (`bind-propagation=rprivate`, `bind-nonrecursive=true` or the driver's equivalent). Inside, read `/proc/self/mountinfo`: the mount must be `ro`, carry no `shared:` or `master:` tag, and have no mount below it. Then add a mount under the source on the host and check that it doesn't appear inside. Record the accepted field names exactly. |
+| S9-9 | Which identity fields of a bound file are the same inside the sandbox: `st_dev`, `st_ino`, `st_mode`, `st_nlink`, `st_size`, `st_ctime_ns`, and a link's target. | In the S9-8 sandbox, `stat` the tree's root and each entry inside and on the host, and compare field by field. |
 
 - [ ] **Step 3: Write the findings**
 
-Write `docs/spikes/s9-managed-installs.md` with one section per check: the command (with temp paths shown as `$T`), what it showed, and the verdict. No checksums, no tokens, no home paths.
+Write `docs/spikes/s9-managed-installs.md` with one section per check: the command (with temp paths shown as `$T`), what it showed, the verdict, and the consumer's stop rule if it applies. No checksums, no tokens, no home paths.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add docs/spikes/s9-managed-installs.md
-git commit -m "plan4c T1: S9 spike, content and updaters on the pinned CLIs"
+git commit -m "plan4c T1: S9 spike, content, updaters and the backend's bind on the pinned versions"
 ```
 
 ## Task 2: the manifest, its digest and the walk
@@ -302,15 +377,15 @@ The core every other task stands on, in `store_core.py`.
 - Produces (all in `store_core`):
   - `MAX_ENTRIES = 200_000`, `MAX_DEPTH = 64`, `MAX_LINK_HOPS = 40`.
   - `Entry(path: str, kind: Literal["dir", "file", "link"], mode: int, size: int, nlink: int, sha256: str | None, target: str | None)`, a frozen dataclass. `path` is relative, `/`-separated, never empty (the root isn't an entry).
-  - `Source(part: str, kind: Literal["release", "npm", "git"], name: str, ref: str, checksum: str, origin: str, signed: bool)`.
+  - `Source(part: str, kind: Literal["release", "npm", "git"], name: str, ref: str, checksum: str, origin: str, signature_available: bool, signature_verified: bool)` (E5; `signature_verified` is always `False` in v1, and `parse` refuses `True` until a plan verifies signatures).
   - `Manifest(adapter: str, version: str, target: str, entry_point: str, sources: tuple[Source, ...], entries: tuple[Entry, ...], format: int = 1)`.
   - `canonical(m: Manifest) -> bytes`: UTF-8 JSON, sorted keys, `separators=(",", ":")`, `ensure_ascii=False`, entries sorted by their path's UTF-8 bytes; and `digest(m) -> str`, `"sha256:" + hexdigest`. `parse(data: bytes) -> Manifest` refuses anything `canonical` would not produce (`MANIFEST_MALFORMED`).
   - `Stat(kind, mode, size, nlink, dev, ino, ctime_ns, mnt_id)` and `statx_at(dirfd: int, name: str) -> Stat`.
   - `walk(root_fd: int) -> Iterator[tuple[str, Stat, str | None]]`: depth-first, sorted, following no link, bounded; refuses with `WalkRefused(<constant>)`.
   - `Record = dict[str, tuple[int, int, int]]` (path to dev, ino, ctime_ns) plus the root's own triple under `""`; `record(root_fd) -> Record`.
-  - `check_fast(root_fd: int, m: Manifest, rec: Record) -> None`: the walk equals the manifest (types, modes, sizes, link counts, link targets) and the record, and every entry's `mnt_id` equals the root's. Raises `Mismatch(<constant>)`.
+  - `check_fast(root_fd: int, m: Manifest, rec: Record) -> None`: the root is a directory with mode 0555 whose `(dev, ino, ctime_ns)` equals `rec[""]`; the walk equals the manifest (types, modes, sizes, link counts, link targets) and the record; and every entry's `mnt_id` equals the root's. Raises `Mismatch(<constant>)`.
   - `rehash(root_fd: int, m: Manifest) -> None`: every regular file's sha256, read by fd; raises `Mismatch(CONTENT_CHANGED)`.
-  - Refusal constants: `TOO_MANY_ENTRIES`, `TOO_DEEP`, `BAD_TYPE`, `HARD_LINK`, `BAD_LINK`, `NO_MOUNT_ID`, `CROSSES_MOUNT`, `ENTRY_CHANGED`, `ENTRY_ADDED`, `ENTRY_MISSING`, `CONTENT_CHANGED`, `MANIFEST_MALFORMED`.
+  - Refusal constants: `TOO_MANY_ENTRIES`, `TOO_DEEP`, `BAD_TYPE`, `HARD_LINK`, `BAD_LINK`, `NO_MOUNT_ID`, `CROSSES_MOUNT`, `ENTRY_CHANGED`, `ENTRY_ADDED`, `ENTRY_MISSING`, `CONTENT_CHANGED`, `MANIFEST_MALFORMED`. `WalkRefused` and `Mismatch` carry the constant as `.constant`, and their message is the constant alone.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -321,6 +396,12 @@ The core every other task stands on, in `store_core.py`.
 ```python
 """Plan 4c Task 2: the manifest's canonical encoding and digest (r16 §7 Authentication)."""
 
+import dataclasses
+import hashlib
+import json
+from collections.abc import Callable
+
+import pytest
 from hypothesis import given, strategies as st
 
 from heterodyne.harness.resources import store_core as sc
@@ -329,21 +410,75 @@ from tests.harness_env import sample_manifest
 
 def test_the_digest_is_the_sha256_of_the_canonical_encoding() -> None:
     m = sample_manifest()
-    import hashlib
     assert sc.digest(m) == "sha256:" + hashlib.sha256(sc.canonical(m)).hexdigest()
 
 
 @given(st.permutations(range(5)))
 def test_entry_order_does_not_change_the_digest(order: list[int]) -> None:
     m = sample_manifest()
-    shuffled = m.__class__(**{**m.__dict__, "entries": tuple(m.entries[i] for i in order)})
+    shuffled = dataclasses.replace(m, entries=tuple(m.entries[i] for i in order))
     assert sc.digest(shuffled) == sc.digest(m)
 
 
-def test_any_field_change_changes_the_digest() -> None: ...           # every Entry and Manifest field
-def test_parse_round_trips_and_refuses_a_non_canonical_encoding() -> None: ...   # MANIFEST_MALFORMED
-def test_non_ascii_paths_are_encoded_as_utf8_bytes_and_sorted_by_them() -> None: ...
+ENTRY_CHANGES = {"path": "cli/other", "kind": "link", "mode": 0o555, "size": 7, "nlink": 2,
+                 "sha256": "0" * 8, "target": "elsewhere"}
+MANIFEST_CHANGES = {"adapter": "other", "version": "9.9.9", "target": "other-target",
+                    "entry_point": "cli/bin/other", "format": 2}
+SOURCE_CHANGES = {"part": "defaults", "kind": "git", "name": "other", "ref": "other", "checksum": "sha256:1",
+                  "origin": "other", "signature_available": True}
+
+
+@pytest.mark.parametrize(("field", "value"), sorted(ENTRY_CHANGES.items()))
+def test_any_entry_field_change_changes_the_digest(field: str, value: object) -> None:
+    m = sample_manifest()
+    changed = dataclasses.replace(m, entries=(dataclasses.replace(m.entries[0], **{field: value}),
+                                              *m.entries[1:]))
+    assert sc.digest(changed) != sc.digest(m)
+
+
+@pytest.mark.parametrize(("field", "value"), sorted(MANIFEST_CHANGES.items()))
+def test_any_manifest_field_change_changes_the_digest(field: str, value: object) -> None:
+    m = sample_manifest()
+    assert sc.digest(dataclasses.replace(m, **{field: value})) != sc.digest(m)
+
+
+@pytest.mark.parametrize(("field", "value"), sorted(SOURCE_CHANGES.items()))
+def test_any_source_field_change_changes_the_digest(field: str, value: object) -> None:
+    m = sample_manifest()
+    changed = dataclasses.replace(m, sources=(dataclasses.replace(m.sources[0], **{field: value}),
+                                              *m.sources[1:]))
+    assert sc.digest(changed) != sc.digest(m)
+
+
+def test_parse_round_trips_the_canonical_encoding() -> None:
+    m = sample_manifest()
+    assert sc.parse(sc.canonical(m)) == m
+
+
+@pytest.mark.parametrize("mangle", [
+    lambda b: b.replace(b",", b", ", 1),                        # a separator canonical() never writes
+    lambda b: b + b"\n",                                        # a trailing newline
+    lambda b: json.dumps({**json.loads(b), "extra": 1}, sort_keys=True, separators=(",", ":")).encode(),
+    lambda b: json.dumps({**json.loads(b), "entries": json.loads(b)["entries"][::-1]},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(),
+    lambda b: b.replace(b'"signature_verified":false', b'"signature_verified":true'),
+])
+def test_parse_refuses_anything_canonical_would_not_produce(mangle: Callable[[bytes], bytes]) -> None:
+    data = mangle(sc.canonical(sample_manifest()))
+    with pytest.raises(sc.Mismatch) as e:
+        sc.parse(data)
+    assert e.value.constant == sc.MANIFEST_MALFORMED
+
+
+def test_non_ascii_paths_are_utf8_and_sorted_by_their_bytes() -> None:
+    names = ["cli/z", "cli/\u00e9", "cli/\U0001f600", "cli/A"]   # é is 0xC3 0xA9; the emoji is 0xF0 ...
+    m = sample_manifest(paths=names)
+    data = sc.canonical(m)
+    assert "\u00e9".encode() in data and b"\\u00e9" not in data   # raw UTF-8, never an escape
+    assert [e.path for e in sc.parse(data).entries] == sorted(names, key=lambda n: n.encode())
 ```
+
+`sample_manifest(paths=None)` in `tests/harness_env.py` returns a fixed manifest with two sources and four entries (a directory, a file, an executable, a link), or the given paths as files.
 
 `tests/test_harness_walk.py` covers, each against its constant:
 - `test_a_tree_walks_to_its_manifest_and_the_fast_check_passes`;
@@ -427,11 +562,11 @@ git commit -m "plan4c T2: the install manifest, its digest and the fd walk"
 - Test: `tests/test_harness_stage.py`, `tests/test_harness_fetch.py`, `tests/test_harness_gittree.py` (all new)
 
 **Interfaces:**
-- Consumes: Task 2's walk and manifest.
+- Consumes: Task 2's walk and manifest; Task 1's S9-1 (the Codex archive's layout and its `strip` prefix, which the Codex fixture copies exactly).
 - Produces:
   - `store_core.Layout(version_file: str, version_field: str, target_field: str | None, entry_field: str | None, entry_point: str | None)`: where the version, target and entry point are read, under `cli/`. Exactly one of `entry_field` and `entry_point` is set.
-  - `store_core.Part(part: str, format: Literal["tar.gz", "tgz", "tar", "file"], strip: str, checksum: str, origin: str, signed: bool, source: Source, git_commit: str | None)`. `part` is `cli`, `content/<kind>/<name>` or `defaults`.
-  - `store_core.stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds: Sequence[int], login_names: frozenset[str], *, verity: bool) -> Staged`, where `Staged(id: str, digest: str, entries: int, size: int)`. It writes `<store>/.staging/<id>/` and `<store>/.staged/<id>.json`. A git part takes two fds, the archive and the commit object.
+  - `store_core.Part(part: str, format: Literal["tar.gz", "tgz", "tar", "file"], strip: str, checksum: str, origin: str, signature_available: bool, source: Source, git_commit: str | None)`. `part` is `cli`, `content/<kind>/<name>` or `defaults`.
+  - `store_core.stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds: Sequence[int], login_names: frozenset[str], *, verity: bool) -> Staged`, where `Staged(id: str, digest: str, entries: int, size: int)`. It writes `<store>/.staging/<id>/` and `<store>/.staged/<id>.json`. Before it walks and hashes, it sets every entry's final mode and the root's (E20: directories and the root 0555; a file 0555 if the member had any execute bit, else 0444), so the staged manifest holds the modes the install will have. A git part takes two fds, the archive and the commit object.
   - `store_core.verify_checksum(fd, checksum) -> None`: `sha256:<hex>` or `sha512-<base64>` (SRI); `CHECKSUM_MISMATCH`.
   - `store_core.git_tree_id(members) -> str` and `store_core.check_git(archive_fd, commit_fd, commit_id) -> None`; `GIT_MISMATCH`, `GIT_SUBMODULE`.
   - `store_core.enable_verity(fd) -> bool`: `FS_IOC_ENABLE_VERITY` with sha256 and 4096-byte blocks; `False` on `EOPNOTSUPP` or `ENOTTY`, any other error raises.
@@ -448,7 +583,9 @@ git commit -m "plan4c T2: the install manifest, its digest and the fd walk"
 - `test_tar_hard_links_devices_fifos_and_other_member_types_are_refused` (`BAD_MEMBER`);
 - `test_a_member_named_as_any_login_file_is_refused` (`LOGIN_NAME`, for each of `auth.json` and `.credentials.json`, at any depth);
 - `test_a_checksum_mismatch_refuses_and_leaves_no_staging` (`CHECKSUM_MISMATCH`; `.staging` and `.staged` are empty afterwards, by `os.path.lexists`);
-- `test_the_staged_manifest_is_readable_by_others_and_the_tree_is_not` (modes 0444 and 0700);
+- `test_the_staged_manifest_is_readable_by_others_and_the_staging_dir_is_not` (`.staged/<id>.json` 0444, `.staging` 0700);
+- `test_staged_modes_are_the_final_modes_and_the_manifest_records_them` (directories and the root 0555, a member with any execute bit 0555, others 0444; `check_fast` on the staged tree against the staged manifest passes once the tree is recorded);
+- `test_the_codex_fixture_has_the_layout_s9_1_found` (the strip prefix and member list S9-1 recorded);
 - `test_bounds_apply_at_stage` (as in Task 2, through `stage`);
 - `test_no_package_script_runs` (a `package.json` with a `postinstall` that would create a file; the file never appears);
 - `test_verity_is_enabled_where_supported_and_recorded_off_where_not` (an injected ioctl).
@@ -468,7 +605,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-`stage` reads each part's fd into a staging-private copy first (`os.sendfile` into `<id>.src/<n>`), checks the checksum on that copy, then unpacks from it, so the bytes checked are the bytes unpacked. Tar members are read with `tarfile.open(fileobj=..., mode="r:*")` and written with `os.open(..., O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, dir_fd=...)`; `tarfile.extract` is never used. A member path is checked component by component before any write. `strip` must be a prefix of every member; a member outside it refuses with `BAD_PART`. After unpacking, `stage` reads the version from `layout`, walks the tree (Task 2), hashes every file, writes the manifest to `.staged/<id>.json` by `O_EXCL` then `fsync`, and returns. Any exception removes `.staging/<id>` and `.staged/<id>.json` before it propagates.
+`stage` reads each part's fd into a staging-private copy first (`os.sendfile` into `<id>.src/<n>`), checks the checksum on that copy, then unpacks from it, so the bytes checked are the bytes unpacked. Tar members are read with `tarfile.open(fileobj=..., mode="r:*")` and written with `os.open(..., O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, dir_fd=...)`; `tarfile.extract` is never used. A member path is checked component by component before any write. `strip` must be a prefix of every member; a member outside it refuses with `BAD_PART`. After unpacking, `stage` reads the version from `layout`, sets the final modes bottom-up (files, then directories, then the root), walks the tree (Task 2), hashes every file, writes the manifest to `.staged/<id>.json` by `O_EXCL` then `fsync`, and returns. Any exception removes `.staging/<id>` and `.staged/<id>.json` before it propagates.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -485,7 +622,7 @@ git add src/heterodyne/harness tests/test_harness_stage.py tests/test_harness_gi
 git commit -m "plan4c T3: sources, checksums, git trees and stage"
 ```
 
-## Task 4: `publish`, `verify`, `remove`, the helper socket and the store clients
+## Task 4: `publish`, recovery, `verify`, `remove`, the helper socket and the store clients
 
 **Files:**
 - Modify: `src/heterodyne/harness/resources/store_core.py`
@@ -495,11 +632,14 @@ git commit -m "plan4c T3: sources, checksums, git trees and stage"
 **Interfaces:**
 - Consumes: Task 3's `stage`.
 - Produces:
-  - `store_core.publish(store, staging_id, approved_digest, *, owner_mode: bool) -> str` (the install name `<version>-<12 hex>`): refuses `DIGEST_MISMATCH` unless the staged manifest's digest equals `approved_digest`; sets modes (dirs 0555, files 0444 or 0555); records; renames `.staging/<id>` to `<adapter>/<install>`; writes `.meta/<install>.manifest.json` and `.record.json`; removes `.staged/<id>.json`. With `owner_mode=False` it follows E20 and can refuse `CHANGED_DURING_PUBLISH`. A name that exists refuses `ALREADY_PUBLISHED`.
+  - `store_core.publish(store, staging_id, approved_digest) -> str` (the install name `<version>-<12 hex>`): refuses `DIGEST_MISMATCH` unless the staged manifest's digest equals `approved_digest`; then E20's steps 1–7 inside E21's phases P1–P5, in both helper and fallback mode. It changes no mode. It can refuse `CHANGED_DURING_PUBLISH`. Called again with the same staging ID, it finishes or reports that publication (idempotent). A different staging ID whose install name exists refuses `NAME_CONFLICT`.
+  - `store_core.recover(store) -> list[tuple[str, str]]` (staging ID, outcome): E21's recovery for every intent, run at the start of every request. Outcomes: `published`, `restarted`, `failed:<constant>`. `store_core.outcome(store, staging_id) -> str | None` reads `.failed/<id>.json` or the published state, for `wsd`'s own recovery.
+  - `store_core.state(store, adapter, install) -> Literal["published", "publishing", "broken"]`: E21's definition of published.
   - `store_core.verify(store, adapter, install) -> None`: rehash plus fast check; on a rehash that matches with only `dev` values changed, rewrites the record (E18) and returns.
   - `store_core.remove(store, adapter, install) -> None`: makes the tree writable by its owner, removes it bottom-up by fd, then the `.meta` files.
   - `store_core.sweep(store, now, hours) -> int`: removes staging older than `hours`.
-  - `store_core.list_installs(store) -> list[dict[str, object]]`: name, adapter, version, digest, entries, size, from `.meta`.
+  - `store_core.list_installs(store) -> list[dict[str, object]]`: name, adapter, version, digest, entries, size and `state`, from `.meta` and the intents.
+  - New constants: `DIGEST_MISMATCH`, `CHANGED_DURING_PUBLISH`, `NAME_CONFLICT`, `RECOVERY_FAILED`, `PEER_REFUSED`, `HELPER_FAILED`, `REQUEST_TOO_LARGE`, `TOO_MANY_FDS`.
   - `store_core.serve(conn: socket.socket, config: HelperConfig, clock) -> None`: one connection; `SO_PEERCRED` first (`PEER_REFUSED`); requests as E3. `store_core.main(argv)`: `serve` (`sys.stdin` is the accepted socket under `Accept=yes`) reading `/etc/heterodyne/store-helper.json`, or the path in `--config` for tests.
   - `harness.store.Store` protocol: `stage(adapter, layout, parts, fds, login_names) -> Staged`, `publish(staging_id, digest) -> str`, `verify(adapter, install) -> None`, `remove(adapter, install) -> None`, `list() -> list[InstallInfo]`, `staged_manifest(staging_id) -> Manifest`, `root: Path`, `fallback: bool`.
   - `HelperStore(socket_path, store_root, timeout)` and `LocalStore(root)`; `open_store(h: HarnessSettings) -> Store`. A helper error comes back as `StoreRefused(<constant>)` with the helper's constant, never its text.
@@ -507,14 +647,21 @@ git commit -m "plan4c T3: sources, checksums, git trees and stage"
 - [ ] **Step 1: Write the failing tests**
 
 `tests/test_harness_publish.py`:
-- `test_publish_with_the_staged_digest_names_the_install_and_sets_its_modes`;
+- `test_publish_with_the_staged_digest_names_the_install_and_changes_no_mode`;
+- `test_the_published_tree_passes_check_fast_at_once_and_its_manifest_digest_is_the_approved_one`;
 - `test_publish_with_another_digest_is_refused_and_staging_is_kept` (`DIGEST_MISMATCH`);
 - `test_the_record_matches_a_fresh_walk_and_lies_outside_the_install`;
-- `test_fallback_publish_refuses_a_same_size_rewrite_during_the_rehash` (`CHANGED_DURING_PUBLISH`, by a hook that rewrites a file between the first record and the rehash);
+- `test_a_same_size_rewrite_at_any_point_of_publish_is_refused`, parametrized over the gaps of E20: after `R1` and before the rehash, after a file has been rehashed, between `R2` and the rename, and between the rename and the final `check_fast`. A hook in `publish` rewrites one file in place with the same size at that point. Each case refuses `CHANGED_DURING_PUBLISH` (or `CONTENT_CHANGED` for the first gap), and no install is published. This is the negative control cycle 1 reproduced against the old ordering;
+- `test_a_chmod_and_restore_during_publish_is_refused` (a hook that does `chmod` then restores the mode: the change time moved);
+- `test_only_the_roots_change_time_may_move_at_the_rename` (an injected root `statx` with another `ino` refuses);
+- `test_a_crash_after_each_phase_recovers_to_one_published_install_or_none`, parametrized over a crash (an injected `os._exit` in a child process) after P1, after the rename, after P3, after P4, and part-way through P5. Then `recover` runs, and `publish(id, digest)` is called again: the install is published exactly once and passes `check_fast`, or (for a tree changed before recovery) it is gone with `.failed/<id>.json` holding `RECOVERY_FAILED`, and `state` never says `published` for a tree whose meta is incomplete;
+- `test_an_install_whose_meta_disagrees_with_its_intent_is_broken_never_published`;
+- `test_a_conflicting_install_name_is_refused` (`NAME_CONFLICT`; the existing install is untouched);
+- `test_every_phase_fsyncs_the_file_and_its_directory` (an injected `os.fsync` records the order);
 - `test_verify_finds_a_rewrite_and_a_matching_rehash_after_a_device_change_rerecords` (E18, with an injected `Stat` for the device);
 - `test_remove_leaves_nothing_and_list_no_longer_shows_it`;
 - `test_sweep_removes_only_staging_older_than_its_hours` (injected clock);
-- `test_publishing_twice_is_refused` (`ALREADY_PUBLISHED`).
+- `test_publishing_twice_with_the_same_staging_id_returns_the_same_install` (idempotent).
 
 `tests/test_harness_helper.py`, over `socket.socketpair()` with `serve` in a thread and an injected peer check:
 - `test_a_peer_with_another_uid_gets_peer_refused_and_nothing_is_read` (the injected `SO_PEERCRED` returns another uid; no fd is received);
@@ -523,7 +670,7 @@ git commit -m "plan4c T3: sources, checksums, git trees and stage"
 - `test_the_helper_never_executes_from_an_artifact` (an artifact with an executable named like a helper tool; `serve` is run under an audit hook, `sys.addaudithook`, that fails on `subprocess.Popen` and `os.exec*`);
 - `test_main_reads_its_config_and_refuses_a_store_outside_it`.
 
-`tests/test_harness_store.py`: `HelperStore` against a `serve` thread on a Unix socket in `short_dir()`, and `LocalStore` against a temp store, running one shared contract suite (`@pytest.mark.parametrize("kind", ["helper", "local"])`): stage, staged manifest, publish, list, verify, remove.
+`tests/test_harness_store.py`: `HelperStore` against a `serve` thread on a Unix socket in `short_dir()`, and `LocalStore` against a temp store, running one shared contract suite (`@pytest.mark.parametrize("kind", ["helper", "local"])`): stage, staged manifest, publish, recover, list, verify, remove.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -545,7 +692,7 @@ Then pyright and ruff.
 
 ```bash
 git add src/heterodyne/harness tests/test_harness_publish.py tests/test_harness_helper.py tests/test_harness_store.py
-git commit -m "plan4c T4: publish, verify, remove, the helper socket and the store clients"
+git commit -m "plan4c T4: publish with durable phases and recovery, verify, remove, the helper socket, the stores"
 ```
 
 ## Task 5: configuration, the selection file and the store's location checks
@@ -596,19 +743,21 @@ git commit -m "plan4c T5: [harnesses] config, harnesses.toml and the store locat
 ## Task 6: the adapters' layouts, versions, content and updaters
 
 **Files:**
-- Modify: `src/heterodyne/agents/base.py`, `src/heterodyne/agents/codex.py`, `src/heterodyne/agents/claude_code.py`, `src/heterodyne/sandbox/openshell_selftest.py` (`env_allowed`)
+- Modify: `src/heterodyne/agents/base.py`, `src/heterodyne/agents/registry.py`, `src/heterodyne/agents/codex.py`, `src/heterodyne/agents/claude_code.py`
 - Test: `tests/test_agents_adapters.py`, `tests/test_agents_content.py` (new)
 
+This task only adds (E23). `locate`, `version_pin`, `tool_env`, `find_binary`, `install_root` and `prepare_home`'s current signature stay, and every existing caller and test is unchanged; Task 8 moves the callers and removes them.
+
 **Interfaces:**
-- Consumes: `store_core.Layout`, `store_core.Manifest`; Task 1's findings.
+- Consumes: `store_core.Layout`, `store_core.Manifest` (Tasks 2 and 3); Task 1's S9-1 to S9-7. A finding that is not "confirmed" stops this task as Task 1's stop rules say.
 - Produces, in `agents/base.py`:
   - `Declared(tool_env: frozenset[str], presentation: frozenset[str])`.
   - `InstallLayout(artifact: Literal["github-release", "npm"], locator: str, layout: store_core.Layout, strip: str)`: for Codex `github-release`, `openai/codex`, the asset `codex-package-<target>.tar.gz` and the sums asset; for Claude Code `npm`, `@anthropic-ai/claude-code-<target>`.
   - `Presentation(argv: tuple[str, ...], binds: tuple[Bind, ...], env: Mapping[str, str])`.
-  - `Adapter` gains `versions: Mapping[str, Declared]`, `install_layout: InstallLayout`, `content_kinds: frozenset[str]`, `owned_keys: frozenset[str]`, `check_content(kind: str, tree: Path) -> None` (raises `AdapterError(OWNS_KEY)` or `AdapterError(UNKNOWN_KIND)`), `present(layout: SessionLayout, install: Path, manifest: store_core.Manifest) -> Presentation`. `prepare_home` takes `install: Path` and merges `defaults/` under the launcher's keys.
+  - `Adapter` gains `versions: Mapping[str, Declared]`, `install_layout: InstallLayout`, `content_kinds: frozenset[str]`, `owned_keys: frozenset[str]`, `check_content(kind: str, tree: Path) -> None` (raises `AdapterError(OWNS_KEY)` or `AdapterError(UNKNOWN_KIND)`), `present(layout: SessionLayout, install: Path, manifest: store_core.Manifest) -> Presentation`, and `prepare_install_home(layout, worktree, install: Path)`, which merges `defaults/` under the launcher's keys. The existing `prepare_home(layout, worktree)` keeps its signature and gains only the updater switches (E9).
   - `Cli(binary, root, version, install: str = "", digest: str = "")`.
-  - Removed: `version_pin`, `tool_env`, `locate`, `find_binary`, `install_root`.
-- `openshell_selftest.env_allowed(adapter, path, version)` reads `adapter.versions[version].tool_env`.
+  - Kept until Task 8: `version_pin`, `tool_env`, `locate`, `find_binary`, `install_root`. A test asserts `adapter.tool_env == adapter.versions[adapter.version_pin].tool_env`, so the two can't drift before Task 8.
+- `agents.registry.login_names() -> frozenset[str]`: the union of every adapter's `login_names`, which `wsd` sends to `stage` (Task 10).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -619,7 +768,8 @@ git commit -m "plan4c T5: [harnesses] config, harnesses.toml and the store locat
 - `test_content_that_sets_an_owned_key_is_refused` (`OWNS_KEY`: a Claude plugin with `hooks/`, a `hooks` key, a `settings.json`, an MCP server named like the launcher's; a Codex MCP file with a non-server key);
 - `test_an_undeclared_content_kind_is_refused` (`UNKNOWN_KIND`);
 - `test_presentation_uses_only_paths_inside_the_install` (every `--plugin-dir`, `--mcp-config` source and bind source is under the install root, and every bind is read-only);
-- `test_the_login_names_union_is_what_wsd_sends_to_stage` (`harness.login_names()` equals the union of `ADAPTERS`' `login_names`).
+- `test_registry_login_names_is_the_union_of_the_adapters` (`registry.login_names()`);
+- `test_the_old_lookup_still_works_and_agrees_with_the_declared_versions` (E23).
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -630,19 +780,19 @@ Expected: FAIL.
 
 Codex's `prepare_home` keeps plan 4's text and adds `check_for_update_on_startup = false` before the first table and `in_app_updates = false` under `[features]`; MCP servers from content go under `[mcp_servers.<name>]` before the launcher's own tables, and a server name the launcher uses refuses. Claude Code's `interactive_argv` appends the presentation's argv after plan 4's flags, so `--settings` (the launcher's) stays last among settings sources.
 
-Keep `locate` callers compiling until Task 8 by leaving `SandboxRuntime._cli` on a private shim, `_legacy_locate`, that Task 8 deletes. The shim has no tests of its own.
+No caller changes in this task.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `timeout 600 uv run pytest tests/test_agents_adapters.py tests/test_agents_content.py tests/test_sandbox_*.py -q`
-Expected: PASS.
+Run: `timeout 600 uv run pytest tests/test_agents_adapters.py tests/test_agents_content.py tests/test_sandbox_*.py -q`, then the full suite (`timeout 3600 uv run pytest -q`).
+Expected: PASS, with every existing test unchanged.
 
 Then pyright and ruff.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/heterodyne/agents src/heterodyne/sandbox/openshell_selftest.py src/heterodyne/sandbox/runtime.py \
+git add src/heterodyne/agents \
         tests/test_agents_adapters.py tests/test_agents_content.py
 git commit -m "plan4c T6: adapter layouts, declared versions, content presentation and updaters off"
 ```
@@ -650,46 +800,49 @@ git commit -m "plan4c T6: adapter layouts, declared versions, content presentati
 ## Task 7: launch entries pin their install (D2)
 
 **Files:**
-- Modify: `src/heterodyne/wsd/launches.py`, `src/heterodyne/wsd/journal.py`, `src/heterodyne/wsd/upgrade.py`, `src/heterodyne/wsd/park.py` (`_pin_and_dispatch`), `src/heterodyne/wsd/runtime.py` (`LaunchSpec`, `INSTALL_UNPINNED`), `src/heterodyne/wsd/workstream.py` (`Deps.selections`)
-- Test: `tests/test_wsd_launches.py`, `tests/test_wsd_journal.py`, `tests/test_wsd_upgrade.py`, `tests/test_wsd_dispatch.py`, `tests/wsd_env.py`
+- Modify: `src/heterodyne/wsd/launches.py`, `src/heterodyne/wsd/journal.py`, `src/heterodyne/wsd/upgrade.py`, `src/heterodyne/wsd/park.py` (`_pin_and_dispatch`), `src/heterodyne/wsd/runtime.py` (`LaunchSpec`, `INSTALL_UNPINNED`, `NOT_SELECTED`), `src/heterodyne/wsd/workstream.py` (`Deps.selections`), `src/heterodyne/wsd/daemon.py` (its production wiring)
+- Test: `tests/test_wsd_launches.py`, `tests/test_wsd_journal.py`, `tests/test_wsd_upgrade.py`, `tests/test_wsd_dispatch.py`, `tests/test_wsd_daemon.py`, `tests/wsd_env.py`
 
 **Interfaces:**
-- Consumes: `harness.selection.load` (Task 5) through an injected `Deps.selections: Callable[[str], InstallPin | None]` (adapter name to pin). Task 7 can merge before Task 5 with a fake; production wiring lands in Task 10.
+- Consumes: `harness.selection.load` and `InstallPin` (Task 5).
 - Produces:
+  - `Deps.selections: Callable[[str], InstallPin | None]` (adapter name to the current pin), defaulting to "no selection" in tests. `daemon.py` wires it in production to `selection.load(config_dir)`, read again on each call, so a `use` applies to the next entry without a restart.
   - `LaunchEntry.install: str = ""` and `.install_digest: str = ""` (not set-once: set when journaled, never changed).
   - Journal schema `"3"`: `launches.install TEXT NOT NULL DEFAULT ''`, `launches.install_digest TEXT NOT NULL DEFAULT ''`. `upgrade.run_2_to_3` adds the columns in one transaction, like the 1-to-2 upgrade.
   - `LaunchSpec.install: str = ""`, `.install_digest: str = ""`.
-  - `wsd.runtime.INSTALL_UNPINNED`: the `LaunchFailed` text for an empty pin, and `NOT_SELECTED`: the guard's escalation detail when the profile's adapter has no selection (the bead escalates `CONFIG_INVALID`, nothing is journaled).
+  - `wsd.runtime.INSTALL_UNPINNED` (the `LaunchFailed` text for an empty pin) and `NOT_SELECTED` (the guard's escalation detail when the profile's adapter has no selection). This task defines both; neither refuses anything until Task 8 (E23).
+- Production behaviour after this task: the guard journals the current pin when the adapter has a selection, and an empty pin otherwise. The runtime ignores the pin, so launches are unchanged.
 
 - [ ] **Step 1: Write the failing tests**
 
 - `test_the_guard_journals_the_selected_pin_with_the_entry` (one transaction: a checkpoint crash after it finds both);
-- `test_a_replay_after_a_crash_uses_the_journaled_pin_not_the_current_selection` (change the selection between the entry checkpoint and the replay);
+- `test_a_replay_after_a_crash_uses_the_journaled_pin_not_the_current_selection` (change the selection between the entry checkpoint and the replay; the dispatched `LaunchSpec` carries the journaled pin);
 - `test_a_selection_change_applies_to_the_next_entry_only`;
 - `test_a_resume_takes_the_selection_at_its_own_launch`;
-- `test_no_selection_escalates_config_invalid_and_journals_nothing` (`NOT_SELECTED`);
-- `test_an_entry_from_schema_2_dispatches_as_install_unpinned` and the next generation pins;
+- `test_no_selection_journals_an_empty_pin_and_dispatches_unchanged` (Task 8 turns this into the `NOT_SELECTED` escalation);
+- `test_the_daemon_wires_selections_to_harnesses_toml_and_rereads_it` (`test_wsd_daemon.py`, with a temp config dir);
 - `test_the_upgrade_from_2_to_3_keeps_every_row_and_rolls_back_on_failure`;
 - `test_the_bead_copy_carries_the_pin_and_rebuilds_with_it`.
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `timeout 600 uv run pytest tests/test_wsd_launches.py tests/test_wsd_journal.py tests/test_wsd_upgrade.py tests/test_wsd_dispatch.py -q`
+Run: `timeout 600 uv run pytest tests/test_wsd_launches.py tests/test_wsd_journal.py tests/test_wsd_upgrade.py tests/test_wsd_dispatch.py tests/test_wsd_daemon.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-In `_pin_and_dispatch`, read `pin = self.d.selections(view.adapter)` before building the entry, and pass `pin.install, pin.digest` to `LaunchEntry`. The `LaunchSpec` built for dispatch copies them from the entry.
+In `_pin_and_dispatch`, read `pin = self.d.selections(view.adapter)` before building the entry, and pass `pin.install, pin.digest` (or `"", ""`) to `LaunchEntry`. The `LaunchSpec` built for dispatch copies them from the entry.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Same command, then the whole `tests/test_wsd_*.py` (`timeout 1800`), pyright and ruff.
+Same command, then the full suite (`timeout 3600 uv run pytest -q`, foreground), pyright and ruff.
+Expected: PASS, with no existing test changed except the journal schema assertions.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/heterodyne/wsd tests/test_wsd_launches.py tests/test_wsd_journal.py tests/test_wsd_upgrade.py \
-        tests/test_wsd_dispatch.py tests/wsd_env.py
+        tests/test_wsd_dispatch.py tests/test_wsd_daemon.py tests/wsd_env.py
 git commit -m "plan4c T7: launch entries pin their install and digest (D2)"
 ```
 
@@ -697,20 +850,33 @@ git commit -m "plan4c T7: launch entries pin their install and digest (D2)"
 
 **Files:**
 - Create: `src/heterodyne/harness/verify.py`
-- Modify: `src/heterodyne/sandbox/runtime.py`, `src/heterodyne/sandbox/spec.py`, `src/heterodyne/sandbox/openshell.py`, `src/heterodyne/sandbox/settings.py` (removes `binaries`), `src/heterodyne/sandbox/build.py`, `src/heterodyne/sandbox/hostread.py`, `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/openshell_selftest.py`, `src/heterodyne/sandbox/resources/probes.py`
-- Test: `tests/harness_env.py` (the store fixture), `tests/sandbox_env.py`, `tests/test_harness_verify.py` (new), `tests/test_sandbox_runtime.py`, `tests/test_sandbox_spec.py`, `tests/test_sandbox_settings.py`, `tests/test_sandbox_openshell_policy.py`, `tests/test_sandbox_probes.py`, `tests/test_sandbox_hostread.py`, `tests/test_sandbox_build.py`, `tests/live/harness.py`, `tests/live/conftest.py`, `tests/live/test_live_sandbox.py`
+- Modify: `src/heterodyne/sandbox/runtime.py`, `src/heterodyne/sandbox/spec.py`, `src/heterodyne/sandbox/openshell.py`, `src/heterodyne/sandbox/settings.py` (removes `binaries`), `src/heterodyne/sandbox/build.py`, `src/heterodyne/sandbox/hostread.py`, `src/heterodyne/sandbox/selftest.py`, `src/heterodyne/sandbox/openshell_selftest.py`, `src/heterodyne/sandbox/resources/probes.py`, `src/heterodyne/agents/base.py`, `src/heterodyne/agents/codex.py`, `src/heterodyne/agents/claude_code.py` (remove the old lookup), `src/heterodyne/wsd/runtime.py` (`InstallTainted`), `src/heterodyne/wsd/park.py` (the `NOT_SELECTED` escalation)
+- Test: `tests/harness_env.py` (the store fixture), `tests/sandbox_env.py`, `tests/test_harness_verify.py` (new), `tests/test_sandbox_runtime.py`, `tests/test_sandbox_spec.py`, `tests/test_sandbox_settings.py`, `tests/test_sandbox_openshell_policy.py`, `tests/test_sandbox_probes.py`, `tests/test_sandbox_hostread.py`, `tests/test_sandbox_build.py`, `tests/test_agents_adapters.py`, `tests/test_wsd_dispatch.py`, `tests/live/harness.py`, `tests/live/conftest.py`, `tests/live/test_live_sandbox.py`
 
 **Interfaces:**
-- Consumes: Tasks 4–7; plan 4b's `HostUsageReader` and `build_usage_reader` (plan 4b Task 8).
+- Consumes: Tasks 4–7; Task 1's S9-8 (the bind's driver fields) and S9-9 (which identity fields are the same inside); plan 4b's `HostUsageReader` and `build_usage_reader` (plan 4b Task 8). A finding that is not "confirmed" stops this task as Task 1's stop rules say.
 - Produces:
   - `harness.verify.VerifiedInstall(adapter: str, name: str, digest: str, root: Path, manifest: Manifest, record: Record)`.
-  - `harness.verify.verify_pin(store: Store, adapter: Adapter, pin: InstallPin, taint_dir: Path) -> VerifiedInstall`: the install exists; its manifest's digest equals `pin.digest`; no taint marker; `store_core.check_fast` passes; the version is in `adapter.versions`. Refusals, `REFUSALS`: `NOT_SELECTED`, `NO_SUCH_INSTALL`, `DIGEST_DIFFERS`, `INSTALL_TAINTED`, `INSTALL_CHANGED` (any `Mismatch`), `UNDECLARED_VERSION`, `STORE_UNSAFE` (Task 5's problems, checked again at each launch).
-  - `SandboxRuntime.verified_cli(adapter: Adapter, pin: InstallPin | None = None) -> Cli`: raises `LaunchFailed(<one of REFUSALS>)`. It keeps the `VerifiedInstall` for the launch's probe.
+  - `harness.verify.verify_pin(store: Store, adapter: Adapter, pin: InstallPin, taint_dir: Path) -> VerifiedInstall`, in this order: no taint marker (`INSTALL_TAINTED`; a marker that can't be read refuses the same way); the store's location checks (`STORE_UNSAFE`); the install exists (`NO_SUCH_INSTALL`); its meta files read (`META_UNREADABLE`); the meta manifest's digest equals `pin.digest` (`DIGEST_DIFFERS`); `store_core.check_fast` passes (`INSTALL_CHANGED`); the version is in `adapter.versions` (`UNDECLARED_VERSION`). `REFUSALS` is the tuple of those constants plus `NOT_SELECTED` and `INSTALL_UNPINNED`. `TAINTING` is `(META_UNREADABLE, DIGEST_DIFFERS, INSTALL_CHANGED)` (E22): for these, `verify_pin` writes the taint marker, fsyncs it and its directory, and only then raises.
+  - `harness.verify.taint(taint_dir, adapter, install, constant)`, `tainted(taint_dir, adapter, install) -> bool` (raises on an unreadable marker) and `clear_taint(...)`.
+  - `wsd.runtime.InstallTainted(session_key: str, generation: int, adapter: str, install: str)`, added to plan 4b's `type Signal`.
+  - `SandboxRuntime.verified_cli(adapter: Adapter, pin: InstallPin | None = None) -> Cli`: with no pin it verifies the current selection (`NOT_SELECTED` if there is none); with a pin it verifies that pin. It raises `LaunchFailed(<one of REFUSALS>)`. When `verify_pin` taints, the runtime queues one `InstallTainted` per live session on that install before it raises. It keeps the `VerifiedInstall` for the launch's probe.
   - `SandboxRuntime._cli(adapter, spec)`: `verified_cli(adapter, InstallPin(spec.install, spec.install_digest))`, or `LaunchFailed(INSTALL_UNPINNED)` for an empty pin.
-  - `AgentFacts.cli_root` is the install root. `Bind` gains `private: bool = False`; the install's bind is `Bind(root, root, True, private=True)`, and the OpenShell policy writes it as a non-recursive bind with `rprivate` propagation.
+  - The guard escalates `CONFIG_INVALID` with `NOT_SELECTED` when the profile's adapter has no selection, and journals nothing (Task 7's empty-pin path ends here).
+  - `AgentFacts.cli_root` is the install root, and the adapters' `prepare_install_home` replaces `prepare_home`. `Bind` gains `install: bool = False`; the install's bind is `Bind(root, root, True, install=True)`, and `driver_config` writes it with exactly the fields S9-8 proved give a non-recursive, `rprivate` bind (E24). A test pins the emitted object.
   - `spec.INSIDE_LOGIN_DIR`: `check_credentials` refuses a non-login source inside the chosen account's login directory, too.
-  - `ProbeContext.install: VerifiedInstall`; the check `managed-install` in `COMMON_CHECKS` (both paths); its input is a file `/run/hz/install-record.json` (read-only bind) with the install path and every entry's `(path, kind, size, nlink, ino, ctime_ns)`.
-  - `probes.py`'s `managed_install(cfg)`: reads `/proc/self/mountinfo`; the install path must be exactly one mount, `ro`, with no `shared:` or `master:` tag, and no mount point below it; a walk by fd (`os.lstat` relative to dir fds, following no link) must give exactly the record's entries. Prints `PASS managed-install` or `FAIL managed-install [<reason>]`, the reason being one of `MI_NOT_ONE_MOUNT`, `MI_NOT_READ_ONLY`, `MI_PROPAGATES`, `MI_SUBMOUNT`, `MI_LISTING_DIFFERS`.
+  - `ProbeContext.install: VerifiedInstall`; the check `managed-install` in `COMMON_CHECKS` (both paths). Its input is a file `/run/hz/install-record.json` (read-only bind) with:
+    - the install path;
+    - the root's `(dev, ino, mode, ctime_ns)`;
+    - every entry's `(path, kind, mode, size, nlink, dev, ino, ctime_ns, target)`.
+
+    The record holds only the fields S9-9 confirmed are the same inside; any field it drops is listed in the spike and in `docs/security-model.md`.
+  - `probes.py`'s `managed_install(cfg)` checks two things:
+    - `/proc/self/mountinfo`: the install path must be exactly one mount, `ro`, with no `shared:` or `master:` tag, and no mount point below it.
+    - A walk by fd (`os.lstat` relative to dir fds, following no link) must give exactly the root identity and the record's entries, field by field, including link targets (`os.readlink` relative to the dir fd).
+
+    It prints `PASS managed-install` or `FAIL managed-install [<reason>]`. The reason is one of `MI_NOT_ONE_MOUNT`, `MI_NOT_READ_ONLY`, `MI_PROPAGATES`, `MI_SUBMOUNT`, `MI_ROOT_DIFFERS`, `MI_LISTING_DIFFERS`.
+  - The callers moved off the old lookup (E23), all in this PR: `SandboxRuntime._cli`, `HostUsageReader._locked`, `build_usage_reader`, `openshell_selftest.env_allowed(adapter, path, version)` (now `adapter.versions[version].tool_env`), and every test rig. Then `locate`, `version_pin`, `tool_env`, `find_binary`, `install_root`, the old `prepare_home` and `SandboxSettings.binaries` are deleted.
   - The plan 4b migration, exactly as plan 4b lists it:
     - `hostread.py`: `HostUsageReader(accounts, cli: Callable[[], Cli], credlocks, scratch_root, lock_wait_seconds, *, env, ...)`; `_locked` calls `cli()`; an exception from it logs `DIAG_READ_FAILED` with its type name and starts nothing.
     - `build.py`: `build_usage_reader(s, env)` returns a reader when `selection.load(...)` has a Codex selection, with `cli=lambda: runtime.verified_cli(ADAPTERS["codex"])`. The adapter is looked up by name in `build.py`, which plan 4b's constraint allows (`sandbox/` names adapters only through `ADAPTERS`).
@@ -718,107 +884,132 @@ git commit -m "plan4c T7: launch entries pin their install and digest (D2)"
     - `tests/test_sandbox_build.py`: `test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary` becomes `test_the_reader_needs_the_sandbox_runtime_and_a_selected_codex_install`.
     - Every test configuring `[adapters.<adapter>] binary` or `binaries`, including `tests/sandbox_env.py`'s rig and `tests/live/test_live_sandbox.py`, moves to the store fixture. `install_fake_cli` becomes `harness_env.store_fixture(root, adapter)`: it stages and publishes the fake CLI, at its declared version, into a `LocalStore` under `root`, and writes the selection.
     - `tests/test_sandbox_spec.py`: `test_credentials_pass_with_cli_inside_the_chosen_login_dir` becomes `test_a_cli_inside_the_chosen_login_dir_is_refused` (`INSIDE_LOGIN_DIR`).
+    - Plan 4b's Task 12 is already written against `cli=`, and runs after this task.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/test_harness_verify.py`, one test per refusal in `REFUSALS`, each through `verify_pin` and again through `SandboxRuntime.launch` with the fake backend (the receipt is `refused` with exactly that text), plus:
-- `test_the_root_replaced_between_the_check_and_the_bind_fails_the_probe` (the fake backend's bind hook renames a copy over the root; the probe, run against the fake's view, reports `MI_LISTING_DIFFERS`);
-- `test_a_mount_added_under_the_store_after_the_launch_is_not_visible_inside` (in the probe's own unit test, against a scripted `mountinfo`);
-- `test_a_hard_link_into_an_install_from_a_login_dir_is_caught` (a link made after publish raises the file's `nlink`: `INSTALL_CHANGED`);
-- `test_a_hard_link_to_a_login_file_is_impossible_in_an_install_before_and_after_a_refresh_by_rename` (stage copies, so the published file is a new inode; replacing the login file by rename changes nothing in the install);
+`tests/test_harness_verify.py` has one test per refusal in `REFUSALS`, each run twice: through `verify_pin`, and through `SandboxRuntime.launch` with the fake backend (the receipt is `refused` with exactly that text). It also has:
+- `test_an_integrity_refusal_writes_the_taint_marker_before_it_raises`, parametrized over `TAINTING`. An injected `taint` records the order; the marker exists when the exception is seen. Each refusal outside `TAINTING` writes no marker;
+- `test_a_taint_found_at_launch_signals_every_live_session_on_the_install` (two live sessions on it, one on another install: two `InstallTainted` signals);
+- `test_a_taint_survives_a_restart` (a new `SandboxRuntime` on the same state refuses `INSTALL_TAINTED`, before any signal is drained);
+- `test_a_taint_marker_that_cant_be_read_refuses` (a directory where the file should be);
+- `test_verified_cli_without_a_pin_verifies_the_selection_and_with_one_verifies_the_pin`. Plan 4b's one-argument form is unchanged. With a pin that differs from the selection, the pin's install is the one verified and returned;
+- `test_the_root_replaced_between_the_check_and_the_bind_fails_the_probe`. The fake backend's bind hook renames a copy over the root; the probe, run against the fake's view, reports `MI_ROOT_DIFFERS`;
+- `test_a_hard_link_into_an_install_from_a_login_dir_is_caught` (a link made after publish raises the file's `nlink`: `INSTALL_CHANGED`, and the install is tainted);
+- `test_a_hard_link_to_a_login_file_is_impossible_in_an_install_before_and_after_a_refresh_by_rename`. Stage copies, so the published file is a new inode, and replacing the login file by rename changes nothing in the install;
 - `test_the_trusted_read_verifies_the_current_selection` (`build_usage_reader`'s `cli` raises after the selection's install is tainted).
 
-`tests/test_sandbox_probes.py` gains `managed_install` cases for every `MI_*` reason, with scripted `mountinfo` text and a temp tree.
+`tests/test_sandbox_probes.py` gains `managed_install` cases for every `MI_*` reason, with scripted `mountinfo` text and a temp tree. These prove the probe's logic only. The bind's real behaviour is S9-8's evidence and Task 13's live test.
+
+`tests/test_sandbox_openshell_policy.py` gains `test_the_install_bind_carries_exactly_the_s9_8_fields`, and a test that no other bind carries them.
+
+`tests/test_wsd_dispatch.py`: `test_no_selection_escalates_config_invalid_and_journals_nothing` (`NOT_SELECTED`), and `test_an_entry_from_schema_2_dispatches_as_install_unpinned`, after which the next generation pins.
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `timeout 900 uv run pytest tests/test_harness_verify.py tests/test_sandbox_*.py -q`
+Run: `timeout 900 uv run pytest tests/test_harness_verify.py tests/test_sandbox_*.py tests/test_wsd_dispatch.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-`verified_cli` holds no lock: the store is read-only to the service user, and the taint marker and selection are re-read on every call. The binary path is `root / manifest.entry_point`; `Cli.version` is `manifest.version`. Delete `_legacy_locate` (Task 6) and `SandboxSettings.binaries`.
+`verified_cli` holds no lock: the store is read-only to the service user, and the taint marker and the selection are re-read on every call. The binary path is `root / manifest.entry_point`, and `Cli.version` is `manifest.version`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `timeout 3600 uv run pytest -q` (the full suite, in the foreground).
-Expected: PASS. `grep -rn "binaries\|\.locate(\|version_pin" src tests` finds nothing but admind's own `adapters.<a>.binary` lookup.
+Expected: PASS. Then run `command grep -rnE "settings\.binaries|\.locate\(|version_pin|find_binary|install_root\(" src tests`. It must find nothing; admind's own `adapters.<a>.binary` lookup in `admind/settings.py` doesn't match.
 
-Then pyright and ruff.
+Then pyright and ruff. The PR description states the deployment hold ("What `main` does after each merge").
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/heterodyne/harness src/heterodyne/sandbox tests
+git add src/heterodyne/harness src/heterodyne/sandbox src/heterodyne/agents src/heterodyne/wsd tests
 git commit -m "plan4c T8: verified managed installs at launch, the Managed install probe, plan 4b's migration"
 ```
 
 ## Task 9: the taint watch
 
 **Files:**
-- Modify: `src/heterodyne/sandbox/runtime.py`, `src/heterodyne/wsd/runtime.py` (`InstallTainted` in `Signal`)
+- Modify: `src/heterodyne/sandbox/runtime.py`
 - Test: `tests/test_sandbox_taint.py` (new), `tests/fakes/fake_runtime.py`
 
 **Interfaces:**
-- Consumes: `store_core.check_fast`; plan 4b's `AgentRuntime.signals`.
+- Consumes: `store_core.check_fast`; Task 8's `verify.taint`, `verify.tainted` and `wsd.runtime.InstallTainted`; plan 4b's `AgentRuntime.signals`.
 - Produces:
-  - `wsd.runtime.InstallTainted(session_key: str, generation: int, adapter: str, install: str)`, added to `type Signal`.
   - `wsd.runtime.INSTALL_TAINTED`: the park's `why`.
-  - `SandboxRuntime` re-walks at each session end (in `_end`) and from `expire` (`TAINT_SECONDS = 600`, injected clock). A mismatch writes the marker, then queues one signal per live session on the install.
-  - `harness.verify.taint(taint_dir, adapter, install, reason)` and `cleared(taint_dir, adapter, install)`.
+  - `SandboxRuntime` re-walks every install in use at each session end (in `_end`) and from `expire` (`TAINT_SECONDS = 600`, injected clock). A mismatch calls `verify.taint`, which writes and fsyncs the marker, and only then queues one `InstallTainted` per live session on the install (E17's second path; Task 8's launch check is the first).
+  - `FakeAgentRuntime` can emit `InstallTainted` for Task 10's tests.
 
 - [ ] **Step 1: Write the failing tests**
 
 - `test_a_change_found_at_session_end_taints_and_signals_every_session_on_the_install`;
 - `test_the_walk_repeats_every_ten_minutes_while_a_session_runs` (the clock moves 599 s: no walk; 600 s: a walk);
 - `test_the_marker_is_written_before_the_signal_and_survives_a_restart` (a new runtime refuses with `INSTALL_TAINTED` before any signal is drained);
-- `test_a_marker_that_cant_be_read_refuses` (a directory where the file should be);
+- `test_a_walk_that_finds_nothing_writes_no_marker_and_sends_no_signal`;
 - `test_a_login_file_copied_in_under_the_fallback_is_found_by_the_next_walk` (the §11 fallback control: write into a `LocalStore` install after both checks, then advance the clock).
 
 - [ ] **Step 2–4: Run, implement, pass**
 
-Run: `timeout 600 uv run pytest tests/test_sandbox_taint.py tests/test_sandbox_runtime.py -q`, then pyright and ruff.
+Run: `timeout 600 uv run pytest tests/test_sandbox_taint.py tests/test_sandbox_runtime.py tests/test_harness_verify.py -q`, then the full suite (`timeout 3600 uv run pytest -q`, foreground), pyright and ruff.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/heterodyne/sandbox/runtime.py src/heterodyne/wsd/runtime.py src/heterodyne/harness/verify.py \
-        tests/test_sandbox_taint.py tests/fakes/fake_runtime.py
+git add src/heterodyne/sandbox/runtime.py tests/test_sandbox_taint.py tests/fakes/fake_runtime.py
 git commit -m "plan4c T9: re-walk installs in use, taint and signal"
 ```
 
 ## Task 10: `wsd`'s harness commands, the approval and the taint handling
 
 **Files:**
-- Create: `src/heterodyne/wsd/harness.py`, `src/heterodyne/wsd/alerts.py`
-- Modify: `src/heterodyne/wsd/ctl.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/daemon.py`, `src/heterodyne/wsd/scheduler.py`, `src/heterodyne/wsd/park.py`, `src/heterodyne/wsd/journal.py`, `src/heterodyne/wsd/btq.py` (`QueueLike.policy`; the module's `ask_digest`)
-- Test: `tests/test_wsd_harness.py` (new), `tests/test_wsd_ctl.py`, `tests/test_wsd_cli.py`, `tests/fakes/fake_btq.py`
+- Create: `src/heterodyne/wsd/harness.py`, `src/heterodyne/wsd/alerts.py`, `src/heterodyne/harness/digests.py`
+- Modify: `src/heterodyne/wsd/ctl.py`, `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/workstream.py` (`Deps.harness`), `src/heterodyne/wsd/daemon.py`, `src/heterodyne/wsd/scheduler.py`, `src/heterodyne/wsd/park.py`, `src/heterodyne/wsd/journal.py`, `src/heterodyne/wsd/upgrade.py`, `src/heterodyne/wsd/btq.py` (`QueueLike.policy`, `QueueLike.ask_digest`, `approval_readout`)
+- Test: `tests/test_wsd_harness.py` (new), `tests/test_harness_digests.py` (new), `tests/test_wsd_ctl.py`, `tests/test_wsd_cli.py`, `tests/test_wsd_upgrade.py`, `tests/fakes/fake_btq.py`, `tests/fakes/fake_approve_bead.py` (new)
 
 **Interfaces:**
-- Consumes: Tasks 4, 5, 7, 8 and 9; admind's `AskPost` contract over `ask.sock` (posted as JSON, without importing `admind`); btq's `Queue.bd`, `Queue.show`, `Queue.policy` and the module's `ask_digest`.
+- Consumes: Tasks 4, 5, 7, 8 and 9; `agents.registry.login_names()` (Task 6); admind's `AskPost` contract over `ask.sock` (posted as JSON, without importing `admind`); btq's `Queue.bd`, `Queue.show`, `Queue.policy` and the module's `ask_digest`; `approve-bead <bead> --json` and admind's `Readout` fields (format 1).
 - Produces:
-  - Journal tables (schema 3, with Task 7's columns; Task 10 adds them to the same version if Task 7 hasn't released, else schema 4): `harness_installs(staging_id PRIMARY KEY, adapter, digest, version, approval_bead, ask_id, state CHECK (state IN ('staged','posted','approved','published','denied','expired','failed')), install, created_at, updated_at)` and `harness_events(id, at, actor, action, adapter, install, detail)`.
+  - `harness.digests.ComputedDigest`, built only by `of_manifest(m: Manifest)` (the SHA-256 of `canonical(m)`) and `of_fd(fd: int)` (the SHA-256 of the bytes read); `display(d) -> str` (E14's grouped form) and `parse_display(s) -> ComputedDigest` (raises `ValueError` on any other form). No constructor takes a string from outside.
+  - `wsd.btq.approval_readout(bead: str) -> Readout | Busy`: runs `approve-bead <bead> --json` with a deadline and parses it strictly (unknown fields forbidden). It never runs a writing subcommand.
+  - Journal tables (Task 10's schema step after Task 7's, with its own upgrade in `upgrade.py`): `harness_installs(staging_id PRIMARY KEY, adapter, digest, version, approval_bead, context_digest, ask_id, state CHECK (state IN ('staged','posted','approved','published','denied','expired','failed')), install, failure, created_at, updated_at)` and `harness_events(id, at, actor, action, adapter, install, detail)`.
   - `CtlRequest.op` gains `"harness"`, with `harness: HarnessRequest | None` (`action: Literal["list","install","verify","use","rollback","remove","prune"]`, `adapter`, `install`, `version`, `confirm`).
   - `HarnessOps`:
     - `list(adapter | None) -> list[InstallInfo]` with state `selected`, `previous`, `in use`, `tainted`, `staged`, `awaiting approval`, and the fallback flag.
-    - `install(adapter, version | None) -> str` (the staging ID): recipe, fetch, `check_content`, `stage`, then the approval bead and the ask (E13). Replies at once; the work runs in a worker thread with its own deadline, and every step is journaled.
-    - `advance(now)`: from the scheduler at each pickup: for each `posted` row, read the bead and decide (E13); on approval `publish`, then `published`; on denial `denied`; staging past `staging_hours` is `expired`.
-    - `verify(adapter, install)`: `store.verify`, then the taint marker is removed.
+    - `install(adapter, version | None) -> str` (the staging ID): recipe, fetch, `check_content`, `stage` (with `registry.login_names()`), then the approval bead and the ask, exactly as "The install approval (E13)" says. Replies at once; the work runs in a worker thread with its own deadline, and every step is journaled.
+    - `advance(now)`: from the scheduler at each pickup. For each `posted` row it reads the readout and the bead and applies E13's predicates and outcomes. For each `approved` row it calls `publish` again (E21: idempotent). Staging past `staging_hours` is `expired`.
+    - `recover()`: at start-up, before the first pickup. For each row in `approved`, it asks the store `outcome(staging_id)` and `state(adapter, install)`: `published` records `published`; `failed:<constant>` records `failed` with that constant; no outcome calls `publish` again. A row is never marked `published` from the install's name alone.
+    - `verify(adapter, install)`: `store.verify`, then `verify.clear_taint`.
     - `use(adapter, install)`: refuses `NOT_PUBLISHED`, `UNDECLARED_VERSION`, `INSTALL_TAINTED` and `OWNS_KEY` (E11's second check); writes the selection with the old one first in `previous`; journals the event.
     - `rollback(adapter)`: selects `previous[0]`, with the same checks.
     - `remove(adapter, install)` and `prune(confirm)`: refuse `IN_USE` (E16); `prune` without `confirm` lists what it would remove and returns a one-time confirmation code (`secrets.token_hex(4)`), which `prune --confirm <code>` must echo within 10 minutes.
     - On an `InstallTainted` signal: park the bead with `hold=True` and `why=INSTALL_TAINTED`, and write one alert per install (`harness-taint-<adapter>-<12 hex>`).
   - `wsctl harness list [<adapter>] | install <adapter> [<version>] | verify <adapter> <install> | use <adapter> <install> | rollback <adapter> | remove <adapter> <install> | prune [--confirm <code>]`.
   - `wsd.alerts.write(alerts_dir, id, text)`: admind's contract (dotfile, then rename).
-  - Refusal constants: `NO_RECIPE`, `NO_APPROVAL_WORKSTREAM`, `NOT_APPROVED`, `DENIED`, `DIGEST_NOT_APPROVED`, `NOT_PUBLISHED`, `IN_USE`, `CONFIRM_REQUIRED`.
+  - Refusal and failure constants: `NO_RECIPE`, `NO_APPROVAL_WORKSTREAM`, `NOT_APPROVED`, `DENIED`, `ASK_UNPOSTABLE`, `NOT_PUBLISHED`, `IN_USE`, `CONFIRM_REQUIRED`.
+  - `tests/fakes/fake_approve_bead.py`: a scripted `approve-bead` that serves a given readout (or `Busy`) and records that it was only ever called with `--json`.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/test_wsd_harness.py`, with a `LocalStore`, the fixture fetcher, `fake_btq` (which records `bd create` and serves `show`) and a fake ask socket:
-- `test_install_stages_creates_the_approval_bead_and_posts_the_ask` (the bead's `metadata.ask` has exactly the five fields; the description holds no 64-hex run, checked with `secret_scan.identifier_kind`; the grouped digest parses back to the staged one);
-- `test_nothing_is_published_until_the_approval_is_valid`, parametrized over each missing condition of E13 (open, denied, approver not in the policy, a `*_digest` that differs, a gap, the effect's digest differs, another bead): each leaves the row `posted` or `denied`, and the store has no install;
-- `test_an_approved_install_is_published_with_the_approved_digest`;
-- `test_a_crash_between_approval_and_publish_publishes_once` (checkpoint crash; replay finds `ALREADY_PUBLISHED` from the store and records `published`);
+`tests/test_harness_digests.py`:
+- `test_display_is_sixteen_groups_of_four_lowercase_hex_and_parses_back` (hypothesis over byte strings);
+- `test_parse_display_refuses_every_other_form` (bare hex, upper case, 15 or 17 groups, other separators, a `sha512-` value);
+- `test_no_scanner_pattern_matches_a_displayed_digest` (hypothesis: `secret_scan` finds nothing in `display(d)`, alone and inside the readout text).
+
+`tests/test_wsd_harness.py`, with a `LocalStore`, the fixture fetcher, `fake_btq` (which records `bd create` and serves `show`), `fake_approve_bead` and a fake ask socket:
+- `test_install_stages_creates_the_approval_bead_and_posts_the_ask`. The bead's `metadata.ask` has exactly `ASK_FIELDS`. Its `effect` is exactly `publish <adapter> install <install> manifest <display>`, and `context_digest` is `ask_digest` of the bead as created. The description holds no 64-hex run (checked with `secret_scan.identifier_kind`). The grouped digest parses back to `ComputedDigest.of_manifest` of the staged manifest, read back from `.staged/<id>.json`;
+- `test_install_passes_every_adapters_login_names_to_stage`;
+- `test_upstream_checksums_are_compared_but_never_shown` (the readout says "checksum matches <origin>" and holds neither the `SHA256SUMS` value nor `dist.integrity`);
+- `test_a_secret_looking_upstream_string_is_withheld_not_edited`. It is parametrized over a source name, a release tag and a content ref, each holding an `sk-` token, an `npub` or a 64-hex run, as the fixture recipe supplies them. The install is `failed` with `ASK_UNPOSTABLE`, no bead is created and nothing is posted;
+- `test_the_sources_lines_say_signature_available_not_verified` (and "no signature published" for a source without one);
+- `test_wsd_never_writes_to_an_approval_bead_after_creating_it`. Across a whole install, approval, denial and failure run, `fake_btq` records exactly one `bd create` and no `update`, `close`, `reopen` or `set-state`, and `fake_approve_bead` was only read;
+- `test_nothing_is_published_unless_every_predicate_holds`, parametrized over E13's predicates 2–10. For each one there is a case where the field is missing, one where it is null, one of the wrong type, and one with a wrong value (for predicate 3, `kind_approval` false; for 4, an open status). Each ends `posted` (open), `denied` (a deny) or `failed` with `NOT_APPROVED` and the predicate's number in the log, and the store has no install;
+- `test_a_busy_readout_waits`;
+- `test_an_ask_edited_after_posting_is_not_approved` (the bead's ask changes after posting, so the recomputed `ask_digest` differs from `posted_digest`: predicate 6 or 7 fails);
+- `test_an_approved_install_is_published_with_the_staged_digest`;
+- `test_a_restart_in_approved_publishes_once`. A checkpoint crash after `approved` is journaled: `recover` calls `publish` again; the store's idempotent publish returns the same install, and the row is `published` once;
+- `test_a_crash_inside_publish_is_resolved_from_the_store_not_from_the_name`. It is parametrized over the store crash points of Task 4 (after P1, the rename, P3, P4 and mid-P5). `recover` records exactly what `outcome` and `state` report. An install directory whose `state` is `publishing` or `broken` is never recorded `published`;
+- `test_a_name_conflict_fails_the_install` (another staging already published that name with another digest: `failed` with `NAME_CONFLICT`);
 - `test_use_and_rollback_write_the_selection_and_take_effect_at_the_next_launch` (with Task 7's guard);
 - `test_use_refuses_an_undeclared_version_a_tainted_install_and_content_owning_a_key`;
 - `test_remove_and_prune_refuse_an_install_in_use`, parametrized over E16's four cases;
@@ -827,11 +1018,11 @@ git commit -m "plan4c T9: re-walk installs in use, taint and signal"
 - `test_verify_clears_the_taint_only_after_a_matching_rehash`;
 - `test_every_harness_op_is_journaled_with_its_actor`.
 
-`tests/test_wsd_ctl.py` and `tests/test_wsd_cli.py`: the new op's `refusal` rules and the `wsctl harness` argument parsing and output.
+`tests/test_wsd_ctl.py` and `tests/test_wsd_cli.py`: the new op's `refusal` rules and the `wsctl harness` argument parsing and output. `tests/test_wsd_upgrade.py`: the new tables' upgrade keeps every row and rolls back on failure.
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `timeout 900 uv run pytest tests/test_wsd_harness.py tests/test_wsd_ctl.py tests/test_wsd_cli.py -q`
+Run: `timeout 900 uv run pytest tests/test_harness_digests.py tests/test_wsd_harness.py tests/test_wsd_ctl.py tests/test_wsd_cli.py tests/test_wsd_upgrade.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -847,24 +1038,28 @@ Description:
   Entries: <n>, size: <bytes>
   Sources:
     - cli: codex-package-x86_64-unknown-linux-musl.tar.gz, release rust-v0.160.0,
-      checksum sha256:<16 groups of 4 hex> from codex-package_SHA256SUMS; signature not checked
+      file sha256:<16 groups of 4 hex>; checksum matches codex-package_SHA256SUMS;
+      signature available, not verified
     - content/skills/<name>: git <repo> at <commit>; trust on first install (unsigned)
   Store: helper (store owner) | fallback (accepted risk: a host process of the service user can change it)
-ask.effect: publish exactly the staged install with this manifest digest, under this name.
+ask.effect: publish codex install 0.160.0-<12 hex> manifest sha256:<16 groups of 4 hex>
 ask.excludes: selecting it (`use`), and any other version or content.
 ask.why: the recipe in [harnesses.codex] asks for it.
 ask.risks: the sources' trust as listed; under the fallback, the accepted risk above.
 ask.refs: [{kind: commit, repo: Epiphytic/heterodyne-metaharness, id: <the running harness commit>}]
 ```
 
+The file digest on the `cli` line is `ComputedDigest.of_fd` of the artifact `wsd` fetched; the upstream value it was compared with is not shown (E14). The scanner runs over the whole composed text and the ask before `bd create`.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Same command, then the whole `tests/test_wsd_*.py` (`timeout 1800`), pyright and ruff.
+Same command, then the full suite (`timeout 3600 uv run pytest -q`, foreground), pyright and ruff.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/heterodyne/wsd tests/test_wsd_harness.py tests/test_wsd_ctl.py tests/test_wsd_cli.py tests/fakes/fake_btq.py
+git add src/heterodyne/wsd src/heterodyne/harness/digests.py tests/test_wsd_harness.py tests/test_harness_digests.py \
+        tests/test_wsd_ctl.py tests/test_wsd_cli.py tests/test_wsd_upgrade.py tests/fakes/fake_btq.py tests/fakes/fake_approve_bead.py
 git commit -m "plan4c T10: wsctl harness, the digest-pinned install approval, and taint holds"
 ```
 
@@ -884,7 +1079,11 @@ git commit -m "plan4c T11: document managed installs"
 
 ## Task 12: HOST CHANGE — the store owner, the helper's units and verity (waits for the operator's go)
 
-> **Waits for the operator's go on ADR §17 item 13 (Q1).** This task needs root on the host. It does not start on this plan's approval: its bead blocks on a separate host-change approval bead, which shows the exact commands below. Nothing in Tasks 2–11 needs it. Until it is done, a host can use managed installs only with `[harnesses] fallback = true`.
+> **Waits for the operator's go on ADR §17 item 13 (Q1, asked as `b2m6`).** The task has two beads:
+> - **T12a** (steps 1–2) is repository work only: the unit files, the setup script, their offline test, and the host-change ask. It may run and merge before the host approval, because it changes no host.
+> - **T12b** (steps 3–7) is the privileged host change. It blocks on the host-change approval bead, which shows the exact commands below, and nothing in it runs as root before that bead is approved.
+>
+> Nothing in Tasks 2–11 needs T12b. Until it is done, a host can use managed installs only with `[harnesses] fallback = true`. Finishing on the fallback alone does not close §7's store-owner guarantee: that needs T12b and Task 13's helper-mode tests, or an operator "no" that records the fallback as the accepted risk (Q1).
 
 **Files (in the repo; the host steps run them):**
 - Create: `deploy/store-helper/heterodyne-store-helper.socket`, `deploy/store-helper/heterodyne-store-helper@.service`, `deploy/store-helper/setup-store.sh`, `deploy/store-helper/README.md`
@@ -937,9 +1136,9 @@ TimeoutSec=600
 
   - optionally, the ext4 `verity` feature on `/var/lib`'s filesystem.
 
-- [ ] **Step 1: Write the files and their offline test, and merge them** (a normal PR; it changes no host).
-- [ ] **Step 2: Ask for the go.** Post the host-change approval bead through admind's relay. Its description lists every command of steps 3–6 exactly, with the pinned commit, and says what each changes and how to undo it (README "Rollback": stop and disable the units, remove them, `userdel heterodyne-store`, remove `/var/lib/heterodyne` only if empty or after a `wsctl harness list` shows nothing in use). Stop here until the bead is approved.
-- [ ] **Step 3 (after the go, as root): the user, the store and the helper copy**
+- [ ] **Step 1 (T12a): Write the files and their offline test, and merge them** (a normal PR; it changes no host).
+- [ ] **Step 2 (T12a): Ask for the go.** Post the host-change approval bead through admind's relay. Its description lists every command of steps 3–6 exactly, with the pinned commit, and says what each changes and how to undo it (README "Rollback": stop and disable the units, remove them, `userdel heterodyne-store`, remove `/var/lib/heterodyne` only if empty or after a `wsctl harness list` shows nothing in use). Stop here until the bead is approved.
+- [ ] **Step 3 (T12b, after the go, as root): the user, the store and the helper copy**
 
 ```bash
 sudo bash deploy/store-helper/setup-store.sh --commit <pinned commit> --service-user <service user>
@@ -947,7 +1146,7 @@ sudo bash deploy/store-helper/setup-store.sh --commit <pinned commit> --service-
 
 The script is idempotent and prints each change. It refuses if `/var/lib/heterodyne/harnesses` exists with another owner, or if any path component from `/` is writable by the service user.
 
-- [ ] **Step 4 (as root): the units**
+- [ ] **Step 4 (T12b, as root): the units**
 
 ```bash
 sudo install -m 0644 deploy/store-helper/heterodyne-store-helper.socket deploy/store-helper/heterodyne-store-helper@.service \
@@ -956,9 +1155,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now heterodyne-store-helper.socket
 ```
 
-- [ ] **Step 5 (optional, as root): verity.** `tune2fs -l <device of /var/lib> | grep -i features` first. If `verity` is missing and the operator agreed to it, `tune2fs -O verity <device>` (ext4 allows it on a mounted filesystem; the kernel lists `verity` in `/sys/fs/ext4/features`, F11). Re-run `tune2fs -l` to confirm.
-- [ ] **Step 6: Switch the host config** (with the operator's go for the config change): remove `[harnesses] fallback = true` if it was set, run `heterodyne config check` (no store problem, no `HELPER_DRIFT`), and restart `wsd`.
-- [ ] **Step 7: Evidence.** Close the bead with: `id heterodyne-store`, `stat -c '%U %a %n'` of the store path from `/` down, `systemctl status heterodyne-store-helper.socket`, a `wsctl harness list` that says "store: helper", and the verity line. No checksum or digest beyond its 12-hex prefix.
+- [ ] **Step 5 (T12b, optional, as root): verity.** `tune2fs -l <device of /var/lib> | grep -i features` first. If `verity` is missing and the operator agreed to it, `tune2fs -O verity <device>` (ext4 allows it on a mounted filesystem; the kernel lists `verity` in `/sys/fs/ext4/features`, F11). Re-run `tune2fs -l` to confirm.
+- [ ] **Step 6 (T12b): Switch the host config** (with the operator's go for the config change): remove `[harnesses] fallback = true` if it was set, run `heterodyne config check` (no store problem, no `HELPER_DRIFT`), and restart `wsd`.
+- [ ] **Step 7 (T12b): Evidence.** Close the bead with: `id heterodyne-store`, `stat -c '%U %a %n'` of the store path from `/` down, `systemctl status heterodyne-store-helper.socket`, a `wsctl harness list` that says "store: helper", and the verity line. No checksum or digest beyond its 12-hex prefix.
 
 ## Task 13: the live test on managed installs
 
@@ -998,4 +1197,4 @@ This plan is complete once it has passed its cross-model design review and the o
 1. **Subagent-driven (recommended).** Use superpowers:subagent-driven-development. Give each task a fresh worker session on its own `p4c-t<N>` branch, in the waves of the Parallelism section, and claim each worker's bead with that worker's own session. Each task ends with the cross-model review in Global Constraints before its PR merges.
 2. **Inline.** Use superpowers:executing-plans. Run the tasks in wave order in one session, with a checkpoint and the same review after each task.
 
-Either way, Task 8 starts only after plan 4b's Tasks 6 and 8 have merged, and Task 12 starts only after its own host-change approval. Plan 4b's Task 11b and Task 12 wait for Task 8.
+Either way, Task 8 starts only after plan 4b's Tasks 6 and 8 have merged and Task 1's S9-8 and S9-9 are confirmed, and T12b starts only after its own host-change approval (T12a may come first). Plan 4b's Task 11b and Task 12 wait for Task 8.
