@@ -2635,8 +2635,8 @@ def with_named(rig: "RuntimeRig", adapter: str, name: str, expires_at: int) -> P
     login_dir, files = canonical_login(name, adapter, configured, env)
     current = rig.runtime.c.accounts
     assert isinstance(current, ConfiguredAccounts)
-    named = {**current.named,
-             (adapter, name): Account(name, adapter, configured, login_dir, files, credential_key(adapter, files))}
+    account = Account(name, adapter, configured, login_dir, files, credential_key(adapter, files))
+    named = {**current.named, (adapter, name): account}
     rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(ADAPTERS, env, named))
     return paths.expand(configured, env)
 
@@ -2866,7 +2866,8 @@ with:
         handoff starts fresh whatever is held: a server-assigned ID is learned from the session, and any
         other is the handoff's own (`ids.handoff_session`)."""
         if spec.handoff:
-            return False, None if adapter.assigns_id else ids.handoff_session(spec.session_key, spec.generation)
+            fresh = None if adapter.assigns_id else ids.handoff_session(spec.session_key, spec.generation)
+            return False, fresh
         wanted = spec.native_id or (prev.native_id if prev is not None and prev.ran else None)
 ```
 
@@ -2972,6 +2973,13 @@ The producers, wired: each session's socket counts its adapter's turn ends and h
   - `SandboxSettings.usage_poll_seconds: int`, from `[sandbox] usage_poll_seconds` (60 to 86400, default 600).
   - `runtime.MAX_QUEUED = 256`: the most reports a workstream keeps between drains, the newest kept.
   - `runtime.USAGE_SECONDS = 45`: the read's exec timeout. `codex_usage.py`'s own limit is 30.
+  - `runtime.DIAG_USAGE_READ`: the warning a read that gave no reading logs, as `"<DIAG_USAGE_READ>: <reason>"`. The reason is one of:
+    - the script's own `codex_usage: <type>` name;
+    - `exit <status>` for any other nonzero status (127 included);
+    - `unparsed` for exit 0 with output that isn't a reading;
+    - the exception's type name when the exec itself failed (`BackendError` for its timeout).
+
+    The line never carries the read's output.
   - `FakeBackend.host_env(name) -> dict[str, str]`: the environment the fake runs a sandbox's commands with.
   - `sandbox_env.with_caps(rig, adapter, caps)`.
 
@@ -3016,9 +3024,11 @@ and in `tui()`, replace the line that fires Stop with:
         limits = os.environ.get("HZ_FAKE_STATUS_LINE") if ADAPTER == "claude" else None
         status = claude_status_line() if limits else None
         if status:
-            subprocess.run(host(status), shell=True, check=False,  # noqa: S602
-                           input=json.dumps({"session_id": session, "rate_limits": json.loads(limits or "null")}).encode())
+            fed = json.dumps({"session_id": session, "rate_limits": json.loads(limits or "null")})
+            subprocess.run(host(status), shell=True, check=True, input=fed.encode())  # noqa: S602
 ```
+
+`check=True` is deliberate. The shim's status mode always exits 0, so any other status (127 for a command that can't run among them) is a broken status line, and the fake TUI dies on it. The test waiting on that turn then fails, rather than passing on a status line that never ran.
 
 In `tests/sandbox_env.py`, import `Capabilities` from `heterodyne.config.capabilities`, and add after `with_named`:
 
@@ -3031,7 +3041,7 @@ def with_caps(rig: "RuntimeRig", adapter: str, caps: Capabilities) -> None:
         ADAPTERS, current.env, current.named, {**current.capabilities, adapter: caps}))
 ```
 
-In `tests/test_sandbox_runtime.py`, import `Capabilities`, `from sandbox_env import with_caps`, `from heterodyne.agents.codex import IN_SESSION_SOURCE`, `from heterodyne.agents.claude_code import STATUS_SOURCE`, `from heterodyne.sandbox.runtime import MAX_QUEUED`, `from heterodyne.wsd.runtime import LimitSeen, Signal, UsageSeen` and `from heterodyne.wsd.usage import Observation`, then add:
+In `tests/test_sandbox_runtime.py`, import `logging`, `Sequence` from `collections.abc`, `from heterodyne.sandbox import runtime as runtime_module`, `from heterodyne.sandbox.backend import ExecResult`, `from heterodyne.sandbox.runtime import DIAG_USAGE_READ` (beside `MAX_QUEUED`), `LaunchSpec` beside `LaunchFailed` from `heterodyne.wsd.runtime`, `Capabilities`, `from sandbox_env import with_caps`, `from heterodyne.agents.codex import IN_SESSION_SOURCE`, `from heterodyne.agents.claude_code import STATUS_SOURCE`, `from heterodyne.sandbox.runtime import MAX_QUEUED`, `from heterodyne.wsd.runtime import LimitSeen, Signal, UsageSeen` and `from heterodyne.wsd.usage import Observation`, then add:
 
 ```python
 USAGE = Capabilities(in_session_usage=True)
@@ -3132,18 +3142,85 @@ def test_the_codex_read_is_polled_when_due(rig: RuntimeRig) -> None:
     assert rig.runtime.signals("beta") == []                           # another workstream's: none
 
 
-@pytest.mark.parametrize("fault", ["error", "garbage", "no-login"])
-def test_a_read_that_fails_reports_nothing(rig: RuntimeRig, fault: str) -> None:
+def read_failures(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(DIAG_USAGE_READ)]
+
+
+def pid_gone(pid_file: Path) -> bool:
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def failing_read(rig: RuntimeRig, fault: str | None, login: bool = True) -> tuple[LaunchSpec, Path]:
+    """A Codex session with (c) and (e) on, whose read will meet `fault`. The PID file is emptied after
+    the launch, whose own app-server writes it too, so only the read's app-server can fill it."""
     with_caps(rig, "codex", BOTH)
-    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
-    if fault != "no-login":
+    pid_file = rig.root / "read.pid"
+    rig.backend.env_extra |= {"HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT), "HZ_FAKE_PID_FILE": str(pid_file)}
+    if fault is not None:
         rig.backend.env_extra["HZ_FAKE_RATE_FAULT"] = fault
     spec = launch_spec(rig, "p-two")
     rig.runtime.launch(spec)
-    if fault != "no-login":
+    if login:
         codex_login_inside(rig, spec.session_key)
+    pid_file.unlink(missing_ok=True)
+    return spec, pid_file
+
+
+@pytest.mark.parametrize(("fault", "login", "reason"), [
+    ("error", True, "AnswerError"), ("garbage", True, "JSONDecodeError"), ("close", True, "ClosedOutput"),
+    ("exit", True, "ExitStatus"), (None, False, "AnswerError")])
+def test_a_read_that_fails_reports_nothing_and_names_why(rig: RuntimeRig, caplog: pytest.LogCaptureFixture,
+                                                         fault: str | None, login: bool, reason: str) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
+    _, pid_file = failing_read(rig, fault, login)
     assert rig.runtime.signals("alpha") == []
     assert reads(rig) == 1                                      # it ran and failed: not skipped
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: {reason}"]
+    assert pid_file.is_file() and pid_gone(pid_file)           # its app-server started, and was reaped
+
+
+def test_a_read_past_its_bound_is_a_failure_and_its_server_ends(rig: RuntimeRig,
+                                                                caplog: pytest.LogCaptureFixture,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
+    monkeypatch.setattr(runtime_module, "USAGE_SECONDS", 2)
+    _, pid_file = failing_read(rig, "hang")
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: BackendError"]
+    assert pid_file.is_file()                                   # the read's own server started
+    wait_for(lambda: pid_gone(pid_file))       # the script was killed: its server reads EOF and exits
+
+
+def test_a_read_whose_script_is_missing_is_its_exit_status(rig: RuntimeRig,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
+    spec, pid_file = failing_read(rig, None)
+    (rig.runtime.layout(spec.session_key).run(1) / "codex_usage.py").unlink()
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: exit 2"]      # python3 can't open the file
+    assert not pid_file.exists()
+
+
+@pytest.mark.parametrize(("status", "reason"), [(127, "exit 127"), (1, "exit 1"), (0, "unparsed")])
+def test_only_a_clean_exit_with_a_reading_is_a_reading(rig: RuntimeRig, caplog: pytest.LogCaptureFixture,
+                                                       monkeypatch: pytest.MonkeyPatch, status: int,
+                                                       reason: str) -> None:
+    """127 is a command that never ran, and its output is no reading, even one that parses."""
+    caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
+    failing_read(rig, None)
+    out = json.dumps(SNAPSHOT).encode() if status else b"not a reading"
+
+    def answered(name: str, workdir: Path, argv: Sequence[str], *, input: bytes | None = None,
+                 timeout: float) -> ExecResult:
+        return ExecResult(status, out, b"")
+
+    monkeypatch.setattr(rig.backend, "exec", answered)
+    assert rig.runtime.signals("alpha") == []
+    assert read_failures(caplog) == [f"{DIAG_USAGE_READ}: {reason}"]
 
 
 def test_a_rebound_session_still_reports(rig: RuntimeRig) -> None:
@@ -3223,12 +3300,16 @@ and in `from_config`, after `lock_wait_seconds=...`:
 
 In `src/heterodyne/sandbox/runtime.py`:
 
-- import `threading`; `from heterodyne.agents.base import UsageReport` (beside the existing names); `from heterodyne.config.capabilities import NONE, Capabilities`; and `LimitSeen`, `Signal`, `UsageSeen` from `heterodyne.wsd.runtime`;
+- import `logging`, `re` and `threading`; `ExecResult` beside `Backend` from `heterodyne.sandbox.backend`; `from heterodyne.agents.base import UsageReport` (beside the existing names); `from heterodyne.config.capabilities import NONE, Capabilities`; and `LimitSeen`, `Signal`, `UsageSeen` from `heterodyne.wsd.runtime`;
 - add after `RECORD_LOST`:
 
 ```python
 MAX_QUEUED = 256        # reports a workstream keeps between drains: a flooding session keeps only its newest
 USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py's own limit is 30)
+DIAG_USAGE_READ = "an in-sandbox usage read gave no reading"
+READ_REASON = re.compile(rb"codex_usage: ([A-Za-z]+)\n")       # the script's one stderr line (Task 5)
+
+log = logging.getLogger(__name__)
 ```
 
 - in `SandboxRuntime.__init__`, add:
@@ -3310,10 +3391,26 @@ USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py
             if argv is None:
                 return
             r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)
-        except (LaunchFailed, BackendError, BackendUnavailable):
+        except (LaunchFailed, BackendError, BackendUnavailable) as exc:
+            log.warning("%s: %s", DIAG_USAGE_READ, type(exc).__name__)
             return
-        if r.returncode == 0:
-            self._report(rec.ws, rec.key, rec.generation, caps, adapter.usage_from_read(r.stdout))
+        report = adapter.usage_from_read(r.stdout) if r.returncode == 0 else None
+        if report is None:
+            log.warning("%s: %s", DIAG_USAGE_READ, _read_reason(r))
+            return
+        self._report(rec.ws, rec.key, rec.generation, caps, report)
+```
+
+and, at module level after `SandboxRuntime`:
+
+```python
+def _read_reason(r: ExecResult) -> str:
+    """Why a read gave no reading, from its status and the script's own diagnostic only: never its
+    output. Only exit 0 is a reading, so 127 (nothing ran) is a failure like any other."""
+    if r.returncode == 0:
+        return "unparsed"
+    found = READ_REASON.fullmatch(r.stderr)
+    return found.group(1).decode() if found and r.returncode == 1 else f"exit {r.returncode}"
 ```
 
 - in `_start`, read the capabilities once, before the run files are written, and use them for the files and the server:
@@ -3339,7 +3436,12 @@ and widen its `except OSError:` to `except (OSError, KeyError):`. A record names
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `timeout 900 uv run pytest tests/test_sandbox_runtime.py tests/test_sandbox_settings.py tests/test_sandbox_live_teardown.py tests/test_session_server.py -q`
-Expected: PASS. In `test_a_read_that_fails_reports_nothing`, `reads(rig) == 1` is the negative control's proof that the read ran: a read that was skipped would pass the `== []` check too.
+Expected: PASS. In the failed-read tests, three things prove the read ran and failed for the reason named:
+- `reads(rig) == 1` (a skipped read would also pass the `== []` check);
+- the exact diagnostic: a fault that fails for another reason fails its test, a missing executable's `exit 127` or `FileNotFoundError` among them;
+- the PID file, and that its process is gone.
+
+The timeout case takes about 2 s. A test that waits on `wait_for`'s own bound fails, never passes.
 
 Then: `timeout 600 uv run pyright src tests/test_sandbox_runtime.py tests/fakes` and `uv run ruff check src tests`.
 Expected: 0 errors.
@@ -3368,26 +3470,31 @@ D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio,
 - Consumes:
   - `wsd.usage.TrustedRead`, `UsageReader`, `NoUsageReader`, `Deps.usage_reader` (Task 1).
   - `wsd.credlock.credential_lock`, `CredentialBusy`; `WsdSettings.credlock_dir` (Task 2).
-  - `codex.parse_rate_limits`, `codex.HOST_SOURCE`, `codex.USAGE_SOURCE`, and `codex_usage.read(codex, env, limit)` (Task 5).
+  - `codex.parse_rate_limits`, `codex.HOST_SOURCE`, `codex.USAGE_SOURCE` (Task 5).
+  - `codex_usage.read(codex, env, limit)` (Task 5). It raises `TimeoutError`, `AnswerError`, `ClosedOutput`, `ExitStatus`, `NotGone`, `json.JSONDecodeError`, or the `OSError` of a missing executable. Each is logged here by its type name.
   - `SandboxSettings.lock_wait_seconds` (Task 6).
   - `Accounts.adapter`, `current_key`, `login_paths` (exist).
 - Produces:
   - `sandbox.hostread.HostUsageReader(accounts, binary, path, credlocks, scratch_root, lock_wait_seconds, *, env, read_margin_seconds=300, limit_seconds=30.0, clock=utc_now, wait_clock=time.monotonic, sleep=time.sleep)`, a `UsageReader`.
-  - `hostread.DIAG_ROTATED_DROPPED`, `hostread.DIAG_SCRATCH_KEPT`, `hostread.DIAG_READ_FAILED`: log texts with no path, key or token in them.
+  - Log texts with no path, key or token in them:
+    - `hostread.DIAG_ROTATED_DROPPED` and `hostread.DIAG_SCRATCH_KEPT`, logged alone;
+    - `hostread.DIAG_READ_FAILED`, logged as `"<DIAG_READ_FAILED>: <exception type name>"` (a warning);
+    - `hostread.DIAG_NOT_READ`, logged as `"<DIAG_NOT_READ>: <reason>"` (info) when the read stops before it starts anything. The reason is `NOT_PINNED_KEY`, `TOO_CLOSE`, `NOT_AT_PIN`, or the `CredentialBusy` text (`LOCK_BUSY`, `LOCK_FAILED` or `BAD_KEY`).
+  - `hostread.NoRateLimits`: the failure of an answer that held no `rateLimits`.
   - `sandbox.build.build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader`.
   - `daemon.assemble(..., usage_reader: UsageReader | None = None)` and `cli.run(..., *, usage_reader: UsageReader | None = None)`. None means `NoUsageReader()`.
 
 The read's steps, all inside one `credential_lock(credlocks, credential_key, ...)`:
 
-1. The profile's adapter must be `codex`; otherwise None.
-2. `accounts.current_key("codex", account)` must equal `credential_key`; otherwise None.
+1. The profile's adapter must be `codex`; otherwise None, with nothing logged (a Claude profile is never a failure).
+2. `accounts.current_key("codex", account)` must equal `credential_key`; otherwise `NOT_PINNED_KEY`.
 3. The login file's real path is read without following a final link, at most `MAX_LOGIN` bytes, and must be a regular file.
-4. Its access token must be valid for `read_margin_seconds` more; otherwise None. Codex refreshes only an expired token (S7 (4)), so the read is not expected to write the login.
+4. Its access token must be valid for `read_margin_seconds` more; otherwise `TOO_CLOSE`. Codex refreshes only an expired token (S7 (4)), so the read is not expected to write the login. The CLI must be at its pin; otherwise `NOT_AT_PIN`.
 5. The scratch home is made under `scratch_root` (0700): `auth.json` is the copy, written 0600.
-6. `codex_usage.read(binary, env | {"CODEX_HOME": scratch}, limit_seconds)` gives the `rateLimits`, parsed with `parse_rate_limits(..., HOST_SOURCE)`.
-7. In a `finally`: if the copy's bytes changed, they are written back (a temporary file in the login's directory, then `os.replace`) only if the account's file still holds the original bytes. Otherwise the change is dropped, with `DIAG_ROTATED_DROPPED`. Then the scratch home is removed and checked with `os.path.lexists`. A scratch home that is still there makes the read None, with `DIAG_SCRATCH_KEPT`.
+6. `codex_usage.read(binary, env | {"CODEX_HOME": scratch}, limit_seconds)` gives the `rateLimits`, parsed with `parse_rate_limits(..., HOST_SOURCE)`. An answer with none raises `NoRateLimits`.
+7. In a `finally`: if the copy's bytes changed, they are written back (a temporary file in the login's directory, then `Path.replace`) only if the account's file still holds the original bytes. Otherwise the change is dropped, with `DIAG_ROTATED_DROPPED`. Then the scratch home is removed and checked with `os.path.lexists`. A scratch home that is still there makes the read None, with `DIAG_SCRATCH_KEPT`.
 
-Any failure is None. The log records only the exception's type name, never its text, which may hold a path.
+Any failure is None. The log records only the exception's type name, never its text, which may hold a path. Every None but the Claude profile's logs exactly one line, so each test names the reason it expects and a read that stopped for another reason fails it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3411,18 +3518,30 @@ import json
 import logging
 import os
 import shutil
+import signal
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sandbox_env import fake_jwt, install_fake_cli
 from wsd_env import Clock, accounts_at
 
-from heterodyne.sandbox import hostread
 from heterodyne.agents.codex import HOST_SOURCE
-from heterodyne.sandbox.hostread import DIAG_ROTATED_DROPPED, DIAG_SCRATCH_KEPT, HostUsageReader
 from heterodyne.config import ConfigError
+from heterodyne.sandbox import hostread
+from heterodyne.sandbox.hostread import (
+    DIAG_NOT_READ,
+    DIAG_READ_FAILED,
+    DIAG_ROTATED_DROPPED,
+    DIAG_SCRATCH_KEPT,
+    NOT_PINNED_KEY,
+    TOO_CLOSE,
+    HostUsageReader,
+)
 from heterodyne.wsd.accounts import ConfiguredAccounts
-from heterodyne.wsd.credlock import credential_lock
+from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock
 from heterodyne.wsd.usage import Observation, TrustedRead
 
 DAY = 86_400
@@ -3430,6 +3549,7 @@ RESET = 1_800_003_600
 SNAPSHOT = {"limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
             "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": RESET}}
 WANTED = TrustedRead((Observation("codex:codex:300m", "5h", 100, RESET, HOST_SOURCE),), True, RESET)
+POPEN = subprocess.Popen        # the class itself, before a test wraps or patches it
 
 
 class Rig:
@@ -3446,8 +3566,10 @@ class Rig:
         self.codex = install_fake_cli(tmp_path / "i", "codex")
         self.scratch = tmp_path / "hostread"
         self.credlocks = tmp_path / "k"
+        self.pid_file = tmp_path / "read.pid"
         self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home),
-                    "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT), **env}
+                    "HZ_FAKE_PID_FILE": str(self.pid_file), "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT),
+                    **env}
         self.reader = HostUsageReader(self.accounts, str(self.codex), os.environ["PATH"], self.credlocks,
                                       self.scratch, 1, env=self.env, limit_seconds=5, clock=self.clock)
 
@@ -3457,101 +3579,161 @@ class Rig:
     def scratch_empty(self) -> bool:
         return not self.scratch.exists() or list(self.scratch.iterdir()) == []
 
+    def server_gone(self) -> bool:
+        """The read's app-server started and is gone. It was this process's child, so a process that
+        was killed but not reaped would still answer signal 0 as a zombie."""
+        try:
+            os.kill(int(self.pid_file.read_text()), 0)
+        except ProcessLookupError:
+            return True
+        return False
 
-def test_a_read_gives_the_accounts_windows_and_leaves_nothing(tmp_path: Path) -> None:
+
+@pytest.fixture
+def logged(caplog: pytest.LogCaptureFixture) -> Callable[[], list[str]]:
+    """Every line hostread logs, info and up, in order."""
+    caplog.set_level(logging.INFO, logger=hostread.__name__)
+    return lambda: [r.getMessage() for r in caplog.records if r.name == hostread.__name__]
+
+
+@pytest.fixture
+def started(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[str]]:
+    """Every app-server the read starts, recorded so a test can reap it by its own handle."""
+    made: list[subprocess.Popen[str]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        proc = POPEN(*args, **kwargs)
+        made.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", recording)
+    return made
+
+
+def test_a_read_gives_the_accounts_windows_and_leaves_nothing(tmp_path: Path,
+                                                             logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     assert rig.read() == WANTED
-    assert rig.scratch_empty()
+    assert rig.scratch_empty() and rig.server_gone()
     assert rig.login.read_text() == rig.original
+    assert logged() == []
 
 
-def test_a_claude_profile_has_no_host_read(tmp_path: Path) -> None:
+def test_a_claude_profile_has_no_host_read(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     assert rig.read("p-one", "ck1-" + "0" * 32) is None
-    assert not rig.scratch.exists()                             # nothing was started
+    assert not rig.scratch.exists() and not rig.pid_file.exists()      # nothing was started
+    assert logged() == []
 
 
-def test_a_key_that_changed_is_not_read(tmp_path: Path) -> None:
+def test_a_key_that_changed_is_not_read(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     assert rig.read(key="ck1-" + "0" * 32) is None
-    assert not rig.scratch.exists()
+    assert not rig.scratch.exists() and not rig.pid_file.exists()
+    assert logged() == [f"{DIAG_NOT_READ}: {NOT_PINNED_KEY}"]
 
 
-def test_a_login_too_close_to_expiry_is_not_read(tmp_path: Path) -> None:
+def test_a_login_too_close_to_expiry_is_not_read(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     rig.login.write_text(json.dumps({"tokens": {"access_token": fake_jwt(rig.clock() + 299)}}))
     assert rig.read() is None
-    assert not rig.scratch.exists()
+    assert not rig.scratch.exists() and not rig.pid_file.exists()
+    assert logged() == [f"{DIAG_NOT_READ}: {TOO_CLOSE}"]
 
 
-def test_a_busy_lock_is_not_read(tmp_path: Path) -> None:
+def test_a_busy_lock_is_not_read(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     with credential_lock(rig.credlocks, rig.key, 0):
         assert rig.read() is None
-    assert not rig.scratch.exists()
+    assert not rig.scratch.exists() and not rig.pid_file.exists()
+    assert logged() == [f"{DIAG_NOT_READ}: {LOCK_BUSY}"]
     assert rig.read() == WANTED                                 # released
 
 
-def test_a_refreshed_login_is_saved_back(tmp_path: Path) -> None:
+def test_a_refreshed_login_is_saved_back(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rotated = json.dumps({"tokens": {"access_token": fake_jwt(Clock()() + 2 * DAY)}})
     rig = Rig(tmp_path, HZ_FAKE_ROTATE=rotated)
     assert rig.read() == WANTED
     assert rig.login.read_text() == rotated
     assert rig.login.stat().st_mode & 0o777 == 0o600
     assert [p.name for p in rig.login.parent.iterdir()] == ["auth.json"]       # no temporary file left
-    assert rig.scratch_empty()
+    assert rig.scratch_empty() and rig.server_gone()
+    assert logged() == []
 
 
 def test_a_refresh_is_dropped_if_the_login_changed_meanwhile(tmp_path: Path,
-                                                            caplog: pytest.LogCaptureFixture) -> None:
+                                                            logged: Callable[[], list[str]]) -> None:
     touched = tmp_path / "home" / ".codex" / "auth.json"
     rig = Rig(tmp_path, HZ_FAKE_ROTATE="rotated by the read", HZ_FAKE_TOUCH=str(touched))
-    caplog.set_level(logging.WARNING, logger=hostread.__name__)
     assert rig.read() == WANTED
     assert rig.login.read_text() == "written by someone else"
-    assert [r.getMessage() for r in caplog.records] == [DIAG_ROTATED_DROPPED]
-    assert rig.scratch_empty()
+    assert logged() == [DIAG_ROTATED_DROPPED]
+    assert rig.scratch_empty() and rig.server_gone()
 
 
-@pytest.mark.parametrize("fault", ["error", "garbage", "hang"])
-def test_a_failed_read_is_none_and_leaves_nothing(tmp_path: Path, fault: str) -> None:
-    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT=fault)
+@pytest.mark.parametrize(("env", "reason"), [
+    ({"HZ_FAKE_RATE_FAULT": "error"}, "AnswerError"), ({"HZ_FAKE_RATE_FAULT": "garbage"}, "JSONDecodeError"),
+    ({"HZ_FAKE_RATE_FAULT": "hang"}, "TimeoutError"), ({"HZ_FAKE_RATE_FAULT": "close"}, "ClosedOutput"),
+    ({"HZ_FAKE_RATE_FAULT": "exit"}, "ExitStatus"), ({"HZ_FAKE_RATE_LIMITS": "null"}, "NoRateLimits")])
+def test_a_failed_read_is_none_names_why_and_leaves_nothing(tmp_path: Path, logged: Callable[[], list[str]],
+                                                            env: dict[str, str], reason: str) -> None:
+    rig = Rig(tmp_path, **env)
     assert rig.read() is None
-    assert rig.scratch_empty()
+    assert logged() == [f"{DIAG_READ_FAILED}: {reason}"]
+    assert rig.scratch_empty() and rig.server_gone()           # started, killed and reaped
     assert rig.login.read_text() == rig.original
 
 
-def test_a_missing_cli_is_none(tmp_path: Path) -> None:
+def test_a_missing_cli_stops_before_anything_starts(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     shutil.rmtree(tmp_path / "i")
     assert rig.read() is None
-    assert rig.scratch_empty()
+    assert logged() == [f"{DIAG_READ_FAILED}: AdapterError"]     # locate's, never a reading or a refusal
+    assert not rig.scratch.exists() and not rig.pid_file.exists()
+
+
+def test_an_app_server_that_cannot_be_reaped_is_no_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           logged: Callable[[], list[str]],
+                                                           started: list[subprocess.Popen[str]]) -> None:
+    rig = Rig(tmp_path)
+    real_wait = POPEN.wait
+
+    def stuck(self: subprocess.Popen[str], timeout: float | None = None) -> int:
+        raise subprocess.TimeoutExpired(self.args, timeout or 0)
+
+    monkeypatch.setattr(POPEN, "wait", stuck)
+    try:
+        assert rig.read() is None
+    finally:
+        monkeypatch.setattr(POPEN, "wait", real_wait)
+        reaped = [real_wait(p, 10) for p in started]
+    assert reaped == [-signal.SIGKILL]                          # it was killed; reaped here, by its handle
+    assert logged() == [f"{DIAG_READ_FAILED}: NotGone"]
+    assert rig.scratch_empty() and rig.server_gone()
 
 
 def test_a_scratch_home_that_cant_be_removed_is_no_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                           caplog: pytest.LogCaptureFixture) -> None:
+                                                           logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
-    caplog.set_level(logging.WARNING, logger=hostread.__name__)
     monkeypatch.setattr(hostread.shutil, "rmtree", lambda *_a, **_k: None)
     assert rig.read() is None
-    assert DIAG_SCRATCH_KEPT in [r.getMessage() for r in caplog.records]
+    assert logged() == [DIAG_SCRATCH_KEPT]
+    assert rig.server_gone()
 
 
 def test_a_read_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                             caplog: pytest.LogCaptureFixture) -> None:
+                             logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
-    caplog.set_level(logging.WARNING, logger=hostread.__name__)
 
     def broken(_self: ConfiguredAccounts, _adapter: str, _account: str) -> str:
         raise ConfigError("account default is not configured for adapter codex")
 
     monkeypatch.setattr(ConfiguredAccounts, "current_key", broken)
     assert rig.read() is None
-    text = " ".join(r.getMessage() for r in caplog.records)
-    assert "ConfigError" in text and str(tmp_path) not in text and rig.key not in text
+    assert logged() == [f"{DIAG_READ_FAILED}: ConfigError"]      # the type name: no text, path or key
 
 
-def test_a_linked_login_is_not_read(tmp_path: Path) -> None:
+def test_a_linked_login_is_not_read(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
     elsewhere = tmp_path / "elsewhere.json"
     rig.login.rename(elsewhere)
@@ -3559,7 +3741,10 @@ def test_a_linked_login_is_not_read(tmp_path: Path) -> None:
     rig.key = rig.accounts.current_key("codex", "default")      # the key follows the link (D1)
     assert rig.read() == WANTED                                 # the real path is read, not the link
     assert rig.login.is_symlink() and elsewhere.read_text() == rig.original
+    assert logged() == []
 ```
+
+`server_gone` reads the PID file the fake app-server writes as it starts, so it also proves the read started one. Every check of it runs after `read` has returned, so a server that is still running, or killed but never reaped, fails the test.
 
 In `tests/test_sandbox_build.py`, import `build_usage_reader`, `HostUsageReader` and `NoUsageReader`, then add:
 
@@ -3577,7 +3762,8 @@ def test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary(tmp_path: Path)
 and in `test_wsd_run_uses_the_built_runtime`, replace the inner `run` with:
 
 ```python
-    def run(_s: WsdSettings, _f: object, runtime: AgentRuntime, *, usage_reader: UsageReader | None = None) -> int:
+    def run(_s: WsdSettings, _f: object, runtime: AgentRuntime, *,
+            usage_reader: UsageReader | None = None) -> int:
         seen.append(runtime)
         readers.append(usage_reader)
         return 0
@@ -3650,6 +3836,18 @@ DIAG_ROTATED_DROPPED = ("a trusted usage read refreshed the login, but the accou
                         "the read; the refresh was not saved")
 DIAG_SCRATCH_KEPT = "a trusted usage read's scratch home could not be removed; the read is discarded"
 DIAG_READ_FAILED = "a trusted usage read failed"
+DIAG_NOT_READ = "a trusted usage read was not run"
+NOT_PINNED_KEY = "the account's key is not the pinned one"
+TOO_CLOSE = "the login expires within the read margin"
+NOT_AT_PIN = "the codex CLI is not at its pinned version"
+
+
+class NoRateLimits(Exception):
+    """The app-server answered, but with no rate limits."""
+
+
+class _NotRead(Exception):
+    """The read stopped before it started anything; its text is one of the fixed reasons above."""
 
 
 def _usage_module() -> Any:
@@ -3725,7 +3923,8 @@ class HostUsageReader:
             with credential_lock(self.credlocks, credential_key, self.lock_wait_seconds,
                                  clock=self.wait_clock, sleep=self.sleep):
                 return self._locked(account, credential_key)
-        except CredentialBusy:
+        except (CredentialBusy, _NotRead) as why:
+            log.info("%s: %s", DIAG_NOT_READ, why)      # fixed texts only (credlock's and this module's)
             return None
         except Exception as exc:  # noqa: BLE001 - never raises (UsageReader); the type name only
             log.warning("%s: %s", DIAG_READ_FAILED, type(exc).__name__)
@@ -3733,26 +3932,24 @@ class HostUsageReader:
 
     def _locked(self, account: str, credential_key: str) -> TrustedRead | None:
         if self.accounts.current_key(ADAPTER, account) != credential_key:
-            return None
+            raise _NotRead(NOT_PINNED_KEY)
         _, files = self.accounts.login_paths(ADAPTER, account)
         login = Path(os.path.realpath(files[0]))
         original = _read_regular(login)
-        try:
-            if _expiry(original) - self.clock() < self.read_margin_seconds:
-                return None                   # S7 (4): only an expired token is refreshed; keep clear of it
-        except AdapterError:
-            return None
+        if _expiry(original) - self.clock() < self.read_margin_seconds:
+            raise _NotRead(TOO_CLOSE)         # S7 (4): only an expired token is refreshed; keep clear of it
         cli = self.adapter.locate(self.binary, self.path)
         if cli.version != self.adapter.version_pin:
-            return None
+            raise _NotRead(NOT_AT_PIN)
         private_dir(self.scratch_root)
         scratch = Path(tempfile.mkdtemp(prefix="read-", dir=self.scratch_root))
-        report = None
         try:
             _write_new(scratch, LOGIN, original)
             limits = _usage_module().read(str(cli.binary), {**self.env, "CODEX_HOME": str(scratch)},
                                           self.limit_seconds)
             report = parse_rate_limits(limits, HOST_SOURCE)
+            if report is None:
+                raise NoRateLimits("the answer held no rate limits")
         finally:
             try:
                 self._save_back(login, scratch / LOGIN, original)
@@ -3761,7 +3958,7 @@ class HostUsageReader:
                 kept = os.path.lexists(scratch)
                 if kept:
                     log.warning(DIAG_SCRATCH_KEPT)
-        if kept or report is None:
+        if kept:
             return None
         return TrustedRead(report.windows, report.limited, report.reset_hint)
 
@@ -3778,13 +3975,13 @@ class HostUsageReader:
             return
         temp = _write_new(login.parent, f".{LOGIN}.hz-{uuid.uuid4().hex[:12]}", now)
         try:
-            os.replace(temp, login)
+            temp.replace(login)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 temp.unlink()
 ```
 
-In `_locked`, the scratch home is made only once the lock is held, the key matches, the login is read, its token has the margin left and the CLI is at its pin. So the tests that expect `not rig.scratch.exists()` prove the read stopped before it started anything. `_save_back` runs inside the lock and before the scratch home is removed. The nested `finally` removes the scratch home even when `_save_back` raises; that exception then reaches `read`'s `except Exception`, which logs its type name and returns None.
+In `_locked`, the scratch home is made only once the lock is held, the key matches, the login is read, its token has the margin left and the CLI is at its pin. So the tests that expect `not rig.scratch.exists()` prove the read stopped before it started anything. `_save_back` runs inside the lock and before the scratch home is removed. The nested `finally` removes the scratch home even when `_save_back` raises; that exception then reaches `read`'s `except Exception`, which logs its type name and returns None. A login whose expiry can't be read raises `AdapterError` from `_expiry`, which is logged as a failure: it is not one of the expected stops. When the read itself raised, `kept` is never consulted: the exception leaves `_locked` from the `finally`, after the scratch home's removal was tried and `DIAG_SCRATCH_KEPT` logged if it failed.
 
 In `src/heterodyne/sandbox/build.py`, import `from heterodyne.sandbox.hostread import HostUsageReader` and `from heterodyne.wsd.usage import NoUsageReader, UsageReader`, and add:
 
@@ -3825,7 +4022,7 @@ In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtim
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `timeout 900 uv run pytest tests/test_sandbox_hostread.py tests/test_sandbox_build.py tests/test_wsd_daemon.py tests/test_agents_usage.py -q`
-Expected: PASS. The `hang` case ends in about `limit_seconds` (5), because the client's timer kills the app-server; a test run that waits longer is a failure of the bound, not a slow pass.
+Expected: PASS. The `hang` case ends in about `limit_seconds` (5), because the client's timer kills the app-server; a test run that waits longer is a failure of the bound, not a slow pass. Each failure is named by its own diagnostic, so a fault that fails for another reason (a missing executable among them) fails its test.
 
 Then: `timeout 600 uv run pyright src tests/test_sandbox_hostread.py` and `uv run ruff check src tests`.
 Expected: 0 errors.
@@ -4311,7 +4508,8 @@ def test_a_switch_without_b_is_a_handoff_and_with_b_a_resume(tmp_path: Path, on:
     assert signal(rig) is Outcome.RESUMED
     first, second = rig.runtime.launches
     assert (first.account, first.handoff, second.account) == ("default", False, "spare")
-    assert (second.credential_key, second.handoff, second.resume) == (key_of(rig, "spare"), handoff, not handoff)
+    assert (second.credential_key, second.handoff) == (key_of(rig, "spare"), handoff)
+    assert second.resume is (not handoff)
     entry = rig.journal.launch(rig.key(B), 1)
     assert entry is not None and entry.native_id is not None
     assert second.native_id == (None if handoff else entry.native_id)
@@ -4384,7 +4582,8 @@ def test_each_stale_login_is_tried_once_then_a_human(tmp_path: Path) -> None:
     assert (row.state, row.reason, row.detail) == (BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
     assert rig.runtime.calls == 2 and rig.runtime.launches == []
     [(status, data)] = pickup_ops(rig)
-    assert status == "stuck" and data["stale"] == ",".join(sorted([key_of(rig, "default"), key_of(rig, "spare")]))
+    assert status == "stuck"
+    assert data["stale"] == ",".join(sorted([key_of(rig, "default"), key_of(rig, "spare")]))
 
 
 def test_another_refusal_still_spends_the_budget_and_marks_nothing_stale(tmp_path: Path) -> None:
@@ -4433,8 +4632,9 @@ Add after `_outcome`:
     def _stale(self, op: Op, entry: LaunchEntry) -> Launch:
         """E9: the runtime's freshness gate refused the pinned login. Its key joins the op's `stale` keys as
         the generation is forgotten, in one transaction with the row's reason (`{kind}.stale`), so every
-        later pin of this op gates without it. No budget is spent: another permitted account gives FAILED, and the next
-        pickup's replay pins it; none left escalates (`_pin` applies the same rule on a replay)."""
+        later pin of this op gates without it. No budget is spent: another permitted account gives FAILED,
+        and the next pickup's replay pins it; none left escalates (`_pin` applies the same rule on a
+        replay)."""
         j, ws = self.d.journal, self.ws.name
         stale = stale_keys(op) | {entry.credential_key}
         with j.transaction():
@@ -4445,9 +4645,9 @@ Add after `_outcome`:
         self.d.cp(f"{op.kind.value}.stale")
         accounts = self.ws.accounts
         try:
+            previous = self._previous_key(entry.session_key)
             verdict = None if accounts is None else decide(
-                accounts, j, entry.profile, self._previous_key(entry.session_key), self.d.clock(), self.ws.usage,
-                exclude=stale)
+                accounts, j, entry.profile, previous, self.d.clock(), self.ws.usage, exclude=stale)
         except ConfigError:
             verdict = None                   # the replay's pin escalates it as CONFIG_INVALID
         if isinstance(verdict, AccountChanged):
@@ -4611,13 +4811,14 @@ def test_a_bound_login_with_its_evidence_is_accepted() -> None:
      {"codex": {"login_binding": BOUND, "trusted_read": Evidence("L7", "0.160.0")}}, PROBLEM_STALE_EVIDENCE),
     ({"codex": Capabilities(login_binding=True)}, {"codex": {"login_binding": Evidence("L1,L2", "0.157.0")}},
      PROBLEM_WRONG_VERSION),
-    ({"codex": Capabilities(in_session_usage=True)}, {"codex": {"in_session_usage": Evidence("L2", "0.160.0")}},
-     PROBLEM_NEEDS_BINDING),
+    ({"codex": Capabilities(in_session_usage=True)},
+     {"codex": {"in_session_usage": Evidence("L2", "0.160.0")}}, PROBLEM_NEEDS_BINDING),
     ({"claude-code": Capabilities(login_binding=True, trusted_read=True)},
      {"claude-code": {"login_binding": Evidence("L1,L2", "2.1.286"),
                       "trusted_read": Evidence("L7", "2.1.286")}}, PROBLEM_NO_SOURCE),
     ({"codex": Capabilities(login_binding=True, handoff_relaunch=True)},
-     {"codex": {"login_binding": BOUND, "handoff_relaunch": Evidence("L4", "0.160.0")}}, PROBLEM_NO_GENERATOR),
+     {"codex": {"login_binding": BOUND, "handoff_relaunch": Evidence("L4", "0.160.0")}},
+     PROBLEM_NO_GENERATOR),
 ], ids=["unknown-in-table", "unknown-in-evidence", "no-evidence", "stale-evidence", "wrong-version",
         "needs-binding", "claude-trusted-read", "handoff"])
 def test_each_broken_rule_is_named(table: dict[str, Capabilities], evidence: dict[str, dict[str, Evidence]],
@@ -4633,8 +4834,8 @@ def test_a_problem_names_the_adapter_and_the_field_only() -> None:
 
 def test_every_field_is_a_capability_letter() -> None:
     """The rules name fields by their dataclass names; a renamed field must fail here, not pass silently."""
-    assert capabilities.FIELDS == ("login_binding", "cross_account_resume", "in_session_usage", "trusted_read",
-                                   "limit_signal", "handoff_relaunch")
+    assert capabilities.FIELDS == ("login_binding", "cross_account_resume", "in_session_usage",
+                                   "trusted_read", "limit_signal", "handoff_relaunch")
 ```
 
 In `tests/test_config_accounts.py`, replace `test_capability_table_is_empty` with:
@@ -4752,7 +4953,8 @@ CAPABILITIES: Mapping[str, Capabilities] = {
                           trusted_read=True, limit_signal=True),
 }
 EVIDENCE: Mapping[str, Mapping[str, Evidence]] = {
-    "codex": {"login_binding": Evidence("L1,L2", "0.160.0"), "cross_account_resume": Evidence("L3", "0.160.0"),
+    "codex": {"login_binding": Evidence("L1,L2", "0.160.0"),
+              "cross_account_resume": Evidence("L3", "0.160.0"),
               "in_session_usage": Evidence("L2", "0.160.0"), "trusted_read": Evidence("L7", "0.160.0"),
               "limit_signal": Evidence("L5", "0.160.0")},
 }
@@ -4791,7 +4993,10 @@ Model budget (testing only): `test_live_sandbox.MODELS`. That is Claude `claude-
 - Consumes:
   - From `tests/live/test_live_sandbox.py`: `Live`, `PinnedSelfTest`, `preflight`, `host_config`, `tiny_repo`, `teardown`, `wait_until`, `MODELS`, `PROFILES` and `PROMPT_SECONDS`, imported by name. `tests/live` is on `sys.path` (the conftest), and importing by name brings in no test and no fixture.
   - `RuntimeConfig.credlocks`, `LaunchSpec.account` and `.credential_key` (Tasks 1 and 6); `SandboxRuntime.signals` (Task 7); `HostUsageReader` (Task 8); `CAPABILITIES` (Task 11).
+  - From `tests/sandbox_env.py`: `sandbox_teardown(runtime, keys, listed)` (exists), the module teardown's check, run here per test.
 - Produces: nothing later tasks use.
+
+Every session a test launches is stopped in a `finally` (`running`) and checked by `sandbox_teardown` before the test can pass. A wait that runs out fails the test, because each wait's result is asserted. Failure messages carry statuses, exception type names, account names and hostread's fixed diagnostics, never a pane, a reply or a login.
 
 - [ ] **Step 1: Write the live test**
 
@@ -4807,6 +5012,8 @@ short prompt each, and prints nothing from any login.
 
 Run it only while no wsd on this host uses the OpenShell runtime (see test_live_sandbox)."""
 
+import contextlib
+import logging
 import os
 import shutil
 import sys
@@ -4820,7 +5027,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
-from sandbox_env import config_env  # noqa: E402
+from sandbox_env import config_env, sandbox_teardown  # noqa: E402
 from test_live_sandbox import (  # noqa: E402
     MODELS,
     PROFILES,
@@ -4838,6 +5045,8 @@ from heterodyne.agents.codex import HOST_SOURCE  # noqa: E402
 from heterodyne.config import ConfigError  # noqa: E402
 from heterodyne.config.accounts import Account, canonical_login, credential_key  # noqa: E402
 from heterodyne.config.capabilities import CAPABILITIES, NONE  # noqa: E402
+from heterodyne.sandbox import hostread  # noqa: E402
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable  # noqa: E402
 from heterodyne.sandbox.hostread import HostUsageReader  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime  # noqa: E402
@@ -4957,6 +5166,28 @@ def say(live: Live, key: str, text: str) -> None:
     live.tmux.paste(live.record(key).tmux_session, text)
 
 
+def answered(live: Live, key: str, text: str) -> bool:
+    """Say `text` and wait, up to PROMPT_SECONDS, for the turn it starts to end, by the session's own
+    turn-end count. The pane is never the evidence: it shows the prompt itself, and a resumed
+    session's history."""
+    before = live.runtime.servers[key].turns().stops
+    say(live, key, text)
+    return wait_until(lambda: live.runtime.servers[key].turns().stops > before, PROMPT_SECONDS)
+
+
+@contextlib.contextmanager
+def running(live: Live, spec: LaunchSpec) -> Iterator[Started]:
+    """Launch `spec` and, whatever the test does, stop it. The module's own teardown check then runs
+    on this session alone: the end is confirmed, no create is unresolved, no watcher is left, and its
+    sandboxes are gone from the backend's list. Any of those uncertain fails the test."""
+    try:
+        yield live.launch(spec)
+    finally:
+        uncertain = sandbox_teardown(live.runtime, [spec.session_key], live.backend.names)
+        if uncertain:
+            pytest.fail(f"{spec.session_key}'s teardown is uncertain: " + "; ".join(uncertain))
+
+
 @pytest.mark.parametrize("cli", ["claude", "codex"])
 def test_a_named_account_launches_on_its_own_login(live: Live, cli: str) -> None:
     """(a), AU-6: the launch binds the named login and passes the full self-test, Other accounts
@@ -4964,15 +5195,18 @@ def test_a_named_account_launches_on_its_own_login(live: Live, cli: str) -> None
     need(cli, "login_binding", second=True)
     before = identity(live, cli, OTHER)
     spec = on(live, cli, f"btq-live-a{cli[0]}", OTHER)
-    started = live.launch(spec)
-    rec = live.record(spec.session_key)
-    status = (["codex", "login", "status"] if cli == "codex" else ["claude", "auth", "status", "--json"])
-    ran = live.backend.exec(rec.sandbox, Path(rec.worktree), status, timeout=EXEC_SECONDS)
-    assert ran.returncode == 0, f"{cli} reports no login inside the sandbox (status {ran.returncode})"
-    assert identity(live, cli, OTHER) == before
-    assert started.native_id is not None
+    with running(live, spec) as started:
+        rec = live.record(spec.session_key)
+        status = ["codex", "login", "status"] if cli == "codex" else ["claude", "auth", "status", "--json"]
+        try:
+            ran = live.backend.exec(rec.sandbox, Path(rec.worktree), status, timeout=EXEC_SECONDS)
+        except (BackendError, BackendUnavailable) as exc:      # its timeout among them: never a pass
+            pytest.fail(f"{cli}'s login status could not be run: {type(exc).__name__}")
+        # Only 0 is a login: 127 (no such command) and every other status fail, by the status alone.
+        assert ran.returncode == 0, f"{cli} reports no login inside the sandbox (status {ran.returncode})"
+        assert identity(live, cli, OTHER) == before
+        assert started.native_id is not None
     print(f"EVIDENCE accounts (a) {cli} {spec.session_key} account={OTHER} ok")
-    live.runtime.stop(spec.session_key)
 
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
@@ -4980,9 +5214,9 @@ def test_in_session_usage_arrives_as_an_attributed_signal(live: Live, cli: str) 
     """(c), AU-7: the session's own report reaches wsd's queue, attributed to its launch."""
     need(cli, "in_session_usage")
     spec = on(live, cli, f"btq-live-c{cli[0]}", "default")
-    live.launch(spec)
-    say(live, spec.session_key, "Reply with only the word ok.")
-    found = signals_for(live, spec.session_key, UsageSeen, PROMPT_SECONDS)
+    with running(live, spec):
+        say(live, spec.session_key, "Reply with only the word ok.")
+        found = signals_for(live, spec.session_key, UsageSeen, PROMPT_SECONDS)
     assert found, f"no usage signal from {cli} in {PROMPT_SECONDS}s"
     for s in found:
         assert isinstance(s, UsageSeen) and s.generation == spec.generation
@@ -4990,13 +5224,14 @@ def test_in_session_usage_arrives_as_an_attributed_signal(live: Live, cli: str) 
     windows = sorted({(o.window_id, o.used_percent) for s in found if isinstance(s, UsageSeen)
                       for o in s.observations})
     print(f"EVIDENCE accounts (c) {cli} {spec.session_key} windows={windows}")
-    live.runtime.stop(spec.session_key)
 
 
-def test_the_trusted_read_sees_each_codex_account_and_leaves_no_scratch(live: Live) -> None:
+def test_the_trusted_read_sees_each_codex_account_and_leaves_no_scratch(
+        live: Live, caplog: pytest.LogCaptureFixture) -> None:
     """(d), AU-7: the host read, under the D8 lock, on each Codex login. Its scratch home is gone after
-    each read."""
+    each read. A read that gives nothing fails with hostread's own fixed diagnostic, never its output."""
     need("codex", "trusted_read")
+    caplog.set_level(logging.INFO, logger=hostread.__name__)
     settings = live.runtime.c.settings
     binary = settings.binaries.get("codex")
     assert binary, "no codex binary configured"
@@ -5008,8 +5243,10 @@ def test_the_trusted_read_sees_each_codex_account_and_leaves_no_scratch(live: Li
     names = ["default", *([OTHER] if os.environ.get(SECOND["codex"]) else [])]
     for account in names:
         key = accounts_of(live).current_key("codex", account)
+        caplog.clear()
         read = reader.read(PROFILES["codex"], account, key)
-        assert read is not None, f"no trusted read on codex account {account}"
+        why = [r.getMessage() for r in caplog.records if r.name == hostread.__name__]
+        assert read is not None, f"no trusted read on codex account {account}: {why}"
         assert read.observations and all(o.source == HOST_SOURCE for o in read.observations)
         assert all(0 <= o.used_percent <= 100 for o in read.observations)
         assert not scratch.exists() or list(scratch.iterdir()) == []
@@ -5023,23 +5260,23 @@ def test_a_session_resumes_on_the_other_account(live: Live, cli: str) -> None:
     conversation carries over: the model recalls a word it was given under the first login."""
     need(cli, "cross_account_resume", second=True)
     spec = on(live, cli, f"btq-live-b{cli[0]}", "default")
-    first: Started = live.launch(spec)
-    assert first.native_id is not None
     word = f"hz{uuid.uuid4().hex[:6]}"
-    say(live, spec.session_key, f"Remember the word {word}. Reply with only the word ok.")
-    assert wait_until(lambda: "ok" in live.tmux.capture(live.record(spec.session_key).tmux_session, 50).lower(),
-                      PROMPT_SECONDS)
-    live.runtime.stop(spec.session_key)
+    with running(live, spec) as first:
+        assert first.native_id is not None
+        assert answered(live, spec.session_key, f"Remember the word {word}. Reply with only the word ok."), \
+            f"{cli}'s first turn did not end in {PROMPT_SECONDS}s"
     moved = replace(spec, generation=2, resume=True, native_id=first.native_id, account=OTHER,
                     credential_key=accounts_of(live).current_key(ADAPTER[cli], OTHER))
-    second = live.runtime.launch(moved)
-    live.pinned(moved, second)
-    assert second.native_id == first.native_id
-    say(live, spec.session_key, "Reply with only the word you were asked to remember.")
-    assert wait_until(lambda: word in live.tmux.capture(live.record(spec.session_key).tmux_session, 50),
-                      PROMPT_SECONDS), f"{cli} did not recall the word after the move to account {OTHER}"
+    with running(live, moved) as second:                # `Live.launch` checks the pinned model too
+        assert second.native_id == first.native_id
+        assert answered(live, spec.session_key,
+                        "Reply with only the word you were asked to remember, in upper case."), \
+            f"{cli}'s second turn did not end in {PROMPT_SECONDS}s"
+        # Upper case: the pane holds the word in lower case already, in the resumed history.
+        pane = live.tmux.capture(live.record(spec.session_key).tmux_session, 50)
+        recalled = word.upper() in pane
+    assert recalled, f"{cli} did not recall the word after the move to account {OTHER}"
     print(f"EVIDENCE accounts (b) {cli} {spec.session_key} g1=default g2={OTHER} recalled")
-    live.runtime.stop(spec.session_key)
 
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
@@ -5051,13 +5288,12 @@ def test_a_reached_limit_arrives_as_a_limit_signal(live: Live, cli: str) -> None
     if account not in ("default", OTHER) or (account == OTHER and not os.environ.get(SECOND[cli])):
         pytest.skip("HZ_LIVE_ACCOUNTS_LIMITED names no account at its limit")
     spec = on(live, cli, f"btq-live-e{cli[0]}", account)
-    live.launch(spec)
-    say(live, spec.session_key, "Reply with only the word ok.")
-    found = signals_for(live, spec.session_key, LimitSeen, PROMPT_SECONDS)
+    with running(live, spec):
+        say(live, spec.session_key, "Reply with only the word ok.")
+        found = signals_for(live, spec.session_key, LimitSeen, PROMPT_SECONDS)
     assert found, f"no limit signal from {cli} in {PROMPT_SECONDS}s"
     hints = [s.reset_hint for s in found if isinstance(s, LimitSeen)]
     print(f"EVIDENCE accounts (e) {cli} {spec.session_key} reset-hints={hints} models={MODELS[cli]}")
-    live.runtime.stop(spec.session_key)
 ```
 
 - [ ] **Step 2: Check that it is skipped offline and type-checks**
