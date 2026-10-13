@@ -26,6 +26,11 @@ NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 GONE = ("can't find session", "no server running on ", "server exited unexpectedly", "lost server")
 
 
+def _gone(detail: str) -> bool:
+    return detail.startswith(GONE) or (
+        detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)"))
+
+
 class TmuxError(RuntimeError):
     pass
 
@@ -80,10 +85,20 @@ class Tmux:
         if proc.returncode == 0:
             return False
         detail = proc.stderr.decode("utf-8", "replace").strip()
-        if detail.startswith(GONE) or (
-                detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)")):
+        if _gone(detail):
             return True
         raise TmuxError(f"tmux has-session failed: {detail}")
+
+    def session_names(self) -> set[str]:
+        """Every session on the server; none when no server listens (as `session_absent` reads it). Any
+        other failure raises TmuxError: a listing that failed is never an empty one."""
+        proc = self._run("list-sessions", "-F", "#{session_name}", check=False)
+        if proc.returncode == 0:
+            return set(proc.stdout.decode("utf-8", "replace").splitlines())
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        if _gone(detail):
+            return set()
+        raise TmuxError(f"tmux list-sessions failed: {detail}")
 
     def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
                     unset: Sequence[str] = ()) -> None:
