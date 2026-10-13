@@ -99,7 +99,7 @@
 | E8 | How reactive-limit signals reach `wsd` (§4.4 D6, D9). | `AgentRuntime.signals(ws) -> list[Signal]` drains the reports since the last call: `UsageSeen` and `LimitSeen`, each attributed to `(session key, generation)` by the runtime from the channel it set up. The scheduler calls it in every pickup, just after `expire` and before the sweep. `wsd` ingests a `UsageSeen` only if the profile's capabilities enable (c), and acts on a `LimitSeen` only if they enable (e). | A pull keeps `wsd` the only writer of the journal, as `expire` already does. Latency is up to one backstop interval. That is acceptable: the Claude CLI waits for the reset before it continues (S7 (5)), and the session is stopped before then. |
 | E9 | The freshness-refusal path (AU-8: "A freshness-gate refusal moves on to the next account of the same permitted list"). | The runtime refuses a stale login with exactly `LOGIN_STALE`, and the receipt records it as `refused`/`failed` with that error. `Parker._outcome` recognises it by equality with the constant. It adds the entry's key to the op's `stale` data (comma-separated) and forgets the generation. The next pin runs the gate with those keys excluded (`exclude=`). If the gate finds another permitted account, the op returns `FAILED` without spending the launch budget, and the next pickup launches on that account. If it finds none (`AccountChanged`), the op escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`, so the bead becomes `needs-human`. A `Deadline` defers as usual. | No schema change: `receipts.refusal` keeps its CHECK constraint (`'failed', 'unavailable'`). The exclusion is per operation, so a later operation tries the refreshed login again. Exclusions only grow, so the path ends after at most one try per account. |
 | E10 | The handoff relaunch (§4.4 D7). | `LaunchSpec.handoff` is set by the guard when the new entry's key differs from the last launched entry's, and the profile's capabilities have (f) but not (b). Its `resume` is then false. The runtime's `_resume` returns `(False, None)` for a server-assigned adapter (Codex), and `(False, ids.handoff_session(key, generation))` otherwise. The native ID reaches the entry through the receipt, as it already does. With (b), a switch is an ordinary resume of the latest native ID. **The handoff prompt itself** (the §4.1 deterministic handoff) **is not built here** (Q3). | The ID rule is D7's. The runtime already knows `assigns_id`, so `wsd` stays adapter-free. (f) stays off until S7 L4 passes and a real handoff works (S7's D9 table), so nothing ships a fresh session with no handoff. |
-| E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(session_key, generation, hint, now)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.stopped`. Two new steps sit between it and the WIP commit (`LIMIT_STEPS`): `defer.read!`, after `Deps.usage_reader` answers (asked only if the profile has (d)), and `defer.confirmed`. **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with `defer.confirmed`. **Unconfirmed** keeps the untrusted record. The tail then commits the WIP, labels, comments and finishes as before. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
+| E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(session_key, generation, hint, now)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.stopped`. The tail then commits the WIP unchanged (`defer.committed`, D6's first durable step). Two new steps sit after it (`LIMIT_STEPS`): `defer.read!`, after `Deps.usage_reader` answers (asked only if the profile has (d)), and `defer.confirmed`. **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with `defer.confirmed`. **Unconfirmed** keeps the untrusted record. The tail then labels, comments and finishes as before. A failed WIP commit stops the tail before the read, so nothing is marked exhausted and no trusted record exists for a bead whose work isn't saved. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
 | E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`, inside `check_credentials`, which plan 4's runtime already calls on every launch. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. r16 as first drafted (`0ba5010`) required the walk only for a source inside another account's directory; its follow-up commit `5def9ef` says the walk also covers the chosen account's directory, and states both bounds. The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`. The walk goes by directory fd: each directory is opened relative to its parent's fd with `O_NOFOLLOW` and must be the inode that was listed, and links are resolved strictly and never followed by the walk, so a tree swapped during the walk refuses (`ROOT_RACED`) and a dangling or looping link refuses (`ROOT_LINK_BROKEN`). The names it refuses are the adapter's `login_names` (the names inside the sandbox, carried on `SandboxSpec.login_names`) plus each configured file's own name; the inodes it refuses are every configured account's files, links followed. The refusal texts are `spec.ROOT_*` constants. `check_credentials(spec, protected, real_home)` keeps its signature. It always walks `SandboxSpec.cli_root` (recorded by `build_spec`) when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account-directory rule. No caller can skip the walk or pass another root. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
 | E13 | Other accounts with a named account chosen (§7). | `_logins(adapter, account)` puts the chosen account's directory and files in `chosen_*`. Every other configured account goes in `other_*`, and the `default` login goes there too when it isn't the chosen one. `ProbeContext.others` lists the same accounts. | This is §7's rule ("the default login included"), and plan 4's probe already handles any list. |
 | E14 | A session's turn-end events (S7 finding 1). | `Adapter.turn_end_events` is `("Stop", "StopFailure")` for Claude and `("Stop",)` for Codex. `SessionServer(turn_ends=...)` counts a turn end for any of them, and `TurnState.idle` is true after one. | The server stays adapter-neutral: it is given the names, and doesn't know them. |
@@ -157,7 +157,7 @@ Wave 2 (parallel):  T5 adapter parsing (T4)
                     T6 named-account binding (T1,T2,T3)
                     T9 limit flow (T1)
 Wave 3 (parallel):  T7 runtime signals (T4,T5,T6)
-                    T8 trusted read (T1,T2,T5)
+                    T8 trusted read (T1,T2,T5,T6)
                     T10 handoff and stale path (T1,T6,T9)
 Any wave:           T11a table invariants (none)
 Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test (T11b)
@@ -171,7 +171,7 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 | 4 | none | 1, 2, 3 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
 | 5 | 4 | 1, 2, 3, 6, 9 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
 | 6 | 1, 2, 3 | 5, 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
-| 8 | 1, 2, 5 | 6, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
+| 8 | 1, 2, 5, 6 | 7, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
 | 9 | 1 | 5, 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
 | 10 | 1, 6, 9 | 7, 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
 | 7 | 4, 5, 6 | 10 | `sandbox/runtime.py` |
@@ -4053,12 +4053,12 @@ E8 and E11. Each pickup drains the runtime's signals just after `expire`. A `Usa
   - `Parker._record_defer`, `defer_tail`, `_previous_key` (exist).
 - Produces:
   - `park.capabilities(accounts: Accounts | None, profile: str) -> Capabilities`: E15's one read on the `wsd` side. It returns `NONE` without accounts, or for a profile that can't resolve.
-  - `park.LIMIT_STEPS`: the tail's points for a limit's defer, `defer.read!` and `defer.confirmed` between `defer.stopped` and `defer.committed!`.
+  - `park.LIMIT_STEPS`: the tail's points for a limit's defer, `defer.read!` and `defer.confirmed` between `defer.committed` and `defer.labelled!` (D6: the WIP commit comes first).
   - `Parker.limit(session_key: str, generation: int, hint: int | None, now: int) -> BeadState | None`. The caller holds `entry()`.
   - A PARK op opened by `limit` carries `limit_key` and `limit_gen` in its data.
   - `Rig.usage_reader` (tests): the reader the rig's `Deps` get, kept across `restart`.
 
-The confirming step sits between the stop and the WIP commit, not after the commit. A superseding record has a new number, and the tail's WIP commit, `v2:deferred` and comment all use the number current after `defer.confirmed`. So the commit's mark (`defer:<key>:<n>`) and the comment name the record the bead actually waits on. The superseded untrusted record gets neither, as a record superseded by a requota already doesn't. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
+The confirming step sits after the WIP commit, as D6 orders it (Codex plan 4b r2). If the commit fails, the tail stops before the read: no trusted read, no `mark_exhausted`, and the bead keeps only its untrusted record. A superseding record has a new number. The WIP commit's mark (`defer:<key>:<n>`, written and never read back) names the untrusted record, while `v2:deferred` and the comment use the number current after `defer.confirmed`, so the comment names the record the bead actually waits on. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
 
 A signal is drained before anything can fail. If `BeadsUnavailable` interrupts `limit` before its op is opened, that one report is lost, and the session goes on until its next report. Claude's CLI waits for the reset itself (S7 (5)), and Codex's next poll reports the limit again (Task 7). Once the op is opened, its replay finishes the defer.
 
@@ -4198,6 +4198,24 @@ def test_a_read_that_doesnt_confirm_keeps_the_untrusted_record(tmp_path: Path,
     completed(rig)
 
 
+def test_a_failed_wip_commit_reads_nothing_and_marks_nothing(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """D6 (Codex plan 4b r2): the WIP commit comes before the trusted read. A commit that fails stops the
+    tail with only the untrusted record: no read, no exhaustion mark, no trusted record."""
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), two=True, trusted_read=True, limit_signal=True)
+
+    def fails(*_: object) -> str:
+        raise gitwip.GitFailed("injected")
+
+    monkeypatch.setattr(gitwip, "wip_commit", fails)
+    with contextlib.suppress(gitwip.GitFailed):
+        signal(rig)
+    assert reader.calls == []
+    assert [(r.reason, r.trust) for r in records(rig)] == [(QUOTA, UNTRUSTED)]
+    assert not rig.journal.usage_cache([first_key(rig)]).marks
+
+
 def test_a_confirmed_limit_relaunches_on_the_next_account(tmp_path: Path) -> None:
     rig = rig_for(tmp_path)
     limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
@@ -4263,7 +4281,7 @@ def test_a_crash_at_every_limit_point_replays_to_the_relaunch(tmp_path: Path) ->
     assert [s.account for s in clean.rig.runtime.launches] == ["default", "spare"]
 ```
 
-`defer_mark` is imported from `heterodyne.wsd.park` beside `DEFER_MARK`. `Reason` and `BeadState` are already imported.
+`defer_mark` is imported from `heterodyne.wsd.park` beside `DEFER_MARK`. `Reason` and `BeadState` are already imported. Add `import contextlib` if the module lacks it; `gitwip` is already imported.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -4289,8 +4307,8 @@ from heterodyne.wsd.usage import (
 replacing the existing `from heterodyne.wsd.usage import admitted, decide, untrusted_defer_until`. After `DEFER_STEPS`, add:
 
 ```python
-# A limit's defer (plan 4b E11): the tail with the trusted read between the stop and the WIP commit.
-LIMIT_STEPS = (*DEFER_STEPS[:3], "defer.read!", "defer.confirmed", *DEFER_STEPS[3:])
+# A limit's defer (plan 4b E11): the tail with the trusted read after the WIP commit (D6), before the label.
+LIMIT_STEPS = (*DEFER_STEPS[:5], "defer.read!", "defer.confirmed", *DEFER_STEPS[5:])
 ```
 
 After `resumable`, add:
@@ -4310,17 +4328,17 @@ In the module docstring, add after the Defer item:
 
 ```
 - Limit (plan 4b E11): a session's own limit report opens a PARK op with an untrusted record, then the
-  tail, which asks the trusted read once the session is stopped (`defer.confirmed`). A confirmed read
-  supersedes the record with the gate's trusted verdict before the WIP commit.
+  tail, which asks the trusted read once the WIP is committed (`defer.confirmed`). A confirmed read
+  supersedes the record with the gate's trusted verdict before the label and comment.
 ```
 
-In `defer_tail`, replace the `if op.step == "defer.stopped":` line (the WIP commit's block) with:
+In `defer_tail`, replace the `if op.step == "defer.committed":` line (the label's block) with:
 
 ```python
-            if op.step == "defer.stopped" and "limit_key" in op.data:
+            if op.step == "defer.committed" and "limit_key" in op.data:
                 op = self._confirm(op)
                 n = int(op.data["defer"])          # a confirmed read may have superseded the record
-            if op.step in ("defer.stopped", "defer.confirmed"):
+            if op.step in ("defer.committed", "defer.confirmed"):
 ```
 
 Add after `convert_quota`:
@@ -4357,7 +4375,7 @@ Add after `convert_quota`:
         return self.defer_tail(op)
 
     def _confirm(self, op: Op) -> Op:
-        """The `defer.confirmed` step, once the limited session is stopped: with (d), the trusted read of
+        """The `defer.confirmed` step, once the limited session is stopped and its WIP committed: with (d), the trusted read of
         the limited launch's account. A read that confirms the limit supersedes the untrusted record, in
         one transaction with the step (`_supersede`). Anything else keeps it: no (d), no reading, a
         reading that doesn't confirm, or a record superseded meanwhile (the tail's check escalates that)."""
