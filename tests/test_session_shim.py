@@ -393,3 +393,107 @@ def test_no_socket_variable_still_spools_other_events(run: Path) -> None:
     env = {"HOME": str(run.parent / "home")}
     assert shim.run_hook(b'{"hook_event_name": "Stop"}', env, clock=t.clock, sleep=t.sleep) == (0, "")
     assert (run.parent / "home" / ".hz" / "spool.jsonl").exists()
+
+
+# --- the status mode (plan 4b E7) ---
+
+LIMITS = {"five_hour": {"used_percentage": 42, "resets_at": 1_800_003_600}}
+
+
+WALL = 1_800_000_000.0
+
+
+def status(run: Path, payload: object, t: FakeTime | None = None, wall: float = WALL) -> int:
+    t = t or FakeTime()
+    return shim.run_status(json.dumps(payload).encode(), env_for(run), clock=t.clock, sleep=t.sleep,
+                           wall=lambda: wall)
+
+
+def test_status_sends_each_change_once(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"session_id": "s1"}) == 0                    # the first call has no rate_limits
+        assert status(run, {"session_id": "s1", "rate_limits": LIMITS}) == 0
+        assert status(run, {"session_id": "s1", "rate_limits": LIMITS}) == 0
+        changed = {"five_hour": {"used_percentage": 43, "resets_at": 1_800_003_600}}
+        assert status(run, {"session_id": "s1", "rate_limits": changed}) == 0
+        assert seen == [{"hook_event_name": "StatusLine", "session_id": "s1", "rate_limits": LIMITS},
+                        {"hook_event_name": "StatusLine", "session_id": "s1", "rate_limits": changed}]
+    finally:
+        s.close()
+
+
+def test_status_resends_an_unchanged_value_before_it_could_go_stale(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        for at in (WALL, WALL + shim.STATUS_RESEND - 1, WALL + shim.STATUS_RESEND, WALL - 5):
+            assert status(run, {"session_id": "s1", "rate_limits": LIMITS}, wall=at) == 0
+        assert len(seen) == 3       # the first; once the interval had passed; after the clock went back
+    finally:
+        s.close()
+
+
+def test_a_relaunch_sends_the_same_value_to_its_own_wsd_session(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"rate_limits": LIMITS}) == 0
+    finally:
+        s.close()
+    run2 = run.parent / "r2"                    # the next generation: its own run dir and token, same $HOME
+    run2.mkdir()
+    (run2 / "token").write_text(TOKEN + "-2")
+    (run2 / "shim.json").write_text((run / "shim.json").read_text())
+    s2 = SessionServer(run2 / "s.sock", TOKEN + "-2", run.parent / "events.jsonl", on_event=seen.append)
+    s2.start()
+    try:
+        assert status(run2, {"rate_limits": LIMITS}) == 0
+        assert status(run2, {"rate_limits": LIMITS}) == 0                 # and then once only
+    finally:
+        s2.close()
+    assert [e["rate_limits"] for e in seen] == [LIMITS, LIMITS]
+    kept = (run.parent / "home" / ".hz" / shim.STATUS_FILE).read_text()
+    assert TOKEN not in kept and json.loads(kept)["launch"] == shim._launch(TOKEN + "-2")
+
+
+def test_status_retries_a_change_wsd_never_answered(run: Path) -> None:
+    t = FakeTime()
+    assert status(run, {"rate_limits": LIMITS}, t) == 0                   # nothing listening
+    assert t.now <= shim.STATUS_WAIT
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"rate_limits": LIMITS}) == 0
+        assert [e["rate_limits"] for e in seen] == [LIMITS]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("raw", [b"", b"not json", b"[1]", b"[" * 200 + b"]" * 200])
+def test_status_ignores_input_it_cannot_read(run: Path, live: SessionServer, raw: bytes) -> None:
+    assert shim.run_status(raw, env_for(run), clock=FakeTime().clock, sleep=FakeTime().sleep) == 0
+    assert live.served == 0
+
+
+def test_status_never_follows_a_planted_link(run: Path, live: SessionServer, tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    hz = run.parent / "home" / ".hz"
+    hz.mkdir(mode=0o700)
+    (hz / shim.STATUS_FILE).symlink_to(victim)
+    assert status(run, {"rate_limits": LIMITS}) == 0
+    assert victim.read_text() == "keep"
+
+
+def test_status_runs_standalone_and_prints_nothing(run: Path, live: SessionServer) -> None:
+    proc = subprocess.run([sys.executable, "-I", shim.__file__, "status"],
+                          input=json.dumps({"rate_limits": LIMITS}).encode(), env=env_for(run),
+                          capture_output=True, timeout=30, check=False)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, b"", b"")
+    assert live.served == 1
