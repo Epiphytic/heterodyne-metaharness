@@ -158,7 +158,7 @@ Wave 2 (parallel):  T6 named-account binding (T1,T2,T3)
                     T9 limit flow (T1)
 Wave 3 (parallel):  T7 runtime signals (T4,T5,T6)
                     T10 handoff and stale path (T1,T6,T9)
-Wave 2 (also):     T11a table invariants (none)
+Any wave:           T11a table invariants (none)
 Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test (T11b)
 ```
 
@@ -172,8 +172,8 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 | 6 | 1, 2, 3 | 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
 | 8 | 1, 2, 5 | 6, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
 | 9 | 1 | 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
-| 10 | 1, 6, 9 | 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
-| 7 | 4, 5, 6 | none | `sandbox/runtime.py` |
+| 10 | 1, 6, 9 | 7, 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
+| 7 | 4, 5, 6 | 10 | `sandbox/runtime.py` |
 | 11a | none | any | `config/capabilities.py`, `tests/test_config_accounts.py` |
 | 11b | 6–10, 11a, G2 | none | `config/capabilities.py` |
 | 12 | 11b | none | `tests/live/`, `docs/wsd.md` |
@@ -4599,3 +4599,12 @@ In `docs/wsd.md` §5, after the paragraph that begins "**The live gate (plan 4 T
 git add tests/live/test_live_accounts.py docs/wsd.md
 git commit -m "plan4b T12: live accounts checks on the shipped capability table"
 ```
+
+## Execution handoff
+
+This plan is complete once it has passed its cross-model design review and the operator has approved it. Nothing is executed before then. After approval, there are two ways to run it:
+
+1. **Subagent-driven (recommended).** Use superpowers:subagent-driven-development. Give each task a fresh worker session on its own `p4b-t<N>` branch, in the waves of the Parallelism section, and claim each worker's bead with that worker's own session. Each task ends with the cross-model review in Global Constraints before its PR merges.
+2. **Inline.** Use superpowers:executing-plans. Run the tasks in wave order in one session, with a checkpoint and the same review after each task.
+
+Either way, Task 11 Part B and Task 12 start only after the G2 bead records the operator's accepted findings. They run on the CLI versions those findings name.
