@@ -6,13 +6,16 @@ found and cleaned up. Everything fails closed: what can't be listed, read or con
 RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 
 import contextlib
+import dataclasses
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +26,7 @@ import msgspec
 from heterodyne.agents.base import Adapter, AdapterError, Cli, write_private
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError
+from heterodyne.fsutil import private_dir
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
@@ -47,14 +51,20 @@ from heterodyne.session.server import SessionServer
 from heterodyne.tmux import Tmux, TmuxError
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.accounts import Accounts
+from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.runtime import (
+    Action,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
     Liveness,
+    Resolution,
+    ResolveFailed,
+    ResolveRefused,
     RuntimeUnavailable,
     Session,
     Started,
+    UnlandedView,
 )
 
 DEFAULT_ACCOUNT = "default"
@@ -65,6 +75,17 @@ TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
+# btq-xb56t: the operator's resolve of an unlanded session (docs/wsd.md §5).
+SHORT_ID = re.compile(r"hz[0-9a-f]{12}")
+ZERO = "0" * 40
+SUBJECT_CHARS = 72
+CONFIRMED, IMPORTED, MOVED, REMOVED = "confirmed", "imported", "moved", "removed"
+INCONSISTENT = "the resolve's state is inconsistent; see docs/wsd.md §5"
+NO_RECORD = "the session has no record; see docs/wsd.md §5"
+KEEP_REFUSED = "the keep ref can't be created"
+NO_FAST_FORWARD = "the bead branch can't be fast-forwarded to the session's tip; nothing was changed"
+STEP_FAILED = "a resolve step failed; run the same wsctl resolve again"
+RESOLVE_POINTS = ("imported", "imported.recorded", "moved", "moved.recorded", "removed", "removed.recorded")
 
 
 class Phase(StrEnum):
@@ -120,6 +141,47 @@ def write_record(layout: SessionLayout, rec: SessionRecord) -> None:
     write_private(layout.record, msgspec.json.encode(rec).decode())
 
 
+class Intent(msgspec.Struct, frozen=True, kw_only=True):
+    """A resolve's durable intent (btq-xb56t), in `<state>/resolutions/`: written before its first side
+    effect, checkpointed after each, removed only once its journal entry is committed."""
+    ws: str
+    bead: str
+    key: str
+    generation: int
+    tip: str | None
+    action: Action
+    ref: str = ""                     # the keep ref
+    step: str                         # CONFIRMED, IMPORTED, MOVED or REMOVED
+    dir_id: tuple[int, int]           # the session directory's (st_dev, st_ino) when it was confirmed
+
+
+def printable(raw: bytes) -> str:
+    """An untrusted commit subject for a terminal: UTF-8 with replacement, every character outside
+    printable ASCII as `?`, at most SUBJECT_CHARS."""
+    text = raw.decode("utf-8", "replace")
+    return "".join(c if " " <= c <= "~" else "?" for c in text)[:SUBJECT_CHARS]
+
+
+def keep_ref(bead: str, sid: str, generation: int) -> str:
+    return f"refs/heads/unlanded/{bead}/{sid}-g{generation}"
+
+
+def _ident(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _sync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class _StepFailed(Exception):
     """A launch step failed. Fixed wording."""
 
@@ -151,6 +213,9 @@ class SandboxRuntime:
         self.backend = backend
         self.selftest = selftest
         self.servers: dict[str, SessionServer] = {}      # key -> its running generation's socket
+        self.cp: Checkpoint = nothing                       # a test's crash points in a resolve
+        self._inspect_lock = threading.Lock()
+        self._inspect_cleared = False
 
     # --- names ---
 
@@ -197,6 +262,7 @@ class SandboxRuntime:
                 listed.append(Session(rec.key, rec.ws, rec.bead, rec.role, Liveness.UNKNOWN))
         # T10 r3: commits that were not landed hold the whole workstream, so neither a park nor a defer
         # makes a host WIP over them. Read again: an end above may have just recorded one.
+        self._held(ws=ws)
         for rec in self._records():
             if rec.ws == ws and rec.unlanded:
                 raise self._unlanded(rec)
@@ -261,11 +327,13 @@ class SandboxRuntime:
         layout = self.layout(session_key)
         rec = read_record(layout)
         if rec is None:
+            self._held(key=session_key)         # its directory may have moved for a resolve
             return
         if rec.phase is not Phase.ENDED:
             if not self._end(rec, interrupt=True):
                 raise RuntimeUnavailable("the session's end could not be confirmed")
             rec = read_record(layout)
+        self._held(ws=rec.ws if rec is not None else None, key=session_key)
         if rec is not None and rec.unlanded:
             raise self._unlanded(rec)            # ended, but its caller must not commit over it
 
@@ -621,12 +689,9 @@ class SandboxRuntime:
         return rec
 
     def _unlanded(self, rec: SessionRecord) -> RuntimeUnavailable:
-        """The hold's detail names the session and its private git directory, relative to the state
-        directory: never a home path."""
-        git = self.layout(rec.key).git.relative_to(self.c.sessions.parent)
+        """The hold's detail names the session and the command that shows it: never a path."""
         return RuntimeUnavailable(f"session {short_id(rec.key)} generation {rec.generation}: its commits "
-                                  f"were not landed; land them from {git} in wsd's state directory by hand "
-                                  "(docs/wsd.md §5)")
+                                  f"were not landed; see `wsctl unlanded {rec.ws}` (docs/wsd.md §5)")
 
     def _overdue(self, rec: SessionRecord) -> bool:
         """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""
@@ -655,3 +720,311 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the session records can't be listed") from None
         found = [read_record(SessionLayout(p)) for p in folders]
         return [r for r in found if r is not None]
+
+    # --- unlanded sessions: the operator's view and resolve (btq-xb56t, docs/wsd.md §5) ---
+
+    def _resolutions(self) -> Path:
+        return self.c.sessions.parent / "resolutions"
+
+    def _intent_path(self, sid: str, generation: int) -> Path:
+        return self._resolutions() / f"{sid}-g{generation}.json"
+
+    def _trash(self, sid: str, generation: int) -> Path:
+        """Beside the intents, on the same filesystem as `sessions/` and outside it: one rename takes the
+        whole session directory out of `_records`' sight."""
+        return self._resolutions() / f"{sid}-g{generation}.trash"
+
+    def _read_intent(self, sid: str, generation: int) -> Intent | None:
+        return self._intent_at(self._intent_path(sid, generation))
+
+    def _intent_at(self, path: Path) -> Intent | None:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise RuntimeUnavailable("a resolve's intent can't be read") from None
+        try:
+            return msgspec.json.decode(data, type=Intent)
+        except msgspec.MsgspecError:
+            raise RuntimeUnavailable("a resolve's intent is unreadable") from None
+
+    def _intents(self) -> list[Intent]:
+        folder = self._resolutions()
+        if not os.path.lexists(folder):
+            return []
+        try:
+            paths = sorted(p for p in folder.iterdir() if p.name.endswith(".json"))
+        except OSError:
+            raise RuntimeUnavailable("the resolves' intents can't be listed") from None
+        found = [self._intent_at(p) for p in paths]
+        return [i for i in found if i is not None]
+
+    def _held(self, *, ws: str | None = None, key: str | None = None) -> None:
+        """A resolve's intent holds its workstream from its first write until it is removed."""
+        for intent in self._intents():
+            if intent.ws == ws or intent.key == key:
+                raise RuntimeUnavailable(f"an unlanded resolve of session {short_id(intent.key)} is "
+                                         "unfinished; run `wsctl resolve` for it again")
+
+    def _write_intent(self, intent: Intent) -> Intent:
+        """Atomic and durable: a temporary file, an fsync, the rename, an fsync of `resolutions/`."""
+        private_dir(self._resolutions())
+        write_private(self._intent_path(short_id(intent.key), intent.generation),
+                      msgspec.json.encode(intent).decode())
+        return intent
+
+    @contextlib.contextmanager
+    def _inspection(self) -> Generator[Path]:
+        """A fresh path for one snapshot under `<state>/inspect/` (wsd-owned, outside every bind), removed
+        when done. The first in this process first clears what an earlier wsd left: wsd holds its
+        instance lock for as long as it runs, and every snapshot is this process's."""
+        root = self.c.sessions.parent / "inspect"
+        with self._inspect_lock:
+            if not self._inspect_cleared:
+                if root.is_symlink():
+                    root.unlink()
+                elif os.path.lexists(root):
+                    shutil.rmtree(root)
+                self._inspect_cleared = True
+            private_dir(root)
+        dest = root / secrets.token_hex(8)
+        try:
+            yield dest
+        finally:
+            shutil.rmtree(dest, ignore_errors=True)
+
+    def _running(self, sid: str) -> str:
+        """Why something may still write the session's directory, or "": its pane or a reaper of any
+        generation on wsd's tmux server, or a sandbox of any generation. A listing that fails is
+        RuntimeUnavailable, never taken as absent."""
+        try:
+            panes = self.c.tmux.session_names()
+        except TMUX_ERRORS:
+            raise RuntimeUnavailable("wsd's tmux sessions can't be listed") from None
+        reaper = re.compile(rf"wsd-{sid}-r[0-9]+")
+        if f"wsd-{sid}" in panes or any(reaper.fullmatch(n) for n in panes):
+            return "its pane or a reaper is on wsd's tmux server"
+        if any(re.fullmatch(rf"{sid}g[0-9]+", n) for n in self._names()):
+            return "the backend lists a sandbox of it"
+        return ""
+
+    def _snap(self, rec: SessionRecord, dest: Path) -> tuple[gitwip.Pinned | None, sessiongit.Snapshot]:
+        """The session's objects, snapshotted. A repository that can't be pinned leaves the tip unread."""
+        if not rec.repo or not rec.worktree:
+            return None, sessiongit.Snapshot(dest, None, "the session record names no repository")
+        try:
+            p = gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{rec.bead}")
+        except gitwip.GitFailed as exc:
+            return None, sessiongit.Snapshot(dest, None, str(exc))
+        try:
+            return p, sessiongit.snapshot(p, self.layout(rec.key).git, dest)
+        except (gitwip.GitFailed, OSError):
+            raise ResolveFailed("the snapshot store can't be made") from None
+
+    def unlanded(self, ws: str) -> list[UnlandedView]:
+        views: list[UnlandedView] = []
+        for rec in self._records():
+            if rec.ws != ws or not rec.unlanded:
+                continue
+            sid = short_id(rec.key)
+            view = UnlandedView(sid, rec.generation, rec.bead, f"btq/{rec.bead}")
+            if rec.phase is not Phase.ENDED or self._running(sid):
+                views.append(dataclasses.replace(view, running=True))      # no snapshot while it may write
+                continue
+            with self._inspection() as dest:
+                views.append(self._view(rec, view, dest))
+        return views
+
+    def _view(self, rec: SessionRecord, view: UnlandedView, dest: Path) -> UnlandedView:
+        try:
+            p, snap = self._snap(rec, dest)
+        except ResolveFailed as exc:
+            return dataclasses.replace(view, error=str(exc))
+        if p is None or snap.tip is None:
+            return dataclasses.replace(view, error=snap.error)
+        try:
+            landed = sessiongit.landed(p)
+            cmp = sessiongit.compare(p, snap, landed)
+        except gitwip.GitFailed:
+            return dataclasses.replace(view, tip=snap.tip,
+                                       error="the session's tip can't be compared with the landed one")
+        return dataclasses.replace(view, landed=landed, tip=snap.tip, ahead=cmp.ahead, behind=cmp.behind,
+                                   fast_forward=cmp.behind == 0,
+                                   subjects=tuple(printable(raw) for raw in cmp.subjects))
+
+    def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
+                         tip: str | None) -> Resolution:
+        if not SHORT_ID.fullmatch(sid):
+            raise ResolveRefused("that is not a session's short ID")
+        intent = self._read_intent(sid, generation)
+        if intent is not None:
+            # A replay: the whole identity first, before anything is read or changed. From here on the
+            # intent, not the request, supplies every value.
+            if (intent.ws, intent.generation, intent.action, intent.tip) != (ws, generation, action, tip):
+                raise ResolveRefused("an unfinished resolve of this session asked for something else; "
+                                     "repeat that request")
+            return self._advance(intent, None)
+        for other in self._intents():
+            if other.ws == ws or short_id(other.key) == sid:     # name the one to finish first
+                raise ResolveRefused(f"an unfinished resolve of session {short_id(other.key)} generation "
+                                     f"{other.generation} comes first; repeat that request")
+        rec = self._resolvable(ws, sid, generation, None)
+        if why := self._running(sid):
+            raise ResolveRefused(f"the session may still run: {why}")
+        with self._inspection() as dest:
+            p, snap = self._snap(rec, dest)
+            if tip != snap.tip:
+                raise ResolveRefused(_tip_refusal(action, snap, tip))
+            ref = keep_ref(rec.bead, sid, generation) if action == "keep" else ""
+            if action == "land":
+                self._can_land(p, snap)
+            elif action == "keep":
+                self._can_keep(p, snap, rec.bead, ref)
+            try:
+                st = os.lstat(self.c.sessions / sid)
+                intent = self._write_intent(Intent(ws=ws, bead=rec.bead, key=rec.key, generation=generation,
+                                                   tip=tip, action=action, ref=ref, step=CONFIRMED,
+                                                   dir_id=(st.st_dev, st.st_ino)))
+            except OSError:
+                raise ResolveFailed("the resolve's intent can't be written; nothing was changed") from None
+            return self._advance(intent, (p, snap))
+
+    def _resolvable(self, ws: str, sid: str, generation: int, key: str | None) -> SessionRecord:
+        """The record a resolve needs before its directory moves: this workstream's, of this generation,
+        ended and unlanded (and, on a replay, the intent's own)."""
+        rec = read_record(SessionLayout(self.c.sessions / sid))
+        if rec is None:
+            raise ResolveRefused(NO_RECORD)
+        if short_id(rec.key) != sid or rec.ws != ws or key is not None and rec.key != key:
+            raise ResolveRefused("the session is not one of this workstream's")
+        if rec.generation != generation:
+            raise ResolveRefused("the session's generation is not the one given")
+        if rec.phase is not Phase.ENDED:
+            raise ResolveRefused("the session has not ended")
+        if not rec.unlanded:
+            raise ResolveRefused("the session's commits are not unlanded")
+        return rec
+
+    def _can_land(self, p: gitwip.Pinned | None, snap: sessiongit.Snapshot) -> None:
+        if p is None or snap.tip is None:
+            raise ResolveRefused("the session's tip can't be read")
+        try:
+            landed = sessiongit.landed(p)
+        except gitwip.GitFailed:
+            raise ResolveRefused("the bead branch can't be read") from None
+        if landed != snap.tip and not sessiongit.fast_forward(p, snap, landed):
+            raise ResolveRefused(NO_FAST_FORWARD)
+
+    def _can_keep(self, p: gitwip.Pinned | None, snap: sessiongit.Snapshot, bead: str, ref: str) -> None:
+        """The keep ref is free, or a replay's (already at the tip), and no ref takes its parents' names."""
+        if p is None or snap.tip is None:
+            raise ResolveRefused("the session's tip can't be read")
+        try:
+            at = sessiongit.ref_at(p, ref)
+            parents = ("refs/heads/unlanded", f"refs/heads/unlanded/{bead}")
+            taken = [sessiongit.ref_at(p, name) for name in parents]
+        except gitwip.GitFailed:
+            raise ResolveRefused(KEEP_REFUSED) from None
+        if at not in (None, snap.tip) or any(taken):
+            raise ResolveRefused(KEEP_REFUSED)
+
+    def _act(self, intent: Intent, p: gitwip.Pinned | None, snap: sessiongit.Snapshot) -> None:
+        """The action, idempotent: a land already at the tip, or a keep ref already there, is done."""
+        if intent.action == "discard":
+            return
+        tip = intent.tip
+        if p is None or tip is None or snap.tip != tip:
+            raise ResolveRefused("the session's tip is no longer the confirmed one")
+        try:
+            if intent.action == "land":
+                landed = sessiongit.landed(p)
+                if landed == tip:
+                    return
+                if not sessiongit.fast_forward(p, snap, landed):
+                    raise ResolveRefused(NO_FAST_FORWARD)
+                sessiongit.import_snapshot(p, snap, tip, f"refs/heads/{p.branch}", landed)
+                return
+            at = sessiongit.ref_at(p, intent.ref)
+            if at == tip:
+                return
+            if at is not None:
+                raise ResolveRefused(KEEP_REFUSED)
+        except gitwip.GitFailed:
+            raise ResolveFailed("the session's commits could not be imported") from None
+        try:
+            sessiongit.import_snapshot(p, snap, tip, intent.ref, ZERO)
+        except gitwip.GitFailed:
+            raise ResolveFailed(KEEP_REFUSED) from None
+
+    def _step(self, intent: Intent, step: str) -> Intent:
+        return self._write_intent(msgspec.structs.replace(intent, step=step))
+
+    def _advance(self, intent: Intent, live: tuple[gitwip.Pinned | None, sessiongit.Snapshot] | None
+                 ) -> Resolution:
+        """Run the resolve on from its last checkpoint, reconciled against the filesystem, since a crash can
+        come between a side effect and its checkpoint (docs/wsd.md §5). `live` is a first run's snapshot."""
+        sid, gen = short_id(intent.key), intent.generation
+        here, trash = self.c.sessions / sid, self._trash(sid, gen)
+        if live is None and (why := self._running(sid)):
+            raise ResolveRefused(f"the session may still run: {why}")
+        try:
+            at_here, at_trash, want = _ident(here), _ident(trash), tuple(intent.dir_id)
+            step = intent.step
+            if step in (CONFIRMED, IMPORTED) and at_here == want and at_trash is None:
+                if live is None:
+                    rec = self._resolvable(intent.ws, sid, gen, intent.key)
+                    with self._inspection() as dest:
+                        self._act(intent, *self._snap(rec, dest))
+                else:
+                    self._act(intent, *live)
+                self.cp("imported")
+                intent = self._step(intent, IMPORTED)
+                self.cp("imported.recorded")
+                here.rename(trash)
+                _sync_dir(self.c.sessions)
+                _sync_dir(self._resolutions())
+                self.cp("moved")
+                intent = self._step(intent, MOVED)
+                self.cp("moved.recorded")
+            elif step == IMPORTED and at_here is None and at_trash == want:
+                intent = self._step(intent, MOVED)            # the rename happened before its checkpoint
+            elif not (step == MOVED and at_here is None and at_trash in (None, want)
+                      or step == REMOVED and at_here is None and at_trash is None):
+                raise ResolveRefused(INCONSISTENT)
+            if intent.step == MOVED:
+                if os.path.lexists(trash):
+                    shutil.rmtree(trash)
+                if os.path.lexists(trash):
+                    raise ResolveFailed(STEP_FAILED)
+                _sync_dir(self._resolutions())
+                self.cp("removed")
+                intent = self._step(intent, REMOVED)
+                self.cp("removed.recorded")
+        except OSError:
+            raise ResolveFailed(STEP_FAILED) from None
+        return Resolution(intent.ws, intent.bead, sid, gen, intent.action, intent.tip, intent.ref)
+
+    def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
+        intent = self._read_intent(sid, generation)
+        if intent is None:
+            return
+        if intent.ws != ws or intent.step != REMOVED:
+            raise ResolveFailed("the resolve is not finished; run the same wsctl resolve again")
+        try:
+            self._intent_path(sid, generation).unlink()
+            _sync_dir(self._resolutions())
+        except OSError:
+            raise ResolveFailed("the resolve's intent can't be removed; run the same wsctl resolve again") \
+                from None
+
+
+def _tip_refusal(action: Action, snap: sessiongit.Snapshot, tip: str | None) -> str:
+    """Why the confirmation doesn't match what the snapshot read."""
+    if snap.tip is None:
+        if action != "discard":
+            return f"the session's tip can't be read ({snap.error}); it can only be discarded"
+        return f"the session's tip can't be read ({snap.error}); discard it without --tip"
+    if tip is None:
+        return "the session's tip is readable: confirm the discard with --tip, as wsctl unlanded shows it"
+    return "the session's tip is not the one given; see wsctl unlanded"

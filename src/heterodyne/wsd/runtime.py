@@ -9,7 +9,7 @@ claim work it can't run.
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from heterodyne.wsd.beads import BeadsAdapter
 
@@ -66,6 +66,49 @@ class Started:
     native_id: str | None       # the session's native ID, when the runtime knows it
 
 
+Action = Literal["land", "keep", "discard"]
+
+
+@dataclass(frozen=True)
+class UnlandedView:
+    """One unlanded session (btq-xb56t), for `wsctl unlanded`. `error` says, in fixed wording, why the
+    tip or its comparison can't be read; `subjects` are the agent's, made printable, and untrusted."""
+    short_id: str
+    generation: int
+    bead: str
+    branch: str
+    running: bool = False
+    landed: str = ""
+    tip: str | None = None
+    error: str = ""
+    ahead: int | None = None
+    behind: int | None = None
+    fast_forward: bool = False
+    subjects: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """A resolve whose side effects are all done, read from its durable intent. Its journal entry and
+    `finish_resolution` are still owed; the workstream stays held until both are done."""
+    ws: str
+    bead: str
+    short_id: str
+    generation: int
+    action: Action
+    tip: str | None
+    ref: str            # the keep ref, or ""
+
+
+class ResolveRefused(Exception):
+    """The resolve can't be done as asked, and nothing was changed by this request. Fixed wording."""
+
+
+class ResolveFailed(Exception):
+    """A resolve step failed; its intent stays at its last checkpoint, and asking again goes on from
+    there. Fixed wording."""
+
+
 class RuntimeUnavailable(Exception):
     """No runtime can act right now (none configured, or its backend is down). Nothing was attempted."""
 
@@ -115,6 +158,22 @@ class AgentRuntime(Protocol):
         Raises RuntimeUnavailable if a stop can't be confirmed. The sweep then resumes the bead."""
         ...
 
+    def unlanded(self, ws: str) -> list[UnlandedView]:
+        """Each of the workstream's sessions whose commits were not landed (docs/wsd.md §5). A failure on
+        one is shown on it. Raises RuntimeUnavailable if the sessions can't be listed."""
+        ...
+
+    def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
+                         tip: str | None) -> Resolution:
+        """Land, keep or discard one unlanded session's commits and remove its directory, through a durable
+        intent that a repeat of the same request goes on from. Raises ResolveRefused (nothing changed),
+        ResolveFailed, or RuntimeUnavailable when what runs can't be listed."""
+        ...
+
+    def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
+        """Remove a finished resolve's intent, once its journal entry is committed: the hold ends here."""
+        ...
+
 
 class NoRuntime:
     """The runtime until plan 4: it launches nothing, and since it can't list sessions it never lets wsd
@@ -134,6 +193,16 @@ class NoRuntime:
 
     def expire(self, ws: str, now: int) -> None:
         return None                  # it runs nothing
+
+    def unlanded(self, ws: str) -> list[UnlandedView]:
+        return []
+
+    def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
+                         tip: str | None) -> Resolution:
+        raise ResolveRefused("no runtime holds sessions")
+
+    def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
+        return None
 
 
 class ActionReconciler(Protocol):
