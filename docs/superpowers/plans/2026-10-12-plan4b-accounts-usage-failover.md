@@ -92,9 +92,9 @@
 | E1 | How the runtime knows the pinned credential key (§4.4 D2: "Immediately before the launch, the guard checks that the account's current credential key still equals the journaled one"). | `LaunchSpec.credential_key` carries the entry's key. Under the D8 lock, just before it reads the login, the runtime recomputes `accounts.current_key(adapter, account)`. A mismatch refuses with `KEY_CHANGED`. An empty `credential_key` is refused the same way. | The guard's step 3 check happens before dispatch. The runtime then reads files that may have been repointed in between. Rechecking under the lock closes that window for the files actually bound. |
 | E2 | The D8 lock's location and shape. | It is `<wsd state>/credlocks/<credential key>.lock`, opened by `gate.open_lock_file` (0600, no symlink, owner checked) and taken with `flock(LOCK_EX)`. The wait is bounded by `lock_wait_seconds` (default 60), polled with `LOCK_NB` and an injected clock and sleep. A wait past that bound raises `CredentialBusy(LOCK_BUSY)`. The key must match `ck1-[0-9a-f]{32}` before it is used in a path. `heterodyne setup` (AU-10) imports `credlock.credential_lock` and the same directory. | flock is per open file description, so threads in one wsd exclude each other, as `ClaimGate.locked` already relies on. The key is a digest, so the path never leaks a login path. A bounded wait turns a stuck holder into a refused launch (`LaunchFailed(LOCK_BUSY)`, a `failed` refusal that spends the launch budget, unlike E9's `LOGIN_STALE`), never a hang. |
 | E3 | Whether plan 4b refreshes on the host (§7: "the launcher refreshes on the host first, or refuses to launch"; plan 4 D12 never refreshes). | **Plan 4b still never refreshes.** Under the lock, the freshness gate rereads the login and refuses with `LOGIN_STALE` (plan 4's text, moved to `wsd/runtime.py`). AU-8 then tries the next permitted account (E9). A host refresh is added only after S7 L6 records what a refresh writes and whether it rotates the refresh token (open question Q2). | S7 has not observed a completed refresh for either CLI. A harness refresh that rotates the shared refresh token and fails to save it would break the operator's host login, which is the exact hazard §7 guards against. |
-| E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). If `auth.json` in the scratch home has changed when the read ends, the new bytes are written back to the login file. That write is atomic, under the lock, and only if the login file still holds the original bytes. Otherwise the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected, and the compare-and-swap write-back keeps a rotated token if one happens anyway. |
+| E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). Nothing is ever written to the account's login: if `auth.json` in the scratch home has changed when the read ends, the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. A read that a crash interrupted is cleaned up at wsd's next start, under its instance lock: its app-servers are found by the `CODEX_HOME` in their environment and killed through a pidfd, and its scratch home is removed (`hostread.recover`). | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected. A write-back can't be a compare-and-swap, because the operator's CLI and admind replace the login without the harness lock (D8), so the harness never writes the login. If a refresh does happen, the warning says so, and a login it left stale is refused at the next pickup (Task 10's `pickup.stale`). |
 | E5 | Codex's in-session usage source (§4.4 D9 (c): "`account/rateLimits/read` at launch and `account/rateLimits/updated` through the per-session app-server"). | A host-side client of the live app-server's WebSocket is not in this plan. Instead, an in-sandbox resource script, `codex_usage.py`, runs `codex app-server` over stdio in a scratch `CODEX_HOME` under `/tmp`. Its `auth.json` is a symlink to the session's read-only bound file. The script sends `account/rateLimits/read` and prints only the `rateLimits` object. The runtime runs it through `backend.exec` once the app-server has started, then every `usage_poll_seconds` (default 600) while the session runs. It runs only if the profile's capabilities enable (c). | This is the pattern `codex_trust.py` already uses: stdio JSON-RPC inside the sandbox, with the output validated on the host. The scratch home keeps the second app-server off the live one's sqlite files. The bind stays read-only, so a refresh attempt inside fails (`EROFS`), as §7 requires. Notification subscription is open question Q4. |
-| E6 | Codex's limit-reached signal (§4.4 D9 (e)). | A `rateLimitReachedType` that isn't null in an in-session read is the limit signal (`LimitSeen`), with the latest `resetsAt` of any window at 100% or more as its hint. `codexErrorInfo` (`usageLimitExceeded` / `rateLimitExceeded`) needs a notification stream, which E5 doesn't have (Q4). | The field is structured, and S7 (3) documents its values. Polling it needs no subscription. It is as untrusted as any in-session report, and D6's trusted read confirms it before anything beyond the bead's own defer. |
+| E6 | Codex's limit-reached signal (§4.4 D9 (e)). | A `rateLimitReachedType` that isn't null in an in-session read is the limit signal (`LimitSeen`). The read runs when (c) or (e) is on, so (e) doesn't depend on (c), with the latest `resetsAt` of any window at 100% or more as its hint. `codexErrorInfo` (`usageLimitExceeded` / `rateLimitExceeded`) needs a notification stream, which E5 doesn't have (Q4). | The field is structured, and S7 (3) documents its values. Polling it needs no subscription. It is as untrusted as any in-session report, and D6's trusted read confirms it before anything beyond the bead's own defer. |
 | E7 | Claude's in-session source and signal (S7 (3), (5)). | **(c):** with (c) enabled, the Claude settings gain `"statusLine": {"type": "command", "command": "python3 -I /run/hz/shim.py status"}`. The shim's new `status` mode sends only `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}`, and only when `rate_limits` differs from the last value this launch's `wsd` accepted, when that value went to another launch (generations share `$HOME`; the launch is named by a digest of its session token, never the token), or when `STATUS_RESEND` (30 s) has passed, so an unchanged reading never goes stale (kept in `$HOME/.hz/status.json`). It prints nothing. **(e):** a `StopFailure` hook is always installed. With `error == "rate_limit"` it is the limit signal, with no structured reset (S7: only message text, which is never parsed). **Turn end:** `StopFailure` counts as a turn boundary (S7 finding 1), always. | The status line is S7's only Claude source. It is installed only when (c) is on, so the managed launch shape T14 validated doesn't change while every capability is off. The `StopFailure` boundary is needed whatever the capabilities, or a limited turn looks like a hang to the lifetime stop. |
 | E8 | How reactive-limit signals reach `wsd` (§4.4 D6, D9). | `AgentRuntime.signals(ws) -> list[Signal]` drains the reports since the last call: `UsageSeen` and `LimitSeen`, each attributed to `(session key, generation)` by the runtime from the channel it set up. The scheduler calls it in every pickup, just after `expire` and before the sweep. `wsd` ingests a `UsageSeen` only if the profile's capabilities enable (c), and acts on a `LimitSeen` only if they enable (e). | A pull keeps `wsd` the only writer of the journal, as `expire` already does. Latency is up to one backstop interval. That is acceptable: the Claude CLI waits for the reset before it continues (S7 (5)), and the session is stopped before then. |
 | E9 | The freshness-refusal path (AU-8: "A freshness-gate refusal moves on to the next account of the same permitted list"). | The runtime refuses a stale login with exactly `LOGIN_STALE`, and the receipt records it as `refused`/`failed` with that error. `Parker._outcome` recognises it by equality with the constant. It adds the entry's key to the op's `stale` data (comma-separated) and forgets the generation. The next pin runs the gate with those keys excluded (`exclude=`). If the gate finds another permitted account, the op returns `FAILED` without spending the launch budget, and the next pickup launches on that account. If it finds none (`AccountChanged`), the op escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`, so the bead becomes `needs-human`. A `Deadline` defers as usual. | No schema change: `receipts.refusal` keeps its CHECK constraint (`'failed', 'unavailable'`). The exclusion is per operation, so a later operation tries the refreshed login again. Exclusions only grow, so the path ends after at most one try per account. |
@@ -112,7 +112,7 @@
 | # | Question | Recommendation |
 |---|---|---|
 | Q1 | **G2 has not passed.** S7 showed the client side only, and L1–L7 need you. AU-6, AU-7 and AU-8 are formally blocked by G2 in the change plan. | Approve building Tasks 1–10 now, gated on capabilities and tested with injected ones, so the code is ready when L1–L7 run. Task 11 Part A (the invariants) can merge too. Task 11 Part B (the table entries) and Task 12 (live) stay blocked on G2. Nothing changes on a host until Task 11 enables a capability. |
-| Q2 | **The host refresh** (§7 "refreshes on the host first, or refuses"). Plan 4b keeps refusing (E3). | Keep refusing in 4b. After L6, add a refresh task. For Codex, `account/read {"refreshToken": true}` in the E4 scratch home, under the lock, with the E4 write-back. For Claude there is no known host mechanism. |
+| Q2 | **The host refresh** (§7 "refreshes on the host first, or refuses"). Plan 4b keeps refusing (E3). | Keep refusing in 4b. After L6, add a refresh task. For Codex, `account/read {"refreshToken": true}` in the E4 scratch home, under the lock. Saving its result needs a write that is safe against D8's writers that don't take the lock (E4 has none), so that task designs one first. For Claude there is no known host mechanism. |
 | Q3 | **The handoff prompt.** (f) needs the §4.1 deterministic handoff, and no generator exists yet (S7 L4 defers it to "the AU task that builds it"). | Build the generator with plan 5 (steering delivers the first prompt there), and keep (f) off until then. Plan 4b builds only the ID and launch mechanics (E10). |
 | Q4 | **Codex's live notifications.** E5 polls rather than subscribing to `account/rateLimits/updated` and `codexErrorInfo` on the live app-server. | Accept polling for v1. L2 should record whether `updated` fires mid-turn. If it does, a later task can add a host-side client on the bridge socket. |
 | Q5 | **Version drift.** S7 ran 2.1.286 and 0.160.0, while the ADR §4.2 table names 2.1.283 and 0.157.0. The code pins 2.1.286 and 0.160.0. | Fix the §4.2 table in the next ADR revision. L1–L7 run on the code's pins. |
@@ -191,7 +191,7 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 | `src/heterodyne/wsd/credlock.py` (new) | 2 | the D8 lock |
 | `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`, `_open_dir`, `_resolve_link`, the `ROOT_*` texts and bounds; `SandboxSpec.cli_root` and `.login_names`, walked by `check_credentials` |
 | `src/heterodyne/session/server.py` | 4 | `turn_ends`, `on_event`, `TurnState.boundary` |
-| `src/heterodyne/agents/base.py` | 4, 5 | `turn_end_events`, `UsageReport`, `usage_from_event`, `run_files(usage=)` |
+| `src/heterodyne/agents/base.py` | 4, 5 | `turn_end_events`, `UsageReport`, `usage_from_event`, `run_files(usage=, limits=)` |
 | `src/heterodyne/agents/claude_code.py` | 4, 5 | the `StopFailure` hook, the status line, parsing |
 | `src/heterodyne/agents/codex.py` | 5 | `parse_rate_limits`, `usage_argv` |
 | `src/heterodyne/session/shim.py` | 5 | the `status` mode |
@@ -585,7 +585,7 @@ git commit -m "plan4b T1: wsd seams for keys, handoffs, signals, exclusion and t
 
 ## Task 2: the D8 credential lock
 
-One host lock per credential identity (§4.4 D8). Every harness read of a login and every write back to one holds it: the runtime's key check and freshness reread (Task 6), the trusted read and its write-back (Task 8), and later `heterodyne setup` (AU-10).
+One host lock per credential identity (§4.4 D8). Every harness read of a login holds it: the runtime's key check and freshness reread (Task 6), the trusted read (Task 8, which never writes the login), and later `heterodyne setup` (AU-10).
 
 **Files:**
 - Create: `src/heterodyne/wsd/credlock.py`
@@ -760,7 +760,7 @@ Create `src/heterodyne/wsd/credlock.py`:
 """The per-credential-identity host lock (ADR 0001 §4.4 D8; plan 4b E2).
 
 Every harness read of a login and every write back to one holds the lock of the login's credential key:
-the runtime's key check and freshness reread, the trusted host-side read and its write-back, and
+the runtime's key check and freshness reread, the trusted host-side read, and
 `heterodyne setup`. A key is a digest of the login's paths (AU-2), so the lock file's name never leaks a
 path. flock locks an open file description, so two threads of one process exclude each other as two
 processes do. The wait is bounded: a holder that never lets go refuses the operation, never hangs it.
@@ -1580,7 +1580,7 @@ The producers' adapter-specific half: what each CLI's payload means, parsed into
 
 **Files:**
 - Modify: `src/heterodyne/agents/base.py` (`STATUS_COMMAND`, `UsageReport`, the `Adapter` methods)
-- Modify: `src/heterodyne/agents/claude_code.py` (`claude_windows`, `usage_from_event`, `usage_argv`, `usage_from_read`, `run_files(usage=)`)
+- Modify: `src/heterodyne/agents/claude_code.py` (`claude_windows`, `usage_from_event`, `usage_argv`, `usage_from_read`, `run_files(usage=, limits=)`)
 - Modify: `src/heterodyne/agents/codex.py` (`parse_rate_limits`, `USAGE_SCRIPT`, `USAGE_SOURCE`, the same methods)
 - Create: `src/heterodyne/sandbox/resources/codex_usage.py`
 - Modify: `src/heterodyne/session/shim.py` (`run_status`, `status_main`, `main`)
@@ -1596,7 +1596,7 @@ The producers' adapter-specific half: what each CLI's payload means, parsed into
     - `usage_from_event(payload: Mapping[str, Any]) -> UsageReport | None`: a session-socket hook payload;
     - `usage_argv(cli: Cli) -> list[str] | None`: the in-sandbox read's command, or None if the adapter has none;
     - `usage_from_read(output: bytes) -> UsageReport | None`: that command's stdout;
-    - `run_files(*, usage: bool = False) -> Mapping[str, str]`: with `usage`, the files the producers need.
+    - `run_files(*, usage: bool = False, limits: bool = False) -> Mapping[str, str]`: with `usage` ((c) on) or `limits` ((e) on), the files that capability's producers need. Each flag installs what its own capability needs: Codex's read serves both, so either flag installs it (Codex plan 4b r2).
   - `codex.parse_rate_limits(data: object, source: str) -> UsageReport | None`, shared with Task 8.
   - `codex.IN_SESSION_SOURCE = "codex.app-server"`, `codex.HOST_SOURCE = "codex.host-read"`, `claude_code.STATUS_SOURCE = "claude.statusline"`.
   - The shim's `status` mode: `python3 -I /run/hz/shim.py status` reads Claude's status-line JSON on stdin and sends `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}` once per change. It prints nothing and exits 0.
@@ -1692,6 +1692,7 @@ def test_the_status_line_is_installed_only_for_usage() -> None:
     usage = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
     assert usage["statusLine"] == {"type": "command", "command": STATUS_COMMAND}
     assert usage["hooks"] == plain["hooks"]
+    assert json.loads(ClaudeCode().run_files(limits=True)[SETTINGS_FILE]) == plain    # StopFailure is a hook
 
 
 # --- Codex ---
@@ -1741,9 +1742,10 @@ def test_codex_hooks_carry_no_usage() -> None:
     assert Codex().usage_from_event({"hook_event_name": "Stop", "rate_limits": {}}) is None
 
 
-def test_the_usage_script_ships_only_for_usage() -> None:
+def test_the_usage_script_ships_for_usage_or_limits() -> None:
     assert USAGE_SCRIPT.name not in Codex().run_files()
     assert Codex().run_files(usage=True)[USAGE_SCRIPT.name] == USAGE.read_text()
+    assert Codex().run_files(limits=True)[USAGE_SCRIPT.name] == USAGE.read_text()
 
 
 # --- codex_usage.py, run against the fake app-server ---
@@ -2078,9 +2080,9 @@ def epoch_or_none(value: object) -> int | None:
 and on the `Adapter` protocol (after `apply_trust`), with `run_files` replaced:
 
 ```python
-    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
-        """Files for the run directory (read-only inside). With `usage`, also what the profile's usage
-        producers need (plan 4b E5, E7)."""
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
+        """Files for the run directory (read-only inside). With `usage` ((c)) or `limits` ((e)), also
+        what that capability's producers need (plan 4b E5, E7)."""
         ...
 
     def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
@@ -2119,7 +2121,8 @@ def claude_windows(limits: Mapping[str, Any]) -> tuple[Observation, ...]:
 In `ClaudeCode`, replace `run_files` and add the usage methods:
 
 ```python
-    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
+        """The limit signal is the StopFailure hook, always installed, so `limits` adds nothing."""
         hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
         settings: dict[str, Any] = {"skipDangerousModePermissionPrompt": True, "hooks": hooks}
         if usage:
@@ -2191,9 +2194,9 @@ def parse_rate_limits(data: object, source: str) -> UsageReport | None:
 In `Codex`, replace `run_files` and add the usage methods:
 
 ```python
-    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
+    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
         files = {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
-        if usage:
+        if usage or limits:                # the one read gives both the windows and the limit
             files[USAGE_SCRIPT.name] = USAGE_SOURCE.read_text()
         return files
 
@@ -2990,6 +2993,8 @@ Which report becomes which signal:
 | a status line's or a read's windows | (c) `in_session_usage` | `UsageSeen(key, generation, windows)` |
 | `StopFailure` with `error == "rate_limit"`, or a read whose `rateLimitReachedType` isn't null | (e) `limit_signal` | `LimitSeen(key, generation, hint)` |
 
+Each signal needs only its own capability. Codex's in-sandbox read gives both, so it is installed and polled when either (c) or (e) is on, and each signal it yields is still emitted only under its own capability (Codex plan 4b r2).
+
 The key and generation are the ones the runtime gave the channel: the socket it served for that generation, or the sandbox it ran the read in. Nothing in a payload names them. The capabilities are read when the channel is set up (at launch or rebind), and `wsd` reads them again before it uses a signal (Task 9).
 
 - [ ] **Step 1: Write the failing tests**
@@ -3142,6 +3147,19 @@ def test_the_codex_read_is_polled_when_due(rig: RuntimeRig) -> None:
     assert rig.runtime.signals("beta") == []                           # another workstream's: none
 
 
+@pytest.mark.parametrize(("caps", "kinds"), [(LIMITS, [LimitSeen]), (USAGE, [UsageSeen])])
+def test_the_codex_read_serves_each_capability_alone(rig: RuntimeRig, caps: Capabilities,
+                                                     kinds: list[type]) -> None:
+    """(e) without (c) still installs and polls the read; each signal comes only under its own one."""
+    with_caps(rig, "codex", caps)
+    rig.backend.env_extra["HZ_FAKE_RATE_LIMITS"] = json.dumps(SNAPSHOT)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    assert (rig.runtime.layout(spec.session_key).run(1) / "codex_usage.py").exists()
+    codex_login_inside(rig, spec.session_key)
+    assert [type(sig) for sig in rig.runtime.signals("alpha")] == kinds and reads(rig) == 1
+
+
 def read_failures(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.getMessage().startswith(DIAG_USAGE_READ)]
 
@@ -3283,13 +3301,13 @@ Expected: FAIL. `SandboxSettings` has no `usage_poll_seconds`, the runtime has n
 In `src/heterodyne/defaults/defaults.toml`, add to `[sandbox]` after `lock_wait_seconds`:
 
 ```toml
-usage_poll_seconds = 600                # how often a session's in-sandbox usage read runs, when (c) is on
+usage_poll_seconds = 600                # how often a session's in-sandbox usage read runs, when (c) or (e) is on
 ```
 
 In `src/heterodyne/sandbox/settings.py`, add `"usage_poll_seconds"` to `HOST_KEYS`, the field after `lock_wait_seconds`:
 
 ```python
-    usage_poll_seconds: int                  # E5: the in-sandbox usage read's interval, when (c) is on
+    usage_poll_seconds: int                  # E5: the in-sandbox usage read's interval, when (c) or (e) is on
 ```
 
 and in `from_config`, after `lock_wait_seconds=...`:
@@ -3375,11 +3393,12 @@ log = logging.getLogger(__name__)
                 del queue[:-MAX_QUEUED]
 
     def _poll(self, rec: SessionRecord) -> None:
-        """E5: run the session's in-sandbox usage read if (c) is on and it is due. A read that fails
-        reports nothing and is not retried before the next interval."""
+        """E5: run the session's in-sandbox usage read if (c) or (e) is on and it is due; `_report`
+        emits each signal only under its own capability. A read that fails reports nothing and is not
+        retried before the next interval."""
         adapter = self.c.adapters.get(rec.adapter)
         caps = self._caps(rec.profile)
-        if adapter is None or not caps.in_session_usage:
+        if adapter is None or not (caps.in_session_usage or caps.limit_signal):
             return
         now, ident = self.c.clock(), (rec.key, rec.generation)
         last = self.polled.get(ident)
@@ -3419,7 +3438,8 @@ def _read_reason(r: ExecResult) -> str:
         caps = self._caps(spec.profile)
         files = {shim.TOKEN_FILE: token, SHIM_SOURCE.name: SHIM_SOURCE.read_text(),
                  shim.CONFIG_FILE: json.dumps(shim_config), REQUEST_INSIDE.name: shim.REQUEST_WRAPPER,
-                 **adapter.run_files(usage=caps.in_session_usage), **self.selftest.files()}
+                 **adapter.run_files(usage=caps.in_session_usage, limits=caps.limit_signal),
+                 **self.selftest.files()}
 ```
 
 and replace `server = SessionServer(layout.socket(gen), token, layout.events(gen))` with `server = self._server(rec, adapter, token, caps)`.
@@ -3457,13 +3477,13 @@ git commit -m "plan4b T7: the runtime's usage and limit signals, gated by capabi
 
 ## Task 8: the trusted host-side read
 
-D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio, in a scratch `CODEX_HOME` holding a copy of the account's login. It runs under the account's D8 lock, while the key is the pinned one, and only while the token has at least `read_margin_seconds` left. A login the read refreshed is saved back only if the account's file is unchanged. The scratch home is removed and confirmed gone. Claude has no host read (S7), so a Claude profile always reads None.
+D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio, in a scratch `CODEX_HOME` holding a copy of the account's login. It runs under the account's D8 lock, while the key is the pinned one, and only while the token has at least `read_margin_seconds` left. Nothing is written to the account's login: a copy the read changed is dropped, with a warning. The scratch home is removed and confirmed gone, and a read a crash interrupted is cleaned up when wsd next starts. Claude has no host read (S7), so a Claude profile always reads None.
 
 **Files:**
 - Create: `src/heterodyne/sandbox/hostread.py`
 - Modify: `src/heterodyne/sandbox/build.py` (`build_usage_reader`)
 - Modify: `src/heterodyne/wsd/daemon.py` (`assemble(..., usage_reader=)`), `src/heterodyne/wsd/cli.py` (`run(..., usage_reader=)`, `wsd_main`)
-- Modify: `tests/fakes/fake_agent_cli.py` (`HZ_FAKE_ROTATE`, `HZ_FAKE_TOUCH`)
+- Modify: `tests/fakes/fake_agent_cli.py` (`HZ_FAKE_ROTATE`)
 - Test: `tests/test_sandbox_hostread.py` (new), `tests/test_sandbox_build.py`, `tests/test_wsd_daemon.py`
 
 **Interfaces:**
@@ -3478,9 +3498,11 @@ D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio,
   - `sandbox.hostread.HostUsageReader(accounts, binary, path, credlocks, scratch_root, lock_wait_seconds, *, env, read_margin_seconds=300, limit_seconds=30.0, clock=utc_now, wait_clock=time.monotonic, sleep=time.sleep)`, a `UsageReader`.
   - Log texts with no path, key or token in them:
     - `hostread.DIAG_ROTATED_DROPPED` and `hostread.DIAG_SCRATCH_KEPT`, logged alone;
+    - `hostread.DIAG_RECOVERED` and `hostread.DIAG_RECOVERY_KEPT`, logged alone by `recover`;
     - `hostread.DIAG_READ_FAILED`, logged as `"<DIAG_READ_FAILED>: <exception type name>"` (a warning);
     - `hostread.DIAG_NOT_READ`, logged as `"<DIAG_NOT_READ>: <reason>"` (info) when the read stops before it starts anything. The reason is `NOT_PINNED_KEY`, `TOO_CLOSE`, `NOT_AT_PIN`, or the `CredentialBusy` text (`LOCK_BUSY`, `LOCK_FAILED` or `BAD_KEY`).
   - `hostread.NoRateLimits`: the failure of an answer that held no `rateLimits`.
+  - `hostread.recover(scratch_root: Path) -> None`: kills the app-servers of any `read-*` home left under `scratch_root` and removes those homes. It never raises. `cli.run` calls it with `s.state_dir / "hostread"` once it holds the instance lock, whichever reader is configured.
   - `sandbox.build.build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader`.
   - `daemon.assemble(..., usage_reader: UsageReader | None = None)` and `cli.run(..., *, usage_reader: UsageReader | None = None)`. None means `NoUsageReader()`.
 
@@ -3490,23 +3512,27 @@ The read's steps, all inside one `credential_lock(credlocks, credential_key, ...
 2. `accounts.current_key("codex", account)` must equal `credential_key`; otherwise `NOT_PINNED_KEY`.
 3. The login file's real path is read without following a final link, at most `MAX_LOGIN` bytes, and must be a regular file.
 4. Its access token must be valid for `read_margin_seconds` more; otherwise `TOO_CLOSE`. Codex refreshes only an expired token (S7 (4)), so the read is not expected to write the login. The CLI must be at its pin; otherwise `NOT_AT_PIN`.
-5. The scratch home is made under `scratch_root` (0700): `auth.json` is the copy, written 0600.
+5. The scratch home is made under `scratch_root` (0700): `auth.json` is the copy, written 0600. Every byte is written (a short `os.write` is continued) and flushed; on any failure the file is unlinked before the error propagates.
 6. `codex_usage.read(binary, env | {"CODEX_HOME": scratch}, limit_seconds)` gives the `rateLimits`, parsed with `parse_rate_limits(..., HOST_SOURCE)`. An answer with none raises `NoRateLimits`.
-7. In a `finally`: if the copy's bytes changed, they are written back (a temporary file in the login's directory, then `Path.replace`) only if the account's file still holds the original bytes. Otherwise the change is dropped, with `DIAG_ROTATED_DROPPED`. Then the scratch home is removed and checked with `os.path.lexists`. A scratch home that is still there makes the read None, with `DIAG_SCRATCH_KEPT`.
+7. Once the answer is parsed, the copy is compared with the original bytes. In a `finally`, the scratch home is removed and checked with `os.path.lexists`. A scratch home that is still there makes the read None, with `DIAG_SCRATCH_KEPT`. A copy that changed is dropped with `DIAG_ROTATED_DROPPED`, and the reading is still returned: it was taken under the lock, from the pinned key. The account's login is never written.
+
+A crash (wsd killed, the host losing power) can interrupt a read after step 5. The copy stays under `scratch_root`, and the app-server, once orphaned, outlives its timer. wsd is the only reader, and it holds its instance lock (`gate.instance_lock`) for its whole life, so at its next start every `read-*` home there is a crashed read's. `recover` runs before anything else can start a read:
+
+- It looks in `/proc` for the processes whose environment holds `CODEX_HOME=<that home>`. Each one is opened as a pidfd first, then its `environ` is read, then signal 0 is sent through the pidfd: if that succeeds, the environment was read from the process the pidfd holds, not from one that reused its PID. A process of another user can't be read and is skipped (it can't have been started by this wsd).
+- Each one found is sent SIGKILL through its pidfd. The scan repeats until none is left, for at most `RECOVER_SECONDS` (10). A killed orphan is reaped by init or the session's subreaper; its zombie has an empty `environ`, so it is no longer found.
+- Each home is removed with `rmtree` and checked with `lexists`. `DIAG_RECOVERED` is logged if all of them are gone and no process is left, otherwise `DIAG_RECOVERY_KEPT`. Nothing is logged when there was nothing to recover.
 
 Any failure is None. The log records only the exception's type name, never its text, which may hold a path. Every None but the Claude profile's logs exactly one line, so each test names the reason it expects and a read that stopped for another reason fails it.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/fakes/fake_agent_cli.py`, add to the docstring's stdio item: "`HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json` with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it answers `account/rateLimits/read`. `HZ_FAKE_TOUCH=<path>` writes to `<path>` at the same moment, standing in for another writer of the account's login." In `rate_limits(msg)`, add as its first lines:
+In `tests/fakes/fake_agent_cli.py`, add to the docstring's stdio item: "`HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json` with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it answers `account/rateLimits/read`." In `rate_limits(msg)`, add as its first lines:
 
 ```python
     if rotated := os.environ.get("HZ_FAKE_ROTATE"):
         auth = Path(os.environ["CODEX_HOME"]) / "auth.json"
         (auth.parent / "auth.json.tmp").write_text(rotated)
         os.replace(auth.parent / "auth.json.tmp", auth)
-    if touched := os.environ.get("HZ_FAKE_TOUCH"):
-        Path(touched).write_text("written by someone else")
 ```
 
 Create `tests/test_sandbox_hostread.py`:
@@ -3520,6 +3546,8 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -3534,11 +3562,14 @@ from heterodyne.sandbox import hostread
 from heterodyne.sandbox.hostread import (
     DIAG_NOT_READ,
     DIAG_READ_FAILED,
+    DIAG_RECOVERED,
+    DIAG_RECOVERY_KEPT,
     DIAG_ROTATED_DROPPED,
     DIAG_SCRATCH_KEPT,
     NOT_PINNED_KEY,
     TOO_CLOSE,
     HostUsageReader,
+    recover,
 )
 from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock
@@ -3650,25 +3681,128 @@ def test_a_busy_lock_is_not_read(tmp_path: Path, logged: Callable[[], list[str]]
     assert rig.read() == WANTED                                 # released
 
 
-def test_a_refreshed_login_is_saved_back(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
+def test_a_refreshed_login_is_dropped_and_never_written(tmp_path: Path,
+                                                         logged: Callable[[], list[str]]) -> None:
     rotated = json.dumps({"tokens": {"access_token": fake_jwt(Clock()() + 2 * DAY)}})
     rig = Rig(tmp_path, HZ_FAKE_ROTATE=rotated)
-    assert rig.read() == WANTED
-    assert rig.login.read_text() == rotated
-    assert rig.login.stat().st_mode & 0o777 == 0o600
-    assert [p.name for p in rig.login.parent.iterdir()] == ["auth.json"]       # no temporary file left
-    assert rig.scratch_empty() and rig.server_gone()
-    assert logged() == []
-
-
-def test_a_refresh_is_dropped_if_the_login_changed_meanwhile(tmp_path: Path,
-                                                            logged: Callable[[], list[str]]) -> None:
-    touched = tmp_path / "home" / ".codex" / "auth.json"
-    rig = Rig(tmp_path, HZ_FAKE_ROTATE="rotated by the read", HZ_FAKE_TOUCH=str(touched))
-    assert rig.read() == WANTED
-    assert rig.login.read_text() == "written by someone else"
+    before = rig.login.stat()
+    assert rig.read() == WANTED                                 # taken under the lock, from the pinned key
+    after = rig.login.stat()
+    assert rig.login.read_text() == rig.original
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert [p.name for p in rig.login.parent.iterdir()] == ["auth.json"]       # nothing written beside it
     assert logged() == [DIAG_ROTATED_DROPPED]
     assert rig.scratch_empty() and rig.server_gone()
+
+
+def test_short_writes_still_copy_the_whole_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                 logged: Callable[[], list[str]]) -> None:
+    rig = Rig(tmp_path)
+    real_write = os.write
+    copied: list[bytes] = []
+
+    def one_byte(fd: int, data: bytes) -> int:
+        copied.append(bytes(data[:1]))
+        return real_write(fd, data[:1])
+
+    monkeypatch.setattr(hostread.os, "write", one_byte)
+    assert rig.read() == WANTED
+    assert b"".join(copied) == rig.original.encode()            # one byte at a time, every byte
+    assert logged() == []
+    assert rig.scratch_empty() and rig.server_gone()
+
+
+@pytest.mark.parametrize("call", ["write", "fsync"])
+def test_a_copy_that_fails_leaves_no_file_and_starts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            logged: Callable[[], list[str]], call: str) -> None:
+    rig = Rig(tmp_path)
+
+    def fails(*_a: object) -> int:
+        raise OSError("injected")
+
+    monkeypatch.setattr(hostread.os, call, fails)
+    assert rig.read() is None
+    assert logged() == [f"{DIAG_READ_FAILED}: OSError"]
+    assert rig.scratch_empty() and not rig.pid_file.exists()    # the copy unlinked, its home removed
+    assert rig.login.read_text() == rig.original
+    assert [p.name for p in rig.login.parent.iterdir()] == ["auth.json"]
+
+
+CRASHING_READER = """
+import os, signal, sys
+sys.path[:0] = [sys.argv[1]]
+from test_sandbox_hostread import Rig
+from heterodyne.sandbox import hostread
+from pathlib import Path
+rig = Rig(Path(sys.argv[2]), HZ_FAKE_RATE_FAULT="hang")
+rig.reader.limit_seconds = 600
+if sys.argv[3] == "copied":
+    hostread._usage_module = lambda: os.kill(os.getpid(), signal.SIGKILL)
+rig.read()
+"""
+
+
+def wait_for(done: Callable[[], bool], seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while not done():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return Path(f"/proc/{pid}/environ").read_bytes() != b""     # a zombie, not yet reaped, has none
+
+
+@pytest.mark.parametrize("crash", ["copied", "started"])
+def test_a_crashed_read_is_recovered_at_the_next_start(tmp_path: Path, logged: Callable[[], list[str]],
+                                                       crash: str) -> None:
+    """The reader is killed after the copy is written, or once its app-server runs. Its home, holding
+    the copy, outlives it; so does the orphaned app-server. `recover` finds and removes both."""
+    rig = Rig(tmp_path / "rig")
+    reader = POPEN([sys.executable, "-c", CRASHING_READER, str(Path(__file__).parent), str(tmp_path / "crash"),
+                    crash], env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+    scratch = tmp_path / "crash" / "hostread"
+    pid_file = tmp_path / "crash" / "read.pid"
+    if crash == "started":
+        assert wait_for(pid_file.exists)
+        assert wait_for(lambda: pid_file.read_text().strip() != "")
+        reader.kill()
+    assert reader.wait(30) == -signal.SIGKILL
+    homes = list(scratch.iterdir())
+    assert len(homes) == 1 and (homes[0] / "auth.json").exists()            # the crash left the copy
+    orphan = int(pid_file.read_text()) if crash == "started" else None
+    if orphan is not None:
+        assert alive(orphan)                                    # its timer died with the reader
+    recover(scratch)
+    assert list(scratch.iterdir()) == []
+    if orphan is not None:
+        assert wait_for(lambda: not alive(orphan))
+    assert logged() == [DIAG_RECOVERED]
+    assert rig.read() == WANTED                                 # another rig's reads are untouched
+
+
+def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                logged: Callable[[], list[str]]) -> None:
+    scratch = tmp_path / "hostread"
+    (scratch / "read-abc").mkdir(parents=True)
+    bystander = POPEN([sys.executable, "-c", "import time; time.sleep(60)"],      # a near miss: not killed
+                      env={**os.environ, "CODEX_HOME": str(scratch / "read-abc") + "-not"})
+    try:
+        monkeypatch.setattr(hostread.shutil, "rmtree", lambda *_a, **_k: None)
+        recover(scratch)
+        assert logged() == [DIAG_RECOVERY_KEPT]
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(10)
+    recover(tmp_path / "missing")                               # nothing there: nothing done, nothing logged
+    assert logged() == [DIAG_RECOVERY_KEPT]
 
 
 @pytest.mark.parametrize(("env", "reason"), [
@@ -3744,7 +3878,7 @@ def test_a_linked_login_is_not_read(tmp_path: Path, logged: Callable[[], list[st
     assert logged() == []
 ```
 
-`server_gone` reads the PID file the fake app-server writes as it starts, so it also proves the read started one. Every check of it runs after `read` has returned, so a server that is still running, or killed but never reaped, fails the test.
+`server_gone` reads the PID file the fake app-server writes as it starts, so it also proves the read started one. `hostread.os` is the `os` module itself, so the short-write and failure tests patch `os.write` or `os.fsync` for the whole process while the read runs. Nothing else on the read's path calls them: the client writes to the app-server through its pipe's file object. The crash test runs the reader in a child process that imports this test module's `Rig`; the child kills itself just after the copy (`copied`), or the test kills it once the app-server has written its PID (`started`). Every check of it runs after `read` has returned, so a server that is still running, or killed but never reaped, fails the test.
 
 In `tests/test_sandbox_build.py`, import `build_usage_reader`, `HostUsageReader` and `NoUsageReader`, then add:
 
@@ -3788,7 +3922,35 @@ def test_assemble_hands_the_reader_to_every_workstream(tmp_path: Path) -> None:
     assert all(isinstance(sch.d.usage_reader, NoUsageReader) for sch in plain.schedulers.values())
 ```
 
-`settings(tmp_path)`, `factory` and `World` are this file's existing helpers. If its settings helper has another name, use that one. `Scheduler.d` is the scheduler's `Deps`, as `Parker` reads it. Import `NoUsageReader` from `heterodyne.wsd.usage`.
+and:
+
+```python
+def test_run_recovers_crashed_reads_once_it_holds_the_lock(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    recovered: list[Path] = []
+
+    def recording(root: Path) -> None:
+        with pytest.raises(AlreadyRunning):
+            instance_lock(s.instance_lock)                  # recover runs under the instance lock
+        recovered.append(root)
+
+    async def served(_d: Wsd) -> None:
+        return None
+
+    monkeypatch.setattr(cli.hostread, "recover", recording)
+    monkeypatch.setattr(cli, "_serve", served)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 0
+    assert recovered == [s.state_dir / "hostread"]
+    held = instance_lock(s.instance_lock)
+    try:
+        assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 1
+    finally:
+        os.close(held)
+    assert recovered == [s.state_dir / "hostread"]          # a second instance recovers nothing
+```
+
+`settings(tmp_path)`, `factory` and `World` are this file's existing helpers, and `cli`, `Wsd`, `AlreadyRunning` and `instance_lock` are already imported (add `import os` if it is missing). If its settings helper has another name, use that one. `Scheduler.d` is the scheduler's `Deps`, as `Parker` reads it. Import `NoUsageReader` from `heterodyne.wsd.usage`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -3811,10 +3973,10 @@ import json
 import logging
 import os
 import shutil
+import signal
 import stat
 import tempfile
 import time
-import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -3832,9 +3994,14 @@ log = logging.getLogger(__name__)
 ADAPTER = "codex"
 LOGIN = "auth.json"
 MAX_LOGIN = 1 << 20
-DIAG_ROTATED_DROPPED = ("a trusted usage read refreshed the login, but the account's login changed during "
-                        "the read; the refresh was not saved")
+RECOVER_SECONDS = 10.0
+DIAG_ROTATED_DROPPED = ("a trusted usage read's app-server rewrote its copy of the login; the copy was dropped "
+                        "and the account's login left as it was. If the account's next session can't sign in, "
+                        "log it in again")
 DIAG_SCRATCH_KEPT = "a trusted usage read's scratch home could not be removed; the read is discarded"
+DIAG_RECOVERED = "an interrupted trusted usage read was cleaned up: its app-server ended, its scratch home removed"
+DIAG_RECOVERY_KEPT = ("an interrupted trusted usage read could not be cleaned up; its scratch home under the "
+                      "state directory's hostread folder holds a copy of a login")
 DIAG_READ_FAILED = "a trusted usage read failed"
 DIAG_NOT_READ = "a trusted usage read was not run"
 NOT_PINNED_KEY = "the account's key is not the pinned one"
@@ -3884,16 +4051,83 @@ def _expiry(login: bytes) -> float:
     return jwt_exp(tokens.get("access_token") if isinstance(tokens, dict) else None)
 
 
-def _write_new(folder: Path, name: str, data: bytes) -> Path:
-    """A new 0600 file in `folder` holding `data`, flushed to disk."""
+def _write_new(folder: Path, name: str, data: bytes) -> None:
+    """A new 0600 file in `folder` holding all of `data`, flushed to disk. On any failure the file is
+    unlinked before the error goes on: no part of a login is left behind."""
     path = folder / name
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    return path
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+
+
+def _holders(marks: set[bytes]) -> list[int]:
+    """pidfds of the live processes whose environment holds one of `marks`. The pidfd is opened before
+    the environment is read, and signal 0 through it afterwards proves the PID wasn't reused meanwhile.
+    A zombie's environment is empty, so a killed process stops being found once it ends."""
+    found: list[int] = []
+    with contextlib.suppress(FileNotFoundError):
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                fd = os.pidfd_open(int(entry.name))
+            except OSError:
+                continue
+            try:
+                with open(f"/proc/{entry.name}/environ", "rb") as f:
+                    environ = set(f.read().split(b"\0"))
+                signal.pidfd_send_signal(fd, 0)
+            except OSError:              # gone, or another user's (not this wsd's)
+                os.close(fd)
+                continue
+            if marks.isdisjoint(environ):
+                os.close(fd)
+            else:
+                found.append(fd)
+    return found
+
+
+def recover(scratch_root: Path, *, seconds: float = RECOVER_SECONDS) -> None:
+    """E4: clean up the reads a crash interrupted. Called at wsd's start under its instance lock, when
+    no read can be running, so every `read-*` home is a crashed read's: its app-servers (found by their
+    CODEX_HOME) are killed through a pidfd, then the home is removed. Never raises."""
+    try:
+        homes = [p for p in scratch_root.iterdir() if p.name.startswith("read-")]
+    except FileNotFoundError:
+        return
+    except OSError:
+        log.warning(DIAG_RECOVERY_KEPT)
+        return
+    if not homes:
+        return
+    marks = {f"CODEX_HOME={home}".encode() for home in homes}
+    deadline = time.monotonic() + seconds
+    left = True
+    while left:
+        fds = _holders(marks)
+        left = bool(fds)
+        for fd in fds:
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+            os.close(fd)
+        if left and time.monotonic() > deadline:
+            break
+        if left:
+            time.sleep(0.05)
+    for home in homes:
+        shutil.rmtree(home, ignore_errors=True)
+    kept = left or any(os.path.lexists(home) for home in homes)
+    log.warning(DIAG_RECOVERY_KEPT if kept else DIAG_RECOVERED)
 
 
 class HostUsageReader:
@@ -3950,38 +4184,23 @@ class HostUsageReader:
             report = parse_rate_limits(limits, HOST_SOURCE)
             if report is None:
                 raise NoRateLimits("the answer held no rate limits")
-        finally:
             try:
-                self._save_back(login, scratch / LOGIN, original)
-            finally:
-                shutil.rmtree(scratch, ignore_errors=True)
-                kept = os.path.lexists(scratch)
-                if kept:
-                    log.warning(DIAG_SCRATCH_KEPT)
+                changed = _read_regular(scratch / LOGIN) != original
+            except OSError:
+                changed = True                # replaced by something that isn't a login file
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+            kept = os.path.lexists(scratch)
+            if kept:
+                log.warning(DIAG_SCRATCH_KEPT)
         if kept:
             return None
+        if changed:
+            log.warning(DIAG_ROTATED_DROPPED)  # E4: never written back; D8's writers don't take the lock
         return TrustedRead(report.windows, report.limited, report.reset_hint)
-
-    def _save_back(self, login: Path, copy: Path, original: bytes) -> None:
-        """E4: keep a login the read refreshed, but only over the bytes it started from."""
-        try:
-            now = _read_regular(copy)
-        except OSError:
-            return                            # nothing readable to save; the account's file is untouched
-        if now == original:
-            return
-        if _read_regular(login) != original:
-            log.warning(DIAG_ROTATED_DROPPED)
-            return
-        temp = _write_new(login.parent, f".{LOGIN}.hz-{uuid.uuid4().hex[:12]}", now)
-        try:
-            temp.replace(login)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temp.unlink()
 ```
 
-In `_locked`, the scratch home is made only once the lock is held, the key matches, the login is read, its token has the margin left and the CLI is at its pin. So the tests that expect `not rig.scratch.exists()` prove the read stopped before it started anything. `_save_back` runs inside the lock and before the scratch home is removed. The nested `finally` removes the scratch home even when `_save_back` raises; that exception then reaches `read`'s `except Exception`, which logs its type name and returns None. A login whose expiry can't be read raises `AdapterError` from `_expiry`, which is logged as a failure: it is not one of the expected stops. When the read itself raised, `kept` is never consulted: the exception leaves `_locked` from the `finally`, after the scratch home's removal was tried and `DIAG_SCRATCH_KEPT` logged if it failed.
+In `_locked`, the scratch home is made only once the lock is held, the key matches, the login is read, its token has the margin left and the CLI is at its pin. So the tests that expect `not rig.scratch.exists()` prove the read stopped before it started anything. Nothing in `_locked` writes outside the scratch home. A failed copy unlinks its own file, and the `finally` then removes the empty home, so the failure tests see an empty `scratch_root` and no app-server's PID file. A login whose expiry can't be read raises `AdapterError` from `_expiry`, which is logged as a failure: it is not one of the expected stops. When the read itself raised, `kept` is never consulted: the exception leaves `_locked` from the `finally`, after the scratch home's removal was tried and `DIAG_SCRATCH_KEPT` logged if it failed.
 
 In `src/heterodyne/sandbox/build.py`, import `from heterodyne.sandbox.hostread import HostUsageReader` and `from heterodyne.wsd.usage import NoUsageReader, UsageReader`, and add:
 
@@ -4012,7 +4231,7 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
 ```
 
-In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtime` and `UsageReader` from `heterodyne.wsd.usage`. Give `run` the keyword `*, usage_reader: UsageReader | None = None` after `exit_now`, and pass `usage_reader=usage_reader` to `assemble(...)`. In `wsd_main`, replace the `run` line with:
+In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtime` and `UsageReader` from `heterodyne.wsd.usage`. Import `from heterodyne.sandbox import hostread`. Give `run` the keyword `*, usage_reader: UsageReader | None = None` after `exit_now`, and pass `usage_reader=usage_reader` to `assemble(...)`. In `run`, right after the `except AlreadyRunning:` block and before `held = False`, add `hostread.recover(s.state_dir / "hostread")` (it never raises, so the lock can't leak). It runs whichever reader is configured, so a crashed read is cleaned up even if the sandbox runtime was switched off since. In `wsd_main`, replace the `run` line with:
 
 ```python
             return run(s, _factory(s), build_runtime(s, os.environ),
@@ -4042,7 +4261,7 @@ E8 and E11. Each pickup drains the runtime's signals just after `expire`. A `Usa
 
 **Files:**
 - Modify: `src/heterodyne/wsd/park.py` (`capabilities`, `LIMIT_STEPS`, `Parker.limit`, `_confirm`, `_supersede`, the tail's new step)
-- Modify: `src/heterodyne/wsd/scheduler.py` (`_signals`, called from `_pickup`)
+- Modify: `src/heterodyne/wsd/scheduler.py` (`held`, `_signals`, `_signal`, called from `_pickup`)
 - Modify: `tests/wsd_env.py` (`Rig.usage_reader`)
 - Test: `tests/test_wsd_defer.py`
 
@@ -4060,7 +4279,7 @@ E8 and E11. Each pickup drains the runtime's signals just after `expire`. A `Usa
 
 The confirming step sits after the WIP commit, as D6 orders it (Codex plan 4b r2). If the commit fails, the tail stops before the read: no trusted read, no `mark_exhausted`, and the bead keeps only its untrusted record. A superseding record has a new number. The WIP commit's mark (`defer:<key>:<n>`, written and never read back) names the untrusted record, while `v2:deferred` and the comment use the number current after `defer.confirmed`, so the comment names the record the bead actually waits on. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
 
-A signal is drained before anything can fail. If `BeadsUnavailable` interrupts `limit` before its op is opened, that one report is lost, and the session goes on until its next report. Claude's CLI waits for the reset itself (S7 (5)), and Codex's next poll reports the limit again (Task 7). Once the op is opened, its replay finishes the defer.
+A limit report is held by the scheduler until `limit` has handled it (Codex plan 4b r2). If handling it raises, `BeadsUnavailable` for one, that report and every limit report after it in the batch stay held. The next pickup handles them first, oldest first, before anything newly drained, so a Beads outage loses no report. Claude reports its limit once and then waits for the reset (S7 (5)), so a lost report would mean no failover. Handling one again is safe: `limit` opens nothing for a launch that is no longer the bead's running one, for a bead that isn't running, or while an op is open. Once the op is opened, its replay finishes the defer. A usage report is not held: the next one replaces it. The held reports live in memory, as the runtime's queue does, so a wsd crash loses both. That loss is accepted: the session then waits for the reset itself, as it would with (e) off.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4078,7 +4297,7 @@ and in `Rig.restart`, replace the `Deps(...)` call with:
                          usage_reader=self.usage_reader)
 ```
 
-In `tests/test_wsd_defer.py`, add `Account`, `ConfiguredAccounts` and `ProfileAccounts` (from `heterodyne.wsd.accounts`), `Capabilities` (from `heterodyne.config.capabilities`), `LIMIT_STEPS` and `TRUSTED` (to the `heterodyne.wsd.park` import), `LimitSeen` and `UsageSeen` (to the `heterodyne.wsd.runtime` import), and `Observation` and `TrustedRead` (from `heterodyne.wsd.usage`) to the imports. Then append:
+In `tests/test_wsd_defer.py`, add `Account`, `ConfiguredAccounts` and `ProfileAccounts` (from `heterodyne.wsd.accounts`), `Capabilities` (from `heterodyne.config.capabilities`), `LIMIT_STEPS` and `TRUSTED` (to the `heterodyne.wsd.park` import), `LimitSeen` and `UsageSeen` (to the `heterodyne.wsd.runtime` import), and `Observation` and `TrustedRead` (from `heterodyne.wsd.usage`), `contextlib`, and `Bead`, `BeadsAdapter` and `BeadsUnavailable` (from `heterodyne.wsd.beads`, where the file doesn't import them already) to the imports. Then append:
 
 ```python
 # --- the reactive limit (plan 4b Task 9) ---
@@ -4229,6 +4448,39 @@ def test_a_confirmed_limit_relaunches_on_the_next_account(tmp_path: Path) -> Non
     assert [(w.window_id, w.source) for w in cache.windows[key]] == [("codex:codex:300m", HOST)]
     assert rig.state(B) == BeadState.RUNNING.value and DEFERRED not in rig.world.beads[B].labels
     assert len(defer_comments(rig)) == 1 and defer_comments(rig)[0].startswith(defer_mark(rig.key(B), 2))
+    completed(rig)
+
+
+def test_a_limit_held_through_a_beads_outage_is_handled_after_it(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    real_show = BeadsAdapter.show
+
+    def down(_self: BeadsAdapter, _ws: str, _bead: str) -> Bead:
+        raise BeadsUnavailable("injected")
+
+    monkeypatch.setattr(BeadsAdapter, "show", down)
+    with contextlib.suppress(BeadsUnavailable):
+        signal(rig)                                             # the report is drained, and can't be handled
+    assert records(rig) == [] and [s.account for s in rig.runtime.launches] == ["default"]
+    monkeypatch.setattr(BeadsAdapter, "show", real_show)
+    assert rig.pickup() is Outcome.RESUMED                      # no new report: the held one is handled
+    assert [(r.number, r.reason, r.trust) for r in records(rig)] == [(1, QUOTA, UNTRUSTED), (2, QUOTA, TRUSTED)]
+    assert [s.account for s in rig.runtime.launches] == ["default", "spare"]
+    rig.pickup()                                                # handled once: nothing is held any more
+    assert len(records(rig)) == 2 and len(rig.runtime.launches) == 2
+    completed(rig)
+
+
+def test_a_held_limit_whose_launch_moved_on_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaying a held report is safe: by then its launch is no longer the bead's running one."""
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))     # the same report twice in one batch
+    assert rig.pickup() is Outcome.RESUMED
+    assert len(records(rig)) == 2 and [s.account for s in rig.runtime.launches] == ["default", "spare"]
     completed(rig)
 
 
@@ -4423,7 +4675,13 @@ Add after `convert_quota`:
 
 `LAUNCHED` joins the `heterodyne.wsd.launches` import.
 
-In `src/heterodyne/wsd/scheduler.py`, add `capabilities` to the `heterodyne.wsd.park` import, `UsageSeen` to the `heterodyne.wsd.runtime` import, and `ingest_untrusted` to the `heterodyne.wsd.usage` import. In `_pickup`, replace the `expire` line with:
+In `src/heterodyne/wsd/scheduler.py`, add `capabilities` to the `heterodyne.wsd.park` import, `LimitSeen`, `Signal` and `UsageSeen` to the `heterodyne.wsd.runtime` import, and `ingest_untrusted` to the `heterodyne.wsd.usage` import. Add `MAX_HELD = 256` after the imports, and in `Scheduler.__init__`, after `self.wake_at`:
+
+```python
+        # Plan 4b E8: limit reports a failed pickup didn't handle, retried first by the next; never journaled.
+        self.held: list[LimitSeen] = []
+```
+ In `_pickup`, replace the `expire` line with:
 
 ```python
             self.d.runtime.expire(name, now)      # §7: a session at its lifetime ends; the sweep resumes it
@@ -4434,21 +4692,33 @@ Add after `_pickup`:
 
 ```python
     def _signals(self, now: int) -> None:
-        """Plan 4b E8: the reports the workstream's sessions sent since the last pickup, oldest first. A
-        usage report is stored untrusted only for a profile with (c); a limit report defers its own bead
-        only with (e). A report for a launch the journal doesn't have as this workstream's is dropped."""
+        """Plan 4b E8: the limit reports held from a failed pickup, then the reports the workstream's
+        sessions sent since the last pickup, oldest first. If handling one raises, it and the limit
+        reports after it are held for the next pickup, and the error goes on."""
+        batch: list[Signal] = [*self.held, *self.d.runtime.signals(self.ws.name)]
+        self.held = []
+        for i, signal in enumerate(batch):
+            try:
+                self._signal(signal, now)
+            except BaseException:
+                self.held = [s for s in batch[i:] if isinstance(s, LimitSeen)][-MAX_HELD:]
+                raise
+
+    def _signal(self, signal: Signal, now: int) -> None:
+        """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
+        bead only with (e). A report for a launch the journal doesn't have as this workstream's is
+        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time)."""
         j, name = self.d.journal, self.ws.name
-        for signal in self.d.runtime.signals(name):
-            entry = j.launch(signal.session_key, signal.generation)
-            if entry is None or entry.ws != name:
-                continue
-            caps = capabilities(self.ws.accounts, entry.profile)
-            if isinstance(signal, UsageSeen):
-                if caps.in_session_usage:
-                    for obs in signal.observations:
-                        ingest_untrusted(j, entry.ident, obs, now, self.ws.usage)
-            elif caps.limit_signal:
-                self.parker.limit(signal.session_key, signal.generation, signal.reset_hint, now)
+        entry = j.launch(signal.session_key, signal.generation)
+        if entry is None or entry.ws != name:
+            return
+        caps = capabilities(self.ws.accounts, entry.profile)
+        if isinstance(signal, UsageSeen):
+            if caps.in_session_usage:
+                for obs in signal.observations:
+                    ingest_untrusted(j, entry.ident, obs, now, self.ws.usage)
+        elif caps.limit_signal:
+            self.parker.limit(signal.session_key, signal.generation, signal.reset_hint, now)
 ```
 
 In the module docstring, change step 3 to begin: "3. the sessions' own reports are drained (plan 4b E8), then the sweep (`sweep.py`) reconciles beads, sessions and the journal: ...".
@@ -4494,11 +4764,13 @@ In `tests/fakes/fake_runtime.py`, import `LOGIN_STALE` from `heterodyne.wsd.runt
 
 ```python
         self.stale_keys: set[str] = set()        # a launch pinned to one of these keys: refused as stale
+        self.attempts: list[LaunchSpec] = []     # every spec `launch` was given, refused ones included
 ```
 
 In `launch`, before the `if self.launch_failures or spec.bead in self.failing_beads:` line, add:
 
 ```python
+        self.attempts.append(spec)
         if spec.credential_key in self.stale_keys:
             raise LaunchFailed(LOGIN_STALE)
 ```
@@ -4614,13 +4886,75 @@ def test_another_refusal_still_spends_the_budget_and_marks_nothing_stale(tmp_pat
     assert "stale" not in data
 
 
+def spec_view(rig: Rig) -> list[tuple[object, ...]]:
+    """What each launch attempt asked for: the account and key, a handoff, a resume and the native ID."""
+    return [(a.account, a.credential_key, a.handoff, a.resume, a.native_id, a.generation)
+            for a in rig.runtime.attempts]
+
+
+def stale_points(tmp_path: Path, scenario: Scenario) -> tuple[str, ...]:
+    """The stale step and the outcome points around it, in the order the uncrashed run passes them."""
+    seen = run(tmp_path / "points", scenario).seen
+    points = tuple(dict.fromkeys(p for p in seen if p.rsplit(".", 1)[1] in ("outcome", "outcome!", "stale")))
+    assert any(p.endswith(".stale") for p in points)
+    return points
+
+
+def same_specs(tmp_path: Path, scenario: Scenario) -> Run:
+    """`same_end` at each stale point, and every replay attempts exactly the uncrashed run's launches."""
+    points = stale_points(tmp_path, scenario)
+    clean = same_end(tmp_path / "end", scenario, points)
+    want = spec_view(clean.rig)
+    for i, point in enumerate(points):
+        assert spec_view(run(tmp_path / f"specs-{i}", scenario, point).rig) == want, point
+    return clean
+
+
+def stale_handoff(rig: Rig) -> None:
+    """B limited on `default`, able to switch only by a handoff, and `spare`'s login stale."""
+    limited(rig, Reader(reading()), two=True, handoff_relaunch=True, trusted_read=True, limit_signal=True)
+    rig.runtime.stale_keys = {key_of(rig, "spare")}
+
+
 STALE = Scenario(lambda r: fresh_only(r, "default"), lambda r: r.pickup())
+STALE_ALONE = Scenario(lambda r: fresh_only(r, "default", two=False), lambda r: r.pickup())
+ALL_STALE = Scenario(lambda r: fresh_only(r, "default", "spare"), lambda r: [r.pickup() for _ in range(3)])
+HANDOFF_STALE = Scenario(stale_handoff, lambda r: (signal(r), r.pickup()))
 
 
 def test_a_crash_after_a_stale_refusal_replays_to_the_next_account(tmp_path: Path) -> None:
-    clean = same_end(tmp_path, STALE, ("pickup.outcome", "pickup.outcome!", "pickup.stale"))
+    clean = same_specs(tmp_path, STALE)
     assert [s.account for s in clean.rig.runtime.launches] == ["spare"]
+    assert [(a.account, a.handoff, a.resume) for a in clean.rig.runtime.attempts] == [
+        ("default", False, False), ("spare", False, False)]
+
+
+def test_a_crash_after_a_stale_refusal_with_no_other_account_still_needs_a_human(tmp_path: Path) -> None:
+    clean = same_specs(tmp_path, STALE_ALONE)
+    row = clean.rig.journal.state(WS, B)
+    assert row is not None and (row.state, row.detail) == (BeadState.STUCK, LOGIN_STALE)
+    assert [a.account for a in clean.rig.runtime.attempts] == ["default"]
+
+
+def test_a_crash_when_every_login_is_stale_tries_each_once(tmp_path: Path) -> None:
+    clean = same_specs(tmp_path, ALL_STALE)
+    assert [a.account for a in clean.rig.runtime.attempts] == ["default", "spare"]
+    assert clean.rig.runtime.launches == []
+
+
+def test_a_crash_after_a_stale_handoff_resumes_nothing(tmp_path: Path) -> None:
+    """The handoff to `spare` is refused as stale, and `default` is at its limit, so the bead waits for
+    the reset; nothing runs on `spare`. Every replay asked for the same handoff: fresh, with no resume
+    and no native ID."""
+    clean = same_specs(tmp_path, HANDOFF_STALE)
+    first, handoff = clean.rig.runtime.attempts
+    assert (first.account, first.handoff) == ("default", False)
+    assert (handoff.account, handoff.handoff, handoff.resume, handoff.native_id) == ("spare", True, False, None)
+    assert [s.account for s in clean.rig.runtime.launches] == ["default"]
+    assert records(clean.rig)[-1].reason == QUOTA
 ```
+
+The rig's p-two is a Codex profile, so a handoff's native ID is None; the Claude form of D7's fresh ID is Task 6's to test. `run`, `Run.seen` and `same_end` are this file's existing crash helpers.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -5045,6 +5379,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
+from probe_verdicts import SELFTEST_FAILED, launch_shown  # noqa: E402
 from sandbox_env import config_env, sandbox_teardown  # noqa: E402
 from test_live_sandbox import (  # noqa: E402
     MODELS,
@@ -5053,6 +5388,7 @@ from test_live_sandbox import (  # noqa: E402
     Live,
     PinnedSelfTest,
     host_config,
+    models_used,
     preflight,
     teardown,
     tiny_repo,
@@ -5071,7 +5407,8 @@ from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime  # noqa: E4
 from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts, ProfileAccounts  # noqa: E402
-from heterodyne.wsd.runtime import LaunchSpec, LimitSeen, Signal, Started, UsageSeen  # noqa: E402
+from heterodyne.sandbox.spec import sandbox_name  # noqa: E402
+from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, LimitSeen, Signal, Started, UsageSeen  # noqa: E402
 from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
@@ -5144,13 +5481,15 @@ def live() -> Iterator[Live]:
         yield live
     finally:
         uncertain = teardown(live) if live is not None else []
-        if uncertain:
-            pytest.fail(f"live teardown is uncertain; kept the scratch {root} and tmux server "
+        if uncertain:                   # the scratch's own name only: never a host path
+            pytest.fail(f"live teardown is uncertain; kept the temp directory's {root.name} and tmux server "
                         f"{live.tmux.socket_name if live else None}: " + "; ".join(uncertain))
         if live is not None:
             live.tmux.kill_server()
         canary.unlink(missing_ok=True)
         shutil.rmtree(root, ignore_errors=True)
+        if os.path.lexists(root):
+            pytest.fail(f"the live scratch {root.name} in the temp directory could not be removed")
 
 
 def accounts_of(live: Live) -> ConfiguredAccounts:
@@ -5204,6 +5543,22 @@ def running(live: Live, spec: LaunchSpec) -> Iterator[Started]:
         uncertain = sandbox_teardown(live.runtime, [spec.session_key], live.backend.names)
         if uncertain:
             pytest.fail(f"{spec.session_key}'s teardown is uncertain: " + "; ".join(uncertain))
+
+
+def launch_limited(live: Live, spec: LaunchSpec) -> Started | None:
+    """A launch on an account already at its limit, observed, never forced. Its self-test's one model
+    turn is the provider's to refuse, so either outcome is expected: the launch fails its self-test
+    (None; the failure must be the self-test's, and no sandbox may be left), or it starts. `Live.launch`
+    isn't used, because its model check needs a turn the provider answered."""
+    live.keys.append(spec.session_key)
+    try:
+        return live.runtime.launch(spec)
+    except LaunchFailed as exc:
+        said = str(exc)
+        if not said.startswith(SELFTEST_FAILED):
+            pytest.fail(f"the limited launch failed before its self-test: {launch_shown(said)}")
+        assert sandbox_name(spec.session_key, spec.generation) not in live.backend.names(), "the sandbox was left"
+        return None
 
 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
@@ -5306,12 +5661,28 @@ def test_a_reached_limit_arrives_as_a_limit_signal(live: Live, cli: str) -> None
     if account not in ("default", OTHER) or (account == OTHER and not os.environ.get(SECOND[cli])):
         pytest.skip("HZ_LIVE_ACCOUNTS_LIMITED names no account at its limit")
     spec = on(live, cli, f"btq-live-e{cli[0]}", account)
-    with running(live, spec):
-        say(live, spec.session_key, "Reply with only the word ok.")
+    assert spec.model == MODELS[cli]                            # the testing pin, low effort for Codex
+    try:
+        started = launch_limited(live, spec)
+        if started is not None:
+            say(live, spec.session_key, "Reply with only the word ok.")
+        elif cli == "codex":            # Codex's signal comes from polling a running session (E6)
+            pytest.skip("the limited account's codex self-test was refused: no running session to poll")
         found = signals_for(live, spec.session_key, LimitSeen, PROMPT_SECONDS)
+        # The provider refused the turns, so the log may record no model; any it does record is the pin.
+        native = started.native_id if started is not None and started.native_id else "*"
+        used = models_used(live.runtime.layout(spec.session_key).home, cli, native)
+    finally:
+        uncertain = sandbox_teardown(live.runtime, [spec.session_key], live.backend.names)
+        if uncertain:
+            pytest.fail(f"{spec.session_key}'s teardown is uncertain: " + "; ".join(uncertain))
     assert found, f"no limit signal from {cli} in {PROMPT_SECONDS}s"
+    assert all(isinstance(s, LimitSeen) and s.generation == spec.generation for s in found)
+    assert used <= {MODELS[cli]}, f"{cli} ran on {sorted(used)}, not the pinned {MODELS[cli]}"
     hints = [s.reset_hint for s in found if isinstance(s, LimitSeen)]
-    print(f"EVIDENCE accounts (e) {cli} {spec.session_key} reset-hints={hints} models={MODELS[cli]}")
+    outcome = "started" if started is not None else "self-test refused"
+    print(f"EVIDENCE accounts (e) {cli} {spec.session_key} launch={outcome} reset-hints={hints} "
+          f"models={sorted(used)} pin={MODELS[cli]}")
 ```
 
 - [ ] **Step 2: Check that it is skipped offline and type-checks**
