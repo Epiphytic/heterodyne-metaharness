@@ -3801,7 +3801,7 @@ In `tests/test_wsd_defer.py`, add `LOGIN_STALE` to the `heterodyne.wsd.runtime` 
 
 def key_of(rig: Rig, account: str) -> str:
     accounts = rig.ws.accounts
-    assert accounts is not None
+    assert isinstance(accounts, ConfiguredAccounts)
     return accounts.current_key("codex", account)
 
 
@@ -3840,6 +3840,7 @@ def fresh_only(rig: Rig, *stale: str, two: bool = True) -> None:
     if two:
         spare(rig)
         caps(rig, cross_account_resume=True)
+    rig.restart(rig.cp)
     rig.runtime.stale_keys = {key_of(rig, a) for a in stale}
     rig.world.add(B)
     on_profile(rig, B, "p-two")
@@ -3906,7 +3907,7 @@ STALE = Scenario(lambda r: fresh_only(r, "default"), lambda r: r.pickup())
 
 
 def test_a_crash_after_a_stale_refusal_replays_to_the_next_account(tmp_path: Path) -> None:
-    clean = same_end(tmp_path, STALE, ("pickup.outcome", "pickup.outcome!"))
+    clean = same_end(tmp_path, STALE, ("pickup.outcome", "pickup.outcome!", "pickup.stale"))
     assert [s.account for s in clean.rig.runtime.launches] == ["spare"]
 ```
 
@@ -3937,8 +3938,8 @@ Add after `_outcome`:
 ```python
     def _stale(self, op: Op, entry: LaunchEntry) -> Launch:
         """E9: the runtime's freshness gate refused the pinned login. Its key joins the op's `stale` keys as
-        the generation is forgotten, in one transaction with the row's reason, so every later pin of this
-        op gates without it. No budget is spent: another permitted account gives FAILED, and the next
+        the generation is forgotten, in one transaction with the row's reason (`{kind}.stale`), so every
+        later pin of this op gates without it. No budget is spent: another permitted account gives FAILED, and the next
         pickup's replay pins it; none left escalates (`_pin` applies the same rule on a replay)."""
         j, ws = self.d.journal, self.ws.name
         stale = stale_keys(op) | {entry.credential_key}
@@ -3947,6 +3948,7 @@ Add after `_outcome`:
             op = j.op_step(op.op_id, op.step, {"stale": ",".join(sorted(stale))})
             row = j.state(ws, op.bead)
             j.set_state(ws, op.bead, row.state if row else BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+        self.d.cp(f"{op.kind.value}.stale")
         accounts = self.ws.accounts
         try:
             verdict = None if accounts is None else decide(
