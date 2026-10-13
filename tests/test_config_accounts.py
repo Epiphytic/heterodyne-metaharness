@@ -76,8 +76,8 @@ def test_usage_defaults_load(cfg: Path) -> None:
     assert c.accounts[("claude-code", "default")].login_dir == home / ".claude"
 
 
-def test_capability_table_is_empty() -> None:
-    assert capabilities.CAPABILITIES == {}
+def test_capability_switching() -> None:
+    """The table's contents are checked by tests/test_config_capabilities.py (plan 4b Task 11)."""
     assert not capabilities.NONE.can_switch
     assert Capabilities(handoff_relaunch=True).can_switch
     assert Capabilities(cross_account_resume=True).can_switch
