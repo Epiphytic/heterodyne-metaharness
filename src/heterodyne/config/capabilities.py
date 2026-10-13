@@ -1,7 +1,7 @@
 """Per-adapter account and usage capabilities that S7 must demonstrate (ADR 0001 §4.4 D9)."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass(frozen=True)
@@ -20,9 +20,50 @@ class Capabilities:
         return self.cross_account_resume or self.handoff_relaunch
 
 
-# Empty: S7 demonstrated nothing on a real account. AU-6 and AU-7 add entries from accepted findings.
+@dataclass(frozen=True)
+class Evidence:
+    """The S7 real-account runs that demonstrated one capability, and the CLI version they ran on (D9)."""
+    runs: str            # S7's run ids, e.g. "L1,L2"
+    version: str         # must equal the adapter's version pin
+
+
+# Each entry is enabled by its own commit, after the G2 bead records the operator's acceptance of the
+# finding; the commit message names the G2 bead and the S7 commit (plan 4b Task 11 Part B).
 CAPABILITIES: Mapping[str, Capabilities] = {}
+EVIDENCE: Mapping[str, Mapping[str, Evidence]] = {}
 NONE = Capabilities()
+FIELDS: tuple[str, ...] = tuple(f.name for f in fields(Capabilities))
+
+PROBLEM_UNKNOWN_ADAPTER = "no pinned adapter"
+PROBLEM_NO_EVIDENCE = "enabled without evidence"
+PROBLEM_STALE_EVIDENCE = "evidence for a capability that is off"
+PROBLEM_WRONG_VERSION = "evidence from another CLI version"
+PROBLEM_NEEDS_BINDING = "enabled without (a) login binding"
+PROBLEM_NO_SOURCE = "claude-code has no (d) source"
+PROBLEM_NO_GENERATOR = "(f) needs the handoff generator"
+
+
+def table_problems(table: Mapping[str, Capabilities], evidence: Mapping[str, Mapping[str, Evidence]],
+                   pins: Mapping[str, str]) -> tuple[str, ...]:
+    """The D9 rules every table edit keeps (plan 4b Task 11). Each line names an adapter and a field."""
+    found: list[str] = []
+    for adapter in sorted(set(table) | set(evidence)):
+        caps, shown = table.get(adapter, NONE), evidence.get(adapter, {})
+        if adapter not in pins:
+            found.append(f"{PROBLEM_UNKNOWN_ADAPTER}: {adapter}")
+            continue
+        on = {name for name in FIELDS if getattr(caps, name)}
+        found += [f"{PROBLEM_NO_EVIDENCE}: {adapter}.{name}" for name in sorted(on - set(shown))]
+        found += [f"{PROBLEM_STALE_EVIDENCE}: {adapter}.{name}" for name in sorted(set(shown) - on)]
+        found += [f"{PROBLEM_WRONG_VERSION}: {adapter}.{name}" for name in sorted(shown)
+                  if shown[name].version != pins[adapter]]
+        if on and not caps.login_binding:
+            found.append(f"{PROBLEM_NEEDS_BINDING}: {adapter}")
+        if adapter == "claude-code" and caps.trusted_read:
+            found.append(f"{PROBLEM_NO_SOURCE}: {adapter}.trusted_read")
+        if caps.handoff_relaunch:
+            found.append(f"{PROBLEM_NO_GENERATOR}: {adapter}.handoff_relaunch")
+    return tuple(found)
 
 # Login file set per adapter, relative to its login directory (S7 (1), client side shown). Used only for
 # credential identities and alias checks; it enables nothing.
