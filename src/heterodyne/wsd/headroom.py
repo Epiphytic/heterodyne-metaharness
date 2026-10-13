@@ -85,17 +85,20 @@ def clamp_bound(now: int, s: UsageSettings) -> int:
     return now + s.max_window_hours * 3600
 
 
-def permitted(p: ProfileView, previous_key: str | None) -> tuple[Candidate, ...]:
-    """D4: the failover mode's list, then credential continuity."""
+def permitted(p: ProfileView, previous_key: str | None,
+              exclude: frozenset[str] = frozenset()) -> tuple[Candidate, ...]:
+    """D4: the failover mode's list, then credential continuity, less the keys in `exclude` (the logins
+    this operation already found stale, plan 4b E9). Excluding only ever removes accounts."""
     listed = p.accounts[:1] if p.failover == "none" else p.accounts
     if previous_key is None:
-        return listed
-    if p.failover == "none":
-        return listed if listed and listed[0].key == previous_key else ()
-    previous = tuple(c for c in listed if c.key == previous_key)[:1]
-    if p.capabilities.can_switch:
-        return previous + tuple(c for c in listed if c not in previous)    # affinity
-    return previous
+        found = listed
+    elif p.failover == "none":
+        found = listed if listed and listed[0].key == previous_key else ()
+    else:
+        previous = tuple(c for c in listed if c.key == previous_key)[:1]
+        found = previous + tuple(c for c in listed if c not in previous) if p.capabilities.can_switch \
+            else previous                                                   # affinity
+    return tuple(c for c in found if c.key not in exclude)
 
 
 def blocking(key: str, cache: UsageCache, now: int, s: UsageSettings) -> tuple[int, ...]:
@@ -113,11 +116,11 @@ def blocking(key: str, cache: UsageCache, now: int, s: UsageSettings) -> tuple[i
     return tuple(found)
 
 
-def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: int,
-         s: UsageSettings) -> Chosen | AccountChanged | Deadline:
+def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: int, s: UsageSettings,
+         exclude: frozenset[str] = frozenset()) -> Chosen | AccountChanged | Deadline:
     """The first eligible permitted account; `AccountChanged` when nothing is permitted; otherwise the
     earliest time a permitted account clears, never earlier than `now + min_recheck_seconds`."""
-    allowed = permitted(p, previous_key)
+    allowed = permitted(p, previous_key, exclude)
     if not allowed:
         return AccountChanged(f'profile {p.profile} (failover = "{p.failover}") permits no account: the '
                               "session's last launch used a credential key it can't continue on now")
@@ -131,11 +134,11 @@ def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: int,
 
 
 def admits(p: ProfileView, previous_key: str | None, entry: LaunchEntry, cache: UsageCache, now: int,
-           s: UsageSettings) -> bool:
+           s: UsageSettings, exclude: frozenset[str] = frozenset()) -> bool:
     """The guard's step 3: the pinned account is still permitted, under the key it was pinned with, and
     nothing blocks it."""
     key = entry.credential_key
-    return (any(c.account == entry.account and c.key == key for c in permitted(p, previous_key))
+    return (any(c.account == entry.account and c.key == key for c in permitted(p, previous_key, exclude))
             and not blocking(key, cache, now, s))
 
 

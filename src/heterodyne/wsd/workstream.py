@@ -19,6 +19,7 @@ from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime
+from heterodyne.wsd.usage import NoUsageReader, UsageReader
 
 REPO_KEY = "repo"            # bead metadata naming one of the workstream's [repos]
 DEFAULT_REPO = "default"
@@ -100,3 +101,5 @@ class Deps:
     cp: Checkpoint = nothing
     # Every AU-5 scheduling decision takes `now` from here (UTC epoch seconds), so tests drive one clock.
     clock: Callable[[], int] = utc_now
+    # The trusted host-side read (D9 (d), plan 4b Task 8). The default confirms nothing.
+    usage_reader: UsageReader = field(default_factory=NoUsageReader)

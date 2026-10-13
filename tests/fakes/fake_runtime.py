@@ -17,6 +17,7 @@ from heterodyne.wsd.runtime import (
     ResolveFailed,
     RuntimeUnavailable,
     Session,
+    Signal,
     Started,
     UnlandedView,
 )
@@ -46,6 +47,8 @@ class FakeRuntime:
         self.ends: dict[str, Ended] = {}      # key -> its latest generation's end
         self.generations: dict[str, int] = {}
         self.ended_failures = 0
+        self.queued: dict[str, list[Signal]] = {}   # reports by workstream, drained by signals()
+        self.drains: list[str] = []
 
     def available(self) -> bool:
         return self.up
@@ -105,6 +108,10 @@ class FakeRuntime:
             self.expire_failures -= 1
             raise RuntimeUnavailable("lifetime stop not confirmed")
 
+    def signals(self, ws: str) -> list[Signal]:
+        self.drains.append(ws)
+        return self.queued.pop(ws, [])
+
     def unlanded(self, ws: str) -> list[UnlandedView]:
         if not self.up:
             raise RuntimeUnavailable("down")
@@ -145,6 +152,10 @@ class FakeRuntime:
             self.ends[session_key] = Ended(generation, cause, True, 60)
 
     # --- test controls ---
+
+    def report(self, ws: str, *signals: Signal) -> None:
+        """The workstream's sessions sent these reports (already attributed, as the runtime does)."""
+        self.queued.setdefault(ws, []).extend(signals)
 
     def end(self, session_key: str, cause: EndCause = EndCause.DIED) -> None:
         """The session ended on its own (the agent exited or crashed)."""

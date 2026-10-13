@@ -38,6 +38,12 @@ def role_session(bead: str, role: str, profile: str) -> str:
     return str(uuid.uuid5(NS, f"{slug(bead, 'bead')}:{slug(role, 'role')}:{profile}"))
 
 
+def handoff_session(session_key: str, generation: int) -> str:
+    """A handoff relaunch's fresh native session ID (D7): new for each generation, recomputable. Its
+    uuid5 name has one colon (`<session key>:<generation>`); role_session's has two, so they never meet."""
+    return str(uuid.uuid5(NS, f"{session_key}:{generation}"))
+
+
 def profile_for(labels: tuple[str, ...], role: str, default: str) -> str:
     """The profile for `role` on a bead: a single `role:<role>=<profile>` label overrides the configured
     default (§4.1, §15 layer 4). Two different overrides for the same role are ambiguous: refused."""

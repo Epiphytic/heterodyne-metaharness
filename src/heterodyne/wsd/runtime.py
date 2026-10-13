@@ -12,12 +12,18 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from heterodyne.wsd.beads import BeadsAdapter
+from heterodyne.wsd.usage import Observation
 
 ACTION_STATE = "action_state"
 # The action states that say nothing is in flight (ADR §3.3: pending, executing, then succeeded, failed
 # or uncertain). A pending action has not started. Every other value, including one wsd doesn't know,
 # is unsettled.
 SETTLED_ACTIONS = frozenset({"pending", "succeeded", "failed"})
+
+# The LaunchFailed texts the guard acts on, compared by equality (plan 4b E1, E3, E9). A runtime that
+# refuses for these reasons raises exactly these texts and nothing else with them.
+LOGIN_STALE = "the login expires within the session's maximum lifetime; refresh it on the host"
+KEY_CHANGED = "the account's credential key changed after the launch was pinned"
 
 
 class Liveness(StrEnum):
@@ -55,6 +61,11 @@ class LaunchSpec:
     account: str = "default"
     model: str = ""
     repo: Path | None = None    # the bead's repository, as recorded: the only trusted source of its git dirs
+    # The entry's pinned credential key (plan 4b E1). The runtime recomputes the account's key under the
+    # D8 lock and refuses with KEY_CHANGED unless it equals this; an empty key is refused the same way.
+    credential_key: str = ""
+    # A cross-account relaunch without (b): a fresh native session, never a resume (D7, plan 4b E10).
+    handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,27 @@ class Started:
     tmux_pane: str
     pane_pid: int
     native_id: str | None       # the session's native ID, when the runtime knows it
+
+
+@dataclass(frozen=True)
+class UsageSeen:
+    """A session's own usage report (untrusted, D3). The runtime attributes it to the launch whose channel
+    carried it, never to anything the payload says."""
+    session_key: str
+    generation: int
+    observations: tuple[Observation, ...]
+
+
+@dataclass(frozen=True)
+class LimitSeen:
+    """A session reported reaching its usage limit (untrusted, D6). `reset_hint` is the payload's own
+    reset time, if it gave one; wsd clamps it."""
+    session_key: str
+    generation: int
+    reset_hint: int | None
+
+
+type Signal = UsageSeen | LimitSeen
 
 
 Action = Literal["land", "keep", "discard"]
@@ -176,6 +208,12 @@ class AgentRuntime(Protocol):
         Raises RuntimeUnavailable if a stop can't be confirmed. The sweep then resumes the bead."""
         ...
 
+    def signals(self, ws: str) -> list[Signal]:
+        """Drain the reports the workstream's sessions have sent since the last call, oldest first. Each
+        is attributed to the (session key, generation) whose channel carried it. Never raises: a report
+        the runtime can't attribute is never queued."""
+        ...
+
     def unlanded(self, ws: str) -> list[UnlandedView]:
         """Each of the workstream's sessions whose commits were not landed (docs/wsd.md §5). A failure on
         one is shown on it. Raises RuntimeUnavailable if the sessions can't be listed."""
@@ -216,6 +254,9 @@ class NoRuntime:
 
     def expire(self, ws: str, now: int) -> None:
         return None                  # it runs nothing
+
+    def signals(self, ws: str) -> list[Signal]:
+        return []                    # it runs nothing
 
     def unlanded(self, ws: str) -> list[UnlandedView]:
         return []

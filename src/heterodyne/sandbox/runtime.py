@@ -67,6 +67,7 @@ from heterodyne.wsd.runtime import (
     ResolveRefused,
     RuntimeUnavailable,
     Session,
+    Signal,
     Started,
     UnlandedView,
 )
@@ -394,6 +395,9 @@ class SandboxRuntime:
                 failed.append("a session at its maximum lifetime could not be stopped")
         if failed:
             raise RuntimeUnavailable(failed[0])
+
+    def signals(self, ws: str) -> list[Signal]:
+        return []                    # nothing produces a signal yet; Task 7 replaces this
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record. Whether it ran is this generation's
