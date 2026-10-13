@@ -3758,3 +3758,271 @@ Expected: 0 errors.
 git add src/heterodyne/wsd/park.py src/heterodyne/wsd/scheduler.py tests/wsd_env.py tests/test_wsd_defer.py
 git commit -m "plan4b T9: drain the sessions' signals; defer on a limit and confirm it with the trusted read"
 ```
+
+## Task 10: the account switch (handoff) and the stale-login path
+
+AU-8, E9 and E10. When the guard pins a key other than the session's last launched key, and the profile has (f) but not (b), the spec asks for a handoff: no resume and no native ID, so the runtime starts fresh with D7's ID (Task 6). With (b), a switch stays an ordinary resume. A refusal that is exactly `LOGIN_STALE` spends no budget. Its key joins the op's `stale` keys, and every later pin of that op gates without them. Another permitted account gives `FAILED`, and the next pickup's replay launches on it. None left escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`.
+
+**Files:**
+- Modify: `src/heterodyne/wsd/park.py` (`stale_keys`, `_outcome`, `_stale`, `_pin`, `_pin_holds`, `_pin_and_dispatch`)
+- Modify: `tests/fakes/fake_runtime.py` (`stale_keys`)
+- Test: `tests/test_wsd_defer.py`
+
+**Interfaces:**
+- Consumes:
+  - `LaunchSpec.credential_key` / `.handoff`, `LOGIN_STALE`, `decide(..., exclude=)`, `admitted(..., exclude=)` (Task 1).
+  - The runtime's handoff and its `LOGIN_STALE` refusal (Task 6).
+  - `park.capabilities` and the Task 9 test helpers `limited`, `spare`, `caps`, `Reader`, `reading`, `signal` (Task 9).
+- Produces:
+  - `park.stale_keys(op: Op) -> frozenset[str]`: the op's `stale` data, comma-separated keys.
+  - `FakeRuntime.stale_keys: set[str]`: a launch pinned to one of these keys is refused with `LaunchFailed(LOGIN_STALE)`.
+
+`LOGIN_STALE` is matched only as the whole error text of a `failed` refusal, the text Task 6's `_pinned` raises. A refusal with any other text spends the budget as before. `_stale` records the key and forgets the generation in one transaction, together with the row's reason. A crash after that transaction leaves the op open with its `stale` keys and no generation, so the replay's `_pin` gates without them. `_pin` applies the same "none left" rule as `_stale`, so a crash between the transaction and the escalation still escalates. The keys belong to the operation, so a later operation tries a refreshed login again.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/fakes/fake_runtime.py`, import `LOGIN_STALE` from `heterodyne.wsd.runtime`. In `__init__`, after `failing_beads`, add:
+
+```python
+        self.stale_keys: set[str] = set()        # a launch pinned to one of these keys: refused as stale
+```
+
+In `launch`, before the `if self.launch_failures or spec.bead in self.failing_beads:` line, add:
+
+```python
+        if spec.credential_key in self.stale_keys:
+            raise LaunchFailed(LOGIN_STALE)
+```
+
+In `tests/test_wsd_defer.py`, add `LOGIN_STALE` to the `heterodyne.wsd.runtime` import, then append:
+
+```python
+# --- the account switch (plan 4b Task 10) ---
+
+def key_of(rig: Rig, account: str) -> str:
+    accounts = rig.ws.accounts
+    assert accounts is not None
+    return accounts.current_key("codex", account)
+
+
+@pytest.mark.parametrize(("on", "handoff"), [
+    ({"handoff_relaunch": True}, True),
+    ({"cross_account_resume": True}, False),
+    ({"cross_account_resume": True, "handoff_relaunch": True}, False),
+], ids=["f", "b", "b-and-f"])
+def test_a_switch_without_b_is_a_handoff_and_with_b_a_resume(tmp_path: Path, on: dict[str, bool],
+                                                             handoff: bool) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, trusted_read=True, limit_signal=True, **on)
+    assert signal(rig) is Outcome.RESUMED
+    first, second = rig.runtime.launches
+    assert (first.account, first.handoff, second.account) == ("default", False, "spare")
+    assert (second.credential_key, second.handoff, second.resume) == (key_of(rig, "spare"), handoff, not handoff)
+    entry = rig.journal.launch(rig.key(B), 1)
+    assert entry is not None and entry.native_id is not None
+    assert second.native_id == (None if handoff else entry.native_id)
+    completed(rig)
+
+
+def test_a_relaunch_on_the_same_key_is_never_a_handoff(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), handoff_relaunch=True, trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED
+    second = rig.runtime.launches[1]
+    assert (second.handoff, second.resume, second.credential_key) == (False, True, key_of(rig, "default"))
+
+
+def fresh_only(rig: Rig, *stale: str, two: bool = True) -> None:
+    """B ready on p-two (on `default` then `spare`, able to switch, if `two`), with the runtime refusing the
+    logins of the `stale` accounts as stale."""
+    if two:
+        spare(rig)
+        caps(rig, cross_account_resume=True)
+    rig.runtime.stale_keys = {key_of(rig, a) for a in stale}
+    rig.world.add(B)
+    on_profile(rig, B, "p-two")
+
+
+def pickup_ops(rig: Rig) -> list[tuple[str, dict[str, str]]]:
+    return [(status, data) for kind, _, status, data in ops(rig) if kind == "pickup"]
+
+
+def attempts(rig: Rig) -> list[int]:
+    return [r[0] for r in rig.journal.db.execute("SELECT attempts FROM ops WHERE kind = 'pickup'")]
+
+
+def test_a_stale_login_moves_on_to_the_next_account_without_spending_the_budget(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default")
+    assert rig.pickup() is Outcome.NOTHING
+    row = rig.journal.state(WS, B)
+    assert row is not None and (row.reason, row.detail) == (Reason.LAUNCH_FAILED, LOGIN_STALE)
+    [(status, data)] = pickup_ops(rig)
+    assert status == "open" and data["stale"] == key_of(rig, "default") and "generation" not in data
+    assert rig.pickup() is Outcome.BUSY
+    assert [s.account for s in rig.runtime.launches] == ["spare"] and rig.runtime.calls == 2
+    assert attempts(rig) == [0] and rig.state(B) == BeadState.RUNNING.value
+    completed(rig)
+
+
+def test_a_stale_login_with_no_other_account_needs_a_human(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default", two=False)
+    rig.pickup()
+    row = rig.journal.state(WS, B)
+    assert row is not None
+    assert (row.state, row.reason, row.detail) == (BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+    assert NEEDS_HUMAN in rig.world.beads[B].labels
+    assert rig.runtime.calls == 1 and attempts(rig) == [0] and rig.journal.ops_open(WS) == []
+
+
+def test_each_stale_login_is_tried_once_then_a_human(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig, "default", "spare")
+    rig.pickup()
+    rig.pickup()
+    rig.pickup()
+    row = rig.journal.state(WS, B)
+    assert row is not None
+    assert (row.state, row.reason, row.detail) == (BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+    assert rig.runtime.calls == 2 and rig.runtime.launches == []
+    [(status, data)] = pickup_ops(rig)
+    assert status == "stuck" and data["stale"] == ",".join(sorted([key_of(rig, "default"), key_of(rig, "spare")]))
+
+
+def test_another_refusal_still_spends_the_budget_and_marks_nothing_stale(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    fresh_only(rig)
+    rig.runtime.launch_failures = 1
+    rig.pickup()
+    assert attempts(rig) == [1]
+    [(_, data)] = pickup_ops(rig)
+    assert "stale" not in data
+
+
+STALE = Scenario(lambda r: fresh_only(r, "default"), lambda r: r.pickup())
+
+
+def test_a_crash_after_a_stale_refusal_replays_to_the_next_account(tmp_path: Path) -> None:
+    clean = same_end(tmp_path, STALE, ("pickup.outcome", "pickup.outcome!"))
+    assert [s.account for s in clean.rig.runtime.launches] == ["spare"]
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 600 uv run pytest tests/test_wsd_defer.py -q -k "switch or handoff or stale or refusal"`
+Expected: FAIL. The switch test fails on `second.handoff` (False where True is wanted), and the stale tests fail on `data["stale"]` (`KeyError: 'stale'`) and on the budget (`attempts(rig) == [1]`).
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/wsd/park.py`, add `LOGIN_STALE` to the `heterodyne.wsd.runtime` import. After `capabilities`, add:
+
+```python
+def stale_keys(op: Op) -> frozenset[str]:
+    """The keys whose logins the runtime refused as stale during this operation (plan 4b E9)."""
+    return frozenset(filter(None, op.data.get("stale", "").split(",")))
+```
+
+In `_outcome`, after the `if receipt.refusal == "unavailable":` block, add:
+
+```python
+        if receipt.refusal == "failed" and receipt.error == LOGIN_STALE:
+            return self._stale(op, entry)
+```
+
+Add after `_outcome`:
+
+```python
+    def _stale(self, op: Op, entry: LaunchEntry) -> Launch:
+        """E9: the runtime's freshness gate refused the pinned login. Its key joins the op's `stale` keys as
+        the generation is forgotten, in one transaction with the row's reason, so every later pin of this
+        op gates without it. No budget is spent: another permitted account gives FAILED, and the next
+        pickup's replay pins it; none left escalates (`_pin` applies the same rule on a replay)."""
+        j, ws = self.d.journal, self.ws.name
+        stale = stale_keys(op) | {entry.credential_key}
+        with j.transaction():
+            op = j.op_forget(op.op_id, "generation")
+            op = j.op_step(op.op_id, op.step, {"stale": ",".join(sorted(stale))})
+            row = j.state(ws, op.bead)
+            j.set_state(ws, op.bead, row.state if row else BeadState.STUCK, Reason.LAUNCH_FAILED, LOGIN_STALE)
+        accounts = self.ws.accounts
+        try:
+            verdict = None if accounts is None else decide(
+                accounts, j, entry.profile, self._previous_key(entry.session_key), self.d.clock(), self.ws.usage,
+                exclude=stale)
+        except ConfigError:
+            verdict = None                   # the replay's pin escalates it as CONFIG_INVALID
+        if isinstance(verdict, AccountChanged):
+            self.escalate_from(op, Reason.LAUNCH_FAILED, LOGIN_STALE)
+            return Launch.ENDED
+        return Launch.FAILED
+```
+
+In `_pin`, replace the `try: chosen = decide(...)` block and the `AccountChanged | Deadline` check with:
+
+```python
+        stale = stale_keys(op)
+        try:
+            chosen = decide(accounts, j, rec.profile, self._previous_key(rec.session_key), self.d.clock(),
+                            self.ws.usage, exclude=stale)
+        except ConfigError as exc:
+            self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+            return Launch.ENDED
+        if isinstance(chosen, AccountChanged) and stale:      # E9: every permitted login was stale
+            self.escalate_from(op, Reason.LAUNCH_FAILED, LOGIN_STALE)
+            return Launch.ENDED
+        if isinstance(chosen, AccountChanged | Deadline):
+            until = chosen.at if isinstance(chosen, Deadline) else None
+            self._defer_within(op, rec, QUOTA if until is not None else ACCOUNT_CHANGED, until)
+            return Launch.ENDED
+```
+
+Replace `_pin_holds` with:
+
+```python
+    def _pin_holds(self, op: Op, accounts: Accounts, rec: SessionRecord, entry: LaunchEntry) -> bool:
+        """Step 3, immediately before dispatch: the pinned account is still permitted under its pinned key,
+        less the op's stale keys, and nothing blocks it (`admits`, through the same view and cache as step
+        2). A key that can't be resolved has changed."""
+        return admitted(accounts, self.d.journal, self._previous_key(rec.session_key), entry, self.d.clock(),
+                        self.ws.usage, exclude=stale_keys(op))
+```
+
+and its call in `_pin_and_dispatch` with `if self._pin_holds(op, accounts, rec, entry):           # step 3`.
+
+In `_pin_and_dispatch`, replace the lines from `launched = [e for e in j.launches(rec.session_key) if e.outcome == LAUNCHED]` to the end of the `spec = LaunchSpec(...)` call with:
+
+```python
+        launched = [e for e in j.launches(rec.session_key) if e.outcome == LAUNCHED]
+        previous = launched[-1].credential_key if launched else None
+        caps = capabilities(accounts, rec.profile)
+        # D7, plan 4b E10: a new key without (b) is a handoff, which starts fresh and resumes nothing.
+        handoff = (previous is not None and previous != entry.credential_key and caps.handoff_relaunch
+                   and not caps.cross_account_resume)
+        # A resume continues the latest launched generation's native session; Claude's first launch uses
+        # the session key as its native ID, and Codex's is unknown until its thread starts.
+        first = rec.session_key if adapter == "claude-code" else None
+        native = None if handoff else launched[-1].native_id if launched else first
+        spec = LaunchSpec(ws, op.bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
+                          worktree, resume=op.kind is OpKind.RESUME and not handoff,
+                          ref=op.data.get("ref") or None, generation=entry.generation, native_id=native,
+                          account=entry.account, credential_key=entry.credential_key, handoff=handoff,
+                          model=entry.model_passed, repo=Path(rec.repo))
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 1200 uv run pytest tests/test_wsd_defer.py tests/test_wsd_park.py tests/test_wsd_pickup.py tests/test_wsd_recovery.py -q`
+Expected: PASS.
+
+Then: `timeout 600 uv run pyright src tests/test_wsd_defer.py tests/fakes/fake_runtime.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/wsd/park.py tests/fakes/fake_runtime.py tests/test_wsd_defer.py
+git commit -m "plan4b T10: handoff relaunches without (b), and a stale login moves on to the next account"
+```
