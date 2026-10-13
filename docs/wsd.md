@@ -117,7 +117,7 @@ With `[platform] sandbox = "openshell"`, wsd runs each session's agent CLI in it
 - Codex policies were `('never', 'danger-full-access')` for every generation.
 - n8: the probe was rejected once, as environment beyond the allowlist, naming a non-empty subset of the agent-only tool variables.
 - n9: the overlay was refused, the launch passed, and the channel rejected nothing.
-- n10: 3 curls were seen and all 3 were whole. Their output fds showed `socket:ENXIO` 0 times and `hidden:EACCES` 6 times. Landlock denies `readlink` on another domain's fds, so the check reports `hidden:EACCES`, and it still tries the open (erratum item 9).
+- n10: 3 curls were seen and all 3 were whole. Their output fds showed `socket:ENXIO` 0 times and `hidden:EACCES` 6 times. The sandbox refuses `readlink` on the probe's fds, most likely a Landlock ptrace-mode check or non-dumpability (EACCES alone doesn't say which), so the check reports `hidden:EACCES`, and it still tries the open (erratum item 9).
 - adv: memory access to 4 targets was refused for every operation.
 
 ## 6. Seams for later plans
