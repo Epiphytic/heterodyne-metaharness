@@ -1,103 +1,165 @@
 # btq-xb56t: `wsctl unlanded` and `wsctl resolve`, an operator path for an unlanded hold
 
-Bead: btq-xb56t. Base: main 850d531. ADR 0001 r15 (28e3df4): D26 (the session's private git, landed fast-forward only) and §9 (operator control over the wsd socket) are unchanged. This adds two operator commands on that socket, and they do what docs/wsd.md §5 tells a human to do by hand today. No amendment is needed.
+Bead: btq-xb56t. Base: main 850d531. ADR 0001 r15 (28e3df4) is unchanged. Two operator commands are added on wsd's control socket (§4.3, §16: wsctl is wsd's operator interface), and they do what docs/wsd.md §5 tells a human to do by hand today. The rules they follow are plan 4's D26 (Task 7A; plan 4 is approved under btq-9r2w3):
+
+- the sandbox never sees anything host git trusts;
+- only the bead branch's tip is imported (`index-pack --strict`, compare-and-swap);
+- the bead branch moves fast-forward only.
+
+Nothing here relaxes them, so no ADR or plan amendment is needed. The new `refs/heads/unlanded/` namespace is a recovery contract, recorded in docs/wsd.md §5.
 
 ## Problem
 
-When `sessiongit.land` refuses a session's commits (its tip does not descend from the landed tip, or its branch can't be read), `_end` records the session ENDED with `unlanded=True` and keeps `sessions/<short id>/git`. From then on `sessions(ws)` and `stop()` raise `RuntimeUnavailable`, so the whole workstream is held until a human runs the five manual steps in docs/wsd.md §5:
+When `sessiongit.land` refuses a session's commits, `_end` records the session ENDED with `unlanded=True` and keeps `sessions/<short id>/git`. The land is refused when:
 
-1. check that nothing runs;
-2. fetch from the untrusted directory and review;
-3. land fast-forward only, or skip;
-4. remove the session directory;
-5. tick pickup.
+- the session's tip doesn't descend from the landed tip;
+- its branch or objects can't be read;
+- the import fails.
 
-T14's live run hit this, and the common cause is a branch that moved under the session (another session's WIP; btq-jjnqm now refuses that at launch). In that case a fast-forward is impossible, so the manual procedure's only options are to lose the work or to do a by-hand merge outside the procedure.
+From then on `sessions(ws)` and `stop()` raise `RuntimeUnavailable`, so the whole workstream is held until a human runs the five manual steps in §5. T14 hit this case: the branch moved under the session. A fast-forward is then impossible, and the manual procedure can only throw the work away.
+
+## The untrusted directory: one inspection boundary
+
+The agent could write to the private git directory, so it is never used as a git directory, an alternate or a config source. Its objects are snapshotted into wsd-owned storage, and every later step reads only the snapshot. That covers the view, `--land` and `--keep`. The new function is `sessiongit.snapshot(p: Pinned, private: Path, dest: Path) -> Snapshot`:
+
+1. **Make the store.** `dest` is a fresh directory under `<state>/inspect/` (0700, wsd-owned, outside every sandbox bind), set up as a bare repository by pinned host git, with no hooks and `core.hooksPath=/dev/null`. The bead repository's object store is its only alternate, written by wsd.
+2. **Read the tip.** It is the session's `refs/heads/btq/<bead>`, read with the existing `_tip` rules: no link below `refs`, at most `PACKED_LIMIT` bytes, a full SHA. If the tip can't be read, the snapshot is `Snapshot(tip=None, error=<fixed reason>)`.
+3. **Copy the objects.** Only these are copied from `private/objects`:
+   - `objects/??/<38 hex>` loose objects;
+   - `objects/pack/pack-*.pack` packs.
+   
+   Each is opened with `O_NOFOLLOW | O_NONBLOCK`, through a directory fd walk that refuses links (the `_plain_tree` and `no_link` checks). It must be a regular file with one link (`st_nlink == 1`) and under a size cap, and it is copied by fd. Indexes, `info/alternates`, `info/packs`, config, hooks and every other file are ignored.
+4. **Check the copy.** Each copied pack is re-indexed with `index-pack --strict` in `dest`. Each loose object is checked with `cat-file -t` and must then pass `fsck --strict --connectivity-only` from the tip. Any failure makes the snapshot `tip=None` with a fixed reason. Nothing in `dest` is trusted until this step has passed.
+
+The private directory is only read, never changed. The existing `land` rewrites `objects/info/alternates` there (`_trusted_alternates`), so it is replaced by `land_snapshot(p, snap, tip)`. That runs the same fast-forward check, `pack-objects` from `dest` into the repository, the connectivity check, and the compare-and-swap `update-ref`, with the given `tip` all through, never a second read. `_end`'s automatic land moves to snapshot-then-land too, so there is a single import path. Its tests are kept.
+
+The snapshot is taken only once nothing runs (below). `dest` is removed when the command ends, and any left there is cleared at wsd's start, under the instance lock.
 
 ## Commands
 
-`wsctl unlanded <ws>` is read-only. For each unlanded record of the workstream it shows:
+`wsctl unlanded <ws>` lists each unlanded record of the workstream:
 
-- the short ID, the bead, the generation and the branch `btq/<bead>`;
-- the landed tip and the session's tip, as full SHAs;
-- `ahead` (session commits not on the branch) and `behind` (branch commits not in the session);
-- whether a fast-forward is possible;
-- up to 20 of the session's commit subjects, `ahead` first.
+- **Identity:** short ID, generation, bead and branch.
+- **Running:** if anything still runs for it, it shows `running` and takes no snapshot.
+- **Tips:** the landed tip and the session's tip as full SHAs, or `tip: unreadable (<fixed reason>)`.
+- **Counts:** `ahead` and `behind`, and whether a fast-forward is possible.
+- **Subjects:** up to 20 commit subjects from the snapshot, labelled untrusted. Each is decoded as UTF-8 with replacement; every character outside printable ASCII (newlines and escapes included) becomes `?`, and it is cut to 72 characters.
 
-The subjects are agent-written. Each one is cut to 72 characters, every character outside printable ASCII becomes `?`, and they are labelled untrusted.
+A failure on one record is shown on that record, and the others are still listed.
 
-`wsctl resolve <ws> <short id> --tip <sha> (--land | --keep | --discard)` resolves one record.
+`wsctl resolve <ws> <short id> --generation <n> (--land --tip <sha> | --keep --tip <sha> | --discard [--tip <sha>])`:
 
-- **The tip is the confirmation.** `--tip` must equal the session tip that `unlanded` showed. The resolve reads the tip again and refuses if it differs, so the operator acts on exactly what they reviewed.
-- **`--land`** runs `sessiongit.land`, the same fast-forward-only import with its checks (trusted alternates, `--strict` index-pack, connectivity, compare-and-swap `update-ref`). It refuses when the branch can't be fast-forwarded and leaves everything as it was.
-- **`--keep`** imports the session's objects the same way, but writes them to a new ref, `refs/heads/unlanded/<bead>/<short id>`, with `update-ref <ref> <tip> <zero>` (create only). The bead branch is not touched, so the operator can merge or cherry-pick later, by hand, in their own checkout. If the ref already exists at `tip` (a replay), that counts as done. If it exists at another SHA, the resolve refuses.
-- **`--discard`** imports nothing.
+- **`--generation` binds the identity:** it must equal the record's generation.
+- **`--tip` is the confirmation:** it must equal the tip the snapshot reads at resolve time. `--discard` takes no `--tip` only when the tip is unreadable. If the tip is readable, `--discard` needs `--tip`, so an operator can't discard something they haven't seen.
+- **`--land`:** `land_snapshot`, fast-forward only. If the branch can't be fast-forwarded, it refuses and changes nothing.
+- **`--keep`:** imports the snapshot to `refs/heads/unlanded/<bead>/<short id>-g<generation>` with `update-ref <ref> <tip> <zero>` (create only). The bead branch is not touched.
+  - A ref already at `tip` is a replay and counts as done.
+  - A ref at another SHA, or a name conflict (an existing `unlanded` or `unlanded/<bead>` ref), refuses with the fixed reason "the keep ref can't be created".
+- **`--discard`:** imports nothing.
 
-Each of the three then removes the whole session directory, and the reply says the hold clears at the next pickup.
+## Durable intent, removal and the journal
 
-## Where it runs
+Every resolve that passes its checks first writes an intent to `<state>/resolutions/<short id>-g<generation>.json` (0600, atomic write and fsync). It is outside the session directory, wsd-owned and never bound into a sandbox. The intent holds:
 
-There is a new runtime method, `AgentRuntime.resolve_unlanded(ws, short_id, tip, action) -> Resolution`, with a matching `unlanded(ws) -> list[UnlandedView]`:
+- `ws`, `bead`, `key`, `generation`;
+- `tip` (or null), `action` and `ref` (for keep);
+- `step`, one of `confirmed`, `imported` or `moved`.
 
-- `SandboxRuntime` implements both.
-- `NoRuntime` returns `[]` and refuses resolve ("no runtime holds sessions").
-- `FakeRuntime` records the calls.
+The steps, each recorded before the next one starts:
 
-The daemon runs both on the workstream's lane (`self._run(ws, key, ...)`), so they are serialized with pickup, park and reconcile. They are never on the status lane: `unlanded` runs git.
+1. `confirmed`: the intent is written.
+2. The action runs. Land and keep are idempotent, as above. Then `step=imported`.
+3. The session directory is renamed, in one `rename`, to `<state>/resolutions/<short id>-g<generation>.trash`. That path is on the same filesystem and is not under `sessions/`, so `_records` stops seeing the record at once, and never sees half of it. Then `step=moved`.
+4. The trash is removed with `rmtree` and checked with `lexists`.
+5. `journal.emit_once(ws, bead, "unlanded_resolved", detail, ref=<short id>-g<generation>)`. This is a new Journal method: inside one transaction it inserts the event only if no event of that kind and `ref` exists, so a replay never writes it twice. The detail is `action=<action> tip=<tip or none>` (plus `ref=` for keep), with no paths.
+6. The intent file is removed.
 
-`SandboxRuntime.resolve_unlanded` refuses, each with a fixed reason and nothing changed, unless all of these hold:
+**The hold.** `sessions(ws)` and `stop()` also raise `RuntimeUnavailable` while any intent for `ws` exists: "an unlanded resolve of session <short id> is unfinished; run `wsctl resolve` for it again". The workstream stays held from the first write until the intent is gone. It is never released while the trash or the journal entry is still owed.
 
-1. **The record.** `sessions/<short id>/session.json` exists, its `ws` is `ws`, its phase is ENDED and `unlanded` is set. `short_id` must fully match `hz[0-9a-f]{12}` (the form `short_id()` makes), so it can't name a path.
-2. **Nothing runs.** Neither the session's pane (`tmux_name`, `wsd-<short id>`) nor any deadline watcher (`reaper_name`, `wsd-<short id>-r<n>`) is on wsd's tmux server, and the backend lists no sandbox with that short ID. If either listing fails, it is `RuntimeUnavailable`, never taken as absent.
-3. **The tip.** `sessiongit._tip(private, f"btq/{bead}")` equals `tip`.
-4. The action's own checks, above.
+**A replay.** `wsctl resolve` for the same short ID and generation, while an intent exists:
 
-The removal comes last. It is `shutil.rmtree` of the session directory, then `os.path.lexists`. A directory that is still there is reported as `failed`, and the hold stays: the record is still there and still `unlanded`.
+- It must name the same action and tip as the intent; otherwise it refuses.
+- It continues from the recorded `step`, so finished steps are skipped:
+  - an intent at `moved` removes the trash and emits once;
+  - an intent at `confirmed` or `imported` still has the record.
+- A missing trash at `moved` is fine.
 
-**Crash safety.** No new state is needed, because each step can be replayed:
+A session directory without a record and without an intent is not resolvable by this command. It is refused ("the session has no record; see docs/wsd.md §5"). An unrelated orphan from a launch therefore can never be deleted through it.
 
-- A crash after `--land`'s `update-ref`, before the removal: the replay's `land` sees the tip already landed (returns None) and goes on to remove.
-- A crash after `--keep`'s ref was created: the replay finds the ref at `tip` and goes on.
-- A crash during `rmtree`: the record may be gone while `git` is left, and a private git directory without a record refuses the next launch (§5). The replay therefore accepts a session directory that has no record if, and only if, the operator passes the same short ID: it re-checks condition 2 and finishes the removal. With nothing to check the tip against, it imports nothing.
+A failure leaves the intent at its last step, with nothing beyond it done, and the reply says `failed` and why.
 
-**Journal.** After a resolve succeeds, the daemon emits `unlanded_resolved` for the workstream and bead, with `{"session": short_id, "action": action, "tip": tip}` (and the kept ref for `--keep`). No path appears in it. A refused or failed resolve emits nothing; its reply says why.
+## Nothing runs, and serialization
+
+The snapshot and every resolve step need all of these:
+
+- **The record:** `sessions/<short id>/session.json` is ENDED and `unlanded`, its `ws` is the request's, and its generation is `--generation`. Before step 3 the record must exist; `short_id` must fully match `hz[0-9a-f]{12}`.
+- **No pane:** neither `wsd-<short id>` (`tmux_name`) nor any `wsd-<short id>-r<n>` (`reaper_name`, of any generation) is on wsd's tmux server.
+- **No sandbox:** the backend lists no sandbox `<short id>g<n>` for any `n`.
+
+A listing that fails is `RuntimeUnavailable`, never taken as absent.
+
+The daemon runs both commands as jobs on the workstream's lane, so they are serialized with pickup, park and reconcile, and the intent, the action and the journal write all happen inside that job. The lane keys are:
+
+- `("unlanded", ws)` for the view;
+- `("resolve", short_id, generation, action, tip)` for a resolve.
+
+Two different resolves therefore never coalesce, and an identical retry joins the one already queued. If the caller disconnects, the job still runs to its end, and a later `wsctl resolve` replays from the intent.
 
 ## Wire changes
 
 - `CtlRequest.op` gains `"unlanded"` and `"resolve"`.
-- New optional fields: `session: str | None`, `tip: str | None` and `action: Literal["land", "keep", "discard"] | None`.
-- `refusal()` checks the combinations: both ops need `ws`; resolve needs all three new fields; nothing else takes them.
-- `wsctl_main` gets the two subparsers. `--land`, `--keep` and `--discard` are a required mutually exclusive group.
-- The views come back in `CtlReply.data`, keyed by short ID, as strings.
+- Optional new fields: `session`, `generation: int`, `tip` and `action: Literal["land", "keep", "discard"]`.
+- `refusal()`:
+  - both new ops need `ws`;
+  - resolve needs `session`, `generation` and `action`, plus `tip` for land and keep;
+  - nothing else takes these fields.
+- `wsctl_main` gets two subparsers, with a required exclusive group for the actions.
+- The views come back in `CtlReply.data`, keyed by short ID, all as strings.
+- `_unlanded`'s hold detail now points at `wsctl unlanded <ws>` (docs/wsd.md §5). Refusal texts are fixed, and no path appears in any of them.
 
-The hold's detail text (`_unlanded`) changes from "land them … by hand (docs/wsd.md §5)" to "see `wsctl unlanded <ws>` (docs/wsd.md §5)".
+`AgentRuntime` gains `unlanded(ws) -> list[UnlandedView]` and `resolve_unlanded(ws, short_id, generation, action, tip) -> Resolution`. `NoRuntime` returns `[]` and refuses with "no runtime holds sessions"; `FakeRuntime` records calls. The intent and the trash belong to `SandboxRuntime`. The journal call is made by the daemon's job with the identity `Resolution` returns, and `emit_once` makes a replay safe.
 
 ## Tests (offline)
 
-`tests/test_sandbox_runtime.py`, using the existing git fixtures:
+**`tests/test_sessiongit.py`** (snapshot and land_snapshot; the existing land tests move to land_snapshot):
 
-1. `test_unlanded_shows_ahead_behind_and_untrusted_subjects`: covers a diverged session (behind 1) and a fast-forwardable one. A subject with an escape sequence and one over 72 characters are shown sanitized.
-2. `test_resolve_land_fast_forwards_and_removes`, and `test_resolve_land_refuses_a_diverged_branch` (the branch and the session directory are unchanged).
-3. `test_resolve_keep_writes_a_side_ref_and_leaves_the_branch`. A replay with the ref already at `tip` succeeds. The ref at another SHA refuses.
-4. `test_resolve_discard_removes_without_importing`: the repository gains no objects from the session.
-5. `test_resolve_refuses_a_moved_tip`: the session tip is changed after the view, and the resolve refuses with nothing changed.
-6. `test_resolve_refuses_while_anything_runs`, parameterized: a pane listed, a sandbox listed, the record not ENDED, the record not unlanded, another workstream's record, a short ID that isn't one. Failed listings give `RuntimeUnavailable`.
-7. `test_resolve_replays_after_a_crash`, parameterized: after `update-ref` (land), after the ref was made (keep), and after the record went but `git` stayed. Each replay completes, and the branch holds one landing.
-8. `test_the_hold_clears_after_resolve`: `sessions(ws)` raises before the resolve and lists sessions after it.
+1. `test_snapshot_ignores_private_config_hooks_and_alternates`: a private dir has a malicious `config` (`core.fsmonitor`, `core.hooksPath`), hooks, and `info/alternates` pointing at another repository holding the tip's objects. The snapshot doesn't run any of them, and without the objects present itself it fails with a fixed reason.
+2. `test_snapshot_refuses_links_special_files_and_hard_links`, parameterized: a symlinked object dir, a symlinked pack, a FIFO, a hard-linked pack (nlink 2), an oversized object. Each gives a fixed reason, and nothing outside `dest` is read.
+3. `test_snapshot_refuses_malformed_objects`: a corrupt loose object, a corrupt pack, a missing parent.
+4. `test_snapshot_leaves_the_private_dir_unchanged`: a tree digest of the private dir is the same before and after.
+5. `test_land_snapshot_uses_the_given_tip`: the private ref is changed after the snapshot, and the landed tip is the snapshot's.
 
-`tests/test_wsd_daemon.py` (where `CtlRequest` and `refusal` are tested today):
+**`tests/test_sandbox_runtime.py`**:
 
-- the `refusal()` combinations;
-- the wsctl argument group;
-- the daemon runs both ops on the workstream lane, not the status lane (a pickup holding the lane delays the resolve);
-- `unlanded_resolved` is journaled once on success and not at all on a refusal.
+6. `test_unlanded_view`: covers diverged, fast-forwardable and unreadable tips (a missing ref, a malformed `packed-refs`, a tip whose objects are gone), plus subjects with invalid UTF-8, newlines, escape sequences and over 72 characters. One failing record doesn't hide another.
+7. `test_resolve_land`, `test_resolve_land_refuses_a_diverged_branch` (everything unchanged), `test_resolve_keep` (side ref; a replay at the same tip; a ref at another SHA, and an `unlanded` prefix conflict, both refuse with the fixed reason), and `test_resolve_discard`. Discard covers an unreadable tip without `--tip`, and a readable tip refused without `--tip`.
+8. `test_resolve_refuses`, parameterized:
+   - a moved tip, a wrong generation, another workstream, a non-ENDED record, a non-unlanded record, a bad short ID;
+   - a pane, a reaper of an older generation, a sandbox of an older generation;
+   - failed tmux or backend listings, which raise `RuntimeUnavailable`;
+   - a recordless orphan with no intent.
+9. `test_resolve_replays_from_each_step`, parameterized over a crash after each of steps 1-5: the hold stays (`sessions(ws)` raises) until the replay finishes, the event is written once, and the branch has one landing. A replay with a different action or tip refuses.
+10. `test_the_hold_clears_after_resolve`.
+
+**`tests/test_wsd_daemon.py`**:
+
+- `refusal()` combinations and the wsctl argument groups;
+- both ops run on the workstream lane (a pickup holding it delays them);
+- two different resolves queued behind a pickup each get their own result;
+- a disconnected caller's resolve still completes;
+- `emit_once` writes one event across a replay, and a journal write that fails leaves the intent at `moved` with the reply `failed`.
 
 ## Docs
 
-docs/wsd.md §5 "Unlanded commits": the five manual steps become the two commands, with what each action does. The manual steps stay as the fallback when wsd is not running. docs/configuration.md is unchanged.
+docs/wsd.md §5 "Unlanded commits" changes:
+
+- the two commands and the three actions replace the five manual steps;
+- the `unlanded/` namespace is reserved;
+- the hold lasts until a resolve's intent is gone;
+- the manual steps stay as the fallback when wsd is not running.
 
 ## Open questions for Liam
 
-1. **Offer `--keep`?** I recommend yes. It is the only option that keeps the work when the branch moved, which is T14's case, without a human doing git by hand in wsd's state directory. The ref namespace `unlanded/` is new.
-2. **Tick pickup after a resolve, or leave it to the next pickup?** I recommend leaving it: the resolve stays one action, and the reply says how to tick.
-3. **Fallback without wsd.** I recommend keeping the manual steps documented, and no offline command: an offline resolve would need wsd's instance lock to be safe, and that is a second path to test.
+1. **Offer `--keep`?** I recommend yes: it is the only option that keeps the work when the branch moved, without a human doing git in wsd's state directory.
+2. **Tick pickup after a resolve, or leave it to the next pickup?** I recommend leaving it: the reply says how to tick.
+3. **An offline fallback?** I recommend none. The manual steps stay documented, and an offline resolve would need wsd's instance lock, which is a second path to test.
