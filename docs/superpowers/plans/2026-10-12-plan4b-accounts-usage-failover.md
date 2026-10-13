@@ -3344,3 +3344,417 @@ git add src/heterodyne/sandbox/hostread.py src/heterodyne/sandbox/build.py src/h
         tests/test_sandbox_build.py tests/test_wsd_daemon.py
 git commit -m "plan4b T8: the trusted host-side Codex read, under the account's lock"
 ```
+
+## Task 9: draining the signals, and the reactive limit flow
+
+E8 and E11. Each pickup drains the runtime's signals just after `expire`. A `UsageSeen` is stored untrusted if the profile has (c). A `LimitSeen` defers its own bead if the profile has (e): an untrusted QUOTA record first, then the AU-4 tail. Once the session is stopped, a new tail step asks the trusted read, if the profile has (d). A read that confirms the limit supersedes the record with the gate's trusted verdict, so a profile that can fail over relaunches on its next account in the same pickup.
+
+**Files:**
+- Modify: `src/heterodyne/wsd/park.py` (`capabilities`, `LIMIT_STEPS`, `Parker.limit`, `_confirm`, `_supersede`, the tail's new step)
+- Modify: `src/heterodyne/wsd/scheduler.py` (`_signals`, called from `_pickup`)
+- Modify: `tests/wsd_env.py` (`Rig.usage_reader`)
+- Test: `tests/test_wsd_defer.py`
+
+**Interfaces:**
+- Consumes:
+  - `UsageSeen`, `LimitSeen`, `AgentRuntime.signals`, `TrustedRead`, `Deps.usage_reader`, `FakeRuntime.report` / `drains` (Task 1).
+  - `usage.ingest_untrusted`, `ingest_trusted`, `mark_exhausted`, `decide`, `untrusted_defer_until` (exist).
+  - `Parker._record_defer`, `defer_tail`, `_previous_key` (exist).
+- Produces:
+  - `park.capabilities(accounts: Accounts | None, profile: str) -> Capabilities`: E15's one read on the `wsd` side. It returns `NONE` without accounts, or for a profile that can't resolve.
+  - `park.LIMIT_STEPS`: the tail's points for a limit's defer, `defer.read!` and `defer.confirmed` between `defer.stopped` and `defer.committed!`.
+  - `Parker.limit(session_key: str, generation: int, hint: int | None, now: int) -> BeadState | None`. The caller holds `entry()`.
+  - A PARK op opened by `limit` carries `limit_key` and `limit_gen` in its data.
+  - `Rig.usage_reader` (tests): the reader the rig's `Deps` get, kept across `restart`.
+
+The confirming step sits between the stop and the WIP commit, not after the commit. A superseding record has a new number, and the tail's WIP commit, `v2:deferred` and comment all use the number current after `defer.confirmed`. So the commit's mark (`defer:<key>:<n>`) and the comment name the record the bead actually waits on. The superseded untrusted record gets neither, as a record superseded by a requota already doesn't. The read runs after the stop, so the limited session can't refresh the login while the host reads it.
+
+A signal is drained before anything can fail. If `BeadsUnavailable` interrupts `limit` before its op is opened, that one report is lost, and the session goes on until its next report. Claude's CLI waits for the reset itself (S7 (5)), and Codex's next poll reports the limit again (Task 7). Once the op is opened, its replay finishes the defer.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/wsd_env.py`, import `NoUsageReader` and `UsageReader` from `heterodyne.wsd.usage`. Add the field to `Rig`, after `clock`:
+
+```python
+    usage_reader: UsageReader = field(default_factory=NoUsageReader)
+```
+
+and in `Rig.restart`, replace the `Deps(...)` call with:
+
+```python
+        self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
+                         self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
+                         usage_reader=self.usage_reader)
+```
+
+In `tests/test_wsd_defer.py`, add `Account`, `ConfiguredAccounts` and `ProfileAccounts` (from `heterodyne.wsd.accounts`), `Capabilities` (from `heterodyne.config.capabilities`), `LIMIT_STEPS` and `TRUSTED` (to the `heterodyne.wsd.park` import), `LimitSeen` and `UsageSeen` (to the `heterodyne.wsd.runtime` import), and `Observation` and `TrustedRead` (from `heterodyne.wsd.usage`) to the imports. Then append:
+
+```python
+# --- the reactive limit (plan 4b Task 9) ---
+
+NOW = 1_800_000_000                   # the rig's clock (wsd_env.Clock)
+RESET = NOW + HOUR
+HOST = "codex.host-read"
+LIMIT_POINTS = tuple(f"park.{s}" for s in LIMIT_STEPS)
+
+
+class Reader:
+    """A scripted trusted read: `answer` every time, each call recorded, `then` run during each call."""
+
+    def __init__(self, answer: TrustedRead | None, then: Callable[[], object] = lambda: None) -> None:
+        self.answer = answer
+        self.then = then
+        self.calls: list[tuple[str, str, str]] = []
+
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        self.calls.append((profile, account, credential_key))
+        self.then()
+        return self.answer
+
+
+def reading(limited: bool = True) -> TrustedRead:
+    return TrustedRead((Observation("codex:codex:300m", "5h", 100, RESET, HOST),), limited, RESET)
+
+
+def caps(rig: Rig, **on: bool) -> None:
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    accounts.capabilities = {"codex": Capabilities(**on)}
+
+
+def spare(rig: Rig) -> None:
+    """p-two on its `default` codex login, then a named `spare` one with its own file, failing over."""
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    login = Path(accounts.env["HOME"]) / ".codex-spare"
+    login.mkdir(parents=True, exist_ok=True)
+    (login / "auth.json").write_text("{}")
+    accounts.named[("codex", "spare")] = Account("spare", "codex", str(login), login, (), "")
+    accounts.profiles["p-two"] = ProfileAccounts("codex", ("default", "spare"), "next")
+
+
+def limited(rig: Rig, reader: Reader | None = None, *, two: bool = False, **on: bool) -> Reader:
+    """B launched on p-two's default login, with capabilities `on` and `reader` as the trusted read."""
+    if two:
+        spare(rig)
+    caps(rig, **on)
+    used = reader if reader is not None else Reader(None)
+    rig.usage_reader = used
+    rig.restart(rig.cp)
+    launched(rig)
+    return used
+
+
+def signal(rig: Rig, hint: int | None = RESET, generation: int = 1) -> Outcome:
+    rig.runtime.report(WS, LimitSeen(rig.key(B), generation, hint))
+    return rig.pickup()
+
+
+def first_key(rig: Rig) -> str:
+    entry = rig.journal.launch(rig.key(B), 1)
+    assert entry is not None
+    return entry.credential_key
+
+
+def untrusted_rows(rig: Rig) -> int:
+    return rig.journal.db.execute("SELECT COUNT(*) FROM account_usage_untrusted").fetchone()[0]
+
+
+def test_a_limit_without_e_is_drained_and_ignored(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), trusted_read=True)
+    assert signal(rig) is Outcome.BUSY
+    assert rig.runtime.drains[-1] == WS
+    assert records(rig) == [] and reader.calls == [] and rig.state(B) == BeadState.RUNNING.value
+
+
+def test_a_usage_report_is_stored_untrusted_and_only_with_c(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig)
+    seen = UsageSeen(rig.key(B), 1, (Observation("codex:codex:300m", "5h", 40, None, "codex.app-server"),))
+    rig.runtime.report(WS, seen)
+    rig.pickup()
+    assert untrusted_rows(rig) == 0
+    caps(rig, in_session_usage=True)
+    rig.runtime.report(WS, seen, UsageSeen(rig.key(B), 7, seen.observations))     # no generation 7
+    rig.pickup()
+    assert untrusted_rows(rig) == 1
+    assert not rig.journal.usage_cache([first_key(rig)]).windows.get(first_key(rig))    # never trusted
+
+
+def test_a_limit_without_d_defers_untrusted_and_clamped(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), limit_signal=True)
+    assert signal(rig, hint=NOW + 5 * HOUR) is Outcome.DEFERRED
+    [rec] = records(rig)
+    assert (rec.reason, rec.trust, rec.defer_until) == (QUOTA, UNTRUSTED, str(NOW + HOUR))   # 60 minutes
+    assert reader.calls == [] and rig.runtime.coders() == []
+    assert rig.state(B) == BeadState.DEFERRED.value and DEFERRED in rig.world.beads[B].labels
+    completed(rig)
+
+
+@pytest.mark.parametrize("answer", [None, reading(limited=False)], ids=["no-reading", "not-limited"])
+def test_a_read_that_doesnt_confirm_keeps_the_untrusted_record(tmp_path: Path,
+                                                               answer: TrustedRead | None) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(answer), trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    [rec] = records(rig)
+    assert (rec.reason, rec.trust, rec.defer_until) == (QUOTA, UNTRUSTED, str(RESET))
+    assert reader.calls == [("p-two", "default", first_key(rig))]
+    cache = rig.journal.usage_cache([first_key(rig)])
+    assert not cache.marks and not cache.windows.get(first_key(rig))
+    completed(rig)
+
+
+def test_a_confirmed_limit_relaunches_on_the_next_account(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    key = first_key(rig)
+    assert signal(rig) is Outcome.RESUMED
+    assert [(r.number, r.reason, r.trust, r.defer_until) for r in records(rig)] == [
+        (1, QUOTA, UNTRUSTED, str(RESET)), (2, QUOTA, TRUSTED, str(NOW))]
+    assert [s.account for s in rig.runtime.launches] == ["default", "spare"]
+    cache = rig.journal.usage_cache([key])
+    assert cache.marks[key].until == RESET
+    assert [(w.window_id, w.source) for w in cache.windows[key]] == [("codex:codex:300m", HOST)]
+    assert rig.state(B) == BeadState.RUNNING.value and DEFERRED not in rig.world.beads[B].labels
+    assert len(defer_comments(rig)) == 1 and defer_comments(rig)[0].startswith(defer_mark(rig.key(B), 2))
+    completed(rig)
+
+
+def test_a_confirmed_limit_on_the_only_account_waits_for_the_reset(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    assert [(r.number, r.trust, r.defer_until) for r in records(rig)] == [
+        (1, UNTRUSTED, str(RESET)), (2, TRUSTED, str(RESET))]
+    assert rig.sched.wake_at == RESET
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED
+    assert [s.account for s in rig.runtime.launches] == ["default", "default"]
+    completed(rig)
+
+
+def test_a_confirmed_limit_on_a_repointed_login_waits_for_the_operator(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading(), then=lambda: repoint_codex(rig, "other")), trusted_read=True,
+            limit_signal=True)
+    assert signal(rig) is Outcome.NOTHING
+    assert [(r.number, r.reason, r.trust) for r in records(rig)] == [(1, QUOTA, UNTRUSTED),
+                                                                    (2, ACCOUNT_CHANGED, TRUSTED)]
+    assert alerts(rig) == [f"{rig.key(B)}:2"]
+    row = rig.journal.state(WS, B)
+    assert row is not None and (row.state, row.reason) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED)
+    completed(rig)
+
+
+def test_a_limit_for_another_launch_or_a_bead_not_running_is_ignored(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, limit_signal=True)
+    key = rig.key(B)
+    rig.runtime.report(WS, LimitSeen(key, 2, RESET), LimitSeen("sk-never-journaled", 1, RESET))
+    assert rig.pickup() is Outcome.BUSY
+    assert records(rig) == [] and rig.journal.ops_open(WS) == []
+    assert signal(rig) is Outcome.DEFERRED
+    assert signal(rig) is Outcome.DEFERRED                      # again, now that B is deferred
+    assert len(records(rig)) == 1
+    assert [k for k, _, _, d in ops(rig) if "limit_key" in d] == ["park"]
+
+
+FAILOVER = Scenario(lambda r: limited(r, Reader(reading()), two=True, cross_account_resume=True,
+                                      trusted_read=True, limit_signal=True),
+                    lambda r: signal(r))
+
+
+def test_a_crash_at_every_limit_point_replays_to_the_relaunch(tmp_path: Path) -> None:
+    clean = same_end(tmp_path, FAILOVER, LIMIT_POINTS)
+    assert [s.account for s in clean.rig.runtime.launches] == ["default", "spare"]
+```
+
+`defer_mark` is imported from `heterodyne.wsd.park` beside `DEFER_MARK`. `Reason` and `BeadState` are already imported.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 600 uv run pytest tests/test_wsd_defer.py -q`
+Expected: FAIL at import, with `cannot import name 'LIMIT_STEPS' from 'heterodyne.wsd.park'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/wsd/park.py`, add to the imports:
+
+```python
+from heterodyne.config.capabilities import NONE, Capabilities
+from heterodyne.wsd.usage import (
+    TrustedRead,
+    admitted,
+    decide,
+    ingest_trusted,
+    mark_exhausted,
+    untrusted_defer_until,
+)
+```
+
+replacing the existing `from heterodyne.wsd.usage import admitted, decide, untrusted_defer_until`. After `DEFER_STEPS`, add:
+
+```python
+# A limit's defer (plan 4b E11): the tail with the trusted read between the stop and the WIP commit.
+LIMIT_STEPS = (*DEFER_STEPS[:3], "defer.read!", "defer.confirmed", *DEFER_STEPS[3:])
+```
+
+After `resumable`, add:
+
+```python
+def capabilities(accounts: Accounts | None, profile: str) -> Capabilities:
+    """E15: the profile's capabilities as it resolves now; none without accounts, or if it can't resolve."""
+    if accounts is None:
+        return NONE
+    try:
+        return accounts.view(profile).capabilities
+    except ConfigError:
+        return NONE
+```
+
+In the module docstring, add after the Defer item:
+
+```
+- Limit (plan 4b E11): a session's own limit report opens a PARK op with an untrusted record, then the
+  tail, which asks the trusted read once the session is stopped (`defer.confirmed`). A confirmed read
+  supersedes the record with the gate's trusted verdict before the WIP commit.
+```
+
+In `defer_tail`, replace the `if op.step == "defer.stopped":` line (the WIP commit's block) with:
+
+```python
+            if op.step == "defer.stopped" and "limit_key" in op.data:
+                op = self._confirm(op)
+                n = int(op.data["defer"])          # a confirmed read may have superseded the record
+            if op.step in ("defer.stopped", "defer.confirmed"):
+```
+
+Add after `convert_quota`:
+
+```python
+    # --- the reactive limit (plan 4b E11) ---
+
+    def limit(self, session_key: str, generation: int, hint: int | None, now: int) -> BeadState | None:
+        """A session reported its usage limit (D6) on the channel of launch (`session_key`, `generation`).
+        The caller (pickup) holds `entry()` and has checked (e). Only the running bead's latest launch is
+        deferred: an untrusted QUOTA record clamped by D5, recorded before anything stops, then the tail.
+        None: nothing deferred (another launch, a bead not running, an operation open, or no readable
+        record of this session)."""
+        j, ws = self.d.journal, self.ws.name
+        entry = j.launch(session_key, generation)
+        launched = [e.generation for e in j.launches(session_key) if e.outcome == LAUNCHED]
+        if entry is None or entry.ws != ws or not launched or launched[-1] != generation:
+            return None
+        row = j.state(ws, entry.bead)
+        if row is None or row.state is not BeadState.RUNNING or j.op_for(ws, entry.bead) is not None:
+            return None
+        try:
+            rec = self.d.beads.show(ws, entry.bead).record()
+        except RecordUnreadable:
+            return None
+        if rec is None or rec.session_key != session_key:
+            return None
+        until = untrusted_defer_until(hint, now, self.ws.usage)
+        with j.transaction():
+            op = j.op_open(OpKind.PARK, ws, entry.bead,
+                           {"ref": "", "limit_key": session_key, "limit_gen": str(generation)})
+            op = self._record_defer(op, rec, QUOTA, until, UNTRUSTED)
+        self.d.cp("park.defer.recorded")
+        return self.defer_tail(op)
+
+    def _confirm(self, op: Op) -> Op:
+        """The `defer.confirmed` step, once the limited session is stopped: with (d), the trusted read of
+        the limited launch's account. A read that confirms the limit supersedes the untrusted record, in
+        one transaction with the step (`_supersede`). Anything else keeps it: no (d), no reading, a
+        reading that doesn't confirm, or a record superseded meanwhile (the tail's check escalates that)."""
+        j, kind = self.d.journal, op.kind.value
+        key, n = op.data["defer_key"], int(op.data["defer"])
+        entry = j.launch(op.data["limit_key"], int(op.data["limit_gen"]))
+        accounts = self.ws.accounts
+        read = None
+        if entry is not None and accounts is not None and capabilities(accounts, entry.profile).trusted_read:
+            read = self.d.usage_reader.read(entry.profile, entry.account, entry.credential_key)
+        self.d.cp(f"{kind}.defer.read!")
+        current = j.deferral_current(key)
+        with j.transaction():
+            if (read is not None and read.limited and entry is not None and accounts is not None
+                    and current is not None and current.number == n):
+                n = self._supersede(op, current, accounts, entry, read)
+            op = j.op_step(op.op_id, "defer.confirmed", {"defer": str(n)})
+        self.d.cp(f"{kind}.defer.confirmed")
+        return op
+
+    def _supersede(self, op: Op, current: DeferralRow, accounts: Accounts, entry: LaunchEntry,
+                   read: TrustedRead) -> int:
+        """`_confirm`'s confirmed half, inside its transaction. The read's windows are stored as trusted
+        under the launch's key, the key is marked exhausted, and the gate runs again: `Chosen` is due now
+        (the same pickup's undefer relaunches through the guard's pin), a `Deadline` waits for its time,
+        `AccountChanged` for the operator. Returns the record the tail goes on with: the new trusted one,
+        or `current` if the profile can't resolve now (the undefer's gate escalates that)."""
+        j, s, now = self.d.journal, self.ws.usage, self.d.clock()
+        for obs in read.observations:
+            ingest_trusted(j, entry.credential_key, obs, now, s)
+        mark_exhausted(j, entry.credential_key, read.reset_hint, now, s)
+        try:
+            verdict = decide(accounts, j, current.profile, self._previous_key(current.session_key), now, s)
+        except ConfigError:
+            return current.number
+        if isinstance(verdict, AccountChanged):
+            reason, until = ACCOUNT_CHANGED, None
+        else:
+            reason, until = QUOTA, verdict.at if isinstance(verdict, Deadline) else now
+        n = j.deferral_next(current.session_key)
+        j.deferral_insert(DeferralRow(current.session_key, n, op.bead, current.role, current.profile, reason,
+                                      None if until is None else str(until), TRUSTED))
+        return n
+```
+
+`LAUNCHED` joins the `heterodyne.wsd.launches` import.
+
+In `src/heterodyne/wsd/scheduler.py`, add `capabilities` to the `heterodyne.wsd.park` import, `UsageSeen` to the `heterodyne.wsd.runtime` import, and `ingest_untrusted` to the `heterodyne.wsd.usage` import. In `_pickup`, replace the `expire` line with:
+
+```python
+            self.d.runtime.expire(name, now)      # §7: a session at its lifetime ends; the sweep resumes it
+            self._signals(now)                    # plan 4b E8: after the lifetime stop, before the sweep
+```
+
+Add after `_pickup`:
+
+```python
+    def _signals(self, now: int) -> None:
+        """Plan 4b E8: the reports the workstream's sessions sent since the last pickup, oldest first. A
+        usage report is stored untrusted only for a profile with (c); a limit report defers its own bead
+        only with (e). A report for a launch the journal doesn't have as this workstream's is dropped."""
+        j, name = self.d.journal, self.ws.name
+        for signal in self.d.runtime.signals(name):
+            entry = j.launch(signal.session_key, signal.generation)
+            if entry is None or entry.ws != name:
+                continue
+            caps = capabilities(self.ws.accounts, entry.profile)
+            if isinstance(signal, UsageSeen):
+                if caps.in_session_usage:
+                    for obs in signal.observations:
+                        ingest_untrusted(j, entry.ident, obs, now, self.ws.usage)
+            elif caps.limit_signal:
+                self.parker.limit(signal.session_key, signal.generation, signal.reset_hint, now)
+```
+
+In the module docstring, change step 3 to begin: "3. the sessions' own reports are drained (plan 4b E8), then the sweep (`sweep.py`) reconciles beads, sessions and the journal: ...".
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 1200 uv run pytest tests/test_wsd_defer.py tests/test_wsd_pickup.py tests/test_wsd_usage.py tests/test_wsd_headroom.py -q`
+Expected: PASS. AU-4's crash tests still enumerate `DEFER_STEPS`, which is unchanged, so a tail without `limit_key` never reaches the two new points.
+
+Then: `timeout 600 uv run pyright src tests/test_wsd_defer.py tests/wsd_env.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/wsd/park.py src/heterodyne/wsd/scheduler.py tests/wsd_env.py tests/test_wsd_defer.py
+git commit -m "plan4b T9: drain the sessions' signals; defer on a limit and confirm it with the trusted read"
+```
