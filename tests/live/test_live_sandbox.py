@@ -27,11 +27,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
 from probe_verdicts import (  # noqa: E402
+    FILE_OPS,
     file_writes_refused,
     memory_access_refused,
+    namespaces_refused,
     outputs_unreachable,
     overlay_outcome,
-    separate_mount_namespace,
 )
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
@@ -41,7 +42,9 @@ from heterodyne.sandbox import openshell_selftest  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
     AGENT_CHECKS,
+    PROBE_ARGV,
     OpenShellSelfTest,
+    env_allowed,
     probe_config,
     ptrace_scope_refusal,
     read_ptrace_scope,
@@ -649,7 +652,8 @@ def test_a_failed_outer_fence_refuses_a_launch_right_after_a_pass(live: Live) ->
     first = live.launch(spec)
     live.runtime.stop(spec.session_key)
     s = live.runtime.c.settings
-    down = FenceDown(s.openshell, s.podman, s.image, live.backend.env)     # the fixture's environment
+    # The backend's environment, not the raw tool_env: that holds only the overrides, without HOME or XDG_*.
+    down = FenceDown(s.openshell, s.podman, s.image, live.backend.env)
     again = replace(spec, generation=2, resume=True, native_id=first.native_id)
     refused(live, runtime(live, backend=down), again, "outer-fence-network-none")
 
@@ -668,7 +672,7 @@ def test_the_probes_fail_without_the_runtime(live: Live) -> None:
                     "-v", f"{ctx.layout.run(ctx.generation)}:/run/hz:ro", s.image,
                     "python3", "-I", "/run/hz/probes.py"]
             r = subprocess.run(argv, input=data, capture_output=True, timeout=PROMPT_SECONDS,
-                               env={**os.environ, **s.tool_env}, check=False)
+                               env=live.backend.env, check=False)
             assert r.returncode != 0 and b"FAIL direct-network-blocked" in r.stdout, net
     finally:
         live.runtime.stop(spec.session_key)
@@ -698,70 +702,181 @@ def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
     refused(live, runtime(live), live.spec("claude", "btq-live-n8"), "agent-path-channel")
 
 
+# Every process the check can see but itself, its own child included, gets each operation once: the
+# ptrace attach, process_vm_readv and process_vm_writev (no iovec: they move nothing) and a mem write open.
+# pidfd_getfd, with no pidfd to hand (pidfd_open gives ENOSYS), is tried once: unfiltered it gives EBADF.
 MEMORY_CHECK = r"""
 import ctypes, errno, os, subprocess, sys
 libc = ctypes.CDLL(None, use_errno=True)
 libc.ptrace.restype = ctypes.c_long
 libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
-libc.process_vm_writev.restype = ctypes.c_ssize_t
-libc.process_vm_writev.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
-                                   ctypes.c_ulong, ctypes.c_ulong]
-child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
-print(f'child {child.pid}')
-for pid in sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.getpid()}):
-    if libc.ptrace(16, pid, None, None) == 0:
-        print(f'attach {pid} ATTACHED')
-        libc.ptrace(17, pid, None, None)
-    else:
-        print(f'attach {pid} {errno.errorcode.get(ctypes.get_errno(), "?")}')
-    if libc.process_vm_writev(pid, None, 0, None, 0, 0) != -1:     # no iovec: writes nothing
-        print(f'vm {pid} ALLOWED')
-    else:
-        print(f'vm {pid} {errno.errorcode.get(ctypes.get_errno(), "?")}')
+for call in (libc.process_vm_readv, libc.process_vm_writev):
+    call.restype = ctypes.c_ssize_t
+    call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+                     ctypes.c_ulong]
+libc.pidfd_getfd.restype = ctypes.c_int
+libc.pidfd_getfd.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+
+def answer(ok):
+    code = ctypes.get_errno()
+    return 'OK' if ok else errno.errorcode.get(code, str(code))
+
+def mem(pid):
     try:
-        open(f'/proc/{pid}/mem', 'r+b').close()
-        print(f'mem {pid} OPENED')
+        os.close(os.open(f'/proc/{pid}/mem', os.O_RDWR))
+        return 'OK'
     except OSError as e:
-        print(f'mem {pid} {errno.errorcode.get(e.errno, "?")}')
-child.kill()
+        return errno.errorcode.get(e.errno, str(e.errno))
+
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+try:
+    targets = sorted({int(p) for p in os.listdir('/proc') if p.isdigit()} - {os.getpid()})
+    print('targets', *targets)
+    print('child', child.pid)
+    print('getfd', answer(libc.pidfd_getfd(-1, 0, 0) != -1))
+    for pid in targets:
+        attached = libc.ptrace(16, pid, None, None) == 0
+        print('attach', pid, answer(attached))
+        if attached:
+            libc.ptrace(17, pid, None, None)
+        print('readv', pid, answer(libc.process_vm_readv(pid, None, 0, None, 0, 0) != -1))
+        print('writev', pid, answer(libc.process_vm_writev(pid, None, 0, None, 0, 0) != -1))
+        print('mem', pid, mem(pid))
+finally:
+    child.kill()
+    child.wait()
 print('done')
 """
-FILE_CHECK = ("touch /run/hz/hz-new; echo create=$?; echo x >> /run/hz/token; echo append=$?; "
-              "mv /run/hz/token /run/hz/token2; echo rename=$?")
-NAMESPACE_CHECK = "readlink /proc/self/ns/mnt; unshare -Urm readlink /proc/self/ns/mnt || echo refused"
+# Each write /run/hz could take, on the probe, its configuration, the token, the hook shim, and the
+# directory both sockets live in, as a syscall whose errno is reported: no shell, so no command's status
+# can pass for a refusal. A target must be there (or, to be made, absent) for its answer to count.
+FILE_CHECK = f"FILE_OPS = {FILE_OPS!r}\n" + r"""
+import errno, os, socket
+
+def create(path):
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+
+def append(path):                     # opened for writing; nothing is written
+    os.close(os.open(path, os.O_WRONLY | os.O_APPEND))
+
+def bind(path):
+    with socket.socket(socket.AF_UNIX) as s:
+        s.bind(path)
+
+OPS = {'create': (create, False), 'mkdir': (os.mkdir, False), 'bind': (bind, False), 'append': (append, True),
+       'rename': (lambda path: os.rename(path, path + '2'), True), 'unlink': (os.unlink, True)}
+for op, name in FILE_OPS:
+    run, needs = OPS[op]
+    path = f'/run/hz/{name}'
+    if os.path.lexists(path) != needs:
+        print(op, name, 'MISSING' if needs else 'PRESENT')
+        continue
+    try:
+        run(path)
+        print(op, name, 'OK')
+    except OSError as e:
+        print(op, name, errno.errorcode.get(e.errno, str(e.errno)))
+print('done')
+"""
+# unshare(0) is a no-op unless the filter denies unshare outright; the second is the namespace an overlay
+# needs.
+NAMESPACE_CHECK = r"""
+import errno, os
+
+def answer(flags):
+    try:
+        os.unshare(flags)
+        return 'OK'
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+
+print('mnt', os.readlink('/proc/self/ns/mnt'))
+print('unshare-none', answer(0))
+print('unshare-user-mount', answer(os.CLONE_NEWUSER | os.CLONE_NEWNS))
+print('mnt', os.readlink('/proc/self/ns/mnt'))
+print('done')
+"""
 
 
 # The overlay check from a namespace the agent makes: a forged probe over /run/hz/probes.py, and a shell
-# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces. It
-# reports each step's status on stdout, so a refusal can be told from a check that never ran.
+# at the CLI's path that starts it, so the forged probe has a "CLI" parent in the same namespaces and the
+# probe's allowed environment: the channel can then reject it only for its namespaces. Each step reports
+# its errno, the forged probe reports its connect and send, and the shell keeps its exit status.
 NESTED = r"""
-import subprocess, sys
-cli = sys.argv[1]
+import ctypes, errno, os, subprocess, sys
+cli, allowed = sys.argv[1], sys.argv[2].split(',')
+uid, gid = os.getuid(), os.getgid()
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
+MS_BIND = 4096
 with open('/tmp/hz-forged.py', 'w') as fh:
     fh.write(sys.stdin.read())
 print('forged=written', flush=True)
-inner = ('echo ns=entered; mount --bind /tmp/hz-forged.py /run/hz/probes.py; s=$?; echo bind-probe=$s; '
-         f'[ $s -eq 0 ] || exit 1; mount --bind /bin/sh {cli}; s=$?; echo bind-cli=$s; '
-         f'[ $s -eq 0 ] || exit 1; {cli} -c "python3 -I /run/hz/probes.py --agent; :"; echo run=$?')
-r = subprocess.run(['unshare', '-Urm', 'sh', '-c', inner], stderr=subprocess.PIPE, text=True, check=False)
-print(f'unshare={r.returncode}', flush=True)
+
+def maps():
+    for name, value in (('setgroups', 'deny'), ('uid_map', f'0 {uid} 1'), ('gid_map', f'0 {gid} 1')):
+        with open(f'/proc/self/{name}', 'w') as fh:
+            fh.write(value)
+
+def bind(source, target):
+    def run():
+        if libc.mount(source.encode(), target.encode(), None, MS_BIND, None) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+    return run
+
+def step(name, run):
+    try:
+        run()
+    except OSError as e:
+        print(f'{name}={errno.errorcode.get(e.errno, e.errno)}', flush=True)
+        return False
+    print(f'{name}=OK', flush=True)
+    return True
+
+if (step('unshare', lambda: os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)) and step('maps', maps)
+        and step('bind-probe', bind('/tmp/hz-forged.py', '/run/hz/probes.py'))
+        and step('bind-cli', bind('/bin/sh', cli))):
+    env = {k: os.environ[k] for k in allowed if k in os.environ}
+    r = subprocess.run([cli, '-c', 'python3 -I /run/hz/probes.py --agent; exit $?'], env=env, check=False)
+    print(f'run={r.returncode}', flush=True)
 print('done', flush=True)
-sys.stderr.write(r.stderr)
+"""
+# The forged probe: a full set of passing results, sent on the result socket; it holds the connection until
+# the host ends it, so the host's checks see it alive.
+FORGED_PROBE = r"""
+import errno, socket
+s = socket.socket(socket.AF_UNIX)
+try:
+    s.connect('/run/hz/p.sock')
+except OSError as e:
+    print(f'connect={errno.errorcode.get(e.errno, e.errno)}', flush=True)
+    raise SystemExit(1)
+print('connect=OK', flush=True)
+try:
+    s.settimeout(60)
+    s.sendall(RESULTS)
+    s.recv(1)
+    print('sent=OK', flush=True)
+except TimeoutError:
+    print('sent=TIMEOUT', flush=True)
+except OSError as e:
+    print(f'sent={errno.errorcode.get(e.errno, e.errno)}', flush=True)
 """
 
 
 def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(live: Live) -> None:
     results = b"".join((json.dumps(m) + "\n").encode() for m in
                        [*({"check": c, "ok": True, "evidence": "forged"} for c in AGENT_CHECKS), {"done": 0}])
-    forged = ("import socket\ns = socket.socket(socket.AF_UNIX)\ns.connect('/run/hz/p.sock')\n"
-              f"s.sendall({results!r})\n")
+    forged = f"RESULTS = {results!r}\n{FORGED_PROBE}"
     out: list[tuple[int, str, str]] = []
 
     def nest(ctx: ProbeContext) -> None:
         if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
+            allowed = ",".join(sorted(env_allowed(ctx.adapter, "agent")))
             r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
-                                 ["python3", "-I", "-c", NESTED, str(ctx.cli.binary)], input=forged.encode(),
-                                 timeout=EXEC_SECONDS)
+                                 ["python3", "-I", "-c", NESTED, str(ctx.cli.binary), allowed],
+                                 input=forged.encode(), timeout=EXEC_SECONDS)
             out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
                         r.stderr.decode("utf-8", "replace")))
 
@@ -782,40 +897,87 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(live
         assert not failed, f"the overlay was refused, but the launch failed for another reason: {failed}"
 
 
-# Finds each curl the probe starts while it runs, and reports what its output descriptors are and whether a
-# write open of each is refused. It never writes: an open that succeeds is closed at once.
+# Finds the agent-path probe by its argv, then, until it exits, each curl that descends from it, and reports
+# what that curl's output descriptors are and whether a write open of each is refused. It never writes: an
+# open that succeeds is closed at once. Only a process that is gone (ENOENT, ESRCH) counts as gone; any
+# other error is reported, and fails the check.
 OUTPUT_CHECK = r"""
 import errno, os, sys, time
 deadline = time.monotonic() + float(sys.argv[1])
-seen, whole_at = set(), None
+PROBE = [a.encode() for a in sys.argv[2:]]
+GONE = (errno.ENOENT, errno.ESRCH)
+
+def name(code):
+    return errno.errorcode.get(code, str(code))
+
+def read(pid, what):
+    with open(f'/proc/{pid}/{what}', 'rb') as fh:
+        return fh.read()
+
+def live(pid):                          # running: there and not a zombie
+    try:
+        return read(pid, 'stat').rsplit(b')', 1)[1].split()[0] != b'Z'
+    except OSError as e:
+        if e.errno in GONE:
+            return False
+        raise
+
+def descends(pid):                      # True or False; None when it ended before it could be placed
+    q = pid
+    for _ in range(64):
+        try:
+            q = read(q, 'stat').rsplit(b')', 1)[1].split()[1].decode()
+        except OSError as e:
+            if e.errno in GONE:
+                return None
+            raise
+        if q == probe:
+            return True
+        if q in ('0', '1'):
+            return False
+    return False
 
 def state(pid, fd):
     path = f'/proc/{pid}/fd/{fd}'
     try:
         kind = os.readlink(path).partition(':')[0]
-    except OSError:
-        return 'gone'
+    except OSError as e:
+        return 'gone' if e.errno in GONE else f'error:{name(e.errno)}'
     try:
         os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
         return f'{kind}:OPENED'
     except OSError as e:
-        return 'gone' if e.errno == errno.ENOENT else f'{kind}:{errno.errorcode.get(e.errno, "?")}'
+        return 'gone' if e.errno in GONE else f'{kind}:{name(e.errno)}'
 
-while time.monotonic() < (deadline if whole_at is None else min(deadline, whole_at + 15)):
-    for pid in os.listdir('/proc'):
-        if not pid.isdigit() or pid in seen:
-            continue
-        try:
-            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
-                argv0 = fh.read().split(b'\0')[0]
-        except OSError:
-            continue
-        if argv0 == b'/usr/bin/curl':
+def argv(pid):
+    try:
+        return read(pid, 'cmdline').split(b'\0')[:-1]
+    except OSError as e:
+        if e.errno in GONE:
+            return None
+        raise
+
+probe = None
+while probe is None and time.monotonic() < deadline:
+    probe = next((p for p in os.listdir('/proc') if p.isdigit() and argv(p) == PROBE), None)
+    time.sleep(0.005)
+if probe is None:
+    print('probe none', flush=True)
+else:
+    print('probe', probe, flush=True)
+    seen = set()
+    while live(probe) and time.monotonic() < deadline:
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit() or pid in seen or (argv(pid) or [b''])[0] != b'/usr/bin/curl':
+                continue
             seen.add(pid)
-            fds = [state(pid, 1), state(pid, 2)]
-            print('curl', pid, *fds, flush=True)
-            if 'gone' not in fds and whole_at is None:
-                whole_at = time.monotonic()
+            placed = descends(pid)
+            if placed is None:
+                print('curl', pid, 'gone', flush=True)
+            elif placed:
+                print('curl', pid, state(pid, 1), state(pid, 2), flush=True)
+        time.sleep(0.005)
+    print('probe', probe, 'running' if live(probe) else 'exited', flush=True)
 print('done', flush=True)
 """
 
@@ -828,7 +990,7 @@ def test_a_running_probe_s_output_channels_cannot_be_reopened(live: Live) -> Non
     def watch(ctx: ProbeContext) -> None:
         if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
             r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
-                                 ["python3", "-I", "-c", OUTPUT_CHECK, str(PROMPT_SECONDS)],
+                                 ["python3", "-I", "-c", OUTPUT_CHECK, str(PROMPT_SECONDS), *PROBE_ARGV],
                                  timeout=PROMPT_SECONDS + EXEC_SECONDS)
             out.append((r.returncode, r.stdout.decode("utf-8", "replace"),
                         r.stderr.decode("utf-8", "replace")))
@@ -848,11 +1010,11 @@ def test_nothing_in_the_workload_can_tamper_with_a_probe(live: Live) -> None:
     live.launch(spec)
     rec = live.record(spec.session_key)
     try:
-        checks = ((memory_access_refused, ["python3", "-I", "-c", MEMORY_CHECK]),
-                  (file_writes_refused, ["sh", "-c", FILE_CHECK]),
-                  (separate_mount_namespace, ["sh", "-c", NAMESPACE_CHECK]))
-        for verdict, argv in checks:
-            r = live.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=EXEC_SECONDS)
+        checks = ((memory_access_refused, MEMORY_CHECK), (file_writes_refused, FILE_CHECK),
+                  (namespaces_refused, NAMESPACE_CHECK))
+        for verdict, script in checks:
+            r = live.backend.exec(rec.sandbox, Path(rec.worktree), ["python3", "-I", "-c", script],
+                                  timeout=EXEC_SECONDS)
             out = r.stdout.decode("utf-8", "replace")
             why = verdict(r.returncode, out)
             assert why == "", f"{why}\n{out}\n{r.stderr.decode('utf-8', 'replace')}"
