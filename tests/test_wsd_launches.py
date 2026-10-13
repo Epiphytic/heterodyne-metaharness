@@ -596,8 +596,9 @@ def test_entries_rebuild_from_the_bead_after_the_journal_is_lost(tmp_path: Path)
 
 
 def test_entries_rebuilt_after_a_lost_journal_are_accounted_reset(tmp_path: Path) -> None:
-    """g08sd: generations copied from the bead predate the release that a lost journal requires, so they are
-    accounted `reset`, never counted: the release can't account entries the journal no longer has."""
+    """g08sd test 14b: generations copied from the bead predate the release that a lost journal requires
+    (plan 3 D8), so they are accounted `reset`, never counted: the release can't account entries the journal
+    no longer has. A generation launched after the rebuild counts as usual."""
     rig, q = p_q_p(tmp_path)
     lose_journal(rig)
     assert recover(rig.sched).ok
@@ -607,6 +608,10 @@ def test_entries_rebuilt_after_a_lost_journal_are_accounted_reset(tmp_path: Path
     rebuilt = [*rig.journal.launches(p)[:2], *rig.journal.launches(q)]
     assert [rig.journal.crash_class(e) for e in rebuilt] == ["reset", "reset", "reset"]
     assert rig.journal.crash_count(WS, "btq-1") == 0 and rig.state("btq-1") == "running"
+    rig.runtime.end(p)                                               # P3, launched after the rebuild
+    rig.pickup()
+    assert rig.journal.crash_class(rig.journal.launches(p)[2]) == "died"
+    assert rig.journal.crash_count(WS, "btq-1") == 1 and rig.state("btq-1") == "running"
 
 
 def test_a_rebuilt_dispatched_entry_with_no_outcome_holds(tmp_path: Path) -> None:

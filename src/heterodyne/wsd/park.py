@@ -1132,8 +1132,8 @@ class Parker:
         launch that would follow never happens. Only each key's latest generation has evidence (the
         runtime keeps one record per key, and this runs before every pin): an older one not yet accounted
         predates g08sd and is `legacy`. No trusted end is a death, never a healthy end. An entry rebuilt
-        from the bead (the journal was lost, so the bead escalated `journal_lost` and only a release, which
-        resets, frees it) was launched before that reset and is `reset`."""
+        from the bead (the journal was lost, so plan 3 D8 escalated the bead `journal_lost`, and only a
+        release, which resets, frees it) was launched before that reset and is `reset`; later ones count."""
         j, ws, bead = self.d.journal, self.ws.name, op.bead
         todo = [e for e in j.launches_of(ws, bead) if e.outcome == LAUNCHED and not j.crash_accounted(e)]
         if not todo:
@@ -1152,7 +1152,7 @@ class Parker:
             for e in sorted(todo, key=lambda e: (e.journaled_at, e.generation)):
                 end = evidence[e.session_key]
                 if j.rebuilt_at(*e.ident) is not None:
-                    klass = "reset"          # copied from the bead after a lost journal: the release resets
+                    klass = "reset"          # plan 3 D8: a lost journal escalates; the release resets
                 elif e.generation != latest[e.session_key]:
                     klass = "legacy"
                 elif end is None or end.generation != e.generation or not end.reached_running:
