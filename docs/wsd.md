@@ -48,7 +48,7 @@ Each bead wsd holds has one state and, when it is waiting or stuck, a reason:
 
 - `claiming`, `starting`, `running`, `resuming`: being started, working, or coming back from a park.
 - `parking`, then `parked` (`blocked_on_bead`), `waiting_input` (`waiting_on_operator`: it waits on an approval, question or confirm bead) or `held` (`held_by_operator`: `/stop`).
-- `stuck`: needs a human. The reason says why (`launch_failed`, `launch_unrecorded`, `park_failed`, `config_invalid`, `claim_lost`, `routing_changed`, `worktree_failed`, `journal_lost`, `stop_unconfirmed`, `needs_human`, `unexpected_state`) and the bead gets the `needs-human` label.
+- `stuck`: needs a human. The reason says why (`launch_failed`, `crash_loop`, `launch_unrecorded`, `park_failed`, `config_invalid`, `claim_lost`, `routing_changed`, `worktree_failed`, `journal_lost`, `stop_unconfirmed`, `needs_human`, `unexpected_state`) and the bead gets the `needs-human` label.
 - `stuck` with `unclaimable` is different: a ready bead wsd has **not** claimed, because btq's claim can never take it (a `session:` pin on the workstream session, or wsd's park labels left on an unclaimed bead). It gets no `needs-human` label and no release applies to it. A human repairs the bead (removes the pin or the labels) and the next pickup claims it; a bead that stops being ready is forgotten.
 - Owned `held` and `stuck` beads move on only through the operator's release (plan 6). Removing `v2:held` or `needs-human` by hand changes nothing in wsd.
 - `closed`, `dropped` (no longer ours).
