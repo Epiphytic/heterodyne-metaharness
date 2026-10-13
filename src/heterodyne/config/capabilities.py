@@ -65,6 +65,7 @@ def table_problems(table: Mapping[str, Capabilities], evidence: Mapping[str, Map
             found.append(f"{PROBLEM_NO_GENERATOR}: {adapter}.handoff_relaunch")
     return tuple(found)
 
+
 # Login file set per adapter, relative to its login directory (S7 (1), client side shown). Used only for
 # credential identities and alias checks; it enables nothing.
 LOGIN_FILES: Mapping[str, tuple[str, ...]] = {"claude-code": (".credentials.json",), "codex": ("auth.json",)}
