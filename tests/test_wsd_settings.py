@@ -129,3 +129,9 @@ def test_restart_view_is_equal_for_two_resolves_of_the_same_files(cfg: Path) -> 
     assert first != second                         # the settings objects themselves never compare equal
     assert restart_view(first) == restart_view(second)
     assert restart_fields(restart_view(first), restart_view(second)) == []
+
+
+def test_the_credential_locks_live_in_the_state_dir(cfg: Path) -> None:
+    s = resolve(env(cfg))
+    assert s.credlock_dir == s.state_dir / "credlocks"
+    assert s.credlock_dir != s.lock_dir

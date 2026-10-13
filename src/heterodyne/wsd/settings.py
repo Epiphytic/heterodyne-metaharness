@@ -56,6 +56,11 @@ class WsdSettings:
         return self.state_dir / "claims"
 
     @property
+    def credlock_dir(self) -> Path:
+        """The D8 locks, one file per credential key (plan 4b E2). `heterodyne setup` uses the same one."""
+        return self.state_dir / "credlocks"
+
+    @property
     def socket(self) -> Path:
         return self.state_dir / CTL_SOCKET
 
