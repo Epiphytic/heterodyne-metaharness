@@ -26,6 +26,19 @@ NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 GONE = ("can't find session", "no server running on ", "server exited unexpectedly", "lost server")
 
 
+def _gone(detail: str) -> bool:
+    return detail.startswith(GONE) or (
+        detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)"))
+
+
+def _no_server(detail: str) -> bool:
+    """Only the words for a server that isn't there: none listens on the socket, or there is no socket.
+    "lost server" and "server exited unexpectedly" mean the connection broke mid-request, so the server
+    may still hold sessions; they are not absence here."""
+    return detail.startswith("no server running on ") or (
+        detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)"))
+
+
 class TmuxError(RuntimeError):
     pass
 
@@ -80,10 +93,20 @@ class Tmux:
         if proc.returncode == 0:
             return False
         detail = proc.stderr.decode("utf-8", "replace").strip()
-        if detail.startswith(GONE) or (
-                detail.startswith("error connecting to ") and detail.endswith("(No such file or directory)")):
+        if _gone(detail):
             return True
         raise TmuxError(f"tmux has-session failed: {detail}")
+
+    def session_names(self) -> set[str]:
+        """Every session on the server; none only when no server listens or there is no socket. Any other
+        failure, a lost connection included, raises TmuxError: a listing that failed is never an empty one."""
+        proc = self._run("list-sessions", "-F", "#{session_name}", check=False)
+        if proc.returncode == 0:
+            return set(proc.stdout.decode("utf-8", "replace").splitlines())
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        if _no_server(detail):
+            return set()
+        raise TmuxError(f"tmux list-sessions failed: {detail}")
 
     def new_session(self, name: str, cwd: Path, argv: list[str], set: Mapping[str, str] | None = None,
                     unset: Sequence[str] = ()) -> None:

@@ -7,6 +7,7 @@ import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
 from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
 
+from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
 from heterodyne.wsd.journal import JournalBusy, Op, OpKind
@@ -23,7 +24,7 @@ from heterodyne.wsd.park import (
     NotReleasable,
     resumable,
 )
-from heterodyne.wsd.runtime import LaunchSpec, Liveness, Started
+from heterodyne.wsd.runtime import EndCause, LaunchSpec, Liveness, Started
 from heterodyne.wsd.states import Reason
 from heterodyne.wsd.workstream import REPO_KEY, ConfigInvalid, Limits, place
 
@@ -1128,6 +1129,30 @@ def test_release_resets_and_accounts_pending_generations_as_reset(tmp_path: Path
     assert classes(other) == ["reset"] and other.journal.crash_count(WS, "btq-1") == 0
     other.replay_open()
     assert other.state("btq-1") == "running" and other.journal.crash_count(WS, "btq-1") == 0
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_a_resolved_generation_counts_one_death_unless_a_release_resets_first(tmp_path: Path,
+                                                                             released: bool) -> None:
+    """g08sd's rule for a removed session directory holds for `wsctl resolve` too (docs/wsd.md §5): its
+    record goes, so the next guard has no end to read and counts a death, even after a live stop."""
+    rig = picked(tmp_path)
+    key = rig.key("btq-1")
+    rig.runtime.end(key, EndCause.STOPPED)                  # a live stop whose commits couldn't land
+    assert rig.runtime.ended(key) is not None
+    rig.runtime.resolve_unlanded(WS, short_id(key), 1, "discard", None)
+    rig.runtime.finish_resolution(WS, short_id(key), 1)
+    assert rig.runtime.ended(key) is None
+    if released:
+        rig.parker.escalate("btq-1", Reason.LAUNCH_FAILED)
+        rig.parker.release("btq-1")
+        assert classes(rig) == ["reset"] and rig.journal.crash_count(WS, "btq-1") == 0
+        rig.replay_open()
+    else:
+        rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 2
+    assert rig.journal.crash_count(WS, "btq-1") == (0 if released else 1)
+    assert classes(rig) == ["reset" if released else "died", None]
 
 
 def test_refused_launches_keep_their_own_budget(tmp_path: Path) -> None:

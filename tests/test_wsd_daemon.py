@@ -16,7 +16,7 @@ from typing import Any
 
 import msgspec
 import pytest
-from fakes.checkpoints import CrashAt, SimulatedCrash
+from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at
@@ -27,7 +27,7 @@ from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
-from heterodyne.wsd.runtime import Session
+from heterodyne.wsd.runtime import ResolveFailed, ResolveRefused, Session, UnlandedView
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
@@ -2241,3 +2241,267 @@ def test_reload_through_the_real_loader(tmp_path: Path, monkeypatch: pytest.Monk
     broken = reload(wsd)
     assert broken.result == "refused" and "config.toml" in broken.message and str(d) not in broken.message
     assert sched.ws.models["b"] == "m3" and wsd.s.btq_locations["dolt_port"] == "3307"
+
+
+# --- btq-xb56t: wsctl unlanded and wsctl resolve (docs/wsd.md §5) ---
+
+SID, OTHER, TIP = "hz0123456789ab", "hzba9876543210", "a" * 40
+
+
+def unlanded_view(sid: str = SID) -> UnlandedView:
+    return UnlandedView(sid, 1, "btq-1", "btq/btq-1", landed="b" * 40, tip=TIP, ahead=1, behind=0,
+                        fast_forward=True, subjects=("agent work", "?[31mred"))
+
+
+def resolved_events(j: Journal) -> list[journal.Event]:
+    return [e for e in j.events_since(0) if e.kind == "unlanded_resolved"]
+
+
+def resolve_req(sid: str = SID, action: str = "land", tip: str | None = TIP) -> ctl.CtlRequest:
+    return ctl.CtlRequest("resolve", ws=WS, session=sid, generation=1, action=action, tip=tip)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("req, refused", [
+    (ctl.CtlRequest("unlanded"), "unlanded needs a workstream"),
+    (ctl.CtlRequest("unlanded", ws=WS), ""),
+    (ctl.CtlRequest("unlanded", ws=WS, session=SID), "only resolve takes"),
+    (ctl.CtlRequest("resolve", session=SID, generation=1, action="discard"), "resolve needs a workstream"),
+    (ctl.CtlRequest("resolve", ws=WS, generation=1, action="discard"), "resolve needs a session"),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, action="discard"), "resolve needs a session"),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1), "resolve needs a session"),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="land"), "--land needs the tip"),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="keep"), "--keep needs the tip"),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="discard"), ""),
+    (ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="land", tip=TIP), ""),
+    (ctl.CtlRequest("status", tip=TIP), "only resolve takes"),
+    (ctl.CtlRequest("pause", ws=WS, generation=1), "only resolve takes"),
+    (ctl.CtlRequest("tick", job="pickup", action="land"), "only resolve takes"),
+])
+def test_unlanded_and_resolve_refusals(req: ctl.CtlRequest, refused: str) -> None:
+    why = ctl.refusal(req)
+    assert (refused in why and why != "") if refused else why == ""
+
+
+@pytest.mark.parametrize("argv, sent", [
+    (["unlanded", WS], ctl.CtlRequest("unlanded", ws=WS)),
+    (["resolve", WS, SID, "--generation", "2", "--land", "--tip", TIP],
+     ctl.CtlRequest("resolve", ws=WS, session=SID, generation=2, action="land", tip=TIP)),
+    (["resolve", WS, SID, "--generation", "1", "--keep", "--tip", TIP],
+     ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="keep", tip=TIP)),
+    (["resolve", WS, SID, "--generation", "1", "--discard"],
+     ctl.CtlRequest("resolve", ws=WS, session=SID, generation=1, action="discard")),
+    (["resolve", WS, SID, "--generation", "1", "--land"], None),
+    (["resolve", WS, SID, "--generation", "1", "--keep"], None),
+    (["resolve", WS, SID, "--generation", "1"], None),
+    (["resolve", WS, SID, "--generation", "1", "--land", "--discard", "--tip", TIP], None),
+    (["resolve", WS, SID, "--land", "--tip", TIP], None),
+    (["unlanded"], None),
+])
+def test_wsctl_unlanded_and_resolve_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              argv: list[str], sent: ctl.CtlRequest | None) -> None:
+    asked: list[ctl.CtlRequest] = []
+    monkeypatch.setattr(cli, "_settings", lambda: settings(tmp_path))
+    monkeypatch.setattr(cli, "_ask", lambda s, req: asked.append(req) or ctl.CtlReply("ok", "done"))
+    if sent is None:
+        with pytest.raises(SystemExit) as exited:
+            cli.wsctl_main(argv)
+        assert exited.value.code == 2 and asked == []
+    else:
+        assert cli.wsctl_main(argv) == 0 and asked == [sent]
+
+
+def test_wsctl_unlanded_labels_the_subjects_untrusted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
+    reply = ctl.CtlReply("ok", f"{WS}: 1 unlanded session(s)", {SID: daemon.view_fields(unlanded_view())})
+    monkeypatch.setattr(cli, "_settings", lambda: settings(tmp_path))
+    monkeypatch.setattr(cli, "_ask", lambda s, req: reply)
+    assert cli.wsctl_main(["unlanded", WS]) == 0
+    out = capsys.readouterr().out
+    assert f"{SID}:\n  generation: 1\n" in out and f"  tip: {TIP}\n" in out and "  fast_forward: yes\n" in out
+    assert "  subjects (untrusted, written by the agent):\n    agent work\n    ?[31mred\n" in out
+
+
+def test_view_fields_are_strings_and_an_unreadable_tip_says_why() -> None:
+    view = unlanded_view()
+    fields = daemon.view_fields(view)
+    assert fields["ahead"] == "1" and fields["subjects"] == "agent work\n?[31mred"
+    bad = daemon.view_fields(UnlandedView(SID, 1, "btq-1", "btq/btq-1", error="the session's git objects "
+                                          "fail git's integrity check"))
+    assert bad["tip"] == "unreadable (the session's git objects fail git's integrity check)"
+    assert "ahead" not in bad and "subjects" not in bad
+    assert daemon.view_fields(UnlandedView(SID, 1, "btq-1", "btq/btq-1", running=True))["running"] == "yes"
+
+
+def held_wsd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: Any = None,
+             ) -> tuple[Wsd, FakeRuntime, threading.Event, threading.Event]:
+    """A wsd whose next operator pickup holds the workstream's lane until `release` is set."""
+    s = settings(tmp_path)
+    runtime = FakeRuntime()
+    runtime.views[WS] = [unlanded_view(SID), unlanded_view(OTHER)]
+    kwargs = {} if cp is None else {"cp": cp}
+    wsd = Wsd(s, assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), runtime, **kwargs))
+    wsd.startup()
+    sched = wsd.parts.schedulers[WS]
+    real = sched.pickup
+    inside, release = threading.Event(), threading.Event()
+
+    def held(trigger: Trigger) -> Outcome:
+        if trigger.kind is TriggerKind.OPERATOR and not inside.is_set():
+            inside.set()
+            assert release.wait(10)
+        return real(trigger)
+
+    monkeypatch.setattr(sched, "pickup", held)
+    return wsd, runtime, inside, release
+
+
+def test_unlanded_and_resolve_run_on_the_workstream_lane(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pickup holding the lane delays both; two different resolves queued behind it each get their own
+    result, and an identical one joins its twin."""
+    wsd, runtime, inside, release = held_wsd(tmp_path, monkeypatch)
+    keys = counted_submits(wsd.lanes[WS], monkeypatch)
+
+    async def scenario() -> list[ctl.CtlReply]:
+        pickup = asyncio.create_task(wsd.handle(ctl.CtlRequest("tick", job="pickup", ws=WS)))
+        try:
+            await until(inside.is_set)
+            asked = [asyncio.create_task(wsd.handle(req)) for req in (
+                ctl.CtlRequest("unlanded", ws=WS), resolve_req(SID), resolve_req(OTHER, "keep"),
+                resolve_req(OTHER, "keep"))]
+            await asyncio.sleep(0.2)
+            assert not any(t.done() for t in asked) and runtime.resolves == []
+        finally:
+            release.set()
+        await pickup
+        return list(await asyncio.gather(*asked))
+
+    view, first, second, twin = asyncio.run(scenario())
+    assert view.result == "ok" and set(view.data) == {SID, OTHER} and view.data[SID]["tip"] == TIP
+    assert first.result == "ok" and first.data == {SID: {"action": "land", "tip": TIP, "ref": ""}}
+    assert second.result == "ok" and second.data[OTHER]["ref"] == f"refs/heads/unlanded/btq-1/{OTHER}-g1"
+    assert twin == second and len(runtime.resolves) == 2
+    assert ("unlanded", WS) in keys and ("resolve", SID, 1, "land", TIP) in keys
+    assert keys.count(("resolve", OTHER, 1, "keep", TIP)) == 2
+    assert "wsd tick pickup --ws" in first.message
+    assert [e.ref for e in resolved_events(wsd.parts.journal)] == [f"{SID}-g1", f"{OTHER}-g1"]
+    assert runtime.intents == {}
+
+
+def test_a_disconnected_callers_resolve_still_completes(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, inside, release = held_wsd(tmp_path, monkeypatch)
+    s = wsd.s
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        try:
+            await until(s.socket.exists)
+            pickup = asyncio.create_task(ctl.request(s.socket, ctl.CtlRequest("tick", job="pickup", ws=WS)))
+            await until(inside.is_set)
+            with pytest.raises(ctl.CtlUnavailable):
+                await ctl.request(s.socket, resolve_req(), timeout=0.2)      # the caller gives up
+            assert runtime.resolves == []
+            release.set()
+            await pickup
+            await until(lambda: runtime.finished != [])
+        finally:
+            release.set()
+            stop.set()
+            await task
+
+    asyncio.run(scenario())
+    assert runtime.resolves == [(WS, SID, 1, "land", TIP)] and runtime.intents == {}
+    assert len(resolved_events(wsd.parts.journal)) == 1
+
+
+def test_emit_once_writes_one_event(tmp_path: Path) -> None:
+    j = Journal(tmp_path / "j.db")
+    assert j.emit_once(WS, "btq-1", "unlanded_resolved", "action=land tip=none", f"{SID}-g1")
+    assert not j.emit_once(WS, "btq-1", "unlanded_resolved", "action=discard tip=none", f"{SID}-g1")
+    assert j.emit_once(WS, "btq-1", "unlanded_resolved", "action=land tip=none", f"{SID}-g2")
+    assert j.emit_once(WS, "btq-1", "other_kind", "", f"{SID}-g1")
+    assert [(e.detail, e.ref) for e in resolved_events(j)] == [("action=land tip=none", f"{SID}-g1"),
+                                                             ("action=land tip=none", f"{SID}-g2")]
+    j.close()
+
+
+def test_a_failed_journal_write_leaves_the_intent_and_the_hold(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+
+    def busy(*args: object) -> bool:
+        raise JournalBusy("SQLITE_BUSY")
+
+    monkeypatch.setattr(wsd.parts.journal, "emit_once", busy)
+    reply = wsd.resolve_one(WS, SID, 1, "discard", None)
+    assert reply.result == "failed" and "JournalBusy" in reply.message and "again" in reply.message
+    assert (SID, 1) in runtime.intents and runtime.finished == []
+    with pytest.raises(daemon.RuntimeUnavailable, match="unfinished"):
+        runtime.sessions(WS)                                                # the hold stays
+    monkeypatch.undo()
+    assert wsd.resolve_one(WS, SID, 1, "discard", None).result == "ok"
+    assert runtime.intents == {} and len(resolved_events(wsd.parts.journal)) == 1
+    assert resolved_events(wsd.parts.journal)[0].detail == "action=discard tip=none"
+
+
+@pytest.mark.parametrize("point", ["resolve.resolved", "resolve.journaled"])
+def test_a_crash_around_the_journal_entry_replays_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                       point: str) -> None:
+    """Before `emit_once`, or after its commit but before `finish_resolution`: the retry writes no second
+    event and clears the hold."""
+    crash = CrashAt(point)
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch, cp=crash)
+    with pytest.raises(SimulatedCrash):
+        wsd.resolve_one(WS, SID, 1, "keep", TIP)
+    assert (SID, 1) in runtime.intents
+    assert len(resolved_events(wsd.parts.journal)) == (point == "resolve.journaled")
+    reply = wsd.resolve_one(WS, SID, 1, "keep", TIP)
+    assert reply.result == "ok" and runtime.intents == {} and runtime.sessions(WS) == []
+    [event] = resolved_events(wsd.parts.journal)
+    assert (event.ws, event.bead, event.ref) == (WS, "btq-1", f"{SID}-g1")
+    assert event.detail == f"action=keep tip={TIP} ref=refs/heads/unlanded/btq-1/{SID}-g1"
+
+
+def test_a_clean_resolve_job_passes_its_points(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cp = Recorder()
+    wsd, _, _, _ = held_wsd(tmp_path, monkeypatch, cp=cp)
+    cp.seen.clear()
+    assert wsd.resolve_one(WS, SID, 1, "land", TIP).result == "ok"
+    assert tuple(cp.seen) == daemon.RESOLVE_JOB_POINTS
+
+
+@pytest.mark.parametrize("error, result", [(ResolveRefused("the session has not ended"), "refused"),
+                                           (ResolveFailed("a resolve step failed"), "failed"),
+                                           (daemon.RuntimeUnavailable("can't list"), "failed")])
+def test_a_resolve_the_runtime_refuses_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      error: Exception, result: str) -> None:
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+    runtime.resolve_error = error
+    reply = wsd.resolve_one(WS, SID, 1, "land", TIP)
+    assert (reply.result, reply.message) == (result, f"{WS}: {error}")
+    assert resolved_events(wsd.parts.journal) == [] and runtime.finished == []
+
+
+def test_a_resolve_waits_for_the_operation_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+    parker = wsd.parts.schedulers[WS].parker
+    threads = Threads()
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with parker.entry():
+            holding.set()
+            assert release.wait(10)
+
+    try:
+        threads.start("holder", hold)
+        assert holding.wait(10)
+        threads.start("resolve", lambda: wsd.resolve_one(WS, SID, 1, "discard", None))
+        time.sleep(0.2)
+        assert runtime.resolves == []                       # still waiting for the lock
+    finally:
+        release.set()
+        threads.join()
+    assert threads.errors == {} and runtime.finished == [(WS, SID, 1)]

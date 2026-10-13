@@ -6,17 +6,22 @@ import socket
 import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import msgspec
 import pytest
-from sandbox_env import RuntimeRig, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
+from fakes.fake_btq import World, factory
+from sandbox_env import RuntimeRig, bead_worktree, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
-from wsd_env import Clock, git_repo
+from wsd_env import PROFILES, Clock, accounts_at, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
-from heterodyne.sandbox import reaper
+from heterodyne.sandbox import reaper, sessiongit
+from heterodyne.sandbox import runtime as runtime_mod
 from heterodyne.sandbox.runtime import (
     BRANCH_TAKEN,
+    RESOLVE_POINTS,
     WIP_FAILED,
     Phase,
     SandboxRuntime,
@@ -27,14 +32,23 @@ from heterodyne.sandbox.runtime import (
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip, ids
+from heterodyne.wsd.checkpoints import nothing
+from heterodyne.wsd.daemon import Wsd, assemble
+from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import (
+    Action,
     EndCause,
     Ended,
     LaunchFailed,
     LaunchUncertain,
     Liveness,
+    Resolution,
+    ResolveRefused,
     RuntimeUnavailable,
+    UnlandedView,
 )
+from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.workstream import WorkstreamSettings
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
                                  reason="tmux and setsid are needed")
@@ -254,8 +268,8 @@ def test_commits_that_cant_land_refuse_the_relaunch(rig: RuntimeRig) -> None:
 
 def test_unlanded_commits_hold_the_workstream_and_name_where_to_look(rig: RuntimeRig) -> None:
     """T10 r3: an unlanded record makes `sessions()` and `stop()` raise, durably and across a restart, so
-    no park or defer makes a host WIP over it. The detail names the session and its private git
-    directory relative to the state directory, never a home or absolute path."""
+    no park or defer makes a host WIP over it. The detail names the session and the command that shows
+    it (btq-xb56t), never a path."""
     spec = launch_spec(rig, "p-one")
     rig.runtime.launch(spec)
     agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
@@ -270,9 +284,9 @@ def test_unlanded_commits_hold_the_workstream_and_name_where_to_look(rig: Runtim
             runtime.stop(spec.session_key)
         sid = short_id(spec.session_key)
         for exc in (listed.value, stopped.value):
-            assert str(exc) == (f"session {sid} generation 1: its commits were not landed; land them from "
-                                f"s/{sid}/git in wsd's state directory by hand (docs/wsd.md §5)")
-            assert str(rig.root) not in str(exc) and str(rig.home) not in str(exc)
+            assert str(exc) == (f"session {sid} generation 1: its commits were not landed; see "
+                                "`wsctl unlanded alpha` (docs/wsd.md §5)")
+            assert "/" not in str(exc).removesuffix("(docs/wsd.md §5)")
         assert runtime.sessions("beta") == []                         # another workstream is not held
     assert agent_git_tip(rig, spec.session_key) == made               # the private commits are kept
 
@@ -1351,3 +1365,524 @@ def test_other_beads_and_other_repos_are_not_refused(rig: RuntimeRig) -> None:
                          session_key=ids.role_session("btq-1", "reviewer", "p-two"))
     rig.runtime.launch(other_repo)
     assert {record(rig, k).phase for k in (other_bead.session_key, other_repo.session_key)} == {Phase.RUNNING}
+
+
+# --- btq-xb56t: the operator's view and resolve of unlanded sessions (docs/wsd.md §5) ---
+
+
+def host_git(rig: RuntimeRig, *args: str) -> str:
+    r = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.org", "-C", str(rig.repo),
+                        *args], capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+def make_unlanded(rig: RuntimeRig, profile: str = "p-one", *, diverge: bool = False, bead: str = "btq-1",
+                  messages: tuple[bytes, ...] = (b"agent work",)) -> tuple[str, str]:
+    """A session whose commits were left unlanded, as its key and its tip. Its landing fails because the
+    bead branch moved (`diverge`), or else because the pin refused it once, so it is a fast-forward now.
+    A bead other than btq-1 gets a worktree of its own: a branch holds one session at a time."""
+    spec = launch_spec(rig, profile, bead)
+    if bead != "btq-1":
+        spec = replace(spec, worktree=bead_worktree(rig, bead))
+    rig.runtime.launch(spec)
+    for n, message in enumerate(messages):
+        (rig.root / "msg").write_bytes(message)
+        agent_git(rig, spec.session_key, "commit", "-q", "--allow-empty", "--cleanup=verbatim",
+                  "-F", str(rig.root / "msg"), f"--date=@{1_700_000_000 + n}")
+    made = agent_git(rig, spec.session_key, "rev-parse", "HEAD")
+    if diverge:
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.org", "-C", str(rig.worktree),
+                        "commit", "-q", "--allow-empty", "-m", "host work"], check=True, capture_output=True)
+        stop_unlanded(rig, spec.session_key)
+    else:
+        host_git(rig, "config", "filter.x.clean", "cat")
+        stop_unlanded(rig, spec.session_key)
+        host_git(rig, "config", "--unset", "filter.x.clean")
+    rec = record(rig, spec.session_key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
+    return spec.session_key, made
+
+
+def intent_path(rig: RuntimeRig, key: str, generation: int = 1) -> Path:
+    return rig.runtime.c.sessions.parent / "resolutions" / f"{short_id(key)}-g{generation}.json"
+
+
+def trash_path(rig: RuntimeRig, key: str, generation: int = 1) -> Path:
+    return rig.runtime.c.sessions.parent / "resolutions" / f"{short_id(key)}-g{generation}.trash"
+
+
+def resolved_views(rig: RuntimeRig) -> dict[str, UnlandedView]:
+    return {v.short_id: v for v in rig.runtime.unlanded("alpha")}
+
+
+def landings(rig: RuntimeRig) -> int:
+    log = host_git(rig, "reflog", "show", "--format=%gs", "refs/heads/btq/btq-1")
+    return log.count("resolve the session's unlanded commits")
+
+
+def unchanged(rig: RuntimeRig, key: str, branch: str) -> None:
+    """A refused resolve changed nothing: the record, the bead branch, and no intent or trash."""
+    rec = record(rig, key)
+    assert (rec.phase, rec.unlanded) == (Phase.ENDED, True)
+    assert host_tip(rig, "btq/btq-1") == branch
+    assert not os.path.lexists(intent_path(rig, key)) and not os.path.lexists(trash_path(rig, key))
+    assert host_git(rig, "for-each-ref", "refs/heads/unlanded") == ""
+
+
+def break_tip(rig: RuntimeRig, key: str, how: str, bead: str = "btq-1") -> None:
+    git = rig.runtime.layout(key).git
+    loose = git / "refs" / "heads" / "btq" / bead
+    tip = loose.read_text().strip()
+    if how == "missing ref":
+        loose.unlink()
+    elif how == "malformed packed-refs":
+        loose.unlink()
+        (git / "packed-refs").write_text(f"# pack-refs with: peeled\nnot a sha refs/heads/btq/{bead}\n")
+    else:
+        (git / "objects" / tip[:2] / tip[2:]).unlink()
+
+
+@pytest.mark.parametrize("how", ["missing ref", "malformed packed-refs", "objects gone"])
+def test_unlanded_view(rig: RuntimeRig, how: str) -> None:
+    """Fast-forwardable and unreadable tips, side by side: one failing record doesn't hide another. The
+    subjects are untrusted bytes, shown as printable ASCII of at most 72 characters."""
+    long = b"x" * 100
+    key, made = make_unlanded(rig, messages=(b"plain\n", b"bad \xff byte\n", b"\x1b[31mred\x07\n",
+                                             b"two\nlines\n", long + b"\n"))
+    landed = host_tip(rig, "btq/btq-1")
+    other, _ = make_unlanded(rig, "p-two", bead="btq-2")
+    break_tip(rig, other, how, "btq-2")
+    views = resolved_views(rig)
+    assert set(views) == {short_id(key), short_id(other)}
+    good = views[short_id(key)]
+    assert (good.generation, good.bead, good.branch, good.running) == (1, "btq-1", "btq/btq-1", False)
+    assert (good.landed, good.tip, good.ahead, good.behind, good.fast_forward) == (landed, made, 5, 0, True)
+    assert good.subjects == ("x" * 72, "two lines", "?[31mred?", "bad ? byte", "plain")
+    bad = views[short_id(other)]
+    assert (bad.bead, bad.branch) == ("btq-2", "btq/btq-2")
+    assert bad.tip is None and bad.error and bad.ahead is None and bad.subjects == ()
+
+
+def test_unlanded_view_shows_a_diverged_tip(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig, diverge=True)
+    view = resolved_views(rig)[short_id(key)]
+    assert (view.tip, view.ahead, view.behind, view.fast_forward) == (made, 1, 1, False)
+    assert view.landed == host_tip(rig, "btq/btq-1") != made
+
+
+def test_resolve_land(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    done = rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
+    assert done == Resolution("alpha", "btq-1", sid, 1, "land", made, "")
+    assert host_tip(rig, "btq/btq-1") == made and landings(rig) == 1
+    assert not os.path.lexists(rig.runtime.layout(key).root) and not os.path.lexists(trash_path(rig, key))
+    rig.runtime.finish_resolution("alpha", sid, 1)
+    assert rig.runtime.sessions("alpha") == [] and rig.runtime.unlanded("alpha") == []
+
+
+def test_resolve_land_refuses_a_diverged_branch(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig, diverge=True)
+    branch = host_tip(rig, "btq/btq-1")
+    with pytest.raises(ResolveRefused, match="can't be fast-forwarded"):
+        rig.runtime.resolve_unlanded("alpha", short_id(key), 1, "land", made)
+    unchanged(rig, key, branch)
+
+
+def test_resolve_keep(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig, diverge=True)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
+    done = rig.runtime.resolve_unlanded("alpha", sid, 1, "keep", made)
+    assert done == Resolution("alpha", "btq-1", sid, 1, "keep", made, ref)
+    assert host_tip(rig, ref) == made and host_tip(rig, "btq/btq-1") == branch
+    assert not os.path.lexists(rig.runtime.layout(key).root)
+
+
+@pytest.mark.parametrize("taken", ["same tip", "another sha", "parent ref", "namespace ref"])
+def test_resolve_keep_with_its_ref_taken(rig: RuntimeRig, taken: str) -> None:
+    """A keep ref already at the tip is a replay's; any other taken name refuses with the fixed reason."""
+    key, made = make_unlanded(rig, diverge=True)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
+    if taken == "same tip":
+        host_git(rig, "fetch", "-q", str(rig.runtime.layout(key).git), f"refs/heads/btq/btq-1:{ref}")
+        assert rig.runtime.resolve_unlanded("alpha", sid, 1, "keep", made).ref == ref
+        assert host_tip(rig, ref) == made
+        return
+    name = {"another sha": ref, "parent ref": "refs/heads/unlanded/btq-1",
+            "namespace ref": "refs/heads/unlanded"}[taken]
+    host_git(rig, "update-ref", name, branch)
+    with pytest.raises(ResolveRefused, match="^the keep ref can't be created$"):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "keep", made)
+    assert host_tip(rig, name) == branch and record(rig, key).unlanded
+    assert not os.path.lexists(intent_path(rig, key))
+
+
+def test_resolve_discard(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig, diverge=True)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    with pytest.raises(ResolveRefused, match="--tip"):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", None)       # readable: it must be confirmed
+    unchanged(rig, key, branch)
+    assert rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made).tip == made
+    assert host_tip(rig, "btq/btq-1") == branch and not os.path.lexists(rig.runtime.layout(key).root)
+
+
+def test_resolve_discards_an_unreadable_tip_without_tip(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    break_tip(rig, key, "objects gone")
+    for action in ("land", "keep"):
+        with pytest.raises(ResolveRefused, match="can't be read"):
+            rig.runtime.resolve_unlanded("alpha", sid, 1, action, made)  # type: ignore[arg-type]
+    with pytest.raises(ResolveRefused, match="can't be read"):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    unchanged(rig, key, branch)
+    assert rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", None).tip is None
+    assert not os.path.lexists(rig.runtime.layout(key).root)
+
+
+REFUSALS = ["moved tip", "wrong generation", "another workstream", "not ended", "not unlanded",
+            "bad short ID", "pane", "older reaper", "older sandbox", "orphan"]
+
+
+@pytest.mark.parametrize("case", REFUSALS + ["tmux listing", "backend listing"])
+def test_resolve_refuses(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    key, made = make_unlanded(rig)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    layout = rig.runtime.layout(key)
+    ws, generation, tip = "alpha", 1, made
+    if case == "moved tip":
+        tip = branch
+    elif case == "wrong generation":
+        generation = 2
+    elif case == "another workstream":
+        ws = "beta"
+    elif case in ("not ended", "not unlanded"):
+        change = {"phase": Phase.STOPPING} if case == "not ended" else {"unlanded": False}
+        write_record(layout, msgspec.structs.replace(record(rig, key), **change))
+    elif case == "bad short ID":
+        sid = sid.upper()
+    elif case == "pane":
+        rig.tmux.new_session(f"wsd-{sid}", rig.root, ["sleep", "60"])
+    elif case in ("older reaper", "older sandbox"):
+        # The record is of generation 3; the actor left over is generation 1's, so only a match across
+        # generations finds it.
+        generation = 3
+        write_record(layout, msgspec.structs.replace(record(rig, key), generation=3))
+        if case == "older reaper":
+            rig.tmux.new_session(f"wsd-{sid}-r1", rig.root, ["sleep", "60"])
+        else:
+            rig.backend.extra.add(f"{sid}g1")
+    elif case == "orphan":
+        layout.record.unlink()
+    elif case == "tmux listing":
+        real = rig.tmux._exec
+
+        def lost(argv: list[str], *, input: bytes | None,
+                 timeout: float) -> subprocess.CompletedProcess[bytes]:
+            if "list-sessions" in argv:                     # tmux's own words for a dropped connection
+                return subprocess.CompletedProcess(argv, 1, b"", b"server exited unexpectedly\n")
+            return real(argv, input=input, timeout=timeout)
+        monkeypatch.setattr(rig.tmux, "_exec", lost)
+    else:
+        rig.backend.list_failures = 1
+    raises = RuntimeUnavailable if case.endswith("listing") else ResolveRefused
+    with pytest.raises(raises) as refused:
+        rig.runtime.resolve_unlanded(ws, sid, generation, "land", tip)
+    if case == "orphan":
+        assert str(refused.value) == "the session has no record; see docs/wsd.md §5"
+        assert host_tip(rig, "btq/btq-1") == branch and not os.path.lexists(intent_path(rig, key))
+        return
+    rec = record(rig, key)
+    assert host_tip(rig, "btq/btq-1") == branch and os.path.lexists(layout.record)
+    for g in (1, 3):
+        assert not os.path.lexists(intent_path(rig, key, g)) and not os.path.lexists(trash_path(rig, key, g))
+    inspect = rig.runtime.c.sessions.parent / "inspect"
+    assert not inspect.exists() or not any(inspect.iterdir())
+    assert rec.unlanded == (case != "not unlanded")
+    assert rec.generation == (3 if case.startswith("older") else 1)
+
+
+def crash_at(rig: RuntimeRig, point: str) -> None:
+    def cp(name: str) -> None:
+        if name == point:
+            raise Crash(name)
+    rig.runtime.cp = cp
+
+
+def restarted(rig: RuntimeRig) -> SandboxRuntime:
+    return SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
+
+
+def test_a_clean_resolve_passes_every_point(rig: RuntimeRig) -> None:
+    key, made = make_unlanded(rig)
+    passed: list[str] = []
+    rig.runtime.cp = passed.append
+    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, "land", made)
+    assert tuple(passed) == RESOLVE_POINTS
+
+
+def record_durability(runtime: SandboxRuntime, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every fsync of the import, every directory sync and intent write of the runtime, and every point,
+    in order."""
+    events: list[tuple[str, str]] = []
+    fsync, sync_dir, write = sessiongit._fsync, runtime_mod._sync_dir, runtime_mod.write_private
+
+    def fsync_(path: Path, *, directory: bool = False) -> None:
+        events.append(("fsync", str(path)))
+        fsync(path, directory=directory)
+
+    def sync_dir_(path: Path) -> None:
+        events.append(("sync", str(path)))
+        sync_dir(path)
+
+    def write_(path: Path, text: str) -> None:
+        events.append(("write", str(path)))
+        write(path, text)
+    monkeypatch.setattr(sessiongit, "_fsync", fsync_)
+    monkeypatch.setattr(runtime_mod, "_sync_dir", sync_dir_)
+    monkeypatch.setattr(runtime_mod, "write_private", write_)
+    runtime.cp = lambda name: events.append(("cp", name))
+    return events
+
+
+def host_common(rig: RuntimeRig) -> Path:
+    return Path(host_git(rig, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+
+@pytest.mark.safety
+@pytest.mark.parametrize("run", ["first", "replay"])
+@pytest.mark.parametrize("action", ["land", "keep"])
+def test_the_import_is_durable_before_it_is_recorded(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch,
+                                                      action: Action, run: str) -> None:
+    key, made = make_unlanded(rig)
+    sid, common = short_id(key), host_common(rig)
+    runtime = rig.runtime
+    if run == "replay":                       # the import happened, then a crash before its checkpoint:
+        crash_at(rig, "imported")             # the replay finds it done and must still make it durable
+        with pytest.raises(Crash):
+            rig.runtime.resolve_unlanded("alpha", sid, 1, action, made)
+        runtime = restarted(rig)
+    events = record_durability(runtime, monkeypatch)
+    done = runtime.resolve_unlanded("alpha", sid, 1, action, made)
+    ref = "refs/heads/btq/btq-1" if action == "land" else done.ref
+    recorded = events.index(("cp", "imported"))
+    synced = {path for kind, path in events[:recorded] if kind == "fsync"}
+    packs = {str(e) for e in (common / "objects" / "pack").iterdir()}
+    parts = ref.split("/")
+    dirs = {str(common.joinpath(*parts[:n])) for n in range(len(parts))}
+    assert packs and packs <= synced
+    loose = common.joinpath(*parts)
+    assert (str(loose) in synced) == loose.exists()
+    assert dirs | {str(common / "objects"), str(common / "objects" / "pack")} <= synced
+
+
+@pytest.mark.safety
+def test_the_state_directory_is_synced_before_the_first_intent(rig: RuntimeRig,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    key, made = make_unlanded(rig)
+    state = rig.runtime.c.sessions.parent
+    assert not os.path.lexists(state / "resolutions")
+    events = record_durability(rig.runtime, monkeypatch)
+    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, "land", made)
+    first = events.index(("write", str(intent_path(rig, key))))
+    assert ("sync", str(state)) in events[:first]
+    assert not any(kind in ("fsync", "cp") for kind, _ in events[:first])    # nothing done before it
+
+
+@pytest.mark.parametrize("action", ["land", "keep", "discard"])
+@pytest.mark.parametrize("point", RESOLVE_POINTS)
+def test_resolve_replays_from_each_step(rig: RuntimeRig, point: str, action: Action) -> None:
+    key, made = make_unlanded(rig)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    crash_at(rig, point)
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, action, made)
+    runtime = restarted(rig)
+    for held in (rig.runtime, runtime):
+        with pytest.raises(RuntimeUnavailable, match=f"resolve of session {sid} is unfinished"):
+            held.sessions("alpha")
+        with pytest.raises(RuntimeUnavailable, match="unfinished"):
+            held.stop(key)
+    done = runtime.resolve_unlanded("alpha", sid, 1, action, made)
+    assert (done.action, done.tip) == (action, made)
+    assert runtime.resolve_unlanded("alpha", sid, 1, action, made) == done        # a replay of the end
+    with pytest.raises(RuntimeUnavailable, match="unfinished"):
+        runtime.sessions("alpha")
+    runtime.finish_resolution("alpha", sid, 1)
+    assert runtime.sessions("alpha") == []
+    assert host_tip(rig, "btq/btq-1") == (made if action == "land" else branch)
+    assert landings(rig) == (action == "land")
+    if action == "keep":
+        assert host_tip(rig, done.ref) == made
+    assert not os.path.lexists(rig.runtime.layout(key).root) and not os.path.lexists(trash_path(rig, key))
+
+
+@pytest.mark.parametrize("state", ["both present", "confirmed without S", "S replaced", "T replaced"])
+def test_resolve_replay_refuses_inconsistent_state(rig: RuntimeRig, state: str) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    here, trash = rig.runtime.layout(key).root, trash_path(rig, key)
+    crash_at(rig, {"both present": "imported.recorded", "confirmed without S": "imported",
+                   "S replaced": "imported", "T replaced": "moved"}[state])
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    aside = rig.root / "aside"
+    if state == "both present":
+        trash.mkdir()
+    elif state == "confirmed without S":
+        here.rename(aside)
+    else:
+        moved = here if state == "S replaced" else trash
+        moved.rename(aside)
+        shutil.copytree(aside, moved, symlinks=True)
+    before = intent_path(rig, key).read_bytes()
+    present = (os.path.lexists(here), os.path.lexists(trash))
+    with pytest.raises(ResolveRefused, match=r"^the resolve's state is inconsistent; see docs/wsd.md §5$"):
+        restarted(rig).resolve_unlanded("alpha", sid, 1, "discard", made)
+    assert intent_path(rig, key).read_bytes() == before
+    assert (os.path.lexists(here), os.path.lexists(trash)) == present
+
+
+@pytest.mark.parametrize("point", RESOLVE_POINTS)
+@pytest.mark.parametrize("retry", ["workstream", "action", "tip", "generation"])
+def test_resolve_replay_binds_the_intent_identity(rig: RuntimeRig, point: str, retry: str) -> None:
+    key, made = make_unlanded(rig)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    crash_at(rig, point)
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
+    before = intent_path(rig, key).read_bytes()
+    here, trash = rig.runtime.layout(key).root, trash_path(rig, key)
+    present = (os.path.lexists(here), os.path.lexists(trash))
+    tips = host_tip(rig, "btq/btq-1")
+    ws, action, tip, generation = "alpha", "land", made, 1
+    if retry == "workstream":
+        ws = "beta"
+    elif retry == "action":
+        action = "keep"
+    elif retry == "tip":
+        tip = branch
+    else:
+        generation = 2
+    with pytest.raises(ResolveRefused, match="unfinished resolve"):
+        restarted(rig).resolve_unlanded(ws, sid, generation, action, tip)  # type: ignore[arg-type]
+    assert intent_path(rig, key).read_bytes() == before and host_tip(rig, "btq/btq-1") == tips
+    assert (os.path.lexists(here), os.path.lexists(trash)) == present
+
+
+def test_the_hold_clears_after_resolve(rig: RuntimeRig) -> None:
+    """Only `finish_resolution` ends the hold: the journal entry comes between, in the daemon."""
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
+    for _ in range(2):
+        with pytest.raises(RuntimeUnavailable, match="unfinished"):
+            rig.runtime.sessions("alpha")
+    assert rig.runtime.sessions("beta") == []                          # another workstream is not held
+    rig.runtime.finish_resolution("alpha", sid, 1)
+    assert rig.runtime.sessions("alpha") == [] and not os.path.lexists(intent_path(rig, key))
+    rig.runtime.finish_resolution("alpha", sid, 1)                       # idempotent
+
+
+# --- the resolve job with the real runtime and the real journal (Codex code r1) ---
+
+
+def wsd_settings(rig: RuntimeRig) -> WsdSettings:
+    repo = rig.root / "wsd" / "proj"
+    if not repo.exists():
+        git_repo(repo)
+    accounts = accounts_at(rig.home)
+    ws = WorkstreamSettings("alpha", {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
+    base = rig.root / "wsd"
+    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts)
+
+
+def journal_at(rig: RuntimeRig) -> Path:
+    return wsd_settings(rig).journal
+
+
+@contextlib.contextmanager
+def resolving_wsd(rig: RuntimeRig, runtime: SandboxRuntime, cp: Any = nothing) -> Iterator[Wsd]:
+    """A wsd on `runtime` and a journal kept under the rig's root across restarts, closed on exit (an open
+    one would fail test_wsd_gate's descriptor count)."""
+    s = wsd_settings(rig)
+    j = Journal(s.journal)
+    try:
+        yield Wsd(s, assemble(s, j, factory(World(rig.root / "wsd" / "btq-state")), runtime, cp=cp))
+    finally:
+        j.close()
+
+
+def resolved(rig: RuntimeRig) -> list[tuple[str, str | None, str | None, str]]:
+    j = Journal(journal_at(rig))
+    try:
+        return [(e.ws, e.bead, e.ref, e.detail) for e in j.events_since(0) if e.kind == "unlanded_resolved"]
+    finally:
+        j.close()
+
+
+@pytest.mark.parametrize("point", [*RESOLVE_POINTS, "resolve.resolved", "resolve.journaled"])
+def test_a_resolve_job_replays_from_each_point_with_one_journal_entry(rig: RuntimeRig, point: str) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+
+    def crash(name: str) -> None:
+        if name == point:
+            raise Crash(name)
+    rig.runtime.cp = crash
+    with resolving_wsd(rig, rig.runtime, cp=crash) as wsd, pytest.raises(Crash):
+        wsd.resolve_one("alpha", sid, 1, "keep", made)
+    assert os.path.lexists(intent_path(rig, key))
+    assert len(resolved(rig)) == (point == "resolve.journaled")
+    runtime = restarted(rig)                                # a new wsd: a new runtime, the same journal
+    with pytest.raises(RuntimeUnavailable, match="unfinished"):
+        runtime.sessions("alpha")
+    with resolving_wsd(rig, runtime) as wsd:
+        reply = wsd.resolve_one("alpha", sid, 1, "keep", made)
+        assert reply.result == "ok", reply.message
+        assert wsd.resolve_one("alpha", sid, 1, "keep", made).result == "refused"    # nothing left to resolve
+    ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
+    assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=keep tip={made} ref={ref}")]
+    assert runtime.sessions("alpha") == [] and not os.path.lexists(intent_path(rig, key))
+    assert host_tip(rig, ref) == made and not os.path.lexists(rig.runtime.layout(key).root)
+
+
+def test_a_failed_journal_entry_keeps_the_removed_intent_and_the_hold(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    with resolving_wsd(rig, rig.runtime) as wsd:
+        def busy(*args: object) -> bool:
+            raise JournalBusy("SQLITE_BUSY")
+        monkeypatch.setattr(wsd.parts.journal, "emit_once", busy)
+        reply = wsd.resolve_one("alpha", sid, 1, "land", made)
+        assert reply.result == "failed" and "JournalBusy" in reply.message
+        intent = msgspec.json.decode(intent_path(rig, key).read_bytes())
+        assert intent["step"] == "removed" and not os.path.lexists(rig.runtime.layout(key).root)
+        assert host_tip(rig, "btq/btq-1") == made
+        for runtime in (rig.runtime, restarted(rig)):
+            with pytest.raises(RuntimeUnavailable, match=f"resolve of session {sid} is unfinished"):
+                runtime.sessions("alpha")
+            with pytest.raises(RuntimeUnavailable, match="unfinished"):
+                runtime.stop(key)
+        monkeypatch.undo()
+        assert wsd.resolve_one("alpha", sid, 1, "land", made).result == "ok"
+    assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=land tip={made}")]
+    assert rig.runtime.sessions("alpha") == [] and landings(rig) == 1
+
+
+@pytest.mark.parametrize("action", ["land", "keep", "discard"])
+def test_a_resolved_generation_has_no_end_to_read(rig: RuntimeRig, action: Action) -> None:
+    """g08sd: the record, and so its end cause, goes with the directory, as in manual step 4, and the next
+    guard counts the generation as a death (docs/wsd.md §5). Its reaper marker goes too."""
+    key, made = make_unlanded(rig)
+    layout = rig.runtime.layout(key)
+    before = rig.runtime.ended(key)
+    assert before is not None and before.generation == 1
+    layout.reaped(1).write_text("{}")                        # a marker left beside the record
+    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, action, made)
+    rig.runtime.finish_resolution("alpha", short_id(key), 1)
+    assert rig.runtime.ended(key) is None and not os.path.lexists(layout.reaped(1))

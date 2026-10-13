@@ -68,7 +68,16 @@ from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, refusal
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.recovery import Recovered, recover
-from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime, HoldingReconciler
+from heterodyne.wsd.runtime import (
+    Action,
+    ActionReconciler,
+    AgentRuntime,
+    HoldingReconciler,
+    ResolveFailed,
+    ResolveRefused,
+    RuntimeUnavailable,
+    UnlandedView,
+)
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
@@ -76,6 +85,8 @@ from heterodyne.wsd.workstream import Deps, WorkstreamSettings
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
+# btq-xb56t: a resolve job's crash windows around its journal entry, after the runtime's own.
+RESOLVE_JOB_POINTS = ("lock.waiting", "resolve.resolved", "resolve.journaled")
 DRAIN_SECONDS = 120.0       # how long shutdown waits for jobs already running in worker threads
 
 
@@ -306,6 +317,52 @@ class Wsd:
         paused = self.wanted_pause[name]
         return paused, self.set_pause(name, paused)
 
+    def unlanded_one(self, name: str) -> CtlReply:
+        """`wsctl unlanded` on the workstream's lane, under its operation lock (docs/wsd.md §5)."""
+        sched = self.parts.schedulers[name]
+        with sched.parker.entry():
+            try:
+                views = sched.d.runtime.unlanded(name)
+            except RuntimeUnavailable as exc:
+                return CtlReply("failed", f"{name}: the unlanded sessions can't be shown: {exc}")
+        if not views:
+            return CtlReply("ok", f"{name}: no unlanded sessions")
+        return CtlReply("ok", f"{name}: {len(views)} unlanded session(s); the subjects are the agent's, "
+                              "untrusted", {v.short_id: view_fields(v) for v in views})
+
+    def resolve_one(self, name: str, sid: str, generation: int, action: Action, tip: str | None) -> CtlReply:
+        """`wsctl resolve` on the workstream's lane, holding its operation lock from the checks to the
+        intent's removal. The journal entry comes from the runtime's Resolution, so from its intent, and is
+        written once however often the request is repeated; the intent, and so the hold, goes only once it
+        has committed."""
+        sched = self.parts.schedulers[name]
+        with sched.parker.entry():
+            try:
+                done = sched.d.runtime.resolve_unlanded(name, sid, generation, action, tip)
+            except ResolveRefused as exc:
+                return CtlReply("refused", f"{name}: {exc}")
+            except (ResolveFailed, RuntimeUnavailable) as exc:
+                return CtlReply("failed", f"{name}: {exc}")
+            sched.d.cp("resolve.resolved")
+            detail = f"action={done.action} tip={done.tip or 'none'}"
+            detail += f" ref={done.ref}" if done.ref else ""
+            try:
+                self.parts.journal.emit_once(done.ws, done.bead, "unlanded_resolved", detail,
+                                             f"{done.short_id}-g{done.generation}")
+            except Exception as exc:  # noqa: BLE001 - reported by type; the intent stays for a retry
+                return CtlReply("failed", f"{name}: the resolve was done, but its journal entry could not be "
+                                          f"written ({type(exc).__name__}); run the same wsctl resolve again")
+            sched.d.cp("resolve.journaled")
+            try:
+                sched.d.runtime.finish_resolution(name, sid, generation)
+            except ResolveFailed as exc:
+                return CtlReply("failed", f"{name}: {exc}")
+        kept = f" to {done.ref}" if done.ref else ""
+        return CtlReply("ok", f"{name}: session {sid} generation {generation}: {done.action}{kept} done; the "
+                              f"workstream is no longer held by it. The next pickup runs on its timer, or "
+                              f"now with `wsd tick pickup --ws {name}`.",
+                        {sid: {"action": done.action, "tip": done.tip or "none", "ref": done.ref}})
+
     def status(self, only: str | None, everything: bool = False) -> dict[str, dict[str, str]]:
         """Each workstream's state. Closed and dropped beads (history) are counted, not listed, unless
         `everything`: the reply must stay within ctl.MAX_REPLY however long wsd has run."""
@@ -416,6 +473,14 @@ class Wsd:
             return await self._pause_state(req.ws, req.op == "pause")
         if req.op == RELOAD:
             return await self._reload()
+        if req.op == "unlanded" and req.ws is not None:
+            name = req.ws
+            return await self._run(name, ("unlanded", name), lambda: self.unlanded_one(name))
+        if req.op == "resolve" and req.ws is not None and req.session is not None \
+                and req.generation is not None and req.action is not None:
+            name, sid, generation, action, tip = req.ws, req.session, req.generation, req.action, req.tip
+            return await self._run(name, ("resolve", sid, generation, action, tip),
+                                   lambda: self.resolve_one(name, sid, generation, action, tip))
         job = self.reconcile_one if req.job == "reconcile" else self._operator_pickup
         kind = req.job or "pickup"
         names = self._names(req.ws)
@@ -615,6 +680,23 @@ class Wsd:
         running, False if something still is after `timeout`."""
         _, left = cf.wait(self._cancel_queued(), timeout)
         return not left
+
+
+def view_fields(view: UnlandedView) -> dict[str, str]:
+    """An unlanded session for a reply, every value a string. A tip that can't be read says why, and then
+    nothing is counted or listed from it."""
+    fields = {"generation": str(view.generation), "bead": view.bead, "branch": view.branch,
+              "running": "yes" if view.running else "no"}
+    if view.running:
+        return fields
+    if view.tip is None:
+        return fields | {"tip": f"unreadable ({view.error})"}
+    fields |= {"landed": view.landed, "tip": view.tip}
+    if view.ahead is None or view.behind is None:
+        return fields | {"error": view.error}
+    return fields | {"ahead": str(view.ahead), "behind": str(view.behind),
+                     "fast_forward": "yes" if view.fast_forward else "no",
+                     "subjects": "\n".join(view.subjects)}
 
 
 def outcome_fields(outcome: Outcome) -> dict[str, str]:

@@ -1,7 +1,10 @@
+import hashlib
 import os
 import shutil
 import subprocess
+import zlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from wsd_env import git_repo
@@ -438,3 +441,221 @@ def test_a_relative_global_hooks_path_is_refused(tmp_path: Path, monkeypatch: py
     global_config(tmp_path, monkeypatch, "[core]\n\thooksPath = .githooks\n")
     with pytest.raises(gitwip.GitFailed, match="program"):
         gitwip.pin(repo, worktree, BRANCH)
+
+
+# --- the operator's resolve (btq-xb56t): snapshot and import_snapshot ---
+
+ZERO = "0" * 40
+
+
+def session_commits(tmp_path: Path, count: int = 1) -> tuple[Path, Path, gitwip.Pinned, Path, str]:
+    """A seeded private directory with `count` agent commits on its bead branch, as `land` would refuse
+    them. Returns the repository, the worktree, the pin, the private directory and the session's tip."""
+    repo, worktree = linked(tmp_path)
+    p = gitwip.pin(repo, worktree, BRANCH)
+    private = tmp_path / "private"
+    sessiongit.seed(p, private, read_only=False)
+    for n in range(count):
+        (worktree / f"f{n}.txt").write_text(f"work {n}\n")
+        inside(private, worktree, "add", f"f{n}.txt")
+        inside(private, worktree, *IDENT, "commit", "-q", "-m", f"agent work {n}")
+    return repo, worktree, p, private, inside(private, worktree, "rev-parse", "HEAD")
+
+
+def take(p: gitwip.Pinned, private: Path, tmp_path: Path, name: str = "one") -> sessiongit.Snapshot:
+    (tmp_path / "inspect").mkdir(mode=0o700, exist_ok=True)
+    return sessiongit.snapshot(p, private, tmp_path / "inspect" / name)
+
+
+def loose_path(private: Path, sha: str) -> Path:
+    return private / "objects" / sha[:2] / sha[2:]
+
+
+def test_a_snapshot_holds_the_tip_and_compares_it(tmp_path: Path) -> None:
+    repo, _, p, private, made = session_commits(tmp_path, 2)
+    snap = take(p, private, tmp_path)
+    assert (snap.tip, snap.error) == (made, "")
+    landed = sessiongit.landed(p)
+    cmp = sessiongit.compare(p, snap, landed)
+    assert (cmp.ahead, cmp.behind, cmp.subjects) == (2, 0, (b"agent work 1", b"agent work 0"))
+    assert sessiongit.fast_forward(p, snap, landed)
+    assert not (snap.dest / "objects" / "info" / "alternates").exists()
+    assert tip(repo, BRANCH) == landed                                   # nothing was imported
+
+
+def test_the_stores_only_alternate_is_the_bead_repositorys_and_fsck_runs_without_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """fsck walks every alternate, so it runs with none and checks the store's own objects; every other
+    store call gets the bead repository's objects alone, never anything under the private directory."""
+    repo, _, p, private, made = session_commits(tmp_path, 2)
+    calls: list[tuple[str, str | None]] = []
+    real = subprocess.run
+
+    def recorded(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+        env = kwargs.get("env")
+        if env is not None and env.get("GIT_DIR", "").startswith(str(tmp_path / "inspect")):
+            verb = next(a for a in argv[1:] if not a.startswith("-") and "=" not in a)
+            calls.append((verb, env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sessiongit.subprocess, "run", recorded)
+    snap = take(p, private, tmp_path)
+    sessiongit.compare(p, snap, sessiongit.landed(p))
+    assert snap.tip == made
+    assert ("fsck", None) in calls and [v for v, alt in calls if alt is None] == ["config", "fsck"]
+    alternates = {alt for _, alt in calls if alt is not None}
+    assert alternates == {str(p.common / "objects")} and p.common.resolve() == (repo / ".git").resolve()
+    assert not any(alt.startswith(str(private)) for alt in alternates)
+
+
+def test_snapshot_ignores_private_config_hooks_and_alternates(tmp_path: Path) -> None:
+    repo, _, p, private, made = session_commits(tmp_path)
+    marker = tmp_path / "ran"
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    script = f"#!/bin/sh\ntouch {marker}\n"
+    for name in ("fsmonitor.sh", *(f"hooks/{h}" for h in ("post-checkout", "reference-transaction",
+                                                          "post-index-change"))):
+        (tmp_path / name).write_text(script)
+        (tmp_path / name).chmod(0o700)
+    with (private / "config").open("a") as fh:
+        fh.write(f"[core]\n\tfsmonitor = {tmp_path / 'fsmonitor.sh'}\n\thooksPath = {hooks}\n")
+    (private / "hooks").mkdir(exist_ok=True)
+    shutil.copy(hooks / "reference-transaction", private / "hooks" / "reference-transaction")
+    elsewhere = tmp_path / "elsewhere.git"
+    gitwip.git(tmp_path, "init", "-q", "--bare", str(elsewhere))
+    for found in (private / "objects").glob("??/*"):                    # the tip's objects live elsewhere
+        target = elsewhere / "objects" / found.parent.name / found.name
+        target.parent.mkdir(exist_ok=True)
+        found.rename(target)
+    with (private / "objects" / "info" / "alternates").open("a") as fh:
+        fh.write(f"{elsewhere / 'objects'}\n")
+    snap = take(p, private, tmp_path)
+    assert (snap.tip, snap.error) == (None, sessiongit.INCOMPLETE)
+    assert not marker.exists()
+    assert tip(repo, BRANCH) != made
+
+
+def make_pack(private: Path, worktree: Path) -> Path:
+    """Pack the session's own objects (its alternates' stay where they are)."""
+    inside(private, worktree, "repack", "-q", "-a", "-d", "-l")
+    [pack] = (private / "objects" / "pack").glob("pack-*.pack")
+    return pack
+
+
+@pytest.mark.parametrize("plant", ["object-dir-link", "pack-link", "fifo", "hard-linked-pack", "oversized"])
+def test_snapshot_refuses_links_special_files_and_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            plant: str) -> None:
+    _, worktree, p, private, made = session_commits(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = b"outside the private directory\n"
+    (outside / ("a" * 38)).write_bytes(secret)
+    expected = sessiongit.LINKED
+    if plant == "object-dir-link":
+        (private / "objects" / "ab").symlink_to(outside)
+    elif plant == "pack-link":
+        (outside / "pack.pack").write_bytes(secret)
+        (private / "objects" / "pack").mkdir(exist_ok=True)
+        (private / "objects" / "pack" / f"pack-{'b' * 40}.pack").symlink_to(outside / "pack.pack")
+    elif plant == "fifo":
+        (private / "objects" / "cd").mkdir()
+        os.mkfifo(private / "objects" / "cd" / ("e" * 38))
+    elif plant == "hard-linked-pack":
+        os.link(make_pack(private, worktree), outside / "linked.pack")
+        expected = sessiongit.HARD_LINKED
+    else:
+        monkeypatch.setattr(sessiongit, "OBJECT_LIMIT", 16)
+        expected = sessiongit.TOO_LARGE
+    snap = take(p, private, tmp_path)
+    assert (snap.tip, snap.error) == (None, expected)
+    copied = [f.read_bytes() for f in snap.dest.rglob("*") if f.is_file() and not f.is_symlink()]
+    assert secret not in copied
+    assert inside(private, worktree, "rev-parse", "HEAD") == made
+
+
+def write_loose(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        path.chmod(0o600)
+    path.write_bytes(zlib.compress(raw))
+
+
+@pytest.mark.parametrize("damage", ["corrupt-loose", "corrupt-pack", "missing-parent", "wrong-name",
+                                    "malformed-blob", "tree-tip", "blob-tip"])
+def test_snapshot_refuses_malformed_objects(tmp_path: Path, damage: str) -> None:
+    _, worktree, p, private, made = session_commits(tmp_path, 2)
+    expected = sessiongit.CORRUPT
+    if damage == "corrupt-loose":
+        write_loose(loose_path(private, made), b"commit 9999\0not a commit")
+    elif damage == "corrupt-pack":
+        pack = make_pack(private, worktree)
+        data = bytearray(pack.read_bytes())
+        data[len(data) // 2] ^= 0xFF
+        pack.chmod(0o600)
+        pack.write_bytes(bytes(data))
+    elif damage == "missing-parent":
+        loose_path(private, inside(private, worktree, "rev-parse", "HEAD~1")).unlink()
+        expected = sessiongit.INCOMPLETE
+    elif damage == "wrong-name":
+        blob = inside(private, worktree, "hash-object", "-w", "--stdin")      # the empty blob
+        other = hashlib.sha1(b"some other name").hexdigest()                  # noqa: S324 - a name, not security
+        loose_path(private, other).parent.mkdir(exist_ok=True)
+        shutil.copy(loose_path(private, blob), loose_path(private, other))
+    elif damage == "malformed-blob":
+        raw = b"blob 99\0short"
+        write_loose(loose_path(private, hashlib.sha1(raw).hexdigest()), raw)  # noqa: S324
+    else:
+        name = "HEAD^{tree}" if damage == "tree-tip" else "HEAD:f1.txt"
+        what = inside(private, worktree, "rev-parse", name)
+        (private / "refs" / "heads" / "btq" / "btq-1").write_text(f"{what}\n")
+        expected = sessiongit.NOT_A_COMMIT
+    snap = take(p, private, tmp_path)
+    assert (snap.tip, snap.error) == (None, expected)
+    with pytest.raises(gitwip.GitFailed):
+        sessiongit.compare(p, snap, sessiongit.landed(p))                   # no counts, no subjects
+
+
+def tree_digest(root: Path) -> list[tuple[str, int, int, int, bytes]]:
+    found: list[tuple[str, int, int, int, bytes]] = []
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        body = path.read_bytes() if path.is_file() and not path.is_symlink() else b""
+        found.append((str(path.relative_to(root)), st.st_mode, st.st_nlink, st.st_mtime_ns, body))
+    return found
+
+
+def test_snapshot_leaves_the_private_dir_unchanged(tmp_path: Path) -> None:
+    _, worktree, p, private, _ = session_commits(tmp_path, 2)
+    make_pack(private, worktree)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "loose after the pack")
+    before = tree_digest(private)
+    snap = take(p, private, tmp_path)
+    assert snap.tip is not None
+    assert tree_digest(private) == before
+
+
+def test_import_snapshot_uses_the_given_tip(tmp_path: Path) -> None:
+    repo, worktree, p, private, made = session_commits(tmp_path)
+    snap = take(p, private, tmp_path)
+    inside(private, worktree, *IDENT, "commit", "-q", "--allow-empty", "-m", "after the snapshot")
+    assert inside(private, worktree, "rev-parse", "HEAD") != made
+    old = sessiongit.landed(p)
+    sessiongit.import_snapshot(p, snap, made, f"refs/heads/{BRANCH}", old)
+    assert tip(repo, BRANCH) == made
+    keep = "refs/heads/unlanded/btq-1/hz0123456789ab-g1"
+    sessiongit.import_snapshot(p, snap, made, keep, ZERO)
+    assert tip(repo, keep) == made
+    with pytest.raises(gitwip.GitFailed):
+        sessiongit.import_snapshot(p, snap, made, keep, ZERO)              # create only
+    with pytest.raises(gitwip.GitFailed, match="does not hold"):
+        sessiongit.import_snapshot(p, snap, old, f"refs/heads/{BRANCH}", made)
+    assert gitwip.git(repo, "fsck", "--connectivity-only", "--no-dangling") == ""
+
+
+def test_a_keep_ref_under_a_taken_name_cant_be_created(tmp_path: Path) -> None:
+    repo, _, p, private, made = session_commits(tmp_path)
+    gitwip.git(repo, "branch", "unlanded/btq-1", "main")
+    snap = take(p, private, tmp_path)
+    with pytest.raises(gitwip.GitFailed):
+        sessiongit.import_snapshot(p, snap, made, "refs/heads/unlanded/btq-1/hz0123456789ab-g1", ZERO)
