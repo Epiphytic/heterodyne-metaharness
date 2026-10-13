@@ -195,7 +195,7 @@ Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  
 | `src/heterodyne/sandbox/runtime.py` | 6, 7 | named-account binding, the key check, the locked freshness gate, the walk, the handoff, `signals` |
 | `src/heterodyne/sandbox/settings.py` | 6, 7 | `lock_wait_seconds`, `usage_poll_seconds` |
 | `src/heterodyne/sandbox/build.py` | 6, 8 | the lock directory; the reader |
-| `src/heterodyne/agents/hostread.py` (new) | 8 | `HostUsageReader` |
+| `src/heterodyne/sandbox/hostread.py` (new) | 8 | `HostUsageReader` |
 | `src/heterodyne/wsd/cli.py`, `src/heterodyne/wsd/daemon.py` | 8 | wiring `Deps.usage_reader` |
 | `src/heterodyne/wsd/park.py` | 9, 10 | `limit`, `defer.confirmed`, the pinned key and handoff, the stale path |
 | `src/heterodyne/wsd/scheduler.py` | 9 | draining `signals` |
@@ -1869,7 +1869,7 @@ def main(argv):
 
 def read(codex, env, limit):
     """The `rateLimits` of the app-server run with `env` (its CODEX_HOME included), or None. Shared
-    with the host's trusted read (agents/hostread.py), which loads this file."""
+    with the host's trusted read (sandbox/hostread.py), which loads this file."""
     proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, text=True, env=env)
     stdin, stdout = proc.stdin, proc.stdout
@@ -2857,4 +2857,490 @@ git add src/heterodyne/sandbox/runtime.py src/heterodyne/sandbox/settings.py src
         tests/fakes/fake_agent_cli.py tests/fakes/fake_backend.py tests/sandbox_env.py \
         tests/test_sandbox_runtime.py tests/test_sandbox_settings.py
 git commit -m "plan4b T7: the runtime's usage and limit signals, gated by capability"
+```
+
+## Task 8: the trusted host-side read
+
+D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio, in a scratch `CODEX_HOME` holding a copy of the account's login. It runs under the account's D8 lock, while the key is the pinned one, and only while the token has at least `read_margin_seconds` left. A login the read refreshed is saved back only if the account's file is unchanged. The scratch home is removed and confirmed gone. Claude has no host read (S7), so a Claude profile always reads None.
+
+**Files:**
+- Create: `src/heterodyne/sandbox/hostread.py`
+- Modify: `src/heterodyne/sandbox/build.py` (`build_usage_reader`)
+- Modify: `src/heterodyne/wsd/daemon.py` (`assemble(..., usage_reader=)`), `src/heterodyne/wsd/cli.py` (`run(..., usage_reader=)`, `wsd_main`)
+- Modify: `tests/fakes/fake_agent_cli.py` (`HZ_FAKE_ROTATE`, `HZ_FAKE_TOUCH`)
+- Test: `tests/test_sandbox_hostread.py` (new), `tests/test_sandbox_build.py`, `tests/test_wsd_daemon.py`
+
+**Interfaces:**
+- Consumes:
+  - `wsd.usage.TrustedRead`, `UsageReader`, `NoUsageReader`, `Deps.usage_reader` (Task 1).
+  - `wsd.credlock.credential_lock`, `CredentialBusy`; `WsdSettings.credlock_dir` (Task 2).
+  - `codex.parse_rate_limits`, `codex.HOST_SOURCE`, `codex.USAGE_SOURCE`, and `codex_usage.read(codex, env, limit)` (Task 5).
+  - `SandboxSettings.lock_wait_seconds` (Task 6).
+  - `Accounts.adapter`, `current_key`, `login_paths` (exist).
+- Produces:
+  - `sandbox.hostread.HostUsageReader(accounts, binary, path, credlocks, scratch_root, lock_wait_seconds, *, env, read_margin_seconds=300, limit_seconds=30.0, clock=utc_now, wait_clock=time.monotonic, sleep=time.sleep)`, a `UsageReader`.
+  - `hostread.DIAG_ROTATED_DROPPED`, `hostread.DIAG_SCRATCH_KEPT`, `hostread.DIAG_READ_FAILED`: log texts with no path, key or token in them.
+  - `sandbox.build.build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader`.
+  - `daemon.assemble(..., usage_reader: UsageReader | None = None)` and `cli.run(..., *, usage_reader: UsageReader | None = None)`. None means `NoUsageReader()`.
+
+The read's steps, all inside one `credential_lock(credlocks, credential_key, ...)`:
+
+1. The profile's adapter must be `codex`; otherwise None.
+2. `accounts.current_key("codex", account)` must equal `credential_key`; otherwise None.
+3. The login file's real path is read without following a final link, at most `MAX_LOGIN` bytes, and must be a regular file.
+4. Its access token must be valid for `read_margin_seconds` more; otherwise None. Codex refreshes only an expired token (S7 (4)), so the read is not expected to write the login.
+5. The scratch home is made under `scratch_root` (0700): `auth.json` is the copy, written 0600.
+6. `codex_usage.read(binary, env | {"CODEX_HOME": scratch}, limit_seconds)` gives the `rateLimits`, parsed with `parse_rate_limits(..., HOST_SOURCE)`.
+7. In a `finally`: if the copy's bytes changed, they are written back (a temporary file in the login's directory, then `os.replace`) only if the account's file still holds the original bytes. Otherwise the change is dropped, with `DIAG_ROTATED_DROPPED`. Then the scratch home is removed and checked with `os.path.lexists`. A scratch home that is still there makes the read None, with `DIAG_SCRATCH_KEPT`.
+
+Any failure is None. The log records only the exception's type name, never its text, which may hold a path.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/fakes/fake_agent_cli.py`, add to the docstring's stdio item: "`HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json` with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it answers `account/rateLimits/read`. `HZ_FAKE_TOUCH=<path>` writes to `<path>` at the same moment, standing in for another writer of the account's login." In `rate_limits(msg)`, add as its first lines:
+
+```python
+    if rotated := os.environ.get("HZ_FAKE_ROTATE"):
+        auth = Path(os.environ["CODEX_HOME"]) / "auth.json"
+        (auth.parent / "auth.json.tmp").write_text(rotated)
+        os.replace(auth.parent / "auth.json.tmp", auth)
+    if touched := os.environ.get("HZ_FAKE_TOUCH"):
+        Path(touched).write_text("written by someone else")
+```
+
+Create `tests/test_sandbox_hostread.py`:
+
+```python
+"""Plan 4b Task 8: the trusted host-side read (D9 (d), E4), against the fake app-server."""
+
+import json
+import logging
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+from sandbox_env import fake_jwt, install_fake_cli
+from wsd_env import Clock, accounts_at
+
+from heterodyne.sandbox import hostread
+from heterodyne.agents.codex import HOST_SOURCE
+from heterodyne.sandbox.hostread import DIAG_ROTATED_DROPPED, DIAG_SCRATCH_KEPT, HostUsageReader
+from heterodyne.config import ConfigError
+from heterodyne.wsd.accounts import ConfiguredAccounts
+from heterodyne.wsd.credlock import credential_lock
+from heterodyne.wsd.usage import Observation, TrustedRead
+
+DAY = 86_400
+RESET = 1_800_003_600
+SNAPSHOT = {"limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": RESET}}
+WANTED = TrustedRead((Observation("codex:codex:300m", "5h", 100, RESET, HOST_SOURCE),), True, RESET)
+
+
+class Rig:
+    def __init__(self, tmp_path: Path, **env: str) -> None:
+        self.clock = Clock()
+        self.home = tmp_path / "home"
+        self.login = self.home / ".codex" / "auth.json"
+        self.login.parent.mkdir(parents=True)
+        self.original = json.dumps({"tokens": {"access_token": fake_jwt(self.clock() + DAY)}})
+        self.login.write_text(self.original)
+        self.login.chmod(0o600)
+        self.accounts = accounts_at(self.home)
+        self.key = self.accounts.current_key("codex", "default")
+        self.codex = install_fake_cli(tmp_path / "i", "codex")
+        self.scratch = tmp_path / "hostread"
+        self.credlocks = tmp_path / "k"
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home),
+                    "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT), **env}
+        self.reader = HostUsageReader(self.accounts, str(self.codex), os.environ["PATH"], self.credlocks,
+                                      self.scratch, 1, env=self.env, limit_seconds=5, clock=self.clock)
+
+    def read(self, profile: str = "p-two", key: str | None = None) -> TrustedRead | None:
+        return self.reader.read(profile, "default", self.key if key is None else key)
+
+    def scratch_empty(self) -> bool:
+        return not self.scratch.exists() or list(self.scratch.iterdir()) == []
+
+
+def test_a_read_gives_the_accounts_windows_and_leaves_nothing(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    assert rig.read() == WANTED
+    assert rig.scratch_empty()
+    assert rig.login.read_text() == rig.original
+
+
+def test_a_claude_profile_has_no_host_read(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    assert rig.read("p-one", "ck1-" + "0" * 32) is None
+    assert not rig.scratch.exists()                             # nothing was started
+
+
+def test_a_key_that_changed_is_not_read(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    assert rig.read(key="ck1-" + "0" * 32) is None
+    assert not rig.scratch.exists()
+
+
+def test_a_login_too_close_to_expiry_is_not_read(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.login.write_text(json.dumps({"tokens": {"access_token": fake_jwt(rig.clock() + 299)}}))
+    assert rig.read() is None
+    assert not rig.scratch.exists()
+
+
+def test_a_busy_lock_is_not_read(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    with credential_lock(rig.credlocks, rig.key, 0):
+        assert rig.read() is None
+    assert not rig.scratch.exists()
+    assert rig.read() == WANTED                                 # released
+
+
+def test_a_refreshed_login_is_saved_back(tmp_path: Path) -> None:
+    rotated = json.dumps({"tokens": {"access_token": fake_jwt(Clock()() + 2 * DAY)}})
+    rig = Rig(tmp_path, HZ_FAKE_ROTATE=rotated)
+    assert rig.read() == WANTED
+    assert rig.login.read_text() == rotated
+    assert rig.login.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in rig.login.parent.iterdir()] == ["auth.json"]       # no temporary file left
+    assert rig.scratch_empty()
+
+
+def test_a_refresh_is_dropped_if_the_login_changed_meanwhile(tmp_path: Path,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    touched = tmp_path / "home" / ".codex" / "auth.json"
+    rig = Rig(tmp_path, HZ_FAKE_ROTATE="rotated by the read", HZ_FAKE_TOUCH=str(touched))
+    caplog.set_level(logging.WARNING, logger=hostread.__name__)
+    assert rig.read() == WANTED
+    assert rig.login.read_text() == "written by someone else"
+    assert [r.getMessage() for r in caplog.records] == [DIAG_ROTATED_DROPPED]
+    assert rig.scratch_empty()
+
+
+@pytest.mark.parametrize("fault", ["error", "garbage", "hang"])
+def test_a_failed_read_is_none_and_leaves_nothing(tmp_path: Path, fault: str) -> None:
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT=fault)
+    assert rig.read() is None
+    assert rig.scratch_empty()
+    assert rig.login.read_text() == rig.original
+
+
+def test_a_missing_cli_is_none(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    shutil.rmtree(tmp_path / "i")
+    assert rig.read() is None
+    assert rig.scratch_empty()
+
+
+def test_a_scratch_home_that_cant_be_removed_is_no_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    rig = Rig(tmp_path)
+    caplog.set_level(logging.WARNING, logger=hostread.__name__)
+    monkeypatch.setattr(hostread.shutil, "rmtree", lambda *_a, **_k: None)
+    assert rig.read() is None
+    assert DIAG_SCRATCH_KEPT in [r.getMessage() for r in caplog.records]
+
+
+def test_a_read_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                             caplog: pytest.LogCaptureFixture) -> None:
+    rig = Rig(tmp_path)
+    caplog.set_level(logging.WARNING, logger=hostread.__name__)
+
+    def broken(_self: ConfiguredAccounts, _adapter: str, _account: str) -> str:
+        raise ConfigError("account default is not configured for adapter codex")
+
+    monkeypatch.setattr(ConfiguredAccounts, "current_key", broken)
+    assert rig.read() is None
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "ConfigError" in text and str(tmp_path) not in text and rig.key not in text
+
+
+def test_a_linked_login_is_not_read(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    elsewhere = tmp_path / "elsewhere.json"
+    rig.login.rename(elsewhere)
+    rig.login.symlink_to(elsewhere)
+    rig.key = rig.accounts.current_key("codex", "default")      # the key follows the link (D1)
+    assert rig.read() == WANTED                                 # the real path is read, not the link
+    assert rig.login.is_symlink() and elsewhere.read_text() == rig.original
+```
+
+In `tests/test_sandbox_build.py`, import `build_usage_reader`, `HostUsageReader` and `NoUsageReader`, then add:
+
+```python
+def test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary(tmp_path: Path) -> None:
+    env = config_env(tmp_path, "")
+    assert isinstance(build_usage_reader(settings(tmp_path, env), env), NoUsageReader)
+    env = config_env(tmp_path, '[platform]\nsandbox = "openshell"\n')
+    reader = build_usage_reader(settings(tmp_path, env), env)
+    assert isinstance(reader, HostUsageReader)
+    assert reader.credlocks == settings(tmp_path, env).credlock_dir
+    assert reader.scratch_root == settings(tmp_path, env).state_dir / "hostread"
+```
+
+and in `test_wsd_run_uses_the_built_runtime`, replace the inner `run` with:
+
+```python
+    def run(_s: WsdSettings, _f: object, runtime: AgentRuntime, *, usage_reader: UsageReader | None = None) -> int:
+        seen.append(runtime)
+        readers.append(usage_reader)
+        return 0
+```
+
+adding `readers: list[UsageReader | None] = []` beside `seen`, `monkeypatch.setattr(cli, "build_usage_reader", lambda _s, _env: NoUsageReader())` beside the `build_runtime` patch, and `assert isinstance(readers[0], NoUsageReader)` after the first `wsd_main` assertion. Import `UsageReader` from `heterodyne.wsd.usage`.
+
+In `tests/test_wsd_daemon.py`, add:
+
+```python
+def test_assemble_hands_the_reader_to_every_workstream(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+
+    class Reader(NoUsageReader):
+        pass
+
+    reader = Reader()
+    parts = assemble(s, Journal(s.journal), factory(world), FakeRuntime(), usage_reader=reader)
+    assert all(sch.d.usage_reader is reader for sch in parts.schedulers.values())
+    plain = assemble(s, Journal(s.journal), factory(world), FakeRuntime())
+    assert all(isinstance(sch.d.usage_reader, NoUsageReader) for sch in plain.schedulers.values())
+```
+
+`settings(tmp_path)`, `factory` and `World` are this file's existing helpers. If its settings helper has another name, use that one. `Scheduler.d` is the scheduler's `Deps`, as `Parker` reads it. Import `NoUsageReader` from `heterodyne.wsd.usage`.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 600 uv run pytest tests/test_sandbox_hostread.py tests/test_sandbox_build.py tests/test_wsd_daemon.py -q`
+Expected: FAIL at import (`No module named 'heterodyne.sandbox.hostread'`, `cannot import name 'build_usage_reader'`), and `TypeError: assemble() got an unexpected keyword argument 'usage_reader'`.
+
+- [ ] **Step 3: Implement**
+
+Create `src/heterodyne/sandbox/hostread.py`:
+
+```python
+"""The trusted host-side usage read (ADR 0001 §4.4 D9 (d), plan 4b E4). Codex only: S7 found no host
+read for Claude. A short-lived `codex app-server` over stdio, in a scratch CODEX_HOME holding a copy of
+the account's login, under the account's D8 lock. The account's own login directory never collects the
+app-server's state. Logs carry no path, key or token: only fixed texts and exception type names."""
+
+import contextlib
+import importlib.util
+import json
+import logging
+import os
+import shutil
+import stat
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+
+from heterodyne.agents.base import AdapterError, jwt_exp
+from heterodyne.agents.codex import HOST_SOURCE, USAGE_SOURCE, Codex, parse_rate_limits
+from heterodyne.fsutil import private_dir
+from heterodyne.wsd.accounts import Accounts
+from heterodyne.wsd.credlock import CredentialBusy, credential_lock
+from heterodyne.wsd.usage import TrustedRead
+from heterodyne.wsd.workstream import utc_now
+
+log = logging.getLogger(__name__)
+
+ADAPTER = "codex"
+LOGIN = "auth.json"
+MAX_LOGIN = 1 << 20
+DIAG_ROTATED_DROPPED = ("a trusted usage read refreshed the login, but the account's login changed during "
+                        "the read; the refresh was not saved")
+DIAG_SCRATCH_KEPT = "a trusted usage read's scratch home could not be removed; the read is discarded"
+DIAG_READ_FAILED = "a trusted usage read failed"
+
+
+def _usage_module() -> Any:
+    """codex_usage.py, the in-sandbox read's file: the host read runs the same client."""
+    spec = importlib.util.spec_from_file_location("heterodyne_codex_usage", USAGE_SOURCE)
+    if spec is None or spec.loader is None:
+        raise ImportError("codex_usage.py can't be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _read_regular(path: Path) -> bytes:
+    """`path`'s bytes, refusing a final link, a non-regular file and anything over MAX_LOGIN."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_LOGIN:
+            raise OSError("not a login file")
+        data = os.read(fd, MAX_LOGIN + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_LOGIN:
+        raise OSError("not a login file")
+    return data
+
+
+def _expiry(login: bytes) -> float:
+    """The access token's expiry, from the bytes the read copies: the same bytes, so no second read."""
+    try:
+        tokens: Any = json.loads(login).get("tokens")
+    except (ValueError, AttributeError) as exc:
+        raise AdapterError("the login's expiry can't be read") from exc
+    return jwt_exp(tokens.get("access_token") if isinstance(tokens, dict) else None)
+
+
+def _write_new(folder: Path, name: str, data: bytes) -> Path:
+    """A new 0600 file in `folder` holding `data`, flushed to disk."""
+    path = folder / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path
+
+
+class HostUsageReader:
+    def __init__(self, accounts: Accounts, binary: str, path: str, credlocks: Path, scratch_root: Path,
+                 lock_wait_seconds: float, *, env: Mapping[str, str], read_margin_seconds: int = 300,
+                 limit_seconds: float = 30.0, clock: Callable[[], int] = utc_now,
+                 wait_clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        self.accounts = accounts
+        self.binary = binary                 # `[adapters.codex] binary`, located on each read
+        self.path = path
+        self.credlocks = credlocks
+        self.scratch_root = scratch_root
+        self.lock_wait_seconds = lock_wait_seconds
+        self.env = dict(env)                 # the app-server's environment, CODEX_HOME aside
+        self.read_margin_seconds = read_margin_seconds
+        self.limit_seconds = limit_seconds
+        self.clock = clock
+        self.wait_clock = wait_clock
+        self.sleep = sleep
+        self.adapter = Codex()
+
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        if self.accounts.adapter(profile) != ADAPTER:
+            return None
+        try:
+            with credential_lock(self.credlocks, credential_key, self.lock_wait_seconds,
+                                 clock=self.wait_clock, sleep=self.sleep):
+                return self._locked(account, credential_key)
+        except CredentialBusy:
+            return None
+        except Exception as exc:  # noqa: BLE001 - never raises (UsageReader); the type name only
+            log.warning("%s: %s", DIAG_READ_FAILED, type(exc).__name__)
+            return None
+
+    def _locked(self, account: str, credential_key: str) -> TrustedRead | None:
+        if self.accounts.current_key(ADAPTER, account) != credential_key:
+            return None
+        _, files = self.accounts.login_paths(ADAPTER, account)
+        login = Path(os.path.realpath(files[0]))
+        original = _read_regular(login)
+        try:
+            if _expiry(original) - self.clock() < self.read_margin_seconds:
+                return None                   # S7 (4): only an expired token is refreshed; keep clear of it
+        except AdapterError:
+            return None
+        cli = self.adapter.locate(self.binary, self.path)
+        if cli.version != self.adapter.version_pin:
+            return None
+        private_dir(self.scratch_root)
+        scratch = Path(tempfile.mkdtemp(prefix="read-", dir=self.scratch_root))
+        report = None
+        try:
+            _write_new(scratch, LOGIN, original)
+            limits = _usage_module().read(str(cli.binary), {**self.env, "CODEX_HOME": str(scratch)},
+                                          self.limit_seconds)
+            report = parse_rate_limits(limits, HOST_SOURCE)
+        finally:
+            try:
+                self._save_back(login, scratch / LOGIN, original)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+                kept = os.path.lexists(scratch)
+                if kept:
+                    log.warning(DIAG_SCRATCH_KEPT)
+        if kept or report is None:
+            return None
+        return TrustedRead(report.windows, report.limited, report.reset_hint)
+
+    def _save_back(self, login: Path, copy: Path, original: bytes) -> None:
+        """E4: keep a login the read refreshed, but only over the bytes it started from."""
+        try:
+            now = _read_regular(copy)
+        except OSError:
+            return                            # nothing readable to save; the account's file is untouched
+        if now == original:
+            return
+        if _read_regular(login) != original:
+            log.warning(DIAG_ROTATED_DROPPED)
+            return
+        temp = _write_new(login.parent, f".{LOGIN}.hz-{uuid.uuid4().hex[:12]}", now)
+        try:
+            os.replace(temp, login)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp.unlink()
+```
+
+In `_locked`, the scratch home is made only once the lock is held, the key matches, the login is read, its token has the margin left and the CLI is at its pin. So the tests that expect `not rig.scratch.exists()` prove the read stopped before it started anything. `_save_back` runs inside the lock and before the scratch home is removed. The nested `finally` removes the scratch home even when `_save_back` raises; that exception then reaches `read`'s `except Exception`, which logs its type name and returns None.
+
+In `src/heterodyne/sandbox/build.py`, import `from heterodyne.sandbox.hostread import HostUsageReader` and `from heterodyne.wsd.usage import NoUsageReader, UsageReader`, and add:
+
+```python
+def build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader:
+    """D9 (d)'s trusted read, when the sandbox runtime runs and a Codex binary is configured. The
+    capability table decides whether wsd ever asks it (E15)."""
+    settings = sandbox_settings(env)
+    binary = settings.binaries.get("codex")
+    if settings.backend != "openshell" or s.accounts is None or not binary:
+        return NoUsageReader()
+    path = env.get("PATH", os.defpath)
+    base = {"PATH": path, "HOME": env.get("HOME", ""), "LANG": "C.UTF-8"}
+    return HostUsageReader(s.accounts, binary, path, s.credlock_dir, s.state_dir / "hostread",
+                           settings.lock_wait_seconds, env=base)
+```
+
+In `src/heterodyne/wsd/daemon.py`, import `NoUsageReader` and `UsageReader` from `heterodyne.wsd.usage` and replace `assemble`:
+
+```python
+def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: AgentRuntime,
+             reconciler: Callable[[BeadsAdapter], ActionReconciler] = HoldingReconciler,
+             cp: Checkpoint = nothing, usage_reader: UsageReader | None = None) -> Parts:
+    beads = BeadsAdapter(factory)
+    gate = ClaimGate(s.lock_dir, beads, cp)
+    deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
+                usage_reader=usage_reader if usage_reader is not None else NoUsageReader())
+    return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
+```
+
+In `src/heterodyne/wsd/cli.py`, import `build_usage_reader` beside `build_runtime` and `UsageReader` from `heterodyne.wsd.usage`. Give `run` the keyword `*, usage_reader: UsageReader | None = None` after `exit_now`, and pass `usage_reader=usage_reader` to `assemble(...)`. In `wsd_main`, replace the `run` line with:
+
+```python
+            return run(s, _factory(s), build_runtime(s, os.environ),
+                       usage_reader=build_usage_reader(s, os.environ))
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 900 uv run pytest tests/test_sandbox_hostread.py tests/test_sandbox_build.py tests/test_wsd_daemon.py tests/test_agents_usage.py -q`
+Expected: PASS. The `hang` case ends in about `limit_seconds` (5), because the client's timer kills the app-server; a test run that waits longer is a failure of the bound, not a slow pass.
+
+Then: `timeout 600 uv run pyright src tests/test_sandbox_hostread.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/sandbox/hostread.py src/heterodyne/sandbox/build.py src/heterodyne/wsd/daemon.py \
+        src/heterodyne/wsd/cli.py tests/fakes/fake_agent_cli.py tests/test_sandbox_hostread.py \
+        tests/test_sandbox_build.py tests/test_wsd_daemon.py
+git commit -m "plan4b T8: the trusted host-side Codex read, under the account's lock"
 ```
