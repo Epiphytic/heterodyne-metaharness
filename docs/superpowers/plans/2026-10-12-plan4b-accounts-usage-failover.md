@@ -4292,7 +4292,7 @@ Model budget (testing only): `test_live_sandbox.MODELS`. That is Claude `claude-
 
 **Files:**
 - Create: `tests/live/test_live_accounts.py`
-- Modify: `docs/wsd.md` (the "Live checks" section: the variables and what each test shows)
+- Modify: `docs/wsd.md` (§5 Runtime, after the paragraph on plan 4's live gate: the variables and what each test shows)
 
 **Interfaces:**
 - Consumes:
@@ -4343,14 +4343,14 @@ from test_live_sandbox import (  # noqa: E402
 
 from heterodyne.agents.codex import HOST_SOURCE  # noqa: E402
 from heterodyne.config import ConfigError  # noqa: E402
-from heterodyne.config.accounts import Account, ProfileAccounts, canonical_login, credential_key  # noqa: E402
+from heterodyne.config.accounts import Account, canonical_login, credential_key  # noqa: E402
 from heterodyne.config.capabilities import CAPABILITIES, NONE  # noqa: E402
 from heterodyne.sandbox.hostread import HostUsageReader  # noqa: E402
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env  # noqa: E402
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime  # noqa: E402
 from heterodyne.sandbox.settings import sandbox_settings  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
-from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
+from heterodyne.wsd.accounts import ConfiguredAccounts, ProfileAccounts  # noqa: E402
 from heterodyne.wsd.runtime import LaunchSpec, LimitSeen, Signal, Started, UsageSeen  # noqa: E402
 from heterodyne.wsd.workstream import utc_now  # noqa: E402
 
@@ -4586,7 +4586,7 @@ Expected: every test whose capability is on passes. The rest are skipped, each n
 
 - [ ] **Step 4: Document and commit**
 
-In `docs/wsd.md`, under "Live checks", add a paragraph naming `HZ_LIVE_ACCOUNTS`, `HZ_LIVE_ACCOUNTS_CODEX`, `HZ_LIVE_ACCOUNTS_CLAUDE` and `HZ_LIVE_ACCOUNTS_LIMITED`. It should say that each test runs only for an enabled capability and that the (e) test never spends quota. Then paste the run's `EVIDENCE` lines with the CLI versions.
+In `docs/wsd.md` §5, after the paragraph that begins "**The live gate (plan 4 Task 14).**", add a paragraph naming `HZ_LIVE_ACCOUNTS`, `HZ_LIVE_ACCOUNTS_CODEX`, `HZ_LIVE_ACCOUNTS_CLAUDE` and `HZ_LIVE_ACCOUNTS_LIMITED`. It should say that each test runs only for an enabled capability and that the (e) test never spends quota. Then paste the run's `EVIDENCE` lines with the CLI versions.
 
 ```bash
 git add tests/live/test_live_accounts.py docs/wsd.md
