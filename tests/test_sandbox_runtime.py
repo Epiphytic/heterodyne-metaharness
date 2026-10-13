@@ -15,6 +15,8 @@ from tmux_guard import new_test_tmux
 from wsd_env import Clock, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
+from heterodyne.sandbox import runtime as runtime_mod
+from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.runtime import (
     BRANCH_TAKEN,
     RESOLVE_POINTS,
@@ -27,7 +29,6 @@ from heterodyne.sandbox.runtime import (
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
-from heterodyne.tmux import TmuxError
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.runtime import (
     Action,
@@ -1205,17 +1206,28 @@ def test_resolve_refuses(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, case:
         write_record(layout, msgspec.structs.replace(record(rig, key), **change))
     elif case == "bad short ID":
         sid = sid.upper()
-    elif case in ("pane", "older reaper"):
-        name = f"wsd-{sid}" if case == "pane" else f"wsd-{sid}-r1"
-        rig.tmux.new_session(name, rig.root, ["sleep", "60"])
-    elif case == "older sandbox":
-        rig.backend.extra.add(f"{sid}g1")
+    elif case == "pane":
+        rig.tmux.new_session(f"wsd-{sid}", rig.root, ["sleep", "60"])
+    elif case in ("older reaper", "older sandbox"):
+        # The record is of generation 3; the actor left over is generation 1's, so only a match across
+        # generations finds it.
+        generation = 3
+        write_record(layout, msgspec.structs.replace(record(rig, key), generation=3))
+        if case == "older reaper":
+            rig.tmux.new_session(f"wsd-{sid}-r1", rig.root, ["sleep", "60"])
+        else:
+            rig.backend.extra.add(f"{sid}g1")
     elif case == "orphan":
         layout.record.unlink()
     elif case == "tmux listing":
-        def broken() -> set[str]:
-            raise TmuxError("tmux list-sessions failed: lost")
-        monkeypatch.setattr(rig.tmux, "session_names", broken)
+        real = rig.tmux._exec
+
+        def lost(argv: list[str], *, input: bytes | None,
+                 timeout: float) -> subprocess.CompletedProcess[bytes]:
+            if "list-sessions" in argv:                     # tmux's own words for a dropped connection
+                return subprocess.CompletedProcess(argv, 1, b"", b"server exited unexpectedly\n")
+            return real(argv, input=input, timeout=timeout)
+        monkeypatch.setattr(rig.tmux, "_exec", lost)
     else:
         rig.backend.list_failures = 1
     raises = RuntimeUnavailable if case.endswith("listing") else ResolveRefused
@@ -1227,8 +1239,12 @@ def test_resolve_refuses(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, case:
         return
     rec = record(rig, key)
     assert host_tip(rig, "btq/btq-1") == branch and os.path.lexists(layout.record)
-    assert not os.path.lexists(intent_path(rig, key)) and not os.path.lexists(trash_path(rig, key))
+    for g in (1, 3):
+        assert not os.path.lexists(intent_path(rig, key, g)) and not os.path.lexists(trash_path(rig, key, g))
+    inspect = rig.runtime.c.sessions.parent / "inspect"
+    assert not inspect.exists() or not any(inspect.iterdir())
     assert rec.unlanded == (case != "not unlanded")
+    assert rec.generation == (3 if case.startswith("older") else 1)
 
 
 class Crash(Exception):
@@ -1252,6 +1268,74 @@ def test_a_clean_resolve_passes_every_point(rig: RuntimeRig) -> None:
     rig.runtime.cp = passed.append
     rig.runtime.resolve_unlanded("alpha", short_id(key), 1, "land", made)
     assert tuple(passed) == RESOLVE_POINTS
+
+
+def record_durability(runtime: SandboxRuntime, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every fsync of the import, every directory sync and intent write of the runtime, and every point,
+    in order."""
+    events: list[tuple[str, str]] = []
+    fsync, sync_dir, write = sessiongit._fsync, runtime_mod._sync_dir, runtime_mod.write_private
+
+    def fsync_(path: Path, *, directory: bool = False) -> None:
+        events.append(("fsync", str(path)))
+        fsync(path, directory=directory)
+
+    def sync_dir_(path: Path) -> None:
+        events.append(("sync", str(path)))
+        sync_dir(path)
+
+    def write_(path: Path, text: str) -> None:
+        events.append(("write", str(path)))
+        write(path, text)
+    monkeypatch.setattr(sessiongit, "_fsync", fsync_)
+    monkeypatch.setattr(runtime_mod, "_sync_dir", sync_dir_)
+    monkeypatch.setattr(runtime_mod, "write_private", write_)
+    runtime.cp = lambda name: events.append(("cp", name))
+    return events
+
+
+def host_common(rig: RuntimeRig) -> Path:
+    return Path(host_git(rig, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+
+@pytest.mark.safety
+@pytest.mark.parametrize("run", ["first", "replay"])
+@pytest.mark.parametrize("action", ["land", "keep"])
+def test_the_import_is_durable_before_it_is_recorded(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch,
+                                                      action: Action, run: str) -> None:
+    key, made = make_unlanded(rig)
+    sid, common = short_id(key), host_common(rig)
+    runtime = rig.runtime
+    if run == "replay":                       # the import happened, then a crash before its checkpoint:
+        crash_at(rig, "imported")             # the replay finds it done and must still make it durable
+        with pytest.raises(Crash):
+            rig.runtime.resolve_unlanded("alpha", sid, 1, action, made)
+        runtime = restarted(rig)
+    events = record_durability(runtime, monkeypatch)
+    done = runtime.resolve_unlanded("alpha", sid, 1, action, made)
+    ref = "refs/heads/btq/btq-1" if action == "land" else done.ref
+    recorded = events.index(("cp", "imported"))
+    synced = {path for kind, path in events[:recorded] if kind == "fsync"}
+    packs = {str(e) for e in (common / "objects" / "pack").iterdir()}
+    parts = ref.split("/")
+    dirs = {str(common.joinpath(*parts[:n])) for n in range(len(parts))}
+    assert packs and packs <= synced
+    loose = common.joinpath(*parts)
+    assert (str(loose) in synced) == loose.exists()
+    assert dirs | {str(common / "objects"), str(common / "objects" / "pack")} <= synced
+
+
+@pytest.mark.safety
+def test_the_state_directory_is_synced_before_the_first_intent(rig: RuntimeRig,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    key, made = make_unlanded(rig)
+    state = rig.runtime.c.sessions.parent
+    assert not os.path.lexists(state / "resolutions")
+    events = record_durability(rig.runtime, monkeypatch)
+    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, "land", made)
+    first = events.index(("write", str(intent_path(rig, key))))
+    assert ("sync", str(state)) in events[:first]
+    assert not any(kind in ("fsync", "cp") for kind, _ in events[:first])    # nothing done before it
 
 
 @pytest.mark.parametrize("action", ["land", "keep", "discard"])

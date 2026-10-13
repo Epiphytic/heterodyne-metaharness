@@ -1,5 +1,6 @@
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -125,4 +126,33 @@ def test_session_names_never_reads_a_failure_as_no_sessions(tmux: Tmux, tmp_path
     finally:
         tmux.socket_path.chmod(0o700)
     tmux.kill_server()
-    assert tmux.session_names() == set()
+
+    def listed_empty() -> bool:
+        try:                                               # a server still exiting is a lost connection,
+            return tmux.session_names() == set()           # never an empty listing
+        except TmuxError as e:
+            assert "server exited unexpectedly" in str(e) or "lost server" in str(e)
+            return False
+    wait_for(listed_empty)
+
+
+@pytest.mark.safety
+@pytest.mark.parametrize(("stderr", "absent"), [
+    ("no server running on /tmp/tmux-1/x", True),
+    ("error connecting to /tmp/tmux-1/x (No such file or directory)", True),
+    ("lost server", False),
+    ("server exited unexpectedly", False),
+    ("error connecting to /tmp/tmux-1/x (Permission denied)", False),
+    ("can't find session: s", False),
+    ("", False),
+])
+def test_session_names_reads_only_a_missing_server_as_no_sessions(
+        tmux: Tmux, monkeypatch: pytest.MonkeyPatch, stderr: str, absent: bool) -> None:
+    def exec_(argv: list[str], *, input: bytes | None, timeout: float) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 1, b"", stderr.encode() + b"\n")
+    monkeypatch.setattr(tmux, "_exec", exec_)
+    if absent:
+        assert tmux.session_names() == set()
+    else:
+        with pytest.raises(TmuxError, match="list-sessions failed"):
+            tmux.session_names()

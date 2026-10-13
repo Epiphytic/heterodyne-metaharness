@@ -199,6 +199,47 @@ def _import(p: Pinned, objects: Path, tip: str) -> None:
     pinned_git(p, "rev-list", "--quiet", "--objects", tip, "--not", "--all")      # connected, here alone
 
 
+def _fsync(path: Path, *, directory: bool = False) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_DIRECTORY if directory else 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def make_durable(p: Pinned, ref: str) -> None:
+    """fsync every pack in the repository, `ref` and the directories naming them, whatever core.fsync
+    says: git's success is no proof its writes reached the disk. The import writes only a pack (index-pack),
+    so the packs hold its objects; the ref is a loose file, packed-refs or reftable, and each that exists is
+    synced. Every path is opened without following a link."""
+    common = p.common
+    try:
+        objects, packs = no_link(common, "objects"), no_link(common, "objects", "pack")
+        for entry in sorted(packs.iterdir()):
+            if stat.S_ISREG(os.lstat(entry).st_mode):
+                _fsync(entry)
+        _fsync(packs, directory=True)
+        _fsync(objects, directory=True)
+        parts = ref.split("/")
+        if all(parts) and ".." not in parts and os.path.lexists(loose := common.joinpath(*parts)):
+            no_link(common, *parts)
+            _fsync(loose)
+            for depth in range(len(parts) - 1, 0, -1):
+                _fsync(common.joinpath(*parts[:depth]), directory=True)
+        if os.path.lexists(packed := common / "packed-refs"):
+            _fsync(packed)
+        if os.path.lexists(table := common / "reftable"):
+            no_link(common, "reftable")
+            for entry in sorted(table.iterdir()):
+                if stat.S_ISREG(os.lstat(entry).st_mode):
+                    _fsync(entry)
+            _fsync(table, directory=True)
+        _fsync(common, directory=True)
+    except OSError as exc:
+        raise GitFailed(f"the import can't be made durable ({type(exc).__name__})") from None
+
+
 # --- the operator's resolve (btq-xb56t) ---
 
 

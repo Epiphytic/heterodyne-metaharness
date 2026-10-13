@@ -796,8 +796,11 @@ class SandboxRuntime:
                                          "unfinished; run `wsctl resolve` for it again")
 
     def _write_intent(self, intent: Intent) -> Intent:
-        """Atomic and durable: a temporary file, an fsync, the rename, an fsync of `resolutions/`."""
+        """Atomic and durable: a temporary file, an fsync, the rename, an fsync of `resolutions/`. `<state>`
+        is synced first, so the entry of a `resolutions/` just created is on disk before anything rests on
+        an intent in it."""
         private_dir(self._resolutions())
+        _sync_dir(self._resolutions().parent)
         write_private(self._intent_path(short_id(intent.key), intent.generation),
                       msgspec.json.encode(intent).decode())
         return intent
@@ -961,32 +964,34 @@ class SandboxRuntime:
             raise ResolveRefused(KEEP_REFUSED)
 
     def _act(self, intent: Intent, p: gitwip.Pinned | None, snap: sessiongit.Snapshot) -> None:
-        """The action, idempotent: a land already at the tip, or a keep ref already there, is done."""
+        """The action, idempotent: a land already at the tip, or a keep ref already there, is done. Either
+        way the repository's packs and the ref are made durable before it returns, since the caller then
+        records the import and deletes the session's own copy."""
         if intent.action == "discard":
             return
         tip = intent.tip
         if p is None or tip is None or snap.tip != tip:
             raise ResolveRefused("the session's tip is no longer the confirmed one")
+        ref = f"refs/heads/{p.branch}" if intent.action == "land" else intent.ref
         try:
             if intent.action == "land":
                 landed = sessiongit.landed(p)
-                if landed == tip:
-                    return
-                if not sessiongit.fast_forward(p, snap, landed):
-                    raise ResolveRefused(NO_FAST_FORWARD)
-                sessiongit.import_snapshot(p, snap, tip, f"refs/heads/{p.branch}", landed)
-                return
-            at = sessiongit.ref_at(p, intent.ref)
-            if at == tip:
-                return
-            if at is not None:
-                raise ResolveRefused(KEEP_REFUSED)
+                if landed != tip:
+                    if not sessiongit.fast_forward(p, snap, landed):
+                        raise ResolveRefused(NO_FAST_FORWARD)
+                    sessiongit.import_snapshot(p, snap, tip, ref, landed)
+            else:
+                at = sessiongit.ref_at(p, ref)
+                if at is not None and at != tip:
+                    raise ResolveRefused(KEEP_REFUSED)
+                if at is None:
+                    try:
+                        sessiongit.import_snapshot(p, snap, tip, ref, ZERO)
+                    except gitwip.GitFailed:
+                        raise ResolveFailed(KEEP_REFUSED) from None
+            sessiongit.make_durable(p, ref)
         except gitwip.GitFailed:
             raise ResolveFailed("the session's commits could not be imported") from None
-        try:
-            sessiongit.import_snapshot(p, snap, tip, intent.ref, ZERO)
-        except gitwip.GitFailed:
-            raise ResolveFailed(KEEP_REFUSED) from None
 
     def _step(self, intent: Intent, step: str) -> Intent:
         return self._write_intent(msgspec.structs.replace(intent, step=step))
