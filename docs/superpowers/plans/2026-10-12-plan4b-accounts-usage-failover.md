@@ -817,3 +817,341 @@ git add src/heterodyne/wsd/credlock.py src/heterodyne/wsd/settings.py tests/test
         tests/test_wsd_settings.py
 git commit -m "plan4b T2: the D8 credential lock"
 ```
+
+## Task 3: the install-root walk and the exemption for the CLI's own bind
+
+r16 §7: the Codex CLI installs under `~/.codex`, the default login's directory. Once a named account is chosen, the default login is another account's, and plan 4's check refuses the CLI's bind ("a bind would reach into another account's login directory"). r16 replaces that refusal, for the CLI's own bind only, with a proof: a bounded walk of the install root that finds nothing that is, names or reaches a login file. Plan 4b runs the walk whenever the root lies inside any login directory, the chosen one's included (E12).
+
+**Files:**
+- Modify: `src/heterodyne/sandbox/spec.py` (the `ROOT_*` texts and bounds, `OTHER_ACCOUNT_DIR`, `check_install_root`, `SandboxSpec.cli_root`, `build_spec`, `check_credentials`)
+- Test: `tests/test_sandbox_spec.py`
+
+**Interfaces:**
+- Consumes: nothing from other tasks.
+- Produces:
+  - `spec.check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None`, raising `SpecRefused` with exactly one of `spec.ROOT_NOT_CANONICAL`, `ROOT_LOGIN_NAME`, `ROOT_LOGIN_ALIAS`, `ROOT_LINK_OUT`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE` or `ROOT_WALK_FAILED`.
+  - `spec.ROOT_MAX_ENTRIES = 100_000` and `spec.ROOT_MAX_DEPTH = 64`, read at call time.
+  - `spec.OTHER_ACCOUNT_DIR`: the existing refusal text, now a constant.
+  - `SandboxSpec.cli_root: Path | None = None`, set by `build_spec` from `AgentFacts.cli_root`.
+  - `check_credentials(spec, protected, real_home)` keeps its signature. It walks `spec.cli_root` when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account rule. Task 6 relies on this for named Codex accounts.
+
+The walk cannot be skipped by a caller: it is part of `check_credentials`, which plan 4's runtime already calls on every launch just before `backend.create`, and `build_spec` always records the root.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_sandbox_spec.py`, import `heterodyne.sandbox.spec as spec_mod`, `os`, and the new names (`OTHER_ACCOUNT_DIR`, `ROOT_LINK_OUT`, `ROOT_LOGIN_ALIAS`, `ROOT_LOGIN_NAME`, `ROOT_NOT_CANONICAL`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_WALK_FAILED`, `check_install_root`). Make `facts` build from the canonical temporary directory, so the CLI root is canonical as `Cli.root` always is (`find_binary` resolves it):
+
+```python
+def facts(root: Path) -> AgentFacts:
+    cli = root.resolve() / "home" / ".codex" / "packages" / "rel" / "bin"
+```
+
+(the rest of `facts` is unchanged). Then append:
+
+```python
+# --- the install-root walk (r16 §7, plan 4b E12) ---
+
+def named(root: Path) -> tuple[SpecInput, Protected]:
+    """A named account (.codex-b) chosen: the default login, which holds the CLI, is another account's."""
+    chosen = root / "home" / ".codex-b"
+    chosen.mkdir(parents=True, exist_ok=True)
+    (chosen / "auth.json").write_text("{}")
+    i = spec_input(root)
+    default = root / "home" / ".codex"
+    return (replace(i, login_files=(chosen / "auth.json",)),
+            Protected(chosen_dir=chosen, chosen_files=(chosen / "auth.json",), other_dirs=(default,),
+                      other_files=(default / "auth.json",)))
+
+
+def cli_root(spec: SandboxSpec) -> Path:
+    assert spec.cli_root is not None
+    return spec.cli_root
+
+
+def test_the_spec_records_the_cli_root(tmp_path: Path) -> None:
+    i = spec_input(tmp_path)
+    assert build_spec(i).cli_root == i.agent.cli_root
+
+
+def test_the_cli_inside_another_accounts_login_dir_passes_once_walked(tmp_path: Path) -> None:
+    i, prot = named(tmp_path)
+    spec = build_spec(i)
+    check_credentials(spec, prot, tmp_path / "home")
+    with pytest.raises(SpecRefused) as refused:            # plan 4's rule, for any other bind
+        check_credentials(replace(spec, binds=(*spec.binds, Bind(tmp_path / "home" / ".codex" / "packages",
+                                                                Path("/mnt/x"), True))),
+                          prot, tmp_path / "home")
+    assert str(refused.value) == OTHER_ACCOUNT_DIR
+
+
+@pytest.mark.parametrize("change", [{"read_only": False}, {"target": Path("/mnt/cli")}])
+def test_only_the_cli_bind_read_only_at_its_own_path_is_exempt(tmp_path: Path,
+                                                               change: dict[str, object]) -> None:
+    i, prot = named(tmp_path)
+    spec = build_spec(i)
+    root = cli_root(spec)
+    binds = tuple(replace(b, **change) if b.source == root else b for b in spec.binds)  # type: ignore[arg-type]
+    with pytest.raises(SpecRefused) as refused:
+        check_credentials(replace(spec, binds=binds), prot, tmp_path / "home")
+    assert str(refused.value) == OTHER_ACCOUNT_DIR
+
+
+def test_a_walk_refusal_refuses_the_launch_inside_the_chosen_dir_too(tmp_path: Path) -> None:
+    spec = build_spec(spec_input(tmp_path))                # the CLI under the chosen ~/.codex
+    (cli_root(spec) / "auth.json").write_text("{}")
+    with pytest.raises(SpecRefused) as refused:
+        check_credentials(spec, protected(tmp_path), tmp_path / "home")
+    assert str(refused.value) == ROOT_LOGIN_NAME
+
+
+def test_a_root_outside_every_login_dir_is_not_walked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    walked: list[Path] = []
+    monkeypatch.setattr(spec_mod, "check_install_root", lambda root, names, files: walked.append(root))
+    outside = tmp_path / "opt" / "cli"
+    outside.mkdir(parents=True)
+    spec = build_spec(spec_input(tmp_path))
+    check_credentials(replace(spec, cli_root=outside.resolve()), protected(tmp_path), tmp_path / "home")
+    assert walked == []
+    check_credentials(spec, protected(tmp_path), tmp_path / "home")
+    assert walked == [cli_root(spec)]
+
+
+def tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A canonical install root with a little content, and a login file outside it."""
+    root = tmp_path / "root"
+    root.mkdir()
+    root = root.resolve()
+    (root / "bin").mkdir()
+    (root / "bin" / "cli").write_text("")
+    (root / "lib" / "deep").mkdir(parents=True)
+    (root / "lib" / "deep" / "x.js").write_text("")
+    (root / "lib" / "here").symlink_to(root / "bin" / "cli")             # a link that stays inside
+    login = tmp_path / "login" / "auth.json"
+    login.parent.mkdir()
+    login.write_text("{}")
+    return root, login
+
+
+def test_a_clean_tree_passes(tmp_path: Path) -> None:
+    root, login = tree(tmp_path)
+    check_install_root(root, ("auth.json",), (login, tmp_path / "missing" / "auth.json"))
+
+
+def _name(root: Path, login: Path) -> None:
+    (root / "lib" / "auth.json").mkdir()
+
+
+def _alias(root: Path, login: Path) -> None:
+    os.link(login, root / "lib" / "deep" / "innocent")
+
+
+def _link_out(root: Path, login: Path) -> None:
+    (root / "lib" / "out").symlink_to(login.parent)
+
+
+def _dangling_out(root: Path, login: Path) -> None:
+    (root / "lib" / "gone").symlink_to(root.parent / "nowhere")
+
+
+def _fifo(root: Path, login: Path) -> None:
+    os.mkfifo(root / "lib" / "pipe")
+
+
+@pytest.mark.parametrize(("plant", "reason"), [(_name, ROOT_LOGIN_NAME), (_alias, ROOT_LOGIN_ALIAS),
+                                                (_link_out, ROOT_LINK_OUT), (_dangling_out, ROOT_LINK_OUT),
+                                                (_fifo, ROOT_SPECIAL)])
+def test_each_way_to_reach_a_login_is_refused(tmp_path: Path, plant: Callable[[Path, Path], None],
+                                              reason: str) -> None:
+    root, login = tree(tmp_path)
+    plant(root, login)
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(root, ("auth.json",), (login,))
+    assert str(refused.value) == reason
+
+
+def test_a_root_that_is_not_canonical_is_refused(tmp_path: Path) -> None:
+    root, login = tree(tmp_path)
+    (tmp_path / "alias").symlink_to(root)
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(tmp_path / "alias", ("auth.json",), (login,))
+    assert str(refused.value) == ROOT_NOT_CANONICAL
+
+
+@pytest.mark.parametrize(("bound", "value"), [("ROOT_MAX_ENTRIES", 4), ("ROOT_MAX_DEPTH", 1)])
+def test_a_tree_past_a_bound_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str,
+                                        value: int) -> None:
+    root, login = tree(tmp_path)                           # 6 entries, 3 levels
+    monkeypatch.setattr(spec_mod, bound, value)
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(root, ("auth.json",), (login,))
+    assert str(refused.value) == ROOT_TOO_LARGE
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_unreadable_directory_or_login_refuses(tmp_path: Path) -> None:
+    root, login = tree(tmp_path)
+    locked = root / "lib" / "deep"
+    locked.chmod(0)
+    try:
+        with pytest.raises(SpecRefused) as refused:
+            check_install_root(root, ("auth.json",), (login,))
+        assert str(refused.value) == ROOT_WALK_FAILED
+    finally:
+        locked.chmod(0o700)
+    login.parent.chmod(0)
+    try:
+        with pytest.raises(SpecRefused) as refused:
+            check_install_root(root, ("auth.json",), (login,))
+        assert str(refused.value) == ROOT_WALK_FAILED
+    finally:
+        login.parent.chmod(0o700)
+
+
+def test_the_root_texts_name_no_path() -> None:
+    for text in (ROOT_NOT_CANONICAL, ROOT_LOGIN_NAME, ROOT_LOGIN_ALIAS, ROOT_LINK_OUT, ROOT_SPECIAL,
+                 ROOT_TOO_LARGE, ROOT_WALK_FAILED, OTHER_ACCOUNT_DIR):
+        assert "/" not in text and "auth.json" not in text
+```
+
+Also import `Callable` from `collections.abc` and `SandboxSpec` from `heterodyne.sandbox.spec`.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_sandbox_spec.py -q`
+Expected: FAIL at import (`cannot import name 'OTHER_ACCOUNT_DIR'`).
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/sandbox/spec.py`, add `import stat` and `from collections.abc import Iterable, Mapping`, then the constants after `LAUNCHER_ENV`:
+
+```python
+# The install-root walk (r16 §7, plan 4b E12). Read at call time, so tests can lower the bounds.
+ROOT_MAX_ENTRIES = 100_000
+ROOT_MAX_DEPTH = 64
+ROOT_NOT_CANONICAL = "the CLI install root inside a login directory is not a canonical path"
+ROOT_LOGIN_NAME = "the CLI install root holds an entry named like a login file"
+ROOT_LOGIN_ALIAS = "the CLI install root holds a hard link to a login file"
+ROOT_LINK_OUT = "the CLI install root holds a symbolic link that leaves it"
+ROOT_SPECIAL = "the CLI install root holds something other than files, directories and links"
+ROOT_TOO_LARGE = "the CLI install root is too large or too deep to check"
+ROOT_WALK_FAILED = "the CLI install root can't be read to check it"
+OTHER_ACCOUNT_DIR = "a bind would reach into another account's login directory"
+```
+
+Add the field at the end of `SandboxSpec`:
+
+```python
+    cli_root: Path | None = None        # the CLI's install root, for the install-root walk (plan 4b E12)
+```
+
+In `build_spec`, pass it:
+
+```python
+    return SandboxSpec(name, i.worktree, binds, tuple(logins), read_only, read_write, tuple(egress), env,
+                       i.uid, i.gid, cli_root=i.agent.cli_root)
+```
+
+Add `check_install_root` before `check_credentials`:
+
+```python
+def check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None:
+    """r16 §7: the CLI's install root holds nothing that is, names or reaches a login file. The root is
+    canonical; no entry is named like a login file; no entry is a hard link to one (same device and
+    inode as any of `login_files`, every configured account's); every symbolic link resolves inside the
+    root; everything else is a regular file or a directory. Links are never followed by the walk. A tree
+    past ROOT_MAX_ENTRIES entries or ROOT_MAX_DEPTH levels, or any error reading it, refuses."""
+    if str(root) != os.path.realpath(root):
+        raise SpecRefused(ROOT_NOT_CANONICAL)
+    names = frozenset(login_names)
+    aliases: set[tuple[int, int]] = set()
+    for login in login_files:
+        try:
+            st = os.stat(login)
+        except FileNotFoundError:
+            continue                            # nothing there to alias
+        except OSError:
+            raise SpecRefused(ROOT_WALK_FAILED) from None
+        aliases.add((st.st_dev, st.st_ino))
+    entries = 0
+    pending = [(root, 0)]
+    try:
+        while pending:
+            folder, depth = pending.pop()
+            with os.scandir(folder) as found:
+                for entry in found:
+                    entries += 1
+                    if entries > ROOT_MAX_ENTRIES:
+                        raise SpecRefused(ROOT_TOO_LARGE)
+                    if entry.name in names:
+                        raise SpecRefused(ROOT_LOGIN_NAME)
+                    st = entry.stat(follow_symlinks=False)
+                    if (st.st_dev, st.st_ino) in aliases:
+                        raise SpecRefused(ROOT_LOGIN_ALIAS)
+                    if stat.S_ISLNK(st.st_mode):
+                        if not Path(os.path.realpath(entry.path)).is_relative_to(root):
+                            raise SpecRefused(ROOT_LINK_OUT)
+                    elif stat.S_ISDIR(st.st_mode):
+                        if depth >= ROOT_MAX_DEPTH:
+                            raise SpecRefused(ROOT_TOO_LARGE)
+                        pending.append((Path(entry.path), depth + 1))
+                    elif not stat.S_ISREG(st.st_mode):
+                        raise SpecRefused(ROOT_SPECIAL)
+    except OSError:
+        raise SpecRefused(ROOT_WALK_FAILED) from None
+```
+
+Replace `check_credentials`:
+
+```python
+def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) -> None:
+    """D10. The login binds are exactly the chosen account's login files, read-only. No other bind's
+    source, by its own path or its canonical one, equals or contains the real home, a login directory or
+    a login file, or lies inside another account's login directory (r15 §7), by its own path or any the
+    kernel walks through to resolve it (`_route`): a symlink out of that directory doesn't excuse a route
+    into it.
+
+    The CLI's install root may lie inside a login directory: the Codex CLI installs under the default
+    login's. Then the root must first pass `check_install_root`, whichever account is chosen (r16 §7,
+    plan 4b E12), and only its own bind, read-only at its canonical path, is exempt from the
+    other-account rule: the same tree is bound under every account."""
+    want = {_real(p) for p in protected.chosen_files}
+    got = [_real(b.source) for b in spec.logins]
+    if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
+        raise SpecRefused("the login binds are not exactly the chosen account's login files, read-only")
+    guarded = {q for p in (protected.chosen_dir, *protected.chosen_files, *protected.other_dirs,
+                           *protected.other_files) for q in (p, _real(p))}
+    other_dirs = {q for p in protected.other_dirs for q in (p, _real(p))}
+    login_dirs = {q for p in (protected.chosen_dir, *protected.other_dirs) for q in (p, _real(p))}
+    homes = {real_home, _real(real_home)}
+    exempt: Bind | None = None
+    root = spec.cli_root
+    if root is not None and any(q.is_relative_to(d) for q in (root, _real(root)) for d in login_dirs):
+        files = (*protected.chosen_files, *protected.other_files)
+        check_install_root(root, {f.name for f in files}, files)
+        exempt = Bind(root, root, True)
+    for b in spec.binds:
+        for source in {b.source, _real(b.source)}:
+            if any(h.is_relative_to(source) for h in homes):
+                raise SpecRefused("a bind would expose the real home directory")
+            if any(p.is_relative_to(source) for p in guarded):
+                raise SpecRefused("a bind would expose a login directory or login file")
+        if b == exempt:
+            continue
+        if any(q.is_relative_to(d) for q in (b.source, *_route(b.source)) for d in other_dirs):
+            raise SpecRefused(OTHER_ACCOUNT_DIR)
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_sandbox_spec.py tests/test_sandbox_runtime.py tests/test_sandbox_openshell_policy.py tests/test_sandbox_openshell_selftest.py -q`
+Expected: PASS. Plan 4's existing tests, `test_credentials_pass_with_cli_inside_the_chosen_login_dir` included, still pass: that tree is clean, so the walk passes.
+
+Then: `timeout 300 uv run pyright src/heterodyne/sandbox/spec.py tests/test_sandbox_spec.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/sandbox/spec.py tests/test_sandbox_spec.py
+git commit -m "plan4b T3: the install-root walk and the CLI bind's exemption (r16 §7)"
+```
