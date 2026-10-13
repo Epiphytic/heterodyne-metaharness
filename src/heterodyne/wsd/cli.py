@@ -28,7 +28,8 @@ import sys
 from collections.abc import Callable, Sequence
 
 from heterodyne.config import ConfigError
-from heterodyne.sandbox.build import build_runtime
+from heterodyne.sandbox import hostread
+from heterodyne.sandbox.build import build_runtime, build_usage_reader
 from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
@@ -36,6 +37,7 @@ from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
 from heterodyne.wsd.runtime import AgentRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
+from heterodyne.wsd.usage import UsageReader
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
 
@@ -49,7 +51,7 @@ def _factory(s: WsdSettings) -> btq.QueueFactory:
 
 
 def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
-        exit_now: Callable[[int], object] = os._exit) -> int:
+        exit_now: Callable[[int], object] = os._exit, *, usage_reader: UsageReader | None = None) -> int:
     try:
         lock = instance_lock(s.instance_lock)
     except AlreadyRunning:
@@ -57,6 +59,7 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
         return 1
     held = False        # jobs outlived shutdown: keep the journal and the lock until the process exits
     try:
+        hostread.recover(s.state_dir / "hostread")     # never raises; under the lock, before any read
         try:
             journal = _open(s, factory)
         except upgrade.UpgradeAborted as exc:
@@ -69,7 +72,7 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
         try:
             if journal.fresh:
                 journal.emit("-", None, "journal_created")
-            daemon = Wsd(s, assemble(s, journal, factory, runtime))
+            daemon = Wsd(s, assemble(s, journal, factory, runtime, usage_reader=usage_reader))
             asyncio.run(_serve(daemon))
             return 0
         except ctl.SocketPathTaken as exc:
@@ -156,7 +159,8 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
     try:
         s = _settings()
         if args.cmd == "run":
-            return run(s, _factory(s), build_runtime(s, os.environ))
+            return run(s, _factory(s), build_runtime(s, os.environ),
+                       usage_reader=build_usage_reader(s, os.environ))
     except ConfigError as exc:
         print(f"wsd: {exc}", file=sys.stderr)
         return EX_CONFIG

@@ -81,6 +81,7 @@ from heterodyne.wsd.runtime import (
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
+from heterodyne.wsd.usage import NoUsageReader, UsageReader
 from heterodyne.wsd.workstream import Deps, WorkstreamSettings
 
 NEEDS_A_HUMAN = "not idle; a human must act"
@@ -199,10 +200,11 @@ class Parts:
 
 def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: AgentRuntime,
              reconciler: Callable[[BeadsAdapter], ActionReconciler] = HoldingReconciler,
-             cp: Checkpoint = nothing) -> Parts:
+             cp: Checkpoint = nothing, usage_reader: UsageReader | None = None) -> Parts:
     beads = BeadsAdapter(factory)
     gate = ClaimGate(s.lock_dir, beads, cp)
-    deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp)
+    deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
+                usage_reader=usage_reader if usage_reader is not None else NoUsageReader())
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
 
 

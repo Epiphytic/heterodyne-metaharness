@@ -11,6 +11,7 @@ from pathlib import Path
 
 from heterodyne.config import ConfigError, load
 from heterodyne.config.layers import table_at
+from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend, tool_env
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime
@@ -18,6 +19,7 @@ from heterodyne.sandbox.settings import sandbox_settings
 from heterodyne.tmux import Tmux
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.usage import NoUsageReader, UsageReader
 from heterodyne.wsd.workstream import utc_now
 
 TMUX_SOCKET = "heterodyne-wsd"
@@ -67,3 +69,16 @@ def build_runtime(s: WsdSettings, env: Mapping[str, str], *,
     backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
                                tool_env(env, settings.tool_env))
     return SandboxRuntime(config, backend, OpenShellSelfTest())
+
+
+def build_usage_reader(s: WsdSettings, env: Mapping[str, str]) -> UsageReader:
+    """D9 (d)'s trusted read, when the sandbox runtime runs and a Codex binary is configured. The
+    capability table decides whether wsd ever asks it (E15)."""
+    settings = sandbox_settings(env)
+    binary = settings.binaries.get("codex")
+    if settings.backend != "openshell" or s.accounts is None or not binary:
+        return NoUsageReader()
+    path = env.get("PATH", os.defpath)
+    base = {"PATH": path, "HOME": env.get("HOME", ""), "LANG": "C.UTF-8"}
+    return HostUsageReader(s.accounts, binary, path, s.credlock_dir, s.state_dir / "hostread",
+                           settings.lock_wait_seconds, env=base)
