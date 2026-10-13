@@ -24,6 +24,23 @@ class ExecResult:
     stderr: bytes
 
 
+@dataclass(frozen=True)
+class Watch:
+    """g08sd: what the reaper reads at the deadline, before its first kill, to record (in `marker`) that it
+    found this generation live: the record names it running, the backend lists it, and its pane lives."""
+    generation: int
+    marker: Path
+    pane: str                       # the agent's tmux session, on wsd's tmux server
+    tmux: str                       # the tmux binary
+    tmux_socket: str                # the server's socket name (`-L`)
+    tmux_socket_path: Path | None   # or its exact socket (`-S`)
+
+    def argv(self) -> list[str]:
+        path = [] if self.tmux_socket_path is None else ["--tmux-socket-path", str(self.tmux_socket_path)]
+        return ["--generation", str(self.generation), "--marker", str(self.marker), "--pane", self.pane,
+                "--tmux", self.tmux, "--tmux-socket", self.tmux_socket, *path]
+
+
 class Backend(Protocol):
     def available(self) -> bool:
         """Whether the backend answers at all (checked before every claim)."""
@@ -71,8 +88,9 @@ class Backend(Protocol):
         """The environment `tty_argv` gives the host command."""
         ...
 
-    def reaper_argv(self, name: str, deadline: int, record: Path) -> list[str]:
+    def reaper_argv(self, name: str, deadline: int, record: Path, watch: Watch) -> list[str]:
         """A host command, run outside wsd (D13's backstop), that waits until `deadline` (UTC epoch
         seconds) and then deletes the sandbox until the backend no longer lists it. It reads the session
-        `record` before it goes (`reaper.settled`). It carries its own environment, as `tty_argv` does."""
+        `record` before it goes (`reaper.settled`), and `watch` before its first kill (g08sd). It carries
+        its own environment, as `tty_argv` does."""
         ...

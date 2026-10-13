@@ -109,6 +109,11 @@ class SessionLayout:
     def scratch(self, generation: int) -> Path:
         return self.root / f"r{generation}-scratch"
 
+    def reaped(self, generation: int) -> Path:
+        """g08sd: the reaper's record that it found this generation live at its deadline, beside the
+        session record and outside every bind."""
+        return self.root / f"reaped-r{generation}.json"
+
 
 @dataclass(frozen=True)
 class Bind:

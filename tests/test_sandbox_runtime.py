@@ -14,6 +14,7 @@ from tmux_guard import new_test_tmux
 from wsd_env import Clock, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
+from heterodyne.sandbox import reaper
 from heterodyne.sandbox.runtime import (
     BRANCH_TAKEN,
     WIP_FAILED,
@@ -26,7 +27,14 @@ from heterodyne.sandbox.runtime import (
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip, ids
-from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
+from heterodyne.wsd.runtime import (
+    EndCause,
+    Ended,
+    LaunchFailed,
+    LaunchUncertain,
+    Liveness,
+    RuntimeUnavailable,
+)
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
                                  reason="tmux and setsid are needed")
@@ -752,6 +760,355 @@ def test_a_tmux_server_it_cant_reach_never_confirms_the_pane_gone(rig: RuntimeRi
     rig.runtime.stop(spec.session_key)
     assert record(rig, spec.session_key).phase is Phase.ENDED
     assert not rig.tmux.has_session(rig.runtime.tmux_name(spec.session_key))
+
+
+# --- g08sd: how each generation ended ---
+
+def cause(rig: RuntimeRig, key: str) -> str:
+    rec = record(rig, key)
+    assert rec.phase is Phase.ENDED
+    return rec.end_cause
+
+
+def kill_pane(rig: RuntimeRig, key: str) -> None:
+    rec = record(rig, key)
+    rig.tmux.kill(rec.tmux_session)
+    assert not rig.tmux.has_session(rec.tmux_session)
+
+
+def reaper_acts(rig: RuntimeRig, key: str) -> bool:
+    """What the reaper does at its first pass past the deadline: decide, once, then kill and delete."""
+    rec, layout = record(rig, key), rig.runtime.layout(key)
+
+    def pane_live() -> bool:
+        return rig.tmux.has_session(rec.tmux_session) and not rig.tmux.pane_dead(rec.tmux_session)
+
+    marked = reaper.mark_live(layout.record, layout.reaped(rec.generation), rec.sandbox, rec.generation,
+                              rig.backend.names, pane_live)
+    rig.tmux.kill(rec.tmux_session)
+    rig.backend.delete(rec.sandbox)
+    return marked
+
+
+def at_deadline(rig: RuntimeRig, key: str) -> int:
+    deadline = record(rig, key).deadline
+    rig.clock.advance(deadline - rig.clock.now)
+    return deadline
+
+
+@pytest.mark.parametrize("how", ["stop", "expire", "found dead", "refused", "stop dead", "expire dead"])
+def test_end_cause_needs_a_live_generation(rig: RuntimeRig, how: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    if how == "refused":
+        rig.selftest.exec_fail = "direct-network-blocked"
+        with pytest.raises(LaunchFailed):
+            rig.runtime.launch(spec)
+        assert cause(rig, spec.session_key) == EndCause.REFUSED
+        return
+    rig.runtime.launch(spec)
+    if how.endswith("dead") or how == "found dead":
+        kill_pane(rig, spec.session_key)
+    if how.startswith("stop"):
+        rig.runtime.stop(spec.session_key)
+    elif how.startswith("expire"):
+        rig.runtime.expire("alpha", at_deadline(rig, spec.session_key))
+    else:
+        assert rig.runtime.sessions("alpha") == []
+    expected = {"stop": EndCause.STOPPED, "expire": EndCause.LIFETIME}.get(how, EndCause.DIED)
+    assert cause(rig, spec.session_key) == expected
+    assert record(rig, spec.session_key).ended_at == rig.clock.now
+
+
+class Crash(Exception):
+    pass
+
+
+def crash_once_stopping(rig: RuntimeRig, key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next teardown crashes after its `stopping` write: the backend's listing raises from then on."""
+    listed = rig.backend.names
+
+    def names() -> set[str]:
+        if record(rig, key).phase is Phase.STOPPING:
+            raise Crash
+        return listed()
+
+    monkeypatch.setattr(rig.backend, "names", names)
+
+
+@pytest.mark.parametrize("first", [EndCause.DIED, EndCause.STOPPED])
+def test_an_end_cause_is_never_changed(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, first: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    with monkeypatch.context() as m:
+        crash_once_stopping(rig, key, m)
+        with pytest.raises(Crash):
+            if first == EndCause.DIED:
+                kill_pane(rig, key)
+                rig.runtime.sessions("alpha")
+            else:
+                rig.runtime.stop(key)
+    rec = record(rig, key)
+    assert (rec.phase, rec.end_cause, rec.stop_reason) == (Phase.STOPPING, first, "")
+    deadline = at_deadline(rig, key)
+    assert rig.runtime.sessions("alpha") == []              # the replay crosses the deadline
+    rec = record(rig, key)
+    assert (rec.phase, rec.end_cause, rec.stop_reason) == (Phase.ENDED, first, "lifetime")
+    assert rec.wip_mark == "" and wip_commits(rig) == 1     # the lifetime WIP landed, once
+    rig.runtime.expire("alpha", deadline)
+    assert wip_commits(rig) == 1 and cause(rig, key) == first
+
+
+@pytest.mark.parametrize("how", ["stop", "expire"])
+def test_a_healthy_stop_whose_cause_cant_be_written_stops_nothing(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """Code r1: the `stopping` write carries the healthy cause. If it fails, the session is left running
+    and the stop is unconfirmed, so a restart lists it live and the retry records the healthy cause; a
+    teardown first would leave a RUNNING record with no cause, which the restart would end `died`."""
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    deadline = at_deadline(rig, key)
+    real = SandboxRuntime._phase
+
+    def failing(self: SandboxRuntime, layout: SessionLayout, rec: SessionRecord,
+                **changes: object) -> SessionRecord:
+        if changes.get("phase") is Phase.STOPPING:
+            raise OSError("disk full")
+        return real(self, layout, rec, **changes)
+
+    with monkeypatch.context() as m:
+        m.setattr(SandboxRuntime, "_phase", failing)
+        with pytest.raises(RuntimeUnavailable):
+            if how == "stop":
+                rig.runtime.stop(key)
+            else:
+                rig.runtime.expire("alpha", deadline)
+    rec = record(rig, key)
+    assert (rec.phase, rec.end_cause) == (Phase.RUNNING, "")
+    assert rig.tmux.has_session(rec.tmux_session) and rec.sandbox in rig.backend.names()
+    restarted = SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
+    assert [s.key for s in restarted.sessions("alpha")] == [key]   # still live, not ended `died`
+    if how == "stop":
+        restarted.stop(key)
+    else:
+        restarted.expire("alpha", deadline)
+    assert cause(rig, key) == {"stop": EndCause.STOPPED, "expire": EndCause.LIFETIME}[how]
+
+
+def test_delayed_discovery_after_the_deadline_is_a_death(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    kill_pane(rig, spec.session_key)
+    rig.backend.up = False
+    with pytest.raises(RuntimeUnavailable):
+        rig.runtime.sessions("alpha")
+    at_deadline(rig, spec.session_key)
+    rig.clock.advance(3600)
+    rig.backend.up = True
+    assert rig.runtime.sessions("alpha") == []
+    rec = record(rig, spec.session_key)
+    assert (rec.end_cause, rec.stop_reason) == (EndCause.DIED, "lifetime") and wip_commits(rig) == 1
+
+
+@pytest.mark.parametrize("found", ["sessions", "racing stop", "expire"])
+@pytest.mark.parametrize("late", ["long earlier job", "lane contention", "stale now"])
+def test_a_late_pickup_still_ends_lifetime(rig: RuntimeRig, late: str, found: str) -> None:
+    """However pickup misses the deadline, the reaper acts first, finds the generation live and marks it;
+    whichever of wsd's reads then finds it gone ends it `lifetime`. A stale `now` expires nothing."""
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    now = rig.clock.now                                     # read before a slow listing
+    deadline = at_deadline(rig, key)
+    if late != "stale now":
+        rig.clock.advance(600)                              # the job or the lane holds pickup this long
+    assert reaper_acts(rig, key) is True
+    if late == "stale now":
+        rig.runtime.expire("alpha", now)
+        assert record(rig, key).phase is Phase.RUNNING
+    if found == "sessions":
+        assert rig.runtime.sessions("alpha") == []
+    elif found == "racing stop":
+        rig.runtime.stop(key)
+    else:
+        rig.runtime.expire("alpha", max(deadline, rig.clock.now))
+    assert cause(rig, key) == EndCause.LIFETIME
+    assert not rig.runtime.layout(key).reaped(1).exists()   # the cause is in the record now
+    ended = rig.runtime.ended(key)
+    assert ended is not None and ended.cause is EndCause.LIFETIME and ended.generation == 1
+
+
+def test_a_generation_dead_at_the_deadline_has_no_marker_and_died(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    kill_pane(rig, spec.session_key)
+    at_deadline(rig, spec.session_key)
+    assert reaper_acts(rig, spec.session_key) is False
+    assert rig.runtime.sessions("alpha") == []
+    assert cause(rig, spec.session_key) == EndCause.DIED
+
+
+@pytest.mark.parametrize("then", ["hard stop live", "later death"])
+def test_a_crash_after_the_marker_and_before_the_kill_is_lifetime(rig: RuntimeRig, then: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    rec, layout = record(rig, key), rig.runtime.layout(key)
+    deadline = at_deadline(rig, key)
+    assert reaper.mark_live(layout.record, layout.reaped(1), rec.sandbox, 1, rig.backend.names,
+                            lambda: True)                   # then the reaper crashed: nothing killed
+    if then == "hard stop live":
+        rig.runtime.expire("alpha", deadline)
+    else:
+        kill_pane(rig, key)
+        assert rig.runtime.sessions("alpha") == []
+    assert cause(rig, key) == EndCause.LIFETIME
+
+
+def test_a_crash_before_the_link_leaves_only_a_temporary_file(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    at_deadline(rig, spec.session_key)
+    (layout.root / f"{layout.reaped(1).name}.4242.tmp").write_text(json.dumps(
+        {"sandbox": record(rig, spec.session_key).sandbox, "generation": 1, "at": 1}))
+    kill_pane(rig, spec.session_key)
+    assert rig.runtime.sessions("alpha") == []
+    assert cause(rig, spec.session_key) == EndCause.DIED
+
+
+def test_a_marker_left_after_the_end_is_removed_by_the_next_launch(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    rig.runtime.stop(spec.session_key)
+    left = [layout.reaped(1), layout.root / f"{layout.reaped(1).name}.7.tmp"]
+    for path in left:                                       # a crash after `ended`, before the removal
+        path.write_text("{}")
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert not any(p.exists() for p in left)
+    assert not list(layout.root.glob("reaped-r*"))
+
+
+@pytest.mark.parametrize("forged", ["wrong sandbox", "wrong generation", "malformed", "not an object",
+                                    "a link", "a directory", "a fifo", "in a bound directory"])
+def test_the_marker_cannot_be_forged(rig: RuntimeRig, forged: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    key = spec.session_key
+    rec, layout = record(rig, key), rig.runtime.layout(key)
+    path = layout.reaped(1)
+    good = json.dumps({"sandbox": rec.sandbox, "generation": 1, "at": 1})
+    if forged == "wrong sandbox":
+        path.write_text(json.dumps({"sandbox": "hz0000000000aag1", "generation": 1, "at": 1}))
+    elif forged == "wrong generation":
+        path.write_text(json.dumps({"sandbox": rec.sandbox, "generation": 2, "at": 1}))
+    elif forged == "malformed":
+        path.write_text("{nope")
+    elif forged == "not an object":
+        path.write_text("[]")
+    elif forged == "a link":
+        (layout.root / "elsewhere.json").write_text(good)
+        path.symlink_to(layout.root / "elsewhere.json")
+    elif forged == "a directory":
+        path.mkdir()
+    elif forged == "a fifo":
+        os.mkfifo(path)
+    else:
+        bound = [d for d in (layout.home, layout.bridge, layout.run(1), layout.git) if d.is_dir()]
+        assert len(bound) >= 3
+        for folder in bound:
+            (folder / path.name).write_text(good)
+    at_deadline(rig, key)
+    kill_pane(rig, key)
+    assert rig.runtime.sessions("alpha") == []
+    assert cause(rig, key) == EndCause.DIED
+
+
+def test_the_marker_is_outside_every_bind(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    [box] = rig.backend.boxes.values()
+    marker = layout.reaped(1).resolve()
+    assert marker.parent == layout.record.resolve().parent
+    for bind in box.spec.binds:
+        assert not marker.is_relative_to(bind.source.resolve()), bind
+    assert rig.backend.watches[-1].marker == layout.reaped(1)
+
+
+def test_an_unreadable_marker_is_unavailable(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    path = rig.runtime.layout(spec.session_key).reaped(1)
+    path.write_text("{}")
+    path.chmod(0)
+    try:
+        kill_pane(rig, spec.session_key)
+        with pytest.raises(RuntimeUnavailable, match="reaper's record"):
+            rig.runtime.sessions("alpha")
+        assert record(rig, spec.session_key).phase is Phase.RUNNING      # nothing recorded
+    finally:
+        path.chmod(0o600)
+    assert rig.runtime.sessions("alpha") == []
+    assert cause(rig, spec.session_key) == EndCause.DIED
+
+
+def test_ended_reports_generation_evidence(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    key = spec.session_key
+    assert rig.runtime.ended(key) is None                   # no record
+    first = rig.runtime.launch(spec)
+    assert rig.runtime.ended(key) is None                   # running
+    rig.clock.advance(41)
+    rig.runtime.stop(key)
+    assert rig.runtime.ended(key) == Ended(1, EndCause.STOPPED, True, 41)
+    layout = rig.runtime.layout(key)
+
+    def rewrite(**changes: object) -> None:
+        data = json.loads(layout.record.read_text())
+        for name, value in changes.items():
+            if value is None:
+                data.pop(name, None)
+            else:
+                data[name] = value
+        layout.record.write_text(json.dumps(data))
+
+    rewrite(ended_at=None)                                  # a record written before g08sd
+    assert rig.runtime.ended(key) == Ended(1, EndCause.STOPPED, True, None)
+    rewrite(end_cause=None, stop_reason="lifetime")
+    assert rig.runtime.ended(key) == Ended(1, EndCause.LEGACY_LIFETIME, True, None)
+    rewrite(stop_reason="")
+    assert rig.runtime.ended(key) == Ended(1, EndCause.DIED, True, None)
+    rewrite(started_at=0)
+    ended = rig.runtime.ended(key)
+    assert ended is not None and ended.reached_running is False
+    layout.record.write_text("{nope")
+    with pytest.raises(RuntimeUnavailable):
+        rig.runtime.ended(key)
+    rewrite_ok = SessionRecord(key=key, ws="alpha", bead="btq-1", role="coder", profile="p-one",
+                               adapter="claude-code", generation=1, phase=Phase.ENDED,
+                               sandbox=sandbox_name(key, 1), tmux_session=rig.runtime.tmux_name(key),
+                               worktree=str(rig.worktree), native_id=first.native_id)
+    write_record(layout, rewrite_ok)
+    assert rig.runtime.ended(key) == Ended(1, EndCause.DIED, False, None)
+
+
+@pytest.mark.parametrize("reason", ["lifetime", ""])
+def test_a_legacy_stopping_record_is_finished_by_its_cause(rig: RuntimeRig, reason: str) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    write_record(layout, msgspec.structs.replace(
+        record(rig, spec.session_key), phase=Phase.STOPPING, stop_reason=reason,
+        wip_mark=f"lifetime:{spec.session_key}:1" if reason else ""))
+    assert rig.runtime.ended(spec.session_key) is None      # listed `unknown` until an end finishes it
+    assert rig.runtime.sessions("alpha") == []
+    expected = EndCause.LEGACY_LIFETIME if reason else EndCause.DIED
+    assert cause(rig, spec.session_key) == expected
+    ended = rig.runtime.ended(spec.session_key)
+    assert ended is not None and ended.cause is expected
 
 
 # btq-jjnqm: a bead's branch holds one session at a time.

@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal, read_ptrace_scope
 from heterodyne.sandbox.spec import NAME, SandboxSpec
 
@@ -144,10 +144,10 @@ class OpenShellBackend:
     def pane_env(self) -> Mapping[str, str]:
         return dict(self.env)
 
-    def reaper_argv(self, name: str, deadline: int, record: Path) -> list[str]:
+    def reaper_argv(self, name: str, deadline: int, record: Path, watch: Watch) -> list[str]:
         return ["env", "-i", *(f"{k}={v}" for k, v in self.env.items()), sys.executable, "-I", "-m",
                 "heterodyne.sandbox.reaper", "--deadline", str(deadline), "--openshell", self.openshell,
-                "--podman", self.podman, "--image", self.image, "--record", str(record), name]
+                "--podman", self.podman, "--image", self.image, "--record", str(record), *watch.argv(), name]
 
     def delete(self, name: str) -> bool:
         try:

@@ -6,10 +6,12 @@ found and cleaned up. Everything fails closed: what can't be listed, read or con
 RuntimeUnavailable or LaunchUncertain, never assumed absent."""
 
 import contextlib
+import errno
 import json
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -24,7 +26,7 @@ from heterodyne.agents.base import Adapter, AdapterError, Cli, write_private
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError
 from heterodyne.sandbox import sessiongit
-from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable
+from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, Watch
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
@@ -48,6 +50,8 @@ from heterodyne.tmux import Tmux, TmuxError
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.runtime import (
+    EndCause,
+    Ended,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -65,6 +69,7 @@ TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
+MARKER_BYTES = 4096
 BRANCH_TAKEN = "another session of this bead still holds its branch; a branch holds one session at a time"
 
 
@@ -108,6 +113,8 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     seeded: bool = False              # this generation's private git directory exists and must be landed
     created: bool = False             # backend.create returned: no create is outstanding (the watcher may go)
     create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
+    end_cause: str = ""               # g08sd: how this generation ended (EndCause); written once
+    ended_at: int = 0                 # the `ended` write's clock
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -177,7 +184,10 @@ class SandboxRuntime:
         deletes the sandbox at the deadline, whether or not wsd, its queue or its reconciliation works."""
         name = self.reaper_name(rec.key, rec.generation)
         self.c.tmux.kill(name)
-        argv = self.backend.reaper_argv(rec.sandbox, rec.deadline, self.layout(rec.key).record)
+        layout, tmux = self.layout(rec.key), self.c.tmux
+        watch = Watch(rec.generation, layout.reaped(rec.generation), rec.tmux_session, tmux.binary,
+                      tmux.socket_name, tmux.socket_path)
+        argv = self.backend.reaper_argv(rec.sandbox, rec.deadline, layout.record, watch)
         self.c.tmux.new_session(name, self.c.sessions, argv)
 
     # --- AgentRuntime ---
@@ -254,6 +264,10 @@ class SandboxRuntime:
             name = sandbox_name(spec.session_key, spec.generation)
         except SpecRefused as exc:
             raise LaunchFailed(str(exc)) from None
+        try:
+            self._drop_markers(layout)              # g08sd: an earlier generation's, left by a crash
+        except OSError:
+            raise RuntimeUnavailable("the session directory can't be cleaned") from None
         rec = SessionRecord(key=spec.session_key, ws=spec.ws, bead=spec.bead, role=spec.role,
                             profile=spec.profile, adapter=adapter.name, generation=spec.generation,
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
@@ -272,7 +286,7 @@ class SandboxRuntime:
         if rec is None:
             return
         if rec.phase is not Phase.ENDED:
-            if not self._end(rec, interrupt=True):
+            if not self._end(rec, interrupt=True, cause=EndCause.STOPPED):
                 raise RuntimeUnavailable("the session's end could not be confirmed")
             rec = read_record(layout)
         if rec is not None and rec.unlanded:
@@ -303,10 +317,31 @@ class SandboxRuntime:
                 server = self.servers.get(rec.key)
                 if not hard and (server is None or not server.turns().idle):
                     continue                     # not at a turn boundary: wait for one, or the deadline
-            if not self._end(rec, interrupt=hard, lifetime=True):
+            try:
+                stopped = self._end(rec, interrupt=hard, lifetime=True, cause=EndCause.LIFETIME)
+            except RuntimeUnavailable as exc:
+                failed.append(str(exc))
+                continue
+            if not stopped:
                 failed.append("a session at its maximum lifetime could not be stopped")
         if failed:
             raise RuntimeUnavailable(failed[0])
+
+    def ended(self, session_key: str) -> Ended | None:
+        """g08sd: the latest generation's end, from its record. Whether it ran is this generation's
+        `started_at`, never `ran` (which persists across generations); the duration is detail only."""
+        rec = read_record(self.layout(session_key))
+        if rec is None or rec.phase is not Phase.ENDED:
+            return None
+        if rec.end_cause:
+            try:
+                cause = EndCause(rec.end_cause)
+            except ValueError:
+                cause = EndCause.DIED
+        else:                                    # ended before g08sd
+            cause = EndCause.LEGACY_LIFETIME if rec.stop_reason == "lifetime" else EndCause.DIED
+        ran = rec.ended_at - rec.started_at if rec.started_at > 0 and rec.ended_at >= rec.started_at else None
+        return Ended(rec.generation, cause, rec.started_at > 0, ran)
 
     # --- the launch ---
 
@@ -505,10 +540,11 @@ class SandboxRuntime:
             gone = self._teardown(rec, interrupt=False)
             with contextlib.suppress(OSError):
                 write_record(layout, msgspec.structs.replace(
-                    rec, phase=Phase.ENDED if gone else Phase.STOPPING, unlanded=True, error=RECORD_LOST))
+                    rec, phase=Phase.ENDED if gone else Phase.STOPPING, unlanded=True, error=RECORD_LOST,
+                    end_cause=EndCause.REFUSED))
             return LaunchUncertain(reason)
         rec = msgspec.structs.replace(current, error=reason)
-        if self._end(rec, interrupt=False):
+        if self._end(rec, interrupt=False, cause=EndCause.REFUSED):
             return LaunchFailed(reason)
         return LaunchUncertain(reason)
 
@@ -551,21 +587,30 @@ class SandboxRuntime:
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
 
-    def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False) -> bool:
+    def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False,
+             cause: EndCause = EndCause.DIED) -> bool:
         """End the session: interrupt it if asked, kill its pane, delete every sandbox of its key. True
         (recorded `ended`) only once the pane is gone and the backend no longer lists any of them.
 
         A lifetime end (D13) records its reason and the WIP commit it owes in the same write that records
-        `stopping`, before anything is stopped, so a crash on either side of any later step replays it."""
+        `stopping`, before anything is stopped, so a crash on either side of any later step replays it.
+        That write also records the end's cause (g08sd, `_cause`), once: a replay never changes it. A
+        healthy cause is evidence only this write keeps, so if it fails nothing is stopped: the end is
+        unconfirmed and the next pass retries it (the reaper still bounds a lifetime). Any other end
+        still stops, since a restart would find the same cause."""
         layout = self.layout(rec.key)
         owed: dict[str, str] = {}
         if lifetime or rec.stop_reason == "lifetime":
             mark = rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"
             owed = {"stop_reason": "lifetime", "wip_mark": mark}
+        if not rec.end_cause:
+            owed["end_cause"] = self._cause(rec, cause)
         try:
             rec = self._phase(layout, rec, phase=Phase.STOPPING, **owed)
             journaled = True
         except OSError:
+            if owed.get("end_cause") in (EndCause.STOPPED, EndCause.LIFETIME):
+                return False                 # code r1: never end a healthy session without its cause
             journaled = False                # stop it anyway; landing and `ended` wait for a durable record
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
@@ -574,12 +619,69 @@ class SandboxRuntime:
                 self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
         try:
             rec = self._land(layout, rec)    # D26: before any host git (the lifetime WIP, a park) runs
-            rec = self._phase(layout, rec, phase=Phase.ENDED)
+            rec = self._phase(layout, rec, phase=Phase.ENDED, ended_at=self.c.clock())
         except OSError:
             return False
         with contextlib.suppress(OSError):
+            layout.reaped(rec.generation).unlink(missing_ok=True)   # the cause is in the record now
+        with contextlib.suppress(OSError):
             self._settle_wip(layout, rec)    # a lost record write keeps the mark; the replay is idempotent
         return True
+
+    def _cause(self, rec: SessionRecord, asked: EndCause) -> EndCause:
+        """g08sd: a stop proves health only if the runtime begins it on a generation it confirms live, here,
+        before the stop, or if the reaper recorded it live at its deadline. Anything else, absence found
+        late included, is a death. The marker is read after liveness: the reaper makes it durable before it
+        kills, so a pane found dead because the reaper just killed it still finds its marker."""
+        if asked is EndCause.REFUSED:
+            return asked
+        if rec.phase is Phase.RUNNING:
+            if asked in (EndCause.STOPPED, EndCause.LIFETIME) and self._alive(rec, self._names()):
+                return asked
+            if self._reaped_live(rec):
+                return EndCause.LIFETIME
+        if rec.phase is Phase.STOPPING:          # a stop begun before g08sd, with no cause recorded
+            return EndCause.LEGACY_LIFETIME if rec.stop_reason == "lifetime" else EndCause.DIED
+        return EndCause.DIED
+
+    def _reaped_live(self, rec: SessionRecord) -> bool:
+        """Whether the reaper's marker names this generation's sandbox. A link, a special file or a
+        malformed marker is none; one that can't be read is unavailable, never assumed absent."""
+        path = self.layout(rec.key).reaped(rec.generation)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return False
+            raise RuntimeUnavailable("the reaper's record can't be read") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return False
+            with os.fdopen(fd, "rb") as f:
+                data = f.read(MARKER_BYTES)
+        except OSError:
+            raise RuntimeUnavailable("the reaper's record can't be read") from None
+        try:
+            fields = json.loads(data)
+        except ValueError:
+            return False
+        if not isinstance(fields, dict):
+            return False
+        marker: dict[str, object] = fields  # pyright: ignore[reportUnknownVariableType]
+        generation = marker.get("generation")
+        return (marker.get("sandbox") == rec.sandbox and isinstance(generation, int)
+                and not isinstance(generation, bool) and generation == rec.generation)
+
+    def _drop_markers(self, layout: SessionLayout) -> None:
+        """Remove every reaper marker (and temporary file) of the session: called before a new generation's
+        record is written, when every earlier generation has ended and been accounted."""
+        if not layout.root.is_dir():
+            return
+        for path in layout.root.glob("reaped-r*"):
+            path.unlink(missing_ok=True)
 
     def _teardown(self, rec: SessionRecord, *, interrupt: bool) -> bool:
         """Close the generation's socket, interrupt (if asked) and kill the pane, delete every sandbox of
