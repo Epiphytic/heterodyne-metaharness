@@ -1376,3 +1376,705 @@ git add src/heterodyne/session/server.py src/heterodyne/agents/base.py src/heter
         src/heterodyne/agents/codex.py tests/test_session_server.py tests/test_agents_adapters.py
 git commit -m "plan4b T4: adapter turn-end events, the event callback and Claude's StopFailure hook"
 ```
+
+## Task 5: usage parsing in the adapters, the shim's status mode, and the in-sandbox Codex read
+
+The producers' adapter-specific half: what each CLI's payload means, parsed into `Observation`s that `wsd` validates again on ingestion. Nothing here runs in a launch yet: Task 7 wires it, and only for a profile whose capabilities enable (c) or (e).
+
+**Files:**
+- Modify: `src/heterodyne/agents/base.py` (`STATUS_COMMAND`, `UsageReport`, the `Adapter` methods)
+- Modify: `src/heterodyne/agents/claude_code.py` (`claude_windows`, `usage_from_event`, `usage_argv`, `usage_from_read`, `run_files(usage=)`)
+- Modify: `src/heterodyne/agents/codex.py` (`parse_rate_limits`, `USAGE_SCRIPT`, `USAGE_SOURCE`, the same methods)
+- Create: `src/heterodyne/sandbox/resources/codex_usage.py`
+- Modify: `src/heterodyne/session/shim.py` (`run_status`, `status_main`, `main`)
+- Modify: `tests/fakes/fake_agent_cli.py` (`account/rateLimits/read`, faults; `hooks/list` reads its config lazily)
+- Test: `tests/test_agents_usage.py` (new), `tests/test_session_shim.py`
+
+**Interfaces:**
+- Consumes: `wsd.usage.Observation` (exists), `session.shim.json_depth`, `MAX_DEPTH`, `MAX_LINE` (exist).
+- Produces:
+  - `agents.base.STATUS_COMMAND = "python3 -I /run/hz/shim.py status"`.
+  - `agents.base.UsageReport(windows: tuple[Observation, ...] = (), limited: bool = False, reset_hint: int | None = None)`.
+  - On the `Adapter` protocol:
+    - `usage_from_event(payload: Mapping[str, Any]) -> UsageReport | None`: a session-socket hook payload;
+    - `usage_argv(cli: Cli) -> list[str] | None`: the in-sandbox read's command, or None if the adapter has none;
+    - `usage_from_read(output: bytes) -> UsageReport | None`: that command's stdout;
+    - `run_files(*, usage: bool = False) -> Mapping[str, str]`: with `usage`, the files the producers need.
+  - `codex.parse_rate_limits(data: object, source: str) -> UsageReport | None`, shared with Task 8.
+  - `codex.IN_SESSION_SOURCE = "codex.app-server"`, `codex.HOST_SOURCE = "codex.host-read"`, `claude_code.STATUS_SOURCE = "claude.statusline"`.
+  - The shim's `status` mode: `python3 -I /run/hz/shim.py status` reads Claude's status-line JSON on stdin and sends `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}` once per change. It prints nothing and exits 0.
+  - `codex_usage.py`: `python3 -I codex_usage.py <codex binary> [limit seconds]` prints the `rateLimits` object and exits 0, or exits 1 with nothing on stdout.
+  - The fake app-server answers `account/rateLimits/read` from `HZ_FAKE_RATE_LIMITS`; `HZ_FAKE_RATE_FAULT` is `hang`, `error` or `garbage`.
+
+The windows' identities: Claude's are `claude:5h` and `claude:7d`. A Codex window is `codex:<limitId>:<minutes>m`, kind `5h` / `7d` / `<n>d` / `<n>h` / `<n>m` from its duration. They match `usage.LABEL` and never name a slot (`primary`, `five_hour`), as `Observation` requires. Percentages and resets pass through unchecked: `usage._check` validates them, so the parsers never decide a value is safe.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_agents_usage.py`:
+
+```python
+"""Plan 4b Task 5: what the CLIs' usage payloads mean (S7 (3), (5)), and the in-sandbox Codex read."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from sandbox_env import install_fake_cli
+
+from heterodyne.agents.base import STATUS_COMMAND, Cli, UsageReport
+from heterodyne.agents.claude_code import SETTINGS_FILE, STATUS_SOURCE, ClaudeCode
+from heterodyne.agents.codex import HOST_SOURCE, IN_SESSION_SOURCE, USAGE_SCRIPT, Codex, parse_rate_limits
+from heterodyne.wsd.usage import LABEL, Observation
+
+RESOURCES = Path(__file__).resolve().parents[1] / "src" / "heterodyne" / "sandbox" / "resources"
+USAGE = RESOURCES / "codex_usage.py"
+NOW = 1_800_000_000
+SNAPSHOT = {"limitId": "codex",
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": NOW + 3600},
+            "secondary": {"usedPercent": 17, "windowDurationMins": 10080, "resetsAt": NOW + 86400},
+            "planType": "pro", "rateLimitReachedType": None}
+
+
+# --- Claude ---
+
+def test_a_status_line_gives_both_windows() -> None:
+    report = ClaudeCode().usage_from_event({
+        "hook_event_name": "StatusLine", "session_id": "s",
+        "rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": NOW + 3600},
+                        "seven_day": {"used_percentage": 17, "resets_at": NOW + 86400}}})
+    assert report == UsageReport((Observation("claude:5h", "5h", 42, NOW + 3600, STATUS_SOURCE),
+                                  Observation("claude:7d", "7d", 17, NOW + 86400, STATUS_SOURCE)))
+
+
+@pytest.mark.parametrize("limits", [None, [], {}, {"five_hour": "full"}, {"other": {"used_percentage": 1}}])
+def test_a_status_line_without_windows_reports_nothing(limits: object) -> None:
+    assert ClaudeCode().usage_from_event({"hook_event_name": "StatusLine", "rate_limits": limits}) is None
+
+
+@pytest.mark.parametrize(("resets", "kept"), [(NOW + 5, NOW + 5), (float(NOW + 5), NOW + 5), (True, None),
+                                              ("soon", None), (None, None), (float("nan"), None)])
+def test_a_reset_that_is_not_a_number_is_unknown(resets: object, kept: int | None) -> None:
+    report = ClaudeCode().usage_from_event({
+        "hook_event_name": "StatusLine", "rate_limits": {"five_hour": {"used_percentage": 1, "resets_at": resets}}})
+    assert report is not None and report.windows[0].resets_at == kept
+
+
+def test_a_percentage_is_passed_on_for_ingestion_to_judge() -> None:
+    report = ClaudeCode().usage_from_event({
+        "hook_event_name": "StatusLine", "rate_limits": {"five_hour": {"used_percentage": "lots"}}})
+    assert report is not None and report.windows[0].used_percent == "lots"
+
+
+def test_only_a_rate_limit_stop_failure_is_a_limit() -> None:
+    c = ClaudeCode()
+    assert c.usage_from_event({"hook_event_name": "StopFailure", "error": "rate_limit",
+                               "last_assistant_message": "resets 12:10pm"}) == UsageReport(limited=True)
+    for error in ("overloaded", "authentication_failed", "billing_error", None, 7):
+        assert c.usage_from_event({"hook_event_name": "StopFailure", "error": error}) is None
+    assert c.usage_from_event({"hook_event_name": "Stop", "error": "rate_limit"}) is None
+
+
+def test_claude_has_no_in_sandbox_read() -> None:
+    cli = Cli(Path("/opt/claude/bin/claude"), Path("/opt/claude"), "2.1.0")
+    assert ClaudeCode().usage_argv(cli) is None
+    assert ClaudeCode().usage_from_read(b"{}") is None
+
+
+def test_the_status_line_is_installed_only_for_usage() -> None:
+    plain = json.loads(ClaudeCode().run_files()[SETTINGS_FILE])
+    assert "statusLine" not in plain
+    usage = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
+    assert usage["statusLine"] == {"type": "command", "command": STATUS_COMMAND}
+    assert usage["hooks"] == plain["hooks"]
+
+
+# --- Codex ---
+
+def test_a_snapshot_gives_one_observation_per_window() -> None:
+    report = parse_rate_limits(SNAPSHOT, IN_SESSION_SOURCE)
+    assert report == UsageReport((Observation("codex:codex:300m", "5h", 42, NOW + 3600, IN_SESSION_SOURCE),
+                                  Observation("codex:codex:10080m", "7d", 17, NOW + 86400, IN_SESSION_SOURCE)))
+    assert all(LABEL.fullmatch(o.window_id) and LABEL.fullmatch(o.kind) for o in report.windows)
+
+
+def test_a_reached_limit_hints_the_latest_full_windows_reset() -> None:
+    snap = {**SNAPSHOT, "rateLimitReachedType": "rate_limit_reached",
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": NOW + 3600},
+            "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": NOW + 86400}}
+    report = parse_rate_limits(snap, HOST_SOURCE)
+    assert report is not None and report.limited and report.reset_hint == NOW + 86400
+    partly = parse_rate_limits({**snap, "secondary": SNAPSHOT["secondary"]}, HOST_SOURCE)
+    assert partly is not None and (partly.limited, partly.reset_hint) == (True, NOW + 3600)
+    nothing_full = parse_rate_limits({**SNAPSHOT, "rateLimitReachedType": "workspace_owner_credits_depleted"},
+                                     HOST_SOURCE)
+    assert nothing_full is not None and (nothing_full.limited, nothing_full.reset_hint) == (True, None)
+
+
+@pytest.mark.parametrize("window", [None, "x", {"usedPercent": 1}, {"usedPercent": 1, "windowDurationMins": 0},
+                                    {"usedPercent": 1, "windowDurationMins": True},
+                                    {"usedPercent": 1, "windowDurationMins": "300"}])
+def test_a_window_without_a_duration_is_skipped(window: object) -> None:
+    report = parse_rate_limits({"limitId": "codex", "primary": window, "rateLimitReachedType": None}, HOST_SOURCE)
+    assert report == UsageReport()
+
+
+@pytest.mark.parametrize("data", [None, [], "x", 1])
+def test_a_snapshot_that_is_not_an_object_is_nothing(data: object) -> None:
+    assert parse_rate_limits(data, HOST_SOURCE) is None
+
+
+@pytest.mark.parametrize("output", [b"", b"not json", b"[" * 200 + b"]" * 200, b"{" + b" " * 70_000 + b"}"])
+def test_read_output_that_cannot_be_trusted_to_parse_is_nothing(output: bytes) -> None:
+    assert Codex().usage_from_read(output) is None
+
+
+def test_codex_hooks_carry_no_usage() -> None:
+    assert Codex().usage_from_event({"hook_event_name": "Stop", "rate_limits": {}}) is None
+
+
+def test_the_usage_script_ships_only_for_usage() -> None:
+    assert USAGE_SCRIPT.name not in Codex().run_files()
+    assert Codex().run_files(usage=True)[USAGE_SCRIPT.name] == USAGE.read_text()
+
+
+# --- codex_usage.py, run against the fake app-server ---
+
+def run_usage(tmp_path: Path, limit: str = "30", **env: str) -> subprocess.CompletedProcess[bytes]:
+    codex = install_fake_cli(tmp_path, "codex")
+    home = tmp_path / "codex-home"
+    home.mkdir(exist_ok=True)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir(exist_ok=True)
+    full = {"PATH": os.environ["PATH"], "CODEX_HOME": str(home), "TMPDIR": str(scratch), **env}
+    return subprocess.run([sys.executable, "-I", str(USAGE), str(codex), limit], env=full,
+                          capture_output=True, timeout=60, check=False)
+
+
+def test_the_read_prints_the_snapshot_and_leaves_no_scratch_home(tmp_path: Path) -> None:
+    (tmp_path / "codex-home").mkdir()
+    (tmp_path / "codex-home" / "auth.json").write_text("fake-not-a-token")
+    proc = run_usage(tmp_path, HZ_FAKE_RATE_LIMITS=json.dumps(SNAPSHOT))
+    assert proc.returncode == 0, proc.stderr
+    assert Codex().usage_from_read(proc.stdout) == parse_rate_limits(SNAPSHOT, IN_SESSION_SOURCE)
+    assert list((tmp_path / "tmp").iterdir()) == []
+    assert (tmp_path / "codex-home" / "auth.json").read_text() == "fake-not-a-token"
+
+
+@pytest.mark.parametrize("fault", ["error", "garbage", "hang", "no-login"])
+def test_a_failed_read_exits_1_with_nothing_on_stdout(tmp_path: Path, fault: str) -> None:
+    (tmp_path / "codex-home").mkdir()
+    if fault != "no-login":
+        (tmp_path / "codex-home" / "auth.json").write_text("fake-not-a-token")
+    env = {"HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
+    if fault != "no-login":
+        env["HZ_FAKE_RATE_FAULT"] = fault
+    proc = run_usage(tmp_path, limit="2", **env)
+    assert proc.returncode == 1 and proc.stdout == b""
+    assert proc.stderr.decode().strip() in {"codex_usage: RuntimeError", "codex_usage: JSONDecodeError"}
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_a_missing_codex_is_not_a_clean_failure(tmp_path: Path) -> None:
+    (tmp_path / "codex-home").mkdir()
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    proc = subprocess.run([sys.executable, "-I", str(USAGE), str(tmp_path / "nowhere" / "codex")],
+                          env={"PATH": os.environ["PATH"], "CODEX_HOME": str(tmp_path / "codex-home"),
+                               "TMPDIR": str(scratch)}, capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 1 and proc.stdout == b""
+    assert proc.stderr.decode().strip() == "codex_usage: FileNotFoundError"
+    assert list(scratch.iterdir()) == []
+```
+
+Append to `tests/test_session_shim.py`:
+
+```python
+# --- the status mode (plan 4b E7) ---
+
+LIMITS = {"five_hour": {"used_percentage": 42, "resets_at": 1_800_003_600}}
+
+
+def status(run: Path, payload: object, t: FakeTime | None = None) -> int:
+    t = t or FakeTime()
+    return shim.run_status(json.dumps(payload).encode(), env_for(run), clock=t.clock, sleep=t.sleep)
+
+
+def test_status_sends_each_change_once(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"session_id": "s1"}) == 0                    # the first call has no rate_limits
+        assert status(run, {"session_id": "s1", "rate_limits": LIMITS}) == 0
+        assert status(run, {"session_id": "s1", "rate_limits": LIMITS}) == 0
+        changed = {"five_hour": {"used_percentage": 43, "resets_at": 1_800_003_600}}
+        assert status(run, {"session_id": "s1", "rate_limits": changed}) == 0
+        assert seen == [{"hook_event_name": "StatusLine", "session_id": "s1", "rate_limits": LIMITS},
+                        {"hook_event_name": "StatusLine", "session_id": "s1", "rate_limits": changed}]
+    finally:
+        s.close()
+
+
+def test_status_retries_a_change_wsd_never_answered(run: Path) -> None:
+    t = FakeTime()
+    assert status(run, {"rate_limits": LIMITS}, t) == 0                   # nothing listening
+    assert t.now <= shim.STATUS_WAIT
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"rate_limits": LIMITS}) == 0
+        assert [e["rate_limits"] for e in seen] == [LIMITS]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("raw", [b"", b"not json", b"[1]", b"[" * 200 + b"]" * 200])
+def test_status_ignores_input_it_cannot_read(run: Path, live: SessionServer, raw: bytes) -> None:
+    assert shim.run_status(raw, env_for(run), clock=FakeTime().clock, sleep=FakeTime().sleep) == 0
+    assert live.served == 0
+
+
+def test_status_never_follows_a_planted_link(run: Path, live: SessionServer, tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    hz = run.parent / "home" / ".hz"
+    hz.mkdir(mode=0o700)
+    (hz / shim.STATUS_FILE).symlink_to(victim)
+    assert status(run, {"rate_limits": LIMITS}) == 0
+    assert victim.read_text() == "keep"
+
+
+def test_status_runs_standalone_and_prints_nothing(run: Path, live: SessionServer) -> None:
+    proc = subprocess.run([sys.executable, "-I", shim.__file__, "status"],
+                          input=json.dumps({"rate_limits": LIMITS}).encode(), env=env_for(run),
+                          capture_output=True, timeout=30, check=False)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, b"", b"")
+    assert live.served == 1
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_agents_usage.py tests/test_session_shim.py -q`
+Expected: FAIL at import (`cannot import name 'STATUS_COMMAND'`), and `AttributeError: module 'heterodyne.session.shim' has no attribute 'run_status'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/agents/base.py`, import `from heterodyne.wsd.usage import Observation`, and add after `HOOK_EVENTS`:
+
+```python
+# Claude's status line, when (c) is on (plan 4b E7): fixed like the hooks, and reading nothing from argv.
+STATUS_COMMAND = "python3 -I /run/hz/shim.py status"
+```
+
+after `Cli`:
+
+```python
+@dataclass(frozen=True)
+class UsageReport:
+    """What one usage payload says, parsed by its adapter. Untrusted until wsd says otherwise; the account
+    is never read from it. Percentages and resets are passed on unchecked: ingestion validates them."""
+    windows: tuple[Observation, ...] = ()
+    limited: bool = False               # the payload says a usage limit is reached (D9 (e))
+    reset_hint: int | None = None       # the latest reset of a reached window, if the payload gave one
+
+
+def epoch_or_none(value: object) -> int | None:
+    """A payload's epoch-seconds time, or None if it is not a finite number."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if value == value and abs(value) < 1e15 else None    # NaN != NaN
+```
+
+and on the `Adapter` protocol (after `apply_trust`), with `run_files` replaced:
+
+```python
+    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
+        """Files for the run directory (read-only inside). With `usage`, also what the profile's usage
+        producers need (plan 4b E5, E7)."""
+        ...
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        """What a session-socket hook payload says about usage, or None if nothing."""
+        ...
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        """The in-sandbox usage read (plan 4b E5), or None if the adapter has none."""
+        ...
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        """The in-sandbox read's stdout, or None if it doesn't parse."""
+        ...
+```
+
+In `src/heterodyne/agents/claude_code.py`, import `STATUS_COMMAND`, `UsageReport` and `epoch_or_none` from `heterodyne.agents.base` and `Observation` from `heterodyne.wsd.usage`, then add after `CLAUDE_HOOK_EVENTS`:
+
+```python
+STATUS_SOURCE = "claude.statusline"
+# The status line's windows (S7 (3)): its key, and the window's identity and label.
+CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
+
+
+def claude_windows(limits: Mapping[str, Any]) -> tuple[Observation, ...]:
+    """The status line's `rate_limits`: one observation per window it has, its values unchecked."""
+    found: list[Observation] = []
+    for key, kind in CLAUDE_WINDOWS:
+        window: Any = limits.get(key)
+        if isinstance(window, dict):
+            w = cast(dict[str, Any], window)
+            found.append(Observation(f"claude:{kind}", kind, w.get("used_percentage"),
+                                     epoch_or_none(w.get("resets_at")), STATUS_SOURCE))
+    return tuple(found)
+```
+
+In `ClaudeCode`, replace `run_files` and add the usage methods:
+
+```python
+    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
+        hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
+        settings: dict[str, Any] = {"skipDangerousModePermissionPrompt": True, "hooks": hooks}
+        if usage:
+            settings["statusLine"] = {"type": "command", "command": STATUS_COMMAND}
+        return {SETTINGS_FILE: json.dumps(settings)}
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        """S7 (5): a StopFailure with `error == "rate_limit"` is the limit signal; its reset is only in
+        message text, which is never parsed. S7 (3): the status line's `rate_limits`."""
+        event = payload.get("hook_event_name")
+        if event == "StopFailure":
+            return UsageReport(limited=True) if payload.get("error") == "rate_limit" else None
+        limits: Any = payload.get("rate_limits")
+        if event != "StatusLine" or not isinstance(limits, dict):
+            return None
+        windows = claude_windows(cast(dict[str, Any], limits))
+        return UsageReport(windows) if windows else None
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        return None
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        return None
+```
+
+In `src/heterodyne/agents/codex.py`, import `UsageReport` and `epoch_or_none` from `heterodyne.agents.base`, `Observation` from `heterodyne.wsd.usage`, and `MAX_DEPTH`, `MAX_LINE`, `json_depth` from `heterodyne.session.shim`; add after `TRUST_SOURCE`:
+
+```python
+USAGE_SCRIPT = RUN_INSIDE / "codex_usage.py"
+USAGE_SOURCE = Path(__file__).resolve().parents[1] / "sandbox" / "resources" / "codex_usage.py"
+IN_SESSION_SOURCE = "codex.app-server"
+HOST_SOURCE = "codex.host-read"
+
+
+def _duration(minutes: int) -> str:
+    for unit, size in (("d", 1440), ("h", 60)):
+        if minutes % size == 0:
+            return f"{minutes // size}{unit}"
+    return f"{minutes}m"
+
+
+def parse_rate_limits(data: object, source: str) -> UsageReport | None:
+    """A `RateLimitSnapshot` (codex-cli 0.160 `account/rateLimits/read`, S7 (3)): one observation per
+    window with a positive integer duration, identified by its limit ID and duration, never its slot. A
+    `rateLimitReachedType` other than null is the limit signal (plan 4b E6); its hint is the latest reset
+    of a window at 100% or more. None if `data` is not an object."""
+    if not isinstance(data, dict):
+        return None
+    snap = cast(dict[str, Any], data)
+    limit: Any = snap.get("limitId")
+    limit_id = limit if isinstance(limit, str) else "default"
+    windows: list[Observation] = []
+    for slot in ("primary", "secondary"):
+        window: Any = snap.get(slot)
+        if not isinstance(window, dict):
+            continue
+        w = cast(dict[str, Any], window)
+        minutes: Any = w.get("windowDurationMins")
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+            continue
+        windows.append(Observation(f"codex:{limit_id}:{minutes}m", _duration(minutes), w.get("usedPercent"),
+                                   epoch_or_none(w.get("resetsAt")), source))
+    limited = snap.get("rateLimitReachedType") is not None
+    full = [o.resets_at for o in windows if o.resets_at is not None and not isinstance(o.used_percent, bool)
+            and isinstance(o.used_percent, int | float) and o.used_percent >= 100]
+    return UsageReport(tuple(windows), limited, max(full) if limited and full else None)
+```
+
+In `Codex`, replace `run_files` and add the usage methods:
+
+```python
+    def run_files(self, *, usage: bool = False) -> Mapping[str, str]:
+        files = {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
+        if usage:
+            files[USAGE_SCRIPT.name] = USAGE_SOURCE.read_text()
+        return files
+
+    def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
+        return None                     # codex 0.160's hooks carry no usage (S7 (5))
+
+    def usage_argv(self, cli: Cli) -> list[str] | None:
+        return ["python3", "-I", str(USAGE_SCRIPT), str(cli.binary)]
+
+    def usage_from_read(self, output: bytes) -> UsageReport | None:
+        if len(output) > MAX_LINE or json_depth(output) > MAX_DEPTH:
+            return None
+        try:
+            data: Any = json.loads(output)
+        except ValueError:
+            return None
+        return parse_rate_limits(data, IN_SESSION_SOURCE)
+```
+
+Create `src/heterodyne/sandbox/resources/codex_usage.py`:
+
+```python
+# pyright: basic
+"""Inside a Codex sandbox while its session runs (plan 4b E5): ask a second `codex app-server`, over
+stdio, for the account's rate limits. It runs in a scratch CODEX_HOME holding only a link to the
+session's read-only login, so it never touches the live app-server's state, and a refresh it attempts
+fails on the read-only bind (§7). No model request is made. Prints the `rateLimits` object as JSON and
+exits 0. Any failure exits 1 with nothing on stdout and only the error's type on stderr. The scratch
+home is removed whatever happens. The host parses and validates the output. Standard library only.
+
+Usage: python3 -I codex_usage.py <codex binary> [limit seconds]
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+
+LIMIT_SECONDS = 30.0
+
+
+def main(argv):
+    codex = argv[0]
+    limit = float(argv[1]) if len(argv) > 1 else LIMIT_SECONDS
+    home = tempfile.mkdtemp(prefix="hz-usage-")
+    try:
+        os.symlink(os.path.join(os.environ["CODEX_HOME"], "auth.json"), os.path.join(home, "auth.json"))
+        limits = read(codex, home, limit)
+    finally:
+        shutil.rmtree(home)
+    if not isinstance(limits, dict):
+        raise RuntimeError("the answer has no rate limits")
+    print(json.dumps(limits))
+    return 0
+
+
+def read(codex, home, limit):
+    proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, CODEX_HOME=home))
+    stdin, stdout = proc.stdin, proc.stdout
+    if stdin is None or stdout is None:
+        raise RuntimeError("codex app-server has no pipes")
+    timer = threading.Timer(limit, proc.kill)
+    timer.start()
+
+    def send(message):
+        stdin.write(json.dumps(message) + "\n")
+        stdin.flush()
+
+    def call(id_, method, params):
+        send({"jsonrpc": "2.0", "id": id_, "method": method, "params": params})
+        while True:
+            line = stdout.readline()
+            if not line:
+                raise RuntimeError("codex app-server closed its output")
+            message = json.loads(line)
+            if message.get("id") == id_:
+                if "error" in message:
+                    raise RuntimeError("codex app-server returned an error")
+                return message["result"]
+
+    try:
+        call(0, "initialize", {"clientInfo": {"name": "heterodyne", "version": "1"}})
+        send({"jsonrpc": "2.0", "method": "initialized"})
+        result = call(1, "account/rateLimits/read", None)
+    finally:
+        timer.cancel()
+        proc.kill()
+        proc.wait(5)
+    return result.get("rateLimits") if isinstance(result, dict) else None
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as exc:  # noqa: BLE001 - any failure is "no reading", decided on the host
+        print(f"codex_usage: {type(exc).__name__}", file=sys.stderr)
+        sys.exit(1)
+```
+
+In `src/heterodyne/session/shim.py`, update the module docstring's first paragraph to name `hook|request|status`, and add before `json_depth`:
+
+```python
+STATUS_FILE = "status.json"     # in $HOME/.hz: the last rate limits wsd accepted
+STATUS_WAIT = 2.0               # the status line redraws often: never hold it longer than this
+
+
+def _status_dir(env: Mapping[str, str]) -> int | None:
+    """$HOME/.hz, opened without following a link; None if $HOME isn't absolute."""
+    home = env.get("HOME")
+    if not home or not Path(home).is_absolute():
+        return None
+    folder = Path(home) / ".hz"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+
+def _last_status(env: Mapping[str, str]) -> str | None:
+    try:
+        dir_fd = _status_dir(env)
+        if dir_fd is None:
+            return None
+        try:
+            fd = os.open(STATUS_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            return os.read(fd, MAX_LINE + 1).decode() if stat.S_ISREG(os.fstat(fd).st_mode) else None
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return None
+
+
+def _save_status(env: Mapping[str, str], text: str) -> None:
+    try:
+        dir_fd = _status_dir(env)
+        if dir_fd is None:
+            return
+        try:
+            fd = os.open(STATUS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        pass
+
+
+def run_status(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
+               sleep: Sleep = time.sleep) -> int:
+    """Claude's status line (plan 4b E7): send the input's `rate_limits` as a StatusLine hook event,
+    once per change, and print nothing. A change wsd didn't accept is sent again on the next redraw.
+    Always exits 0: the status line decides nothing."""
+    try:
+        payload: Any = json.loads(raw) if len(raw) <= MAX_LINE and json_depth(raw) <= MAX_DEPTH else None
+        if not isinstance(payload, dict):
+            return 0
+        fields = cast(dict[str, Any], payload)
+        limits: Any = fields.get("rate_limits")
+        if not isinstance(limits, dict):
+            return 0                    # the first call, before any API response, has none (S7)
+        text = json.dumps(limits, sort_keys=True)
+        if _last_status(env) == text:
+            return 0
+        found = _config(env)
+        if found is None:
+            return 0
+        sock, token, cfg = found
+        event = {"hook_event_name": "StatusLine", "session_id": fields.get("session_id"), "rate_limits": limits}
+        message = _bounded(lambda p: {"token": token, "type": "hook_event", "payload": p}, event)
+        if message is None:
+            return 0
+        reply = _ask(sock, message, min(_wait(cfg), STATUS_WAIT), clock, sleep)
+        if reply is not None and reply.get("ok") is True:
+            _save_status(env, text)
+    except Exception:  # noqa: BLE001, S110 - a status line never fails the session
+        pass
+    return 0
+```
+
+and replace `main`, adding `status_main`:
+
+```python
+def status_main() -> int:
+    return run_status(sys.stdin.buffer.read(), os.environ)
+
+
+def main(argv: Sequence[str]) -> int:
+    if argv[:1] == ["hook"]:
+        return hook_main()
+    if argv[:1] == ["request"]:
+        return request_main(argv[1:])
+    if argv[:1] == ["status"]:
+        return status_main()
+    print("usage: shim.py hook|request|status [text...]", file=sys.stderr)
+    return 2
+```
+
+In `tests/fakes/fake_agent_cli.py`, add to the module docstring's `codex app-server` (stdio) item: "and `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated` notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login. `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error` or `garbage` (a line that isn't JSON)." Then replace `stdio_server`:
+
+```python
+def rate_limits(msg: dict[str, Any]) -> str | None:
+    """The answer line to account/rateLimits/read, or None to never answer."""
+    fault = os.environ.get("HZ_FAKE_RATE_FAULT")
+    if fault == "hang":
+        return None
+    if fault == "garbage":
+        return "not json"
+    if fault == "error" or not (Path(os.environ["CODEX_HOME"]) / "auth.json").is_file():
+        return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
+            "code": -32600, "message": "codex account authentication required to read rate limits"}})
+    snapshot = json.loads(os.environ.get("HZ_FAKE_RATE_LIMITS", "null"))
+    return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"rateLimits": snapshot}})
+
+
+def stdio_server() -> None:
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("method") == "initialize":
+            result: Any = {"userAgent": "fake"}
+        elif msg.get("method") == "hooks/list":
+            trusted = codex_trusted()
+            listed = []
+            for key, event, command in codex_hooks():
+                have = trusted.get(key, {}).get("trusted_hash")
+                status = "trusted" if have == digest(command) else "modified" if have else "untrusted"
+                listed.append({"key": key, "eventName": camel(event), "command": command, "enabled": True,
+                               "trustStatus": status, "currentHash": digest(command), "source": "user"})
+            result = {"data": [{"cwd": msg["params"]["cwds"][0], "hooks": listed, "warnings": [],
+                                "errors": []}]}
+            if fault := os.environ.get("HZ_FAKE_HOOKS_FAULT"):
+                result = faulty(result, fault)
+        elif msg.get("method") == "account/rateLimits/read":
+            print(json.dumps({"jsonrpc": "2.0", "method": "account/rateLimits/updated", "params": {}}),
+                  flush=True)
+            answer = rate_limits(msg)
+            if answer is None:
+                sys.stdin.read()        # hang until killed
+                return
+            print(answer, flush=True)
+            continue
+        else:
+            continue                    # a notification
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_agents_usage.py tests/test_session_shim.py tests/test_agents_adapters.py tests/test_sandbox_runtime.py -q`
+Expected: PASS. The `hang` case passes in about 2 seconds (its limit), never 60: a timeout of the test's own `subprocess.run` is a failure. `test_a_missing_codex_is_not_a_clean_failure` proves a missing executable exits with its own error, never with something that reads as an answer.
+
+Then: `timeout 300 uv run pyright src/heterodyne/agents src/heterodyne/session tests/test_agents_usage.py tests/test_session_shim.py` and `uv run ruff check src tests`.
+Expected: 0 errors. `codex_usage.py` is `# pyright: basic`, like `codex_trust.py`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/agents/base.py src/heterodyne/agents/claude_code.py src/heterodyne/agents/codex.py \
+        src/heterodyne/sandbox/resources/codex_usage.py src/heterodyne/session/shim.py \
+        tests/fakes/fake_agent_cli.py tests/test_agents_usage.py tests/test_session_shim.py
+git commit -m "plan4b T5: usage parsing per adapter, the status-line shim and the in-sandbox Codex read"
+```
