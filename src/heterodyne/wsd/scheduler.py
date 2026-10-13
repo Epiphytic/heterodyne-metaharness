@@ -5,8 +5,9 @@ the workstream's operation lock (`Parker.entry`):
 1. the runtime must be available and list the workstream's sessions, or the workstream holds (no
    failure budget, no `needs-human`); once it does, pickup clears that hold, whoever set it;
 2. unsettled actions are found (closed beads included); any hold the launch guard respects;
-3. the sweep (`sweep.py`) reconciles beads, sessions and the journal: sessions of beads no longer ours
-   are stopped, and a running bead whose session is gone gets a resume operation;
+3. the sessions' own reports are drained (plan 4b E8), then the sweep (`sweep.py`) reconciles beads,
+   sessions and the journal: sessions of beads no longer ours are stopped, and a running bead whose
+   session is gone gets a resume operation;
 4. every open operation is replayed: park, release and escalation finish; pickup and resume reach the
    launch guard, which refuses while any hold applies;
 5. any hold left: pickup reports HELD;
@@ -78,13 +79,14 @@ from heterodyne.wsd.park import (
     RegateCounts,
     Regated,
     blocker_detail,
+    capabilities,
     parked_state,
     resumable,
 )
-from heterodyne.wsd.runtime import RuntimeUnavailable
+from heterodyne.wsd.runtime import LimitSeen, RuntimeUnavailable, Signal, UsageSeen
 from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
-from heterodyne.wsd.usage import decide
+from heterodyne.wsd.usage import decide, ingest_untrusted
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, place, record
 
 POINTS = ("lock.waiting", "pickup.intent", "gate.checked", "pickup.claimed!", "pickup.claimed",
@@ -94,6 +96,7 @@ RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 # Rows of unclaimed ready beads, dropped once the bead is no longer listed.
 UNLISTED = frozenset({Reason.UNCLAIMABLE, Reason.ACCOUNT_REPOINTED})
 KEPT = frozenset({BeadState.HELD, BeadState.STUCK})     # never counted in the wake time
+MAX_HELD = 256
 
 
 class TriggerKind(StrEnum):
@@ -140,6 +143,8 @@ class Scheduler:
         self.parker = parker or Parker(ws, deps)
         # The quota wake time the last pickup computed (§3.6), in UTC epoch seconds; never journaled.
         self.wake_at: int | None = None
+        # Plan 4b E8: limit reports a failed pickup didn't handle, retried first by the next; never journaled.
+        self.held: list[LimitSeen] = []
 
     # --- entry point ---
 
@@ -194,6 +199,7 @@ class Scheduler:
             j.unhold(name, Reason.ACTIONS_UNRECONCILED)
         try:
             self.d.runtime.expire(name, now)      # §7: a session at its lifetime ends; the sweep resumes it
+            self._signals(now)                    # plan 4b E8: after the lifetime stop, before the sweep
             sweep(self.parker)
             for op in j.ops_open(name):
                 self.replay(op)
@@ -219,6 +225,35 @@ class Scheduler:
             j.hold(name, Reason.RUNTIME_UNAVAILABLE, str(exc))
             return Outcome.HELD
         return Outcome.DEFERRED
+
+    def _signals(self, now: int) -> None:
+        """Plan 4b E8: the limit reports held from a failed pickup, then the reports the workstream's
+        sessions sent since the last pickup, oldest first. If handling one raises, it and the limit
+        reports after it are held for the next pickup, and the error goes on."""
+        batch: list[Signal] = [*self.held, *self.d.runtime.signals(self.ws.name)]
+        self.held = []
+        for i, signal in enumerate(batch):
+            try:
+                self._signal(signal, now)
+            except BaseException:
+                self.held = [s for s in batch[i:] if isinstance(s, LimitSeen)][-MAX_HELD:]
+                raise
+
+    def _signal(self, signal: Signal, now: int) -> None:
+        """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
+        bead only with (e). A report for a launch the journal doesn't have as this workstream's is
+        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time)."""
+        j, name = self.d.journal, self.ws.name
+        entry = j.launch(signal.session_key, signal.generation)
+        if entry is None or entry.ws != name:
+            return
+        caps = capabilities(self.ws.accounts, entry.profile)
+        if isinstance(signal, UsageSeen):
+            if caps.in_session_usage:
+                for obs in signal.observations:
+                    ingest_untrusted(j, entry.ident, obs, now, self.ws.usage)
+        elif caps.limit_signal:
+            self.parker.limit(signal.session_key, signal.generation, signal.reset_hint, now)
 
     def _candidates(self, trigger: Trigger, scan: _Scan) -> Outcome:
         """§5.2 step 7, each candidate gated on its own profile (AU-5 §3.6): Source 1 (resumable parked

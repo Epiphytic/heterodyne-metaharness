@@ -1028,10 +1028,12 @@ def test_a_limit_held_through_a_beads_outage_is_handled_after_it(tmp_path: Path,
     def down(_self: BeadsAdapter, _ws: str, _bead: str) -> Bead:
         raise BeadsUnavailable("injected")
 
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))     # sent before the outage: the key reads beads
     monkeypatch.setattr(BeadsAdapter, "show", down)
     with contextlib.suppress(BeadsUnavailable):
-        signal(rig)                                             # the report is drained, and can't be handled
+        rig.pickup()                                            # the report is drained, and can't be handled
     assert records(rig) == [] and [s.account for s in rig.runtime.launches] == ["default"]
+    assert len(rig.sched.held) == 1
     monkeypatch.setattr(BeadsAdapter, "show", real_show)
     assert rig.pickup() is Outcome.RESUMED                      # no new report: the held one is handled
     assert [(r.number, r.reason, r.trust) for r in records(rig)] == [(1, QUOTA, UNTRUSTED),
