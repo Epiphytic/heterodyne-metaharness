@@ -216,6 +216,7 @@ class Adapter(Protocol):
     tool_env: frozenset[str]          # what the pinned CLI adds to its tools' environment (S5 item 11)
     prompt_marker: str                # its ready prompt, as tmux captures it
     assigns_id: bool                  # the CLI assigns the native ID itself (Codex's thread), else wsd does
+    turn_end_events: tuple[str, ...]  # hook events that end a turn (plan 4b E14)
 
     def locate(self, binary: str, path: str) -> Cli: ...
 

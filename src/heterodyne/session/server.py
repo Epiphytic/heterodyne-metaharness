@@ -6,9 +6,9 @@ and `ws_request`, each with the launch token, and refuses every other operation 
 allowed and ws-request is unsupported (plan 4 D15).
 
 Everything a session sends is untrusted. Accepted requests are spooled, capped, to the generation's
-events file outside the sandbox. `TurnState` keeps only what the runtime reads: turn counts and the last
-turn event (the lifetime stop's turn boundary, D13) and the first SessionStart's session ID if it is a
-canonical UUID (the Codex thread ID, D8).
+events file outside the sandbox. `TurnState` keeps only what the runtime reads: turn counts, the last
+turn event and whether it ended a turn (one of the adapter's turn-end events, D13; plan 4b E14), and the
+first SessionStart's session ID if it is a canonical UUID (the Codex thread ID, D8).
 
 The session is untrusted with wsd's resources too: at most `max_handlers` connections are served at
 once (more are closed unread), each request has one absolute deadline however its bytes trickle in, and
@@ -45,26 +45,30 @@ TURN_EVENTS = ("UserPromptSubmit", "Stop")
 @dataclass(frozen=True)
 class TurnState:
     prompts: int = 0
-    stops: int = 0
+    stops: int = 0                  # turn ends of any of the session's turn-end events
     last_event: str = ""
     thread_id: str | None = None
+    boundary: bool = False          # the last turn event ended a turn
 
     @property
     def idle(self) -> bool:
-        """At a turn boundary: the last turn event was a Stop."""
-        return self.last_event == "Stop"
+        """At a turn boundary: the last turn event was one of the session's turn-end events."""
+        return self.boundary
 
 
 class SessionServer:
     def __init__(self, path: Path, token: str, events: Path, *, max_spool: int = 4 << 20,
                  max_handlers: int = MAX_HANDLERS, client_seconds: float = CLIENT_SECONDS,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, turn_ends: tuple[str, ...] = ("Stop",),
+                 on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.path = path
         self.token = token.encode()
         self.events = events
         self.max_spool = max_spool
         self.client_seconds = client_seconds
         self.clock = clock
+        self.turn_ends = turn_ends
+        self.on_event = on_event
         self.served = 0
         self._state = TurnState()
         self._lock = threading.Lock()
@@ -231,6 +235,9 @@ class SessionServer:
         return OK
 
     def _record(self, payload: dict[str, Any]) -> None:
+        """Turn state from the event name and session ID alone, then the runtime's callback, both under
+        the lock and only while open, so nothing is recorded or reported once close has returned. A
+        callback that fails drops its own report: the reply and the turn state are unaffected."""
         event = payload.get("hook_event_name")
         with self._lock:
             if self._closed.is_set():
@@ -241,10 +248,15 @@ class SessionServer:
                 if isinstance(sid, str) and UUID.fullmatch(sid):
                     s = replace(s, thread_id=sid)
             elif event == "UserPromptSubmit":
-                s = replace(s, prompts=s.prompts + 1, last_event=event)
-            elif event == "Stop":
-                s = replace(s, stops=s.stops + 1, last_event=event)
+                s = replace(s, prompts=s.prompts + 1, last_event=event, boundary=False)
+            elif isinstance(event, str) and event in self.turn_ends:
+                s = replace(s, stops=s.stops + 1, last_event=event, boundary=True)
             self._state = s
+            if self.on_event is not None:
+                try:
+                    self.on_event(payload)
+                except Exception:  # noqa: BLE001, S110 - an untrusted report is dropped, never retried
+                    pass
 
     def _spool(self, kind: str, payload: dict[str, Any]) -> None:
         line = (json.dumps({"type": kind, "payload": payload}) + "\n").encode()
