@@ -365,7 +365,16 @@ def test_an_app_server_that_cannot_be_reaped_is_no_reading(tmp_path: Path, monke
     def stuck(self: "subprocess.Popen[str]", timeout: float | None = None) -> int:
         raise subprocess.TimeoutExpired(self.args, timeout or 0)
 
+    real_end = hostread._end_holders
+
+    def once_a_zombie(marks: set[bytes], since: float | None, seconds: float) -> None:
+        """The read's own scan, once the killed server has finished exiting. While it exits its
+        environment can't be read and its state isn't yet Z, so a scan then rightly keeps the home."""
+        assert all(wait_for(lambda p=p: hostread._stat(str(p.pid))[0] == "Z") for p in started)
+        real_end(marks, since, seconds)
+
     monkeypatch.setattr(POPEN, "wait", stuck)
+    monkeypatch.setattr(hostread, "_end_holders", once_a_zombie)
     try:
         assert rig.read() is None
     finally:
