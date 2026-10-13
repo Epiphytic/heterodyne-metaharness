@@ -1231,7 +1231,8 @@ class Parker:
         spec = LaunchSpec(ws, op.bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
                           worktree, resume=op.kind is OpKind.RESUME, ref=op.data.get("ref") or None,
                           generation=entry.generation, native_id=native, account=entry.account,
-                          model=entry.model_passed, repo=Path(rec.repo))
+                          credential_key=entry.credential_key, model=entry.model_passed,
+                          repo=Path(rec.repo))
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)

@@ -11,18 +11,21 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from fakes.fake_backend import FakeBackend
 from fakes.scripted_selftest import ScriptedSelfTest
-from wsd_env import Clock, accounts_at, git_repo, login_home
+from wsd_env import ADAPTERS, Clock, accounts_at, git_repo, login_home
 
+from heterodyne.config import paths
+from heterodyne.config.accounts import Account, canonical_login, credential_key
 from heterodyne.sandbox.backend import BackendUnavailable
 from heterodyne.sandbox.runtime import RuntimeConfig, SandboxRuntime, read_record
 from heterodyne.sandbox.settings import sandbox_settings
 from heterodyne.tmux import Tmux
 from heterodyne.wsd import ids
+from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.runtime import LaunchSpec
 
 BASE_HOST = """
@@ -93,13 +96,35 @@ def fake_jwt(exp: int) -> str:
     return f"x.{body}.x"
 
 
+def write_login(folder: Path, adapter: str, expires_at: int) -> None:
+    """A fake login for `adapter` in `folder` that expires at `expires_at` (epoch seconds). No credential."""
+    folder.mkdir(parents=True, exist_ok=True)
+    if adapter == "claude-code":
+        (folder / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"expiresAt": expires_at * 1000, "accessToken": "fake-not-a-token"}}))
+    else:
+        (folder / "auth.json").write_text(json.dumps({"tokens": {"access_token": fake_jwt(expires_at)}}))
+
+
 def fresh_logins(home: Path, expires_at: int) -> None:
     """Fake default logins that expire at `expires_at` (epoch seconds). Obvious fakes, no credential."""
-    (home / ".claude").mkdir(parents=True, exist_ok=True)
-    (home / ".codex").mkdir(parents=True, exist_ok=True)
-    (home / ".claude" / ".credentials.json").write_text(json.dumps(
-        {"claudeAiOauth": {"expiresAt": expires_at * 1000, "accessToken": "fake-not-a-token"}}))
-    (home / ".codex" / "auth.json").write_text(json.dumps({"tokens": {"access_token": fake_jwt(expires_at)}}))
+    write_login(home / ".claude", "claude-code", expires_at)
+    write_login(home / ".codex", "codex", expires_at)
+
+
+def with_named(rig: "RuntimeRig", adapter: str, name: str, expires_at: int) -> Path:
+    """Configure the named account `name` for `adapter` at `~/.hz-<name>`, its fake login expiring at
+    `expires_at`, as AU-2 would resolve it, and give the runtime the accounts. Returns the directory."""
+    configured = f"~/.hz-{name}"
+    env = {"HOME": str(rig.home)}
+    write_login(paths.expand(configured, env), adapter, expires_at)
+    login_dir, files = canonical_login(name, adapter, configured, env)
+    current = rig.runtime.c.accounts
+    assert isinstance(current, ConfiguredAccounts)
+    account = Account(name, adapter, configured, login_dir, files, credential_key(adapter, files))
+    named = {**current.named, (adapter, name): account}
+    rig.runtime.c = replace(rig.runtime.c, accounts=ConfiguredAccounts(ADAPTERS, env, named))
+    return paths.expand(configured, env)
 
 
 @dataclass
@@ -124,9 +149,10 @@ def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> Runtime
     claude, codex = install_fake_cli(root / "i", "claude-code"), install_fake_cli(root / "i", "codex")
     backend, selftest = FakeBackend(), ScriptedSelfTest()
     config = RuntimeConfig(
-        sessions=root / "s", settings=sandbox_settings(env), accounts=accounts_at(home), real_home=home,
-        real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
-        tmux=tmux, path=os.pathsep.join((str(claude.parent), str(codex.parent))), clock=clock)
+        sessions=root / "s", credlocks=root / "k", settings=sandbox_settings(env), accounts=accounts_at(home),
+        real_home=home, real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(),
+        gid=os.getgid(), tmux=tmux, path=os.pathsep.join((str(claude.parent), str(codex.parent))),
+        clock=clock)
     runtime = SandboxRuntime(config, backend, selftest)
     repo, worktree = git_repo(root / "r"), root / "w"          # a linked worktree, as btq makes them
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "btq/btq-1", str(worktree)],
@@ -137,11 +163,12 @@ def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> Runtime
 def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: str = "default",
                 resume: bool = False) -> LaunchSpec:
     """A first launch, as plan 3's guard builds it: Claude's native ID is the session key, Codex's is
-    unknown until its thread starts."""
+    unknown until its thread starts. The credential key is the account's, pinned now (AU-3)."""
     key = ids.role_session(bead, "coder", profile)
     native = key if profile == "p-one" else None
     return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
-                      native_id=native, account=account, repo=rig.repo)
+                      native_id=native, account=account, repo=rig.repo,
+                      credential_key=rig.runtime.c.accounts.current_key(ADAPTERS[profile], account))
 
 
 def bead_worktree(rig: RuntimeRig, bead: str) -> Path:

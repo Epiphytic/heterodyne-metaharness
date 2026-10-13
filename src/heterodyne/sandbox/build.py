@@ -59,7 +59,8 @@ def build_runtime(s: WsdSettings, env: Mapping[str, str], *,
     real_home = Path(home)
     service_manager = table_at(load(env=env).values, "platform", "config").get("service_manager")
     config = RuntimeConfig(
-        sessions=s.state_dir / "sessions", settings=settings, accounts=s.accounts, real_home=real_home,
+        sessions=s.state_dir / "sessions", credlocks=s.credlock_dir,
+        settings=settings, accounts=s.accounts, real_home=real_home,
         real_home_canary=real_home / CANARY, wsd_socket=s.socket, uid=os.getuid(), gid=os.getgid(),
         tmux=Tmux(TMUX_SOCKET, launcher=_launcher(service_manager)), path=env.get("PATH", os.defpath),
         clock=utc_now)

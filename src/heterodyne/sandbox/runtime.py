@@ -51,10 +51,13 @@ from heterodyne.sandbox.spec import (
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import Tmux, TmuxError
-from heterodyne.wsd import gitwip
+from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
+from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
+    KEY_CHANGED,
+    LOGIN_STALE,
     Action,
     EndCause,
     Ended,
@@ -208,6 +211,7 @@ KNOWN_FAILURES = (SpecRefused, AdapterError, BackendError, _StepFailed, ConfigEr
 @dataclass(frozen=True)
 class RuntimeConfig:
     sessions: Path                    # <wsd state>/sessions
+    credlocks: Path                   # <wsd state>/credlocks: the D8 lock directory (wsd.credlock)
     settings: SandboxSettings
     accounts: Accounts
     real_home: Path
@@ -291,8 +295,6 @@ class SandboxRuntime:
         adapter = self.c.adapters.get(self.c.accounts.adapter(spec.profile) or "")
         if adapter is None:
             raise LaunchFailed("the profile's adapter can't be run in a sandbox")
-        if spec.account != DEFAULT_ACCOUNT:
-            raise LaunchFailed("named accounts are bound by AU-6")
         if spec.repo is None:
             raise LaunchFailed("the launch names no repository")
         try:
@@ -325,8 +327,8 @@ class SandboxRuntime:
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
         cli = self._cli(adapter)
-        protected, others = self._logins(adapter)
-        expiry = self._fresh(adapter, protected.chosen_files)
+        protected, others = self._logins(adapter, spec.account)
+        expiry = self._pinned(adapter, spec, protected.chosen_files)
         try:
             name = sandbox_name(spec.session_key, spec.generation)
         except SpecRefused as exc:
@@ -420,7 +422,12 @@ class SandboxRuntime:
     def _resume(self, adapter: Adapter, layout: SessionLayout, prev: SessionRecord | None,
                 spec: LaunchSpec) -> tuple[bool, str | None]:
         """D9: (resume, native ID). Resume held state; start fresh only when the record shows no generation
-        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed."""
+        ever ran; otherwise RuntimeUnavailable. Missing state is never evidence that none existed. D7: a
+        handoff starts fresh whatever is held: a server-assigned ID is learned from the session, and any
+        other is the handoff's own (`ids.handoff_session`)."""
+        if spec.handoff:
+            fresh = None if adapter.assigns_id else ids.handoff_session(spec.session_key, spec.generation)
+            return False, fresh
         wanted = spec.native_id or (prev.native_id if prev is not None and prev.ran else None)
         try:
             # A home that was never made holds nothing; one that exists is searched anchored (a link refuses).
@@ -446,30 +453,52 @@ class SandboxRuntime:
             raise LaunchFailed(f"the {adapter.name} CLI is not the pinned version {adapter.version_pin}")
         return cli
 
-    def _logins(self, adapter: Adapter) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
+    def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
+        """The chosen account's login, and every other account's as configured: `default` is another
+        account whenever a named one is chosen (§7)."""
         try:
-            chosen_dir, chosen = self.c.accounts.login_paths(adapter.name, DEFAULT_ACCOUNT)
+            chosen_dir, chosen = self.c.accounts.login_paths(adapter.name, account)
             others: list[tuple[str, Path]] = []
             dirs: list[Path] = []
-            for account in self.c.accounts.configured(adapter.name):
-                folder, files = self.c.accounts.login_paths(adapter.name, account)
+            for name in (DEFAULT_ACCOUNT, *self.c.accounts.configured(adapter.name)):
+                if name == account:
+                    continue
+                folder, files = self.c.accounts.login_paths(adapter.name, name)
                 dirs.append(folder)
-                others += [(account, f) for f in files]
+                others += [(name, f) for f in files]
         except ConfigError as exc:
             raise LaunchFailed(str(exc)) from None
         return Protected(chosen_dir, chosen, tuple(dirs), tuple(f for _, f in others)), tuple(others)
 
+    def _pinned(self, adapter: Adapter, spec: LaunchSpec, login_files: tuple[Path, ...]) -> int:
+        """E1, D8: under the account's lock, the key the entry pinned must still be the account's, and
+        then the login is read for the freshness gate. Returns the expiry it checked."""
+        if not spec.credential_key:
+            raise LaunchFailed(KEY_CHANGED)
+        try:
+            with credential_lock(self.c.credlocks, spec.credential_key, self.c.settings.lock_wait_seconds,
+                                 clock=self.c.wait_clock, sleep=self.c.sleep):
+                try:
+                    current = self.c.accounts.current_key(adapter.name, spec.account)
+                except ConfigError as exc:
+                    raise LaunchFailed(str(exc)) from None
+                if current != spec.credential_key:
+                    raise LaunchFailed(KEY_CHANGED)
+                return self._fresh(adapter, login_files)
+        except CredentialBusy as exc:
+            raise LaunchFailed(str(exc)) from None
+
     def _fresh(self, adapter: Adapter, login_files: tuple[Path, ...]) -> int:
-        """§7 freshness gate (D12): plan 4 never refreshes, so a login that would expire within the
-        session's maximum lifetime and stop margin refuses the launch. Returns the expiry it checked."""
+        """§7 freshness gate (D12, E3): plan 4b never refreshes, so a login that would expire within the
+        session's maximum lifetime and stop margin refuses the launch with LOGIN_STALE, which AU-8 reads
+        as "try the next account". Returns the expiry it checked."""
         try:
             expiry = adapter.access_expiry(login_files)
         except AdapterError as exc:
             raise LaunchFailed(str(exc)) from None
         s = self.c.settings
         if expiry - self.c.clock() <= s.max_lifetime_seconds + s.stop_margin_seconds:
-            raise LaunchFailed("the login expires within the session's maximum lifetime; refresh it on "
-                               "the host")
+            raise LaunchFailed(LOGIN_STALE)
         return int(expiry)
 
     def _start(self, spec: LaunchSpec, adapter: Adapter, cli: Cli, layout: SessionLayout, rec: SessionRecord,

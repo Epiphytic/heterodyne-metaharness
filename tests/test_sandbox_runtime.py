@@ -1,4 +1,6 @@
 import contextlib
+import errno
+import fcntl
 import json
 import os
 import shutil
@@ -12,7 +14,17 @@ from typing import Any
 import msgspec
 import pytest
 from fakes.fake_btq import World, factory
-from sandbox_env import RuntimeRig, bead_worktree, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
+from sandbox_env import (
+    RuntimeRig,
+    bead_worktree,
+    fresh_logins,
+    launch_spec,
+    runtime_rig,
+    short_dir,
+    wait_for,
+    with_named,
+    write_login,
+)
 from tmux_guard import new_test_tmux
 from wsd_env import PROFILES, Clock, accounts_at, git_repo
 
@@ -32,10 +44,14 @@ from heterodyne.sandbox.runtime import (
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip, ids
+from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.checkpoints import nothing
+from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock
 from heterodyne.wsd.daemon import Wsd, assemble
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import (
+    KEY_CHANGED,
+    LOGIN_STALE,
     Action,
     EndCause,
     Ended,
@@ -344,10 +360,132 @@ def test_a_worktree_host_git_cant_pin_is_refused(rig: RuntimeRig, change: str) -
     assert rig.backend.created == []
 
 
-def test_a_named_account_is_refused(rig: RuntimeRig) -> None:
-    with pytest.raises(LaunchFailed, match="AU-6"):
-        rig.runtime.launch(launch_spec(rig, "p-one", account="work"))
+DAY = 86_400
+
+
+def logins_bound(rig: RuntimeRig, key: str) -> list[Path]:
+    return [b.source for b in rig.backend.boxes[record(rig, key).sandbox].spec.logins]
+
+
+@pytest.mark.parametrize(("profile", "adapter", "login"), [("p-one", "claude-code", ".credentials.json"),
+                                                           ("p-two", "codex", "auth.json")])
+def test_a_named_account_binds_only_its_own_login(rig: RuntimeRig, profile: str, adapter: str,
+                                                  login: str) -> None:
+    folder = with_named(rig, adapter, "work", rig.clock() + DAY)
+    spec = launch_spec(rig, profile, account="work")
+    rig.runtime.launch(spec)
+    assert logins_bound(rig, spec.session_key) == [(folder / login).resolve()]
+    default = rig.home / (".claude" if adapter == "claude-code" else ".codex") / login
+    assert rig.selftest.others == [(("default", default),)]     # §7: the default login is another account
+
+
+def test_the_default_launch_still_protects_every_named_account(rig: RuntimeRig) -> None:
+    folder = with_named(rig, "codex", "work", rig.clock() + DAY)
+    spec = launch_spec(rig, "p-two")
+    rig.runtime.launch(spec)
+    assert logins_bound(rig, spec.session_key) == [(rig.home / ".codex" / "auth.json").resolve()]
+    assert rig.selftest.others == [(("work", folder / "auth.json"),)]
+
+
+@pytest.mark.parametrize("pinned", ["", "ck1-" + "0" * 32])
+def test_a_key_that_is_not_the_accounts_refuses_the_launch(rig: RuntimeRig, pinned: str) -> None:
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(replace(launch_spec(rig, "p-two"), credential_key=pinned))
+    assert str(caught.value) == KEY_CHANGED
     assert rig.backend.created == []
+
+
+def test_a_login_repointed_after_the_pin_refuses_the_launch(rig: RuntimeRig) -> None:
+    """D2: the account's configured path now resolves to other files, so its key is not the pinned one."""
+    write_login(rig.root / "login-a", "codex", rig.clock() + DAY)
+    write_login(rig.root / "login-b", "codex", rig.clock() + DAY)
+    (rig.home / ".hz-work").symlink_to(rig.root / "login-a")
+    with_named(rig, "codex", "work", rig.clock() + DAY)         # writes through the link, into login-a
+    spec = launch_spec(rig, "p-two", account="work")
+    (rig.home / ".hz-work").unlink()
+    (rig.home / ".hz-work").symlink_to(rig.root / "login-b")
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(spec)
+    assert str(caught.value) == KEY_CHANGED
+    assert rig.backend.created == []
+
+
+def test_the_key_and_the_login_are_read_under_the_accounts_lock(rig: RuntimeRig,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-two")
+    lock = rig.runtime.c.credlocks / f"{spec.credential_key}.lock"
+    held: list[int | None] = []
+    real = ConfiguredAccounts.current_key
+
+    def probing(self: ConfiguredAccounts, adapter: str, account: str) -> str:
+        fd = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(0)                                      # taken: the runtime did not hold it
+        except BlockingIOError as exc:
+            held.append(exc.errno)
+        finally:
+            os.close(fd)
+        return real(self, adapter, account)
+
+    monkeypatch.setattr(ConfiguredAccounts, "current_key", probing)
+    rig.runtime.launch(spec)
+    assert held == [errno.EWOULDBLOCK]
+
+
+def test_a_held_lock_refuses_the_launch_within_its_bound(rig: RuntimeRig) -> None:
+    rig.runtime.c = replace(rig.runtime.c, settings=replace(rig.runtime.c.settings, lock_wait_seconds=1))
+    spec = launch_spec(rig, "p-two")
+    with credential_lock(rig.runtime.c.credlocks, spec.credential_key, 0):
+        with pytest.raises(LaunchFailed) as caught:
+            rig.runtime.launch(spec)
+    assert str(caught.value) == LOCK_BUSY
+    assert rig.backend.created == []
+    rig.runtime.launch(spec)                                    # released: the next pickup launches
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_the_freshness_gate_refuses_a_login_that_expires_too_soon(rig: RuntimeRig, profile: str) -> None:
+    s = rig.runtime.c.settings
+    rig.clock.advance(DAY - (s.max_lifetime_seconds + s.stop_margin_seconds))
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, profile))
+    assert str(caught.value) == LOGIN_STALE
+    assert rig.backend.created == []
+
+
+def test_the_freshness_gate_reads_the_chosen_accounts_login(rig: RuntimeRig) -> None:
+    s = rig.runtime.c.settings
+    soon = rig.clock() + s.max_lifetime_seconds + s.stop_margin_seconds
+    with_named(rig, "codex", "work", soon)
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert str(caught.value) == LOGIN_STALE
+    write_login(rig.home / ".codex", "codex", soon)             # now the default is the stale one
+    write_login(rig.home / ".hz-work", "codex", rig.clock() + DAY)
+    rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert len(rig.backend.created) == 1
+
+
+def test_a_claude_handoff_starts_the_d7_session_fresh(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    second = rig.runtime.launch(replace(spec, generation=2, resume=False, handoff=True,
+                                        native_id=first.native_id))
+    assert second.native_id == ids.handoff_session(spec.session_key, 2) != first.native_id
+    pane = rig.backend.ttys[-1]
+    assert "--resume" not in pane and pane[pane.index("--session-id") + 1] == second.native_id
+
+
+def test_a_codex_handoff_starts_a_new_thread(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-two")
+    first = rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    second = rig.runtime.launch(replace(spec, generation=2, resume=False, handoff=True,
+                                        native_id=first.native_id))
+    assert second.native_id is not None and second.native_id != first.native_id
+    assert "resume" not in rig.backend.ttys[-1]
 
 
 def test_the_cli_pin_refuses_another_version(rig: RuntimeRig) -> None:
@@ -355,14 +493,6 @@ def test_the_cli_pin_refuses_another_version(rig: RuntimeRig) -> None:
     package.write_text(json.dumps({"version": "9.9.9"}))
     with pytest.raises(LaunchFailed, match="pinned version"):
         rig.runtime.launch(launch_spec(rig, "p-one"))
-    assert rig.backend.created == []
-
-
-def test_the_freshness_gate_refuses_a_login_that_expires_too_soon(rig: RuntimeRig) -> None:
-    s = rig.runtime.c.settings
-    rig.clock.advance(86_400 - (s.max_lifetime_seconds + s.stop_margin_seconds))
-    with pytest.raises(LaunchFailed, match="expires"):
-        rig.runtime.launch(launch_spec(rig, "p-two"))
     assert rig.backend.created == []
 
 
