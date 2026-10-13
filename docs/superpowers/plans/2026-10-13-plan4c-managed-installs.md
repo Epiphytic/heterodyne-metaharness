@@ -26,7 +26,7 @@
 - Plan 4 (`docs/superpowers/plans/2026-10-09-plan4-agents-and-sandbox.md`): the runtime, the self-test, `check_credentials`.
 - admind's relay (`docs/admind.md` §10): approval asks over `ask.sock`.
 
-**Status:** draft for review, revised after cross-model cycle 1. It needs the rest of its cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 12 (the host change) also waits for the operator's answer on §17 item 13 (ask `b2m6`), separately from the plan's approval. Task 1 is research and changes nothing; its findings gate Tasks 3, 6, 8 and 13 (Task 1, "Stop rules").
+**Status:** draft for review, revised after cross-model cycle 1. It needs the rest of its cross-model design review, then operator approval (a design-approval bead) before any task starts. The operator decided §17 item 13 on 2026-10-13 (ask `b2m6`): yes, with verity (Q1). Task 12's privileged steps still run only after this plan's approval, deliberately, at that task. Task 1 is research and changes nothing; its findings gate Tasks 3, 6, 8 and 13 (Task 1, "Stop rules").
 
 ## Global Constraints
 
@@ -85,7 +85,7 @@ These were open while r16 was written. They were settled from the pinned binarie
 | F8 | Claude Code's content flags. | `--plugin-dir <path>` (repeatable), `--mcp-config <configs...>` and `--strict-mcp-config` exist. `--setting-sources` takes a comma-separated list; plan 4 passes it empty. `--disable-slash-commands` disables all skills. | E10: plugins and MCP through flags. Task 1 checks that `--plugin-dir` still loads under `--setting-sources=`. |
 | F9 | Claude Code's updater switch. | The binary reads `DISABLE_AUTOUPDATER` and the `autoUpdates` setting. | E9: `DISABLE_AUTOUPDATER=1` in the launcher's environment and `"autoUpdates": false` in its settings file. |
 | F10 | Codex writes into `CODEX_HOME`. | With a temp `CODEX_HOME`, `codex --help` warns that it would create "PATH aliases" (helper binaries) under it, and refuses to under `/tmp`. | E9: anything Codex writes into the synthetic home is never run by the launcher. Task 1 records where the aliases go in a sandbox home. |
-| F11 | fs-verity. | The running kernel lists `verity` in `/sys/fs/ext4/features`. `/var/lib` is on ext4. Whether that filesystem has the `verity` feature set needs `tune2fs -l` as root. | Task 12, step 5. |
+| F11 | fs-verity. | The running kernel lists `verity` in `/sys/fs/ext4/features`. `/var/lib` is on ext4. Whether that filesystem has the `verity` feature set needs `tune2fs -l` as root. | Task 12, step 5 checks it before `tune2fs -O verity`. |
 | F12 | The store owner. | `heterodyne-store` does not exist on the host. | Task 12. |
 
 ## Decisions made in this plan (within the ADR; reviewers should check them)
@@ -153,7 +153,7 @@ These were open while r16 was written. They were settled from the pinned binarie
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **§17 item 13: create the store owner** (the `heterodyne-store` user, `/var/lib/heterodyne/harnesses`, the helper's units), and optionally turn on ext4 `verity` on `/var/lib`'s filesystem. That is Task 12, a root host change. | Yes to both, as r16 recommends (asked as `b2m6`). Until then, Tasks 2–11 and 13's fallback tests run without it, and a host uses the fallback only if you set `[harnesses] fallback = true`. A host running on the fallback has not met §7's store-owner guarantee, whatever else has closed: §7's managed-installs work stays open until Task 12 and Task 13's helper-mode tests close, or you answer "no" and record the fallback as the accepted risk. |
+| Q1 | **§17 item 13: create the store owner** (the `heterodyne-store` user, `/var/lib/heterodyne/harnesses`, the helper's units), and turn on ext4 `verity` on `/var/lib`'s filesystem. That is Task 12, a root host change. | **Decided** (operator, 2026-10-13, ask `b2m6`): yes, with verity, as r16 recommends. The answer authorizes the change; it does not run it. Task 12's privileged steps run only after this plan's approval, at that task. Until then, Tasks 2–11 and 13's fallback tests run without it, and a host uses the fallback only if you set `[harnesses] fallback = true`. A host running on the fallback has not met §7's store-owner guarantee, whatever else has closed: §7's managed-installs work stays open until Task 12 and Task 13's helper-mode tests close. |
 | Q2 | **Signatures.** v1 checks the checksums both upstreams publish (E5), not Codex's sigstore bundle or npm's registry signature: stdlib can't check either, and the runtime dependency rule allows only `msgspec`. | Accept checksums for v1, which §7's "checksum or signature" allows. The ask shows, per source, "checksum matches <origin>; signature available, not verified" (or "no signature published"). A later plan can verify signatures with a host tool `wsd` runs before `stage`. |
 | Q3 | **The grouped digest on cards** (E14): `sha256:` and 16 groups of 4 hex, only for digests `wsd` computed. | Accept. The alternatives are the 12-hex prefix alone, which §5.9 forbids for content the approval binds, or base64url, which can by chance match a token pattern (`sk-` after a `-`) and be withheld. |
 | Q4 | **Where install approval beads live** (E13). | `[harnesses] approval_workstream = "heterodyne"`. It is a required key; `install` refuses without it. |
@@ -196,8 +196,8 @@ Wave 4:            T8 the launcher (T1: S9-8, S9-9; T4, T5, T6, T7, plan 4b T6 a
 Wave 5:            T9 taint watch (T8)
 Wave 6:            T10 wsd harness commands and approval (T4, T5, T7, T8, T9)
 Wave 7:            T11 docs (T9, T10)
-Host:              T12 steps 1-2 (repository files, the ask) after T4; steps 3-7 (privileged) only after the
-                   host-change approval (b2m6)
+Host:              T12a (repository files, the command list) after T4; T12b (privileged) after T12a and the
+                   plan's approval (host change decided: b2m6, yes + verity)
 Live:              T13 live test (T1: S9-7; T9, T10, T11; its helper-mode part also T12)
 ```
 
@@ -214,7 +214,7 @@ Live:              T13 live test (T1: S9-7; T9, T10, T11; its helper-mode part a
 | 9 | 8 | none | `sandbox/runtime.py` (after 8) |
 | 10 | 4, 5, 7, 8, 9 | none | `harness/digests.py` (new), `wsd/ctl.py`, `wsd/cli.py`, `wsd/workstream.py`, `wsd/daemon.py`, `wsd/scheduler.py`, `wsd/park.py` (the taint park), `wsd/journal.py`, `wsd/upgrade.py`, `wsd/btq.py` |
 | 11 | 9, 10 | none | `docs/` |
-| 12 | 4; steps 3-7 also the host-change approval | any | `deploy/` (new unit and setup files) |
+| 12 | 4; steps 3-7 also T12a (the host change is decided, `b2m6`) | any | `deploy/` (new unit and setup files) |
 | 13 | 1 (S9-7), 9, 10, 11 (helper mode: 12) | none | `tests/live/`, `docs/wsd.md` |
 
 ### What `main` does after each merge
@@ -231,7 +231,7 @@ Every merge leaves the full suite green (`timeout 3600 uv run pytest -q`, run in
 | T9 | The taint watch runs. | Passes. |
 | T10 | `wsctl harness` works; installs can be created, approved, published and selected. The deployment hold ends once the operator has selected installs. | Passes. |
 | T11, T13 | Documentation; live evidence. | Passes; the live tests skip offline. |
-| T12 | Steps 1–2 change no host. After the host-change approval, the host has the store owner and the helper. | Passes (`tests/test_deploy_store_helper.py`). |
+| T12 | Steps 1–2 change no host. After T12b, the host has the store owner, the helper and verity. | Passes (`tests/test_deploy_store_helper.py`). |
 
 ## Beads
 
@@ -240,7 +240,7 @@ All in workstream `heterodyne`. Branches are `p4c-t<N>`.
 - **Kinds and gates:**
   - Task 1 is `kind:research`. It changes no code and needs no design approval.
   - Tasks 2–11 and 13 are `kind:task`. Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=<the approved r16 commit>`, and a blocking dependency on the approval bead.
-  - Task 12 is `kind:task` with the same metadata. Its repository steps (1–2) need only the plan's approval. Its privileged steps (3–7) block on a separate **host-change approval bead** (`kind:approval`, ask `b2m6`) for §17 item 13 (Q1); the plan's approval does not authorize them. Task 12's bead is split for this: `T12a` (steps 1–2) and `T12b` (steps 3–7, blocked on the host-change approval).
+  - Task 12 is `kind:task` with the same metadata. Its repository steps (1–2) need only the plan's approval. Its privileged steps (3–7) also need the **host-change decision** for §17 item 13 (Q1), which the operator gave on 2026-10-13 (ask `b2m6`: yes, with verity). The plan's approval alone would not have authorized them. Task 12's bead is split: `T12a` (steps 1–2) and `T12b` (steps 3–7). `T12b` carries `metadata.host_change=b2m6` and blocks on `T12a`.
 - **Dependencies.** Each line is "task: blocks on". Every task 2–13 also blocks on the plan's approval bead.
 
 ```
@@ -256,13 +256,13 @@ T9:   T8
 T10:  T4, T5, T7, T8, T9
 T11:  T9, T10
 T12a: T4
-T12b: T12a, approval(host change, §17 item 13)
+T12b: T12a   (the host change is decided: b2m6, 2026-10-13, yes + verity)
 T13:  T1, T9, T10, T11   (its helper-mode tests also need T12b; without it they skip, and T13 closes with
                           the fallback evidence and a note that the store-owner guarantee is still open)
 ```
 
 - **Plan 4b's beads that wait on plan 4c:** plan 4b Task 11b and Task 12 block on plan 4c Task 8's bead, and AU-6 (btq-bc7yd) closes only after it, as plan 4b says.
-- **The ADR items:** r16's §7 Managed installs work closes when Tasks 2–11 and 13 have closed **and** either T12b has closed with the host evidence (Task 12, step 7) and T13's helper-mode tests have passed, or the operator has answered "no" to §17 item 13, recording the fallback as the accepted risk. Fallback-only completion does not close the store-owner guarantee.
+- **The ADR items:** r16's §7 Managed installs work closes when Tasks 2–11 and 13 have closed **and** either T12b has closed with the host evidence (Task 12, step 7) and T13's helper-mode tests have passed, Fallback-only completion does not close the store-owner guarantee (the operator chose the store owner, `b2m6`).
 
 ## File map
 
@@ -1077,13 +1077,13 @@ git add docs/configuration.md docs/wsd.md docs/security-model.md docs/install.md
 git commit -m "plan4c T11: document managed installs"
 ```
 
-## Task 12: HOST CHANGE — the store owner, the helper's units and verity (waits for the operator's go)
+## Task 12: HOST CHANGE — the store owner, the helper's units and verity (decided: `b2m6`)
 
-> **Waits for the operator's go on ADR §17 item 13 (Q1, asked as `b2m6`).** The task has two beads:
-> - **T12a** (steps 1–2) is repository work only: the unit files, the setup script, their offline test, and the host-change ask. It may run and merge before the host approval, because it changes no host.
-> - **T12b** (steps 3–7) is the privileged host change. It blocks on the host-change approval bead, which shows the exact commands below, and nothing in it runs as root before that bead is approved.
+> **Decided by the operator on 2026-10-13 (ask `b2m6`): yes, with verity** (ADR §17 item 13, Q1). That decision authorizes the change below; it does not run it. The task has two beads:
+> - **T12a** (steps 1–2) is repository work only: the unit files, the setup script, their offline test, and the exact command list. It changes no host.
+> - **T12b** (steps 3–7) is the privileged host change. It runs only after this plan's approval and T12a's merge, deliberately, at this task, and nothing in it runs as root before then.
 >
-> Nothing in Tasks 2–11 needs T12b. Until it is done, a host can use managed installs only with `[harnesses] fallback = true`. Finishing on the fallback alone does not close §7's store-owner guarantee: that needs T12b and Task 13's helper-mode tests, or an operator "no" that records the fallback as the accepted risk (Q1).
+> Nothing in Tasks 2–11 needs T12b. Until it is done, a host can use managed installs only with `[harnesses] fallback = true`. Finishing on the fallback alone does not close §7's store-owner guarantee: that needs T12b and Task 13's helper-mode tests (Q1).
 
 **Files (in the repo; the host steps run them):**
 - Create: `deploy/store-helper/heterodyne-store-helper.socket`, `deploy/store-helper/heterodyne-store-helper@.service`, `deploy/store-helper/setup-store.sh`, `deploy/store-helper/README.md`
@@ -1134,11 +1134,11 @@ UMask=0022
 TimeoutSec=600
 ```
 
-  - optionally, the ext4 `verity` feature on `/var/lib`'s filesystem.
+  - the ext4 `verity` feature on `/var/lib`'s filesystem, so `stage` enables fs-verity on every published file (the primary path; an install without it is recorded `verity: false`).
 
 - [ ] **Step 1 (T12a): Write the files and their offline test, and merge them** (a normal PR; it changes no host).
-- [ ] **Step 2 (T12a): Ask for the go.** Post the host-change approval bead through admind's relay. Its description lists every command of steps 3–6 exactly, with the pinned commit, and says what each changes and how to undo it (README "Rollback": stop and disable the units, remove them, `userdel heterodyne-store`, remove `/var/lib/heterodyne` only if empty or after a `wsctl harness list` shows nothing in use). Stop here until the bead is approved.
-- [ ] **Step 3 (T12b, after the go, as root): the user, the store and the helper copy**
+- [ ] **Step 2 (T12a): Write down the exact change.** T12b's bead description lists every command of steps 3–6 exactly, with the pinned commit, and says what each changes and how to undo it (README "Rollback": stop and disable the units, remove them, `userdel heterodyne-store`, remove `/var/lib/heterodyne` only if empty or after a `wsctl harness list` shows nothing in use; the `verity` feature stays set, since `tune2fs` doesn't clear it). The operator's go is `b2m6` (yes, with verity). If the list does anything beyond what `b2m6` decided (the store owner, the store, the helper's units and verity), stop and ask the operator again for the difference.
+- [ ] **Step 3 (T12b, after this plan's approval, as root): the user, the store and the helper copy**
 
 ```bash
 sudo bash deploy/store-helper/setup-store.sh --commit <pinned commit> --service-user <service user>
@@ -1155,9 +1155,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now heterodyne-store-helper.socket
 ```
 
-- [ ] **Step 5 (T12b, optional, as root): verity.** `tune2fs -l <device of /var/lib> | grep -i features` first. If `verity` is missing and the operator agreed to it, `tune2fs -O verity <device>` (ext4 allows it on a mounted filesystem; the kernel lists `verity` in `/sys/fs/ext4/features`, F11). Re-run `tune2fs -l` to confirm.
+- [ ] **Step 5 (T12b, as root): verity** (the primary path, decided in `b2m6`).
+  - First check that the filesystem supports it, and stop with the failed check if any fails:
+    - `findmnt -no FSTYPE,SOURCE --target /var/lib` names `ext4` and the device;
+    - `/sys/fs/ext4/features/verity` exists (F11);
+    - `tune2fs` is from e2fsprogs 1.45 or later (`tune2fs 2>&1 | head -1`);
+    - `tune2fs -l <device>` shows a block size of 4096, the Merkle tree block size `stage` uses.
+  - If `tune2fs -l <device> | grep -i features` already lists `verity`, skip to the confirmation. Otherwise run `tune2fs -O verity <device>`; ext4 allows it on a mounted filesystem.
+  - Confirm: `tune2fs -l` lists `verity`.
+  - A failed check is not skipped: T12b stays open, the store runs without verity, and the lead and the operator decide what to do next.
 - [ ] **Step 6 (T12b): Switch the host config** (with the operator's go for the config change): remove `[harnesses] fallback = true` if it was set, run `heterodyne config check` (no store problem, no `HELPER_DRIFT`), and restart `wsd`.
-- [ ] **Step 7 (T12b): Evidence.** Close the bead with: `id heterodyne-store`, `stat -c '%U %a %n'` of the store path from `/` down, `systemctl status heterodyne-store-helper.socket`, a `wsctl harness list` that says "store: helper", and the verity line. No checksum or digest beyond its 12-hex prefix.
+- [ ] **Step 7 (T12b): Evidence.** Close the bead with: `id heterodyne-store`, `stat -c '%U %a %n'` of the store path from `/` down, `systemctl status heterodyne-store-helper.socket`, a `wsctl harness list` that says "store: helper", the verity feature line, and a first published install whose record says `verity: true`. No checksum or digest beyond its 12-hex prefix.
 
 ## Task 13: the live test on managed installs
 
@@ -1197,4 +1205,4 @@ This plan is complete once it has passed its cross-model design review and the o
 1. **Subagent-driven (recommended).** Use superpowers:subagent-driven-development. Give each task a fresh worker session on its own `p4c-t<N>` branch, in the waves of the Parallelism section, and claim each worker's bead with that worker's own session. Each task ends with the cross-model review in Global Constraints before its PR merges.
 2. **Inline.** Use superpowers:executing-plans. Run the tasks in wave order in one session, with a checkpoint and the same review after each task.
 
-Either way, Task 8 starts only after plan 4b's Tasks 6 and 8 have merged and Task 1's S9-8 and S9-9 are confirmed, and T12b starts only after its own host-change approval (T12a may come first). Plan 4b's Task 11b and Task 12 wait for Task 8.
+Either way, Task 8 starts only after plan 4b's Tasks 6 and 8 have merged and Task 1's S9-8 and S9-9 are confirmed, and T12b starts only after this plan's approval and T12a's merge (the host change itself was decided in `b2m6`). Plan 4b's Task 11b and Task 12 wait for Task 8.
