@@ -60,7 +60,7 @@
   - Exit 127 or a missing executable is never a refusal: the test fails.
   - A timeout, or no verified run, fails a negative control.
 - **Exit statuses are never masked.** Subprocess helpers return or raise on the real status. Nothing ends in `|| true`, and no `check=False` result goes unread.
-- **Cleanup is proven.** Every subprocess the code starts (the host app-server, the in-sandbox read) is ended in a `finally`, by its own PID, then confirmed gone (`wait` returns its status). A scratch directory is removed in a `finally` and confirmed absent with `os.path.lexists`. An unconfirmed cleanup is a failed read, never a success.
+- **Cleanup is proven.** Every subprocess the code starts (the host app-server, the in-sandbox read) is ended in a `finally`, by its own handle, then confirmed gone (`wait` returns its status within a bound, and that status is its clean exit or the kill; anything else fails the read). Tests prove it: by the fake's recorded PID, or by the handle's `returncode` and closed pipes. A scratch directory is removed in a `finally` and confirmed absent with `os.path.lexists`. An unconfirmed cleanup is a failed read, never a success.
 - **Monitors run until the observed process ends.** A reader thread on a subprocess's stdout is joined after the process is confirmed gone, never left running.
 - **`src/` style:**
   - ruff line length 110, and pyright strict.
@@ -95,12 +95,12 @@
 | E4 | The trusted Codex read's home (§4.4 D9 (d): "a short-lived host-side app-server using the account's `CODEX_HOME`"). | The read runs in a fresh scratch `CODEX_HOME` (0700, under `<wsd state>/hostread/`). It holds only a copy of the account's `auth.json`, read under the lock. Before it starts, the access token must be valid for at least `read_margin_seconds` (default 300), so Codex never attempts a refresh (S7 (4): it attempts one only once the token has expired). If `auth.json` in the scratch home has changed when the read ends, the new bytes are written back to the login file. That write is atomic, under the lock, and only if the login file still holds the original bytes. Otherwise the change is dropped and logged as `DIAG_ROTATED_DROPPED`. The scratch home is removed in a `finally` and confirmed gone. | The app-server writes sqlite state, `installation_id` and more into its home (S7 (1)). The account's real login directory, the operator's `~/.codex` included, must not collect that. The validity precondition makes a refresh unexpected, and the compare-and-swap write-back keeps a rotated token if one happens anyway. |
 | E5 | Codex's in-session usage source (§4.4 D9 (c): "`account/rateLimits/read` at launch and `account/rateLimits/updated` through the per-session app-server"). | A host-side client of the live app-server's WebSocket is not in this plan. Instead, an in-sandbox resource script, `codex_usage.py`, runs `codex app-server` over stdio in a scratch `CODEX_HOME` under `/tmp`. Its `auth.json` is a symlink to the session's read-only bound file. The script sends `account/rateLimits/read` and prints only the `rateLimits` object. The runtime runs it through `backend.exec` once the app-server has started, then every `usage_poll_seconds` (default 600) while the session runs. It runs only if the profile's capabilities enable (c). | This is the pattern `codex_trust.py` already uses: stdio JSON-RPC inside the sandbox, with the output validated on the host. The scratch home keeps the second app-server off the live one's sqlite files. The bind stays read-only, so a refresh attempt inside fails (`EROFS`), as §7 requires. Notification subscription is open question Q4. |
 | E6 | Codex's limit-reached signal (§4.4 D9 (e)). | A `rateLimitReachedType` that isn't null in an in-session read is the limit signal (`LimitSeen`), with the latest `resetsAt` of any window at 100% or more as its hint. `codexErrorInfo` (`usageLimitExceeded` / `rateLimitExceeded`) needs a notification stream, which E5 doesn't have (Q4). | The field is structured, and S7 (3) documents its values. Polling it needs no subscription. It is as untrusted as any in-session report, and D6's trusted read confirms it before anything beyond the bead's own defer. |
-| E7 | Claude's in-session source and signal (S7 (3), (5)). | **(c):** with (c) enabled, the Claude settings gain `"statusLine": {"type": "command", "command": "python3 -I /run/hz/shim.py status"}`. The shim's new `status` mode sends only `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}`, and only when `rate_limits` differs from the last value it sent (kept in `$HOME/.hz/status.json`). It prints nothing. **(e):** a `StopFailure` hook is always installed. With `error == "rate_limit"` it is the limit signal, with no structured reset (S7: only message text, which is never parsed). **Turn end:** `StopFailure` counts as a turn boundary (S7 finding 1), always. | The status line is S7's only Claude source. It is installed only when (c) is on, so the managed launch shape T14 validated doesn't change while every capability is off. The `StopFailure` boundary is needed whatever the capabilities, or a limited turn looks like a hang to the lifetime stop. |
+| E7 | Claude's in-session source and signal (S7 (3), (5)). | **(c):** with (c) enabled, the Claude settings gain `"statusLine": {"type": "command", "command": "python3 -I /run/hz/shim.py status"}`. The shim's new `status` mode sends only `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}`, and only when `rate_limits` differs from the last value this launch's `wsd` accepted, when that value went to another launch (generations share `$HOME`; the launch is named by a digest of its session token, never the token), or when `STATUS_RESEND` (30 s) has passed, so an unchanged reading never goes stale (kept in `$HOME/.hz/status.json`). It prints nothing. **(e):** a `StopFailure` hook is always installed. With `error == "rate_limit"` it is the limit signal, with no structured reset (S7: only message text, which is never parsed). **Turn end:** `StopFailure` counts as a turn boundary (S7 finding 1), always. | The status line is S7's only Claude source. It is installed only when (c) is on, so the managed launch shape T14 validated doesn't change while every capability is off. The `StopFailure` boundary is needed whatever the capabilities, or a limited turn looks like a hang to the lifetime stop. |
 | E8 | How reactive-limit signals reach `wsd` (§4.4 D6, D9). | `AgentRuntime.signals(ws) -> list[Signal]` drains the reports since the last call: `UsageSeen` and `LimitSeen`, each attributed to `(session key, generation)` by the runtime from the channel it set up. The scheduler calls it in every pickup, just after `expire` and before the sweep. `wsd` ingests a `UsageSeen` only if the profile's capabilities enable (c), and acts on a `LimitSeen` only if they enable (e). | A pull keeps `wsd` the only writer of the journal, as `expire` already does. Latency is up to one backstop interval. That is acceptable: the Claude CLI waits for the reset before it continues (S7 (5)), and the session is stopped before then. |
 | E9 | The freshness-refusal path (AU-8: "A freshness-gate refusal moves on to the next account of the same permitted list"). | The runtime refuses a stale login with exactly `LOGIN_STALE`, and the receipt records it as `refused`/`failed` with that error. `Parker._outcome` recognises it by equality with the constant. It adds the entry's key to the op's `stale` data (comma-separated) and forgets the generation. The next pin runs the gate with those keys excluded (`exclude=`). If the gate finds another permitted account, the op returns `FAILED` without spending the launch budget, and the next pickup launches on that account. If it finds none (`AccountChanged`), the op escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`, so the bead becomes `needs-human`. A `Deadline` defers as usual. | No schema change: `receipts.refusal` keeps its CHECK constraint (`'failed', 'unavailable'`). The exclusion is per operation, so a later operation tries the refreshed login again. Exclusions only grow, so the path ends after at most one try per account. |
 | E10 | The handoff relaunch (§4.4 D7). | `LaunchSpec.handoff` is set by the guard when the new entry's key differs from the last launched entry's, and the profile's capabilities have (f) but not (b). Its `resume` is then false. The runtime's `_resume` returns `(False, None)` for a server-assigned adapter (Codex), and `(False, ids.handoff_session(key, generation))` otherwise. The native ID reaches the entry through the receipt, as it already does. With (b), a switch is an ordinary resume of the latest native ID. **The handoff prompt itself** (the §4.1 deterministic handoff) **is not built here** (Q3). | The ID rule is D7's. The runtime already knows `assigns_id`, so `wsd` stays adapter-free. (f) stays off until S7 L4 passes and a real handoff works (S7's D9 table), so nothing ships a fresh session with no handoff. |
 | E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(session_key, generation, hint, now)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.stopped`. Two new steps sit between it and the WIP commit (`LIMIT_STEPS`): `defer.read!`, after `Deps.usage_reader` answers (asked only if the profile has (d)), and `defer.confirmed`. **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with `defer.confirmed`. **Unconfirmed** keeps the untrusted record. The tail then commits the WIP, labels, comments and finishes as before. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
-| E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`, inside `check_credentials`, which plan 4's runtime already calls on every launch. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. r16 as first drafted (`0ba5010`) required the walk only for a source inside another account's directory; its follow-up commit `5def9ef` says the walk also covers the chosen account's directory, and states both bounds. The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`, using `os.scandir` with `follow_symlinks=False`. The refusal texts are `spec.ROOT_*` constants. `check_credentials(spec, protected, real_home)` keeps its signature. It always walks `SandboxSpec.cli_root` (recorded by `build_spec`) when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account-directory rule. No caller can skip the walk or pass another root. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
+| E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`, inside `check_credentials`, which plan 4's runtime already calls on every launch. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. r16 as first drafted (`0ba5010`) required the walk only for a source inside another account's directory; its follow-up commit `5def9ef` says the walk also covers the chosen account's directory, and states both bounds. The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`. The walk goes by directory fd: each directory is opened relative to its parent's fd with `O_NOFOLLOW` and must be the inode that was listed, and links are resolved strictly and never followed by the walk, so a tree swapped during the walk refuses (`ROOT_RACED`) and a dangling or looping link refuses (`ROOT_LINK_BROKEN`). The names it refuses are the adapter's `login_names` (the names inside the sandbox, carried on `SandboxSpec.login_names`) plus each configured file's own name; the inodes it refuses are every configured account's files, links followed. The refusal texts are `spec.ROOT_*` constants. `check_credentials(spec, protected, real_home)` keeps its signature. It always walks `SandboxSpec.cli_root` (recorded by `build_spec`) when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account-directory rule. No caller can skip the walk or pass another root. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
 | E13 | Other accounts with a named account chosen (§7). | `_logins(adapter, account)` puts the chosen account's directory and files in `chosen_*`. Every other configured account goes in `other_*`, and the `default` login goes there too when it isn't the chosen one. `ProbeContext.others` lists the same accounts. | This is §7's rule ("the default login included"), and plan 4's probe already handles any list. |
 | E14 | A session's turn-end events (S7 finding 1). | `Adapter.turn_end_events` is `("Stop", "StopFailure")` for Claude and `("Stop",)` for Codex. `SessionServer(turn_ends=...)` counts a turn end for any of them, and `TurnState.idle` is true after one. | The server stays adapter-neutral: it is given the names, and doesn't know them. |
 | E15 | Capability gating's single source. | Every capability check reads `accounts.view(profile).capabilities`. The runtime reads it for the producers (no exec without (c), no status line without (c)). `wsd` reads it again before ingesting or acting. AU-2's `config check` already refuses accounts without (a), and `"next"` without (d). | One table, checked again by the consumer. A producer bug can't enable a capability. |
@@ -149,14 +149,15 @@
 
 ## Parallelism
 
-Tasks 1–5 have no dependencies on each other, and five worker sessions can build them at once. Each later task starts once everything it depends on has merged to `main`.
+Tasks 1–4 have no dependencies on each other, and four worker sessions can build them at once. Task 5 uses Task 4's `CLAUDE_HOOK_EVENTS` and `SessionServer(on_event=)`, so it starts once Task 4 has merged. Each later task starts once everything it depends on has merged to `main`.
 
 ```
-Wave 1 (parallel):  T1 interfaces, T2 credlock, T3 install-root walk, T4 turn ends, T5 adapter parsing
-Wave 2 (parallel):  T6 named-account binding (T1,T2,T3)
-                    T8 trusted read (T1,T2,T5)
+Wave 1 (parallel):  T1 interfaces, T2 credlock, T3 install-root walk, T4 turn ends
+Wave 2 (parallel):  T5 adapter parsing (T4)
+                    T6 named-account binding (T1,T2,T3)
                     T9 limit flow (T1)
 Wave 3 (parallel):  T7 runtime signals (T4,T5,T6)
+                    T8 trusted read (T1,T2,T5)
                     T10 handoff and stale path (T1,T6,T9)
 Any wave:           T11a table invariants (none)
 Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test (T11b)
@@ -164,14 +165,14 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 
 | Task | Depends on | Can run beside | Files it shares (merge order) |
 |---|---|---|---|
-| 1 | none | 2, 3, 4, 5 | `wsd/runtime.py`, `wsd/headroom.py`, `wsd/usage.py`, `wsd/workstream.py`, `tests/fakes/fake_runtime.py` |
+| 1 | none | 2, 3, 4, 5 | `wsd/runtime.py`, `wsd/headroom.py`, `wsd/usage.py`, `wsd/workstream.py`, `sandbox/runtime.py` (the empty `signals` only), `tests/fakes/fake_runtime.py` |
 | 2 | none | 1, 3, 4, 5 | none |
 | 3 | none | 1, 2, 4, 5 | `sandbox/spec.py` |
-| 4 | none | 1, 2, 3, 5 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
-| 5 | none | 1, 2, 3, 4 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
-| 6 | 1, 2, 3 | 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
+| 4 | none | 1, 2, 3 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
+| 5 | 4 | 1, 2, 3, 6, 9 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
+| 6 | 1, 2, 3 | 5, 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
 | 8 | 1, 2, 5 | 6, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
-| 9 | 1 | 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
+| 9 | 1 | 5, 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
 | 10 | 1, 6, 9 | 7, 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
 | 7 | 4, 5, 6 | 10 | `sandbox/runtime.py` |
 | 11a | none | any | `config/capabilities.py`, `tests/test_config_accounts.py` |
@@ -188,14 +189,14 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 | `src/heterodyne/wsd/ids.py` | 1 | `handoff_session` |
 | `src/heterodyne/wsd/workstream.py` | 1 | `Deps.usage_reader` |
 | `src/heterodyne/wsd/credlock.py` (new) | 2 | the D8 lock |
-| `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`, the `ROOT_*` texts and bounds; `SandboxSpec.cli_root`, walked by `check_credentials` |
+| `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`, `_open_dir`, `_resolve_link`, the `ROOT_*` texts and bounds; `SandboxSpec.cli_root` and `.login_names`, walked by `check_credentials` |
 | `src/heterodyne/session/server.py` | 4 | `turn_ends`, `on_event`, `TurnState.boundary` |
 | `src/heterodyne/agents/base.py` | 4, 5 | `turn_end_events`, `UsageReport`, `usage_from_event`, `run_files(usage=)` |
 | `src/heterodyne/agents/claude_code.py` | 4, 5 | the `StopFailure` hook, the status line, parsing |
 | `src/heterodyne/agents/codex.py` | 5 | `parse_rate_limits`, `usage_argv` |
 | `src/heterodyne/session/shim.py` | 5 | the `status` mode |
 | `src/heterodyne/sandbox/resources/codex_usage.py` (new) | 5 | the in-sandbox read |
-| `src/heterodyne/sandbox/runtime.py` | 6, 7 | named-account binding, the key check, the locked freshness gate, the walk, the handoff, `signals` |
+| `src/heterodyne/sandbox/runtime.py` | 1, 6, 7 | named-account binding, the key check, the locked freshness gate, the walk, the handoff, `signals` |
 | `src/heterodyne/sandbox/settings.py` | 6, 7 | `lock_wait_seconds`, `usage_poll_seconds` |
 | `src/heterodyne/sandbox/build.py` | 6, 8 | the lock directory; the reader |
 | `src/heterodyne/sandbox/hostread.py` (new) | 8 | `HostUsageReader` |
@@ -223,6 +224,7 @@ Everything later tasks share on the `wsd` side, with no behaviour change while n
 - Modify: `src/heterodyne/wsd/usage.py` (`decide`, `admitted`; `TrustedRead`, `UsageReader`, `NoUsageReader`)
 - Modify: `src/heterodyne/wsd/ids.py` (`handoff_session`)
 - Modify: `src/heterodyne/wsd/workstream.py` (`Deps.usage_reader`)
+- Modify: `src/heterodyne/sandbox/runtime.py` (`SandboxRuntime.signals`, empty until Task 7)
 - Modify: `tests/fakes/fake_runtime.py` (`report`, `signals`)
 - Test: `tests/test_wsd_headroom.py`, `tests/test_wsd_ids.py`, `tests/test_wsd_signals.py` (new)
 
@@ -232,7 +234,7 @@ Everything later tasks share on the `wsd` side, with no behaviour change while n
   - `wsd.runtime.LaunchSpec(..., credential_key: str = "", handoff: bool = False)`: two new trailing fields.
   - `wsd.runtime.LOGIN_STALE: str` and `wsd.runtime.KEY_CHANGED: str`: the exact `LaunchFailed` texts for a stale login (E3) and a changed key (E1).
   - `wsd.runtime.UsageSeen(session_key: str, generation: int, observations: tuple[Observation, ...])`, `wsd.runtime.LimitSeen(session_key: str, generation: int, reset_hint: int | None)` and `type Signal = UsageSeen | LimitSeen`.
-  - `AgentRuntime.signals(ws: str) -> list[Signal]`; `NoRuntime.signals` returns `[]`.
+  - `AgentRuntime.signals(ws: str) -> list[Signal]`; `NoRuntime.signals` returns `[]`; `SandboxRuntime.signals` returns `[]` until Task 7 replaces it, so the real runtime satisfies the protocol from this commit on.
   - `headroom.permitted(p, previous_key, exclude: frozenset[str] = frozenset())`; `gate(..., s, exclude=frozenset())`; `admits(..., s, exclude=frozenset())`; `usage.decide(..., s, exclude=frozenset())`; `usage.admitted(..., s, exclude=frozenset())`.
   - `usage.TrustedRead(observations: tuple[Observation, ...], limited: bool, reset_hint: int | None)`, the `usage.UsageReader` protocol `read(profile: str, account: str, credential_key: str) -> TrustedRead | None`, and `usage.NoUsageReader`.
   - `ids.handoff_session(session_key: str, generation: int) -> str`.
@@ -278,7 +280,8 @@ def test_decide_and_admitted_pass_the_exclusion_through(tmp_path: Path) -> None:
     j = Journal(tmp_path / "wsd.db")
     try:
         key = accounts.current_key("codex", "default")
-        assert isinstance(decide(accounts, j, "p-two", None, NOW, S, exclude=frozenset({key})), AccountChanged)
+        found = decide(accounts, j, "p-two", None, NOW, S, exclude=frozenset({key}))
+        assert isinstance(found, AccountChanged)
         entry = LaunchEntry("sk", 1, "alpha", "btq-1", "coder", "p-two", "default", key, "", False, "t")
         assert admitted(accounts, j, None, entry, NOW, S)
         assert not admitted(accounts, j, None, entry, NOW, S, exclude=frozenset({key}))
@@ -302,12 +305,15 @@ Create `tests/test_wsd_signals.py`:
 """Plan 4b Task 1: the runtime's signal seam and the trusted-read seam, before anything produces them."""
 
 from pathlib import Path
+from typing import cast
 
 from fakes.fake_runtime import FakeRuntime
 
+from heterodyne.sandbox.runtime import SandboxRuntime
 from heterodyne.wsd.runtime import (
     KEY_CHANGED,
     LOGIN_STALE,
+    AgentRuntime,
     LaunchSpec,
     LimitSeen,
     NoRuntime,
@@ -330,6 +336,12 @@ def test_the_refusal_texts_are_fixed_and_distinct() -> None:
 
 def test_no_runtime_has_no_signals() -> None:
     assert NoRuntime().signals("alpha") == []
+
+
+def test_the_sandbox_runtime_has_the_seam() -> None:
+    assert "signals" in vars(SandboxRuntime)               # until Task 7, an empty drain; pyright checks
+    runtime: AgentRuntime = cast(SandboxRuntime, None)     # that the class satisfies the protocol
+    assert runtime is None
 
 
 def test_the_fake_runtime_drains_each_workstream_once() -> None:
@@ -418,6 +430,13 @@ Add to `NoRuntime`:
 ```python
     def signals(self, ws: str) -> list[Signal]:
         return []                    # it runs nothing
+```
+
+In `src/heterodyne/sandbox/runtime.py`, add `Signal` to the `heterodyne.wsd.runtime` import and add to `SandboxRuntime`, after `expire`:
+
+```python
+    def signals(self, ws: str) -> list[Signal]:
+        return []                    # nothing produces a signal yet; Task 7 replaces this
 ```
 
 In `src/heterodyne/wsd/headroom.py`, replace `permitted`, and add `exclude` to `gate` and `admits`:
@@ -549,7 +568,7 @@ and, under the test controls:
 Run: `timeout 300 uv run pytest tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py tests/test_wsd_usage.py -q`
 Expected: PASS.
 
-Then: `timeout 300 uv run pyright src/heterodyne/wsd tests/fakes/fake_runtime.py tests/test_wsd_signals.py` and `uv run ruff check src tests`.
+Then: `timeout 300 uv run pyright src/heterodyne/wsd src/heterodyne/sandbox/runtime.py tests/fakes/fake_runtime.py tests/test_wsd_signals.py` and `uv run ruff check src tests`.
 Expected: 0 errors. pyright checks that `FakeRuntime` and `NoRuntime` still satisfy `AgentRuntime` wherever they are passed as one.
 
 - [ ] **Step 5: Run the whole suite, then commit**
@@ -559,8 +578,8 @@ Expected: PASS (no behaviour changed).
 
 ```bash
 git add src/heterodyne/wsd/runtime.py src/heterodyne/wsd/headroom.py src/heterodyne/wsd/usage.py \
-        src/heterodyne/wsd/ids.py src/heterodyne/wsd/workstream.py tests/fakes/fake_runtime.py \
-        tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py
+        src/heterodyne/wsd/ids.py src/heterodyne/wsd/workstream.py src/heterodyne/sandbox/runtime.py \
+        tests/fakes/fake_runtime.py tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py
 git commit -m "plan4b T1: wsd seams for keys, handoffs, signals, exclusion and the trusted read"
 ```
 
@@ -642,8 +661,8 @@ def test_the_lock_is_held_for_the_body_and_released_after(tmp_path: Path) -> Non
     with credential_lock(locks, KEY, 0):
         assert not free(locks / f"{KEY}.lock")
     assert free(locks / f"{KEY}.lock")
-    assert (os.stat(locks).st_mode & 0o777) == 0o700
-    assert (os.stat(locks / f"{KEY}.lock").st_mode & 0o777) == 0o600
+    assert (locks.stat().st_mode & 0o777) == 0o700
+    assert ((locks / f"{KEY}.lock").stat().st_mode & 0o777) == 0o600
 
 
 def test_a_second_holder_waits_its_bound_then_is_busy(tmp_path: Path) -> None:
@@ -831,23 +850,25 @@ git commit -m "plan4b T2: the D8 credential lock"
 r16 §7: the Codex CLI installs under `~/.codex`, the default login's directory. Once a named account is chosen, the default login is another account's, and plan 4's check refuses the CLI's bind ("a bind would reach into another account's login directory"). r16 replaces that refusal, for the CLI's own bind only, with a proof: a bounded walk of the install root that finds nothing that is, names or reaches a login file. Plan 4b runs the walk whenever the root lies inside any login directory, the chosen one's included (E12).
 
 **Files:**
-- Modify: `src/heterodyne/sandbox/spec.py` (the `ROOT_*` texts and bounds, `OTHER_ACCOUNT_DIR`, `check_install_root`, `SandboxSpec.cli_root`, `build_spec`, `check_credentials`)
+- Modify: `src/heterodyne/sandbox/spec.py` (the `ROOT_*` texts and bounds, `OTHER_ACCOUNT_DIR`, `_open_dir`, `_resolve_link`, `check_install_root`, `SandboxSpec.cli_root` and `SandboxSpec.login_names`, `build_spec`, `check_credentials`)
 - Test: `tests/test_sandbox_spec.py`
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
 - Produces:
-  - `spec.check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None`, raising `SpecRefused` with exactly one of `spec.ROOT_NOT_CANONICAL`, `ROOT_LOGIN_NAME`, `ROOT_LOGIN_ALIAS`, `ROOT_LINK_OUT`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE` or `ROOT_WALK_FAILED`.
+  - `spec.check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None`, raising `SpecRefused` with exactly one of `spec.ROOT_NOT_CANONICAL`, `ROOT_LOGIN_NAME`, `ROOT_LOGIN_ALIAS`, `ROOT_LINK_OUT`, `ROOT_LINK_BROKEN`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_RACED` or `ROOT_WALK_FAILED`. `login_names` are the names a login file has inside the sandbox; `login_files` are every configured account's files, whose inodes (links followed) an entry must not share.
   - `spec.ROOT_MAX_ENTRIES = 100_000` and `spec.ROOT_MAX_DEPTH = 64`, read at call time.
   - `spec.OTHER_ACCOUNT_DIR`: the existing refusal text, now a constant.
-  - `SandboxSpec.cli_root: Path | None = None`, set by `build_spec` from `AgentFacts.cli_root`.
-  - `check_credentials(spec, protected, real_home)` keeps its signature. It walks `spec.cli_root` when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account rule. Task 6 relies on this for named Codex accounts.
+  - `SandboxSpec.cli_root: Path | None = None` and `SandboxSpec.login_names: tuple[str, ...] = ()`, set by `build_spec` from `AgentFacts.cli_root` and `AgentFacts.login_names` (the adapter's names, `("auth.json",)` for Codex).
+  - `check_credentials(spec, protected, real_home)` keeps its signature. It walks `spec.cli_root` when that lies inside a login directory, with the names `spec.login_names` plus each configured file's own name, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account rule. Task 6 relies on this for named Codex accounts.
+
+Every link that can't be resolved strictly, dangling or looping, inside the root or out of it, refuses with the one text `ROOT_LINK_BROKEN`: the walk can't tell where it would lead once its target appears, so it fails closed. If a CLI release ships such a link, the launch refuses with that fixed text and the operator learns it at once.
 
 The walk cannot be skipped by a caller: it is part of `check_credentials`, which plan 4's runtime already calls on every launch just before `backend.create`, and `build_spec` always records the root.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_sandbox_spec.py`, import `heterodyne.sandbox.spec as spec_mod`, `os`, and the new names (`OTHER_ACCOUNT_DIR`, `ROOT_LINK_OUT`, `ROOT_LOGIN_ALIAS`, `ROOT_LOGIN_NAME`, `ROOT_NOT_CANONICAL`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_WALK_FAILED`, `check_install_root`). Make `facts` build from the canonical temporary directory, so the CLI root is canonical as `Cli.root` always is (`find_binary` resolves it):
+In `tests/test_sandbox_spec.py`, import `heterodyne.sandbox.spec as spec_mod`, `os`, and the new names (`OTHER_ACCOUNT_DIR`, `ROOT_LINK_BROKEN`, `ROOT_LINK_OUT`, `ROOT_LOGIN_ALIAS`, `ROOT_LOGIN_NAME`, `ROOT_NOT_CANONICAL`, `ROOT_RACED`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_WALK_FAILED`, `check_install_root`). Make `facts` build from the canonical temporary directory, so the CLI root is canonical as `Cli.root` always is (`find_binary` resolves it):
 
 ```python
 def facts(root: Path) -> AgentFacts:
@@ -876,9 +897,10 @@ def cli_root(spec: SandboxSpec) -> Path:
     return spec.cli_root
 
 
-def test_the_spec_records_the_cli_root(tmp_path: Path) -> None:
+def test_the_spec_records_the_cli_root_and_the_login_names(tmp_path: Path) -> None:
     i = spec_input(tmp_path)
-    assert build_spec(i).cli_root == i.agent.cli_root
+    spec = build_spec(i)
+    assert spec.cli_root == i.agent.cli_root and spec.login_names == ("auth.json",)
 
 
 def test_the_cli_inside_another_accounts_login_dir_passes_once_walked(tmp_path: Path) -> None:
@@ -898,7 +920,8 @@ def test_only_the_cli_bind_read_only_at_its_own_path_is_exempt(tmp_path: Path,
     i, prot = named(tmp_path)
     spec = build_spec(i)
     root = cli_root(spec)
-    binds = tuple(replace(b, **change) if b.source == root else b for b in spec.binds)  # type: ignore[arg-type]
+    binds = tuple(replace(b, **change) if b.source == root else b  # type: ignore[arg-type]
+                  for b in spec.binds)
     with pytest.raises(SpecRefused) as refused:
         check_credentials(replace(spec, binds=binds), prot, tmp_path / "home")
     assert str(refused.value) == OTHER_ACCOUNT_DIR
@@ -912,7 +935,21 @@ def test_a_walk_refusal_refuses_the_launch_inside_the_chosen_dir_too(tmp_path: P
     assert str(refused.value) == ROOT_LOGIN_NAME
 
 
-def test_a_root_outside_every_login_dir_is_not_walked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_walk_uses_the_names_inside_the_sandbox_not_the_configured_ones(tmp_path: Path) -> None:
+    store = tmp_path / "home" / ".codex" / "credentials-store"       # configured under another name
+    store.parent.mkdir(parents=True)
+    store.write_text("{}")
+    spec = build_spec(spec_input(tmp_path, login_files=(store,)))
+    prot = Protected(chosen_dir=store.parent, chosen_files=(store,), other_dirs=(), other_files=())
+    check_credentials(spec, prot, tmp_path / "home")
+    (cli_root(spec) / "bin" / "auth.json").write_text("{}")        # bound as auth.json inside
+    with pytest.raises(SpecRefused) as refused:
+        check_credentials(spec, prot, tmp_path / "home")
+    assert str(refused.value) == ROOT_LOGIN_NAME
+
+
+def test_a_root_outside_every_login_dir_is_not_walked(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
     walked: list[Path] = []
     monkeypatch.setattr(spec_mod, "check_install_root", lambda root, names, files: walked.append(root))
     outside = tmp_path / "opt" / "cli"
@@ -961,20 +998,101 @@ def _dangling_out(root: Path, login: Path) -> None:
     (root / "lib" / "gone").symlink_to(root.parent / "nowhere")
 
 
+def _dangling_in(root: Path, login: Path) -> None:
+    (root / "lib" / "gone").symlink_to(root / "nowhere")
+
+
+def _loop(root: Path, login: Path) -> None:
+    (root / "lib" / "a").symlink_to(root / "lib" / "b")
+    (root / "lib" / "b").symlink_to(root / "lib" / "a")
+
+
 def _fifo(root: Path, login: Path) -> None:
     os.mkfifo(root / "lib" / "pipe")
 
 
+def open_fds() -> int:
+    return len(os.listdir("/dev/fd"))  # noqa: PTH208
+
+
 @pytest.mark.parametrize(("plant", "reason"), [(_name, ROOT_LOGIN_NAME), (_alias, ROOT_LOGIN_ALIAS),
-                                                (_link_out, ROOT_LINK_OUT), (_dangling_out, ROOT_LINK_OUT),
+                                                (_link_out, ROOT_LINK_OUT), (_dangling_out, ROOT_LINK_BROKEN),
+                                                (_dangling_in, ROOT_LINK_BROKEN), (_loop, ROOT_LINK_BROKEN),
                                                 (_fifo, ROOT_SPECIAL)])
 def test_each_way_to_reach_a_login_is_refused(tmp_path: Path, plant: Callable[[Path, Path], None],
                                               reason: str) -> None:
     root, login = tree(tmp_path)
     plant(root, login)
+    before = open_fds()
     with pytest.raises(SpecRefused) as refused:
         check_install_root(root, ("auth.json",), (login,))
     assert str(refused.value) == reason
+    assert open_fds() == before                            # every directory fd closed on the way out
+
+
+def _dir_to_link(root: Path, login: Path) -> None:
+    (root / "lib").rename(root.parent / "lib-away")
+    (root / "lib").symlink_to(login.parent)
+
+
+def _dir_to_other_dir(root: Path, login: Path) -> None:
+    (root / "lib").rename(root.parent / "lib-away")
+    (root / "lib").mkdir()
+
+
+@pytest.mark.parametrize("swap", [_dir_to_link, _dir_to_other_dir])
+def test_a_directory_swapped_between_listing_and_opening_is_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: Callable[[Path, Path], None]) -> None:
+    root, login = tree(tmp_path)
+    real = spec_mod._open_dir
+
+    def racing(name: str, parent: int | None, seen: os.stat_result) -> int:
+        if name == "lib":
+            swap(root, login)
+        return real(name, parent, seen)
+
+    monkeypatch.setattr(spec_mod, "_open_dir", racing)
+    before = open_fds()
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(root, ("auth.json",), (login,))
+    assert str(refused.value) == ROOT_RACED
+    assert open_fds() == before
+
+
+def _link_replaced(root: Path, login: Path) -> None:
+    (root / "lib" / "here").unlink()
+    (root / "lib" / "here").symlink_to(root / "bin" / "cli")              # same target, another link
+
+
+def _parent_replaced(root: Path, login: Path) -> None:
+    (root / "lib").rename(root.parent / "lib-away")
+    (root / "lib").mkdir()
+    (root / "lib" / "here").symlink_to(root / "bin" / "cli")
+
+
+@pytest.mark.parametrize("swap", [_link_replaced, _parent_replaced])
+def test_a_link_swapped_while_it_is_resolved_is_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: Callable[[Path, Path], None]) -> None:
+    root, login = tree(tmp_path)
+    real = spec_mod._resolve_link
+
+    def racing(path: str) -> str:
+        swap(root, login)
+        return real(path)
+
+    monkeypatch.setattr(spec_mod, "_resolve_link", racing)
+    before = open_fds()
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(root, ("auth.json",), (login,))
+    assert str(refused.value) == ROOT_RACED
+    assert open_fds() == before
+
+
+def test_a_missing_root_is_refused(tmp_path: Path) -> None:
+    root, login = tree(tmp_path)
+    with pytest.raises(SpecRefused) as refused:
+        check_install_root(root / "nowhere", ("auth.json",), (login,))
+    assert str(refused.value) == ROOT_WALK_FAILED
 
 
 def test_a_root_that_is_not_canonical_is_refused(tmp_path: Path) -> None:
@@ -1016,8 +1134,10 @@ def test_an_unreadable_directory_or_login_refuses(tmp_path: Path) -> None:
 
 
 def test_the_root_texts_name_no_path() -> None:
-    for text in (ROOT_NOT_CANONICAL, ROOT_LOGIN_NAME, ROOT_LOGIN_ALIAS, ROOT_LINK_OUT, ROOT_SPECIAL,
-                 ROOT_TOO_LARGE, ROOT_WALK_FAILED, OTHER_ACCOUNT_DIR):
+    texts = (ROOT_NOT_CANONICAL, ROOT_LOGIN_NAME, ROOT_LOGIN_ALIAS, ROOT_LINK_OUT, ROOT_LINK_BROKEN,
+             ROOT_SPECIAL, ROOT_TOO_LARGE, ROOT_RACED, ROOT_WALK_FAILED, OTHER_ACCOUNT_DIR)
+    assert len(set(texts)) == len(texts)
+    for text in texts:
         assert "/" not in text and "auth.json" not in text
 ```
 
@@ -1030,7 +1150,7 @@ Expected: FAIL at import (`cannot import name 'OTHER_ACCOUNT_DIR'`).
 
 - [ ] **Step 3: Implement**
 
-In `src/heterodyne/sandbox/spec.py`, add `import stat` and `from collections.abc import Iterable, Mapping`, then the constants after `LAUNCHER_ENV`:
+In `src/heterodyne/sandbox/spec.py`, add `import errno`, `import stat` and `from collections.abc import Iterable, Mapping`, then the constants after `LAUNCHER_ENV`:
 
 ```python
 # The install-root walk (r16 §7, plan 4b E12). Read at call time, so tests can lower the bounds.
@@ -1040,8 +1160,10 @@ ROOT_NOT_CANONICAL = "the CLI install root inside a login directory is not a can
 ROOT_LOGIN_NAME = "the CLI install root holds an entry named like a login file"
 ROOT_LOGIN_ALIAS = "the CLI install root holds a hard link to a login file"
 ROOT_LINK_OUT = "the CLI install root holds a symbolic link that leaves it"
+ROOT_LINK_BROKEN = "the CLI install root holds a symbolic link that dangles or loops"
 ROOT_SPECIAL = "the CLI install root holds something other than files, directories and links"
 ROOT_TOO_LARGE = "the CLI install root is too large or too deep to check"
+ROOT_RACED = "the CLI install root changed while it was being checked"
 ROOT_WALK_FAILED = "the CLI install root can't be read to check it"
 OTHER_ACCOUNT_DIR = "a bind would reach into another account's login directory"
 ```
@@ -1050,62 +1172,126 @@ Add the field at the end of `SandboxSpec`:
 
 ```python
     cli_root: Path | None = None        # the CLI's install root, for the install-root walk (plan 4b E12)
+    login_names: tuple[str, ...] = ()   # the adapter's login names inside the sandbox, for the same walk
 ```
 
 In `build_spec`, pass it:
 
 ```python
     return SandboxSpec(name, i.worktree, binds, tuple(logins), read_only, read_write, tuple(egress), env,
-                       i.uid, i.gid, cli_root=i.agent.cli_root)
+                       i.uid, i.gid, cli_root=i.agent.cli_root, login_names=i.agent.login_names)
 ```
 
-Add `check_install_root` before `check_credentials`:
+Add `_open_dir`, `_resolve_link` and `check_install_root` before `check_credentials`. The two helpers are separate functions so the race tests can swap the tree at exactly the moment between listing and opening, and between listing and resolving:
 
 ```python
+def _open_dir(name: str, parent: int | None, seen: os.stat_result) -> int:
+    """Open a directory the walk listed (relative to `parent`'s fd, or the root's path when `parent` is
+    None) without following a link, and confirm it is the inode that was listed. A directory swapped
+    for a link, a file or another directory in between refuses: the walk never reads somewhere else."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            raise SpecRefused(ROOT_RACED) from None
+        raise SpecRefused(ROOT_WALK_FAILED) from None
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise SpecRefused(ROOT_WALK_FAILED) from None
+    if (st.st_dev, st.st_ino) != (seen.st_dev, seen.st_ino):
+        os.close(fd)
+        raise SpecRefused(ROOT_RACED)
+    return fd
+
+
+def _resolve_link(path: str) -> str:
+    """Where a link inside the root leads, every link on the way followed. A dangling link or a loop
+    raises OSError: the walk refuses it rather than guess where it would lead."""
+    return os.path.realpath(path, strict=True)
+
+
 def check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None:
     """r16 §7: the CLI's install root holds nothing that is, names or reaches a login file. The root is
-    canonical; no entry is named like a login file; no entry is a hard link to one (same device and
-    inode as any of `login_files`, every configured account's); every symbolic link resolves inside the
-    root; everything else is a regular file or a directory. Links are never followed by the walk. A tree
-    past ROOT_MAX_ENTRIES entries or ROOT_MAX_DEPTH levels, or any error reading it, refuses."""
-    if str(root) != os.path.realpath(root):
-        raise SpecRefused(ROOT_NOT_CANONICAL)
+    canonical; no entry is named like a login file (`login_names`, the names inside the sandbox); no
+    entry is a hard link to one (the device and inode of any of `login_files`, every configured
+    account's, links followed); every symbolic link resolves, strictly, inside the root; everything
+    else is a regular file or a directory. A tree past ROOT_MAX_ENTRIES entries or ROOT_MAX_DEPTH
+    levels, or any error reading it, refuses.
+
+    The walk goes by directory fd: each directory is opened relative to its parent's fd with
+    O_NOFOLLOW and must be the inode that was listed, and each link's directory must still be the
+    directory being walked once the link is resolved, so a tree changed during the walk refuses
+    (ROOT_RACED) rather than passing on what it used to hold. At most ROOT_MAX_DEPTH + 1 fds are open
+    at once, and every one is closed before this returns or raises."""
     names = frozenset(login_names)
     aliases: set[tuple[int, int]] = set()
     for login in login_files:
         try:
-            st = os.stat(login)
+            st = login.stat()
         except FileNotFoundError:
             continue                            # nothing there to alias
         except OSError:
             raise SpecRefused(ROOT_WALK_FAILED) from None
         aliases.add((st.st_dev, st.st_ino))
-    entries = 0
-    pending = [(root, 0)]
     try:
-        while pending:
-            folder, depth = pending.pop()
-            with os.scandir(folder) as found:
-                for entry in found:
-                    entries += 1
-                    if entries > ROOT_MAX_ENTRIES:
-                        raise SpecRefused(ROOT_TOO_LARGE)
-                    if entry.name in names:
-                        raise SpecRefused(ROOT_LOGIN_NAME)
-                    st = entry.stat(follow_symlinks=False)
-                    if (st.st_dev, st.st_ino) in aliases:
-                        raise SpecRefused(ROOT_LOGIN_ALIAS)
-                    if stat.S_ISLNK(st.st_mode):
-                        if not Path(os.path.realpath(entry.path)).is_relative_to(root):
-                            raise SpecRefused(ROOT_LINK_OUT)
-                    elif stat.S_ISDIR(st.st_mode):
-                        if depth >= ROOT_MAX_DEPTH:
-                            raise SpecRefused(ROOT_TOO_LARGE)
-                        pending.append((Path(entry.path), depth + 1))
-                    elif not stat.S_ISREG(st.st_mode):
-                        raise SpecRefused(ROOT_SPECIAL)
+        top = os.lstat(root)
+        canonical = os.path.realpath(root, strict=True)
     except OSError:
         raise SpecRefused(ROOT_WALK_FAILED) from None
+    if str(root) != canonical:
+        raise SpecRefused(ROOT_NOT_CANONICAL)
+    entries = 0
+
+    def walk(fd: int, where: str, seen: os.stat_result, depth: int) -> None:
+        nonlocal entries
+        folders: list[tuple[str, os.stat_result]] = []
+        with os.scandir(fd) as found:
+            for entry in found:
+                entries += 1
+                if entries > ROOT_MAX_ENTRIES:
+                    raise SpecRefused(ROOT_TOO_LARGE)
+                if entry.name in names:
+                    raise SpecRefused(ROOT_LOGIN_NAME)
+                st = entry.stat(follow_symlinks=False)
+                if (st.st_dev, st.st_ino) in aliases:
+                    raise SpecRefused(ROOT_LOGIN_ALIAS)
+                if stat.S_ISLNK(st.st_mode):
+                    try:
+                        target = _resolve_link(posixpath.join(where, entry.name))
+                    except OSError:
+                        raise SpecRefused(ROOT_LINK_BROKEN) from None
+                    try:
+                        now = os.lstat(entry.name, dir_fd=fd)
+                        here = os.lstat(where)
+                    except OSError:
+                        raise SpecRefused(ROOT_RACED) from None   # it was listed a moment ago
+                    if ((now.st_dev, now.st_ino) != (st.st_dev, st.st_ino)
+                            or (here.st_dev, here.st_ino) != (seen.st_dev, seen.st_ino)):
+                        raise SpecRefused(ROOT_RACED)
+                    if not Path(target).is_relative_to(root):
+                        raise SpecRefused(ROOT_LINK_OUT)
+                elif stat.S_ISDIR(st.st_mode):
+                    if depth >= ROOT_MAX_DEPTH:
+                        raise SpecRefused(ROOT_TOO_LARGE)
+                    folders.append((entry.name, st))
+                elif not stat.S_ISREG(st.st_mode):
+                    raise SpecRefused(ROOT_SPECIAL)
+        for name, st in folders:
+            child = _open_dir(name, fd, st)
+            try:
+                walk(child, posixpath.join(where, name), st, depth + 1)
+            finally:
+                os.close(child)
+
+    fd = _open_dir(str(root), None, top)
+    try:
+        walk(fd, str(root), top, 0)
+    except OSError:
+        raise SpecRefused(ROOT_WALK_FAILED) from None
+    finally:
+        os.close(fd)
 ```
 
 Replace `check_credentials`:
@@ -1121,7 +1307,9 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
     The CLI's install root may lie inside a login directory: the Codex CLI installs under the default
     login's. Then the root must first pass `check_install_root`, whichever account is chosen (r16 §7,
     plan 4b E12), and only its own bind, read-only at its canonical path, is exempt from the
-    other-account rule: the same tree is bound under every account."""
+    other-account rule: the same tree is bound under every account. The walk's names are the adapter's
+    (the names the files have inside the sandbox) and each configured file's own; its inodes are every
+    configured account's files, links followed."""
     want = {_real(p) for p in protected.chosen_files}
     got = [_real(b.source) for b in spec.logins]
     if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
@@ -1135,7 +1323,7 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
     root = spec.cli_root
     if root is not None and any(q.is_relative_to(d) for q in (root, _real(root)) for d in login_dirs):
         files = (*protected.chosen_files, *protected.other_files)
-        check_install_root(root, {f.name for f in files}, files)
+        check_install_root(root, {*spec.login_names, *(f.name for f in files)}, files)
         exempt = Bind(root, root, True)
     for b in spec.binds:
         for source in {b.source, _real(b.source)}:
@@ -1191,7 +1379,8 @@ Append to `tests/test_session_server.py`:
 
 ```python
 def test_any_configured_turn_end_is_a_boundary(tmp_path: Path) -> None:
-    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", turn_ends=("Stop", "StopFailure"))
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl",
+                      turn_ends=("Stop", "StopFailure"))
     s.start()
     try:
         sock = tmp_path / "s.sock"
@@ -1399,7 +1588,7 @@ The producers' adapter-specific half: what each CLI's payload means, parsed into
 - Test: `tests/test_agents_usage.py` (new), `tests/test_session_shim.py`
 
 **Interfaces:**
-- Consumes: `wsd.usage.Observation` (exists), `session.shim.json_depth`, `MAX_DEPTH`, `MAX_LINE` (exist).
+- Consumes: `wsd.usage.Observation` (exists), `session.shim.json_depth`, `MAX_DEPTH`, `MAX_LINE` (exist); from Task 4, which must have merged first, `claude_code.CLAUDE_HOOK_EVENTS` and `SessionServer(..., on_event=)`.
 - Produces:
   - `agents.base.STATUS_COMMAND = "python3 -I /run/hz/shim.py status"`.
   - `agents.base.UsageReport(windows: tuple[Observation, ...] = (), limited: bool = False, reset_hint: int | None = None)`.
@@ -1411,8 +1600,8 @@ The producers' adapter-specific half: what each CLI's payload means, parsed into
   - `codex.parse_rate_limits(data: object, source: str) -> UsageReport | None`, shared with Task 8.
   - `codex.IN_SESSION_SOURCE = "codex.app-server"`, `codex.HOST_SOURCE = "codex.host-read"`, `claude_code.STATUS_SOURCE = "claude.statusline"`.
   - The shim's `status` mode: `python3 -I /run/hz/shim.py status` reads Claude's status-line JSON on stdin and sends `{"hook_event_name": "StatusLine", "session_id", "rate_limits"}` once per change. It prints nothing and exits 0.
-  - `codex_usage.py`: `python3 -I codex_usage.py <codex binary> [limit seconds]` prints the `rateLimits` object and exits 0, or exits 1 with nothing on stdout.
-  - The fake app-server answers `account/rateLimits/read` from `HZ_FAKE_RATE_LIMITS`; `HZ_FAKE_RATE_FAULT` is `hang`, `error` or `garbage`.
+  - `codex_usage.py`: `python3 -I codex_usage.py <codex binary> [limit seconds]` prints the `rateLimits` object and exits 0, or exits 1 with nothing on stdout and exactly `codex_usage: <type>` on stderr. Its `read(codex, env, limit)` raises `TimeoutError`, `AnswerError`, `ClosedOutput`, `ExitStatus`, `NotGone`, `json.JSONDecodeError` or the `OSError` of a missing executable; `main` adds `NoRateLimits` and `ScratchKept`. All but the builtins are classes in the script.
+  - The fake app-server answers `account/rateLimits/read` from `HZ_FAKE_RATE_LIMITS`; `HZ_FAKE_RATE_FAULT` is `hang`, `error`, `garbage`, `close` or `exit`; `HZ_FAKE_PID_FILE` receives its PID.
 
 The windows' identities: Claude's are `claude:5h` and `claude:7d`. A Codex window is `codex:<limitId>:<minutes>m`, kind `5h` / `7d` / `<n>d` / `<n>h` / `<n>m` from its duration. They match `usage.LABEL` and never name a slot (`primary`, `five_hour`), as `Observation` requires. Percentages and resets pass through unchecked: `usage._check` validates them, so the parsers never decide a value is safe.
 
@@ -1423,11 +1612,17 @@ Create `tests/test_agents_usage.py`:
 ```python
 """Plan 4b Task 5: what the CLIs' usage payloads mean (S7 (3), (5)), and the in-sandbox Codex read."""
 
+import importlib.util
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sandbox_env import install_fake_cli
@@ -1465,8 +1660,8 @@ def test_a_status_line_without_windows_reports_nothing(limits: object) -> None:
 @pytest.mark.parametrize(("resets", "kept"), [(NOW + 5, NOW + 5), (float(NOW + 5), NOW + 5), (True, None),
                                               ("soon", None), (None, None), (float("nan"), None)])
 def test_a_reset_that_is_not_a_number_is_unknown(resets: object, kept: int | None) -> None:
-    report = ClaudeCode().usage_from_event({
-        "hook_event_name": "StatusLine", "rate_limits": {"five_hour": {"used_percentage": 1, "resets_at": resets}}})
+    limits = {"five_hour": {"used_percentage": 1, "resets_at": resets}}
+    report = ClaudeCode().usage_from_event({"hook_event_name": "StatusLine", "rate_limits": limits})
     assert report is not None and report.windows[0].resets_at == kept
 
 
@@ -1503,8 +1698,9 @@ def test_the_status_line_is_installed_only_for_usage() -> None:
 
 def test_a_snapshot_gives_one_observation_per_window() -> None:
     report = parse_rate_limits(SNAPSHOT, IN_SESSION_SOURCE)
-    assert report == UsageReport((Observation("codex:codex:300m", "5h", 42, NOW + 3600, IN_SESSION_SOURCE),
-                                  Observation("codex:codex:10080m", "7d", 17, NOW + 86400, IN_SESSION_SOURCE)))
+    src = IN_SESSION_SOURCE
+    assert report == UsageReport((Observation("codex:codex:300m", "5h", 42, NOW + 3600, src),
+                                  Observation("codex:codex:10080m", "7d", 17, NOW + 86400, src)))
     assert all(LABEL.fullmatch(o.window_id) and LABEL.fullmatch(o.kind) for o in report.windows)
 
 
@@ -1521,11 +1717,13 @@ def test_a_reached_limit_hints_the_latest_full_windows_reset() -> None:
     assert nothing_full is not None and (nothing_full.limited, nothing_full.reset_hint) == (True, None)
 
 
-@pytest.mark.parametrize("window", [None, "x", {"usedPercent": 1}, {"usedPercent": 1, "windowDurationMins": 0},
+@pytest.mark.parametrize("window", [None, "x", {"usedPercent": 1},
+                                    {"usedPercent": 1, "windowDurationMins": 0},
                                     {"usedPercent": 1, "windowDurationMins": True},
                                     {"usedPercent": 1, "windowDurationMins": "300"}])
 def test_a_window_without_a_duration_is_skipped(window: object) -> None:
-    report = parse_rate_limits({"limitId": "codex", "primary": window, "rateLimitReachedType": None}, HOST_SOURCE)
+    snap = {"limitId": "codex", "primary": window, "rateLimitReachedType": None}
+    report = parse_rate_limits(snap, HOST_SOURCE)
     assert report == UsageReport()
 
 
@@ -1550,51 +1748,191 @@ def test_the_usage_script_ships_only_for_usage() -> None:
 
 # --- codex_usage.py, run against the fake app-server ---
 
+def diagnostic(proc: subprocess.CompletedProcess[bytes]) -> str:
+    """The script's one stderr line, if it is `codex_usage: <type>`; never its raw text otherwise."""
+    found = re.fullmatch(rb"codex_usage: ([A-Za-z]+)\n", proc.stderr)
+    return found.group(1).decode() if found else "<unrecognised>"
+
+
+def gone(pid_file: Path) -> bool:
+    """The fake app-server that wrote `pid_file` has ended and been reaped: no such process is left."""
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 def run_usage(tmp_path: Path, limit: str = "30", **env: str) -> subprocess.CompletedProcess[bytes]:
     codex = install_fake_cli(tmp_path, "codex")
     home = tmp_path / "codex-home"
     home.mkdir(exist_ok=True)
     scratch = tmp_path / "tmp"
     scratch.mkdir(exist_ok=True)
-    full = {"PATH": os.environ["PATH"], "CODEX_HOME": str(home), "TMPDIR": str(scratch), **env}
+    full = {"PATH": os.environ["PATH"], "CODEX_HOME": str(home), "TMPDIR": str(scratch),
+            "HZ_FAKE_PID_FILE": str(tmp_path / "app-server.pid"), **env}
     return subprocess.run([sys.executable, "-I", str(USAGE), str(codex), limit], env=full,
                           capture_output=True, timeout=60, check=False)
 
 
-def test_the_read_prints_the_snapshot_and_leaves_no_scratch_home(tmp_path: Path) -> None:
+def test_the_read_prints_the_snapshot_and_leaves_nothing(tmp_path: Path) -> None:
     (tmp_path / "codex-home").mkdir()
     (tmp_path / "codex-home" / "auth.json").write_text("fake-not-a-token")
     proc = run_usage(tmp_path, HZ_FAKE_RATE_LIMITS=json.dumps(SNAPSHOT))
-    assert proc.returncode == 0, proc.stderr
+    assert (proc.returncode, diagnostic(proc) if proc.stderr else "") == (0, "")
     assert Codex().usage_from_read(proc.stdout) == parse_rate_limits(SNAPSHOT, IN_SESSION_SOURCE)
+    assert gone(tmp_path / "app-server.pid")
     assert list((tmp_path / "tmp").iterdir()) == []
     assert (tmp_path / "codex-home" / "auth.json").read_text() == "fake-not-a-token"
 
 
-@pytest.mark.parametrize("fault", ["error", "garbage", "hang", "no-login"])
-def test_a_failed_read_exits_1_with_nothing_on_stdout(tmp_path: Path, fault: str) -> None:
+@pytest.mark.parametrize(("fault", "reason"), [
+    ("error", "AnswerError"), ("garbage", "JSONDecodeError"), ("hang", "TimeoutError"),
+    ("close", "ClosedOutput"), ("exit", "ExitStatus"), ("no-login", "AnswerError"),
+    ("no-limits", "NoRateLimits")])
+def test_a_failed_read_exits_1_with_its_own_diagnostic(tmp_path: Path, fault: str, reason: str) -> None:
     (tmp_path / "codex-home").mkdir()
     if fault != "no-login":
         (tmp_path / "codex-home" / "auth.json").write_text("fake-not-a-token")
-    env = {"HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
-    if fault != "no-login":
+    env = {"HZ_FAKE_RATE_LIMITS": "null" if fault == "no-limits" else json.dumps(SNAPSHOT)}
+    if fault in ("error", "garbage", "hang", "close", "exit"):
         env["HZ_FAKE_RATE_FAULT"] = fault
-    proc = run_usage(tmp_path, limit="2", **env)
-    assert proc.returncode == 1 and proc.stdout == b""
-    assert proc.stderr.decode().strip() in {"codex_usage: RuntimeError", "codex_usage: JSONDecodeError"}
+    proc = run_usage(tmp_path, limit="2", **env)      # a TimeoutExpired here fails the test
+    assert (proc.returncode, proc.stdout, diagnostic(proc)) == (1, b"", reason)
+    assert gone(tmp_path / "app-server.pid")
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
-def test_a_missing_codex_is_not_a_clean_failure(tmp_path: Path) -> None:
+def test_a_missing_codex_is_its_own_error_never_an_answer(tmp_path: Path) -> None:
     (tmp_path / "codex-home").mkdir()
     scratch = tmp_path / "tmp"
     scratch.mkdir()
     proc = subprocess.run([sys.executable, "-I", str(USAGE), str(tmp_path / "nowhere" / "codex")],
                           env={"PATH": os.environ["PATH"], "CODEX_HOME": str(tmp_path / "codex-home"),
                                "TMPDIR": str(scratch)}, capture_output=True, timeout=60, check=False)
-    assert proc.returncode == 1 and proc.stdout == b""
-    assert proc.stderr.decode().strip() == "codex_usage: FileNotFoundError"
+    assert (proc.returncode, proc.stdout, diagnostic(proc)) == (1, b"", "FileNotFoundError")
     assert list(scratch.iterdir()) == []
+
+
+# --- codex_usage.read and main, in this process, with their seams forced ---
+
+POPEN = subprocess.Popen        # the class itself, before the `started` fixture wraps it
+
+def usage_module() -> Any:
+    spec = importlib.util.spec_from_file_location("codex_usage_under_test", USAGE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def started(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[str]]:
+    """Every app-server the read starts, recorded so a test can prove each was reaped."""
+    made: list[subprocess.Popen[str]] = []
+
+    def recording(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        proc = POPEN(*args, **kwargs)
+        made.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", recording)
+    return made
+
+
+def ended(made: list[subprocess.Popen[str]]) -> bool:
+    """One app-server was started, and it was reaped and its pipes closed."""
+    return len(made) == 1 and all(p.returncode is not None and p.stdin is not None and p.stdin.closed
+                                  and p.stdout is not None and p.stdout.closed for p in made)
+
+
+def read_env(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "auth.json").write_text("fake-not-a-token")
+    return {"PATH": os.environ["PATH"], "CODEX_HOME": str(home), "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT)}
+
+
+def test_read_answers_and_reaps_the_app_server(tmp_path: Path, started: list[subprocess.Popen[str]]) -> None:
+    codex = install_fake_cli(tmp_path, "codex")
+    assert usage_module().read(str(codex), read_env(tmp_path), 5) == SNAPSHOT
+    assert ended(started)
+
+
+def test_a_timer_that_cannot_start_still_ends_the_app_server(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
+    module = usage_module()
+    codex = install_fake_cli(tmp_path, "codex")
+
+    def refuse(_self: threading.Timer) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(module.threading.Timer, "start", refuse)
+    with pytest.raises(RuntimeError, match="^can't start new thread$"):
+        module.read(str(codex), read_env(tmp_path), 5)
+    assert ended(started)
+
+
+class LateTimer:
+    """A deadline that passes just as the answer arrives: it fires when it is cancelled."""
+
+    def __init__(self, interval: float, function: Callable[[], None]) -> None:
+        self.function = function
+
+    def start(self) -> None:
+        pass
+
+    def cancel(self) -> None:
+        self.function()
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+
+def test_an_answer_that_races_the_deadline_is_a_timeout(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
+    module = usage_module()
+    codex = install_fake_cli(tmp_path, "codex")
+    monkeypatch.setattr(module.threading, "Timer", LateTimer)
+    with pytest.raises(TimeoutError):
+        module.read(str(codex), read_env(tmp_path), 5)
+    assert ended(started)
+
+
+def test_an_app_server_that_cannot_be_reaped_fails_the_read(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
+    module = usage_module()
+    codex = install_fake_cli(tmp_path, "codex")
+    real_wait = POPEN.wait
+
+    def stuck(self: subprocess.Popen[str], timeout: float | None = None) -> int:
+        raise subprocess.TimeoutExpired(self.args, timeout or 0)
+
+    monkeypatch.setattr(POPEN, "wait", stuck)
+    with pytest.raises(module.NotGone):
+        module.read(str(codex), read_env(tmp_path), 5)
+    monkeypatch.setattr(POPEN, "wait", real_wait)
+    assert [real_wait(p, 10) for p in started] == [-signal.SIGKILL]      # it was killed; now reaped here
+    assert ended(started)
+
+
+def test_a_scratch_home_that_stays_is_no_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                 capsys: pytest.CaptureFixture[str],
+                                                 started: list[subprocess.Popen[str]]) -> None:
+    module = usage_module()
+    codex = install_fake_cli(tmp_path, "codex")
+    env = read_env(tmp_path)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(module.tempfile, "tempdir", str(scratch))
+    monkeypatch.setattr(module.shutil, "rmtree", lambda *_a, **_k: None)
+    with pytest.raises(module.ScratchKept):
+        module.main([str(codex), "5"])
+    assert capsys.readouterr().out == ""                   # nothing that reads as an answer
+    assert ended(started)
+    assert len(list(scratch.iterdir())) == 1               # the home it could not remove
 ```
 
 Append to `tests/test_session_shim.py`:
@@ -1605,9 +1943,13 @@ Append to `tests/test_session_shim.py`:
 LIMITS = {"five_hour": {"used_percentage": 42, "resets_at": 1_800_003_600}}
 
 
-def status(run: Path, payload: object, t: FakeTime | None = None) -> int:
+WALL = 1_800_000_000.0
+
+
+def status(run: Path, payload: object, t: FakeTime | None = None, wall: float = WALL) -> int:
     t = t or FakeTime()
-    return shim.run_status(json.dumps(payload).encode(), env_for(run), clock=t.clock, sleep=t.sleep)
+    return shim.run_status(json.dumps(payload).encode(), env_for(run), clock=t.clock, sleep=t.sleep,
+                           wall=lambda: wall)
 
 
 def test_status_sends_each_change_once(run: Path) -> None:
@@ -1624,6 +1966,42 @@ def test_status_sends_each_change_once(run: Path) -> None:
                         {"hook_event_name": "StatusLine", "session_id": "s1", "rate_limits": changed}]
     finally:
         s.close()
+
+
+def test_status_resends_an_unchanged_value_before_it_could_go_stale(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        for at in (WALL, WALL + shim.STATUS_RESEND - 1, WALL + shim.STATUS_RESEND, WALL - 5):
+            assert status(run, {"session_id": "s1", "rate_limits": LIMITS}, wall=at) == 0
+        assert len(seen) == 3       # the first; once the interval had passed; after the clock went back
+    finally:
+        s.close()
+
+
+def test_a_relaunch_sends_the_same_value_to_its_own_wsd_session(run: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        assert status(run, {"rate_limits": LIMITS}) == 0
+    finally:
+        s.close()
+    run2 = run.parent / "r2"                    # the next generation: its own run dir and token, same $HOME
+    run2.mkdir()
+    (run2 / "token").write_text(TOKEN + "-2")
+    (run2 / "shim.json").write_text((run / "shim.json").read_text())
+    s2 = SessionServer(run2 / "s.sock", TOKEN + "-2", run.parent / "events.jsonl", on_event=seen.append)
+    s2.start()
+    try:
+        assert status(run2, {"rate_limits": LIMITS}) == 0
+        assert status(run2, {"rate_limits": LIMITS}) == 0                 # and then once only
+    finally:
+        s2.close()
+    assert [e["rate_limits"] for e in seen] == [LIMITS, LIMITS]
+    kept = (run.parent / "home" / ".hz" / shim.STATUS_FILE).read_text()
+    assert TOKEN not in kept and json.loads(kept)["launch"] == shim._launch(TOKEN + "-2")
 
 
 def test_status_retries_a_change_wsd_never_answered(run: Path) -> None:
@@ -1843,21 +2221,56 @@ Create `src/heterodyne/sandbox/resources/codex_usage.py`:
 stdio, for the account's rate limits. It runs in a scratch CODEX_HOME holding only a link to the
 session's read-only login, so it never touches the live app-server's state, and a refresh it attempts
 fails on the read-only bind (§7). No model request is made. Prints the `rateLimits` object as JSON and
-exits 0. Any failure exits 1 with nothing on stdout and only the error's type on stderr. The scratch
-home is removed whatever happens. The host parses and validates the output. Standard library only.
+exits 0. Any failure exits 1 with nothing on stdout and only the error's type on stderr. The host
+parses and validates the output. Standard library only.
+
+A reading counts only if all of these hold: the app-server answered before its deadline (an answer
+that races the deadline is a timeout), it was then ended and reaped by its own handle with the status
+of its own clean exit or of the kill (anything else is ExitStatus), and the scratch home is confirmed
+gone (ScratchKept). An error in ending the app-server or removing the scratch home replaces any
+earlier error: the cleanup's failure is the one reported.
 
 Usage: python3 -I codex_usage.py <codex binary> [limit seconds]
 """
 
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 
 LIMIT_SECONDS = 30.0
+END_SECONDS = 5.0           # how long a killed app-server may take to be reaped
+MAX_ANSWER = 1 << 20        # characters in one line of the app-server's output
+ENDED = (0, -signal.SIGKILL)  # its own clean exit, or the kill
+
+
+class AnswerError(Exception):
+    """The app-server answered with an error, or with something that isn't a JSON-RPC object."""
+
+
+class ClosedOutput(Exception):
+    """The app-server's output ended before it answered."""
+
+
+class ExitStatus(Exception):
+    """The app-server ended with a status that is neither its clean exit nor the kill."""
+
+
+class NotGone(Exception):
+    """The app-server could not be reaped after the kill."""
+
+
+class NoRateLimits(Exception):
+    """The answer holds no `rateLimits` object."""
+
+
+class ScratchKept(Exception):
+    """The scratch home is still there after its removal."""
 
 
 def main(argv):
@@ -1868,23 +2281,51 @@ def main(argv):
         os.symlink(os.path.join(os.environ["CODEX_HOME"], "auth.json"), os.path.join(home, "auth.json"))
         limits = read(codex, dict(os.environ, CODEX_HOME=home), limit)
     finally:
-        shutil.rmtree(home)
+        shutil.rmtree(home, ignore_errors=True)
+        if os.path.lexists(home):
+            raise ScratchKept("the scratch home is still there")
     if not isinstance(limits, dict):
-        raise RuntimeError("the answer has no rate limits")
+        raise NoRateLimits("the answer has no rate limits")
     print(json.dumps(limits))
     return 0
 
 
 def read(codex, env, limit):
-    """The `rateLimits` of the app-server run with `env` (its CODEX_HOME included), or None. Shared
-    with the host's trusted read (sandbox/hostread.py), which loads this file."""
+    """The `rateLimits` of the app-server run with `env` (its CODEX_HOME included), or None if the
+    answer has none. Raises on any failure, TimeoutError past `limit` seconds. The app-server is ended
+    in a `finally` whatever happens, the timer that bounds it included. Shared with the host's trusted
+    read (sandbox/hostread.py), which loads this file."""
     proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, text=True, env=env)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        proc.kill()
+
+    timer = threading.Timer(limit, expire)
+    started = False
+    result = None
+    try:
+        try:
+            timer.start()
+            started = True
+            result = _converse(proc)
+        finally:
+            timer.cancel()
+            if started:
+                timer.join()            # from here on, `expired` can't change
+            if expired.is_set():
+                raise TimeoutError("codex app-server did not answer within its limit")
+    finally:
+        _end(proc)
+    return result.get("rateLimits") if isinstance(result, dict) else None
+
+
+def _converse(proc):
     stdin, stdout = proc.stdin, proc.stdout
     if stdin is None or stdout is None:
-        raise RuntimeError("codex app-server has no pipes")
-    timer = threading.Timer(limit, proc.kill)
-    timer.start()
+        raise ClosedOutput("codex app-server has no pipes")
 
     def send(message):
         stdin.write(json.dumps(message) + "\n")
@@ -1893,24 +2334,40 @@ def read(codex, env, limit):
     def call(id_, method, params):
         send({"jsonrpc": "2.0", "id": id_, "method": method, "params": params})
         while True:
-            line = stdout.readline()
+            line = stdout.readline(MAX_ANSWER)
             if not line:
-                raise RuntimeError("codex app-server closed its output")
+                raise ClosedOutput("codex app-server closed its output")
+            if not line.endswith("\n"):
+                raise AnswerError("codex app-server sent an overlong line")
             message = json.loads(line)
+            if not isinstance(message, dict):
+                raise AnswerError("codex app-server sent something other than an object")
             if message.get("id") == id_:
-                if "error" in message:
-                    raise RuntimeError("codex app-server returned an error")
+                if "error" in message or "result" not in message:
+                    raise AnswerError("codex app-server returned an error")
                 return message["result"]
 
+    call(0, "initialize", {"clientInfo": {"name": "heterodyne", "version": "1"}})
+    send({"jsonrpc": "2.0", "method": "initialized"})
+    return call(1, "account/rateLimits/read", None)
+
+
+def _end(proc):
+    """Kill the app-server by its own handle, reap it and close its pipes. NotGone if it isn't reaped
+    within END_SECONDS; ExitStatus unless it ended by its own clean exit or the kill."""
     try:
-        call(0, "initialize", {"clientInfo": {"name": "heterodyne", "version": "1"}})
-        send({"jsonrpc": "2.0", "method": "initialized"})
-        result = call(1, "account/rateLimits/read", None)
-    finally:
-        timer.cancel()
         proc.kill()
-        proc.wait(5)
-    return result.get("rateLimits") if isinstance(result, dict) else None
+        try:
+            status = proc.wait(END_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise NotGone("codex app-server is still running") from None
+    finally:
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+    if status not in ENDED:
+        raise ExitStatus("codex app-server ended abnormally")
 
 
 if __name__ == "__main__":
@@ -1921,11 +2378,24 @@ if __name__ == "__main__":
         sys.exit(1)
 ```
 
-In `src/heterodyne/session/shim.py`, update the module docstring's first paragraph to name `hook|request|status`, and add before `json_depth`:
+In `src/heterodyne/session/shim.py`, add `import hashlib`, update the module docstring's first paragraph to name `hook|request|status`, and add before `json_depth` (the helpers call `json_depth` only at run time, so the order is free):
 
 ```python
-STATUS_FILE = "status.json"     # in $HOME/.hz: the last rate limits wsd accepted
+STATUS_FILE = "status.json"     # in $HOME/.hz: what wsd last accepted, from which launch, and when
 STATUS_WAIT = 2.0               # the status line redraws often: never hold it longer than this
+STATUS_RESEND = 30.0            # an unchanged value is sent again this often (wall seconds): well inside
+                                # the smallest stale window wsd allows (usage.stale_minutes >= 1)
+
+
+def _launch(token: str) -> str:
+    """Which launch the status was sent to, without keeping its token: each generation has its own."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _recent(sent: object, now: float) -> bool:
+    if isinstance(sent, bool) or not isinstance(sent, int | float):
+        return False
+    return 0 <= now - sent < STATUS_RESEND          # a clock that went back is never recent
 
 
 def _status_dir(env: Mapping[str, str]) -> int | None:
@@ -1938,21 +2408,24 @@ def _status_dir(env: Mapping[str, str]) -> int | None:
     return os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 
 
-def _last_status(env: Mapping[str, str]) -> str | None:
+def _last_status(env: Mapping[str, str]) -> dict[str, Any] | None:
     try:
         dir_fd = _status_dir(env)
         if dir_fd is None:
             return None
         try:
-            fd = os.open(STATUS_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+            fd = os.open(STATUS_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=dir_fd)
         finally:
             os.close(dir_fd)
         try:
-            return os.read(fd, MAX_LINE + 1).decode() if stat.S_ISREG(os.fstat(fd).st_mode) else None
+            raw = os.read(fd, MAX_LINE + 1) if stat.S_ISREG(os.fstat(fd).st_mode) else b""
         finally:
             os.close(fd)
+        data: Any = json.loads(raw) if raw and len(raw) <= MAX_LINE and json_depth(raw) <= MAX_DEPTH else None
     except (OSError, ValueError):
         return None
+    return cast(dict[str, Any], data) if isinstance(data, dict) else None
 
 
 def _save_status(env: Mapping[str, str], text: str) -> None:
@@ -1975,10 +2448,12 @@ def _save_status(env: Mapping[str, str], text: str) -> None:
 
 
 def run_status(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
-               sleep: Sleep = time.sleep) -> int:
-    """Claude's status line (plan 4b E7): send the input's `rate_limits` as a StatusLine hook event,
-    once per change, and print nothing. A change wsd didn't accept is sent again on the next redraw.
-    Always exits 0: the status line decides nothing."""
+               sleep: Sleep = time.sleep, wall: Clock = time.time) -> int:
+    """Claude's status line (plan 4b E7): send the input's `rate_limits` as a StatusLine hook event and
+    print nothing. A value is sent when it differs from what this launch's wsd last accepted, when it
+    went to another launch (a relaunch shares $HOME), or when STATUS_RESEND has passed since, so an
+    unchanged reading never goes stale in wsd's cache. A value wsd didn't accept is sent again on the
+    next redraw. Always exits 0: the status line decides nothing."""
     try:
         payload: Any = json.loads(raw) if len(raw) <= MAX_LINE and json_depth(raw) <= MAX_DEPTH else None
         if not isinstance(payload, dict):
@@ -1988,19 +2463,23 @@ def run_status(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monoto
         if not isinstance(limits, dict):
             return 0                    # the first call, before any API response, has none (S7)
         text = json.dumps(limits, sort_keys=True)
-        if _last_status(env) == text:
-            return 0
         found = _config(env)
         if found is None:
             return 0
         sock, token, cfg = found
-        event = {"hook_event_name": "StatusLine", "session_id": fields.get("session_id"), "rate_limits": limits}
+        launch, now = _launch(token), wall()
+        last = _last_status(env)
+        if (last is not None and last.get("launch") == launch and last.get("limits") == text
+                and _recent(last.get("sent"), now)):
+            return 0
+        event = {"hook_event_name": "StatusLine", "session_id": fields.get("session_id"),
+                 "rate_limits": limits}
         message = _bounded(lambda p: {"token": token, "type": "hook_event", "payload": p}, event)
         if message is None:
             return 0
         reply = _ask(sock, message, min(_wait(cfg), STATUS_WAIT), clock, sleep)
         if reply is not None and reply.get("ok") is True:
-            _save_status(env, text)
+            _save_status(env, json.dumps({"launch": launch, "limits": text, "sent": now}))
     except Exception:  # noqa: BLE001, S110 - a status line never fails the session
         pass
     return 0
@@ -2024,7 +2503,7 @@ def main(argv: Sequence[str]) -> int:
     return 2
 ```
 
-In `tests/fakes/fake_agent_cli.py`, add to the module docstring's `codex app-server` (stdio) item: "and `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated` notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login. `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error` or `garbage` (a line that isn't JSON)." Then replace `stdio_server`:
+In `tests/fakes/fake_agent_cli.py`, add to the module docstring's `codex app-server` (stdio) item: "and `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated` notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login. `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error`, `garbage` (a line that isn't JSON), `close` (closes its output and waits) or `exit` (exits 3 without answering). With `HZ_FAKE_PID_FILE` set, it first writes its PID there, so a test can prove it is gone." Then replace `stdio_server`:
 
 ```python
 def rate_limits(msg: dict[str, Any]) -> str | None:
@@ -2034,6 +2513,11 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
         return None
     if fault == "garbage":
         return "not json"
+    if fault == "close":
+        os.close(1)
+        return None
+    if fault == "exit":
+        os._exit(3)
     if fault == "error" or not (Path(os.environ["CODEX_HOME"]) / "auth.json").is_file():
         return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
             "code": -32600, "message": "codex account authentication required to read rate limits"}})
@@ -2042,6 +2526,8 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
 
 
 def stdio_server() -> None:
+    if pid_file := os.environ.get("HZ_FAKE_PID_FILE"):
+        Path(pid_file).write_text(str(os.getpid()))
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("method") == "initialize":
@@ -2063,7 +2549,7 @@ def stdio_server() -> None:
                   flush=True)
             answer = rate_limits(msg)
             if answer is None:
-                sys.stdin.read()        # hang until killed
+                sys.stdin.read()        # hang (or, its output closed, wait) until killed
                 return
             print(answer, flush=True)
             continue
@@ -2075,7 +2561,7 @@ def stdio_server() -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `timeout 300 uv run pytest tests/test_agents_usage.py tests/test_session_shim.py tests/test_agents_adapters.py tests/test_sandbox_runtime.py -q`
-Expected: PASS. The `hang` case passes in about 2 seconds (its limit), never 60: a timeout of the test's own `subprocess.run` is a failure. `test_a_missing_codex_is_not_a_clean_failure` proves a missing executable exits with its own error, never with something that reads as an answer.
+Expected: PASS. The `hang` case passes in about 2 seconds (its limit), never 60: a timeout of the test's own `subprocess.run` is a failure. Each fault is named by its own diagnostic, so a fault that fails for another reason (a missing executable's `FileNotFoundError` among them) fails its test. Every case that started an app-server proves it was reaped: by its PID for the script, and by its handle's `returncode` and closed pipes in this process.
 
 Then: `timeout 300 uv run pyright src/heterodyne/agents src/heterodyne/session tests/test_agents_usage.py tests/test_session_shim.py` and `uv run ruff check src tests`.
 Expected: 0 errors. `codex_usage.py` is `# pyright: basic`, like `codex_trust.py`.
