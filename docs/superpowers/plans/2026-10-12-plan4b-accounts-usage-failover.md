@@ -555,3 +555,265 @@ git add src/heterodyne/wsd/runtime.py src/heterodyne/wsd/headroom.py src/heterod
         tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py
 git commit -m "plan4b T1: wsd seams for keys, handoffs, signals, exclusion and the trusted read"
 ```
+
+## Task 2: the D8 credential lock
+
+One host lock per credential identity (§4.4 D8). Every harness read of a login and every write back to one holds it: the runtime's key check and freshness reread (Task 6), the trusted read and its write-back (Task 8), and later `heterodyne setup` (AU-10).
+
+**Files:**
+- Create: `src/heterodyne/wsd/credlock.py`
+- Modify: `src/heterodyne/wsd/settings.py` (`WsdSettings.credlock_dir`)
+- Test: `tests/test_wsd_credlock.py` (new)
+
+**Interfaces:**
+- Consumes: `heterodyne.fsutil.private_dir(path)`, `heterodyne.wsd.gate.open_lock_file(path) -> int`.
+- Produces:
+  - `credlock.credential_lock(lock_dir: Path, key: str, wait_seconds: float, *, clock=time.monotonic, sleep=time.sleep)`: a context manager that holds `flock(LOCK_EX)` on `<lock_dir>/<key>.lock` for its body.
+  - `credlock.CredentialBusy(Exception)`, whose text is exactly one of `credlock.LOCK_BUSY`, `credlock.LOCK_FAILED` or `credlock.BAD_KEY`.
+  - `credlock.KEY`: the compiled `ck1-[0-9a-f]{32}` pattern.
+  - `WsdSettings.credlock_dir -> Path`: `state_dir / "credlocks"`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_wsd_credlock.py`:
+
+```python
+"""Plan 4b Task 2: the D8 lock, one per credential key. Keys are obvious fakes."""
+
+import fcntl
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from heterodyne.wsd import credlock
+from heterodyne.wsd.credlock import BAD_KEY, LOCK_BUSY, LOCK_FAILED, CredentialBusy, credential_lock
+
+KEY = "ck1-" + "a" * 32
+OTHER = "ck1-" + "b" * 32
+HOLDER = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("locked", flush=True)
+sys.stdin.read()
+"""
+
+
+class Ticks:
+    """A clock that only moves when the code under test sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def free(path: Path) -> bool:
+    """Whether another open file description can take the lock now."""
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_the_lock_is_held_for_the_body_and_released_after(tmp_path: Path) -> None:
+    locks = tmp_path / "credlocks"
+    with credential_lock(locks, KEY, 0):
+        assert not free(locks / f"{KEY}.lock")
+    assert free(locks / f"{KEY}.lock")
+    assert (os.stat(locks).st_mode & 0o777) == 0o700
+    assert (os.stat(locks / f"{KEY}.lock").st_mode & 0o777) == 0o600
+
+
+def test_a_second_holder_waits_its_bound_then_is_busy(tmp_path: Path) -> None:
+    ticks = Ticks()
+    with credential_lock(tmp_path, KEY, 0), pytest.raises(CredentialBusy) as busy, \
+            credential_lock(tmp_path, KEY, 1.0, clock=ticks.clock, sleep=ticks.sleep):
+        pytest.fail("the lock was taken twice")
+    assert str(busy.value) == LOCK_BUSY
+    assert ticks.slept and sum(ticks.slept) == pytest.approx(1.0)
+    assert max(ticks.slept) <= credlock.POLL_SECONDS
+    with credential_lock(tmp_path, OTHER, 0):          # another key is another lock
+        pass
+
+
+def test_a_holder_in_another_process_excludes_this_one(tmp_path: Path) -> None:
+    lock = tmp_path / f"{KEY}.lock"
+    with credential_lock(tmp_path, KEY, 0):            # creates the file
+        pass
+    proc = subprocess.Popen([sys.executable, "-I", "-c", HOLDER, str(lock)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout is not None and proc.stdout.readline() == "locked\n"
+        with pytest.raises(CredentialBusy) as busy, credential_lock(tmp_path, KEY, 0):
+            pytest.fail("the lock was taken while another process held it")
+        assert str(busy.value) == LOCK_BUSY
+    finally:
+        assert proc.stdin is not None
+        proc.stdin.close()
+        assert proc.wait(timeout=30) == 0
+    with credential_lock(tmp_path, KEY, 0):
+        pass
+
+
+def test_the_lock_is_released_when_the_body_raises(tmp_path: Path) -> None:
+    with pytest.raises(ZeroDivisionError), credential_lock(tmp_path, KEY, 0):
+        _ = 1 / 0
+    assert free(tmp_path / f"{KEY}.lock")
+
+
+@pytest.mark.parametrize("key", ["", "ck1-" + "A" * 32, "ck1-" + "a" * 31, "../" + KEY, KEY + "/x",
+                                 "ck2-" + "a" * 32])
+def test_a_key_that_is_not_a_key_is_refused_before_any_path(tmp_path: Path, key: str) -> None:
+    with pytest.raises(CredentialBusy) as bad, credential_lock(tmp_path / "credlocks", key, 0):
+        pytest.fail("a bad key was locked")
+    assert str(bad.value) == BAD_KEY
+    assert not (tmp_path / "credlocks").exists()
+
+
+def test_a_symlinked_lock_file_is_refused_and_its_target_untouched(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    locks = tmp_path / "credlocks"
+    locks.mkdir(mode=0o700)
+    (locks / f"{KEY}.lock").symlink_to(victim)
+    with pytest.raises(CredentialBusy) as failed, credential_lock(locks, KEY, 0):
+        pytest.fail("a symlinked lock was taken")
+    assert str(failed.value) == LOCK_FAILED
+    assert victim.read_text() == "keep"
+
+
+def test_a_symlinked_lock_dir_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "credlocks").symlink_to(real)
+    with pytest.raises(CredentialBusy) as failed, credential_lock(tmp_path / "credlocks", KEY, 0):
+        pytest.fail("a symlinked lock directory was used")
+    assert str(failed.value) == LOCK_FAILED
+    assert list(real.iterdir()) == []
+
+
+def test_the_texts_name_no_key_or_path() -> None:
+    for text in (LOCK_BUSY, LOCK_FAILED, BAD_KEY):
+        assert "ck1-" not in text and "/" not in text
+```
+
+Append to `tests/test_wsd_settings.py`:
+
+```python
+def test_the_credential_locks_live_in_the_state_dir(cfg: Path) -> None:
+    s = resolve(env(cfg))
+    assert s.credlock_dir == s.state_dir / "credlocks"
+    assert s.credlock_dir != s.lock_dir
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_wsd_credlock.py tests/test_wsd_settings.py -q`
+Expected: FAIL at import (`No module named 'heterodyne.wsd.credlock'`), and `AttributeError: 'WsdSettings' object has no attribute 'credlock_dir'`.
+
+- [ ] **Step 3: Implement**
+
+Create `src/heterodyne/wsd/credlock.py`:
+
+```python
+"""The per-credential-identity host lock (ADR 0001 §4.4 D8; plan 4b E2).
+
+Every harness read of a login and every write back to one holds the lock of the login's credential key:
+the runtime's key check and freshness reread, the trusted host-side read and its write-back, and
+`heterodyne setup`. A key is a digest of the login's paths (AU-2), so the lock file's name never leaks a
+path. flock locks an open file description, so two threads of one process exclude each other as two
+processes do. The wait is bounded: a holder that never lets go refuses the operation, never hangs it.
+"""
+
+import contextlib
+import fcntl
+import os
+import re
+import time
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+from heterodyne.fsutil import private_dir
+from heterodyne.wsd.gate import open_lock_file
+
+KEY = re.compile(r"ck1-[0-9a-f]{32}")
+POLL_SECONDS = 0.05
+LOCK_BUSY = "the account's login is locked by another harness operation"
+LOCK_FAILED = "the account's login lock can't be opened or taken"
+BAD_KEY = "the credential key is not a valid key"
+
+
+class CredentialBusy(Exception):
+    """The lock was not taken; nothing under it ran. The text is LOCK_BUSY, LOCK_FAILED or BAD_KEY."""
+
+
+@contextlib.contextmanager
+def credential_lock(lock_dir: Path, key: str, wait_seconds: float, *,
+                    clock: Callable[[], float] = time.monotonic,
+                    sleep: Callable[[float], None] = time.sleep) -> Iterator[None]:
+    """Hold the lock of `key` for the body. The key is checked before it is used in a path. The lock
+    directory is made 0700 (a symlink is refused) and the lock file 0600, never through a link. The wait
+    polls without blocking, for at most `wait_seconds` in all."""
+    if not KEY.fullmatch(key):
+        raise CredentialBusy(BAD_KEY)
+    try:
+        private_dir(lock_dir)
+        fd = open_lock_file(lock_dir / f"{key}.lock")
+    except OSError:
+        raise CredentialBusy(LOCK_FAILED) from None
+    try:
+        end = clock() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                left = end - clock()
+                if left <= 0:
+                    raise CredentialBusy(LOCK_BUSY) from None
+                sleep(min(POLL_SECONDS, left))
+            except OSError:
+                raise CredentialBusy(LOCK_FAILED) from None
+        yield
+    finally:
+        os.close(fd)                # closing the descriptor releases the lock
+```
+
+In `src/heterodyne/wsd/settings.py`, add after `lock_dir`:
+
+```python
+    @property
+    def credlock_dir(self) -> Path:
+        """The D8 locks, one file per credential key (plan 4b E2). `heterodyne setup` uses the same one."""
+        return self.state_dir / "credlocks"
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_wsd_credlock.py tests/test_wsd_settings.py -q`
+Expected: PASS. `test_a_holder_in_another_process_excludes_this_one` must pass, not skip: it is the cross-process proof.
+
+Then: `timeout 300 uv run pyright src/heterodyne/wsd/credlock.py tests/test_wsd_credlock.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/wsd/credlock.py src/heterodyne/wsd/settings.py tests/test_wsd_credlock.py \
+        tests/test_wsd_settings.py
+git commit -m "plan4b T2: the D8 credential lock"
+```
