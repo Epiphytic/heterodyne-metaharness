@@ -130,6 +130,21 @@ def _print(reply: ctl.CtlReply) -> int:
     return 0 if reply.result == "ok" else 1
 
 
+def _print_unlanded(reply: ctl.CtlReply) -> int:
+    """One block per session; its subjects one per line, after a label that says they are the agent's."""
+    print(reply.message)
+    for sid, fields in sorted(reply.data.items()):
+        print(f"{sid}:")
+        for k, v in fields.items():
+            if k != "subjects":
+                print(f"  {k}: {v}")
+        if fields.get("subjects"):
+            print("  subjects (untrusted, written by the agent):")
+            for line in fields["subjects"].split("\n"):
+                print(f"    {line}")
+    return 0 if reply.result == "ok" else 1
+
+
 def wsd_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wsd")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -161,7 +176,21 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
     status.add_argument("ws", nargs="?")
     status.add_argument("--all", action="store_true", help="list closed and dropped beads too")
     sub.add_parser("reload", help="reload accounts, usage and models, then re-gate account changes")
+    unlanded = sub.add_parser("unlanded", help="show a workstream's sessions whose commits were not landed")
+    unlanded.add_argument("ws")
+    resolve = sub.add_parser("resolve", help="land, keep or discard an unlanded session's commits")
+    resolve.add_argument("ws")
+    resolve.add_argument("session", help="the session's short ID, as wsctl unlanded shows it")
+    resolve.add_argument("--generation", type=int, required=True)
+    actions = resolve.add_mutually_exclusive_group(required=True)
+    for action, text in (("land", "fast-forward the bead branch to the session's tip"),
+                         ("keep", "keep the tip on refs/heads/unlanded/<bead>/<session>-g<generation>"),
+                         ("discard", "drop the session's commits")):
+        actions.add_argument(f"--{action}", dest="action", action="store_const", const=action, help=text)
+    resolve.add_argument("--tip", help="the session's tip, as wsctl unlanded shows it: the confirmation")
     args = parser.parse_args(argv)
+    if args.cmd == "resolve" and args.action != "discard" and args.tip is None:
+        resolve.error(f"--{args.action} needs --tip")
     try:
         s = _settings()
         if args.cmd == "status":
@@ -169,6 +198,13 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
             return 1 if reply is None else _print(reply)
         if args.cmd == "reload":
             reply = _ask(s, ctl.CtlRequest("reload"))
+            return 1 if reply is None else _print(reply)
+        if args.cmd == "unlanded":
+            reply = _ask(s, ctl.CtlRequest("unlanded", ws=args.ws))
+            return 1 if reply is None else _print_unlanded(reply)
+        if args.cmd == "resolve":
+            reply = _ask(s, ctl.CtlRequest("resolve", ws=args.ws, session=args.session,
+                                           generation=args.generation, action=args.action, tip=args.tip))
             return 1 if reply is None else _print(reply)
         reply = _ask(s, ctl.CtlRequest(args.cmd, ws=args.ws))
         return 1 if reply is None else _print(reply)

@@ -1109,6 +1109,17 @@ class Journal:
         return int(cast(int, cur.lastrowid))
 
     @_locked
+    def emit_once(self, ws: str, bead: str | None, kind: str, detail: str, ref: str) -> bool:
+        """`emit`, unless an event of this kind with this ref is already there: one transaction, so a
+        replayed step (an unlanded resolve's, btq-xb56t) is journaled once. True if it wrote one."""
+        with self.transaction():
+            if self.db.execute("SELECT 1 FROM events WHERE kind = ? AND ref = ?", (kind, ref)).fetchone():
+                return False
+            self.db.execute("INSERT INTO events (at, ws, bead, kind, detail, ref) VALUES (?, ?, ?, ?, ?, ?)",
+                            (now(), ws, bead, kind, detail, ref))
+            return True
+
+    @_locked
     def inbox_pending_count(self) -> int:
         row = self.db.execute("SELECT COUNT(*) FROM inbox WHERE status = 'pending'").fetchone()
         return int(cast(int, row[0]))

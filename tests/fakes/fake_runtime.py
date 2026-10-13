@@ -4,13 +4,17 @@ returns a `Started` with synthetic tmux IDs; its native ID is the spec's, or a s
 spec has none (Codex before its thread is known)."""
 
 from heterodyne.wsd.runtime import (
+    Action,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
     Liveness,
+    Resolution,
+    ResolveFailed,
     RuntimeUnavailable,
     Session,
     Started,
+    UnlandedView,
 )
 
 
@@ -30,11 +34,18 @@ class FakeRuntime:
         self.list_failures = 0
         self.calls = 0                # every launch() call, whatever it did
         self.raise_after_start: BaseException | None = None    # raised once, after the session started
+        self.views: dict[str, list[UnlandedView]] = {}        # ws -> its unlanded sessions
+        self.resolves: list[tuple[str, str, int, Action, str | None]] = []     # every resolve asked
+        self.resolve_error: Exception | None = None            # raised by the next resolve
+        self.intents: dict[tuple[str, int], Resolution] = {}   # resolved, not yet finished: the hold
+        self.finished: list[tuple[str, str, int]] = []
 
     def available(self) -> bool:
         return self.up
 
     def sessions(self, ws: str) -> list[Session]:
+        if any(r.ws == ws for r in self.intents.values()):
+            raise RuntimeUnavailable("an unlanded resolve is unfinished")
         if not self.up or self.list_failures:
             self.list_failures = max(0, self.list_failures - 1)
             raise RuntimeUnavailable("can't list sessions")
@@ -83,6 +94,32 @@ class FakeRuntime:
         if self.expire_failures:
             self.expire_failures -= 1
             raise RuntimeUnavailable("lifetime stop not confirmed")
+
+    def unlanded(self, ws: str) -> list[UnlandedView]:
+        if not self.up:
+            raise RuntimeUnavailable("down")
+        return list(self.views.get(ws, []))
+
+    def resolve_unlanded(self, ws: str, sid: str, generation: int, action: Action,
+                         tip: str | None) -> Resolution:
+        """Like SandboxRuntime's: the Resolution comes from the intent, which a repeat finds again."""
+        self.resolves.append((ws, sid, generation, action, tip))
+        if self.resolve_error is not None:
+            exc, self.resolve_error = self.resolve_error, None
+            raise exc
+        done = self.intents.setdefault(
+            (sid, generation), Resolution(ws, "btq-1", sid, generation, action, tip,
+                                          f"refs/heads/unlanded/btq-1/{sid}-g{generation}" if action == "keep"
+                                          else ""))
+        self.views[ws] = [v for v in self.views.get(ws, []) if v.short_id != sid]
+        return done
+
+    def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
+        intent = self.intents.get((sid, generation))
+        if intent is not None and intent.ws != ws:
+            raise ResolveFailed("not this workstream's")
+        self.intents.pop((sid, generation), None)
+        self.finished.append((ws, sid, generation))
 
     # --- test controls ---
 

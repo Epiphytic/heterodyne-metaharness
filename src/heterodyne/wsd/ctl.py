@@ -1,5 +1,5 @@
 """wsd's host control socket (ADR 0001 §4.3, §9): `wsd tick <job>` from the timers, and `wsctl pause`,
-`resume`, `status` and `reload` (AU-4 §5.2).
+`resume`, `status` and `reload` (AU-4 §5.2), `unlanded` and `resolve` (btq-xb56t, docs/wsd.md §5).
 
 One JSON request per connection, one JSON reply, each a single newline-terminated line. A request is at
 most MAX_REQUEST bytes and a reply at most MAX_REPLY bytes; the client reads up to MAX_REPLY, and a reply
@@ -38,11 +38,15 @@ def _no_data() -> dict[str, dict[str, str]]:
 
 
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume", "reload"]
+    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
-    ws: str | None = None       # None: every workstream (tick and status); pause and resume need one,
-    #                             and reload takes none
+    ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
+    #                             resolve need one, and reload takes none
     all: bool = False           # status only: list closed and dropped beads too
+    session: str | None = None                              # resolve only: the session's short ID
+    generation: int | None = None                           # resolve only
+    tip: str | None = None                                  # resolve only: the confirmation
+    action: Literal["land", "keep", "discard"] | None = None    # resolve only
 
 
 class CtlReply(msgspec.Struct, frozen=True):
@@ -63,8 +67,15 @@ def refusal(req: CtlRequest) -> str:
     call it without the socket."""
     if (req.op == "tick") != (req.job is not None):
         return "tick needs a job; nothing else takes one"
-    if req.op in ("pause", "resume") and req.ws is None:
+    if req.op in ("pause", "resume", "unlanded", "resolve") and req.ws is None:
         return f"{req.op} needs a workstream"
+    resolving = (req.session, req.generation, req.tip, req.action)
+    if req.op != "resolve" and any(v is not None for v in resolving):
+        return "only resolve takes a session, generation, tip or action"
+    if req.op == "resolve" and (req.session is None or req.generation is None or req.action is None):
+        return "resolve needs a session, a generation and an action"
+    if req.op == "resolve" and req.action != "discard" and req.tip is None:
+        return f"resolve --{req.action} needs the tip it confirms"
     if req.op == "reload" and req.ws is not None:
         return "reload takes no workstream; it reloads them all"
     if req.all and req.op != "status":
