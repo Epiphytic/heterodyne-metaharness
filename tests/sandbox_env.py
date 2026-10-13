@@ -144,10 +144,12 @@ def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: 
                       native_id=native, account=account, repo=rig.repo)
 
 
-def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str],
-                     listed: Callable[[], set[str]]) -> list[str]:
+def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str], listed: Callable[[], set[str]],
+                     owners: Mapping[str, SandboxRuntime] | None = None) -> list[str]:
     """The live module's teardown: stop every session it launched, each tried whatever the others do,
     then confirm with the sandbox list (`openshell sandbox list`) that none of their sandboxes is left.
+    A session launched through another runtime (`owners`) is stopped through that one: only the runtime
+    that launched it holds its session server.
     A create that may still land (started, never returned, its cancellation not recorded) is uncertain
     in any phase, `ended` included: its watcher is kept for a sandbox that may yet appear. So is any
     generation's watcher still running once its session is stopped, which an earlier generation's late
@@ -156,17 +158,18 @@ def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str],
     uncertain: list[str] = []
     sandboxes: set[str] = set()
     for key in dict.fromkeys(keys):
+        owner = (owners or {}).get(key, runtime)
         try:
-            rec = read_record(runtime.layout(key))
+            rec = read_record(owner.layout(key))
             sandboxes |= {rec.sandbox} if rec is not None else set()
-            runtime.stop(key)
-            rec = read_record(runtime.layout(key))
+            owner.stop(key)
+            rec = read_record(owner.layout(key))
             if rec is not None:
                 sandboxes.add(rec.sandbox)
                 if rec.create_started and not rec.created:
                     uncertain.append(f"session {key} generation {rec.generation}: its create is unresolved")
                 kept = [g for g in range(1, rec.generation + 1)
-                        if runtime.c.tmux.has_session(runtime.reaper_name(key, g))]
+                        if owner.c.tmux.has_session(owner.reaper_name(key, g))]
                 if kept:
                     uncertain.append(f"session {key}: the watchers of generations {kept} are still running")
         except Exception as exc:  # noqa: BLE001 - every session is tried; each failure is reported

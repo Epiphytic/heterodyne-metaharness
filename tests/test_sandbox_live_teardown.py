@@ -11,7 +11,7 @@ from sandbox_env import RuntimeRig, launch_spec, runtime_rig, sandbox_teardown, 
 from tmux_guard import new_test_tmux
 from wsd_env import Clock
 
-from heterodyne.sandbox.runtime import Phase, read_record
+from heterodyne.sandbox.runtime import Phase, SandboxRuntime, read_record
 from heterodyne.wsd.runtime import LaunchFailed, RuntimeUnavailable
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -92,3 +92,16 @@ def test_every_session_is_tried_and_a_listed_sandbox_or_a_failed_list_is_uncerta
     rig.backend.list_failures = 1
     assert sandbox_teardown(rig.runtime, [two.session_key], rig.backend.names) == [
         "the sandbox list: the fake backend is down"]
+
+
+def test_a_session_launched_through_another_runtime_is_stopped_through_it(rig: RuntimeRig) -> None:
+    """Codex T15 r1: a control launches through a runtime of its own, and only that runtime holds the
+    session's server. Teardown stops each session through its owner, so the server is closed too."""
+    other = SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
+    spec = launch_spec(rig, "p-one")
+    other.launch(spec)
+    assert spec.session_key in other.servers
+    assert sandbox_teardown(rig.runtime, [spec.session_key], rig.backend.names,
+                            owners={spec.session_key: other}) == []
+    assert other.servers == {}
+    assert rig.backend.boxes == {}

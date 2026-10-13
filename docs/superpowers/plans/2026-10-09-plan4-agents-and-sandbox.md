@@ -9829,6 +9829,48 @@ git commit -m "plan4 T14: the live sandbox gate, both shapes, egress, reviewer, 
 
 ### Task 15 [r15]: The live negative and adversarial controls
 
+> **Erratum (Task 15 code review, gpt-6.1-sol cycles 1-3).** The code blocks in this task are superseded by the reviewed implementation on branch `p4-t15`: `tests/probe_verdicts.py`, `tests/test_probe_verdicts.py` and the Task 15 part of `tests/live/test_live_sandbox.py`. Where this task's code and that implementation differ, the implementation governs.
+>
+> **Why.** As first written, several controls could pass without exercising the protection, or could leak diagnostics:
+> - verdicts accepted any `E*` error or any nonzero status, so a missing command's 127 counted as a refusal;
+> - exit statuses were masked;
+> - "no verified probe run" satisfied a negative control;
+> - the output monitor stopped after 15 s;
+> - container cleanup was unproven;
+> - raw subprocess output reached assertions.
+>
+> D23 (as amended by Amendment 1) and Tasks 9A-9C are unchanged. The corrections only make the controls meet D23's exact enforcing answers and Amendment 1's "controls must prove they ran".
+>
+> **Corrections:**
+> 1. FenceDown and the plain podman run use `live.backend.env`; the raw `tool_env` holds only the overrides, without HOME or XDG_*.
+> 2. The plain podman run uses `--pull=never` and the preflight's podman `--url`. It is named, uses a `--cidfile`, is removed by CID and by name in a `finally`, and is confirmed absent before the scratch directory is removed. Otherwise it is recorded as uncertain and the scratch is kept.
+> 3. The check scripts are `python3 -I` stdlib/ctypes syscall wrappers that report errno names. No shell is involved.
+> 4. Exact enforcing answers:
+>    - EPERM for ptrace attach, `process_vm_readv` and `process_vm_writev`, `pidfd_getfd(-1)` and `unshare(0)`;
+>    - EACCES for opening `/proc/<pid>/mem` for writing;
+>    - EROFS or EACCES for file operations (per Task 9C);
+>    - for the overlay, step-wise: unshare EPERM, uid map EACCES, then EPERM for each bind.
+> 5. Targets are every visible process except the check itself, and must include the check's own child. Each target must have exactly one complete set of operations.
+> 6. `separate_mount_namespace` became `namespaces_refused`.
+> 7. `FILE_OPS` coverage:
+>    - create and mkdir;
+>    - bind `p.sock`;
+>    - append to the token, `probes.py`, `agent-probe.json`, `shim.py` and `shim.json`;
+>    - rename the token;
+>    - unlink `agent-probe.json` and `s.sock`.
+> 8. The forged probe reports `connect`, `sent` and `run` without masking its status. n7 requires a connection and exactly `["not the probe"]`.
+> 9. `OUTPUT_CHECK` watches until the probe exits, attributes curls along the PPid chain, and reports `error:ERRNO`. ENOENT and ESRCH mean the process is gone. A descriptor counts as refused only as `socket:ENXIO`, or as `hidden:EACCES` (readlink and the write open both refused across the sandbox boundary); any other inspection error fails.
+> 10. `sandbox_teardown(..., owners)` stops each session through the runtime that launched it. `Live` carries `owners` and `uncertain`.
+> 11. `refused()` requires exactly `launch self-test failed: <reason>` (with an optional freeze-attempts suffix) and requires that no sandbox remains. `recorded_channels()` observes `.rejected`.
+> 12. n8 requires exactly one "environment beyond the allowlist" rejection, naming a non-empty subset of the agent-only tool variables. n9 has two outcomes: if it is refused, the launch passed and nothing was rejected; if it ran, the result must be `CHANNEL_REJECTED` with exactly the namespace reason.
+> 13. The dead-socket control expects the two-check reason derived from `probes.py` (today `control-op-rejected, hook-event-accepted`), not `hook-event-accepted` alone.
+> 14. Diagnostics are allowlisted:
+>    - `shown()`, `rejection_shown()` and `launch_shown()` print only known vocabulary, numeric PIDs and errno names; everything else prints as `<unrecognised>`;
+>    - sensitive comparisons run outside `assert` and fail via `pytest.fail()` with sanitised text only;
+>    - subprocess errors show only the exception's type name.
+> 15. `CHANNEL_REJECTED`'s parts and the fixed-wording tables live in `tests/probe_verdicts.py`, which imports `EXEC_CHECKS` and `AGENT_CHECKS` from `heterodyne.sandbox.openshell_selftest`. The offline tests import the private `_results` for the combined-failure case.
+> 16. `require(ok, why)` in `tests/probe_verdicts.py` fails with only `why` (`pytest.fail`, `pytrace=False`), and `tool_var_rejection()` holds n8's check. The T15 controls' checks on raw launch reasons, rejection reasons and environment names go through them, as do the T14 live checks whose operands hold a host path, environment names or command output.
+
 **Files:**
 - Create: `tests/probe_verdicts.py`, `tests/test_probe_verdicts.py` (Amendment 1: offline, in the normal suite)
 - Modify: `tests/live/test_live_sandbox.py` (append; still the only change under `tests/live/`)
