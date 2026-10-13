@@ -233,7 +233,7 @@ def assert_held_unlanded(both: Both, bead: str, host_before: str, made: str) -> 
     rig = both.rig
     detail = rig.journal.holds(WS).get(Reason.RUNTIME_UNAVAILABLE, "")
     sid = short_id(rig.key(bead))
-    assert f"session {sid} generation 1" in detail and f" s/{sid}/git " in detail     # the rig's is s/
+    assert f"session {sid} generation 1" in detail and f"see `wsctl unlanded {WS}`" in detail   # btq-xb56t
     assert host_log(both, bead) == host_before and lifetime_marks(rig, bead) == []   # no host WIP
     assert private_tip(both, bead) == made                                        # kept for a human
     assert rig.journal.receipt(rig.key(bead), 2) is None                          # no generation 2
