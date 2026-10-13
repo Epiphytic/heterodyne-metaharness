@@ -12,6 +12,9 @@
   and the `wsd-defer` comment, with no blocking edge. The tail runs inside whichever op deferred the bead
   (a standalone PARK, a pickup's or resume's guard, an undefer, a re-gate or a release), found by its
   `defer.*` step names. Undefer gates the bead again, removes `v2:deferred` and launches through the guard.
+- Limit (plan 4b E11): a session's own limit report opens a PARK op with an untrusted record, then the
+  tail, which asks the trusted read once the WIP is committed (`defer.confirmed`). A confirmed read
+  supersedes the record with the gate's trusted verdict before the label and comment.
 - `launch`, the guard: the only call to `AgentRuntime.launch`, used by pickup, resume and their replays.
   Before it pins a generation it accounts for every earlier launched one (g08sd, `_account`): a bead whose
   sessions keep dying escalates `crash_loop` there, before the launch that would follow.
@@ -35,6 +38,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from heterodyne.config import ConfigError
+from heterodyne.config.capabilities import NONE, Capabilities
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import DEFAULT, AccountChanged, Accounts
 from heterodyne.wsd.beads import (
@@ -79,7 +83,14 @@ from heterodyne.wsd.upgrade import (
     check_agreement,
     configured_at_upgrade,
 )
-from heterodyne.wsd.usage import admitted, decide, untrusted_defer_until
+from heterodyne.wsd.usage import (
+    TrustedRead,
+    admitted,
+    decide,
+    ingest_trusted,
+    mark_exhausted,
+    untrusted_defer_until,
+)
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
 
 PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
@@ -93,6 +104,8 @@ UNRECEIPTED = ("dispatched", "dispatched!", "launched!")
 # The defer tail's points (AU-4 §3.1), as `<kind>.<step>` for the op that contains it.
 DEFER_STEPS = ("defer.recorded", "defer.stopped!", "defer.stopped", "defer.committed!", "defer.committed",
                "defer.labelled!", "defer.labelled", "defer.commented!", "defer.done")
+# A limit's defer (plan 4b E11): the tail with the trusted read after the WIP commit (D6), before the label.
+LIMIT_STEPS = (*DEFER_STEPS[:5], "defer.read!", "defer.confirmed", *DEFER_STEPS[5:])
 UNDEFER_POINTS = ("undefer.intent", "undefer.gated!", "undefer.gated", "undefer.unlabelled!",
                   "undefer.unlabelled")
 RESUME_POINTS = ("resume.intent", "resume.unlabelled!", "resume.unlabelled",
@@ -208,6 +221,16 @@ def resumable(bead: Bead) -> bool:
     the operator or escalated to a human is not resumable."""
     return (PARKED in bead.labels and HELD not in bead.labels and NEEDS_HUMAN not in bead.labels
             and not bead.open_blockers())
+
+
+def capabilities(accounts: Accounts | None, profile: str) -> Capabilities:
+    """E15: the profile's capabilities as it resolves now; none without accounts, or if it can't resolve."""
+    if accounts is None:
+        return NONE
+    try:
+        return accounts.view(profile).capabilities
+    except ConfigError:
+        return NONE
 
 
 class Parker:
@@ -500,7 +523,10 @@ class Parker:
                 self.d.cp(f"{kind}.defer.committed!")
                 op = j.op_step(op.op_id, "defer.committed", {"sha": sha})
                 self.d.cp(f"{kind}.defer.committed")
-            if op.step == "defer.committed":
+            if op.step == "defer.committed" and "limit_key" in op.data:
+                op = self._confirm(op)
+                n = int(op.data["defer"])          # a confirmed read may have superseded the record
+            if op.step in ("defer.committed", "defer.confirmed"):
                 self.d.beads.ensure_label(ws, bead, DEFERRED)
                 self.d.cp(f"{kind}.defer.labelled!")
                 op = j.op_step(op.op_id, "defer.labelled")
@@ -562,6 +588,83 @@ class Parker:
             return Launch.ENDED
         self._defer_within(op, rec, QUOTA, int(op.data["until"]))
         return Launch.ENDED
+
+    # --- the reactive limit (plan 4b E11) ---
+
+    def limit(self, session_key: str, generation: int, hint: int | None, now: int) -> BeadState | None:
+        """A session reported its usage limit (D6) on the channel of launch (`session_key`, `generation`).
+        The caller (pickup) holds `entry()` and has checked (e). Only the running bead's latest launch is
+        deferred: an untrusted QUOTA record clamped by D5, recorded before anything stops, then the tail.
+        None: nothing deferred (another launch, a bead not running, an operation open, or no readable
+        record of this session)."""
+        j, ws = self.d.journal, self.ws.name
+        entry = j.launch(session_key, generation)
+        launched = [e.generation for e in j.launches(session_key) if e.outcome == LAUNCHED]
+        if entry is None or entry.ws != ws or not launched or launched[-1] != generation:
+            return None
+        row = j.state(ws, entry.bead)
+        if row is None or row.state is not BeadState.RUNNING or j.op_for(ws, entry.bead) is not None:
+            return None
+        try:
+            rec = self.d.beads.show(ws, entry.bead).record()
+        except RecordUnreadable:
+            return None
+        if rec is None or rec.session_key != session_key:
+            return None
+        until = untrusted_defer_until(hint, now, self.ws.usage)
+        with j.transaction():
+            op = j.op_open(OpKind.PARK, ws, entry.bead,
+                           {"ref": "", "limit_key": session_key, "limit_gen": str(generation)})
+            op = self._record_defer(op, rec, QUOTA, until, UNTRUSTED)
+        self.d.cp("park.defer.recorded")
+        return self.defer_tail(op)
+
+    def _confirm(self, op: Op) -> Op:
+        """The `defer.confirmed` step, once the limited session is stopped and its WIP committed: with (d),
+        the trusted read of the limited launch's account. A read that confirms the limit supersedes the
+        untrusted record, in one transaction with the step (`_supersede`). Anything else keeps it: no (d),
+        no reading, a reading that doesn't confirm, or a record superseded meanwhile (the tail's check
+        escalates that)."""
+        j, kind = self.d.journal, op.kind.value
+        key, n = op.data["defer_key"], int(op.data["defer"])
+        entry = j.launch(op.data["limit_key"], int(op.data["limit_gen"]))
+        accounts = self.ws.accounts
+        read = None
+        if entry is not None and accounts is not None and capabilities(accounts, entry.profile).trusted_read:
+            read = self.d.usage_reader.read(entry.profile, entry.account, entry.credential_key)
+        self.d.cp(f"{kind}.defer.read!")
+        current = j.deferral_current(key)
+        with j.transaction():
+            if (read is not None and read.limited and entry is not None and accounts is not None
+                    and current is not None and current.number == n):
+                n = self._supersede(op, current, accounts, entry, read)
+            op = j.op_step(op.op_id, "defer.confirmed", {"defer": str(n), "wip_defer": op.data["defer"]})
+        self.d.cp(f"{kind}.defer.confirmed")
+        return op
+
+    def _supersede(self, op: Op, current: DeferralRow, accounts: Accounts, entry: LaunchEntry,
+                   read: TrustedRead) -> int:
+        """`_confirm`'s confirmed half, inside its transaction. The read's windows are stored as trusted
+        under the launch's key, the key is marked exhausted, and the gate runs again: `Chosen` is due now
+        (the same pickup's undefer relaunches through the guard's pin), a `Deadline` waits for its time,
+        `AccountChanged` for the operator. Returns the record the tail goes on with: the new trusted one,
+        or `current` if the profile can't resolve now (the undefer's gate escalates that)."""
+        j, s, now = self.d.journal, self.ws.usage, self.d.clock()
+        for obs in read.observations:
+            ingest_trusted(j, entry.credential_key, obs, now, s)
+        mark_exhausted(j, entry.credential_key, read.reset_hint, now, s)
+        try:
+            verdict = decide(accounts, j, current.profile, self._previous_key(current.session_key), now, s)
+        except ConfigError:
+            return current.number
+        if isinstance(verdict, AccountChanged):
+            reason, until = ACCOUNT_CHANGED, None
+        else:
+            reason, until = QUOTA, verdict.at if isinstance(verdict, Deadline) else now
+        n = j.deferral_next(current.session_key)
+        j.deferral_insert(DeferralRow(current.session_key, n, op.bead, current.role, current.profile, reason,
+                                      None if until is None else str(until), TRUSTED))
+        return n
 
     def current_deferral(self, shown: Bead) -> DeferralRow | None:
         """The current deferral record of the bead's recorded session."""

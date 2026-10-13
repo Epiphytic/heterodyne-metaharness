@@ -6,6 +6,7 @@ run without a crash: the deferral records, labels, `wsd-defer` comments, row, al
 commits. The uncertainty oracle covers the guard's UNRECEIPTED points, where the replay escalates instead.
 """
 
+import contextlib
 import gc
 import json
 import subprocess
@@ -19,8 +20,10 @@ from fakes.checkpoints import Recorder, SimulatedCrash
 from fakes.fake_runtime import FakeRuntime
 from wsd_env import WS, Rig, block, make_rig, on_profile, profile_key, repoint_codex
 
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.wsd import gitwip
-from heterodyne.wsd.beads import DEFERRED, HELD, NEEDS_HUMAN, PARKED
+from heterodyne.wsd.accounts import Account, ConfiguredAccounts, ProfileAccounts
+from heterodyne.wsd.beads import DEFERRED, HELD, NEEDS_HUMAN, PARKED, Bead, BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.journal import DeferralRow, Journal
 from heterodyne.wsd.park import (
     ACCOUNT_CHANGED,
@@ -28,18 +31,22 @@ from heterodyne.wsd.park import (
     DEFER_MARK,
     DEFER_STEPS,
     GUARD_STEPS,
+    LIMIT_STEPS,
     QUOTA,
     RELEASE_REGATE_POINTS,
+    TRUSTED,
     UNDEFER_POINTS,
     UNRECEIPTED,
     UNTRUSTED,
     NotReleasable,
+    defer_mark,
 )
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import LaunchSpec, Started
+from heterodyne.wsd.runtime import LaunchSpec, LimitSeen, Started, UsageSeen
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.sweep import sweep
+from heterodyne.wsd.usage import Observation, TrustedRead
 
 B = "btq-1"
 HOUR = 3600
@@ -229,14 +236,14 @@ def claimed(rig: Rig, bead: str = B) -> None:
 
 
 def wip_of(rig: Rig, rec: DeferralRow) -> str | None:
-    """The SHA a tail journaled for `rec`, checked against git: the mark for (key, n) finds it."""
-    shas = [d["sha"] for _, _, _, d in ops(rig)
-            if d.get("defer_key") == rec.session_key and d.get("defer") == str(rec.number) and "sha" in d]
-    if not shas:
+    """The SHA a tail journaled for `rec`, checked against git: the mark it was committed under finds it."""
+    found = [(d["sha"], d.get("wip_defer", d["defer"])) for _, _, _, d in ops(rig)
+             if d.get("defer_key") == rec.session_key and d.get("defer") == str(rec.number) and "sha" in d]
+    if not found:
         return None
-    [sha] = shas
+    [(sha, committed)] = found
     assert gitwip.find_wip(gitwip.pin(rig.repo, rig.worktree(rec.bead), f"btq/{rec.bead}"),
-                           f"defer:{rec.session_key}:{rec.number}") == sha
+                           f"defer:{rec.session_key}:{committed}") == sha
     return sha
 
 
@@ -859,3 +866,240 @@ def test_recovery_converts_the_au5_shelve_fixture(tmp_path: Path, outcome: str) 
         rig.pickup()
         assert rig.runtime.calls == calls
     claimed(rig)
+
+
+# --- the reactive limit (plan 4b Task 9) ---
+
+NOW = 1_800_000_000                   # the rig's clock (wsd_env.Clock)
+RESET = NOW + HOUR
+HOST = "codex.host-read"
+LIMIT_POINTS = tuple(f"park.{s}" for s in LIMIT_STEPS)
+
+
+class Reader:
+    """A scripted trusted read: `answer` every time, each call recorded, `then` run during each call."""
+
+    def __init__(self, answer: TrustedRead | None, then: Callable[[], object] = lambda: None) -> None:
+        self.answer = answer
+        self.then = then
+        self.calls: list[tuple[str, str, str]] = []
+
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        self.calls.append((profile, account, credential_key))
+        self.then()
+        return self.answer
+
+
+def reading(limited: bool = True) -> TrustedRead:
+    return TrustedRead((Observation("codex:codex:300m", "5h", 100, RESET, HOST),), limited, RESET)
+
+
+def caps(rig: Rig, **on: bool) -> None:
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    accounts.capabilities = {"codex": Capabilities(**on)}
+
+
+def spare(rig: Rig) -> None:
+    """p-two on its `default` codex login, then a named `spare` one with its own file, failing over."""
+    accounts = rig.ws.accounts
+    assert isinstance(accounts, ConfiguredAccounts)
+    login = Path(accounts.env["HOME"]) / ".codex-spare"
+    login.mkdir(parents=True, exist_ok=True)
+    (login / "auth.json").write_text("{}")
+    accounts.named[("codex", "spare")] = Account("spare", "codex", str(login), login, (), "")
+    accounts.profiles["p-two"] = ProfileAccounts("codex", ("default", "spare"), "next")
+
+
+def limited(rig: Rig, reader: Reader | None = None, *, two: bool = False, **on: bool) -> Reader:
+    """B launched on p-two's default login, with capabilities `on` and `reader` as the trusted read."""
+    if two:
+        spare(rig)
+    caps(rig, **on)
+    used = reader if reader is not None else Reader(None)
+    rig.usage_reader = used
+    rig.restart(rig.cp)
+    launched(rig)
+    return used
+
+
+def signal(rig: Rig, hint: int | None = RESET, generation: int = 1) -> Outcome:
+    rig.runtime.report(WS, LimitSeen(rig.key(B), generation, hint))
+    return rig.pickup()
+
+
+def first_key(rig: Rig) -> str:
+    entry = rig.journal.launch(rig.key(B), 1)
+    assert entry is not None
+    return entry.credential_key
+
+
+def untrusted_rows(rig: Rig) -> int:
+    return rig.journal.db.execute("SELECT COUNT(*) FROM account_usage_untrusted").fetchone()[0]
+
+
+def test_a_limit_without_e_is_drained_and_ignored(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), trusted_read=True)
+    assert signal(rig) is Outcome.BUSY
+    assert rig.runtime.drains[-1] == WS
+    assert records(rig) == [] and reader.calls == [] and rig.state(B) == BeadState.RUNNING.value
+
+
+def test_a_usage_report_is_stored_untrusted_and_only_with_c(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig)
+    seen = UsageSeen(rig.key(B), 1, (Observation("codex:codex:300m", "5h", 40, None, "codex.app-server"),))
+    rig.runtime.report(WS, seen)
+    rig.pickup()
+    assert untrusted_rows(rig) == 0
+    caps(rig, in_session_usage=True)
+    rig.runtime.report(WS, seen, UsageSeen(rig.key(B), 7, seen.observations))     # no generation 7
+    rig.pickup()
+    assert untrusted_rows(rig) == 1
+    assert not rig.journal.usage_cache([first_key(rig)]).windows.get(first_key(rig))    # never trusted
+
+
+def test_a_limit_without_d_defers_untrusted_and_clamped(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), limit_signal=True)
+    assert signal(rig, hint=NOW + 5 * HOUR) is Outcome.DEFERRED
+    [rec] = records(rig)
+    assert (rec.reason, rec.trust, rec.defer_until) == (QUOTA, UNTRUSTED, str(NOW + HOUR))   # 60 minutes
+    assert reader.calls == [] and rig.runtime.coders() == []
+    assert rig.state(B) == BeadState.DEFERRED.value and DEFERRED in rig.world.beads[B].labels
+    completed(rig)
+
+
+@pytest.mark.parametrize("answer", [None, reading(limited=False)], ids=["no-reading", "not-limited"])
+def test_a_read_that_doesnt_confirm_keeps_the_untrusted_record(tmp_path: Path,
+                                                               answer: TrustedRead | None) -> None:
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(answer), trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    [rec] = records(rig)
+    assert (rec.reason, rec.trust, rec.defer_until) == (QUOTA, UNTRUSTED, str(RESET))
+    assert reader.calls == [("p-two", "default", first_key(rig))]
+    cache = rig.journal.usage_cache([first_key(rig)])
+    assert not cache.marks and not cache.windows.get(first_key(rig))
+    completed(rig)
+
+
+def test_a_failed_wip_commit_reads_nothing_and_marks_nothing(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """D6 (Codex plan 4b r2): the WIP commit comes before the trusted read. A commit that fails stops the
+    tail with only the untrusted record: no read, no exhaustion mark, no trusted record."""
+    rig = rig_for(tmp_path)
+    reader = limited(rig, Reader(reading()), two=True, trusted_read=True, limit_signal=True)
+
+    def fails(*_: object) -> str:
+        raise gitwip.GitFailed("injected")
+
+    monkeypatch.setattr(gitwip, "wip_commit", fails)
+    with contextlib.suppress(gitwip.GitFailed):
+        signal(rig)
+    assert reader.calls == []
+    assert [(r.reason, r.trust) for r in records(rig)] == [(QUOTA, UNTRUSTED)]
+    assert not rig.journal.usage_cache([first_key(rig)]).marks
+
+
+def test_a_confirmed_limit_relaunches_on_the_next_account(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    key = first_key(rig)
+    assert signal(rig) is Outcome.RESUMED
+    assert [(r.number, r.reason, r.trust, r.defer_until) for r in records(rig)] == [
+        (1, QUOTA, UNTRUSTED, str(RESET)), (2, QUOTA, TRUSTED, str(NOW))]
+    assert [s.account for s in rig.runtime.launches] == ["default", "spare"]
+    cache = rig.journal.usage_cache([key])
+    assert cache.marks[key].until == RESET
+    assert [(w.window_id, w.source) for w in cache.windows[key]] == [("codex:codex:300m", HOST)]
+    assert rig.state(B) == BeadState.RUNNING.value and DEFERRED not in rig.world.beads[B].labels
+    assert len(defer_comments(rig)) == 1 and defer_comments(rig)[0].startswith(defer_mark(rig.key(B), 2))
+    completed(rig)
+
+
+def test_a_limit_held_through_a_beads_outage_is_handled_after_it(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    real_show = BeadsAdapter.show
+
+    def down(_self: BeadsAdapter, _ws: str, _bead: str) -> Bead:
+        raise BeadsUnavailable("injected")
+
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))     # sent before the outage: the key reads beads
+    monkeypatch.setattr(BeadsAdapter, "show", down)
+    with contextlib.suppress(BeadsUnavailable):
+        rig.pickup()                                            # the report is drained, and can't be handled
+    assert records(rig) == [] and [s.account for s in rig.runtime.launches] == ["default"]
+    assert len(rig.sched.held) == 1
+    monkeypatch.setattr(BeadsAdapter, "show", real_show)
+    assert rig.pickup() is Outcome.RESUMED                      # no new report: the held one is handled
+    assert [(r.number, r.reason, r.trust) for r in records(rig)] == [(1, QUOTA, UNTRUSTED),
+                                                                    (2, QUOTA, TRUSTED)]
+    assert [s.account for s in rig.runtime.launches] == ["default", "spare"]
+    rig.pickup()                                                # handled once: nothing is held any more
+    assert len(records(rig)) == 2 and len(rig.runtime.launches) == 2
+    completed(rig)
+
+
+def test_a_held_limit_whose_launch_moved_on_is_dropped(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaying a held report is safe: by then its launch is no longer the bead's running one."""
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), two=True, cross_account_resume=True, trusted_read=True, limit_signal=True)
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))
+    rig.runtime.report(WS, LimitSeen(rig.key(B), 1, RESET))     # the same report twice in one batch
+    assert rig.pickup() is Outcome.RESUMED
+    assert len(records(rig)) == 2 and [s.account for s in rig.runtime.launches] == ["default", "spare"]
+    completed(rig)
+
+
+def test_a_confirmed_limit_on_the_only_account_waits_for_the_reset(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading()), trusted_read=True, limit_signal=True)
+    assert signal(rig) is Outcome.DEFERRED
+    assert [(r.number, r.trust, r.defer_until) for r in records(rig)] == [
+        (1, UNTRUSTED, str(RESET)), (2, TRUSTED, str(RESET))]
+    assert rig.sched.wake_at == RESET
+    rig.clock.advance(HOUR)
+    assert rig.pickup() is Outcome.RESUMED
+    assert [s.account for s in rig.runtime.launches] == ["default", "default"]
+    completed(rig)
+
+
+def test_a_confirmed_limit_on_a_repointed_login_waits_for_the_operator(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, Reader(reading(), then=lambda: repoint_codex(rig, "other")), trusted_read=True,
+            limit_signal=True)
+    assert signal(rig) is Outcome.NOTHING
+    assert [(r.number, r.reason, r.trust) for r in records(rig)] == [(1, QUOTA, UNTRUSTED),
+                                                                    (2, ACCOUNT_CHANGED, TRUSTED)]
+    assert alerts(rig) == [f"{rig.key(B)}:2"]
+    row = rig.journal.state(WS, B)
+    assert row is not None and (row.state, row.reason) == (BeadState.DEFERRED, Reason.ACCOUNT_CHANGED)
+    completed(rig)
+
+
+def test_a_limit_for_another_launch_or_a_bead_not_running_is_ignored(tmp_path: Path) -> None:
+    rig = rig_for(tmp_path)
+    limited(rig, limit_signal=True)
+    key = rig.key(B)
+    rig.runtime.report(WS, LimitSeen(key, 2, RESET), LimitSeen("sk-never-journaled", 1, RESET))
+    assert rig.pickup() is Outcome.BUSY
+    assert records(rig) == [] and rig.journal.ops_open(WS) == []
+    assert signal(rig) is Outcome.DEFERRED
+    assert signal(rig) is Outcome.DEFERRED                      # again, now that B is deferred
+    assert len(records(rig)) == 1
+    assert [k for k, _, _, d in ops(rig) if "limit_key" in d] == ["park"]
+
+
+FAILOVER = Scenario(lambda r: limited(r, Reader(reading()), two=True, cross_account_resume=True,
+                                      trusted_read=True, limit_signal=True),
+                    lambda r: signal(r))
+
+
+def test_a_crash_at_every_limit_point_replays_to_the_relaunch(tmp_path: Path) -> None:
+    clean = same_end(tmp_path, FAILOVER, LIMIT_POINTS)
+    assert [s.account for s in clean.rig.runtime.launches] == ["default", "spare"]
