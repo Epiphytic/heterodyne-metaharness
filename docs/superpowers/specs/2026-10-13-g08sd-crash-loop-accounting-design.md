@@ -1,227 +1,247 @@
 # btq-g08sd: persistent crash-loop accounting
 
-Bead: btq-g08sd. Base: main 850d531. ADR 0001 r15 (28e3df4) is unchanged. §9 (reconcile) and §10 ("Agent or runner crash") already say that a bead whose session keeps dying is resumed, and that after 2 failures it becomes `needs-human`. This design implements that rule, so it needs no amendment. Plan 3's P1 (plan-3 doc, "Prerequisites for later plans") and `docs/wsd.md` §5 and §6 name this as the last thing before a real runtime is enabled.
+Bead: btq-g08sd. Base: main 850d531. ADR 0001 r15 (28e3df4). Revision 2 addresses Codex r1 (`/tmp/review-g08sd-r1.md`): findings 1 and 2 were blocking, and 3 to 5 were not.
+
+**The ADR.** §9 (reconcile) and §10 ("Agent or runner crash") say that a bead whose session dies is resumed, and that after 2 failures it becomes `needs-human`. This design implements that bound, so it needs no amendment. The ADR doesn't say what proves a run was healthy, what resets the count, or whether a reboot counts. This design decides those as plan-level policy, listed under "Policy clarifications" below. Approving the design approves them. They are not presented as something the ADR already establishes.
+
+Plan 3's P1 (plan-3 doc, "Prerequisites for later plans") and `docs/wsd.md` §5 and §6 name this as the last thing before a real runtime is enabled.
 
 ## Problem
 
 A session that starts and then dies spends no budget anywhere today:
 
 - The launch-failure budget counts only refused launches. `Parker._outcome` (`park.py`) calls `_spend` on a `refused` receipt. A `started` receipt finishes the operation DONE, and the bead is RUNNING.
-- When that session dies, the next pickup's `runtime.sessions(ws)` ends its record (`SandboxRuntime.sessions` calls `_end` on a RUNNING record whose pane or sandbox is gone), and stops listing it. The sweep's `_Sweep._running` (`sweep.py`) then finds a RUNNING bead with no session and calls `open_resumes`. That opens a **new** RESUME operation with `attempts = 0`, at step `unlabelled`, so the guard's check `op.attempts >= launch_failures_before_human` starts over.
-- The guard launches again, the session starts, the operation finishes, and the loop repeats. Nothing ever reaches the bound.
+- When that session dies, `runtime.sessions(ws)` ends its record and stops listing it. Then either of two things happens. The sweep's `_Sweep._running` (`sweep.py`) opens a **new** RESUME operation with `attempts = 0` (`open_resumes`). Or a PARK or defer operation that was already open finds the session gone, finishes PARKED or DEFERRED, and a later resume or undefer launches again.
+- Either way the next launch starts, the operation finishes, and the loop repeats without limit.
 
-A lifetime stop goes through the same path on purpose. `Scheduler._pickup` calls `runtime.expire`, and then the sweep resumes the bead. So the sweep can't count every resume as a crash: it needs the runtime to say how the session ended.
+There is a second problem. `SandboxRuntime._end` calls a session `lifetime` whenever it is found past its deadline (`_overdue`). A session that died at once and was found late, after an outage, looks like a healthy lifetime end.
 
-## What counts as a crash
+## Evidence: an end cause, recorded once
 
-A crash is a generation that reached `running` and then ended without being ended by the runtime. The runtime ends a session in three ways, all through `SandboxRuntime._end`:
-
-| How the session ended | Caller | `stop_reason` (new values in bold) | A crash? |
-|---|---|---|---|
-| wsd stopped it: park, defer, a bead no longer ours, release, an operator stop | `stop()` | **`stopped`** | no |
-| Its lifetime was up, or it was found dead past its deadline (the deadline watcher deleted it) | `expire()`, or `_overdue` in `sessions()` and `launch()` | `lifetime` (exists) | no |
-| Found dead before its deadline: the agent CLI exited or crashed, the pane died, the sandbox went away | `sessions()`, or `launch()`'s cleanup of `prev` | **`died`** | yes |
-| A launch the runtime refused (`_fail`) | `launch()` | **`refused`** | not counted here; the existing launch budget counts it |
-
-The cause is written by `_end` in its first `stopping` write, before anything is torn down, as `lifetime`'s already is. A later `_end` of the same record never changes it. The one exception is the existing rule that a lifetime end overrides the cause, because it owes its WIP commit:
+`SessionRecord` (`sandbox/runtime.py`) gains three fields:
 
 ```python
-STOPPED, DIED, LIFETIME, REFUSED = "stopped", "died", "lifetime", "refused"
-
-    def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False, cause: str = DIED) -> bool:
-        owed: dict[str, str] = {}
-        if lifetime or rec.stop_reason == LIFETIME:
-            owed = {"stop_reason": LIFETIME, "wip_mark": rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"}
-        elif not rec.stop_reason:
-            owed = {"stop_reason": cause}               # g08sd: the first cause recorded stands
-        ...
-            rec = self._phase(layout, rec, phase=Phase.ENDED, ended_at=self.c.clock())
+    end_cause: str = ""      # g08sd: how this generation ended; written once, never changed
+    ended_at: int = 0        # the `ended` write's clock
+    # started_at (exists) is per generation: each launch writes a new record, and it is set at `running`
 ```
 
-`stop()` passes `cause=STOPPED`, and `_fail` passes `cause=REFUSED`. `sessions()` and `launch()` keep the default. `SessionRecord` gains `ended_at: int = 0`. `started_at` already exists.
+`stop_reason` and `wip_mark` stay exactly as they are. They are the lifetime WIP obligation (D13), not evidence of health. A session found dead past its deadline still owes its lifetime WIP commit, as today, but its end cause is `died`.
 
-**Why this evidence is trusted.** `session.json` sits in the session directory's root. Only `home`, `bridge`, `git` and the generation's folder are bound into the sandbox (`docs/wsd.md` §5), so the agent can't write the record. The pane's exit status is not used, because the agent controls it. Hook-spool events and transcripts are not used either: they stay untrusted observations (ADR §3.3).
+`_end` decides the cause before its first `stopping` write. It writes the cause in that same write, and it never changes a cause that is already recorded:
 
-**Host restarts count.** After a reboot, the tmux server and the sandboxes are gone, so a session that was running is found `died`. The table above has no separate cause for this (see Open question 2).
+```python
+DIED, STOPPED, LIFETIME, REFUSED = "died", "stopped", "lifetime", "refused"
+
+    def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False, cause: str = DIED) -> bool:
+        changes: dict[str, str] = {}
+        if lifetime or rec.stop_reason == LIFETIME:                     # the WIP obligation, unchanged
+            changes = {"stop_reason": LIFETIME, "wip_mark": rec.wip_mark or f"lifetime:{rec.key}:{rec.generation}"}
+        if not rec.end_cause:
+            changes["end_cause"] = self._cause(rec, cause)
+        ...                                                             # stopping write, teardown, land
+            rec = self._phase(layout, rec, phase=Phase.ENDED, ended_at=self.c.clock())
+
+    def _cause(self, rec: SessionRecord, asked: str) -> str:
+        """g08sd: a stop proves health only if the runtime starts it on a generation it confirms live,
+        here, before the stop. Anything else, including absence found late, is a death."""
+        if asked == REFUSED:
+            return REFUSED
+        if asked in (STOPPED, LIFETIME) and rec.phase is Phase.RUNNING and self._alive(rec, self._names()):
+            return asked
+        if not rec.end_cause and rec.phase is Phase.STOPPING:           # a record written before g08sd
+            return "legacy_lifetime" if rec.stop_reason == LIFETIME else DIED
+        return DIED
+```
+
+- `stop()` asks for `STOPPED`, and `expire()` asks for `LIFETIME`. `sessions()` and `launch()`'s cleanup of `prev` keep the default `DIED`. `_fail` asks for `REFUSED`.
+- `_alive` raising `RuntimeUnavailable` propagates as it does today, and nothing is recorded. The cause is decided only when liveness was actually read.
+- **Delayed discovery.** A session that dies, then stays unseen through an outage until after its deadline, is `died`, with the lifetime WIP owed. A replayed cleanup that crosses the deadline keeps the cause it recorded first.
+- **The reaper.** The deadline watcher (`sandbox/reaper.py`) deletes the sandbox at the deadline and records nothing. A session it killed is later found absent, which makes it `died`. Healthy sessions must therefore be stopped by wsd before the reaper acts. `expire()`'s hard stop moves from `now >= deadline` to `now >= deadline - hard_lead`. Here `hard_lead = min(120, stop_margin_seconds // 2)` seconds. `build_runtime` refuses a configuration whose `wsd.backstop_seconds` is not shorter than `hard_lead`, so a pickup always runs inside that window. This is a refinement of plan 4 D13: the ADR §7 rule ("a hard interrupt", stopped before the token expires) is unchanged.
+- **Why it is trusted.** `session.json` sits in the session directory's root. Only `home`, `bridge`, `git` and the generation's folder are bound into the sandbox (`docs/wsd.md` §5), so the agent can't write the record. The pane's exit status, hook-spool events and transcripts are not used (ADR §3.3).
 
 ## The seam: `AgentRuntime.ended`
-
-`heterodyne.wsd.runtime` adds:
 
 ```python
 class EndCause(StrEnum):
     DIED = "died"
-    STOPPED = "stopped"
-    LIFETIME = "lifetime"
+    STOPPED = "stopped"                  # wsd stopped it, confirmed live when the stop began
+    LIFETIME = "lifetime"                # the runtime's lifetime stop, confirmed live when it began
     REFUSED = "refused"
+    LEGACY_LIFETIME = "legacy_lifetime"  # a pre-g08sd lifetime end: liveness was never checked
 
 
 @dataclass(frozen=True)
 class Ended:
-    """How the runtime recorded a session's latest generation ending (g08sd)."""
     generation: int
     cause: EndCause
-    ran_seconds: int | None     # None: the generation never reached running
+    reached_running: bool               # this generation's `started_at` is set
+    ran_seconds: int | None             # None when either time is missing (a legacy record has no ended_at)
 
 
 class AgentRuntime(Protocol):
     def ended(self, session_key: str) -> Ended | None:
-        """The latest generation's end, once the runtime has confirmed it, or None when the runtime
-        has no ended record for the key. Raises RuntimeUnavailable if the record can't be read."""
+        """The latest generation's end, once the runtime has confirmed it, or None when the runtime has
+        no ended record for the key. Raises RuntimeUnavailable if the record can't be read."""
 ```
 
-- **`SandboxRuntime.ended`** reads the key's record with `read_record`, which raises `RuntimeUnavailable` on an unreadable record. It returns None if there is no record or the phase is not `ended`. An ended record whose `stop_reason` is `""` was written before this change, and it maps to `DIED`. `ran_seconds` is `ended_at - started_at` when both are set, and None otherwise.
-- **`NoRuntime.ended`** raises `RuntimeUnavailable`. It is never reached, because `sessions()` raises first.
-- **`FakeRuntime`** (`tests/fakes/fake_runtime.py`) keeps `ends[key]`. `end(key, cause=EndCause.DIED, ran=60)` records a session that ended on its own. `stop()` records `STOPPED`, and a new `lifetime(key)` control records `LIFETIME`. The generation comes from the spec of the key's last launch.
+- **`SandboxRuntime.ended`** reads the record. It gives None if there is no record or the phase is not `ended`. Whether the generation ran (`reached_running`, from this generation's `started_at`) is reported separately from how long it ran. `ran_seconds` is only for the operator's detail and never decides anything. `ran` is not used, because it persists across generations.
+- **Legacy records** (ended before g08sd, with no `end_cause`) map as follows:
+  - `stop_reason == "lifetime"` gives `LEGACY_LIFETIME`, which is neither counted nor a reset;
+  - `stop_reason == ""` gives `DIED`;
+  - a legacy STOPPING record is listed `unknown` until a new `_end` finishes it with `_cause` above.
+- **`NoRuntime.ended`** raises `RuntimeUnavailable`. **`FakeRuntime`** keeps `ends[key]`: `end(key, cause=EndCause.DIED)` for a session that ended on its own, `stop()` for STOPPED, and a `lifetime(key)` control for LIFETIME.
 
-## Where the count lives
+## Accounting in the launch guard, for every launched generation
 
-The journal's `meta` table holds one row per counted death: `crash:<ws>:<bead>:<session_key>:<generation>`, with the time it was counted as the value. This follows the precedent of `deferral_over:` (AU-4 §2.1).
+Every launch goes through `Parker.launch`: pickup, resume (from the sweep, a parked bead or a release), undefer, and their replays. Before the guard pins a new generation (step 2, `_pin`), it accounts for every launched generation of the bead that isn't accounted yet. It escalates there if the bound is reached. So no path launches a replacement without first counting the deaths before it, whoever ended the dead session (the sweep, a park, a defer, or a replay of either).
 
-- **No migration.** The schema is unchanged, so `_check`'s exact schema match and `SCHEMA_VERSION = "2"` stand. A v1 journal upgrades exactly as it does today. An older wsd ignores the rows. Workstream names and bead IDs are slugs (`ids.SLUG`, no `:`), so the prefix is unambiguous. Rows are matched by `substr(key, 1, n) = prefix`, not `LIKE`: `_` is legal in a slug, and `LIKE` would treat it as a wildcard.
-- **Per bead.** The ADR's consequence falls on the bead ("the bead becomes `needs-human`"). A bead has one session key per profile, and a profile change goes through the operator anyway, which resets the count (below).
-- **Idempotent by generation.** `INSERT OR IGNORE` on `(session_key, generation)`, so seeing the same death twice counts it once.
+Journal state, in the existing `meta` table (no schema change; see "Storage"):
 
-`Journal` gains three methods, each `@_locked`:
+- `crash_gen:<ws>:<bead>:<session_key>:<generation>` = the accounted class (`died`, `stopped`, `lifetime`, `legacy`, `reset`). There is one row per launched generation, written once.
+- `crash_run:<ws>:<bead>` = the count of deaths since the last reset.
 
 ```python
-CRASH = "crash:"     # g08sd: a generation of the bead that died, until a reset
-
-    def crash_add(self, ws: str, bead: str, session_key: str, generation: int) -> int:
-        """Count one death (idempotent per generation); the bead's count after it."""
-
-    def crashes(self, ws: str, bead: str) -> int: ...
-
-    def crash_clear(self, ws: str, bead: str) -> None: ...
+    def _account(self, op: Op, own: list[Session]) -> Launch | None:      # Parker; after step 1, before step 2
+        """g08sd: every launched generation of the bead is classified once, in order, before any new one
+        is pinned; the bound escalates here, so the launch that would follow never happens."""
+        j, ws, bead = self.d.journal, self.ws.name, op.bead
+        todo = [e for e in j.launches_of(ws, bead) if e.outcome == LAUNCHED and not j.crash_accounted(e)]
+        if not todo:
+            return None
+        latest = {e.session_key: max(x.generation for x in todo if x.session_key == e.session_key) for e in todo}
+        evidence = {k: self.d.runtime.ended(k) for k in latest}          # RuntimeUnavailable: a hold
+        details: list[str] = []
+        with j.transaction():
+            for e in sorted(todo, key=lambda e: (e.journaled_at, e.generation)):
+                end = evidence[e.session_key]
+                if e.generation != latest[e.session_key]:
+                    klass = "legacy"         # launched before g08sd: its record is long overwritten
+                elif end is None or end.generation != e.generation or not end.reached_running:
+                    klass = "died"           # no trusted end evidence: a death, never a healthy end
+                else:
+                    klass = {EndCause.STOPPED: "stopped", EndCause.LIFETIME: "lifetime",
+                             EndCause.LEGACY_LIFETIME: "legacy"}.get(end.cause, "died")
+                n = j.crash_account(ws, bead, e, klass)   # died: +1; lifetime: 0; else unchanged
+                if klass == "died":
+                    details.append(_died(e, end))
+            if n >= self.ws.limits.launch_failures_before_human:
+                esc = self._stuck(op, Reason.CRASH_LOOP, f"{'; '.join(details)}; {n} in a row")
+            else:
+                esc = None
+        self.d.cp(f"{op.kind.value}.accounted")
+        if esc is None:
+            return None
+        self._handoff(esc)
+        return Launch.ENDED
 ```
 
-## The check: in `open_resumes`, before any relaunch
+The guard calls `_account` in `launch()` after `_reconcile` (step 1) and after the own-session checks, so no session of the bead is listed. It calls it immediately before `_pin_and_dispatch`. `_own_dispatch` (step 0) returns earlier for an operation whose own generation is already dispatched, so a replay of a dispatched launch never accounts again.
 
-The sweep reads the runtime's evidence while it reads everything else. `open_resumes` counts and decides in the same transaction that would open the resume. In recovery's deferred sweep, that is the one transaction that opens every resume.
+- **Why only the latest generation per key has evidence.** The runtime keeps one record per key, and a new launch overwrites it. Because accounting runs before every pin, each key has at most one launched generation that isn't accounted, and it is the latest. An older unaccounted generation can only predate g08sd. It is accounted `legacy`, not counted: no evidence remains, and counting it would escalate existing beads at upgrade.
+- **The bound and escalation.** The bound is `Limits.launch_failures_before_human` (default 2), whose comment already cites §9 and §10, so there is no new key. With the default:
+  1. launch 1 dies, and before launch 2 the count is 1;
+  2. launch 2 dies, and before launch 3 the count is 2, so the bead escalates and **launch 3 never happens**.
 
-```python
-@dataclass(frozen=True)
-class Dead:
-    bead: str
-    session_key: str
-    generation: int      # the session's latest launched generation in the journal; 0 if none
-    crashed: bool
-    detail: str
+  The escalation is STUCK with a new fixed reason, `Reason.CRASH_LOOP = "crash_loop"`, and a numbers-only detail (for example `generation 7 died after 41s; generation 8 died; 2 in a row`). The STUCK row and the escalation's intent commit in the same transaction as the accounting, then `needs-human` goes on the bead, as `_spend` does (plan 3 finding 11). The only exit is `Parker.release` (plan 3 D19).
+- **Crash safety.** The class rows, the counter and the escalation's journal half are one transaction. A crash before it commits leaves nothing, and the replay reads the same ended record (nothing has overwritten it, because nothing was pinned) and decides the same way. After the commit, the rows make the replay a no-op. An ESCALATE cut short before its label is replayed like any open escalation.
+- **The refused-launch budget is separate and unchanged.** Refused generations are never LAUNCHED, so they are never accounted here. They stay on the operation's `attempts` (`_spend`).
+- **The sweep is unchanged.** `open_resumes` opens resumes as today. The guard counts.
 
+## Resets
 
-    def _death(self, rec: SessionRecord) -> Dead:            # _Sweep, from `_running`
-        launched = [e for e in self.j.launches(rec.session_key) if e.outcome == LAUNCHED]
-        latest = launched[-1].generation if launched else 0
-        end = self.d.runtime.ended(rec.session_key)          # RuntimeUnavailable propagates: a hold
-        if end is None or end.generation != latest:
-            return Dead(rec.bead, rec.session_key, latest, True, f"generation {latest}: no end recorded")
-        if end.cause in (EndCause.STOPPED, EndCause.LIFETIME) and end.ran_seconds is not None:
-            return Dead(rec.bead, rec.session_key, latest, False, f"generation {latest} ended: {end.cause}")
-        ran = "" if end.ran_seconds is None else f" after {end.ran_seconds}s"
-        return Dead(rec.bead, rec.session_key, latest, True, f"generation {latest} died{ran}")
+- **A lifetime stop of a live generation** (`EndCause.LIFETIME` from `_cause`) sets the counter to 0 when it is accounted. It is the only runtime evidence of health: the runtime itself stopped a generation that it had just confirmed live, at the end of its lifetime.
+- **An intentional stop** (`STOPPED`: park, defer, not ours, release, an operator stop) of a live generation is not counted and does not reset. It proves the session was alive when wsd stopped it, not that it was healthy.
+- **Operator resets**: `Parker.release`'s intent transaction, and a new claim in `Scheduler.start_new`'s intent transaction (a bead returned to the queue). Each sets the counter to 0 and accounts every unaccounted launched generation of the bead as `reset` (not counted). The class rows are kept, because a reclaimed bead keeps its session key and its generation numbers.
 
+## Storage and retention
 
-def open_resumes(parker: Parker, dead: tuple[Dead, ...]) -> int:
-    j, name = parker.d.journal, parker.ws.name
-    limit = parker.ws.limits.launch_failures_before_human
-    escalations: list[Op] = []
-    with j.transaction():
-        for d in dead:
-            if not d.crashed:
-                j.crash_clear(name, d.bead)                  # a healthy end resets the run
-            elif (n := j.crash_add(name, d.bead, d.session_key, d.generation)) >= limit:
-                escalations.append(parker.escalation_for(d.bead, Reason.CRASH_LOOP, f"{d.detail}; {n} in a row"))
-                continue
-            op = j.op_open(OpKind.RESUME, name, d.bead, {"ref": ""})
-            j.op_step(op.op_id, "unlabelled")
-            j.set_state(name, d.bead, BeadState.RESUMING, Reason.SESSION_DEAD, d.detail)
-    for esc in escalations:
-        parker.handoff(esc)          # `_handoff` made public: cp("escalate.intent"), then the label
-    return len(dead) - len(escalations)
-```
-
-- **Evidence is never inferred from absence.** No ended record, or a record for a generation other than the latest launched one, counts as a crash. That is the conservative direction: toward a human, never toward relaunching without limit. A record that can't be read is `RuntimeUnavailable`, which holds the workstream as everywhere else (plan 3 D9) and counts nothing.
-- **Crash safety.** The count, the escalation's journal half and the resume operation commit together, before any launch. A crash before the commit leaves nothing: the next sweep reads the same ended record and decides the same way. After the commit, the bead has an open operation (RESUME or ESCALATE), so the sweep skips it and the operation's replay owns it. An ESCALATE cut short before its label is replayed like any open escalation (`replay_escalate`). The `(session_key, generation)` key makes a second count of one death impossible, even on a path that sees it twice.
-
-## The bound and what happens at it
-
-- **The bound is `Limits.launch_failures_before_human` (default 2).** No new key. Its comment already cites §9 reconcile and §10 agent crash, and the ADR gives one number for both. With 2, a session's first death is resumed. The second consecutive death makes the bead `needs-human` instead of resuming it.
-- **The count is separate from the launch budget.** Refused launches stay on the operation's `attempts`, exactly as today. A resume whose launches are refused twice escalates `launch_failed`, and crash accounting doesn't change that.
-- **At the bound:** `Parker.escalation_for` ends nothing, because the sweep only sees beads with no open operation. It opens an ESCALATE and adopts STUCK with a new fixed reason, `Reason.CRASH_LOOP = "crash_loop"`. The detail holds numbers only, never a path, for example `generation 7 died after 41s; 2 in a row`. Then `needs-human` goes on the bead. This is plan 3's escalation pattern (finding 11: journaled with the STUCK row in one transaction, then labelled). The only way out is `Parker.release` (plan 3 D19).
-
-## When the count resets
-
-The count resets when there is evidence that the session ran healthily, or when the operator steps in:
-
-1. **A healthy end seen by the sweep:** the bead's latest generation ended `lifetime` (or `stopped`) after reaching `running`. `open_resumes` clears the count in the transaction that opens the resume. A lifetime end means the generation lived its whole lifetime (default 120 minutes) without dying, which is the strongest evidence of health the runtime has, and it recurs on every healthy bead.
-2. **The operator's release** clears the count in `Parker.release`'s intent transaction, so a released bead gets the full bound again.
-3. **A new claim** (`Scheduler.start_new`'s intent transaction, where a returned bead's old row is dropped) clears it. A bead given back to the queue and claimed again is new work.
-
-Rejected options:
-
-- **A run of N seconds.** This would need a new tunable, and any value is arbitrary. A slow crash loop (each run dying after N+1 seconds) would never be bounded.
-- **A landed commit.** It is evidence of progress, not of health. A healthy session can run for hours without committing. A session can also commit and then die on every launch.
-
-A park or a defer neither counts nor resets. `stop()` records `stopped`, but the bead is then PARKED or DEFERRED and never reaches `_running`, so the sweep doesn't see that end. A bead that died once, then parked and resumed, and then died again has died twice since its last proof of health, and it escalates. That is the intent.
+- **No migration.** Both kinds of row live in `meta`, following the precedent of `deferral_over:` (AU-4 §2.1). The schema and `SCHEMA_VERSION = "2"` are unchanged, so `_check`'s exact match stands and a v1 journal upgrades as today. An older wsd ignores the rows. Workstream names and bead IDs are slugs (`ids.SLUG`, no `:`). Every lookup is by exact key, so there are no prefix scans.
+- **`Journal`** gains `crash_accounted(entry) -> bool`, `crash_account(ws, bead, entry, klass) -> int` (an insert-or-ignore of the class row, and the counter changed only when that row is new) and `crash_reset(ws, bead)`.
+- **Retention is deferred** to the journal-retention work (plan 8, beside `Journal.backup`). It is not designed here. There is at most one row per launched generation, plus one counter per bead. When retention is designed, it must keep the rows of any bead with a non-terminal row or an open operation, and must never reset the count of a bead that can still be relaunched. The rows of a closed or dropped bead are its only candidates.
 
 ## Interaction with other flows
 
-- **Lifetime stop (plan 4 D13):** not a crash, and it resets the count. A session found dead after its deadline is `lifetime` through `_overdue`, as today, because the deadline watcher deleting the sandbox looks exactly like that.
-- **Resume after a refused launch:** unchanged. That is the operation's own budget, and the record's `refused` end is never matched, because the sweep only compares against the latest *launched* generation.
-- **Park, defer, undefer, release:** their stops record `stopped`. A release resets the count. An undefer or a resume of a parked bead launches a new generation, and its death counts against whatever count the bead already had.
-- **Unlanded commits:** `sessions()` raises, the workstream holds, and the sweep never runs, so nothing is counted. After the operator resolves the hold by removing the session directory (`docs/wsd.md` §5, step 4), `ended()` returns None, and the next resume counts one death. That is acceptable at the default bound, and it is noted in §5 (see Open question 3).
-- **Handoff or swap to another profile:** it gets a new session key, but the count is per bead, so a swap does not reset it. The only swaps today are operator actions through release, which does reset it.
-- **Restarts:** the rows live in the journal, so they survive wsd restarts and reboots. A lost journal escalates the bead `journal_lost` anyway (plan 3 D8).
-- **Recovery never launches:** this is unchanged. The deferred sweep collects `Dead` values, and `open_resumes` runs once at the end of the pass.
+- **Park and defer:** a death they find (their `_sessions()` ends the record as `died`) is counted by the next resume's or undefer's guard, before that launch. Their own stop of a live session is `STOPPED`.
+- **Lifetime (D13):** a live lifetime stop resets. A session found dead after its deadline is a death that still owes its WIP commit. The earlier hard stop keeps healthy sessions away from the reaper.
+- **Reboots and outages:** sandboxes and panes are gone, so a running session is `died` and counts (policy 3). Each outage-and-death cycle counts once, so repeated cycles are bounded like any other.
+- **Unlanded commits:** `sessions()` raises, and the workstream holds, so nothing launches or is accounted. After the operator removes the session directory (`docs/wsd.md` §5, step 4), `ended()` gives None, and the next guard counts one death. The operator's release, if any, resets first.
+- **Handoff or swap to another profile:** a new key, but the counter is per bead. Swaps today are operator actions through release.
+- **Restarts:** everything is in the journal. A lost journal escalates the bead `journal_lost` anyway (plan 3 D8).
+
+## Policy clarifications (decided here, not in the ADR)
+
+1. A crash is a launched generation that ended without the runtime stopping it while it was confirmed live, including when no trusted end evidence exists.
+2. The count resets only on a live lifetime stop, a release, or a new claim. Intentional stops neither count nor reset.
+3. A reboot or a backend loss that kills running sessions counts as a death.
+4. A session the reaper deleted counts as a death. wsd's hard stop comes `hard_lead` before the deadline so that a healthy session never reaches the reaper.
+5. The bound reuses `launch_failures_before_human` with a separate counter.
 
 ## The setup default
 
-I recommend a separate step, after this lands, with Liam's go. The change itself is one line: `platform._BACKENDS["linux"]["sandbox"] = "openshell"`. `heterodyne setup` never overwrites an existing `config.toml`, so it affects only new hosts. It still changes what a fresh install does: wsd would then build the OpenShell runtime, which needs a prepared host (OpenShell 0.1.2, rootless podman 5, the image, `ptrace_scope = 1`). Until the host is prepared, workstreams hold `runtime_unavailable` or wsd fails its config check. That is an operator-facing decision, not part of crash accounting.
+This is a separate step after this lands, and it needs Liam's go. The change is one line: `platform._BACKENDS["linux"]["sandbox"] = "openshell"`. `heterodyne setup` never overwrites an existing `config.toml`, so it affects only new hosts. Those hosts then need host preparation (OpenShell 0.1.2, rootless podman 5, the image, `ptrace_scope = 1`) before any agent runs.
 
 ## Tests
 
 `tests/test_sandbox_runtime.py`:
 
-1. `test_end_records_how_a_session_ended`: `stop()` records `stopped`. `expire()` at the deadline records `lifetime`. A pane killed in the fake backend and then found by `sessions()` records `died`. One found dead past its deadline records `lifetime`. A refused launch records `refused`. Each sets `ended_at`.
-2. `test_the_first_end_cause_stands`: a record already in `stopping` with `stopped` is found dead and stays `stopped`. One with `died` that is then overdue becomes `lifetime` (the WIP rule).
-3. `test_ended_reports_the_latest_generation`: `ended()` gives `None` before the record is ended, the generation, cause and `ran_seconds` once it is, `DIED` for a pre-change ended record with no cause, and `RuntimeUnavailable` for an unreadable record.
+1. `test_end_cause_needs_a_live_generation`: `stop()` of a live session records `stopped`, and `expire()` of a live one records `lifetime`. A dead pane found by `sessions()` records `died`, and a refused launch records `refused`. `stop()` and `expire()` on a RUNNING record whose pane is dead record `died`.
+2. `test_an_end_cause_is_never_changed` (replaces r1's test 2): a record in `stopping` with `died`, replayed after the deadline, stays `died`, gains `stop_reason = "lifetime"` and its `wip_mark`, and the WIP lands once. A `stopped` one crossing the deadline stays `stopped`.
+3. `test_delayed_discovery_after_the_deadline_is_a_death`: the session dies, the backend is unavailable until past the deadline, and then `sessions()` gives `died` with the lifetime WIP owed.
+4. `test_the_hard_stop_comes_before_the_reaper`: `expire()` interrupts at `deadline - hard_lead`, not later. `build_runtime` refuses `backstop_seconds >= hard_lead`.
+5. `test_ended_reports_generation_evidence`:
+   - `ended()` gives None before the end;
+   - `reached_running` is true with `ran_seconds` None when `ended_at` is missing;
+   - legacy records: a lifetime end gives `LEGACY_LIFETIME`, an empty cause gives `DIED`, and a legacy STOPPING record is finished by `_cause`;
+   - an unreadable record gives `RuntimeUnavailable`.
 
 `tests/test_wsd_journal.py`:
 
-4. `test_crash_rows_count_per_bead_and_once_per_generation`: adding the same generation twice counts 1. Another bead's rows are not counted. A workstream or bead name containing `_` doesn't match its neighbours. `crash_clear` removes only that bead's rows. The schema check still passes on a journal with crash rows.
+6. `test_crash_accounting_is_once_per_generation`:
+   - accounting a generation twice changes the counter once;
+   - counters are per bead;
+   - `lifetime` zeroes the counter, and `stopped` and `legacy` leave it alone;
+   - `crash_reset` zeroes it and keeps the class rows;
+   - the schema check passes with the rows present.
 
-`tests/test_wsd_sweep.py`:
+`tests/test_wsd_park.py` (the guard):
 
-5. `test_a_session_that_dies_on_every_launch_becomes_needs_human`: the first death is resumed (row RESUMING / `session_dead`, a new generation launched). The second death is STUCK / `crash_loop` with `needs-human` and no third launch. The runtime's `launches` has exactly 2 entries.
-6. `test_a_lifetime_end_is_not_a_crash_and_resets_the_count`: death, then a resume, then a lifetime end, then a resume, then a death: still resumed. The count is 1, not 2.
-7. `test_missing_end_evidence_counts_as_a_crash`: `ended()` gives None, or a generation other than the latest launched one. The death is counted.
-8. `test_unreadable_end_evidence_holds_and_counts_nothing`: `ended()` raises. The workstream holds `runtime_unavailable`, no resume is opened, and no row is written.
-9. `test_crash_at_every_point_counts_once`, parameterized over a crash inside `open_resumes`' transaction, at `escalate.intent` and at `escalate.labelled!`, in pickup and in recovery: after replay, exactly one row per generation, at most one ESCALATE, and `needs-human` present once.
-10. `test_the_count_survives_a_restart`: one death, then a restart (a new `Wsd` on the same journal), then a second death escalates.
-
-`tests/test_wsd_park.py`:
-
-11. `test_release_resets_the_crash_count`: a `crash_loop` bead is released, and its next death is resumed, not escalated.
-12. `test_a_park_neither_counts_nor_resets`: death (count 1), then park and resume, then a death, which escalates.
-13. `test_refused_launches_keep_their_own_budget`: two refused launches still escalate `launch_failed` with no crash rows.
+7. `test_a_session_that_dies_on_every_launch_escalates_before_a_third_launch`: through the sweep's resumes, the runtime's `launches` has exactly 2 entries, and the bead is STUCK / `crash_loop` with `needs-human`.
+8. `test_a_death_consumed_by_a_park_is_counted_at_resume`:
+   - the session dies, then a PARK runs before any sweep and ends the record `died`;
+   - the blockers close, and the resume launches (count 1);
+   - it dies, is parked the same way, and the next resume escalates with no third launch.
+9. `test_a_death_consumed_by_a_defer_is_counted_at_undefer`: the same sequence through a defer and an undefer.
+10. `test_a_crash_during_park_or_defer_replay_still_counts`, parameterized over every `park.*` and `defer.*` point: crash there, replay, then resume or undefer. The death is counted once.
+11. `test_crash_at_every_accounting_point_counts_once`: a crash inside `_account`'s transaction, at `<kind>.accounted`, `escalate.intent` and `escalate.labelled!`, for pickup, resume and undefer operations. After replay there is one class row per generation, at most one ESCALATE, and no launch past the bound.
+12. `test_repeated_outage_and_death_cycles_are_bounded`: launch, death, runtime unavailable until after the deadline, then recovery, repeated. The bead escalates at the second death, and no cycle is counted as `lifetime`.
+13. `test_a_live_lifetime_stop_resets_and_an_intentional_stop_does_not`: death, live lifetime stop, death gives a resume (count 1). Death, live park stop, resume, death gives an escalation.
+14. `test_release_resets_and_accounts_pending_generations_as_reset`: a `crash_loop` bead is released, and its next death is resumed. A bead released with an unaccounted death doesn't count it.
+15. `test_refused_launches_keep_their_own_budget`: two refused launches still escalate `launch_failed` with no class rows.
+16. `test_generations_before_g08sd_are_legacy`: a journal with launched generations and no class rows. Only the latest per key is classified from evidence, and the rest are `legacy`.
+17. `test_the_count_survives_a_restart`: one death, a new `Wsd` on the same journal, and the second death escalates.
 
 `tests/test_wsd_pickup.py`:
 
-14. `test_a_new_claim_starts_with_no_crashes`: a bead returned to the queue with crash rows is claimed again, and the rows are gone in the claim's transaction.
+18. `test_a_new_claim_resets_the_count`: a bead returned to the queue with a count of 1 is claimed again. The counter is 0 in the claim's transaction, and its old generations stay accounted.
 
-Existing tests that call `FakeRuntime.end(key)` twice in a row on one bead and expect two relaunches, and the never-idle property, are audited. Each either expects `crash_loop` at the second death or ends with `cause=LIFETIME`. The property's oracle accepts STUCK for a bead whose fault is "dies at once".
+Existing tests that call `FakeRuntime.end(key)` twice in a row on one bead and expect two relaunches, and the never-idle property, are audited. Each either expects `crash_loop` before the third launch or ends with `lifetime(key)`. The property's oracle accepts STUCK for a bead whose fault is "dies at once".
 
 ## Docs
 
-- `docs/wsd.md` §1: `launch_failures_before_human` also bounds consecutive deaths of a bead's session (resets: a lifetime end, a release, a new claim).
-- `docs/wsd.md` §5, "Enabling it": drop "wait for crash-loop accounting". Add a short paragraph: a session found dead before its deadline counts against the bead; the second death in a row (by default) makes the bead `needs-human` with `crash_loop`; and the record's `stop_reason` says how each generation ended. Step 4 of the unlanded procedure notes that the next resume counts one death.
+- `docs/wsd.md` §1: `launch_failures_before_human` also bounds consecutive deaths of a bead's session, counted before each launch. Resets: a live lifetime stop, a release, a new claim.
+- `docs/wsd.md` §5:
+  - "Enabling it": drop "wait for crash-loop accounting";
+  - the lifetime paragraph: the hard stop comes `hard_lead` before the deadline, and a session found dead late is a death that still owes its WIP;
+  - a short paragraph on `end_cause` and `crash_loop`;
+  - the unlanded procedure's step 4: the next launch counts one death.
 - `docs/wsd.md` §6: replace the "Plan 4 must add persistent crash-loop accounting…" sentences with the `ended()` seam. Keep "setup does not select it" until the setup step is approved.
-- `docs/install.md` (line 12): drop "should wait for crash-loop accounting (btq-g08sd) first". Keep the explicit operator edit until the setup step lands.
-- The plan-3 doc's P1 is not edited (it is a record). The plan-4 doc gets a row pointing here.
+- `docs/install.md` (line 12): drop "should wait for crash-loop accounting (btq-g08sd) first".
+- The plan-4 doc: a D13 note for `hard_lead`, and a row pointing here. The plan-3 doc's P1 is a record and is not edited.
 
 ## Open questions for Liam
 
-1. **Setup default.** Should `heterodyne setup` record `openshell` on Linux once this lands? Recommendation: yes, but as its own small bead after this merges, with your go. It changes only fresh installs, but those then need host preparation before any agent runs.
-2. **Host restarts.** A reboot is counted as a death, so two reboots without a lifetime end between them escalate a healthy bead. Recommendation: accept this for now. It is rare, a release clears it, and telling a reboot apart (recording `boot_id` at `running`) would let a workload that crashes the host loop without limit.
-3. **Operator removal after unlanded.** The next resume counts one death. Recommendation: accept this and document it, rather than add an operator-reset path before plan 6's commands exist.
-4. **A separate limit.** Should crashes get their own `wsd.crashes_before_human`? Recommendation: no. The ADR names one number for both, and a new key can be split out later without a migration.
+1. **Setup default.** Should setup record `openshell` on Linux after this lands? Recommendation: yes, as its own small bead, with your go.
+2. **Reboots count** (policy 3). Two reboots with no live lifetime stop between them escalate a healthy bead. Recommendation: accept this. A release clears it, and exempting reboots would let a workload that crashes the host loop without limit.
+3. **`hard_lead`.** It is `min(120 s, margin / 2)`, and the config is refused when the backstop is not shorter. Recommendation: accept this. The defaults (60 s backstop, 15 min margin) give a 120 s lead.
+4. **A separate limit.** Should crashes get their own `wsd.crashes_before_human`? Recommendation: no. The ADR names one number, and splitting it later needs no migration.
