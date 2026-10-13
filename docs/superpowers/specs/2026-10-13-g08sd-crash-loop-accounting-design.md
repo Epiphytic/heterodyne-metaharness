@@ -1,6 +1,6 @@
 # btq-g08sd: persistent crash-loop accounting
 
-Bead: btq-g08sd. Base: main 850d531. ADR 0001 r15 (28e3df4). Revision 2 addresses Codex r1 (`/tmp/review-g08sd-r1.md`): findings 1 and 2 were blocking, and 3 to 5 were not.
+Bead: btq-g08sd. Base: main 850d531. ADR 0001 r15 (28e3df4). Revision 2 addressed Codex r1 (`/tmp/review-g08sd-r1.md`). Revision 3 addresses r2 (`/tmp/review-g08sd-r2.md`): the reaper now records its own evidence of a live generation, so a healthy session's lifetime end no longer depends on pickup timing.
 
 **The ADR.** §9 (reconcile) and §10 ("Agent or runner crash") say that a bead whose session dies is resumed, and that after 2 failures it becomes `needs-human`. This design implements that bound, so it needs no amendment. The ADR doesn't say what proves a run was healthy, what resets the count, or whether a reboot counts. This design decides those as plan-level policy, listed under "Policy clarifications" below. Approving the design approves them. They are not presented as something the ADR already establishes.
 
@@ -47,8 +47,11 @@ DIED, STOPPED, LIFETIME, REFUSED = "died", "stopped", "lifetime", "refused"
         here, before the stop. Anything else, including absence found late, is a death."""
         if asked == REFUSED:
             return REFUSED
-        if asked in (STOPPED, LIFETIME) and rec.phase is Phase.RUNNING and self._alive(rec, self._names()):
-            return asked
+        if rec.phase is Phase.RUNNING:
+            if asked in (STOPPED, LIFETIME) and self._alive(rec, self._names()):
+                return asked
+            if self._reaped_live(rec):                                  # read after liveness: see below
+                return LIFETIME
         if not rec.end_cause and rec.phase is Phase.STOPPING:           # a record written before g08sd
             return "legacy_lifetime" if rec.stop_reason == LIFETIME else DIED
         return DIED
@@ -57,8 +60,24 @@ DIED, STOPPED, LIFETIME, REFUSED = "died", "stopped", "lifetime", "refused"
 - `stop()` asks for `STOPPED`, and `expire()` asks for `LIFETIME`. `sessions()` and `launch()`'s cleanup of `prev` keep the default `DIED`. `_fail` asks for `REFUSED`.
 - `_alive` raising `RuntimeUnavailable` propagates as it does today, and nothing is recorded. The cause is decided only when liveness was actually read.
 - **Delayed discovery.** A session that dies, then stays unseen through an outage until after its deadline, is `died`, with the lifetime WIP owed. A replayed cleanup that crosses the deadline keeps the cause it recorded first.
-- **The reaper.** The deadline watcher (`sandbox/reaper.py`) deletes the sandbox at the deadline and records nothing. A session it killed is later found absent, which makes it `died`. Healthy sessions must therefore be stopped by wsd before the reaper acts. `expire()`'s hard stop moves from `now >= deadline` to `now >= deadline - hard_lead`. Here `hard_lead = min(120, stop_margin_seconds // 2)` seconds. `build_runtime` refuses a configuration whose `wsd.backstop_seconds` is not shorter than `hard_lead`, so a pickup always runs inside that window. This is a refinement of plan 4 D13: the ADR §7 rule ("a hard interrupt", stopped before the token expires) is unchanged.
 - **Why it is trusted.** `session.json` sits in the session directory's root. Only `home`, `bridge`, `git` and the generation's folder are bound into the sandbox (`docs/wsd.md` §5), so the agent can't write the record. The pane's exit status, hook-spool events and transcripts are not used (ADR §3.3).
+
+### The reaper's evidence: `reaped-r<gen>.json`
+
+wsd can't promise to stop a healthy session before the deadline. `_every` (`daemon.py`) sleeps only after the previous job returns, and pickup takes the workstream lane, lists and reconciles before `expire` runs, with a `now` read earlier. So a long earlier job, lane contention or a stale `now` can carry pickup past the deadline, and the reaper (`sandbox/reaper.py`) acts first. Today it records nothing, and the session it killed would be found absent and counted `died`. Instead, the reaper records what it saw, since it is the one stop that is always on time.
+
+- **The check.** At its first pass at or after the deadline, and only then, the reaper decides once, before its first `kill`. It writes the marker only if all of these hold:
+  - the record (`--record`, read as `settled` already does) is this generation, its sandbox is the one being reaped, its phase is `running`, `started_at` is set, and there is no `end_cause`;
+  - the backend lists the sandbox (`names()`);
+  - the pane is present and not dead, through the same tmux server (the reaper runs there, and it gets `--tmux-socket` and `--pane`).
+
+  Anything else, including an error from any of these reads, means no marker. The kill and delete then go ahead exactly as today, because the backstop never waits on its own evidence.
+- **The marker.** `SessionLayout.reaped(gen)` is `root / f"reaped-r{gen}.json"`, beside `session.json` in the root and outside every bind. It holds `{"sandbox": ..., "generation": ..., "at": ...}`. It is written once: the reaper writes a temporary file, fsyncs it, links it to the final name (failing if the name exists), fsyncs the directory, and only then kills. A temporary file left by a crash is ignored.
+- **The reader.** `_reaped_live(rec)` is true only for a well-formed marker whose `sandbox` and `generation` match the record. `_cause` reads it only for a `running` record that has no cause yet, and only after its own liveness read. Because the reaper makes the marker durable before it kills, a wsd stop that finds the session dead because the reaper just killed it also finds the marker, and the cause is `lifetime`.
+- **A session already dead at the deadline** has no marker, so it stays `died`. r1's rule holds: discovering a death late never turns it into a lifetime end.
+- **A crash between the marker and the kill** leaves a marker and a live sandbox. The generation was live at its deadline, so `lifetime` is correct whichever way it later ends: wsd's own hard stop at `now >= deadline` (unchanged) or a later death. The safety cost is the existing one of a reaper that died, and this design doesn't change it.
+- **Cleanup.** Once `_end` writes `ended`, the cause is in the record and the marker is redundant. `_end` removes it after that write, and `launch()` removes any leftover marker of an earlier generation before writing the new record.
+- **Unchanged.** Plan 4 D13 is unchanged: the turn-boundary stop within the margin, wsd's hard stop at the deadline, and the reaper as the backstop. The only change is two reaper arguments and a marker file. Earlier pickups are not needed.
 
 ## The seam: `AgentRuntime.ended`
 
@@ -163,7 +182,7 @@ The guard calls `_account` in `launch()` after `_reconcile` (step 1) and after t
 ## Interaction with other flows
 
 - **Park and defer:** a death they find (their `_sessions()` ends the record as `died`) is counted by the next resume's or undefer's guard, before that launch. Their own stop of a live session is `STOPPED`.
-- **Lifetime (D13):** a live lifetime stop resets. A session found dead after its deadline is a death that still owes its WIP commit. The earlier hard stop keeps healthy sessions away from the reaper.
+- **Lifetime (D13):** a live lifetime stop resets. A session found dead after its deadline is a death that still owes its WIP commit. A healthy session the reaper reaches first is still a lifetime end, through its marker.
 - **Reboots and outages:** sandboxes and panes are gone, so a running session is `died` and counts (policy 3). Each outage-and-death cycle counts once, so repeated cycles are bounded like any other.
 - **Unlanded commits:** `sessions()` raises, and the workstream holds, so nothing launches or is accounted. After the operator removes the session directory (`docs/wsd.md` §5, step 4), `ended()` gives None, and the next guard counts one death. The operator's release, if any, resets first.
 - **Handoff or swap to another profile:** a new key, but the counter is per bead. Swaps today are operator actions through release.
@@ -171,10 +190,10 @@ The guard calls `_account` in `launch()` after `_reconcile` (step 1) and after t
 
 ## Policy clarifications (decided here, not in the ADR)
 
-1. A crash is a launched generation that ended without the runtime stopping it while it was confirmed live, including when no trusted end evidence exists.
+1. A crash is a launched generation that ended without the runtime stopping it while it was confirmed live (by wsd at its stop, or by the reaper at the deadline), including when no trusted end evidence exists. **Upgrade exception:** generations launched before g08sd (an older generation whose record was overwritten, or a `legacy_lifetime` record) have no such evidence and are not counted. This holds once per bead at upgrade, and never for a generation launched after it.
 2. The count resets only on a live lifetime stop, a release, or a new claim. Intentional stops neither count nor reset.
 3. A reboot or a backend loss that kills running sessions counts as a death.
-4. A session the reaper deleted counts as a death. wsd's hard stop comes `hard_lead` before the deadline so that a healthy session never reaches the reaper.
+4. A session the reaper deleted is a lifetime end if the reaper found it live and recorded so. Otherwise it is a death, including when the backend or tmux couldn't be read at the deadline (as in policy 3).
 5. The bound reuses `launch_failures_before_human` with a separate counter.
 
 ## The setup default
@@ -188,7 +207,17 @@ This is a separate step after this lands, and it needs Liam's go. The change is 
 1. `test_end_cause_needs_a_live_generation`: `stop()` of a live session records `stopped`, and `expire()` of a live one records `lifetime`. A dead pane found by `sessions()` records `died`, and a refused launch records `refused`. `stop()` and `expire()` on a RUNNING record whose pane is dead record `died`.
 2. `test_an_end_cause_is_never_changed` (replaces r1's test 2): a record in `stopping` with `died`, replayed after the deadline, stays `died`, gains `stop_reason = "lifetime"` and its `wip_mark`, and the WIP lands once. A `stopped` one crossing the deadline stays `stopped`.
 3. `test_delayed_discovery_after_the_deadline_is_a_death`: the session dies, the backend is unavailable until past the deadline, and then `sessions()` gives `died` with the lifetime WIP owed.
-4. `test_the_hard_stop_comes_before_the_reaper`: `expire()` interrupts at `deadline - hard_lead`, not later. `build_runtime` refuses `backstop_seconds >= hard_lead`.
+4. `test_a_late_pickup_still_ends_lifetime`, parameterized over the ways pickup misses the deadline: a long earlier job, lane contention, and a stale `now` (taken before a slow listing). The reaper finds the session live, writes `reaped-r<gen>.json`, and kills it. The next `sessions()` (or a stop racing it, which finds the pane dead) records `lifetime`, and the guard resets the count.
+4a. `test_the_reaper_marks_only_a_live_generation` (in a new `tests/test_sandbox_reaper.py`, with the reaper's reads injected):
+   - no marker if the sandbox or pane died before the deadline, and the cause is `died`;
+   - no marker if the record is `stopping` or `ended`, has a cause, or names another generation or sandbox;
+   - no marker if `names()` or tmux raises, but the kill and delete still happen;
+   - the decision is made once: later passes never write.
+4b. `test_a_crash_around_the_marker`: a crash after the marker and before the kill gives `lifetime`, whether wsd's hard stop then finds the session live or dead. A crash before the link leaves only a temporary file and gives `died`. A crash after `ended` and before the removal leaves a marker that the next launch removes.
+4c. `test_the_marker_cannot_be_forged`:
+   - `SessionLayout.reaped(gen)` is outside every bind in the sandbox spec (checked against `test_sandbox_spec.py`'s bind list);
+   - a marker with the wrong `sandbox` or `generation`, or malformed JSON, is ignored;
+   - a file of the same name under a bound directory has no effect.
 5. `test_ended_reports_generation_evidence`:
    - `ended()` gives None before the end;
    - `reached_running` is true with `ran_seconds` None when `ended_at` is missing;
@@ -232,16 +261,16 @@ Existing tests that call `FakeRuntime.end(key)` twice in a row on one bead and e
 - `docs/wsd.md` §1: `launch_failures_before_human` also bounds consecutive deaths of a bead's session, counted before each launch. Resets: a live lifetime stop, a release, a new claim.
 - `docs/wsd.md` §5:
   - "Enabling it": drop "wait for crash-loop accounting";
-  - the lifetime paragraph: the hard stop comes `hard_lead` before the deadline, and a session found dead late is a death that still owes its WIP;
+  - the lifetime paragraph: the reaper records a generation it found live at the deadline, and a session found dead late is a death that still owes its WIP;
   - a short paragraph on `end_cause` and `crash_loop`;
   - the unlanded procedure's step 4: the next launch counts one death.
 - `docs/wsd.md` §6: replace the "Plan 4 must add persistent crash-loop accounting…" sentences with the `ended()` seam. Keep "setup does not select it" until the setup step is approved.
 - `docs/install.md` (line 12): drop "should wait for crash-loop accounting (btq-g08sd) first".
-- The plan-4 doc: a D13 note for `hard_lead`, and a row pointing here. The plan-3 doc's P1 is a record and is not edited.
+- The plan-4 doc: a D13 note for the reaper's marker, and a row pointing here. The plan-3 doc's P1 is a record and is not edited.
 
 ## Open questions for Liam
 
 1. **Setup default.** Should setup record `openshell` on Linux after this lands? Recommendation: yes, as its own small bead, with your go.
 2. **Reboots count** (policy 3). Two reboots with no live lifetime stop between them escalate a healthy bead. Recommendation: accept this. A release clears it, and exempting reboots would let a workload that crashes the host loop without limit.
-3. **`hard_lead`.** It is `min(120 s, margin / 2)`, and the config is refused when the backstop is not shorter. Recommendation: accept this. The defaults (60 s backstop, 15 min margin) give a 120 s lead.
+3. **A backend outage at the deadline.** If OpenShell can't list sandboxes when the reaper fires, the reaper can't confirm the session was live, so a healthy session counts as a death. Recommendation: accept this, like policy 3. A local `podman` check could replace the listing later, but it would widen what the reaper trusts.
 4. **A separate limit.** Should crashes get their own `wsd.crashes_before_human`? Recommendation: no. The ADR names one number, and splitting it later needs no migration.
