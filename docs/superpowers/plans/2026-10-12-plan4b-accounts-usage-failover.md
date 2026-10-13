@@ -204,3 +204,354 @@ Wave 4 (G2-gated):                       T11 capability table (T6-T10, G2)  ->  
 | `tests/live/test_live_accounts.py` (new) | 12 | the live test |
 
 ---
+
+## Task 1: the wsd seams (spec fields, refusal texts, signals, exclusion, the reader)
+
+Everything later tasks share on the `wsd` side, with no behaviour change while nothing produces a signal, no reader is wired and no key is excluded.
+
+**Files:**
+- Modify: `src/heterodyne/wsd/runtime.py` (`LaunchSpec`, the refusal texts, the signals, `AgentRuntime.signals`, `NoRuntime.signals`)
+- Modify: `src/heterodyne/wsd/headroom.py` (`permitted`, `gate`, `admits`)
+- Modify: `src/heterodyne/wsd/usage.py` (`decide`, `admitted`; `TrustedRead`, `UsageReader`, `NoUsageReader`)
+- Modify: `src/heterodyne/wsd/ids.py` (`handoff_session`)
+- Modify: `src/heterodyne/wsd/workstream.py` (`Deps.usage_reader`)
+- Modify: `tests/fakes/fake_runtime.py` (`report`, `signals`)
+- Test: `tests/test_wsd_headroom.py`, `tests/test_wsd_ids.py`, `tests/test_wsd_signals.py` (new)
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces:
+  - `wsd.runtime.LaunchSpec(..., credential_key: str = "", handoff: bool = False)`: two new trailing fields.
+  - `wsd.runtime.LOGIN_STALE: str` and `wsd.runtime.KEY_CHANGED: str`: the exact `LaunchFailed` texts for a stale login (E3) and a changed key (E1).
+  - `wsd.runtime.UsageSeen(session_key: str, generation: int, observations: tuple[Observation, ...])`, `wsd.runtime.LimitSeen(session_key: str, generation: int, reset_hint: int | None)` and `type Signal = UsageSeen | LimitSeen`.
+  - `AgentRuntime.signals(ws: str) -> list[Signal]`; `NoRuntime.signals` returns `[]`.
+  - `headroom.permitted(p, previous_key, exclude: frozenset[str] = frozenset())`; `gate(..., s, exclude=frozenset())`; `admits(..., s, exclude=frozenset())`; `usage.decide(..., s, exclude=frozenset())`; `usage.admitted(..., s, exclude=frozenset())`.
+  - `usage.TrustedRead(observations: tuple[Observation, ...], limited: bool, reset_hint: int | None)`, the `usage.UsageReader` protocol `read(profile: str, account: str, credential_key: str) -> TrustedRead | None`, and `usage.NoUsageReader`.
+  - `ids.handoff_session(session_key: str, generation: int) -> str`.
+  - `Deps.usage_reader: UsageReader` (default `NoUsageReader()`).
+  - `FakeRuntime.report(ws: str, *signals: Signal)` and `FakeRuntime.signals(ws)`, which drains that workstream's queue; `FakeRuntime.drains: list[str]` records each call.
+
+`wsd/runtime.py` may import `heterodyne.wsd.usage`: `usage` imports `config`, `wsd.accounts`, `wsd.headroom`, `wsd.journal` and `wsd.launches`, and none of them imports `wsd.runtime`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_wsd_headroom.py`:
+
+```python
+# --- exclusion (plan 4b E9) ---
+
+def test_excluded_keys_are_never_permitted() -> None:
+    p = view(A, B, C, caps=SWITCH)
+    assert permitted(p, None, frozenset({A.key})) == (B, C)
+    assert permitted(p, A.key, frozenset({A.key})) == (B, C)            # affinity, less the stale key
+    assert permitted(view(A, B), A.key, frozenset({A.key})) == ()      # can't switch: only A, excluded
+    assert permitted(view(A, B, failover="none"), None, frozenset({A.key})) == ()
+    assert gate(p, None, UsageCache(), NOW, S, exclude=frozenset({A.key})) == Chosen("b", B.key)
+    assert isinstance(gate(view(A), None, UsageCache(), NOW, S, exclude=frozenset({A.key})), AccountChanged)
+    entry = LaunchEntry("sk", 1, "alpha", "btq-1", "coder", "p-one", "a", A.key, "", False, "t")
+    assert admits(p, None, entry, UsageCache(), NOW, S)
+    assert not admits(p, None, entry, UsageCache(), NOW, S, exclude=frozenset({A.key}))
+
+
+@given(st.sets(st.sampled_from([A.key, B.key, C.key])), st.sampled_from([None, A.key, B.key]),
+       st.booleans(), st.sampled_from(["none", "next"]))
+def test_exclusion_only_removes_keys(excluded: set[str], previous: str | None, switch: bool,
+                                     failover: Failover) -> None:
+    p = view(A, B, C, failover=failover, caps=SWITCH if switch else NONE)
+    assert permitted(p, previous, frozenset(excluded)) == tuple(
+        c for c in permitted(p, previous) if c.key not in excluded)
+
+
+def test_decide_and_admitted_pass_the_exclusion_through(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text("{}")
+    accounts = ConfiguredAccounts({"p-two": ProfileAccounts("codex", failover="next")}, {"HOME": str(home)})
+    j = Journal(tmp_path / "wsd.db")
+    try:
+        key = accounts.current_key("codex", "default")
+        assert isinstance(decide(accounts, j, "p-two", None, NOW, S, exclude=frozenset({key})), AccountChanged)
+        entry = LaunchEntry("sk", 1, "alpha", "btq-1", "coder", "p-two", "default", key, "", False, "t")
+        assert admitted(accounts, j, None, entry, NOW, S)
+        assert not admitted(accounts, j, None, entry, NOW, S, exclude=frozenset({key}))
+    finally:
+        j.close()
+```
+
+Append to `tests/test_wsd_ids.py`:
+
+```python
+def test_a_handoff_session_is_new_per_generation_and_recomputable() -> None:
+    key = ids.role_session("btq-1", "coder", "p-one")
+    assert ids.handoff_session(key, 2) == str(uuid.uuid5(ids.NS, f"{key}:2"))
+    assert ids.handoff_session(key, 2) != ids.handoff_session(key, 3)
+    assert ids.handoff_session(key, 2) != key
+```
+
+Create `tests/test_wsd_signals.py`:
+
+```python
+"""Plan 4b Task 1: the runtime's signal seam and the trusted-read seam, before anything produces them."""
+
+from pathlib import Path
+
+from fakes.fake_runtime import FakeRuntime
+
+from heterodyne.wsd.runtime import (
+    KEY_CHANGED,
+    LOGIN_STALE,
+    LaunchSpec,
+    LimitSeen,
+    NoRuntime,
+    UsageSeen,
+)
+from heterodyne.wsd.usage import NoUsageReader, Observation, TrustedRead
+
+KEY = "ck1-" + "a" * 32
+
+
+def test_a_spec_pins_no_key_and_no_handoff_by_default(tmp_path: Path) -> None:
+    spec = LaunchSpec("alpha", "btq-1", "coder", "p-one", "sk", "label", tmp_path, False)
+    assert spec.credential_key == "" and spec.handoff is False
+
+
+def test_the_refusal_texts_are_fixed_and_distinct() -> None:
+    assert LOGIN_STALE == "the login expires within the session's maximum lifetime; refresh it on the host"
+    assert KEY_CHANGED != LOGIN_STALE and "ck1-" not in KEY_CHANGED
+
+
+def test_no_runtime_has_no_signals() -> None:
+    assert NoRuntime().signals("alpha") == []
+
+
+def test_the_fake_runtime_drains_each_workstream_once() -> None:
+    rt = FakeRuntime()
+    usage = UsageSeen("sk", 1, (Observation("w5h", "5h", 50.0, None, "codex.app-server"),))
+    rt.report("alpha", usage, LimitSeen("sk", 1, None))
+    rt.report("beta", LimitSeen("sk-b", 2, 1_800_000_000))
+    assert rt.signals("alpha") == [usage, LimitSeen("sk", 1, None)]
+    assert rt.signals("alpha") == []
+    assert rt.signals("beta") == [LimitSeen("sk-b", 2, 1_800_000_000)]
+    assert rt.drains == ["alpha", "alpha", "beta"]
+
+
+def test_no_usage_reader_never_confirms() -> None:
+    assert NoUsageReader().read("p-one", "default", KEY) is None
+    assert TrustedRead((), limited=True, reset_hint=None).limited
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py -q`
+Expected: FAIL. `tests/test_wsd_signals.py` fails at import (`cannot import name 'KEY_CHANGED'`); the headroom tests fail with `TypeError: permitted() takes 2 positional arguments but 3 were given`; the ids test fails with `AttributeError: module 'heterodyne.wsd.ids' has no attribute 'handoff_session'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/wsd/runtime.py`, add the import and the texts after `SETTLED_ACTIONS`:
+
+```python
+from heterodyne.wsd.beads import BeadsAdapter
+from heterodyne.wsd.usage import Observation
+```
+
+```python
+# The LaunchFailed texts the guard acts on, compared by equality (plan 4b E1, E3, E9). A runtime that
+# refuses for these reasons raises exactly these texts and nothing else with them.
+LOGIN_STALE = "the login expires within the session's maximum lifetime; refresh it on the host"
+KEY_CHANGED = "the account's credential key changed after the launch was pinned"
+```
+
+Add the two fields at the end of `LaunchSpec`, after `repo`:
+
+```python
+    # The entry's pinned credential key (plan 4b E1). The runtime recomputes the account's key under the
+    # D8 lock and refuses with KEY_CHANGED unless it equals this; an empty key is refused the same way.
+    credential_key: str = ""
+    # A cross-account relaunch without (b): a fresh native session, never a resume (D7, plan 4b E10).
+    handoff: bool = False
+```
+
+Add the signals after `Started`:
+
+```python
+@dataclass(frozen=True)
+class UsageSeen:
+    """A session's own usage report (untrusted, D3). The runtime attributes it to the launch whose channel
+    carried it, never to anything the payload says."""
+    session_key: str
+    generation: int
+    observations: tuple[Observation, ...]
+
+
+@dataclass(frozen=True)
+class LimitSeen:
+    """A session reported reaching its usage limit (untrusted, D6). `reset_hint` is the payload's own
+    reset time, if it gave one; wsd clamps it."""
+    session_key: str
+    generation: int
+    reset_hint: int | None
+
+
+type Signal = UsageSeen | LimitSeen
+```
+
+Add to `AgentRuntime`, after `expire`:
+
+```python
+    def signals(self, ws: str) -> list[Signal]:
+        """Drain the reports the workstream's sessions have sent since the last call, oldest first. Each
+        is attributed to the (session key, generation) whose channel carried it. Never raises: a report
+        the runtime can't attribute is never queued."""
+        ...
+```
+
+Add to `NoRuntime`:
+
+```python
+    def signals(self, ws: str) -> list[Signal]:
+        return []                    # it runs nothing
+```
+
+In `src/heterodyne/wsd/headroom.py`, replace `permitted`, and add `exclude` to `gate` and `admits`:
+
+```python
+def permitted(p: ProfileView, previous_key: str | None,
+              exclude: frozenset[str] = frozenset()) -> tuple[Candidate, ...]:
+    """D4: the failover mode's list, then credential continuity, less the keys in `exclude` (the logins
+    this operation already found stale, plan 4b E9). Excluding only ever removes accounts."""
+    listed = p.accounts[:1] if p.failover == "none" else p.accounts
+    if previous_key is None:
+        found = listed
+    elif p.failover == "none":
+        found = listed if listed and listed[0].key == previous_key else ()
+    else:
+        previous = tuple(c for c in listed if c.key == previous_key)[:1]
+        found = previous + tuple(c for c in listed if c not in previous) if p.capabilities.can_switch \
+            else previous                                                   # affinity
+    return tuple(c for c in found if c.key not in exclude)
+```
+
+```python
+def gate(p: ProfileView, previous_key: str | None, cache: UsageCache, now: int, s: UsageSettings,
+         exclude: frozenset[str] = frozenset()) -> Chosen | AccountChanged | Deadline:
+    """The first eligible permitted account; `AccountChanged` when nothing is permitted; otherwise the
+    earliest time a permitted account clears, never earlier than `now + min_recheck_seconds`."""
+    allowed = permitted(p, previous_key, exclude)
+```
+
+(the rest of `gate` is unchanged)
+
+```python
+def admits(p: ProfileView, previous_key: str | None, entry: LaunchEntry, cache: UsageCache, now: int,
+           s: UsageSettings, exclude: frozenset[str] = frozenset()) -> bool:
+    """The guard's step 3: the pinned account is still permitted, under the key it was pinned with, and
+    nothing blocks it."""
+    key = entry.credential_key
+    return (any(c.account == entry.account and c.key == key for c in permitted(p, previous_key, exclude))
+            and not blocking(key, cache, now, s))
+```
+
+In `src/heterodyne/wsd/usage.py`, add `from typing import Protocol`, pass `exclude` through, and add the reader seam after `admitted`:
+
+```python
+def decide(accounts: Accounts, j: Journal, profile: str, previous_key: str | None, now: int,
+           s: UsageSettings, exclude: frozenset[str] = frozenset()) -> Chosen | AccountChanged | Deadline:
+    """The gate on the profile as it resolves now. Raises ConfigError (path-free) if it can't resolve."""
+    view = accounts.view(profile)
+    return gate(view, previous_key, j.usage_cache(c.key for c in view.accounts), now, s, exclude)
+
+
+def admitted(accounts: Accounts, j: Journal, previous_key: str | None, entry: LaunchEntry, now: int,
+             s: UsageSettings, exclude: frozenset[str] = frozenset()) -> bool:
+    """The guard's step 3 for a pinned entry, through the same view and cache as `decide`. A profile or
+    key that can't be resolved has changed: not admitted."""
+    try:
+        view = accounts.view(entry.profile)
+    except ConfigError:
+        return False
+    return admits(view, previous_key, entry, j.usage_cache(c.key for c in view.accounts), now, s, exclude)
+
+
+@dataclass(frozen=True)
+class TrustedRead:
+    """A host-side read (D9 (d)), run under the D8 lock on one credential key: the windows it saw, whether
+    any limit is reached, and the latest reset of a reached window, if it gave one."""
+    observations: tuple[Observation, ...]
+    limited: bool
+    reset_hint: int | None
+
+
+class UsageReader(Protocol):
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        """A trusted read of `account`'s usage, attempted only while the account's current key is
+        `credential_key`. None when it can't be read now (no reader for the profile's adapter, a changed
+        key, a busy lock, a stale login, a timeout, an answer that doesn't parse, a cleanup that can't be
+        confirmed): unconfirmed, never "fine". Never raises."""
+        ...
+
+
+class NoUsageReader:
+    """No trusted read is wired in: every limit stays unconfirmed (the untrusted defer only)."""
+
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        return None
+```
+
+In `src/heterodyne/wsd/ids.py`, after `role_session`:
+
+```python
+def handoff_session(session_key: str, generation: int) -> str:
+    """A handoff relaunch's fresh native session ID (D7): new for each generation, recomputable. A
+    session key holds no colon-free bead, so this never equals a role_session input."""
+    return str(uuid.uuid5(NS, f"{session_key}:{generation}"))
+```
+
+In `src/heterodyne/wsd/workstream.py`, import `from heterodyne.wsd.usage import NoUsageReader, UsageReader` and add the field after `clock`:
+
+```python
+    # The trusted host-side read (D9 (d), plan 4b Task 8). The default confirms nothing.
+    usage_reader: UsageReader = field(default_factory=NoUsageReader)
+```
+
+In `tests/fakes/fake_runtime.py`, import `Signal` from `heterodyne.wsd.runtime`, add to `__init__`:
+
+```python
+        self.queued: dict[str, list[Signal]] = {}   # reports by workstream, drained by signals()
+        self.drains: list[str] = []
+```
+
+and add after `expire`:
+
+```python
+    def signals(self, ws: str) -> list[Signal]:
+        self.drains.append(ws)
+        return self.queued.pop(ws, [])
+```
+
+and, under the test controls:
+
+```python
+    def report(self, ws: str, *signals: Signal) -> None:
+        """The workstream's sessions sent these reports (already attributed, as the runtime does)."""
+        self.queued.setdefault(ws, []).extend(signals)
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py tests/test_wsd_usage.py -q`
+Expected: PASS.
+
+Then: `timeout 300 uv run pyright src/heterodyne/wsd tests/fakes/fake_runtime.py tests/test_wsd_signals.py` and `uv run ruff check src tests`.
+Expected: 0 errors. pyright checks that `FakeRuntime` and `NoRuntime` still satisfy `AgentRuntime` wherever they are passed as one.
+
+- [ ] **Step 5: Run the whole suite, then commit**
+
+Run: `timeout 3600 uv run pytest -q`
+Expected: PASS (no behaviour changed).
+
+```bash
+git add src/heterodyne/wsd/runtime.py src/heterodyne/wsd/headroom.py src/heterodyne/wsd/usage.py \
+        src/heterodyne/wsd/ids.py src/heterodyne/wsd/workstream.py tests/fakes/fake_runtime.py \
+        tests/test_wsd_headroom.py tests/test_wsd_ids.py tests/test_wsd_signals.py
+git commit -m "plan4b T1: wsd seams for keys, handoffs, signals, exclusion and the trusted read"
+```
