@@ -108,6 +108,8 @@ To resolve it, with wsd running:
 
 A resolve drops a lifetime WIP mark the session still owed, with its record; it makes no WIP commit itself. The worktree's uncommitted changes stay there, and the next park or lifetime stop commits them as usual, as after manual step 4.
 
+A resolve, whether it lands, keeps or discards, removes the session's record with its directory, as manual step 4 does, so the next launch of the bead has no ended record to read and counts one death toward `crash_loop`, however the generation ended. A release before that launch resets the count first.
+
 When wsd is not running, the manual steps are the fallback:
 
 1. Check that nothing is running: `tmux -L heterodyne-wsd ls` lists no `wsd-<short id>` pane, and the record `sessions/<short id>/session.json` says `"phase": "ended"`.

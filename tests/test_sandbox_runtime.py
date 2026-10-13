@@ -1872,3 +1872,17 @@ def test_a_failed_journal_entry_keeps_the_removed_intent_and_the_hold(
         assert wsd.resolve_one("alpha", sid, 1, "land", made).result == "ok"
     assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=land tip={made}")]
     assert rig.runtime.sessions("alpha") == [] and landings(rig) == 1
+
+
+@pytest.mark.parametrize("action", ["land", "keep", "discard"])
+def test_a_resolved_generation_has_no_end_to_read(rig: RuntimeRig, action: Action) -> None:
+    """g08sd: the record, and so its end cause, goes with the directory, as in manual step 4, and the next
+    guard counts the generation as a death (docs/wsd.md §5). Its reaper marker goes too."""
+    key, made = make_unlanded(rig)
+    layout = rig.runtime.layout(key)
+    before = rig.runtime.ended(key)
+    assert before is not None and before.generation == 1
+    layout.reaped(1).write_text("{}")                        # a marker left beside the record
+    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, action, made)
+    rig.runtime.finish_resolution("alpha", short_id(key), 1)
+    assert rig.runtime.ended(key) is None and not os.path.lexists(layout.reaped(1))

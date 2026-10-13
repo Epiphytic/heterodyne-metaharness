@@ -4,6 +4,7 @@ like real agent processes do. A session stays listed until it is stopped or `end
 returns a `Started` with synthetic tmux IDs; its native ID is the spec's, or a synthetic thread ID when the
 spec has none (Codex before its thread is known)."""
 
+from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd.runtime import (
     Action,
     EndCause,
@@ -121,6 +122,8 @@ class FakeRuntime:
                                           f"refs/heads/unlanded/btq-1/{sid}-g{generation}" if action == "keep"
                                           else ""))
         self.views[ws] = [v for v in self.views.get(ws, []) if v.short_id != sid]
+        for key in [k for k in self.ends if short_id(k) == sid]:
+            del self.ends[key]                  # its record goes with its directory, as SandboxRuntime's does
         return done
 
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
