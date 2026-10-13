@@ -34,6 +34,7 @@ from probe_verdicts import (  # noqa: E402
     NAMESPACE_REJECTED,
     NOT_THE_PROBE,
     SELFTEST_FAILED,
+    UNRECOGNISED,
     file_writes_refused,
     launch_shown,
     memory_access_refused,
@@ -41,7 +42,9 @@ from probe_verdicts import (  # noqa: E402
     outputs_unreachable,
     overlay_outcome,
     rejection_shown,
+    require,
     session_socket_checks,
+    tool_var_rejection,
 )
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
@@ -189,8 +192,8 @@ class Live:
         runtime = [m for m in mounts if m.get("Destination") == RUNTIME_BINARY]
         assert len(runtime) == 1 and runtime[0].get("Type") == "bind", \
             f"{name}'s runtime binary is not one bind mount at {RUNTIME_BINARY}"
-        assert runtime[0].get("Source") == str(self.artifact.runtime_binary), \
-            f"{name}'s runtime binary is not the driver's cache for the preflight's {RUNTIME_IMAGE}"
+        require(runtime[0].get("Source") == str(self.artifact.runtime_binary),
+                f"{name}'s runtime binary is not the driver's cache for the preflight's {RUNTIME_IMAGE}")
         digest = sha256(self.artifact.runtime_binary)
         assert digest == self.artifact.runtime_sha256, f"{name}'s runtime binary changed in the run"
         mounted: list[str] = []
@@ -366,14 +369,15 @@ def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
     packaged = sums[sums.index(binary.lstrip("/")) - 1]
     exe = Path(f"/proc/{pid}/exe")
     digest = hashlib.md5(exe.read_bytes(), usedforsecurity=False).hexdigest()     # dpkg records md5
-    assert str(exe.readlink()) == binary and digest == packaged, \
-        f"preflight: the running gateway is not the packaged {binary}"
+    require(str(exe.readlink()) == binary and digest == packaged,
+            f"preflight: the running gateway is not the packaged {binary}")
     argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[:-1]
     assert len(argv) == 1, "preflight: the gateway was started with arguments"
     penv = dict(e.split("=", 1) for e in Path(f"/proc/{pid}/environ").read_text().split("\0") if "=" in e)
     named = sorted(k for k in penv if k.startswith("OPENSHELL_"))
-    assert set(named) <= GATEWAY_ENV and penv.get("OPENSHELL_COMPUTE_DRIVER") == "podman", \
-        f"preflight: the gateway's environment sets {named}"
+    require(set(named) <= GATEWAY_ENV and penv.get("OPENSHELL_COMPUTE_DRIVER") == "podman",
+            f"preflight: the gateway's environment sets "
+            f"{[n if n in GATEWAY_ENV else UNRECOGNISED for n in named]}")
     config = Path(penv["OPENSHELL_GATEWAY_CONFIG"])
     unit_env = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "openshell" / "gateway.env"
     start = started_at(pid)
@@ -412,7 +416,7 @@ def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
     data = Path(penv.get("XDG_DATA_HOME") or Path(penv["HOME"]) / ".local" / "share")
     cache = (data / "openshell" / "podman-sandbox" / images[RUNTIME_IMAGE].replace(":", "-")
              / "openshell-sandbox")
-    assert cache.is_file(), (f"preflight: the runtime binary of {RUNTIME_IMAGE} isn't cached yet: the "
+    require(cache.is_file(), f"preflight: the runtime binary of {RUNTIME_IMAGE} isn't cached yet: the "
                              "gateway extracts it on its first sandbox create")
     cached = sha256(cache)
     lines.append(f"EVIDENCE artifact runtime binary: bind-mounted from the driver's cache for "
@@ -477,9 +481,11 @@ def test_both_shapes_launch_through_the_full_self_test(live: Live, cli: str) -> 
 @pytest.mark.parametrize("cli", ["claude", "codex"])
 def test_egress_is_refused_and_no_push_credential_is_inside(live: Live, cli: str) -> None:
     key = live.first[cli][0].session_key
-    assert live.run(key, "curl", "-sS", "-m", "10", "-o", "/dev/null", "https://example.org") != 0
-    assert live.run(key, "sh", "-c", 'test ! -e "$HOME/.git-credentials" && test ! -e "$HOME/.config/gh" '
-                                     '&& test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}"') == 0
+    require(live.run(key, "curl", "-sS", "-m", "10", "-o", "/dev/null", "https://example.org") != 0,
+            f"{cli}: egress to example.org was not refused")
+    require(live.run(key, "sh", "-c", 'test ! -e "$HOME/.git-credentials" && test ! -e "$HOME/.config/gh" '
+                                      '&& test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}"') == 0,
+            f"{cli}: a push credential is inside")
 
 
 def test_an_agent_commits_on_its_bead_branch_and_nothing_else_moves(live: Live) -> None:
@@ -489,17 +495,23 @@ def test_an_agent_commits_on_its_bead_branch_and_nothing_else_moves(live: Live) 
     main = git(live.repo, "rev-parse", "main")
     key = spec.session_key
     try:
-        assert live.run(key, "git", "-c", "user.name=agent", "-c", "user.email=agent@example.org", "commit",
-                        "--allow-empty", "-q", "-m", "hz-live") == 0
-        assert live.run(key, "git", "update-ref", "refs/heads/main", "HEAD") == 0      # its own copy only
-        assert live.run(key, "test", "!", "-e", str(live.repo / ".git" / "config")) == 0
+        require(live.run(key, "git", "-c", "user.name=agent", "-c", "user.email=agent@example.org", "commit",
+                         "--allow-empty", "-q", "-m", "hz-live") == 0, "the agent could not commit")
+        require(live.run(key, "git", "update-ref", "refs/heads/main", "HEAD") == 0,       # its own copy only
+                "the agent could not move its own main")
+        require(live.run(key, "test", "!", "-e", str(live.repo / ".git" / "config")) == 0,
+                "the main repository's git config is visible inside")
         dot_git, marker = spec.worktree / ".git", spec.worktree / "hz-ran"
         pointer = dot_git.read_text()
-        assert live.run(key, "sh", "-c", f"echo 'gitdir: /tmp' > {dot_git}") != 0      # bound read-only
-        assert live.run(key, "mv", str(dot_git), "/tmp/hz-git") != 0  # noqa: S108 - a mount point
-        assert live.run(key, "git", "config", "core.fsmonitor", f"touch {marker}") == 0  # its own config
+        require(live.run(key, "sh", "-c", f"echo 'gitdir: /tmp' > {dot_git}") != 0,      # bound read-only
+                "the worktree's .git pointer was writable")
+        require(live.run(key, "mv", str(dot_git), "/tmp/hz-git") != 0,  # noqa: S108 - a mount point
+                "the worktree's .git pointer could be moved")
+        require(live.run(key, "git", "config", "core.fsmonitor", f"touch {marker}") == 0,  # its own config
+                "the agent could not set its own git config")
         git(spec.worktree, "status", "--porcelain")                     # unpinned, as btq's git runs
-        assert dot_git.read_text() == pointer and not marker.exists()
+        require(dot_git.read_text() == pointer and not marker.exists(),
+                "the worktree's .git pointer changed, or the agent's fsmonitor ran on the host")
     finally:
         live.runtime.stop(key)
     assert git(live.repo, "log", "-1", "--format=%s", "btq/btq-live-3") == "hz-live"
@@ -528,16 +540,19 @@ def test_fetch_and_registry_work_and_push_fails_for_want_of_a_credential(live: L
                     f"( {AGENT_NET} ) > {target} 2>&1")
     assert wait_until(lambda: out.exists() and "push=" in out.read_text(), PROMPT_SECONDS)
     text = out.read_text()
-    assert {"git=0", "fetch=0", "registry=0"} <= set(text.split()), text
-    assert "push=0" not in text.split()
-    assert "could not read Username for 'https://github.com'" in text
+    statuses = [w for w in text.split() if re.fullmatch(r"(git|fetch|registry|push)=\d{1,3}", w)]
+    require({"git=0", "fetch=0", "registry=0"} <= set(statuses), f"the agent's network statuses: {statuses}")
+    require("push=0" not in statuses, "the push succeeded")
+    require("could not read Username for 'https://github.com'" in text,
+            f"the push failed, but not for want of a credential: {statuses}")
 
 
 def test_the_reviewer_worktree_is_read_only(live: Live) -> None:
     spec = live.spec("claude", "btq-live-2", role="reviewer")
     live.launch(spec)
-    assert live.run(spec.session_key, "touch", str(spec.worktree / "hz-live-ro")) != 0
-    assert not (spec.worktree / "hz-live-ro").exists()
+    require(live.run(spec.session_key, "touch", str(spec.worktree / "hz-live-ro")) != 0,
+            "the reviewer could write its worktree")
+    require(not (spec.worktree / "hz-live-ro").exists(), "the reviewer's write reached the host")
     live.runtime.stop(spec.session_key)
 
 
@@ -645,8 +660,8 @@ def refused(live: Live, rt: SandboxRuntime, spec: LaunchSpec, reason: str) -> No
     with pytest.raises(LaunchFailed) as caught:
         launch_with(live, rt, spec)
     said = str(caught.value)
-    assert re.fullmatch(re.escape(f"{SELFTEST_FAILED}{reason}") + FREEZES, said), \
-        f"the launch failed for another reason: {launch_shown(said)}"
+    require(re.fullmatch(re.escape(f"{SELFTEST_FAILED}{reason}") + FREEZES, said),
+            f"the launch failed for another reason: {launch_shown(said)}")
     assert sandbox_name(spec.session_key, spec.generation) not in live.backend.names(), "the sandbox was left"
 
 
@@ -849,7 +864,7 @@ def test_a_forged_agent_path_result_refuses_the_launch(live: Live, monkeypatch: 
     refused(live, runtime(live, selftest=Hooked(beside_agent=forge)), live.spec("claude", "btq-live-n7"),
             CHANNEL_REJECTED)
     assert forger == [(0, "connected")], f"the forger did not reach the channel: {forger}"
-    assert rejections(made) == [NOT_THE_PROBE], f"the channel rejected {rejections_shown(rejections(made))}"
+    require(rejections(made) == [NOT_THE_PROBE], f"the channel rejected {rejections_shown(rejections(made))}")
 
 
 def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
@@ -864,12 +879,11 @@ def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
     adapter = hooked.seen[0].adapter
     tool_only = frozenset(real(adapter, "agent") - real(adapter, "exec"))
     reasons = rejections(made)
-    assert len(reasons) == 1 and reasons[0].startswith(ENV_REJECTED), \
-        f"the channel rejected {rejections_shown(reasons, tool_only)}"
-    named = set(reasons[0].removeprefix(ENV_REJECTED).split(" "))
-    # Codex T15 r2: only the CLI's own tool variables are named; any other is shown as unrecognised.
-    assert named and named <= tool_only, f"rejected for {rejection_shown(reasons[0], tool_only)}"
-    print(f"EVIDENCE n8 the probe was rejected for the tool-path variables {sorted(named)}")
+    # Codex T15 r2, r3: only the CLI's own tool variables are named; any other is shown as unrecognised.
+    why = tool_var_rejection(reasons, tool_only)
+    require(not why, why)
+    print(f"EVIDENCE n8 the probe was rejected for the tool-path variables "
+          f"{sorted(reasons[0].removeprefix(ENV_REJECTED).split(' '))}")
 
 
 # Every process the check can see but itself, its own child included, gets each operation once: the
@@ -1069,11 +1083,12 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(
         print(f"EVIDENCE n9 overlay {outcome}; launch {launch}; channel rejected {shown}")
         if outcome == "ran":
             rejected = re.escape(f"{SELFTEST_FAILED}{CHANNEL_REJECTED}") + FREEZES
-            assert re.fullmatch(rejected, failed), f"an overlaid probe ran and was not rejected: {launch}"
-            assert reasons == [NAMESPACE_REJECTED], f"the overlaid probe was rejected for {shown}"
+            require(re.fullmatch(rejected, failed), f"an overlaid probe ran and was not rejected: {launch}")
+            require(reasons == [NAMESPACE_REJECTED], f"the overlaid probe was rejected for {shown}")
         else:
-            assert not failed and not reasons, \
-                f"the overlay was refused, yet the launch failed or a peer was rejected: {launch}; {shown}"
+            require(not failed and not reasons,
+                    f"the overlay was refused, yet the launch failed or a peer was rejected: {launch}; "
+                    f"{shown}")
     finally:
         stop(live, spec.session_key)
 

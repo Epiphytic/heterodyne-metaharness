@@ -10,6 +10,8 @@ import errno
 import re
 from collections.abc import Collection
 
+import pytest
+
 from heterodyne.sandbox.openshell_selftest import AGENT_CHECKS, EXEC_CHECKS
 
 # OpenShell's child filter answers the ptrace family and pidfd_getfd with EPERM; Landlock keeps /proc
@@ -259,3 +261,21 @@ def outputs_unreachable(rc: int, out: str) -> str:
             return f"a curl output is reopenable, not a socket, or unreadable: {shown(line)}"
         whole += len(fds) == 2
     return "" if whole else "the check saw no curl process whole while the probe ran"
+
+
+def require(ok: object, why: str) -> None:
+    """Fails with only `why` unless `ok`. Codex T15 r3: pytest's assertion rewriting prints an assert's
+    operands raw, so a check on a raw value (a launch's or a peer's reason, a variable's name, a path, a
+    process's output) is made through this, with `why` built only from sanitised text."""
+    if not ok:
+        pytest.fail(why, pytrace=False)
+
+
+def tool_var_rejection(reasons: list[str], tool_vars: Collection[str]) -> str:
+    """"" when the channel rejected exactly one peer, and that for variables all in `tool_vars` (the CLI's
+    agent-only tool variables); otherwise the reason, sanitised (`rejection_shown`)."""
+    if len(reasons) != 1 or not reasons[0].startswith(ENV_REJECTED):
+        return f"the channel rejected {[rejection_shown(r, tool_vars) for r in reasons]}"
+    if not set(reasons[0].removeprefix(ENV_REJECTED).split(" ")) <= set(tool_vars):
+        return f"rejected for {rejection_shown(reasons[0], tool_vars)}, not only tool-path variables"
+    return ""

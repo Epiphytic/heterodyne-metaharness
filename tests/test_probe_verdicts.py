@@ -14,8 +14,10 @@ from probe_verdicts import (
     outputs_unreachable,
     overlay_outcome,
     rejection_shown,
+    require,
     session_socket_checks,
     shown,
+    tool_var_rejection,
 )
 
 from heterodyne.sandbox.openshell_selftest import EXEC_CHECKS, PROBES_SOURCE, _results
@@ -246,3 +248,26 @@ def test_a_channel_rejection_is_shown_only_in_its_fixed_words(reason: str, expec
 ])
 def test_a_launch_failure_is_shown_only_in_its_fixed_words(said: str, expect: str) -> None:
     assert launch_shown(said) == expect
+
+
+@pytest.mark.parametrize("reasons", [
+    [f"no {HOME} ancestor inside the workload netns"],
+    [f"{ENV_REJECTED}CLAUDE_CODE_X TOKEN_{HEX}"],
+    [f"{ENV_REJECTED}CLAUDE_CODE_X", f"no {HOME} ancestor inside the workload netns"],
+    [f"{ENV_REJECTED}{HOME}={HEX}"],
+])
+def test_a_failed_check_on_a_raw_reason_shows_neither_a_path_nor_a_64_hex_value(reasons: list[str]) -> None:
+    """Codex T15 r3: an assert's rewriting prints its operands raw, so the live controls check raw reasons
+    through `require`, which fails with only the sanitised text: the tool-variable control's check here."""
+    why = tool_var_rejection(reasons, {"CLAUDE_CODE_X"})
+    with pytest.raises(pytest.fail.Exception) as caught:
+        require(not why, why)
+    text = str(caught.value)
+    assert text and HOME not in text and HEX not in text and "TOKEN_" not in text
+
+
+def test_a_tool_variable_rejection_passes_only_for_tool_variables() -> None:
+    assert tool_var_rejection([f"{ENV_REJECTED}CLAUDE_CODE_X"], {"CLAUDE_CODE_X"}) == ""
+    assert tool_var_rejection([f"{ENV_REJECTED}"], {"CLAUDE_CODE_X"}) != ""
+    assert tool_var_rejection([], {"CLAUDE_CODE_X"}) != ""
+    require(True, "never shown")
