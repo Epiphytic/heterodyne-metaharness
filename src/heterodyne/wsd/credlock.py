@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import os
 import re
+import stat
 import time
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -29,6 +30,20 @@ class CredentialBusy(Exception):
     """The lock was not taken; nothing under it ran. The text is LOCK_BUSY, LOCK_FAILED or BAD_KEY."""
 
 
+def _open_in(lock_dir: Path, name: str) -> int:
+    """Open the lock file relative to a descriptor of the checked directory. The directory is opened
+    without following a link and checked again through that descriptor (owned by this user, 0700), so a
+    link swapped in after `private_dir` is refused and a swap after the open can't redirect the file."""
+    dir_fd = os.open(lock_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(dir_fd)
+        if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+            raise PermissionError("the lock directory is not private")
+        return open_lock_file(Path(name), dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 @contextlib.contextmanager
 def credential_lock(lock_dir: Path, key: str, wait_seconds: float, *,
                     clock: Callable[[], float] = time.monotonic,
@@ -40,7 +55,7 @@ def credential_lock(lock_dir: Path, key: str, wait_seconds: float, *,
         raise CredentialBusy(BAD_KEY)
     try:
         private_dir(lock_dir)
-        fd = open_lock_file(lock_dir / f"{key}.lock")
+        fd = _open_in(lock_dir, f"{key}.lock")
     except OSError:
         raise CredentialBusy(LOCK_FAILED) from None
     try:

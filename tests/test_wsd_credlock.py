@@ -126,6 +126,63 @@ def test_a_symlinked_lock_dir_is_refused(tmp_path: Path) -> None:
     assert list(real.iterdir()) == []
 
 
+def swap_for_link(locks: Path, elsewhere: Path) -> Path:
+    """Move the checked lock directory aside and leave a link to `elsewhere` in its place."""
+    moved = locks.with_name("credlocks.checked")
+    locks.rename(moved)
+    locks.symlink_to(elsewhere)
+    return moved
+
+
+def test_a_lock_dir_swapped_for_a_link_after_its_check_is_refused(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    locks = tmp_path / "credlocks"
+    real_private_dir = credlock.private_dir
+
+    def check_then_swap(path: Path) -> None:
+        real_private_dir(path)
+        swap_for_link(path, elsewhere)
+
+    monkeypatch.setattr(credlock, "private_dir", check_then_swap)
+    with pytest.raises(CredentialBusy) as failed, credential_lock(locks, KEY, 0):
+        pytest.fail("the lock was taken through a swapped directory")
+    assert str(failed.value) == LOCK_FAILED
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_lock_dir_swapped_after_it_is_opened_keeps_the_lock_in_the_checked_dir(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    locks = tmp_path / "credlocks"
+    real_open_lock_file = credlock.open_lock_file
+    moved: list[Path] = []
+
+    def swap_then_open(path: Path, *, dir_fd: int | None = None) -> int:
+        moved.append(swap_for_link(locks, elsewhere))
+        return real_open_lock_file(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(credlock, "open_lock_file", swap_then_open)
+    with credential_lock(locks, KEY, 0):
+        assert not free(moved[0] / f"{KEY}.lock")
+        assert list(elsewhere.iterdir()) == []
+
+
+def test_a_second_holder_after_a_swap_is_refused_not_given_another_lock(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    locks = tmp_path / "credlocks"
+    with credential_lock(locks, KEY, 0):
+        moved = swap_for_link(locks, elsewhere)
+        with pytest.raises(CredentialBusy) as failed, credential_lock(locks, KEY, 0):
+            pytest.fail("two holders took the same key")
+        assert str(failed.value) == LOCK_FAILED
+        assert not free(moved / f"{KEY}.lock")
+    assert list(elsewhere.iterdir()) == []
+
+
 def test_the_texts_name_no_key_or_path() -> None:
     for text in (LOCK_BUSY, LOCK_FAILED, BAD_KEY):
         assert "ck1-" not in text and "/" not in text

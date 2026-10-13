@@ -67,10 +67,11 @@ class ClaimGate:
             return self.beads.claim(ws, bead)
 
 
-def open_lock_file(path: Path) -> int:
+def open_lock_file(path: Path, *, dir_fd: int | None = None) -> int:
     """Open (creating it 0600) a lock file: a regular file owned by this user, never through a symlink.
-    A broader mode left on an existing file is narrowed to 0600; anything else is refused."""
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    A broader mode left on an existing file is narrowed to 0600; anything else is refused. With `dir_fd`,
+    `path` is relative to that open directory, so the directory can't be swapped after it was checked."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
