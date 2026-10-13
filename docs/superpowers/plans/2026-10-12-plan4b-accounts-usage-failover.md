@@ -20,7 +20,7 @@
 **Tech Stack:** Python 3.12+, `uv`, pytest, hypothesis, ruff, pyright strict, msgspec (the only runtime dependency), SQLite (the existing journal), `fcntl.flock`.
 
 **Spec:**
-- ADR 0001, revision 16 draft (design repo `hermes-workstreams-v2`, branch `adr-r16`, commits `0ba5010` and `5def9ef`, rewritten by `54a808d` for the operator's decision of 2026-10-13, on r15 `28e3df4`): §4.4 D1–D10, §7 Home isolation, Managed installs, the freshness gate and Other accounts. The first draft's install-root exception is gone (Appendix A.3).
+- ADR 0001, revision 16 draft (design repo `hermes-workstreams-v2`, branch `adr-r16`, commits `0ba5010` and `5def9ef`, rewritten by `54a808d` for the operator's decision of 2026-10-13 and revised by `93d0e90` (the store owner and helper), on r15 `28e3df4`): §4.4 D1–D10, §7 Home isolation, Managed installs, the freshness gate and Other accounts. The first draft's install-root exception is gone (Appendix A.3).
 - The accounts change plan `docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at `66ad195`: AU-6, AU-7 and AU-8, and gates G1–G3.
 - S7, `docs/spikes/s7-accounts-and-usage.md` on `main`: the client-side findings, the L1–L7 runs and the recommended D9 defaults.
 - Plan 4: D9–D13, D22, gap 3.
@@ -153,10 +153,19 @@ The managed install store is too large for this plan and reaches past it, so it 
 - the offline rig's fake CLI lies outside every login directory, so Task 6's named-account tests run on plan 4's check unchanged;
 - on a host, before plan 4c lands, a named Codex account whose CLI lies in `~/.codex` is refused by plan 4's check, which is the r16 rule. Nothing ships with an exception.
 
-Plan 4b consumes from plan 4c:
-- the runtime's CLI resolution moved onto the selected, verified install (plan 4's `SandboxRuntime._cli`). Task 6 calls `_cli` as it is and needs no change.
-- the same resolution for host-side use, so Task 8's `HostUsageReader` runs the verified install's entry point, and `build_usage_reader` enables the reader when Codex has a selected install, not when `[adapters.codex] binary` is set. Until then Task 8 locates the CLI as plan 4 does, and its pin check holds. Plan 4c makes that one change to `hostread.py` and `build.py`, and the (d) capability stays off until it has (Task 11b waits on plan 4c).
-- Task 12 runs on the managed installs, so it waits for plan 4c, as Task 11b does.
+Plan 4b consumes from plan 4c, under these names:
+- `SandboxRuntime.verified_cli(adapter) -> Cli`: the adapter's selected managed install, verified as r16 §7 requires before a launch or a host-side use (the digest pin, the walk, a declared version). It refuses with `LaunchFailed` and plan 4c's refusal text. Plan 4's `_cli` becomes a call to it, and `SandboxSettings.binaries` is gone. Task 6 calls `_cli` as it is and needs no change.
+- `HostUsageReader(accounts, cli, credlocks, scratch_root, lock_wait_seconds, *, env, ...)`, where `cli: Callable[[], Cli]` replaces `binary` and `path`. `_locked` calls it where it now calls `adapter.locate` and checks the pin. An exception from it stops the read before anything starts, logged as `DIAG_READ_FAILED` with its type name, as a failed `locate` is now.
+- `build_usage_reader(s, env)` returns a `HostUsageReader` when Codex has a selected install (not when `[adapters.codex] binary` is set), with the store's resolution as `cli`.
+
+**Plan 4c's migration contract.** Tasks 1–11 are written against plan 4's CLI lookup, and plan 4c migrates them in the same PR that retires `binaries`:
+- `src/heterodyne/sandbox/hostread.py` (Task 8): the constructor and `_locked`, as above.
+- `src/heterodyne/sandbox/build.py` (Task 8): `build_usage_reader`.
+- `tests/test_sandbox_hostread.py` (Task 8): `Rig` builds the reader with `cli=` from a store fixture that holds the fake CLI. `test_a_missing_cli_stops_before_anything_starts` becomes the same test for an install that fails verification, with the same assertions.
+- `tests/test_sandbox_build.py` (Task 8): `test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary` needs a selected Codex install instead of a binary.
+- every test that configures `[adapters.<adapter>] binary` or `binaries`, plan 4's included (`tests/sandbox_env.py`'s rig, `tests/live/test_live_sandbox.py`), moves to the store fixture.
+
+Task 12 runs only after plan 4c, so it is written against these names already, and constructs the reader with `cli=`. The (d) capability stays off until plan 4c has merged (Task 11b waits on it).
 
 ## Parallelism
 
@@ -4999,7 +5008,7 @@ from test_live_sandbox import (  # noqa: E402
     wait_until,
 )
 
-from heterodyne.agents.codex import HOST_SOURCE  # noqa: E402
+from heterodyne.agents.codex import HOST_SOURCE, Codex  # noqa: E402
 from heterodyne.config import ConfigError  # noqa: E402
 from heterodyne.config.accounts import Account, canonical_login, credential_key  # noqa: E402
 from heterodyne.config.capabilities import CAPABILITIES, NONE  # noqa: E402
@@ -5210,12 +5219,12 @@ def test_the_trusted_read_sees_each_codex_account_and_leaves_no_scratch(
     need("codex", "trusted_read")
     caplog.set_level(logging.INFO, logger=hostread.__name__)
     settings = live.runtime.c.settings
-    binary = settings.binaries.get("codex")
-    assert binary, "no codex binary configured"
+    codex = Codex()
+    live.runtime.verified_cli(codex)      # plan 4c: the selected install, verified; raises if there is none
     path = os.environ.get("PATH", os.defpath)
     scratch = live.root / "hostread"
-    reader = HostUsageReader(accounts_of(live), binary, path, live.runtime.c.credlocks, scratch,
-                             settings.lock_wait_seconds,
+    reader = HostUsageReader(accounts_of(live), lambda: live.runtime.verified_cli(codex),
+                             live.runtime.c.credlocks, scratch, settings.lock_wait_seconds,
                              env={"PATH": path, "HOME": str(Path.home()), "LANG": "C.UTF-8"})
     names = ["default", *([OTHER] if os.environ.get(SECOND["codex"]) else [])]
     for account in names:
