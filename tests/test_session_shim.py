@@ -497,3 +497,42 @@ def test_status_runs_standalone_and_prints_nothing(run: Path, live: SessionServe
                           capture_output=True, timeout=30, check=False)
     assert (proc.returncode, proc.stdout, proc.stderr) == (0, b"", b"")
     assert live.served == 1
+
+
+def test_status_reads_no_more_than_one_line_of_input(run: Path, live: SessionServer) -> None:
+    flood = json.dumps({"rate_limits": LIMITS, "pad": "x" * (4 * shim.MAX_LINE)}).encode()
+    proc = subprocess.run([sys.executable, "-I", shim.__file__, "status"], input=flood, env=env_for(run),
+                          capture_output=True, timeout=30, check=False)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, b"", b"")
+    assert live.served == 0
+
+
+def test_status_input_that_never_ends_never_holds_the_shim(run: Path, live: SessionServer) -> None:
+    proc = subprocess.Popen([sys.executable, "-I", shim.__file__, "status"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env_for(run))
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({"rate_limits": LIMITS}).encode())
+        proc.stdin.flush()                  # no end of input: the shim gives up after STATUS_WAIT
+        assert proc.wait(timeout=30) == 0   # stdin still open; a TimeoutExpired here fails the test
+        assert proc.stdout is not None and proc.stderr is not None
+        assert (proc.stdout.read(), proc.stderr.read()) == (b"", b"")
+    finally:
+        proc.kill()
+        proc.wait()
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+    assert live.served == 0
+
+
+def test_read_bounded_cuts_a_flood_and_drops_a_stall() -> None:
+    r, w = os.pipe()
+    try:
+        os.write(w, b"y" * 100)
+        assert shim.read_bounded(r, 10, 5.0) == b"y" * 11      # cut at limit + 1, never all of it
+        t = FakeTime()
+        assert shim.read_bounded(r, 1000, 0.0, clock=t.clock) == b""   # no end of input in time
+    finally:
+        os.close(r)
+        os.close(w)

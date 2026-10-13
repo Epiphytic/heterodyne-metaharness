@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import select
 import socket
 import stat
 import sys
@@ -415,8 +416,26 @@ def request_main(argv: Sequence[str] | None = None) -> int:
     return rc
 
 
+def read_bounded(fd: int, limit: int, seconds: float, clock: Clock = time.monotonic) -> bytes:
+    """`fd`'s input up to its end, cut at `limit` + 1 bytes (too long to be read as one line), or b"" if
+    it hasn't ended within `seconds`: neither an endless nor a stalled stream can hold the caller."""
+    end = clock() + seconds
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    data = b""
+    while len(data) <= limit:
+        left = end - clock()
+        if left <= 0 or not poller.poll(max(1, int(left * 1000))):
+            return b""
+        chunk = os.read(fd, limit + 1 - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
 def status_main() -> int:
-    return run_status(sys.stdin.buffer.read(), os.environ)
+    return run_status(read_bounded(sys.stdin.fileno(), MAX_LINE, STATUS_WAIT), os.environ)
 
 
 def main(argv: Sequence[str]) -> int:
