@@ -144,6 +144,15 @@ def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: 
                       native_id=native, account=account, repo=rig.repo)
 
 
+def bead_worktree(rig: RuntimeRig, bead: str) -> Path:
+    """A linked worktree of the rig's repository pinned on `btq/<bead>`, for a second independent session:
+    a bead's branch holds one session at a time (btq-jjnqm)."""
+    worktree = rig.root / f"w-{bead}"
+    subprocess.run(["git", "-C", str(rig.repo), "worktree", "add", "-q", "-b", f"btq/{bead}", str(worktree)],
+                   check=True, capture_output=True)
+    return worktree
+
+
 def sandbox_teardown(runtime: SandboxRuntime, keys: Iterable[str], listed: Callable[[], set[str]],
                      owners: Mapping[str, SandboxRuntime] | None = None) -> list[str]:
     """The live module's teardown: stop every session it launched, each tried whatever the others do,

@@ -114,6 +114,8 @@ When wsd is not running, the manual steps are the fallback:
 4. Remove the whole session directory, `<state>/sessions/<short id>`, not only its record: a private git directory without a record refuses the next launch. The agent's conversation goes with it, so the next launch of that session starts the agent afresh.
 5. Start wsd. If `<state>/resolutions/` holds an intent for the session, finish it with `wsctl resolve` instead: the hold stays while it is there.
 
+**One session per bead branch.** A bead's branch `btq/<bead>` holds one session at a time, so a launch is refused (`another session of this bead still holds its branch`) while another session's record of that bead, in the same repository, is not ended, is unlanded, or still owes its lifetime WIP commit. A launch never ends that other session to make room: the hold clears through its own workstream's pickup (which ends a dead session) or its `stop`, and an unlanded one through the steps above.
+
 **What `RuntimeUnavailable` holds.** wsd holds the workstream (`runtime_unavailable`, with the runtime's reason as its detail) when the backend can't list its sandboxes, a session's commits were not landed (above), a sandbox has no session record, a session's pane or record can't be read, a session's end can't be confirmed, or a session ran but its state can't be found. Every listed session counts as the coder's, and a session whose end is unconfirmed stays listed as `unknown`. The hold is retried on every pickup.
 
 **Attaching.** An operator can watch a session with `tmux -L heterodyne-wsd attach -t wsd-<short id>`. By convention this is read-only: the pane is the agent's own terminal, so anything typed there is input to the agent.

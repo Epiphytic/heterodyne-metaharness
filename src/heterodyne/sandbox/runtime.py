@@ -86,6 +86,14 @@ KEEP_REFUSED = "the keep ref can't be created"
 NO_FAST_FORWARD = "the bead branch can't be fast-forwarded to the session's tip; nothing was changed"
 STEP_FAILED = "a resolve step failed; run the same wsctl resolve again"
 RESOLVE_POINTS = ("imported", "imported.recorded", "moved", "moved.recorded", "removed", "removed.recorded")
+BRANCH_TAKEN = "another session of this bead still holds its branch; a branch holds one session at a time"
+
+
+def _same_repo(recorded: str, repo: Path | None) -> bool:
+    """Whether a record's repository is the launch's: the same path once symlinks are resolved."""
+    if not recorded or repo is None:
+        return False
+    return os.path.realpath(recorded) == os.path.realpath(repo)
 
 
 class Phase(StrEnum):
@@ -303,6 +311,7 @@ class SandboxRuntime:
                 raise RuntimeUnavailable("the session record can't be written") from None
             if prev.wip_mark:
                 raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
+        self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
         cli = self._cli(adapter)
         protected, others = self._logins(adapter)
@@ -696,6 +705,25 @@ class SandboxRuntime:
     def _overdue(self, rec: SessionRecord) -> bool:
         """A session that ran is past its deadline: whatever ends it now ends it for its lifetime."""
         return rec.started_at > 0 and self.c.clock() >= rec.deadline
+
+    def _claim_branch(self, spec: LaunchSpec) -> None:
+        """Refuse a launch while another key's record of this bead holds the branch ``btq/<bead>``.
+
+        A record holds it while it is not ENDED (it still owes its land or lifetime WIP, D13), is unlanded,
+        or owes a WIP that can't be settled now. Every record is checked before anything is settled, so a
+        refusal moves nothing. This relies on wsd serializing launches per workstream (the Parker's entry
+        lock); it is not a cross-process lock, and two concurrent direct callers could both pass.
+        """
+        others = [r for r in self._records() if r.key != spec.session_key and r.bead == spec.bead
+                  and _same_repo(r.repo, spec.repo)]
+        if any(r.phase is not Phase.ENDED or r.unlanded for r in others):
+            raise LaunchFailed(BRANCH_TAKEN)
+        for other in others:
+            if other.wip_mark:
+                with contextlib.suppress(OSError):          # D13: the WIP it owes lands before anyone else's
+                    other = self._settle_wip(self.layout(other.key), other)
+                if other.wip_mark:
+                    raise LaunchFailed(BRANCH_TAKEN)
 
     def _settle_wip(self, layout: SessionLayout, rec: SessionRecord) -> SessionRecord:
         """Land the lifetime WIP commit an ended session still owes (D13), then clear the mark. The commit is
