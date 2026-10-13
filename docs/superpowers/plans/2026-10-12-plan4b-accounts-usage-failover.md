@@ -4,7 +4,7 @@
 
 **Goal:** the accounts change plan's three launcher items on top of plan 4's `SandboxRuntime`:
 
-- **AU-6** (btq-bc7yd): a launch binds the chosen account's login files, named accounts included. The per-credential-identity host lock (D8) serialises every harness refresh and rereads the login under it. The compiled spec check takes revision 16's install-root exception. The Other accounts probe covers the default login whenever a named account is chosen.
+- **AU-6** (btq-bc7yd): a launch binds the chosen account's login files, named accounts included. The per-credential-identity host lock (D8) serialises every harness refresh and rereads the login under it. The compiled spec check refuses every source in another account's login directory, with no exception (revision 16): the agent CLI comes from plan 4c's managed install, which lies in none. The Other accounts probe covers the default login whenever a named account is chosen.
 - **AU-7** (btq-n1ox2): the in-session usage producers (untrusted), the trusted host-side read (Codex only), the limit-reached signals, and the reactive limit flow: defer up to the WIP commit, then the trusted read, then exhausted-and-regate or an untrusted defer on the session's own account.
 - **AU-8** (btq-flxmf): launch, resume and relaunch take the gate's account. A switch is a cross-account resume (b) or a handoff relaunch (f) with `uuid5(NS, f"{session_key}:{generation}")`. A confirmed limit relaunches on the next eligible account at once. A freshness refusal moves to the next account of the same permitted list, else `needs-human`.
 
@@ -20,12 +20,12 @@
 **Tech Stack:** Python 3.12+, `uv`, pytest, hypothesis, ruff, pyright strict, msgspec (the only runtime dependency), SQLite (the existing journal), `fcntl.flock`.
 
 **Spec:**
-- ADR 0001, revision 16 draft (design repo `hermes-workstreams-v2`, branch `adr-r16`, commits `0ba5010` and `5def9ef`, on r15 `28e3df4`): §4.4 D1–D10, §7 Home isolation, the freshness gate, Other accounts and the install-root exception.
+- ADR 0001, revision 16 draft (design repo `hermes-workstreams-v2`, branch `adr-r16`, commits `0ba5010` and `5def9ef`, rewritten by `54a808d` for the operator's decision of 2026-10-13, on r15 `28e3df4`): §4.4 D1–D10, §7 Home isolation, Managed installs, the freshness gate and Other accounts. The first draft's install-root exception is gone (Appendix A.3).
 - The accounts change plan `docs/superpowers/plans/2026-10-05-heterodyne-accounts-and-usage-changes.md` at `66ad195`: AU-6, AU-7 and AU-8, and gates G1–G3.
 - S7, `docs/spikes/s7-accounts-and-usage.md` on `main`: the client-side findings, the L1–L7 runs and the recommended D9 defaults.
 - Plan 4: D9–D13, D22, gap 3.
 
-**Status:** draft for review. It needs a cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 11 Part B and Task 12 also wait on G2.
+**Status:** draft for review. The managed install store that r16 now requires is plan 4c (Task 3; Plan 4c, below). It needs a cross-model design review, then operator approval (a design-approval bead) before any task starts. Task 11 Part B and Task 12 also wait on G2.
 
 ## Global Constraints
 
@@ -52,11 +52,11 @@
   - `src/heterodyne/sandbox/` names adapters only through `heterodyne.agents.registry.ADAPTERS`.
   - The existing `adapter == "claude-code"` test in `Parker._pin_and_dispatch` is left as it is. It is pre-existing, and recorded under "Contradictions found in the sources".
 - **Fail closed.** "Every recovery path fails closed. Never infer absent, complete or safe from missing or unreadable evidence." In this plan:
-  - Each of these gives "unconfirmed" or a refused launch, never "fine": a lock that can't be taken, a login that can't be reread, a key that doesn't match, an install-root walk that errors or hits a bound, a trusted read that times out or returns nothing parseable, and a scratch home that can't be confirmed gone.
+  - Each of these gives "unconfirmed" or a refused launch, never "fine": a lock that can't be taken, a login that can't be reread, a key that doesn't match, a CLI that isn't at its pin, a trusted read that times out or returns nothing parseable, and a scratch home that can't be confirmed gone.
   - An untrusted report never moves another bead or another account.
-- **Never patch out the self-test, the credential check, the freshness gate, the CLI pin, the key check or the install-root walk.** No setting disables them. Tests prove each one refuses a launch.
+- **Never patch out the self-test, the credential check, the freshness gate, the CLI pin or the key check.** No setting disables them. Tests prove each one refuses a launch.
 - **Negative controls name their exact refusal.**
-  - Each refusal test asserts the exact message or errno, through the source's own constant (`spec.ROOT_*`, `runtime.LOGIN_STALE`, `runtime.KEY_CHANGED`, `credlock.LOCK_BUSY`). It is never a hand-typed string, never "any exception" and never "nonzero".
+  - Each refusal test asserts the exact message or errno, through the source's own constant (`runtime.LOGIN_STALE`, `runtime.KEY_CHANGED`, `credlock.LOCK_BUSY`). It is never a hand-typed string, never "any exception" and never "nonzero".
   - Exit 127 or a missing executable is never a refusal: the test fails.
   - A timeout, or no verified run, fails a negative control.
 - **Exit statuses are never masked.** Subprocess helpers return or raise on the real status. Nothing ends in `|| true`, and no `check=False` result goes unread.
@@ -77,10 +77,10 @@
   - Review runs at most three cycles. The third asks whether the result is good enough for this stage.
   - Close evidence includes `Code-Review: reviewer=<model> author=<model> mode=<cross-model|adversarial> range=<BASE>..<HEAD>`.
 - **Beads** (workstream `heterodyne`):
-  - Tasks 1–12 are `kind:task`.
+  - Tasks 1, 2 and 4–12 are `kind:task`. Task 3 is retired and has no bead.
   - Each carries `metadata.design_approval=<this plan's approval bead>`, `metadata.adr_revision=<the approved r16 commit>` and a blocking dependency on the approval bead.
-  - Task 11 is two beads: Part A (`kind:task`, no G2 dependency) and Part B (one bead per enabling commit, each blocking on the G2 bead). Task 12 blocks on the G2 bead and on Part B.
-  - AU-6, AU-7 and AU-8 (btq-bc7yd, btq-n1ox2 and btq-flxmf) close when every task that implements them has closed: Tasks 1–3 and 6 for AU-6; 4, 5, 7, 8 and 9 for AU-7; 10 for AU-8; and 11 for all three.
+  - Task 11 is two beads: Part A (`kind:task`, no G2 dependency) and Part B (one bead per enabling commit, each blocking on the G2 bead and on plan 4c's launcher bead). Task 12 blocks on the G2 bead, on Part B and on plan 4c's launcher bead.
+  - AU-6, AU-7 and AU-8 (btq-bc7yd, btq-n1ox2 and btq-flxmf) close when every task that implements them has closed: Tasks 1, 2 and 6 for AU-6; 4, 5, 7, 8 and 9 for AU-7; 10 for AU-8; and 11 for all three. AU-6 also waits for plan 4c's launcher task, without which a named Codex account is refused (Task 3).
 - **Branches:** each task has its own branch from `main` (`p4b-t<N>`) and its own PR, as plan 4's tasks did. Merge `origin/main`, never rebase, and never amend a pushed commit. Tasks that touch the same file merge in the order the Parallelism section gives.
 
 ---
@@ -100,7 +100,7 @@
 | E9 | The freshness-refusal path (AU-8: "A freshness-gate refusal moves on to the next account of the same permitted list"). | The runtime refuses a stale login with exactly `LOGIN_STALE`, and the receipt records it as `refused`/`failed` with that error. `Parker._outcome` recognises it by equality with the constant. It adds the entry's key to the op's `stale` data (comma-separated) and forgets the generation. The next pin runs the gate with those keys excluded (`exclude=`). If the gate finds another permitted account, the op returns `FAILED` without spending the launch budget, and the next pickup launches on that account. If it finds none (`AccountChanged`), the op escalates `LAUNCH_FAILED` with the detail `LOGIN_STALE`, so the bead becomes `needs-human`. A `Deadline` defers as usual. | No schema change: `receipts.refusal` keeps its CHECK constraint (`'failed', 'unavailable'`). The exclusion is per operation, so a later operation tries the refreshed login again. Exclusions only grow, so the path ends after at most one try per account. |
 | E10 | The handoff relaunch (§4.4 D7). | `LaunchSpec.handoff` is set by the guard when the new entry's key differs from the last launched entry's, and the profile's capabilities have (f) but not (b). Its `resume` is then false. The runtime's `_resume` returns `(False, None)` for a server-assigned adapter (Codex), and `(False, ids.handoff_session(key, generation))` otherwise. The native ID reaches the entry through the receipt, as it already does. With (b), a switch is an ordinary resume of the latest native ID. **The handoff prompt itself** (the §4.1 deterministic handoff) **is not built here** (Q3). | The ID rule is D7's. The runtime already knows `assigns_id`, so `wsd` stays adapter-free. (f) stays off until S7 L4 passes and a real handoff works (S7's D9 table), so nothing ships a fresh session with no handoff. |
 | E11 | The reactive limit flow (§4.4 D6). | `Parker.limit(session_key, generation, hint, now)` opens a PARK op with an **untrusted** QUOTA record clamped by D5. The record exists before anything stops, so a crash leaves the untrusted defer, never a trusted one. The op carries `limit_key` and `limit_gen`. The defer tail runs unchanged up to `defer.stopped`. The tail then commits the WIP unchanged (`defer.committed`, D6's first durable step). Two new steps sit after it (`LIMIT_STEPS`): `defer.read!`, after `Deps.usage_reader` answers (asked only if the profile has (d)), and `defer.confirmed`. **Confirmed** (`TrustedRead.limited`) means: the read's windows are ingested as trusted, `mark_exhausted` runs, and the gate runs again. The result supersedes the record with a trusted one: `Chosen` gives QUOTA until now (due at once), `Deadline` gives QUOTA until its `at`, and `AccountChanged` gives ACCOUNT_CHANGED. That happens in one transaction with `defer.confirmed`. **Unconfirmed** keeps the untrusted record. The tail then labels, comments and finishes as before. A failed WIP commit stops the tail before the read, so nothing is marked exhausted and no trusted record exists for a bead whose work isn't saved. A due QUOTA record goes through `undefer` in the same pickup, so the relaunch takes the next account through the guard's pin, as a new launch entry. | It reuses AU-4's crash-safe tail and AU-5's gate, and adds no new op kind. A forged signal reaches only its own bead's defer, at most `untrusted_max_defer_minutes`. "Relaunch at once" is the existing due-deferral path, which arms no timer for `until <= now`. |
-| E12 | The install-root walk (r16 §7). | `spec.check_install_root(root, login_names, login_files)` runs on the host just before `backend.create`, inside `check_credentials`, which plan 4's runtime already calls on every launch. It applies when the adapter's install root lies inside **any** login directory, the chosen account's included. r16 as first drafted (`0ba5010`) required the walk only for a source inside another account's directory; its follow-up commit `5def9ef` says the walk also covers the chosen account's directory, and states both bounds. The bounds are `ROOT_MAX_ENTRIES = 100_000` and `ROOT_MAX_DEPTH = 64`. The walk goes by directory fd: each directory is opened relative to its parent's fd with `O_NOFOLLOW` and must be the inode that was listed, and links are resolved strictly and never followed by the walk, so a tree swapped during the walk refuses (`ROOT_RACED`) and a dangling or looping link refuses (`ROOT_LINK_BROKEN`). The names it refuses are the adapter's `login_names` (the names inside the sandbox, carried on `SandboxSpec.login_names`) plus each configured file's own name; the inodes it refuses are every configured account's files, links followed. The refusal texts are `spec.ROOT_*` constants. `check_credentials(spec, protected, real_home)` keeps its signature. It always walks `SandboxSpec.cli_root` (recorded by `build_spec`) when that lies inside a login directory, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account-directory rule. No caller can skip the walk or pass another root. | The same tree is bound under every account, so it gets the same proof under every account. Claude's npm-local install (`~/.claude/local`) is covered too, and that tree is the larger one, so the bound is generous. A walk that errors or hits a bound refuses the launch. |
+| E12 | The CLI's install root inside a login directory (r16 §7, first draft). | **Superseded.** r16 as rewritten (`54a808d`) has no install-root exception, so plan 4b has no walk and no exemption. Plan 4's `check_credentials` refuses a CLI bound from another account's login directory, unchanged. The agent CLI moves to a managed install in plan 4c (Task 3; Plan 4c, above). | The operator chose a harness-owned, versioned, authenticated install store over proving a live install clean (2026-10-13). The walk's three blocking review findings (the tree isn't pinned after the walk, mounts can hide it, a hard link survives a refresh by rename) are closed by the store's design, not by a stronger walk. |
 | E13 | Other accounts with a named account chosen (§7). | `_logins(adapter, account)` puts the chosen account's directory and files in `chosen_*`. Every other configured account goes in `other_*`, and the `default` login goes there too when it isn't the chosen one. `ProbeContext.others` lists the same accounts. | This is §7's rule ("the default login included"), and plan 4's probe already handles any list. |
 | E14 | A session's turn-end events (S7 finding 1). | `Adapter.turn_end_events` is `("Stop", "StopFailure")` for Claude and `("Stop",)` for Codex. `SessionServer(turn_ends=...)` counts a turn end for any of them, and `TurnState.idle` is true after one. | The server stays adapter-neutral: it is given the names, and doesn't know them. |
 | E15 | Capability gating's single source. | Every capability check reads `accounts.view(profile).capabilities`. The runtime reads it for the producers (no exec without (c), no status line without (c)). `wsd` reads it again before ingesting or acting. AU-2's `config check` already refuses accounts without (a), and `"next"` without (d). | One table, checked again by the consumer. A producer bug can't enable a capability. |
@@ -117,7 +117,7 @@
 | Q4 | **Codex's live notifications.** E5 polls rather than subscribing to `account/rateLimits/updated` and `codexErrorInfo` on the live app-server. | Accept polling for v1. L2 should record whether `updated` fires mid-turn. If it does, a later task can add a host-side client on the bridge socket. |
 | Q5 | **Version drift.** S7 ran 2.1.286 and 0.160.0, while the ADR §4.2 table names 2.1.283 and 0.157.0. The code pins 2.1.286 and 0.160.0. | Fix the §4.2 table in the next ADR revision. L1–L7 run on the code's pins. |
 | Q6 | **Claude's `.credentials.lock`** sits beside `.credentials.json` (S7 (1)). Under a single-file read-only bind, the CLI's lock goes into the synthetic config directory, which is writable. Whether the CLI needs it to be shared with the host is L6's question. | No change in 4b. The single-file bind already keeps the host's lock out of the sandbox. L6 records the behaviour. |
-| Q7 | **Stricter install-root walk** (E12): it also runs when the root is inside the chosen account's own directory. | Accept. r16 commit `5def9ef` makes the ADR say so, with the bounds 100_000 entries and depth 64. |
+| Q7 | **The managed install store is its own plan (4c).** r16's store adds an installer, manifests and verification, a selection file, launch-entry fields, `wsctl harness` commands with Marmot approval asks, a new self-test probe, and changes to both adapters' launch shapes. | Approve the split. Plan 4b's Tasks 1, 2 and 4–10 and 11a don't need the store and can proceed. Named Codex accounts, Task 11b and Task 12 wait for plan 4c. |
 | Q8 | **Failover for Claude.** Claude has no (d), so `failover = "next"` is refused for it, and a Claude limit always defers on its own account. | Accept, as S7 recommends. Revisit only if a CLI version adds a host-side read. |
 | Q9 | **`failover = "next"` without (b) or (f).** The config check requires only (d), and S7 recommends (d) plus (b) or (f). | Accept as it is: the gate already keeps a running session on its account without (b) or (f), so the only effect is that new sessions fail over. If you want S7's stricter rule, it is a two-line change to `config/accounts.py` in Task 11 Part B. |
 
@@ -134,7 +134,7 @@
 | AU item | Scope line (change plan at `66ad195`) | Task |
 |---|---|---|
 | AU-6 | Bind only the chosen account's login files; `CLAUDE_CONFIG_DIR` / `CODEX_HOME` inside the home; never override `HOME` | 6 (the binds already exist in plan 4; 6 makes them follow the chosen account) |
-| AU-6 | The compiled spec check before every launch | 3, 6 |
+| AU-6 | The compiled spec check before every launch | 6 (plan 4's check, unchanged: no exception, r16); the CLI's managed install is plan 4c |
 | AU-6 | The freshness gate per account, under a lock keyed by credential identity, rereading under it | 2, 6 |
 | AU-6 | The new self-test probe (Other accounts, default included, canary) | 6 (plan 4's probe; the list now includes the default) |
 | AU-6 | The account on the launch entry; the env allowlist | already in AU-3 and plan 4 (`LAUNCHER_ENV`); 1 adds `credential_key` to `LaunchSpec` |
@@ -147,36 +147,47 @@
 | AU-8 | After a confirmed limit with `"next"`, relaunch at once on the next eligible account | 9 |
 | AU-8 | A freshness refusal moves to the next account, else `needs-human` | 10 |
 
+## Plan 4c: what plan 4b consumes (r16 §7 Managed installs)
+
+The managed install store is too large for this plan and reaches past it, so it is **plan 4c**, written next. It holds the installer and its manifest, the per-launch verification and taint, the Managed install probe, `harnesses.toml` and `[harnesses.<adapter>]`, the install and digest on launch entries (D2), `wsctl harness` and `/harness` with the install's approval ask, and each adapter's layout, content presentation and updater switches. It touches the config loader, `wsd`'s commands and journal, the admind approval flow, the self-test and both adapters. Plan 4b's tasks need none of it to be built and tested offline:
+- the offline rig's fake CLI lies outside every login directory, so Task 6's named-account tests run on plan 4's check unchanged;
+- on a host, before plan 4c lands, a named Codex account whose CLI lies in `~/.codex` is refused by plan 4's check, which is the r16 rule. Nothing ships with an exception.
+
+Plan 4b consumes from plan 4c:
+- the runtime's CLI resolution moved onto the selected, verified install (plan 4's `SandboxRuntime._cli`). Task 6 calls `_cli` as it is and needs no change.
+- the same resolution for host-side use, so Task 8's `HostUsageReader` runs the verified install's entry point, and `build_usage_reader` enables the reader when Codex has a selected install, not when `[adapters.codex] binary` is set. Until then Task 8 locates the CLI as plan 4 does, and its pin check holds. Plan 4c makes that one change to `hostread.py` and `build.py`, and the (d) capability stays off until it has (Task 11b waits on plan 4c).
+- Task 12 runs on the managed installs, so it waits for plan 4c, as Task 11b does.
+
 ## Parallelism
 
-Tasks 1–4 have no dependencies on each other, and four worker sessions can build them at once. Task 5 uses Task 4's `CLAUDE_HOOK_EVENTS` and `SessionServer(on_event=)`, so it starts once Task 4 has merged. Each later task starts once everything it depends on has merged to `main`.
+Tasks 1, 2 and 4 have no dependencies on each other, and three worker sessions can build them at once. Task 3 is retired (plan 4c). Task 5 uses Task 4's `CLAUDE_HOOK_EVENTS` and `SessionServer(on_event=)`, so it starts once Task 4 has merged. Each later task starts once everything it depends on has merged to `main`.
 
 ```
-Wave 1 (parallel):  T1 interfaces, T2 credlock, T3 install-root walk, T4 turn ends
+Wave 1 (parallel):  T1 interfaces, T2 credlock, T4 turn ends
 Wave 2 (parallel):  T5 adapter parsing (T4)
-                    T6 named-account binding (T1,T2,T3)
+                    T6 named-account binding (T1,T2)
                     T9 limit flow (T1)
 Wave 3 (parallel):  T7 runtime signals (T4,T5,T6)
                     T8 trusted read (T1,T2,T5,T6)
                     T10 handoff and stale path (T1,T6,T9)
 Any wave:           T11a table invariants (none)
-Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test (T11b)
+Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2, plan 4c)  ->  T12 live test (T11b)
 ```
 
 | Task | Depends on | Can run beside | Files it shares (merge order) |
 |---|---|---|---|
-| 1 | none | 2, 3, 4, 5 | `wsd/runtime.py`, `wsd/headroom.py`, `wsd/usage.py`, `wsd/workstream.py`, `sandbox/runtime.py` (the empty `signals` only), `tests/fakes/fake_runtime.py` |
-| 2 | none | 1, 3, 4, 5 | none |
-| 3 | none | 1, 2, 4, 5 | `sandbox/spec.py` |
-| 4 | none | 1, 2, 3 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
-| 5 | 4 | 1, 2, 3, 6, 9 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
-| 6 | 1, 2, 3 | 5, 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
+| 1 | none | 2, 4, 5 | `wsd/runtime.py`, `wsd/headroom.py`, `wsd/usage.py`, `wsd/workstream.py`, `sandbox/runtime.py` (the empty `signals` only), `tests/fakes/fake_runtime.py` |
+| 2 | none | 1, 4, 5 | none |
+| 3 | retired (plan 4c) | | |
+| 4 | none | 1, 2 | `session/server.py`, `agents/base.py`, `agents/claude_code.py` (4 before 5) |
+| 5 | 4 | 1, 2, 6, 9 | `agents/base.py`, `agents/claude_code.py`, `agents/codex.py`, `session/shim.py` (merges after 4) |
+| 6 | 1, 2 | 5, 8, 9 | `sandbox/runtime.py`, `sandbox/build.py`, `wsd/park.py` (one line in `_pin_and_dispatch`; merges before 10) |
 | 8 | 1, 2, 5, 6 | 7, 9, 10 | `wsd/cli.py`, `wsd/daemon.py`, `sandbox/build.py` (merges after 6) |
 | 9 | 1 | 5, 6, 8 | `wsd/park.py` (`capabilities`, `limit`, `defer_tail`), `wsd/scheduler.py`, `tests/wsd_env.py` |
 | 10 | 1, 6, 9 | 7, 8 | `wsd/park.py` (`_pin`, `_pin_holds`, `_pin_and_dispatch`, `_outcome`; merges after 6 and 9), `tests/fakes/fake_runtime.py`, `tests/test_wsd_defer.py` (uses 9's helpers) |
 | 7 | 4, 5, 6 | 10 | `sandbox/runtime.py` |
 | 11a | none | any | `config/capabilities.py`, `tests/test_config_accounts.py` |
-| 11b | 6–10, 11a, G2 | none | `config/capabilities.py` |
+| 11b | 6–10, 11a, G2, plan 4c | none | `config/capabilities.py` |
 | 12 | 11b | none | `tests/live/`, `docs/wsd.md` |
 
 ## File map
@@ -189,14 +200,13 @@ Wave 4 (G2-gated):  T11b capability table (T6-T10, T11a, G2)  ->  T12 live test 
 | `src/heterodyne/wsd/ids.py` | 1 | `handoff_session` |
 | `src/heterodyne/wsd/workstream.py` | 1 | `Deps.usage_reader` |
 | `src/heterodyne/wsd/credlock.py` (new) | 2 | the D8 lock |
-| `src/heterodyne/sandbox/spec.py` | 3 | `check_install_root`, `_open_dir`, `_resolve_link`, the `ROOT_*` texts and bounds; `SandboxSpec.cli_root` and `.login_names`, walked by `check_credentials` |
 | `src/heterodyne/session/server.py` | 4 | `turn_ends`, `on_event`, `TurnState.boundary` |
 | `src/heterodyne/agents/base.py` | 4, 5 | `turn_end_events`, `UsageReport`, `usage_from_event`, `run_files(usage=, limits=)` |
 | `src/heterodyne/agents/claude_code.py` | 4, 5 | the `StopFailure` hook, the status line, parsing |
 | `src/heterodyne/agents/codex.py` | 5 | `parse_rate_limits`, `usage_argv` |
 | `src/heterodyne/session/shim.py` | 5 | the `status` mode |
 | `src/heterodyne/sandbox/resources/codex_usage.py` (new) | 5 | the in-sandbox read |
-| `src/heterodyne/sandbox/runtime.py` | 1, 6, 7 | named-account binding, the key check, the locked freshness gate, the walk, the handoff, `signals` |
+| `src/heterodyne/sandbox/runtime.py` | 1, 6, 7 | named-account binding, the key check, the locked freshness gate, the handoff, `signals` |
 | `src/heterodyne/sandbox/settings.py` | 6, 7 | `lock_wait_seconds`, `usage_poll_seconds` |
 | `src/heterodyne/sandbox/build.py` | 6, 8 | the lock directory; the reader |
 | `src/heterodyne/sandbox/hostread.py` (new) | 8 | `HostUsageReader` |
@@ -845,512 +855,13 @@ git add src/heterodyne/wsd/credlock.py src/heterodyne/wsd/settings.py tests/test
 git commit -m "plan4b T2: the D8 credential lock"
 ```
 
-## Task 3: the install-root walk and the exemption for the CLI's own bind
+## Task 3: retired (the managed install store is plan 4c)
 
-r16 §7: the Codex CLI installs under `~/.codex`, the default login's directory. Once a named account is chosen, the default login is another account's, and plan 4's check refuses the CLI's bind ("a bind would reach into another account's login directory"). r16 replaces that refusal, for the CLI's own bind only, with a proof: a bounded walk of the install root that finds nothing that is, names or reaches a login file. Plan 4b runs the walk whenever the root lies inside any login directory, the chosen one's included (E12).
+This task was the install-root walk and the exemption for the CLI's own bind. Revision 16, as rewritten for the operator's decision of 2026-10-13 (`54a808d`), drops that exception: the agent CLI and the content it loads come from a managed, versioned, authenticated install that lies inside no login directory (§7 Managed installs). The store is its own plan, **plan 4c** (see "Plan 4c: what plan 4b consumes", above). The heading stays so the task numbers hold. There is no Task 3 bead.
 
-**Files:**
-- Modify: `src/heterodyne/sandbox/spec.py` (the `ROOT_*` texts and bounds, `OTHER_ACCOUNT_DIR`, `_open_dir`, `_resolve_link`, `check_install_root`, `SandboxSpec.cli_root` and `SandboxSpec.login_names`, `build_spec`, `check_credentials`)
-- Test: `tests/test_sandbox_spec.py`
-
-**Interfaces:**
-- Consumes: nothing from other tasks.
-- Produces:
-  - `spec.check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None`, raising `SpecRefused` with exactly one of `spec.ROOT_NOT_CANONICAL`, `ROOT_LOGIN_NAME`, `ROOT_LOGIN_ALIAS`, `ROOT_LINK_OUT`, `ROOT_LINK_BROKEN`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_RACED` or `ROOT_WALK_FAILED`. `login_names` are the names a login file has inside the sandbox; `login_files` are every configured account's files, whose inodes (links followed) an entry must not share.
-  - `spec.ROOT_MAX_ENTRIES = 100_000` and `spec.ROOT_MAX_DEPTH = 64`, read at call time.
-  - `spec.OTHER_ACCOUNT_DIR`: the existing refusal text, now a constant.
-  - `SandboxSpec.cli_root: Path | None = None` and `SandboxSpec.login_names: tuple[str, ...] = ()`, set by `build_spec` from `AgentFacts.cli_root` and `AgentFacts.login_names` (the adapter's names, `("auth.json",)` for Codex).
-  - `check_credentials(spec, protected, real_home)` keeps its signature. It walks `spec.cli_root` when that lies inside a login directory, with the names `spec.login_names` plus each configured file's own name, then exempts exactly the bind `Bind(cli_root, cli_root, True)` from the other-account rule. Task 6 relies on this for named Codex accounts.
-
-Every link that can't be resolved strictly, dangling or looping, inside the root or out of it, refuses with the one text `ROOT_LINK_BROKEN`: the walk can't tell where it would lead once its target appears, so it fails closed. If a CLI release ships such a link, the launch refuses with that fixed text and the operator learns it at once.
-
-The walk cannot be skipped by a caller: it is part of `check_credentials`, which plan 4's runtime already calls on every launch just before `backend.create`, and `build_spec` always records the root.
-
-- [ ] **Step 1: Write the failing tests**
-
-In `tests/test_sandbox_spec.py`, import `heterodyne.sandbox.spec as spec_mod`, `os`, and the new names (`OTHER_ACCOUNT_DIR`, `ROOT_LINK_BROKEN`, `ROOT_LINK_OUT`, `ROOT_LOGIN_ALIAS`, `ROOT_LOGIN_NAME`, `ROOT_NOT_CANONICAL`, `ROOT_RACED`, `ROOT_SPECIAL`, `ROOT_TOO_LARGE`, `ROOT_WALK_FAILED`, `check_install_root`). Make `facts` build from the canonical temporary directory, so the CLI root is canonical as `Cli.root` always is (`find_binary` resolves it):
-
-```python
-def facts(root: Path) -> AgentFacts:
-    cli = root.resolve() / "home" / ".codex" / "packages" / "rel" / "bin"
-```
-
-(the rest of `facts` is unchanged). Then append:
-
-```python
-# --- the install-root walk (r16 §7, plan 4b E12) ---
-
-def named(root: Path) -> tuple[SpecInput, Protected]:
-    """A named account (.codex-b) chosen: the default login, which holds the CLI, is another account's."""
-    chosen = root / "home" / ".codex-b"
-    chosen.mkdir(parents=True, exist_ok=True)
-    (chosen / "auth.json").write_text("{}")
-    i = spec_input(root)
-    default = root / "home" / ".codex"
-    return (replace(i, login_files=(chosen / "auth.json",)),
-            Protected(chosen_dir=chosen, chosen_files=(chosen / "auth.json",), other_dirs=(default,),
-                      other_files=(default / "auth.json",)))
-
-
-def cli_root(spec: SandboxSpec) -> Path:
-    assert spec.cli_root is not None
-    return spec.cli_root
-
-
-def test_the_spec_records_the_cli_root_and_the_login_names(tmp_path: Path) -> None:
-    i = spec_input(tmp_path)
-    spec = build_spec(i)
-    assert spec.cli_root == i.agent.cli_root and spec.login_names == ("auth.json",)
-
-
-def test_the_cli_inside_another_accounts_login_dir_passes_once_walked(tmp_path: Path) -> None:
-    i, prot = named(tmp_path)
-    spec = build_spec(i)
-    check_credentials(spec, prot, tmp_path / "home")
-    with pytest.raises(SpecRefused) as refused:            # plan 4's rule, for any other bind
-        check_credentials(replace(spec, binds=(*spec.binds, Bind(tmp_path / "home" / ".codex" / "packages",
-                                                                Path("/mnt/x"), True))),
-                          prot, tmp_path / "home")
-    assert str(refused.value) == OTHER_ACCOUNT_DIR
-
-
-@pytest.mark.parametrize("change", [{"read_only": False}, {"target": Path("/mnt/cli")}])
-def test_only_the_cli_bind_read_only_at_its_own_path_is_exempt(tmp_path: Path,
-                                                               change: dict[str, object]) -> None:
-    i, prot = named(tmp_path)
-    spec = build_spec(i)
-    root = cli_root(spec)
-    binds = tuple(replace(b, **change) if b.source == root else b  # type: ignore[arg-type]
-                  for b in spec.binds)
-    with pytest.raises(SpecRefused) as refused:
-        check_credentials(replace(spec, binds=binds), prot, tmp_path / "home")
-    assert str(refused.value) == OTHER_ACCOUNT_DIR
-
-
-def test_a_walk_refusal_refuses_the_launch_inside_the_chosen_dir_too(tmp_path: Path) -> None:
-    spec = build_spec(spec_input(tmp_path))                # the CLI under the chosen ~/.codex
-    (cli_root(spec) / "auth.json").write_text("{}")
-    with pytest.raises(SpecRefused) as refused:
-        check_credentials(spec, protected(tmp_path), tmp_path / "home")
-    assert str(refused.value) == ROOT_LOGIN_NAME
-
-
-def test_the_walk_uses_the_names_inside_the_sandbox_not_the_configured_ones(tmp_path: Path) -> None:
-    store = tmp_path / "home" / ".codex" / "credentials-store"       # configured under another name
-    store.parent.mkdir(parents=True)
-    store.write_text("{}")
-    spec = build_spec(spec_input(tmp_path, login_files=(store,)))
-    prot = Protected(chosen_dir=store.parent, chosen_files=(store,), other_dirs=(), other_files=())
-    check_credentials(spec, prot, tmp_path / "home")
-    (cli_root(spec) / "bin" / "auth.json").write_text("{}")        # bound as auth.json inside
-    with pytest.raises(SpecRefused) as refused:
-        check_credentials(spec, prot, tmp_path / "home")
-    assert str(refused.value) == ROOT_LOGIN_NAME
-
-
-def test_a_root_outside_every_login_dir_is_not_walked(tmp_path: Path,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    walked: list[Path] = []
-    monkeypatch.setattr(spec_mod, "check_install_root", lambda root, names, files: walked.append(root))
-    outside = tmp_path / "opt" / "cli"
-    outside.mkdir(parents=True)
-    spec = build_spec(spec_input(tmp_path))
-    check_credentials(replace(spec, cli_root=outside.resolve()), protected(tmp_path), tmp_path / "home")
-    assert walked == []
-    check_credentials(spec, protected(tmp_path), tmp_path / "home")
-    assert walked == [cli_root(spec)]
-
-
-def tree(tmp_path: Path) -> tuple[Path, Path]:
-    """A canonical install root with a little content, and a login file outside it."""
-    root = tmp_path / "root"
-    root.mkdir()
-    root = root.resolve()
-    (root / "bin").mkdir()
-    (root / "bin" / "cli").write_text("")
-    (root / "lib" / "deep").mkdir(parents=True)
-    (root / "lib" / "deep" / "x.js").write_text("")
-    (root / "lib" / "here").symlink_to(root / "bin" / "cli")             # a link that stays inside
-    login = tmp_path / "login" / "auth.json"
-    login.parent.mkdir()
-    login.write_text("{}")
-    return root, login
-
-
-def test_a_clean_tree_passes(tmp_path: Path) -> None:
-    root, login = tree(tmp_path)
-    check_install_root(root, ("auth.json",), (login, tmp_path / "missing" / "auth.json"))
-
-
-def _name(root: Path, login: Path) -> None:
-    (root / "lib" / "auth.json").mkdir()
-
-
-def _alias(root: Path, login: Path) -> None:
-    os.link(login, root / "lib" / "deep" / "innocent")
-
-
-def _link_out(root: Path, login: Path) -> None:
-    (root / "lib" / "out").symlink_to(login.parent)
-
-
-def _dangling_out(root: Path, login: Path) -> None:
-    (root / "lib" / "gone").symlink_to(root.parent / "nowhere")
-
-
-def _dangling_in(root: Path, login: Path) -> None:
-    (root / "lib" / "gone").symlink_to(root / "nowhere")
-
-
-def _loop(root: Path, login: Path) -> None:
-    (root / "lib" / "a").symlink_to(root / "lib" / "b")
-    (root / "lib" / "b").symlink_to(root / "lib" / "a")
-
-
-def _fifo(root: Path, login: Path) -> None:
-    os.mkfifo(root / "lib" / "pipe")
-
-
-def open_fds() -> int:
-    return len(os.listdir("/dev/fd"))  # noqa: PTH208
-
-
-@pytest.mark.parametrize(("plant", "reason"), [(_name, ROOT_LOGIN_NAME), (_alias, ROOT_LOGIN_ALIAS),
-                                                (_link_out, ROOT_LINK_OUT), (_dangling_out, ROOT_LINK_BROKEN),
-                                                (_dangling_in, ROOT_LINK_BROKEN), (_loop, ROOT_LINK_BROKEN),
-                                                (_fifo, ROOT_SPECIAL)])
-def test_each_way_to_reach_a_login_is_refused(tmp_path: Path, plant: Callable[[Path, Path], None],
-                                              reason: str) -> None:
-    root, login = tree(tmp_path)
-    plant(root, login)
-    before = open_fds()
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(root, ("auth.json",), (login,))
-    assert str(refused.value) == reason
-    assert open_fds() == before                            # every directory fd closed on the way out
-
-
-def _dir_to_link(root: Path, login: Path) -> None:
-    (root / "lib").rename(root.parent / "lib-away")
-    (root / "lib").symlink_to(login.parent)
-
-
-def _dir_to_other_dir(root: Path, login: Path) -> None:
-    (root / "lib").rename(root.parent / "lib-away")
-    (root / "lib").mkdir()
-
-
-@pytest.mark.parametrize("swap", [_dir_to_link, _dir_to_other_dir])
-def test_a_directory_swapped_between_listing_and_opening_is_refused(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: Callable[[Path, Path], None]) -> None:
-    root, login = tree(tmp_path)
-    real = spec_mod._open_dir
-
-    def racing(name: str, parent: int | None, seen: os.stat_result) -> int:
-        if name == "lib":
-            swap(root, login)
-        return real(name, parent, seen)
-
-    monkeypatch.setattr(spec_mod, "_open_dir", racing)
-    before = open_fds()
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(root, ("auth.json",), (login,))
-    assert str(refused.value) == ROOT_RACED
-    assert open_fds() == before
-
-
-def _link_replaced(root: Path, login: Path) -> None:
-    (root / "lib" / "here").unlink()
-    (root / "lib" / "here").symlink_to(root / "bin" / "cli")              # same target, another link
-
-
-def _parent_replaced(root: Path, login: Path) -> None:
-    (root / "lib").rename(root.parent / "lib-away")
-    (root / "lib").mkdir()
-    (root / "lib" / "here").symlink_to(root / "bin" / "cli")
-
-
-@pytest.mark.parametrize("swap", [_link_replaced, _parent_replaced])
-def test_a_link_swapped_while_it_is_resolved_is_refused(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: Callable[[Path, Path], None]) -> None:
-    root, login = tree(tmp_path)
-    real = spec_mod._resolve_link
-
-    def racing(path: str) -> str:
-        swap(root, login)
-        return real(path)
-
-    monkeypatch.setattr(spec_mod, "_resolve_link", racing)
-    before = open_fds()
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(root, ("auth.json",), (login,))
-    assert str(refused.value) == ROOT_RACED
-    assert open_fds() == before
-
-
-def test_a_missing_root_is_refused(tmp_path: Path) -> None:
-    root, login = tree(tmp_path)
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(root / "nowhere", ("auth.json",), (login,))
-    assert str(refused.value) == ROOT_WALK_FAILED
-
-
-def test_a_root_that_is_not_canonical_is_refused(tmp_path: Path) -> None:
-    root, login = tree(tmp_path)
-    (tmp_path / "alias").symlink_to(root)
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(tmp_path / "alias", ("auth.json",), (login,))
-    assert str(refused.value) == ROOT_NOT_CANONICAL
-
-
-@pytest.mark.parametrize(("bound", "value"), [("ROOT_MAX_ENTRIES", 4), ("ROOT_MAX_DEPTH", 1)])
-def test_a_tree_past_a_bound_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str,
-                                        value: int) -> None:
-    root, login = tree(tmp_path)                           # 6 entries, 3 levels
-    monkeypatch.setattr(spec_mod, bound, value)
-    with pytest.raises(SpecRefused) as refused:
-        check_install_root(root, ("auth.json",), (login,))
-    assert str(refused.value) == ROOT_TOO_LARGE
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
-def test_an_unreadable_directory_or_login_refuses(tmp_path: Path) -> None:
-    root, login = tree(tmp_path)
-    locked = root / "lib" / "deep"
-    locked.chmod(0)
-    try:
-        with pytest.raises(SpecRefused) as refused:
-            check_install_root(root, ("auth.json",), (login,))
-        assert str(refused.value) == ROOT_WALK_FAILED
-    finally:
-        locked.chmod(0o700)
-    login.parent.chmod(0)
-    try:
-        with pytest.raises(SpecRefused) as refused:
-            check_install_root(root, ("auth.json",), (login,))
-        assert str(refused.value) == ROOT_WALK_FAILED
-    finally:
-        login.parent.chmod(0o700)
-
-
-def test_the_root_texts_name_no_path() -> None:
-    texts = (ROOT_NOT_CANONICAL, ROOT_LOGIN_NAME, ROOT_LOGIN_ALIAS, ROOT_LINK_OUT, ROOT_LINK_BROKEN,
-             ROOT_SPECIAL, ROOT_TOO_LARGE, ROOT_RACED, ROOT_WALK_FAILED, OTHER_ACCOUNT_DIR)
-    assert len(set(texts)) == len(texts)
-    for text in texts:
-        assert "/" not in text and "auth.json" not in text
-```
-
-Also import `Callable` from `collections.abc` and `SandboxSpec` from `heterodyne.sandbox.spec`.
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `timeout 300 uv run pytest tests/test_sandbox_spec.py -q`
-Expected: FAIL at import (`cannot import name 'OTHER_ACCOUNT_DIR'`).
-
-- [ ] **Step 3: Implement**
-
-In `src/heterodyne/sandbox/spec.py`, add `import errno`, `import stat` and `from collections.abc import Iterable, Mapping`, then the constants after `LAUNCHER_ENV`:
-
-```python
-# The install-root walk (r16 §7, plan 4b E12). Read at call time, so tests can lower the bounds.
-ROOT_MAX_ENTRIES = 100_000
-ROOT_MAX_DEPTH = 64
-ROOT_NOT_CANONICAL = "the CLI install root inside a login directory is not a canonical path"
-ROOT_LOGIN_NAME = "the CLI install root holds an entry named like a login file"
-ROOT_LOGIN_ALIAS = "the CLI install root holds a hard link to a login file"
-ROOT_LINK_OUT = "the CLI install root holds a symbolic link that leaves it"
-ROOT_LINK_BROKEN = "the CLI install root holds a symbolic link that dangles or loops"
-ROOT_SPECIAL = "the CLI install root holds something other than files, directories and links"
-ROOT_TOO_LARGE = "the CLI install root is too large or too deep to check"
-ROOT_RACED = "the CLI install root changed while it was being checked"
-ROOT_WALK_FAILED = "the CLI install root can't be read to check it"
-OTHER_ACCOUNT_DIR = "a bind would reach into another account's login directory"
-```
-
-Add the field at the end of `SandboxSpec`:
-
-```python
-    cli_root: Path | None = None        # the CLI's install root, for the install-root walk (plan 4b E12)
-    login_names: tuple[str, ...] = ()   # the adapter's login names inside the sandbox, for the same walk
-```
-
-In `build_spec`, pass it:
-
-```python
-    return SandboxSpec(name, i.worktree, binds, tuple(logins), read_only, read_write, tuple(egress), env,
-                       i.uid, i.gid, cli_root=i.agent.cli_root, login_names=i.agent.login_names)
-```
-
-Add `_open_dir`, `_resolve_link` and `check_install_root` before `check_credentials`. The two helpers are separate functions so the race tests can swap the tree at exactly the moment between listing and opening, and between listing and resolving:
-
-```python
-def _open_dir(name: str, parent: int | None, seen: os.stat_result) -> int:
-    """Open a directory the walk listed (relative to `parent`'s fd, or the root's path when `parent` is
-    None) without following a link, and confirm it is the inode that was listed. A directory swapped
-    for a link, a file or another directory in between refuses: the walk never reads somewhere else."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-    except OSError as e:
-        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
-            raise SpecRefused(ROOT_RACED) from None
-        raise SpecRefused(ROOT_WALK_FAILED) from None
-    try:
-        st = os.fstat(fd)
-    except OSError:
-        os.close(fd)
-        raise SpecRefused(ROOT_WALK_FAILED) from None
-    if (st.st_dev, st.st_ino) != (seen.st_dev, seen.st_ino):
-        os.close(fd)
-        raise SpecRefused(ROOT_RACED)
-    return fd
-
-
-def _resolve_link(path: str) -> str:
-    """Where a link inside the root leads, every link on the way followed. A dangling link or a loop
-    raises OSError: the walk refuses it rather than guess where it would lead."""
-    return os.path.realpath(path, strict=True)
-
-
-def check_install_root(root: Path, login_names: Iterable[str], login_files: Iterable[Path]) -> None:
-    """r16 §7: the CLI's install root holds nothing that is, names or reaches a login file. The root is
-    canonical; no entry is named like a login file (`login_names`, the names inside the sandbox); no
-    entry is a hard link to one (the device and inode of any of `login_files`, every configured
-    account's, links followed); every symbolic link resolves, strictly, inside the root; everything
-    else is a regular file or a directory. A tree past ROOT_MAX_ENTRIES entries or ROOT_MAX_DEPTH
-    levels, or any error reading it, refuses.
-
-    The walk goes by directory fd: each directory is opened relative to its parent's fd with
-    O_NOFOLLOW and must be the inode that was listed, and each link's directory must still be the
-    directory being walked once the link is resolved, so a tree changed during the walk refuses
-    (ROOT_RACED) rather than passing on what it used to hold. At most ROOT_MAX_DEPTH + 1 fds are open
-    at once, and every one is closed before this returns or raises."""
-    names = frozenset(login_names)
-    aliases: set[tuple[int, int]] = set()
-    for login in login_files:
-        try:
-            st = login.stat()
-        except FileNotFoundError:
-            continue                            # nothing there to alias
-        except OSError:
-            raise SpecRefused(ROOT_WALK_FAILED) from None
-        aliases.add((st.st_dev, st.st_ino))
-    try:
-        top = os.lstat(root)
-        canonical = os.path.realpath(root, strict=True)
-    except OSError:
-        raise SpecRefused(ROOT_WALK_FAILED) from None
-    if str(root) != canonical:
-        raise SpecRefused(ROOT_NOT_CANONICAL)
-    entries = 0
-
-    def walk(fd: int, where: str, seen: os.stat_result, depth: int) -> None:
-        nonlocal entries
-        folders: list[tuple[str, os.stat_result]] = []
-        with os.scandir(fd) as found:
-            for entry in found:
-                entries += 1
-                if entries > ROOT_MAX_ENTRIES:
-                    raise SpecRefused(ROOT_TOO_LARGE)
-                if entry.name in names:
-                    raise SpecRefused(ROOT_LOGIN_NAME)
-                st = entry.stat(follow_symlinks=False)
-                if (st.st_dev, st.st_ino) in aliases:
-                    raise SpecRefused(ROOT_LOGIN_ALIAS)
-                if stat.S_ISLNK(st.st_mode):
-                    try:
-                        target = _resolve_link(posixpath.join(where, entry.name))
-                    except OSError:
-                        raise SpecRefused(ROOT_LINK_BROKEN) from None
-                    try:
-                        now = os.lstat(entry.name, dir_fd=fd)
-                        here = os.lstat(where)
-                    except OSError:
-                        raise SpecRefused(ROOT_RACED) from None   # it was listed a moment ago
-                    if ((now.st_dev, now.st_ino) != (st.st_dev, st.st_ino)
-                            or (here.st_dev, here.st_ino) != (seen.st_dev, seen.st_ino)):
-                        raise SpecRefused(ROOT_RACED)
-                    if not Path(target).is_relative_to(root):
-                        raise SpecRefused(ROOT_LINK_OUT)
-                elif stat.S_ISDIR(st.st_mode):
-                    if depth >= ROOT_MAX_DEPTH:
-                        raise SpecRefused(ROOT_TOO_LARGE)
-                    folders.append((entry.name, st))
-                elif not stat.S_ISREG(st.st_mode):
-                    raise SpecRefused(ROOT_SPECIAL)
-        for name, st in folders:
-            child = _open_dir(name, fd, st)
-            try:
-                walk(child, posixpath.join(where, name), st, depth + 1)
-            finally:
-                os.close(child)
-
-    fd = _open_dir(str(root), None, top)
-    try:
-        walk(fd, str(root), top, 0)
-    except OSError:
-        raise SpecRefused(ROOT_WALK_FAILED) from None
-    finally:
-        os.close(fd)
-```
-
-Replace `check_credentials`:
-
-```python
-def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) -> None:
-    """D10. The login binds are exactly the chosen account's login files, read-only. No other bind's
-    source, by its own path or its canonical one, equals or contains the real home, a login directory or
-    a login file, or lies inside another account's login directory (r15 §7), by its own path or any the
-    kernel walks through to resolve it (`_route`): a symlink out of that directory doesn't excuse a route
-    into it.
-
-    The CLI's install root may lie inside a login directory: the Codex CLI installs under the default
-    login's. Then the root must first pass `check_install_root`, whichever account is chosen (r16 §7,
-    plan 4b E12), and only its own bind, read-only at its canonical path, is exempt from the
-    other-account rule: the same tree is bound under every account. The walk's names are the adapter's
-    (the names the files have inside the sandbox) and each configured file's own; its inodes are every
-    configured account's files, links followed."""
-    want = {_real(p) for p in protected.chosen_files}
-    got = [_real(b.source) for b in spec.logins]
-    if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
-        raise SpecRefused("the login binds are not exactly the chosen account's login files, read-only")
-    guarded = {q for p in (protected.chosen_dir, *protected.chosen_files, *protected.other_dirs,
-                           *protected.other_files) for q in (p, _real(p))}
-    other_dirs = {q for p in protected.other_dirs for q in (p, _real(p))}
-    login_dirs = {q for p in (protected.chosen_dir, *protected.other_dirs) for q in (p, _real(p))}
-    homes = {real_home, _real(real_home)}
-    exempt: Bind | None = None
-    root = spec.cli_root
-    if root is not None and any(q.is_relative_to(d) for q in (root, _real(root)) for d in login_dirs):
-        files = (*protected.chosen_files, *protected.other_files)
-        check_install_root(root, {*spec.login_names, *(f.name for f in files)}, files)
-        exempt = Bind(root, root, True)
-    for b in spec.binds:
-        for source in {b.source, _real(b.source)}:
-            if any(h.is_relative_to(source) for h in homes):
-                raise SpecRefused("a bind would expose the real home directory")
-            if any(p.is_relative_to(source) for p in guarded):
-                raise SpecRefused("a bind would expose a login directory or login file")
-        if b == exempt:
-            continue
-        if any(q.is_relative_to(d) for q in (b.source, *_route(b.source)) for d in other_dirs):
-            raise SpecRefused(OTHER_ACCOUNT_DIR)
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `timeout 300 uv run pytest tests/test_sandbox_spec.py tests/test_sandbox_runtime.py tests/test_sandbox_openshell_policy.py tests/test_sandbox_openshell_selftest.py -q`
-Expected: PASS. Plan 4's existing tests, `test_credentials_pass_with_cli_inside_the_chosen_login_dir` included, still pass: that tree is clean, so the walk passes.
-
-Then: `timeout 300 uv run pyright src/heterodyne/sandbox/spec.py tests/test_sandbox_spec.py` and `uv run ruff check src tests`.
-Expected: 0 errors.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/heterodyne/sandbox/spec.py tests/test_sandbox_spec.py
-git commit -m "plan4b T3: the install-root walk and the CLI bind's exemption (r16 §7)"
-```
+Nothing in plan 4b needs a replacement here:
+- plan 4's `check_credentials` stays as it is, with no exemption. With a named account chosen, the default login is another account's, so a CLI bound from inside `~/.codex` is refused with plan 4's existing text. That is the r16 rule;
+- plan 4c moves the CLI's bind onto the selected install, which lies outside every login directory, and turns plan 4's `test_credentials_pass_with_cli_inside_the_chosen_login_dir` into a refusal.
 
 ## Task 4: turn ends, the event callback, and Claude's StopFailure hook
 
@@ -2596,7 +2107,7 @@ AU-6 proper: the runtime launches on the account the entry pinned, never only `d
   - `wsd.ids.handoff_session(session_key, generation)` (Task 1).
   - `wsd.credlock.credential_lock(lock_dir, key, wait_seconds, *, clock, sleep)`, `CredentialBusy` (Task 2).
   - `WsdSettings.credlock_dir` (Task 2).
-  - `SandboxSpec.cli_root` and the walk inside `check_credentials` (Task 3): it now runs for named accounts too, with no change here.
+  - Plan 4's `check_credentials`, unchanged (Task 3 is retired). With a named account chosen, the default login is another account's, so its directory joins the protected set and no bind may reach into it (r16 §7, no exception).
 - Produces:
   - `RuntimeConfig.credlocks: Path`, a required field placed after `sessions`. Every construction uses keywords.
   - `SandboxSettings.lock_wait_seconds: int`, from `[sandbox] lock_wait_seconds` (1 to 600, default 60).
@@ -3477,7 +2988,7 @@ git commit -m "plan4b T7: the runtime's usage and limit signals, gated by capabi
 
 ## Task 8: the trusted host-side read
 
-D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio, in a scratch `CODEX_HOME` holding a copy of the account's login. It runs under the account's D8 lock, while the key is the pinned one, and only while the token has at least `read_margin_seconds` left. Nothing is written to the account's login: a copy the read changed is dropped, with a warning. The scratch home is removed and confirmed gone, and a read a crash interrupted is cleaned up when wsd next starts. Claude has no host read (S7), so a Claude profile always reads None.
+D9 (d) for Codex (E4): a short-lived `codex app-server` on the host, over stdio, in a scratch `CODEX_HOME` holding a copy of the account's login. It runs under the account's D8 lock, while the key is the pinned one, and only while the token has at least `read_margin_seconds` left. Nothing is written to the account's login: a copy the read changed is dropped, with a warning. The scratch home is removed and confirmed gone, and a read a crash interrupted is cleaned up when wsd next starts. Claude has no host read (S7), so a Claude profile always reads None. The read finds its CLI as plan 4's runtime does (`[adapters.codex] binary`, `adapter.locate`, then the pin). r16 requires the selected managed install, verified, for every host-side use (§7 Managed installs): plan 4c makes that change here, and (d) stays off until it has (Plan 4c, above).
 
 **Files:**
 - Create: `src/heterodyne/sandbox/hostread.py`
@@ -5422,9 +4933,9 @@ git commit -m "plan4b T11b: enable codex (a) login binding (S7 L1,L2 on 0.160.0;
 
 - [ ] **Step 7: Enable (c), then (e), then (b), then Codex (d), each as its own commit, as in Step 6.** Codex `failover = "next"` passes `config check` once (d) is on: the existing `config/accounts.py` check requires `trusted_read` only. S7 says more: "Codex gets `next` only once (d) and either (b) or (f) are on". Without (b) or (f), `permitted` keeps a session on its previous account (`can_switch` is false), so `"next"` moves only new sessions. This task doesn't change the check, and the open question Q9 asks whether it should.
 
-## Task 12: the live accounts test (G2-gated, after Task 11)
+## Task 12: the live accounts test (G2-gated, after Task 11 and plan 4c)
 
-The real-account counterpart of Tasks 6–10, run on the shipped capability table. Each test needs one capability. A test is skipped when that capability is off in `CAPABILITIES`, so the suite proves what the table claims, never more. It is opt-in: `HZ_LIVE=1` (the conftest), `HZ_LIVE_SANDBOX=1` and `HZ_LIVE_ACCOUNTS=1`. It also has the S5 host setup and the `HZ_LIVE_SANDBOX_*` variables that `tests/live/test_live_sandbox.py` reads.
+The real-account counterpart of Tasks 6–10, run on the shipped capability table and on the managed installs plan 4c selects. Each test needs one capability. A test is skipped when that capability is off in `CAPABILITIES`, so the suite proves what the table claims, never more. It is opt-in: `HZ_LIVE=1` (the conftest), `HZ_LIVE_SANDBOX=1` and `HZ_LIVE_ACCOUNTS=1`. It also has the S5 host setup and the `HZ_LIVE_SANDBOX_*` variables that `tests/live/test_live_sandbox.py` reads.
 
 The operator names a second login for each adapter under test. `HZ_LIVE_ACCOUNTS_CODEX` and `HZ_LIVE_ACCOUNTS_CLAUDE` each hold a configured login directory as `config.toml` would write it, such as `~/.codex-b`. The test never opens, hashes or prints a login file. Only the runtime and the reader read them. The test checks a host login file's identity (`st_dev`, `st_ino`) and nothing else. Evidence lines carry session keys, window IDs and percentages, never a path, a model reply or a token.
 
@@ -5811,4 +5322,4 @@ This plan is complete once it has passed its cross-model design review and the o
 1. **Subagent-driven (recommended).** Use superpowers:subagent-driven-development. Give each task a fresh worker session on its own `p4b-t<N>` branch, in the waves of the Parallelism section, and claim each worker's bead with that worker's own session. Each task ends with the cross-model review in Global Constraints before its PR merges.
 2. **Inline.** Use superpowers:executing-plans. Run the tasks in wave order in one session, with a checkpoint and the same review after each task.
 
-Either way, Task 11 Part B and Task 12 start only after the G2 bead records the operator's accepted findings. They run on the CLI versions those findings name.
+Either way, Task 11 Part B and Task 12 start only after the G2 bead records the operator's accepted findings, and after plan 4c's launcher task has merged. They run on the CLI versions those findings name.
