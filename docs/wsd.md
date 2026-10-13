@@ -104,7 +104,7 @@ To resolve it, with wsd running:
    Two refusals point here. `the resolve's state is inconsistent` means the session's directory and its trash (`<state>/resolutions/<short id>-g<n>.trash`) are not where the intent's step says, or are not the directory it confirmed: something other than wsd changed them. wsd changes nothing then; compare them with the intent by hand. `the session has no record` means a session directory without a record and without an intent: this command never removes one, since it may be a launch's leftover rather than an unlanded session.
 4. Run `wsd tick pickup --ws <ws>` (or wait for the next pickup). The hold clears once the runtime lists sessions again.
 
-Uncommitted changes in the worktree are kept. A lifetime WIP commit the session still owed is dropped with its record; the next park or lifetime stop commits those changes as usual.
+A resolve drops a lifetime WIP mark the session still owed, with its record; it makes no WIP commit itself. The worktree's uncommitted changes stay there, and the next park or lifetime stop commits them as usual, as after manual step 4.
 
 When wsd is not running, the manual steps are the fallback:
 

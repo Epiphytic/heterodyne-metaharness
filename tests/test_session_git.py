@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import zlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from wsd_env import git_repo
@@ -480,6 +481,31 @@ def test_a_snapshot_holds_the_tip_and_compares_it(tmp_path: Path) -> None:
     assert sessiongit.fast_forward(p, snap, landed)
     assert not (snap.dest / "objects" / "info" / "alternates").exists()
     assert tip(repo, BRANCH) == landed                                   # nothing was imported
+
+
+def test_the_stores_only_alternate_is_the_bead_repositorys_and_fsck_runs_without_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """fsck walks every alternate, so it runs with none and checks the store's own objects; every other
+    store call gets the bead repository's objects alone, never anything under the private directory."""
+    repo, _, p, private, made = session_commits(tmp_path, 2)
+    calls: list[tuple[str, str | None]] = []
+    real = subprocess.run
+
+    def recorded(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+        env = kwargs.get("env")
+        if env is not None and env.get("GIT_DIR", "").startswith(str(tmp_path / "inspect")):
+            verb = next(a for a in argv[1:] if not a.startswith("-") and "=" not in a)
+            calls.append((verb, env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sessiongit.subprocess, "run", recorded)
+    snap = take(p, private, tmp_path)
+    sessiongit.compare(p, snap, sessiongit.landed(p))
+    assert snap.tip == made
+    assert ("fsck", None) in calls and [v for v, alt in calls if alt is None] == ["config", "fsck"]
+    alternates = {alt for _, alt in calls if alt is not None}
+    assert alternates == {str(p.common / "objects")} and p.common.resolve() == (repo / ".git").resolve()
+    assert not any(alt.startswith(str(private)) for alt in alternates)
 
 
 def test_snapshot_ignores_private_config_hooks_and_alternates(tmp_path: Path) -> None:

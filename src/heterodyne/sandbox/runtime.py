@@ -781,6 +781,9 @@ class SandboxRuntime:
         instance lock for as long as it runs, and every snapshot is this process's."""
         root = self.c.sessions.parent / "inspect"
         with self._inspect_lock:
+            # Cleared here, once per process, not when the runtime is built: build_runtime runs before wsd
+            # takes its instance lock, and clearing then could remove a live wsd's snapshot. Every snapshot
+            # runs in the process that holds the lock, so anything here at the first one is a dead wsd's.
             if not self._inspect_cleared:
                 if root.is_symlink():
                     root.unlink()
