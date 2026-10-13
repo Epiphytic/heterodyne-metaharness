@@ -28,12 +28,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
 from probe_verdicts import (  # noqa: E402
+    CHANNEL,
+    ENV_REJECTED,
     FILE_OPS,
+    NAMESPACE_REJECTED,
+    NOT_THE_PROBE,
+    SELFTEST_FAILED,
     file_writes_refused,
+    launch_shown,
     memory_access_refused,
     namespaces_refused,
     outputs_unreachable,
     overlay_outcome,
+    rejection_shown,
+    session_socket_checks,
 )
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
@@ -47,6 +55,7 @@ from heterodyne.sandbox.openshell_selftest import (  # noqa: E402
     AGENT_CHECKS,
     EXEC_CHECKS,
     PROBE_ARGV,
+    PROBES_SOURCE,
     VERDICT,
     OpenShellSelfTest,
     env_allowed,
@@ -324,7 +333,7 @@ def gateway_process(openshell: str, env: dict[str, str]) -> tuple[int, str]:
     try:
         pid = gateway_listener(tool(env, "ss", "-ltnpeH", f"sport = :{port}"), port)
     except (OSError, ValueError) as exc:
-        pytest.fail(f"preflight: the gateway's endpoint: {exc}")
+        pytest.fail(f"preflight: the gateway's endpoint: {type(exc).__name__}")
     return pid, status.get("Version", "")
 
 
@@ -609,13 +618,8 @@ class FenceDown(OpenShellBackend):
         return "bridge"
 
 
-# The self-test's own words for each refusal (openshell_selftest, channel): a control passes only on the
-# one it injects. A launch's reason is the runtime's ("launch self-test failed: ..."), which may add the
-# agent path's freeze attempts.
-CHANNEL_REJECTED = "agent-path-channel: a peer that is not the probe connected"
-NOT_THE_PROBE = "not the probe"
-ENV_REJECTED = "environment beyond the allowlist: "
-NAMESPACE_REJECTED = "the probe or its CLI is outside the workload's user and mount namespaces"
+# A control passes only on the self-test's own words (probe_verdicts) for the refusal it injects.
+CHANNEL_REJECTED = f"{CHANNEL}a peer that is not the probe connected"
 FREEZES = r"( \(freeze attempts: \d+(, \d+)*\))?"
 
 
@@ -641,8 +645,8 @@ def refused(live: Live, rt: SandboxRuntime, spec: LaunchSpec, reason: str) -> No
     with pytest.raises(LaunchFailed) as caught:
         launch_with(live, rt, spec)
     said = str(caught.value)
-    assert re.fullmatch(re.escape(f"launch self-test failed: {reason}") + FREEZES, said), \
-        f"the launch failed for another reason: {said}"
+    assert re.fullmatch(re.escape(f"{SELFTEST_FAILED}{reason}") + FREEZES, said), \
+        f"the launch failed for another reason: {launch_shown(said)}"
     assert sandbox_name(spec.session_key, spec.generation) not in live.backend.names(), "the sandbox was left"
 
 
@@ -662,6 +666,10 @@ def recorded_channels(monkeypatch: pytest.MonkeyPatch) -> list[ProbeChannel]:
 
 def rejections(made: list[ProbeChannel]) -> list[str]:
     return [reason for c in made for reason in c.rejected]
+
+
+def rejections_shown(reasons: list[str], tool_vars: frozenset[str] = frozenset()) -> list[str]:
+    return [rejection_shown(r, tool_vars) for r in reasons]
 
 
 def in_workload(ctx: ProbeContext, script: str, *args: str) -> tuple[int, str]:
@@ -731,7 +739,9 @@ def test_a_dead_session_socket_refuses_the_launch(live: Live) -> None:
 
     rt = runtime(live, selftest=Hooked(before_exec=close))
     holder.append(rt)
-    refused(live, rt, spec, "hook-event-accepted")
+    # Codex T15 r2: every check whose request goes over the session socket fails, so the reason is
+    # exactly those, as the probes name them.
+    refused(live, rt, spec, ", ".join(session_socket_checks(PROBES_SOURCE.read_text())))
     assert closed == [True], "the session socket was not closed before the probes ran"
 
 
@@ -762,10 +772,13 @@ def plain_probes(live: Live, ctx: ProbeContext, net: list[str], data: bytes) -> 
             "-v", f"{ctx.layout.run(ctx.generation)}:/run/hz:ro", live.runtime.c.settings.image,
             "python3", "-I", "/run/hz/probes.py"]
     r: subprocess.CompletedProcess[bytes] | None = None
+    ran = ""
     try:
         with contextlib.suppress(subprocess.TimeoutExpired):
             r = subprocess.run(argv, input=data, capture_output=True, timeout=PROMPT_SECONDS,
                                env=live.backend.env, check=False)
+    except OSError as exc:              # Codex T15 r2: its text may name a path
+        ran = type(exc).__name__
     finally:
         why = remove_container(live, name, cidfile)
         if why:
@@ -773,6 +786,8 @@ def plain_probes(live: Live, ctx: ProbeContext, net: list[str], data: bytes) -> 
         else:
             shutil.rmtree(scratch)
     assert not why, why
+    if ran:
+        pytest.fail(f"the plain probes ({net or 'a network'}) could not run: {ran}")
     if r is None:
         pytest.fail(f"the plain probes ({net or 'a network'}) timed out")
     lines = r.stdout.decode("utf-8", "replace").splitlines()
@@ -834,7 +849,7 @@ def test_a_forged_agent_path_result_refuses_the_launch(live: Live, monkeypatch: 
     refused(live, runtime(live, selftest=Hooked(beside_agent=forge)), live.spec("claude", "btq-live-n7"),
             CHANNEL_REJECTED)
     assert forger == [(0, "connected")], f"the forger did not reach the channel: {forger}"
-    assert rejections(made) == [NOT_THE_PROBE], f"the channel rejected {rejections(made)}"
+    assert rejections(made) == [NOT_THE_PROBE], f"the channel rejected {rejections_shown(rejections(made))}"
 
 
 def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
@@ -847,11 +862,13 @@ def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
     hooked = Hooked()
     refused(live, runtime(live, selftest=hooked), live.spec("claude", "btq-live-n8"), CHANNEL_REJECTED)
     adapter = hooked.seen[0].adapter
-    tool_only = real(adapter, "agent") - real(adapter, "exec")
+    tool_only = frozenset(real(adapter, "agent") - real(adapter, "exec"))
     reasons = rejections(made)
-    assert len(reasons) == 1 and reasons[0].startswith(ENV_REJECTED), f"the channel rejected {reasons}"
-    named = set(reasons[0].removeprefix(ENV_REJECTED).split())
-    assert named and named <= tool_only, f"rejected for {sorted(named)}, not only tool-path variables"
+    assert len(reasons) == 1 and reasons[0].startswith(ENV_REJECTED), \
+        f"the channel rejected {rejections_shown(reasons, tool_only)}"
+    named = set(reasons[0].removeprefix(ENV_REJECTED).split(" "))
+    # Codex T15 r2: only the CLI's own tool variables are named; any other is shown as unrecognised.
+    assert named and named <= tool_only, f"rejected for {rejection_shown(reasons[0], tool_only)}"
     print(f"EVIDENCE n8 the probe was rejected for the tool-path variables {sorted(named)}")
 
 
@@ -1041,20 +1058,22 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(
             launch_with(live, runtime(live, selftest=Hooked(beside_agent=nest)), spec)
         except LaunchFailed as exc:
             failed = str(exc)
+        # Codex T15 r2: the launch's reason and the channel's are shown only in their fixed wording.
+        launch = launch_shown(failed) if failed else "passed"
         assert wait_until(lambda: bool(out), EXEC_SECONDS), \
-            f"the overlay check never reported; launch: {failed or 'passed'}"
+            f"the overlay check never reported; launch: {launch}"
         outcome = overlay_outcome(*out[0])
         assert outcome in ("refused", "ran"), outcome
         reasons = rejections(made)
-        print(f"EVIDENCE n9 overlay {outcome}; launch {failed or 'passed'}; channel rejected {reasons}")
+        shown = rejections_shown(reasons)
+        print(f"EVIDENCE n9 overlay {outcome}; launch {launch}; channel rejected {shown}")
         if outcome == "ran":
-            rejected = re.escape(f"launch self-test failed: {CHANNEL_REJECTED}") + FREEZES
-            assert re.fullmatch(rejected, failed), \
-                f"an overlaid probe ran and was not rejected: {failed or 'passed'}"
-            assert reasons == [NAMESPACE_REJECTED], f"the overlaid probe was rejected for {reasons}"
+            rejected = re.escape(f"{SELFTEST_FAILED}{CHANNEL_REJECTED}") + FREEZES
+            assert re.fullmatch(rejected, failed), f"an overlaid probe ran and was not rejected: {launch}"
+            assert reasons == [NAMESPACE_REJECTED], f"the overlaid probe was rejected for {shown}"
         else:
             assert not failed and not reasons, \
-                f"the overlay was refused, yet the launch failed or a peer was rejected: {failed}; {reasons}"
+                f"the overlay was refused, yet the launch failed or a peer was rejected: {launch}; {shown}"
     finally:
         stop(live, spec.session_key)
 

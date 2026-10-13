@@ -3,14 +3,23 @@ so does any answer but the exact one the enforcing layer gives (D23, Task 9B).""
 
 import pytest
 from probe_verdicts import (
+    ENV_REJECTED,
     FILE_OPS,
+    NOT_THE_PROBE,
+    UNRECOGNISED,
     file_writes_refused,
+    launch_shown,
     memory_access_refused,
     namespaces_refused,
     outputs_unreachable,
     overlay_outcome,
+    rejection_shown,
+    session_socket_checks,
     shown,
 )
+
+from heterodyne.sandbox.openshell_selftest import EXEC_CHECKS, PROBES_SOURCE, _results
+from heterodyne.sandbox.selftest import SelfTestFailed
 
 MEM = ("targets 1 7\nchild 7\ngetfd EPERM\n"
        "attach 1 EPERM\nreadv 1 EPERM\nwritev 1 EPERM\nmem 1 EACCES\n"
@@ -160,4 +169,80 @@ def test_a_reason_never_echoes_a_path_or_free_text(line: str) -> None:
     assert line not in memory_access_refused(0, MEM.replace("attach 1 EPERM", line))
     assert line not in file_writes_refused(0, FILES.replace("create hz-new EROFS", line))
     assert line not in outputs_unreachable(0, CURLS.replace("curl 43 gone", line))
-    assert shown("attach 7 ERROR") == "'attach 7 ERROR'"
+    assert shown("attach 7 ERROR") == "'attach 7 <unrecognised>'"
+    assert shown("attach 7 EPERM") == "'attach 7 EPERM'"
+    assert shown("mnt mnt:[4026531841]") == "'mnt mnt:[4026531841]'"
+
+
+HEX = "0123456789abcdef" * 4
+SECRETS = ["hunter2", "s3cr3t", HEX, HEX.upper(), "9" * 64, f"token={HEX}", f"sk-{HEX[:20]}"]
+
+
+@pytest.mark.parametrize("secret", SECRETS)
+def test_a_reason_never_echoes_a_secret_or_a_64_hex_value(secret: str) -> None:
+    """Codex T15 r2: a line of the checks' own characters can still hold a secret, so a reason renders
+    only the checks' own words, numeric PIDs and statuses; anything else is replaced."""
+    for line in (secret, f"attach 1 {secret}", f"unshare={secret}", f"curl 41 socket:{secret} gone"):
+        assert secret not in shown(line)
+        assert UNRECOGNISED in shown(line)
+    assert secret not in memory_access_refused(0, MEM.replace("attach 1 EPERM", f"attach 1 {secret}"))
+    assert secret not in memory_access_refused(0, MEM.replace("getfd EPERM", f"getfd {secret}"))
+    assert secret not in file_writes_refused(0, FILES.replace("append token EROFS", f"append token {secret}"))
+    assert secret not in namespaces_refused(0, NS.replace("unshare-none EPERM", f"unshare-none {secret}"))
+    assert secret not in overlay_outcome(0, NO_NS.replace("unshare=EPERM", f"unshare={secret}"))
+    assert secret not in overlay_outcome(0, RAN.replace("sent=OK", f"sent={secret}"))
+    assert secret not in outputs_unreachable(0, CURLS.replace("socket:ENXIO socket:ENXIO",
+                                                              f"socket:{secret} socket:ENXIO"))
+
+
+def test_closing_the_session_socket_fails_exactly_its_checks() -> None:
+    """Codex T15 r2: each check whose request goes over the session socket fails once it is closed, so
+    the dead-socket control expects exactly those, in the probes' order; the self-test reports the
+    combined failure as that one reason."""
+    over_socket = session_socket_checks(PROBES_SOURCE.read_text())
+    assert over_socket == ("control-op-rejected", "hook-event-accepted")
+    assert set(over_socket) <= set(EXEC_CHECKS)
+    out = "".join(f"{'FAIL' if c in over_socket else 'PASS'} {c} [reply=socket error ENOENT]\n"
+                  for c in EXEC_CHECKS) + "DONE 1\n"
+    with pytest.raises(SelfTestFailed) as caught:
+        _results(1, out.encode(), EXEC_CHECKS)
+    assert str(caught.value) == ", ".join(over_socket)
+
+
+HOME = "/srv/someone/.local/bin/claude"
+CAPS = "workload process 12 (thread 13) holds capabilities"
+PEER = ("launch self-test failed: agent-path-channel: a peer that is not the probe connected "
+        "(freeze attempts: 1, 2)")
+
+
+@pytest.mark.parametrize(("reason", "expect"), [
+    (NOT_THE_PROBE, NOT_THE_PROBE),
+    (CAPS, CAPS),
+    (f"no {HOME} ancestor inside the workload netns", "no <cli> ancestor inside the workload netns"),
+    ("/proc/12 unreadable (Permission denied)", "/proc/<pid> unreadable"),
+    (f"{ENV_REJECTED}CLAUDE_CODE_X", f"{ENV_REJECTED}CLAUDE_CODE_X"),
+    (f"{ENV_REJECTED}AWS_SECRET_ACCESS_KEY CLAUDE_CODE_X", f"{ENV_REJECTED}{UNRECOGNISED} CLAUDE_CODE_X"),
+    (f"{ENV_REJECTED}{HEX}", f"{ENV_REJECTED}{UNRECOGNISED}"),
+    (f"something new at {HOME}", UNRECOGNISED),
+])
+def test_a_channel_rejection_is_shown_only_in_its_fixed_words(reason: str, expect: str) -> None:
+    """Codex T15 r2: a peer's rejection can name the CLI's path or any variable; it is shown in its
+    fixed wording, with only the CLI's agent-only tool variables named."""
+    assert rejection_shown(reason, {"CLAUDE_CODE_X"}) == expect
+
+
+@pytest.mark.parametrize(("said", "expect"), [
+    ("launch self-test failed: control-op-rejected, hook-event-accepted",
+     "launch self-test failed: control-op-rejected, hook-event-accepted"),
+    (PEER, PEER),
+    ("launch self-test failed: agent-path-channel: failed checks: other-accounts, hunter2",
+     f"launch self-test failed: agent-path-channel: failed checks: other-accounts, {UNRECOGNISED}"),
+    (f"launch self-test failed: agent-path-channel: unexpected checks: token={HEX}",
+     f"launch self-test failed: agent-path-channel: unexpected checks: {UNRECOGNISED}"),
+    (f"launch self-test failed: agent-path-channel: {HOME}", f"launch self-test failed: agent-path-channel: "
+                                                             f"{UNRECOGNISED}"),
+    (f"launch self-test failed: {HEX}", f"launch self-test failed: {UNRECOGNISED}"),
+    (f"{HOME}: no such file", "a launch failure outside the self-test"),
+])
+def test_a_launch_failure_is_shown_only_in_its_fixed_words(said: str, expect: str) -> None:
+    assert launch_shown(said) == expect

@@ -3,9 +3,14 @@ returns "" only when the check ran to completion and every operation it reports 
 the enforcing layer gives (D23, Task 9B); otherwise it returns the reason. A status or any other errno is
 not a refusal: a missing command, a gone process or a garbled line must not pass for one. Kept apart
 from the live module so the normal suite can test them offline. A reason reaches pytest's output, so it
-quotes only lines of the checks' own vocabulary (`shown`)."""
+renders only the checks' own vocabulary (`shown`); the self-test's and the channel's reasons are rendered
+the same way, from their fixed wording (`launch_shown`, `rejection_shown`)."""
 
+import errno
 import re
+from collections.abc import Collection
+
+from heterodyne.sandbox.openshell_selftest import AGENT_CHECKS, EXEC_CHECKS
 
 # OpenShell's child filter answers the ptrace family and pidfd_getfd with EPERM; Landlock keeps /proc
 # read-only, so a mem write open gives EACCES (Task 9B's table).
@@ -24,12 +29,118 @@ MOUNT_NS = re.compile(r"mnt:\[\d+\]")
 # read-only /proc (the uid map) and Landlock's mount denial (each bind).
 OVERLAY_REFUSALS = {"unshare": "EPERM", "maps": "EACCES", "bind-probe": "EPERM", "bind-cli": "EPERM"}
 SENT = ("OK", "EPIPE", "ECONNRESET")       # the channel may reject the peer before its send lands
-SAFE = re.compile(r"[A-Za-z0-9_.:=\[\] -]{0,100}")
+UNRECOGNISED = "<unrecognised>"
+# Codex T15 r2: a reason renders only words the checks print (operation and file names, steps, answers,
+# errno names, descriptor kinds), numeric PIDs and statuses and mount-namespace IDs; any other piece, a
+# secret or a 64-hex value among them, is replaced. A PID has at most 7 digits (pid_max is 2^22).
+WORDS = frozenset({*MEMORY_ANSWERS, *(op for op, _ in FILE_OPS), *(name for _, name in FILE_OPS), *NS_OPS,
+                   *OVERLAY_REFUSALS, "connect", "sent", "run", "forged", "written", "targets", "child",
+                   "getfd", "curl", "probe", "mnt", "done", "exited", "running", "gone", "none", "OK",
+                   "MISSING", "PRESENT", "OPENED", "TIMEOUT", "socket", "pipe", "anon_inode", "error",
+                   *errno.errorcode.values()})
+NUMBER = re.compile(r"-?\d{1,7}")
+NS_ID = re.compile(r"\[\d{1,12}\]")
+SEPARATORS = frozenset({"", " ", "=", ":"})
+MAX_PIECES = 24
 
 
 def shown(line: str) -> str:
-    """A line for a reason: quoted when it is the checks' own vocabulary, else only described."""
-    return repr(line) if SAFE.fullmatch(line) else "an unrecognised line"
+    """A line for a reason: each piece of it the checks' own vocabulary, any other piece replaced."""
+    pieces = re.split(r"([ =:])", line)
+    if len(pieces) > MAX_PIECES:
+        return "an unrecognised line"
+    return repr("".join(p if p in SEPARATORS or p in WORDS or NUMBER.fullmatch(p) or NS_ID.fullmatch(p)
+                        else UNRECOGNISED for p in pieces))
+
+
+def session_socket_checks(source: str) -> tuple[str, ...]:
+    """The probes' checks that each rest on a request over the session socket (an `r = sock(...)` and the
+    `check(...)` on its reply), in the order the probes run them: closing the socket fails exactly
+    these. `source` is the probes' own (openshell_selftest.PROBES_SOURCE)."""
+    names: list[str] = []
+    pending = False
+    for line in source.splitlines():
+        if line.startswith("r = sock("):
+            pending = True
+        elif pending and (m := re.match(r"check\('([a-z0-9-]+)', r\b", line)):
+            names.append(m[1])
+            pending = False
+    return tuple(names)
+
+
+# The self-test's own words for each refusal (openshell_selftest, channel). A launch's reason is the
+# runtime's ("launch self-test failed: ..."), which may add the agent path's freeze attempts.
+SELFTEST_FAILED = "launch self-test failed: "
+CHANNEL = "agent-path-channel: "
+NOT_THE_PROBE = "not the probe"
+ENV_REJECTED = "environment beyond the allowlist: "
+NAMESPACE_REJECTED = "the probe or its CLI is outside the workload's user and mount namespaces"
+# Every name a self-test failure gives: the probes' checks and the host's own (openshell_selftest).
+FAILURES = frozenset({*EXEC_CHECKS, *AGENT_CHECKS, "probes", "probes-output", "probes-timeout",
+                      "canary-precondition", "workload-namespaces", "workload-netns", "workload-cgroup",
+                      "outer-fence-network-none", "agent-prompt", "proxy-logged-refusal",
+                      "proxy-logged-allow", "proxy-logged-direct-deny", "agent-ancestry-allowed",
+                      "exec-path-not-agent"})
+CHANNEL_VERDICTS = frozenset({"the channel did not finish", "a peer that is not the probe connected",
+                              "no verified probe run", "more than one probe run", "malformed result",
+                              "the probe changed before it finished", "the probe did not finish cleanly",
+                              "the probe did not finish in time"})
+CHANNEL_LISTS = ("unexpected checks: ", "failed checks: ", "missing checks: ")
+# A peer's rejection (channel.ProcVerifier and the channel's acceptor), each in its fixed wording.
+REJECTIONS = frozenset({NOT_THE_PROBE, NAMESPACE_REJECTED, "traced", "the probe can gain privileges",
+                        "netns is not the workload container's", "the workload's first process changed",
+                        "the probe is outside the workload's cgroup",
+                        "a workload thread ended while the workload was frozen",
+                        "workload process evidence unreadable", "the workload scan did not finish",
+                        "the workload could not be frozen", "the workload could not be thawed",
+                        "too many peers", "peer credentials unreadable"})
+WORKLOAD_PROCESS = re.compile(r"workload process \d{1,7}( \(thread \d{1,7}\))? (can gain privileges|"
+                              r"holds capabilities|has no seccomp filter|has \d{1,3} seccomp filters; "
+                              r"OpenShell gives every workload process \d{1,3})")
+FREEZE_ATTEMPTS = re.compile(r" \(freeze attempts: \d{1,3}(, \d{1,3})*\)$")
+
+
+def names_shown(text: str, known: Collection[str], sep: str = ", ") -> str:
+    """A list of names: each one shown when it is in `known`, any other replaced."""
+    return sep.join(n if n in known else UNRECOGNISED for n in text.split(sep))
+
+
+def rejection_shown(reason: str, tool_vars: Collection[str] = ()) -> str:
+    """A peer's rejection for a reason: its fixed wording, with only a PID or a variable named in
+    `tool_vars` (the CLI's agent-only tool variables) kept from what it reports; the CLI's path, an
+    unreadable entry's error and any other variable or wording are replaced (Codex T15 r2)."""
+    if reason in REJECTIONS or WORKLOAD_PROCESS.fullmatch(reason):
+        return reason
+    if reason.startswith(ENV_REJECTED):
+        return ENV_REJECTED + names_shown(reason.removeprefix(ENV_REJECTED), tool_vars, " ")
+    if re.fullmatch(r"/proc/\d{1,7} unreadable \(.*\)", reason, re.DOTALL):
+        return "/proc/<pid> unreadable"
+    if re.fullmatch(r"no .* ancestor inside the workload netns", reason, re.DOTALL):
+        return "no <cli> ancestor inside the workload netns"
+    if reason.startswith("ptrace-scope: "):
+        return "ptrace-scope: <refused>"
+    return UNRECOGNISED
+
+
+def launch_shown(said: str) -> str:
+    """A launch's failure for a reason: the self-test's check names, the channel's verdict and the freeze
+    attempts as given; any other name, verdict or launch failure (one may hold a path) replaced."""
+    if not said.startswith(SELFTEST_FAILED):
+        return "a launch failure outside the self-test"
+    body = said.removeprefix(SELFTEST_FAILED)
+    attempts = m[0] if (m := FREEZE_ATTEMPTS.search(body)) else ""
+    body = body.removesuffix(attempts)
+    if body.startswith("ptrace-scope: "):
+        return SELFTEST_FAILED + "ptrace-scope: <refused>" + attempts
+    if not body.startswith(CHANNEL):
+        return SELFTEST_FAILED + names_shown(body, FAILURES) + attempts
+    verdict = body.removeprefix(CHANNEL)
+    listed = next((p for p in CHANNEL_LISTS if verdict.startswith(p)), None)
+    if listed is not None:
+        verdict = listed + names_shown(verdict.removeprefix(listed), FAILURES)
+    elif verdict not in CHANNEL_VERDICTS:
+        verdict = UNRECOGNISED
+    return SELFTEST_FAILED + CHANNEL + verdict + attempts
 
 
 def memory_access_refused(rc: int, out: str) -> str:
