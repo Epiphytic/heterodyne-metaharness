@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 
 import pytest
-from sandbox_env import RuntimeRig, launch_spec, runtime_rig, sandbox_teardown, short_dir
+from sandbox_env import RuntimeRig, bead_worktree, launch_spec, runtime_rig, sandbox_teardown, short_dir
 from tmux_guard import new_test_tmux
 from wsd_env import Clock
 
@@ -36,7 +36,8 @@ def rig() -> Iterator[RuntimeRig]:
 
 
 def test_a_clean_teardown_reports_nothing(rig: RuntimeRig) -> None:
-    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    one = launch_spec(rig, "p-one")
+    two = replace(launch_spec(rig, "p-two", "btq-2"), worktree=bead_worktree(rig, "btq-2"))
     rig.runtime.launch(one)
     rig.runtime.launch(two)
     assert sandbox_teardown(rig.runtime, [one.session_key, two.session_key, one.session_key],
@@ -72,7 +73,8 @@ def test_an_earlier_generations_late_create_is_uncertain(rig: RuntimeRig) -> Non
 
 def test_every_session_is_tried_and_a_listed_sandbox_or_a_failed_list_is_uncertain(
         rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
-    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    one = launch_spec(rig, "p-one")
+    two = replace(launch_spec(rig, "p-two", "btq-2"), worktree=bead_worktree(rig, "btq-2"))
     rig.runtime.launch(one)
     rig.runtime.launch(two)
     stop = rig.runtime.stop
