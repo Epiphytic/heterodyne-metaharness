@@ -60,7 +60,7 @@ A failure on one record is shown on that record, and the others are still listed
 
 - **`--generation` binds the identity:** it must equal the record's generation.
 - **`--tip` is the confirmation:** it must equal the tip the snapshot reads at resolve time. `--discard` takes no `--tip` only when the tip is unreadable. If the tip is readable, `--discard` needs `--tip`, so an operator can't discard something they haven't seen.
-- **`--land`:** `land_snapshot`, fast-forward only. If the branch can't be fast-forwarded, it refuses and changes nothing.
+- **`--land`:** `import_snapshot` to the bead branch, fast-forward only. If the branch can't be fast-forwarded, it refuses and changes nothing.
 - **`--keep`:** imports the snapshot to `refs/heads/unlanded/<bead>/<short id>-g<generation>` with `update-ref <ref> <tip> <zero>` (create only). The bead branch is not touched.
   - A ref already at `tip` is a replay and counts as done.
   - A ref at another SHA, or a name conflict (an existing `unlanded` or `unlanded/<bead>` ref), refuses with the fixed reason "the keep ref can't be created".
