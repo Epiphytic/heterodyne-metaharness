@@ -26,6 +26,7 @@ from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSpec
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
+from heterodyne.wsd.usage import NoUsageReader, UsageReader
 from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
 
 WS = "alpha"
@@ -77,6 +78,7 @@ class Rig:
     cp: Checkpoint = field(default_factory=Recorder)
     reconciler: ActionReconciler | None = None
     clock: Clock = field(default_factory=Clock)
+    usage_reader: UsageReader = field(default_factory=NoUsageReader)
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -95,7 +97,8 @@ class Rig:
         self.beads = BeadsAdapter(factory(self.world))
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
-                         self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock)
+                         self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
+                         usage_reader=self.usage_reader)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 
