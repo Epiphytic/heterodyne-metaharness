@@ -17,21 +17,23 @@ In `SandboxRuntime.launch` (`src/heterodyne/sandbox/runtime.py`), add one check.
 ```python
 BRANCH_TAKEN = "another session of this bead still holds its branch; a branch holds one session at a time"
 
-        for other in self._records():
-            if other.key == spec.session_key or other.bead != spec.bead or not _same_repo(other.repo, spec.repo):
-                continue
-            if other.phase is Phase.ENDED and other.wip_mark and not other.unlanded:
+        others = [r for r in self._records() if r.key != spec.session_key and r.bead == spec.bead
+                  and _same_repo(r.repo, spec.repo)]
+        if any(r.phase is not Phase.ENDED or r.unlanded for r in others):
+            raise LaunchFailed(BRANCH_TAKEN)    # before any settlement: a refusal moves nothing
+        for other in others:
+            if other.wip_mark:
                 with contextlib.suppress(OSError):          # D13: the WIP it owes lands before anyone else's
                     other = self._settle_wip(self.layout(other.key), other)
-            if other.phase is not Phase.ENDED or other.unlanded or other.wip_mark:
-                raise LaunchFailed(BRANCH_TAKEN)
+                if other.wip_mark:
+                    raise LaunchFailed(BRANCH_TAKEN)
 ```
 
 - **What is "the same branch".** The branch is `btq/<bead>` in the record's repository (`gitwip.pin(spec.repo, spec.worktree, f"btq/{spec.bead}")`). Two records name the same branch when they have the same bead and the same repository. `_same_repo` compares `os.path.realpath` of the two paths. A record without a repo can't share one, so it is not counted.
 - **Which records hold the branch** (Codex jjnqm r1). ENDED alone doesn't mean the branch is settled: `_end` records ENDED before it settles the lifetime WIP, and a land that fails records ENDED with `unlanded`. So another key's record holds the branch while any of these is true:
   - its phase is not ENDED (CREATING, TESTING, STARTING, RUNNING or STOPPING), whether or not its sandbox is still alive, because it still owes its land or its lifetime WIP (D13);
   - it is `unlanded`: its commits wait for a human (T10 r3), and a new session's commits would diverge from them;
-  - it still owes a lifetime WIP (`wip_mark`). The check first tries `_settle_wip` on it, which is what the owner's own end or relaunch does and is idempotent by its mark (a crash between ENDED and the commit is the case this covers). If the mark is still set after that, the branch stays held.
+  - it still owes a lifetime WIP (`wip_mark`). Only once no matching record is unended or unlanded (Codex jjnqm r2: a refusal must move nothing, so settling one record and then refusing on another is ruled out) does the check try `_settle_wip` on each that owes, which is what the owner's own end or relaunch does and is idempotent by its mark (a crash between ENDED and the commit is the case this covers). If the mark is still set after that, the branch stays held.
 - **How a hold clears.** `sessions(ws)` ends that workstream's dead sessions, and `stop(key)` ends one. A dead record is only ended by a call for its own workstream or key: a launch never ends another key's session, live or not, to make room for itself. A caller handing a bead to another workstream ends the old session first (`stop(other.key)`, or `sessions(other.ws)`). An unlanded record clears only through the operator path that resolves the hold (btq-xb56t).
 - **What it doesn't refuse.**
   - The same key: the existing idempotent path handles that.
@@ -53,7 +55,9 @@ BRANCH_TAKEN = "another session of this bead still holds its branch; a branch ho
 4. `test_an_ended_session_that_owes_still_holds_the_branch`:
    - an ENDED record of another key with `unlanded`: refused, and the record is unchanged;
    - an ENDED record of another key with `wip_mark` (a crash after ENDED, before the WIP commit): the launch settles it (the WIP commit is on the branch, the mark cleared) and then succeeds;
-   - the same, with `gitwip.wip_commit` failing: refused, and the mark is kept.
+   - the same, with `gitwip.wip_commit` failing: refused, and the mark is kept;
+   - the same, with the record write that clears the mark failing after the commit: refused, no record or sandbox for the new key, the mark kept; a retry launches and the branch holds exactly one WIP commit for that mark;
+   - an owed-WIP record together with an unended (RUNNING) or an unlanded record of the same bead, in both directory orders (short IDs chosen to sort either way): refused, and the branch tip, the worktree and every record are unchanged (no WIP committed).
 5. `test_a_hold_in_another_workstream_clears_through_that_workstream`:
    - a dead RUNNING record of workstream A on bead X; a launch for workstream B on X is refused;
    - `sessions("B")` doesn't clear it; `sessions("A")` does, and the launch then succeeds.
@@ -66,7 +70,7 @@ BRANCH_TAKEN = "another session of this bead still holds its branch; a branch ho
    - a second key on bead X in another repo launches.
 9. The existing `test_launch_is_idempotent_on_a_live_session` still passes unchanged (same key).
 
-The live test that produced the shape (T14's two-CLI run on one bead) must use one bead per CLI. If it still shares one, it will now fail at launch with `BRANCH_TAKEN`, and that is fixed in the test, not the runtime.
+Existing tests that launch two sessions at once on the defaults (`tests/sandbox_env.py` gives every spec bead `btq-1` in one repo) now fail at the second launch. They are migrated: each independent session gets its own bead with its own pinned worktree. Known now: `tests/test_wsd_lifetime.py::test_one_stop_that_fails_does_not_keep_the_next_from_stopping`, and the live two-CLI run that produced the shape (T14). The implementation greps the suites for others (two `launch(` calls without a stop between them). A shared branch stays only where refusal or legacy-state recovery is the test's point. The fix is in the tests, never the runtime.
 
 ## Docs
 
