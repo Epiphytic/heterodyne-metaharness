@@ -7,13 +7,15 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
 
+import msgspec
 import pytest
 from sandbox_env import RuntimeRig, fresh_logins, launch_spec, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
-from wsd_env import Clock
+from wsd_env import Clock, git_repo
 
 from heterodyne.agents.base import HOOK_EVENTS
 from heterodyne.sandbox.runtime import (
+    BRANCH_TAKEN,
     WIP_FAILED,
     Phase,
     SandboxRuntime,
@@ -23,7 +25,7 @@ from heterodyne.sandbox.runtime import (
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
-from heterodyne.wsd import gitwip
+from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.runtime import LaunchFailed, LaunchUncertain, Liveness, RuntimeUnavailable
 
 needs_tools = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
@@ -750,3 +752,245 @@ def test_a_tmux_server_it_cant_reach_never_confirms_the_pane_gone(rig: RuntimeRi
     rig.runtime.stop(spec.session_key)
     assert record(rig, spec.session_key).phase is Phase.ENDED
     assert not rig.tmux.has_session(rig.runtime.tmux_name(spec.session_key))
+
+
+# btq-jjnqm: a bead's branch holds one session at a time.
+
+def other_record(rig: RuntimeRig, key: str, phase: Phase, *, ws: str = "alpha",
+                 **changes: object) -> SessionRecord:
+    """A record of another key on bead btq-1 in the rig's repository, written as a dead wsd left it."""
+    rec = SessionRecord(key=key, ws=ws, bead="btq-1", role="coder", profile="p-two", adapter="codex",
+                        generation=1, phase=phase, sandbox=sandbox_name(key, 1),
+                        tmux_session=rig.runtime.tmux_name(key), worktree=str(rig.worktree),
+                        repo=str(rig.repo))
+    rec = msgspec.structs.replace(rec, **changes)
+    write_record(rig.runtime.layout(key), rec)
+    return rec
+
+
+def keys_sorted(first_low: bool) -> tuple[str, str]:
+    """Two session keys whose record directories sort (short ID) as asked: `first_low` puts the first one
+    first."""
+    keys = [ids.role_session("btq-1", "coder", f"p-k{i}") for i in range(2)]
+    if (short_id(keys[0]) < short_id(keys[1])) != first_low:
+        keys.reverse()
+    return keys[0], keys[1]
+
+
+def owe_wip(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    """End `key` for its lifetime with its WIP commit failing, so its record is ENDED and owes the WIP."""
+    real = gitwip.wip_commit
+
+    def broken(p: gitwip.Pinned, mark: str, summary: str) -> str:
+        raise gitwip.GitFailed("git timed out")
+
+    (rig.worktree / "edit.txt").write_text("unsaved work\n")
+    monkeypatch.setattr("heterodyne.wsd.gitwip.wip_commit", broken)
+    lifetime_end(rig, key)
+    monkeypatch.setattr("heterodyne.wsd.gitwip.wip_commit", real)
+    rec = record(rig, key)
+    assert (rec.phase, rec.error) == (Phase.ENDED, WIP_FAILED) and rec.wip_mark
+    fresh_logins(rig.home, rig.clock() + 86_400)
+
+
+@pytest.mark.parametrize("phase", [p for p in Phase if p is not Phase.ENDED])
+def test_a_second_session_on_the_same_bead_is_refused(rig: RuntimeRig, phase: Phase) -> None:
+    second = launch_spec(rig, "p-one")
+    if phase is Phase.RUNNING:
+        first = launch_spec(rig, "p-two")
+        rig.runtime.launch(first)
+        holder = first.session_key
+    else:
+        holder = ids.role_session("btq-1", "coder", "p-two")
+        other_record(rig, holder, phase)
+    created = list(rig.backend.created)
+    with pytest.raises(LaunchFailed) as refused:
+        rig.runtime.launch(second)
+    assert str(refused.value) == BRANCH_TAKEN
+    assert read_record(rig.runtime.layout(second.session_key)) is None
+    assert rig.backend.created == created
+    assert record(rig, holder).phase is phase
+
+
+def test_the_branch_is_free_once_the_first_session_ends(rig: RuntimeRig) -> None:
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    rig.runtime.stop(first.session_key)
+    assert record(rig, first.session_key).phase is Phase.ENDED
+    rig.runtime.launch(second)
+    assert record(rig, second.session_key).phase is Phase.RUNNING
+
+
+def test_a_dead_but_not_ended_session_still_holds_the_branch(rig: RuntimeRig) -> None:
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    rec = record(rig, first.session_key)
+    rig.tmux.send_key(rec.tmux_session, "C-d")                   # the fake CLI exits at end of input
+    wait_for(lambda: rig.tmux.pane_dead(rec.tmux_session))
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(second)
+    assert record(rig, first.session_key).phase is Phase.RUNNING
+    assert rig.runtime.sessions("alpha") == []
+    rig.runtime.launch(second)
+    assert record(rig, second.session_key).phase is Phase.RUNNING
+
+
+def test_an_unlanded_session_of_another_key_holds_the_branch(rig: RuntimeRig) -> None:
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    agent_git(rig, first.session_key, "commit", "-q", "--allow-empty", "-m", "agent work")
+    (rig.runtime.layout(first.session_key).git / "objects" / "zz").symlink_to(rig.root)
+    stop_unlanded(rig, first.session_key)
+    before = record(rig, first.session_key)
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(second)
+    assert record(rig, first.session_key) == before
+    assert read_record(rig.runtime.layout(second.session_key)) is None
+
+
+def test_an_owed_wip_of_another_key_is_settled_first(rig: RuntimeRig,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    owe_wip(rig, monkeypatch, first.session_key)
+    rig.runtime.launch(second)
+    assert wip_commits(rig) == 1
+    assert record(rig, first.session_key).wip_mark == ""
+    assert record(rig, second.session_key).phase is Phase.RUNNING
+
+
+def test_an_owed_wip_of_another_key_that_still_fails_holds_the_branch(rig: RuntimeRig,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    owe_wip(rig, monkeypatch, first.session_key)
+
+    def broken(p: gitwip.Pinned, mark: str, summary: str) -> str:
+        raise gitwip.GitFailed("git timed out")
+
+    monkeypatch.setattr("heterodyne.wsd.gitwip.wip_commit", broken)
+    created = list(rig.backend.created)
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(second)
+    assert record(rig, first.session_key).wip_mark and wip_commits(rig) == 0
+    assert rig.backend.created == created
+
+
+def test_a_settled_wip_whose_mark_cant_be_cleared_holds_then_lands_once(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The WIP commit is made but the record write that clears its mark fails: the launch is refused with
+    nothing created for the new key; a retry finds the commit by its mark and lands no second one."""
+    first, second = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    rig.runtime.launch(first)
+    owe_wip(rig, monkeypatch, first.session_key)
+    real = SandboxRuntime._phase
+    fails = [True]
+
+    def flaky(self: SandboxRuntime, layout: SessionLayout, rec: SessionRecord,
+              **changes: object) -> SessionRecord:
+        if fails and changes.get("wip_mark") == "":
+            fails.clear()
+            raise OSError("disk full")
+        return real(self, layout, rec, **changes)
+
+    monkeypatch.setattr(SandboxRuntime, "_phase", flaky)
+    created = list(rig.backend.created)
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(second)
+    assert read_record(rig.runtime.layout(second.session_key)) is None and rig.backend.created == created
+    assert record(rig, first.session_key).wip_mark and wip_commits(rig) == 1
+    rig.runtime.launch(second)
+    assert wip_commits(rig) == 1 and record(rig, first.session_key).wip_mark == ""
+
+
+@pytest.mark.parametrize("hold", ["running", "unlanded"])
+@pytest.mark.parametrize("wip_first", [True, False])
+def test_a_refusal_settles_nothing(rig: RuntimeRig, hold: str, wip_first: bool) -> None:
+    """Codex jjnqm r2: with one record owing a WIP and another holding the branch, the launch is refused
+    before any WIP is committed, whichever record the directory listing returns first."""
+    owing, holding = keys_sorted(wip_first)
+    other_record(rig, owing, Phase.ENDED, wip_mark=f"lifetime:{owing}:1", stop_reason="lifetime")
+    if hold == "running":
+        other_record(rig, holding, Phase.RUNNING)
+    else:
+        other_record(rig, holding, Phase.ENDED, unlanded=True)
+    (rig.worktree / "edit.txt").write_text("unsaved work\n")
+    tip = host_tip(rig, "btq/btq-1")
+    records = {k: record(rig, k) for k in (owing, holding)}
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(launch_spec(rig, "p-one"))
+    assert host_tip(rig, "btq/btq-1") == tip and wip_commits(rig) == 0
+    assert (rig.worktree / "edit.txt").read_text() == "unsaved work\n"
+    status = subprocess.run(["git", "-C", str(rig.worktree), "status", "--porcelain"], capture_output=True,
+                            text=True, check=True).stdout
+    assert "edit.txt" in status
+    assert {k: record(rig, k) for k in records} == records
+
+
+def test_a_hold_in_another_workstream_clears_through_that_workstream(rig: RuntimeRig) -> None:
+    first, second = launch_spec(rig, "p-one"), replace(launch_spec(rig, "p-two"), ws="beta")
+    rig.runtime.launch(first)
+    rec = record(rig, first.session_key)
+    rig.tmux.send_key(rec.tmux_session, "C-d")
+    wait_for(lambda: rig.tmux.pane_dead(rec.tmux_session))
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(second)
+    assert rig.runtime.sessions("beta") == []
+    assert record(rig, first.session_key).phase is Phase.RUNNING          # not another workstream's to end
+    assert rig.runtime.sessions("alpha") == []
+    rig.runtime.launch(second)
+    assert record(rig, second.session_key).phase is Phase.RUNNING
+
+
+def test_a_stale_same_key_record_is_ended_before_the_check(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    stale = SessionRecord(key=spec.session_key, ws="alpha", bead="btq-1", role="coder", profile="p-one",
+                          adapter="claude-code", generation=1, phase=Phase.TESTING,
+                          sandbox=sandbox_name(spec.session_key, 1),
+                          tmux_session=rig.runtime.tmux_name(spec.session_key), worktree=str(rig.worktree),
+                          repo=str(rig.repo))
+    write_record(rig.runtime.layout(spec.session_key), stale)
+    rig.backend.extra.add(stale.sandbox)
+    rig.runtime.launch(replace(spec, generation=2))
+    assert stale.sandbox in rig.backend.deleted
+    assert record(rig, spec.session_key).phase is Phase.RUNNING
+
+
+def test_a_dead_running_same_key_session_is_ended_before_the_check(rig: RuntimeRig) -> None:
+    """Design test 6: a session of this key that ran and whose pane died, with no listing or stop since,
+    is ended by its own relaunch (landing what it owes), and the relaunch then succeeds."""
+    spec = launch_spec(rig, "p-one")
+    first = rig.runtime.launch(spec)
+    rec = record(rig, spec.session_key)
+    rig.tmux.send_key(rec.tmux_session, "C-d")                   # the fake CLI exits at end of input
+    wait_for(lambda: rig.tmux.pane_dead(rec.tmux_session))
+    assert record(rig, spec.session_key).phase is Phase.RUNNING
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    assert rec.sandbox in rig.backend.deleted
+    after = record(rig, spec.session_key)
+    assert (after.phase, after.generation) == (Phase.RUNNING, 2)
+
+
+def test_a_repo_alias_is_the_same_repo(rig: RuntimeRig) -> None:
+    rig.runtime.launch(launch_spec(rig, "p-one"))
+    alias = rig.root / "alias"
+    alias.symlink_to(rig.repo)
+    with pytest.raises(LaunchFailed, match="still holds its branch"):
+        rig.runtime.launch(replace(launch_spec(rig, "p-two"), repo=alias))
+
+
+def test_other_beads_and_other_repos_are_not_refused(rig: RuntimeRig) -> None:
+    rig.runtime.launch(launch_spec(rig, "p-one"))
+    w2 = rig.root / "w2"
+    subprocess.run(["git", "-C", str(rig.repo), "worktree", "add", "-q", "-b", "btq/btq-2", str(w2)],
+                   check=True, capture_output=True)
+    other_bead = replace(launch_spec(rig, "p-two", "btq-2"), worktree=w2)
+    rig.runtime.launch(other_bead)
+    repo2 = git_repo(rig.root / "r2")
+    w3 = rig.root / "w3"
+    subprocess.run(["git", "-C", str(repo2), "worktree", "add", "-q", "-b", "btq/btq-1", str(w3)],
+                   check=True, capture_output=True)
+    other_repo = replace(launch_spec(rig, "p-two"), worktree=w3, repo=repo2,
+                         session_key=ids.role_session("btq-1", "reviewer", "p-two"))
+    rig.runtime.launch(other_repo)
+    assert {record(rig, k).phase for k in (other_bead.session_key, other_repo.session_key)} == {Phase.RUNNING}

@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sandbox_env import RuntimeRig, launch_spec, runtime_rig, short_dir
+from sandbox_env import RuntimeRig, bead_worktree, launch_spec, runtime_rig, short_dir
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Clock, make_rig
 
@@ -229,7 +229,8 @@ def test_the_next_generation_never_removes_an_earlier_watcher(rig: RuntimeRig) -
 @needs_tools
 def test_one_stop_that_fails_does_not_keep_the_next_from_stopping(rig: RuntimeRig) -> None:
     """T11 r1: every session of the workstream is tried; the failure is raised after the pass."""
-    one, two = launch_spec(rig, "p-one"), launch_spec(rig, "p-two")
+    one = launch_spec(rig, "p-one")
+    two = replace(launch_spec(rig, "p-two", "btq-2"), worktree=bead_worktree(rig, "btq-2"))
     rig.runtime.launch(one)
     rig.runtime.launch(two)
     deadline = max(record(rig, one.session_key).deadline, record(rig, two.session_key).deadline)
