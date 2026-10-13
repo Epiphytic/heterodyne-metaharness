@@ -207,3 +207,44 @@ def test_epoch_quota_detail_and_wake_time() -> None:
     assert quota_detail(NOW) == "no headroom until 2027-01-15T08:00:00+00:00"
     assert wake_time([NOW + 5, NOW + 1], NOW) == NOW + 1
     assert wake_time([NOW, NOW + 9], NOW) is None and wake_time([], NOW) is None
+
+
+# --- exclusion (plan 4b E9) ---
+
+def test_excluded_keys_are_never_permitted() -> None:
+    p = view(A, B, C, caps=SWITCH)
+    assert permitted(p, None, frozenset({A.key})) == (B, C)
+    assert permitted(p, A.key, frozenset({A.key})) == (B, C)            # affinity, less the stale key
+    assert permitted(view(A, B), A.key, frozenset({A.key})) == ()      # can't switch: only A, excluded
+    assert permitted(view(A, B, failover="none"), None, frozenset({A.key})) == ()
+    assert gate(p, None, UsageCache(), NOW, S, exclude=frozenset({A.key})) == Chosen("b", B.key)
+    assert isinstance(gate(view(A), None, UsageCache(), NOW, S, exclude=frozenset({A.key})), AccountChanged)
+    entry = LaunchEntry("sk", 1, "alpha", "btq-1", "coder", "p-one", "a", A.key, "", False, "t")
+    assert admits(p, None, entry, UsageCache(), NOW, S)
+    assert not admits(p, None, entry, UsageCache(), NOW, S, exclude=frozenset({A.key}))
+
+
+@given(st.sets(st.sampled_from([A.key, B.key, C.key])), st.sampled_from([None, A.key, B.key]),
+       st.booleans(), st.sampled_from(["none", "next"]))
+def test_exclusion_only_removes_keys(excluded: set[str], previous: str | None, switch: bool,
+                                     failover: Failover) -> None:
+    p = view(A, B, C, failover=failover, caps=SWITCH if switch else NONE)
+    assert permitted(p, previous, frozenset(excluded)) == tuple(
+        c for c in permitted(p, previous) if c.key not in excluded)
+
+
+def test_decide_and_admitted_pass_the_exclusion_through(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text("{}")
+    accounts = ConfiguredAccounts({"p-two": ProfileAccounts("codex", failover="next")}, {"HOME": str(home)})
+    j = Journal(tmp_path / "wsd.db")
+    try:
+        key = accounts.current_key("codex", "default")
+        found = decide(accounts, j, "p-two", None, NOW, S, exclude=frozenset({key}))
+        assert isinstance(found, AccountChanged)
+        entry = LaunchEntry("sk", 1, "alpha", "btq-1", "coder", "p-two", "default", key, "", False, "t")
+        assert admitted(accounts, j, None, entry, NOW, S)
+        assert not admitted(accounts, j, None, entry, NOW, S, exclude=frozenset({key}))
+    finally:
+        j.close()
