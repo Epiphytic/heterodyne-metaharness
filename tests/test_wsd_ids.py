@@ -109,3 +109,10 @@ def test_profile_for_reads_only_its_own_role() -> None:
 
 def test_a_repeated_identical_role_label_is_not_a_conflict() -> None:
     assert ids.profile_for(("role:coder=p-two", "role:coder=p-two"), "coder", "p-one") == "p-two"
+
+
+def test_a_handoff_session_is_new_per_generation_and_recomputable() -> None:
+    key = ids.role_session("btq-1", "coder", "p-one")
+    assert ids.handoff_session(key, 2) == str(uuid.uuid5(ids.NS, f"{key}:2"))
+    assert ids.handoff_session(key, 2) != ids.handoff_session(key, 3)
+    assert ids.handoff_session(key, 2) != key

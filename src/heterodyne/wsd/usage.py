@@ -14,6 +14,7 @@ then the pure gate. Pickup, the guard's step 2 and its step 3 (`admitted`) all u
 import logging
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
 from heterodyne.config import ConfigError
 from heterodyne.wsd.accounts import AccountChanged, Accounts, Chosen
@@ -120,18 +121,43 @@ def mark_exhausted(j: Journal, credential_key: str, reset_hint: int | None, now:
 
 
 def decide(accounts: Accounts, j: Journal, profile: str, previous_key: str | None, now: int,
-           s: UsageSettings) -> Chosen | AccountChanged | Deadline:
+           s: UsageSettings, exclude: frozenset[str] = frozenset()) -> Chosen | AccountChanged | Deadline:
     """The gate on the profile as it resolves now. Raises ConfigError (path-free) if it can't resolve."""
     view = accounts.view(profile)
-    return gate(view, previous_key, j.usage_cache(c.key for c in view.accounts), now, s)
+    return gate(view, previous_key, j.usage_cache(c.key for c in view.accounts), now, s, exclude)
 
 
 def admitted(accounts: Accounts, j: Journal, previous_key: str | None, entry: LaunchEntry, now: int,
-             s: UsageSettings) -> bool:
+             s: UsageSettings, exclude: frozenset[str] = frozenset()) -> bool:
     """The guard's step 3 for a pinned entry, through the same view and cache as `decide`. A profile or
     key that can't be resolved has changed: not admitted."""
     try:
         view = accounts.view(entry.profile)
     except ConfigError:
         return False
-    return admits(view, previous_key, entry, j.usage_cache(c.key for c in view.accounts), now, s)
+    return admits(view, previous_key, entry, j.usage_cache(c.key for c in view.accounts), now, s, exclude)
+
+
+@dataclass(frozen=True)
+class TrustedRead:
+    """A host-side read (D9 (d)), run under the D8 lock on one credential key: the windows it saw, whether
+    any limit is reached, and the latest reset of a reached window, if it gave one."""
+    observations: tuple[Observation, ...]
+    limited: bool
+    reset_hint: int | None
+
+
+class UsageReader(Protocol):
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        """A trusted read of `account`'s usage, attempted only while the account's current key is
+        `credential_key`. None when it can't be read now (no reader for the profile's adapter, a changed
+        key, a busy lock, a stale login, a timeout, an answer that doesn't parse, a cleanup that can't be
+        confirmed): unconfirmed, never "fine". Never raises."""
+        ...
+
+
+class NoUsageReader:
+    """No trusted read is wired in: every limit stays unconfirmed (the untrusted defer only)."""
+
+    def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
+        return None
