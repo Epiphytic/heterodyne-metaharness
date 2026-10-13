@@ -2592,7 +2592,10 @@ def test_a_claude_status_line_is_usage_from_its_own_session(rig: RuntimeRig) -> 
     rig.backend.env_extra["HZ_FAKE_STATUS_LINE"] = json.dumps(STATUS)
     spec = launch_spec(rig, "p-one")
     rig.runtime.launch(spec)
-    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "another turn")     # unchanged: not sent again
+    pane = record(rig, spec.session_key).tmux_session
+    rig.tmux.paste(pane, "another turn")
+    # The fake echoes only after its status line has run: the unchanged limits were not sent again.
+    wait_for(lambda: "echo: another turn" in rig.tmux.capture(pane, 50))
     assert drained(rig, 1) == [UsageSeen(spec.session_key, 1,
                                          (Observation("claude:5h", "5h", 42, RESET, STATUS_SOURCE),))]
 
