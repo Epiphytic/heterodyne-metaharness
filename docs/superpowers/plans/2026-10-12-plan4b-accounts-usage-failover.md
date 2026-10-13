@@ -1155,3 +1155,224 @@ Expected: 0 errors.
 git add src/heterodyne/sandbox/spec.py tests/test_sandbox_spec.py
 git commit -m "plan4b T3: the install-root walk and the CLI bind's exemption (r16 §7)"
 ```
+
+## Task 4: turn ends, the event callback, and Claude's StopFailure hook
+
+S7 finding 1: a Claude turn that ends in an API error fires `StopFailure`, not `Stop`. Plan 4's lifetime stop waits for a turn boundary, so a limited Claude turn would look like a turn that never ends. This task makes the per-session server count any of the adapter's turn-end events as a boundary, and gives the runtime a callback for every accepted event (Task 7 parses usage from it).
+
+**Files:**
+- Modify: `src/heterodyne/session/server.py` (`TurnState.boundary`, `SessionServer(turn_ends=, on_event=)`, `_record`)
+- Modify: `src/heterodyne/agents/base.py` (`Adapter.turn_end_events`)
+- Modify: `src/heterodyne/agents/claude_code.py` (`CLAUDE_HOOK_EVENTS`, `turn_end_events`, `run_files`)
+- Modify: `src/heterodyne/agents/codex.py` (`turn_end_events`)
+- Test: `tests/test_session_server.py`, `tests/test_agents_adapters.py`
+
+**Interfaces:**
+- Consumes: nothing from other tasks.
+- Produces:
+  - `TurnState.boundary: bool` (default `False`); `TurnState.idle` returns it. `TurnState.last_event` keeps the real event name.
+  - `SessionServer(path, token, events, *, ..., turn_ends: tuple[str, ...] = ("Stop",), on_event: Callable[[dict[str, Any]], None] | None = None)`. `on_event` gets each accepted `hook_event` payload, under the server's lock, never after `close` has returned. It must be quick and must not call back into the server.
+  - `Adapter.turn_end_events: tuple[str, ...]`: `("Stop", "StopFailure")` for `ClaudeCode`, `("Stop",)` for `Codex`.
+  - `claude_code.CLAUDE_HOOK_EVENTS = (*HOOK_EVENTS, "StopFailure")`.
+
+Codex's hooks are unchanged, so the trusted hashes T14 validated stay valid. `HOOK_EVENTS` itself is unchanged.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_session_server.py`:
+
+```python
+def test_any_configured_turn_end_is_a_boundary(tmp_path: Path) -> None:
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", turn_ends=("Stop", "StopFailure"))
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+        assert not s.turns().idle
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StopFailure", "error": "rate_limit"}))
+        t = s.turns()
+        assert (t.prompts, t.stops, t.idle, t.last_event) == (1, 1, True, "StopFailure")
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+        assert not s.turns().idle
+    finally:
+        s.close()
+
+
+def test_an_unconfigured_turn_end_is_not_a_boundary(server: SessionServer, tmp_path: Path) -> None:
+    sock = tmp_path / "s.sock"
+    ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "UserPromptSubmit"}))
+    ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StopFailure"}))
+    assert not server.turns().idle and server.turns().stops == 0
+
+
+def test_each_accepted_event_reaches_the_callback_and_refused_ones_never(tmp_path: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=seen.append)
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "StatusLine", "rate_limits": {}}))
+        ask(sock, req("wrong", "hook_event", {"hook_event_name": "Stop"}))
+        ask(sock, req(TOKEN, "ws_request", {"text": "x"}))
+        ask(sock, req(TOKEN, "hook_event", [1]))
+        assert seen == [{"hook_event_name": "StatusLine", "rate_limits": {}}]
+    finally:
+        s.close()
+
+
+def test_a_failing_callback_drops_only_its_report(tmp_path: Path) -> None:
+    def boom(payload: dict[str, object]) -> None:
+        raise ValueError("parser bug")
+
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=boom)
+    s.start()
+    try:
+        sock = tmp_path / "s.sock"
+        assert ask(sock, req(TOKEN, "hook_event", {"hook_event_name": "Stop"})) == '{"ok": true}'
+        assert s.turns().idle                   # the turn state was recorded before the callback
+    finally:
+        s.close()
+
+
+def test_nothing_reaches_the_callback_after_close(tmp_path: Path) -> None:
+    seen: list[dict[str, object]] = []
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", on_event=seen.append)
+    s.start()
+    s.close()
+    s._record({"hook_event_name": "Stop"})     # a handler still unwinding after close  # noqa: SLF001
+    assert seen == [] and not s.turns().idle
+```
+
+In `tests/test_agents_adapters.py`, import `CLAUDE_HOOK_EVENTS` from `heterodyne.agents.claude_code`, and in `test_claude_home_merges_its_state_and_hooks_are_read_only` replace the last three lines with:
+
+```python
+    assert set(flag["hooks"]) == set(CLAUDE_HOOK_EVENTS) == {*HOOK_EVENTS, "StopFailure"}
+    assert {e: [h["command"] for g in gs for h in g["hooks"]] for e, gs in flag["hooks"].items()} == {
+        e: [PRE_TOOL_COMMAND if e == "PreToolUse" else HOOK_COMMAND] for e in CLAUDE_HOOK_EVENTS}
+```
+
+and append:
+
+```python
+def test_turn_end_events_per_adapter() -> None:
+    assert ClaudeCode().turn_end_events == ("Stop", "StopFailure")
+    assert Codex().turn_end_events == ("Stop",)
+    assert "StopFailure" not in HOOK_EVENTS            # Codex's trusted hook set is unchanged
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_session_server.py tests/test_agents_adapters.py -q`
+Expected: FAIL: `TypeError: SessionServer.__init__() got an unexpected keyword argument 'turn_ends'`, and `cannot import name 'CLAUDE_HOOK_EVENTS'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/session/server.py`, update the module docstring's `TurnState` sentence to say "turn counts, the last turn event and whether it ended a turn (one of the adapter's turn-end events, D13; plan 4b E14)", and replace `TurnState`:
+
+```python
+@dataclass(frozen=True)
+class TurnState:
+    prompts: int = 0
+    stops: int = 0                  # turn ends of any of the session's turn-end events
+    last_event: str = ""
+    thread_id: str | None = None
+    boundary: bool = False          # the last turn event ended a turn
+
+    @property
+    def idle(self) -> bool:
+        """At a turn boundary: the last turn event was one of the session's turn-end events."""
+        return self.boundary
+```
+
+Add the two parameters to `SessionServer.__init__` and keep them:
+
+```python
+    def __init__(self, path: Path, token: str, events: Path, *, max_spool: int = 4 << 20,
+                 max_handlers: int = MAX_HANDLERS, client_seconds: float = CLIENT_SECONDS,
+                 clock: Callable[[], float] = time.monotonic, turn_ends: tuple[str, ...] = ("Stop",),
+                 on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
+        self.path = path
+        self.token = token.encode()
+        self.events = events
+        self.max_spool = max_spool
+        self.client_seconds = client_seconds
+        self.clock = clock
+        self.turn_ends = turn_ends
+        self.on_event = on_event
+```
+
+(the rest of `__init__` is unchanged). Replace `_record`:
+
+```python
+    def _record(self, payload: dict[str, Any]) -> None:
+        """Turn state from the event name and session ID alone, then the runtime's callback, both under
+        the lock and only while open, so nothing is recorded or reported once close has returned. A
+        callback that fails drops its own report: the reply and the turn state are unaffected."""
+        event = payload.get("hook_event_name")
+        with self._lock:
+            if self._closed.is_set():
+                return
+            s = self._state
+            if event == "SessionStart" and s.thread_id is None:
+                sid = payload.get("session_id")
+                if isinstance(sid, str) and UUID.fullmatch(sid):
+                    s = replace(s, thread_id=sid)
+            elif event == "UserPromptSubmit":
+                s = replace(s, prompts=s.prompts + 1, last_event=event, boundary=False)
+            elif isinstance(event, str) and event in self.turn_ends:
+                s = replace(s, stops=s.stops + 1, last_event=event, boundary=True)
+            self._state = s
+            if self.on_event is not None:
+                try:
+                    self.on_event(payload)
+                except Exception:  # noqa: BLE001, S110 - an untrusted report is dropped, never retried
+                    pass
+```
+
+In `src/heterodyne/agents/base.py`, add to the `Adapter` protocol, beside `assigns_id`:
+
+```python
+    turn_end_events: tuple[str, ...]    # hook events that end a turn (plan 4b E14)
+```
+
+In `src/heterodyne/agents/claude_code.py`, after `SETTINGS_FILE`:
+
+```python
+# Claude Code 2.1.286 ends a turn that fails on an API error, a usage limit included, with StopFailure
+# instead of Stop (S7 finding 1): it must reach the session socket, or the turn never ends to wsd.
+CLAUDE_HOOK_EVENTS = (*HOOK_EVENTS, "StopFailure")
+```
+
+and in `ClaudeCode`:
+
+```python
+    turn_end_events: tuple[str, ...] = ("Stop", "StopFailure")
+```
+
+```python
+    def run_files(self) -> Mapping[str, str]:
+        hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
+        return {SETTINGS_FILE: json.dumps({"skipDangerousModePermissionPrompt": True, "hooks": hooks})}
+```
+
+In `src/heterodyne/agents/codex.py`, in `Codex`:
+
+```python
+    turn_end_events: tuple[str, ...] = ("Stop",)
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_session_server.py tests/test_agents_adapters.py tests/test_sandbox_runtime.py -q`
+Expected: PASS. `test_sandbox_runtime.py` still passes: the runtime still builds its servers with the default `turn_ends` until Task 7.
+
+Then: `timeout 300 uv run pyright src/heterodyne/session src/heterodyne/agents tests/test_session_server.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/session/server.py src/heterodyne/agents/base.py src/heterodyne/agents/claude_code.py \
+        src/heterodyne/agents/codex.py tests/test_session_server.py tests/test_agents_adapters.py
+git commit -m "plan4b T4: adapter turn-end events, the event callback and Claude's StopFailure hook"
+```
