@@ -1101,8 +1101,9 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(
 
 # Finds the agent-path probe by its argv, then, until it exits, each curl that descends from it, and reports
 # what that curl's output descriptors are and whether a write open of each is refused. It never writes: an
-# open that succeeds is closed at once. Only a process that is gone (ENOENT, ESRCH) counts as gone; any
-# other error is reported, and fails the check.
+# open that succeeds is closed at once. Only a process that is gone (ENOENT, ESRCH) counts as gone. A
+# descriptor whose link the sandbox hides (EACCES: the watcher is outside the probe's domain) is `hidden`, and
+# its write open is still tried; any other error is reported, and fails the check.
 OUTPUT_CHECK = r"""
 import errno, os, sys, time
 deadline = time.monotonic() + float(sys.argv[1])
@@ -1144,7 +1145,11 @@ def state(pid, fd):
     try:
         kind = os.readlink(path).partition(':')[0]
     except OSError as e:
-        return 'gone' if e.errno in GONE else f'error:{name(e.errno)}'
+        if e.errno in GONE:
+            return 'gone'
+        if e.errno != errno.EACCES:
+            return f'error:{name(e.errno)}'
+        kind = 'hidden'
     try:
         os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
         return f'{kind}:OPENED'
@@ -1186,7 +1191,8 @@ print('done', flush=True)
 
 def test_a_running_probe_s_output_channels_cannot_be_reopened(live: Live) -> None:
     """Task 9C: while the agent-path probe runs, a separate workload process finds each curl the probe
-    starts. Both of its output descriptors must be sockets whose write open is refused (ENXIO)."""
+    starts. Neither of its output descriptors may be reopened for writing: each is a socket whose open is
+    refused (ENXIO), or one whose link and open the sandbox both refuse (EACCES)."""
     out: list[tuple[int, str]] = []
 
     def watch(ctx: ProbeContext) -> None:
@@ -1205,7 +1211,9 @@ def test_a_running_probe_s_output_channels_cannot_be_reopened(live: Live) -> Non
         assert why == "", why
         curls = [line.split()[2:] for line in out[0][1].splitlines() if line.startswith("curl ")]
         whole = sum(len(c) == 2 and "gone" not in c for c in curls)
-        print(f"EVIDENCE n10 curls seen {len(curls)}, whole {whole}")
+        fds = [fd for c in curls for fd in c]
+        print(f"EVIDENCE n10 curls seen {len(curls)}, whole {whole}; fds socket:ENXIO "
+              f"{fds.count('socket:ENXIO')}, hidden:EACCES {fds.count('hidden:EACCES')}")
     finally:
         stop(live, spec.session_key)
 

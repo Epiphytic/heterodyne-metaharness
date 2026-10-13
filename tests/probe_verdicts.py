@@ -30,7 +30,10 @@ MOUNT_NS = re.compile(r"mnt:\[\d+\]")
 # The overlay's steps and the answer that is each one's refusal: the filter (unshare), Landlock's
 # read-only /proc (the uid map) and Landlock's mount denial (each bind).
 OVERLAY_REFUSALS = {"unshare": "EPERM", "maps": "EACCES", "bind-probe": "EPERM", "bind-cli": "EPERM"}
-SENT = ("OK", "EPIPE", "ECONNRESET")       # the channel may reject the peer before its send lands
+SENT = ("OK", "EPIPE", "ECONNRESET")
+# A curl output descriptor that can't be reopened: a socket whose write open gives ENXIO, or one whose link
+# and write open the sandbox both refuse from outside the probe's domain (EACCES; team-lead, T15 live).
+UNREACHABLE = ("socket:ENXIO", "hidden:EACCES")       # the channel may reject the peer before its send lands
 UNRECOGNISED = "<unrecognised>"
 # Codex T15 r2: a reason renders only words the checks print (operation and file names, steps, answers,
 # errno names, descriptor kinds), numeric PIDs and statuses and mount-namespace IDs; any other piece, a
@@ -38,8 +41,8 @@ UNRECOGNISED = "<unrecognised>"
 WORDS = frozenset({*MEMORY_ANSWERS, *(op for op, _ in FILE_OPS), *(name for _, name in FILE_OPS), *NS_OPS,
                    *OVERLAY_REFUSALS, "connect", "sent", "run", "forged", "written", "targets", "child",
                    "getfd", "curl", "probe", "mnt", "done", "exited", "running", "gone", "none", "OK",
-                   "MISSING", "PRESENT", "OPENED", "TIMEOUT", "socket", "pipe", "anon_inode", "error",
-                   *errno.errorcode.values()})
+                   "MISSING", "PRESENT", "OPENED", "TIMEOUT", "socket", "pipe", "anon_inode", "hidden",
+                   "error", *errno.errorcode.values()})
 NUMBER = re.compile(r"-?\d{1,7}")
 NS_ID = re.compile(r"\[\d{1,12}\]")
 SEPARATORS = frozenset({"", " ", "=", ":"})
@@ -239,9 +242,11 @@ def overlay_outcome(rc: int, out: str) -> str:
 def outputs_unreachable(rc: int, out: str) -> str:
     """The output-channel check prints `probe <pid>` once it finds the agent-path probe, then `curl <pid>
     <fd 1> <fd 2>` for each curl it saw that descends from the probe, each fd as `<kind>:<result of a write
-    open>` or `gone` (the process ended first), or `curl <pid> gone` (it ended before it could be placed),
-    then `probe <pid> exited` once the probe has, and `done`. At least one curl must have been seen whole,
-    and every fd seen must be a socket that refused the open (ENXIO)."""
+    open>` (kind `hidden` when its link was refused with EACCES), `error:<errno>` (its link was unreadable
+    otherwise) or `gone` (the process ended first), or `curl <pid> gone` (it ended before it could be
+    placed), then `probe <pid> exited` once the probe has, and `done`. At least one curl must have been seen
+    whole, and every fd seen must be one of UNREACHABLE: a socket that refused the open (ENXIO), or a hidden
+    fd whose open was refused too (EACCES)."""
     lines = out.splitlines()
     if rc != 0 or lines[-1:] != ["done"]:
         return f"the output-channel check did not run to completion (exit {rc})"
@@ -257,7 +262,7 @@ def outputs_unreachable(rc: int, out: str) -> str:
                 or (len(parts) == 3 and parts[2] != "gone"):
             return f"not a result: {shown(line)}"
         fds = [fd for fd in parts[2:] if fd != "gone"]
-        if any(fd != "socket:ENXIO" for fd in fds):
+        if any(fd not in UNREACHABLE for fd in fds):
             return f"a curl output is reopenable, not a socket, or unreadable: {shown(line)}"
         whole += len(fds) == 2
     return "" if whole else "the check saw no curl process whole while the probe ran"

@@ -162,6 +162,29 @@ def test_an_incomplete_or_reachable_output_check_fails(rc: int, out: str) -> Non
     assert outputs_unreachable(rc, out) != ""
 
 
+@pytest.mark.parametrize("fds", ["hidden:EACCES hidden:EACCES", "socket:ENXIO hidden:EACCES",
+                                 "hidden:EACCES socket:ENXIO"])
+def test_a_hidden_output_whose_open_is_refused_is_unreachable(fds: str) -> None:
+    """T15 live: from the exec path, the sandbox refuses the curl's fd links and their write opens alike
+    (EACCES). That is the threat itself refused, so it counts, by that exact errno only."""
+    assert outputs_unreachable(0, CURLS.replace("socket:ENXIO socket:ENXIO", fds)) == ""
+
+
+@pytest.mark.parametrize("fd", ["hidden:OPENED", "hidden:EPERM", "hidden:ENXIO", "error:EACCES",
+                                "error:EPERM", "hidden:EROFS", "socket:EACCES"])
+def test_any_other_hidden_or_unreadable_output_fails(fd: str) -> None:
+    assert outputs_unreachable(0, CURLS.replace("socket:ENXIO socket:ENXIO", f"hidden:EACCES {fd}")) != ""
+    assert outputs_unreachable(0, CURLS.replace("socket:ENXIO socket:ENXIO", f"{fd} socket:ENXIO")) != ""
+
+
+def test_a_hidden_output_still_needs_a_curl_seen_whole() -> None:
+    gone = "probe 40\ncurl 42 gone gone\ncurl 43 gone\nprobe 40 exited\ndone\n"
+    assert outputs_unreachable(0, gone) != ""
+    assert outputs_unreachable(0, gone.replace("curl 42 gone gone", "curl 42 hidden:EACCES gone")) != ""
+    hidden = gone.replace("curl 42 gone gone", "curl 42 hidden:EACCES hidden:EACCES")     # both seen: whole
+    assert outputs_unreachable(0, hidden) == ""
+
+
 @pytest.mark.parametrize("line", ["/srv/someone/.claude/.credentials.json", "Traceback (most recent call",
                                   "x" * 101, "sha=abc\x1b[0m"])
 def test_a_reason_never_echoes_a_path_or_free_text(line: str) -> None:
