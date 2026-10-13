@@ -121,7 +121,7 @@ Two different resolves therefore never coalesce, and an identical retry joins th
 
 ## Tests (offline)
 
-**`tests/test_sessiongit.py`** (snapshot and land_snapshot; the existing land tests move to land_snapshot):
+**`tests/test_session_git.py`** (snapshot and land_snapshot; the existing land tests move to land_snapshot):
 
 1. `test_snapshot_ignores_private_config_hooks_and_alternates`: a private dir has a malicious `config` (`core.fsmonitor`, `core.hooksPath`), hooks, and `info/alternates` pointing at another repository holding the tip's objects. The snapshot doesn't run any of them, and without the objects present itself it fails with a fixed reason.
 2. `test_snapshot_refuses_links_special_files_and_hard_links`, parameterized: a symlinked object dir, a symlinked pack, a FIFO, a hard-linked pack (nlink 2), an oversized object. Each gives a fixed reason, and nothing outside `dest` is read.
