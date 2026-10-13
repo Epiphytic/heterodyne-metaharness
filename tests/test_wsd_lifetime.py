@@ -491,6 +491,11 @@ def test_no_runtime_expires_nothing() -> None:
     NoRuntime().expire("alpha", 0)
 
 
+def test_no_runtime_reads_no_end() -> None:
+    with pytest.raises(RuntimeUnavailable):
+        NoRuntime().ended("k")
+
+
 def test_pickup_expires_before_it_sweeps(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
     rig.world.add("btq-1")

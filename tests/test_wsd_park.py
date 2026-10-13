@@ -1161,3 +1161,15 @@ def test_the_count_survives_a_restart(tmp_path: Path) -> None:
     dies(rig)
     rig.pickup()
     crash_looped(rig)
+
+
+def test_an_unreadable_end_holds_and_counts_nothing(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.runtime.ended_failures = 1
+    rig.pickup()
+    assert Reason.RUNTIME_UNAVAILABLE in rig.journal.holds(WS) and len(rig.runtime.launches) == 1
+    assert classes(rig) == [None] and NEEDS_HUMAN not in rig.world.beads["btq-1"].labels
+    rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 2
+    assert classes(rig) == ["died", None]
