@@ -1858,7 +1858,7 @@ def main(argv):
     home = tempfile.mkdtemp(prefix="hz-usage-")
     try:
         os.symlink(os.path.join(os.environ["CODEX_HOME"], "auth.json"), os.path.join(home, "auth.json"))
-        limits = read(codex, home, limit)
+        limits = read(codex, dict(os.environ, CODEX_HOME=home), limit)
     finally:
         shutil.rmtree(home)
     if not isinstance(limits, dict):
@@ -1867,9 +1867,11 @@ def main(argv):
     return 0
 
 
-def read(codex, home, limit):
+def read(codex, env, limit):
+    """The `rateLimits` of the app-server run with `env` (its CODEX_HOME included), or None. Shared
+    with the host's trusted read (agents/hostread.py), which loads this file."""
     proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, CODEX_HOME=home))
+                            stderr=subprocess.DEVNULL, text=True, env=env)
     stdin, stdout = proc.stdin, proc.stdout
     if stdin is None or stdout is None:
         raise RuntimeError("codex app-server has no pipes")
