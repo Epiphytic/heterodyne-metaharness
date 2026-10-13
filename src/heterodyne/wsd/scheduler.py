@@ -433,6 +433,7 @@ class Scheduler:
                 j.adopt(name, bead.id, BeadState.DROPPED, Reason.CLAIM_LOST, "returned to the queue")
             op = j.op_open(OpKind.PICKUP, name, bead.id, {"ref": ref or "", "role": self.ws.coder_role})
             j.set_state(name, bead.id, BeadState.CLAIMING, ref=ref)
+            j.crash_reset(name, bead.id)          # g08sd: a new claim starts its count afresh
         self.d.cp("pickup.intent")
         try:
             self.d.gate.claim(name, bead.id)

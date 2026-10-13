@@ -33,6 +33,7 @@ class Reason(StrEnum):
     ROUTING_CHANGED = "routing_changed"
     WORKTREE_FAILED = "worktree_failed"
     LAUNCH_FAILED = "launch_failed"            # the runtime confirmed nothing is running
+    CRASH_LOOP = "crash_loop"                  # g08sd: its sessions died, launch after launch (§10)
     LAUNCH_UNCERTAIN = "launch_uncertain"      # the runtime can't say whether the launch started
     LAUNCH_UNRECORDED = "launch_unrecorded"    # no readable launched-session record on the bead
     STOP_UNCONFIRMED = "stop_unconfirmed"      # a session that must end could not be confirmed ended

@@ -13,6 +13,8 @@
   (a standalone PARK, a pickup's or resume's guard, an undefer, a re-gate or a release), found by its
   `defer.*` step names. Undefer gates the bead again, removes `v2:deferred` and launches through the guard.
 - `launch`, the guard: the only call to `AgentRuntime.launch`, used by pickup, resume and their replays.
+  Before it pins a generation it accounts for every earlier launched one (g08sd, `_account`): a bead whose
+  sessions keep dying escalates `crash_loop` there, before the launch that would follow.
 
 Every external effect is followed by a `<op>.<step>!` checkpoint, and every journal write by
 `<op>.<step>`, so a test can crash on either side of each write. `entry()` is the workstream's one
@@ -60,7 +62,15 @@ from heterodyne.wsd.launches import (
     LaunchesUnreadable,
     Receipt,
 )
-from heterodyne.wsd.runtime import LaunchFailed, LaunchSpec, Liveness, RuntimeUnavailable, Session
+from heterodyne.wsd.runtime import (
+    EndCause,
+    Ended,
+    LaunchFailed,
+    LaunchSpec,
+    Liveness,
+    RuntimeUnavailable,
+    Session,
+)
 from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.upgrade import (
     CODEX_THREAD_FIELD,
@@ -107,6 +117,17 @@ ACCOUNT_CHANGED_EVENT = "deferral_account_changed"
 # Holds the guard settles itself from the session list instead of waiting on, but only an operation's
 # own: the hold's detail names the bead whose launch was uncertain, and every other operation waits (D17).
 GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
+
+
+# g08sd: what an end is accounted as. Anything else (DIED, REFUSED, a cause wsd doesn't know) is a death.
+CLASSES = {EndCause.STOPPED: "stopped", EndCause.LIFETIME: "lifetime", EndCause.LEGACY_LIFETIME: "legacy"}
+
+
+def _died(generation: int, end: Ended | None) -> str:
+    """Numbers only: the operator's detail of one death."""
+    if end is not None and end.generation == generation and end.ran_seconds is not None:
+        return f"generation {generation} died after {end.ran_seconds}s"
+    return f"generation {generation} died"
 
 
 class Launch(StrEnum):
@@ -745,6 +766,7 @@ class Parker:
                     raise NotReleasable(f"{bead} waits on quota")      # nothing for the operator to release
                 self._refuse_unverifiable(bead)
                 op = j.op_open(OpKind.RELEASE, ws, bead, {"ref": ref or ""})
+                j.crash_reset(ws, bead)                   # g08sd: the operator's reset
                 if row.state is BeadState.DEFERRED:       # nothing to unlabel: straight to `regate`
                     op = j.op_step(op.op_id, "regate")
             self.d.cp("release.regate" if op.step == "regate" else "release.intent")
@@ -999,6 +1021,9 @@ class Parker:
             if own:
                 self._finish_live(op, rec)
                 return Launch.LIVE
+            done = self._account(op)
+            if done is not None:
+                return done
             return self._pin_and_dispatch(op, rec, shown, worktree, accounts)    # steps 2 to 6
         except (LaunchConflict, LaunchesUnreadable, EntryConflict) as exc:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"launch entries disagree: {exc}")
@@ -1100,6 +1125,48 @@ class Parker:
             if at is None or copies.entries[at] != entry:
                 self._bead_write(entry, f"{kind}.reconciled!")
         return None
+
+    def _account(self, op: Op) -> Launch | None:
+        """g08sd, after step 1 with no session of the bead listed: every launched generation of the bead is
+        classified once, in order, before any new one is pinned, and the bound escalates here, so the
+        launch that would follow never happens. Only each key's latest generation has evidence (the
+        runtime keeps one record per key, and this runs before every pin): an older one not yet accounted
+        predates g08sd and is `legacy`. No trusted end is a death, never a healthy end."""
+        j, ws, bead = self.d.journal, self.ws.name, op.bead
+        todo = [e for e in j.launches_of(ws, bead) if e.outcome == LAUNCHED and not j.crash_accounted(e)]
+        if not todo:
+            return None
+        latest: dict[str, int] = {}
+        for e in todo:
+            latest[e.session_key] = max(latest.get(e.session_key, 0), e.generation)
+        try:
+            evidence = {key: self.d.runtime.ended(key) for key in latest}
+        except RuntimeUnavailable as exc:
+            j.hold(ws, Reason.RUNTIME_UNAVAILABLE, str(exc))
+            return Launch.WAIT
+        details: list[str] = []
+        with j.transaction():
+            n = j.crash_count(ws, bead)
+            for e in sorted(todo, key=lambda e: (e.journaled_at, e.generation)):
+                end = evidence[e.session_key]
+                if e.generation != latest[e.session_key]:
+                    klass = "legacy"
+                elif end is None or end.generation != e.generation or not end.reached_running:
+                    klass = "died"
+                else:
+                    klass = CLASSES.get(end.cause, "died")
+                n = j.crash_account(ws, bead, e, klass)
+                if klass == "died":
+                    details.append(_died(e.generation, end))
+            if n >= self.ws.limits.launch_failures_before_human:
+                esc = self._stuck(op, Reason.CRASH_LOOP, "; ".join([*details, f"{n} in a row"]))
+            else:
+                esc = None
+        self.d.cp(f"{op.kind.value}.accounted")
+        if esc is None:
+            return None
+        self._handoff(esc)
+        return Launch.ENDED
 
     def _finish_live(self, op: Op, rec: SessionRecord) -> None:
         """The bead's own session is live: the op's pinned generation, if any, never reached the runtime.

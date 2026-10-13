@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult
+from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.spec import SandboxSpec
 
 
@@ -39,6 +39,7 @@ class FakeBackend:
     execs: list[list[str]] = field(default_factory=list[list[str]])
     ttys: list[list[str]] = field(default_factory=list[list[str]])          # each pane's argv, as asked
     reapers: list[tuple[str, int, Path]] = field(default_factory=list[tuple[str, int, Path]])
+    watches: list[Watch] = field(default_factory=list[Watch])
     env_extra: dict[str, str] = field(default_factory=dict[str, str])     # fault knobs for the fake CLI
 
     def available(self) -> bool:
@@ -135,10 +136,11 @@ class FakeBackend:
     def workload_pid(self, name: str) -> int:
         return os.getpid()
 
-    def reaper_argv(self, name: str, deadline: int, record: Path) -> list[str]:
+    def reaper_argv(self, name: str, deadline: int, record: Path, watch: Watch) -> list[str]:
         """The fake's sandboxes live in this process, so its backstop only waits; Task 11's tests drive
         the deletion it stands for, and `reaper.reap` is tested on its own."""
         self.reapers.append((name, deadline, record))
+        self.watches.append(watch)
         return [sys.executable, "-I", "-c", "import time; time.sleep(86400)"]
 
     def pane_env(self) -> Mapping[str, str]:
