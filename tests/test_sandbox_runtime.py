@@ -6,7 +6,7 @@ import os
 import shutil
 import socket
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -452,6 +452,105 @@ def test_the_freshness_gate_refuses_a_login_that_expires_too_soon(rig: RuntimeRi
         rig.runtime.launch(launch_spec(rig, profile))
     assert str(caught.value) == LOGIN_STALE
     assert rig.backend.created == []
+
+
+def after_the_check(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]) -> None:
+    """Run `change` as soon as the locked check has returned, before the spec and the bind exist."""
+    real = SandboxRuntime._pinned
+
+    def pinned_then_change(self: SandboxRuntime, *args: Any) -> Any:
+        checked = real(self, *args)
+        change()
+        return checked
+
+    monkeypatch.setattr(SandboxRuntime, "_pinned", pinned_then_change)
+
+
+def during_the_create(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]) -> None:
+    """Run `change` just before the backend makes the sandbox, after the spec was checked."""
+    real = rig.backend.create
+
+    def change_then_create(spec: Any, scratch: Path) -> None:
+        change()
+        real(spec, scratch)
+
+    monkeypatch.setattr(rig.backend, "create", change_then_create)
+
+
+def repoint_at_default(rig: RuntimeRig, folder: Path) -> Callable[[], None]:
+    """Codex r1 (PR #74): the named account's login replaced by a link to the default account's."""
+    def change() -> None:
+        (folder / "auth.json").unlink()
+        (folder / "auth.json").symlink_to(rig.home / ".codex" / "auth.json")
+    return change
+
+
+def replace_with_short_lived(rig: RuntimeRig, folder: Path) -> Callable[[], None]:
+    """The named account's login replaced, by rename, with one that expires inside the session's window."""
+    def change() -> None:
+        s = rig.runtime.c.settings
+        write_login(rig.root / "short", "codex", rig.clock() + s.max_lifetime_seconds)
+        (rig.root / "short" / "auth.json").replace(folder / "auth.json")
+    return change
+
+
+def rewrite_short_lived_in_place(rig: RuntimeRig, folder: Path) -> Callable[[], None]:
+    """The same file rewritten in place (same inode) with a token that expires inside the window."""
+    def change() -> None:
+        s = rig.runtime.c.settings
+        write_login(folder, "codex", rig.clock() + s.max_lifetime_seconds)
+    return change
+
+
+@pytest.mark.parametrize("when", [after_the_check, during_the_create])
+def test_a_login_repointed_after_the_locked_check_is_never_bound(rig: RuntimeRig,
+                                                                 monkeypatch: pytest.MonkeyPatch,
+                                                                 when: Any) -> None:
+    folder = with_named(rig, "codex", "work", rig.clock() + DAY)
+    when(rig, monkeypatch, repoint_at_default(rig, folder))
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert str(caught.value) == KEY_CHANGED
+    assert rig.backend.boxes == {}
+    if when is after_the_check:
+        assert rig.backend.created == []                        # refused before any sandbox is made
+
+
+@pytest.mark.parametrize("when", [after_the_check, during_the_create])
+@pytest.mark.parametrize("swap", [replace_with_short_lived, rewrite_short_lived_in_place])
+def test_a_login_made_stale_after_the_locked_check_refuses_the_launch(rig: RuntimeRig,
+                                                                      monkeypatch: pytest.MonkeyPatch,
+                                                                      when: Any, swap: Any) -> None:
+    folder = with_named(rig, "codex", "work", rig.clock() + DAY)
+    when(rig, monkeypatch, swap(rig, folder))
+    with pytest.raises(LaunchFailed) as caught:
+        rig.runtime.launch(launch_spec(rig, "p-two", account="work"))
+    assert str(caught.value) == LOGIN_STALE
+    assert rig.backend.boxes == {}
+
+
+def test_the_bound_login_is_read_again_under_the_lock(rig: RuntimeRig,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = launch_spec(rig, "p-two")
+    lock = rig.runtime.c.credlocks / f"{spec.credential_key}.lock"
+    adapter = type(rig.runtime.c.adapters["codex"])
+    held: list[int | None] = []
+    real = adapter.access_expiry
+
+    def probing(self: Any, login_files: Any) -> float:
+        fd = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(0)                                      # taken: the runtime did not hold it
+        except BlockingIOError as exc:
+            held.append(exc.errno)
+        finally:
+            os.close(fd)
+        return real(self, login_files)
+
+    monkeypatch.setattr(adapter, "access_expiry", probing)
+    rig.runtime.launch(spec)
+    assert held == [errno.EWOULDBLOCK, errno.EWOULDBLOCK]       # the freshness gate, then the bound check
 
 
 def test_the_freshness_gate_reads_the_chosen_accounts_login(rig: RuntimeRig) -> None:
