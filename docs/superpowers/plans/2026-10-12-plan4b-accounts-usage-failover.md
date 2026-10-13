@@ -4028,3 +4028,255 @@ Expected: 0 errors.
 git add src/heterodyne/wsd/park.py tests/fakes/fake_runtime.py tests/test_wsd_defer.py
 git commit -m "plan4b T10: handoff relaunches without (b), and a stale login moves on to the next account"
 ```
+
+## Task 11: the capability table (G2-gated)
+
+AU-6 and AU-7 "fill the table". D9: only a capability S7 **demonstrated on a real account**, on the adapter's pinned CLI version, is enabled. This task has two parts.
+
+- **Part A** can merge before G2, because it enables nothing. It adds the evidence record and an invariant check that every later table edit must pass.
+- **Part B** is one commit per accepted finding, made only after the G2 bead records that the operator accepted it.
+
+**Files:**
+- Modify: `src/heterodyne/config/capabilities.py` (`Evidence`, `EVIDENCE`, `table_problems` and the `PROBLEM_*` texts; then the table entries)
+- Test: `tests/test_config_capabilities.py` (new); `tests/test_config_accounts.py` (`test_capability_table_is_empty` replaced)
+
+**Interfaces:**
+- Consumes:
+  - `Capabilities`, `CAPABILITIES` and `LOGIN_FILES`, as they are now.
+  - `Adapter.version_pin` through `heterodyne.agents.registry.ADAPTERS`, in the test only. `config/` doesn't import `agents/`, and this task keeps it that way: the pins are a parameter.
+- Produces:
+  - `Evidence(runs: str, version: str)`: the S7 runs that showed one capability (for example `"L3"`), and the CLI version they ran on.
+  - `EVIDENCE: Mapping[str, Mapping[str, Evidence]]`: adapter, then `Capabilities` field name.
+  - `table_problems(table, evidence, pins) -> tuple[str, ...]`: an empty tuple, or one line per broken rule, each starting with a `PROBLEM_*` text.
+
+The rules `table_problems` enforces:
+
+1. Every adapter in the table or in the evidence has a pin, and so is a known adapter.
+2. Every enabled field has evidence, and no evidence names a field that is off.
+3. The evidence's version equals the adapter's pin. D9 is per pinned version, so a pin bump fails the suite until the runs are repeated, or the capability is turned off.
+4. Any enabled field needs (a). Without a working login binding nothing else was demonstrated (S7 "Recommended D9 defaults": "This is the first gate").
+5. Claude never has (d): S7 found no source, and `get_usage` is ruled out by §2. Only a new ADR revision can change this rule.
+6. Nobody has (f) yet: a handoff needs the §4.1 generator (Q3), which plan 5 builds. Plan 5 removes this rule when it lands.
+
+### Part A: the evidence record and the invariants
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_config_capabilities.py`:
+
+```python
+"""The D9 capability table's invariants (plan 4b Task 11): evidence per enabled field, on the pinned CLI."""
+
+import pytest
+
+from heterodyne.agents.registry import ADAPTERS
+from heterodyne.config import capabilities
+from heterodyne.config.capabilities import (
+    CAPABILITIES,
+    EVIDENCE,
+    PROBLEM_NEEDS_BINDING,
+    PROBLEM_NO_EVIDENCE,
+    PROBLEM_NO_GENERATOR,
+    PROBLEM_NO_SOURCE,
+    PROBLEM_STALE_EVIDENCE,
+    PROBLEM_UNKNOWN_ADAPTER,
+    PROBLEM_WRONG_VERSION,
+    Capabilities,
+    Evidence,
+    table_problems,
+)
+
+PINS = {"claude-code": "2.1.286", "codex": "0.160.0"}
+BOUND = Evidence("L1,L2", "0.160.0")
+
+
+def test_the_shipped_table_keeps_every_rule() -> None:
+    pins = {name: adapter.version_pin for name, adapter in ADAPTERS.items()}
+    assert table_problems(CAPABILITIES, EVIDENCE, pins) == ()
+
+
+def test_the_pins_here_are_the_adapters_pins() -> None:
+    """The fixtures below use literal pins; this keeps them honest."""
+    assert {name: adapter.version_pin for name, adapter in ADAPTERS.items()} == PINS
+
+
+def test_an_empty_table_needs_no_evidence() -> None:
+    assert table_problems({}, {}, PINS) == ()
+
+
+def test_a_bound_login_with_its_evidence_is_accepted() -> None:
+    table = {"codex": Capabilities(login_binding=True)}
+    assert table_problems(table, {"codex": {"login_binding": BOUND}}, PINS) == ()
+
+
+@pytest.mark.parametrize(("table", "evidence", "problem"), [
+    ({"gemini": Capabilities()}, {}, PROBLEM_UNKNOWN_ADAPTER),
+    ({}, {"gemini": {"login_binding": BOUND}}, PROBLEM_UNKNOWN_ADAPTER),
+    ({"codex": Capabilities(login_binding=True)}, {}, PROBLEM_NO_EVIDENCE),
+    ({"codex": Capabilities(login_binding=True)},
+     {"codex": {"login_binding": BOUND, "trusted_read": Evidence("L7", "0.160.0")}}, PROBLEM_STALE_EVIDENCE),
+    ({"codex": Capabilities(login_binding=True)}, {"codex": {"login_binding": Evidence("L1,L2", "0.157.0")}},
+     PROBLEM_WRONG_VERSION),
+    ({"codex": Capabilities(in_session_usage=True)}, {"codex": {"in_session_usage": Evidence("L2", "0.160.0")}},
+     PROBLEM_NEEDS_BINDING),
+    ({"claude-code": Capabilities(login_binding=True, trusted_read=True)},
+     {"claude-code": {"login_binding": Evidence("L1,L2", "2.1.286"),
+                      "trusted_read": Evidence("L7", "2.1.286")}}, PROBLEM_NO_SOURCE),
+    ({"codex": Capabilities(login_binding=True, handoff_relaunch=True)},
+     {"codex": {"login_binding": BOUND, "handoff_relaunch": Evidence("L4", "0.160.0")}}, PROBLEM_NO_GENERATOR),
+], ids=["unknown-in-table", "unknown-in-evidence", "no-evidence", "stale-evidence", "wrong-version",
+        "needs-binding", "claude-trusted-read", "handoff"])
+def test_each_broken_rule_is_named(table: dict[str, Capabilities], evidence: dict[str, dict[str, Evidence]],
+                                   problem: str) -> None:
+    found = table_problems(table, evidence, PINS)
+    assert len(found) == 1 and found[0].startswith(problem), found
+
+
+def test_a_problem_names_the_adapter_and_the_field_only() -> None:
+    [found] = table_problems({"codex": Capabilities(login_binding=True)}, {}, PINS)
+    assert found == f"{PROBLEM_NO_EVIDENCE}: codex.login_binding"
+
+
+def test_every_field_is_a_capability_letter() -> None:
+    """The rules name fields by their dataclass names; a renamed field must fail here, not pass silently."""
+    assert capabilities.FIELDS == ("login_binding", "cross_account_resume", "in_session_usage", "trusted_read",
+                                   "limit_signal", "handoff_relaunch")
+```
+
+In `tests/test_config_accounts.py`, replace `test_capability_table_is_empty` with:
+
+```python
+def test_capability_switching() -> None:
+    """The table's contents are checked by tests/test_config_capabilities.py (plan 4b Task 11)."""
+    assert not capabilities.NONE.can_switch
+    assert Capabilities(handoff_relaunch=True).can_switch
+    assert Capabilities(cross_account_resume=True).can_switch
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `timeout 300 uv run pytest tests/test_config_capabilities.py -q`
+Expected: FAIL with `ImportError: cannot import name 'EVIDENCE' from 'heterodyne.config.capabilities'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/heterodyne/config/capabilities.py`, change `from dataclasses import dataclass` to `from dataclasses import dataclass, fields`. Replace the `CAPABILITIES` comment and assignment with:
+
+```python
+@dataclass(frozen=True)
+class Evidence:
+    """The S7 real-account runs that demonstrated one capability, and the CLI version they ran on (D9)."""
+    runs: str            # S7's run ids, e.g. "L1,L2"
+    version: str         # must equal the adapter's version pin
+
+
+# Each entry is enabled by its own commit, after the G2 bead records the operator's acceptance of the
+# finding; the commit message names the G2 bead and the S7 commit (plan 4b Task 11 Part B).
+CAPABILITIES: Mapping[str, Capabilities] = {}
+EVIDENCE: Mapping[str, Mapping[str, Evidence]] = {}
+NONE = Capabilities()
+FIELDS: tuple[str, ...] = tuple(f.name for f in fields(Capabilities))
+
+PROBLEM_UNKNOWN_ADAPTER = "no pinned adapter"
+PROBLEM_NO_EVIDENCE = "enabled without evidence"
+PROBLEM_STALE_EVIDENCE = "evidence for a capability that is off"
+PROBLEM_WRONG_VERSION = "evidence from another CLI version"
+PROBLEM_NEEDS_BINDING = "enabled without (a) login binding"
+PROBLEM_NO_SOURCE = "claude-code has no (d) source"
+PROBLEM_NO_GENERATOR = "(f) needs the handoff generator"
+
+
+def table_problems(table: Mapping[str, Capabilities], evidence: Mapping[str, Mapping[str, Evidence]],
+                   pins: Mapping[str, str]) -> tuple[str, ...]:
+    """The D9 rules every table edit keeps (plan 4b Task 11). Each line names an adapter and a field."""
+    found: list[str] = []
+    for adapter in sorted(set(table) | set(evidence)):
+        caps, shown = table.get(adapter, NONE), evidence.get(adapter, {})
+        if adapter not in pins:
+            found.append(f"{PROBLEM_UNKNOWN_ADAPTER}: {adapter}")
+            continue
+        on = {name for name in FIELDS if getattr(caps, name)}
+        found += [f"{PROBLEM_NO_EVIDENCE}: {adapter}.{name}" for name in sorted(on - set(shown))]
+        found += [f"{PROBLEM_STALE_EVIDENCE}: {adapter}.{name}" for name in sorted(set(shown) - on)]
+        found += [f"{PROBLEM_WRONG_VERSION}: {adapter}.{name}" for name in sorted(shown)
+                  if shown[name].version != pins[adapter]]
+        if on and not caps.login_binding:
+            found.append(f"{PROBLEM_NEEDS_BINDING}: {adapter}")
+        if adapter == "claude-code" and caps.trusted_read:
+            found.append(f"{PROBLEM_NO_SOURCE}: {adapter}.trusted_read")
+        if caps.handoff_relaunch:
+            found.append(f"{PROBLEM_NO_GENERATOR}: {adapter}.handoff_relaunch")
+    return tuple(found)
+```
+
+`config/` already names `claude-code` in `LOGIN_FILES` and `DEFAULT_LOGIN_DIRS`, so rule 5 follows the existing style. The "no adapter names" constraint covers `wsd/` and `sandbox/` only.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `timeout 300 uv run pytest tests/test_config_capabilities.py tests/test_config_accounts.py -q`
+Expected: PASS.
+
+Then: `timeout 600 uv run pyright src/heterodyne/config tests/test_config_capabilities.py` and `uv run ruff check src tests`.
+Expected: 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/heterodyne/config/capabilities.py tests/test_config_capabilities.py tests/test_config_accounts.py
+git commit -m "plan4b T11a: capability evidence and the D9 table invariants"
+```
+
+### Part B: enabling accepted findings (only after G2)
+
+Each step below is one commit and one PR. A step starts only when the G2 bead's close evidence lists that finding as accepted, on the adapter's current pin. Skip a step whose finding was not accepted. The order matters, because rule 4 requires (a) to be enabled first.
+
+The S7 runs map to fields as follows:
+
+| Field | Claude (`claude-code`) | Codex (`codex`) |
+|---|---|---|
+| `login_binding` (a) | L1, L2 | L1, L2 |
+| `cross_account_resume` (b) | L3 | L3 |
+| `in_session_usage` (c) | L2 | L2 |
+| `trusted_read` (d) | never (rule 5) | L7, with L6's refresh outcome recorded in S7 |
+| `limit_signal` (e) | L5 | L5 |
+| `handoff_relaunch` (f) | after plan 5 (rule 6) | after plan 5 (rule 6) |
+
+- [ ] **Step 6: Enable (a) for each accepted adapter**
+
+For Codex, set the table and evidence in `src/heterodyne/config/capabilities.py` to:
+
+```python
+CAPABILITIES: Mapping[str, Capabilities] = {"codex": Capabilities(login_binding=True)}
+EVIDENCE: Mapping[str, Mapping[str, Evidence]] = {"codex": {"login_binding": Evidence("L1,L2", "0.160.0")}}
+```
+
+For Claude, add `"claude-code": Capabilities(login_binding=True)` and `"claude-code": {"login_binding": Evidence("L1,L2", "2.1.286")}` beside the Codex entries. Each later step adds `True` fields to the same `Capabilities(...)` call and an `Evidence` to the same inner mapping. For example, the Codex end state, if every Codex finding is accepted, is:
+
+```python
+CAPABILITIES: Mapping[str, Capabilities] = {
+    "codex": Capabilities(login_binding=True, cross_account_resume=True, in_session_usage=True,
+                          trusted_read=True, limit_signal=True),
+}
+EVIDENCE: Mapping[str, Mapping[str, Evidence]] = {
+    "codex": {"login_binding": Evidence("L1,L2", "0.160.0"), "cross_account_resume": Evidence("L3", "0.160.0"),
+              "in_session_usage": Evidence("L2", "0.160.0"), "trusted_read": Evidence("L7", "0.160.0"),
+              "limit_signal": Evidence("L5", "0.160.0")},
+}
+```
+
+Then, for every step:
+
+Run: `timeout 300 uv run pytest tests/test_config_capabilities.py tests/test_config_accounts.py -q`
+Expected: PASS. `test_the_shipped_table_keeps_every_rule` is the gate.
+
+Then run the full suite: `timeout 3600 uv run pytest -q`.
+Expected: PASS. Enabling (a) makes `config check` accept `accounts` for that adapter. The tests that monkeypatch `CAPABILITIES` keep their own tables. A test that relied on the shipped table being empty fails here. Fix that test to inject `capabilities=NONE`-style tables, as `tests/test_config_accounts.py` already does with `ON`. Never weaken the rule it checked.
+
+Commit, one per step:
+
+```bash
+git add src/heterodyne/config/capabilities.py
+git commit -m "plan4b T11b: enable codex (a) login binding (S7 L1,L2 on 0.160.0; G2 <bead id>)"
+```
+
+- [ ] **Step 7: Enable (c), then (e), then (b), then Codex (d), each as its own commit, as in Step 6.** Codex `failover = "next"` passes `config check` only once (d) and (b) are both on (S7 "Recommended D9 defaults": "Codex gets `next` only once (d) and either (b) or (f) are on"). That rule lives in the existing `config/accounts.py` check, and this task doesn't change it.
