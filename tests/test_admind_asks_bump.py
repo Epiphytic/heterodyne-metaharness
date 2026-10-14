@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from admind_asks_fixture import sent_mid
+from admind_asks_fixture import listed_mid, sent_mid
 from admind_waits import stays, wait_until
 from test_admind_approvals import (
     BEAD,
@@ -35,7 +35,7 @@ from test_admind_approvals import (
     waiting,
 )
 from test_admind_asks import NONE, audited, card_sent, joined, outbox, pasted, posted, question, row
-from test_admind_daemon import Harness, needs_tmux
+from test_admind_daemon import Harness, needs_tmux, posting
 from test_admind_reactions import OLD_TABLES, columns, outbox_count, react, reacted, threads
 from test_admind_settings import BASE_CONFIG, write
 
@@ -378,6 +378,11 @@ def rows(h: Harness, like: str) -> list[tuple[str, str | None, str]]:
     """(key, reply_to, text) of the outbox rows whose key is LIKE `like`, in queue order."""
     return [(str(k), r, str(t)) for k, r, t in h.store.db.execute(
         "SELECT key, reply_to, text FROM outbox WHERE key LIKE ? ORDER BY seq", (like,)).fetchall()]
+
+
+def statuses(h: Harness, like: str) -> set[str]:
+    """The statuses of the outbox rows whose key is LIKE `like`."""
+    return {str(s) for s, in h.store.db.execute("SELECT status FROM outbox WHERE key LIKE ?", (like,))}
 
 
 def bump_rows(h: Harness, ask_id: str, command: str) -> list[tuple[str, str | None, str]]:
@@ -1281,7 +1286,7 @@ def test_a_latch_after_the_enqueue_is_left_to_the_outbound_gate(
             h.daemon.latch("test latch")                # before the outbox loop can see the row
         key = f"asknote:{ask_id}:autobump:1:0"
         assert [k for k, _, _ in auto_rows(h, ask_id)] == [key]
-        await stays(lambda: sent_mid(h, key) is None)
+        await stays(lambda: listed_mid(h, key) is None)
     go(tmp_path, scenario)
 
 
@@ -1329,7 +1334,8 @@ def test_a_pending_reminder_blocks_until_it_fails_and_a_restart_keeps_that(
         assert auto_rows(h, ask_id) == [] and activity(h.store, ask_id) == at
         assert audited(h, kind="ask", action="autobump", bumped=[],
                        skipped=[{"ask_id": ask_id, "why": "pending delivery"}])
-        gate.set()
+        gate.set()                                      # the restart starts from a delivered reminder
+        await wait_until(lambda: statuses(h, f"asknote:{ask_id}:bump:%") == {"sent"}, 20)
     go(tmp_path, first_run)
 
     async def restarted(h: Harness) -> None:
@@ -1337,11 +1343,13 @@ def test_a_pending_reminder_blocks_until_it_fails_and_a_restart_keeps_that(
         ask_id = ids[0]
         h.store.db.execute("UPDATE outbox SET status = 'failed' WHERE key LIKE ?",
                            (f"asknote:{ask_id}:bump:%",))
+        await posting(h)                                # a closed gate makes the check a no-op
         await check(h)
         assert [k for k, _, _ in auto_rows(h, ask_id)] == [f"asknote:{ask_id}:autobump:1:0"]
     go(tmp_path, restarted, fresh=False)
 
     async def again(h: Harness) -> None:
+        await posting(h)
         await check(h)
         assert len(auto_rows(h, ids[0])) == 1
     go(tmp_path, again, fresh=False)

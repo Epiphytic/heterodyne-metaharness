@@ -39,6 +39,10 @@ class FakeWnAgent:
         self.info_gate: asyncio.Event | None = None  # when set to an Event, group_info waits for it
         self.send_gate: asyncio.Event | None = None  # when set to an Event, send_final waits for it
         self.on_send: Callable[[dict[str, Any]], None] | None = None   # called after each new send
+        # Timing knobs that make the harness's races reproducible (btq-y3e88); both default to off.
+        self.reply_delay = 0.0       # seconds between listing a send in `sent` and replying final_sent
+        self.ack_check_delay = 0.0   # seconds the first group_info after each subscription is held
+        self._hold_check = False
         self._keys: dict[str, str] = {}
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._server: asyncio.Server | None = None
@@ -122,6 +126,9 @@ class FakeWnAgent:
                 await self._reply(writer, rid, {"type": "ack"})
             elif kind == "group_info":
                 count = self.member_count       # as of the request, even if a gate holds the answer back
+                if self._hold_check:
+                    self._hold_check = False
+                    await asyncio.sleep(self.ack_check_delay)
                 if self.info_gate is not None:
                     await self.info_gate.wait()
                 if self.fail_group_info:
@@ -197,12 +204,15 @@ class FakeWnAgent:
                 self._keys[key] = message_id
             if self.on_send is not None:
                 self.on_send(req)
+            if self.reply_delay:
+                await asyncio.sleep(self.reply_delay)
         await self._reply(writer, rid, {"type": "final_sent", "message_ids_hex": [message_id],
                                         "maintenance_disposition": "ready"})
 
     async def _subscribe(self, writer: asyncio.StreamWriter, rid: str) -> None:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._subscribers.append(queue)
+        self._hold_check = self.ack_check_delay > 0
         try:
             await self._reply(writer, rid, {"type": "ack"})
             while True:

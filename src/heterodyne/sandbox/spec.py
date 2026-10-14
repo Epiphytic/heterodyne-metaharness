@@ -174,6 +174,7 @@ class SandboxSpec:
     env: Mapping[str, str]
     uid: int
     gid: int
+    install: Path | None = None        # the CLI's install root: its bind is the install bind
 
 
 def _reaches_proc(path: str) -> bool:
@@ -234,7 +235,7 @@ def build_spec(i: SpecInput) -> SandboxSpec:
            "HZ_SESSION_SOCKET": str(SOCKET_INSIDE), i.agent.config_var: str(i.agent.config_dir),
            **i.agent.extra_env}
     return SandboxSpec(name, i.worktree, binds, tuple(logins), read_only, read_write, tuple(egress), env,
-                       i.uid, i.gid)
+                       i.uid, i.gid, i.agent.cli_root)
 
 
 @dataclass(frozen=True)

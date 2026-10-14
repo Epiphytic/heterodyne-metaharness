@@ -145,6 +145,16 @@ def test_env_allowed_adds_the_cli_tool_env_on_the_agent_path_only() -> None:
     assert {"HOME", "OPENSHELL_SANDBOX", "PWD"} <= env_allowed(Codex(), "exec")
 
 
+def test_the_probe_config_has_no_submount_switch(tmp_path: Path) -> None:
+    """The bind mode is no probe input (btq-wazo1 §3.3): nothing in it can turn a mount check off."""
+    ctx = context(tmp_path, StubBackend())
+    with held_canaries(ctx):
+        cfg = probe_config(ctx, "exec")
+    assert set(cfg) == {"path", "real_home_canary", "oa_canary", "other_accounts", "chosen", "allowed",
+                        "denied", "model_host", "wsd_socket", "env_allowed", "env_user"}
+    assert not any(word in json.dumps(sorted(cfg)) for word in ("recursive", "submount", "bind", "mount"))
+
+
 def test_probe_config_holds_no_token_and_pins_the_chosen_hash(tmp_path: Path) -> None:
     ctx = context(tmp_path, StubBackend())
     with held_canaries(ctx):

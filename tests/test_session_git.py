@@ -543,24 +543,38 @@ def make_pack(private: Path, worktree: Path) -> Path:
     return pack
 
 
-@pytest.mark.parametrize("plant", ["object-dir-link", "pack-link", "fifo", "hard-linked-pack", "oversized"])
+def absent_fanout(private: Path) -> str:
+    """The first fan-out directory, `00` to `ff`, with nothing under the private objects: the commit's
+    own is random (its hash holds its timestamps), so a fixed one collides 1 run in 256."""
+    return next(f"{n:02x}" for n in range(256) if not os.path.lexists(private / "objects" / f"{n:02x}"))
+
+
+@pytest.mark.parametrize(("plant", "taken"), [
+    ("object-dir-link", False), ("pack-link", False), ("fifo", False), ("hard-linked-pack", False),
+    ("oversized", False), ("object-dir-link", True), ("fifo", True)])
 def test_snapshot_refuses_links_special_files_and_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                            plant: str) -> None:
+                                                            plant: str, taken: bool) -> None:
+    """`taken`: the commit's random fan-out directory is one a fixed plant would have used (CI, PR #67)."""
     _, worktree, p, private, made = session_commits(tmp_path)
+    if taken:
+        for fan in ("ab", "cd"):
+            (private / "objects" / fan).mkdir(exist_ok=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     secret = b"outside the private directory\n"
     (outside / ("a" * 38)).write_bytes(secret)
     expected = sessiongit.LINKED
+    fan = absent_fanout(private)
+    assert not os.path.lexists(private / "objects" / fan)
     if plant == "object-dir-link":
-        (private / "objects" / "ab").symlink_to(outside)
+        (private / "objects" / fan).symlink_to(outside)
     elif plant == "pack-link":
         (outside / "pack.pack").write_bytes(secret)
         (private / "objects" / "pack").mkdir(exist_ok=True)
         (private / "objects" / "pack" / f"pack-{'b' * 40}.pack").symlink_to(outside / "pack.pack")
     elif plant == "fifo":
-        (private / "objects" / "cd").mkdir()
-        os.mkfifo(private / "objects" / "cd" / ("e" * 38))
+        (private / "objects" / fan).mkdir()
+        os.mkfifo(private / "objects" / fan / ("e" * 38))
     elif plant == "hard-linked-pack":
         os.link(make_pack(private, worktree), outside / "linked.pack")
         expected = sessiongit.HARD_LINKED
