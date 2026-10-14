@@ -12,12 +12,12 @@ checksum in an error.
 
 import contextlib
 import dataclasses
-import hashlib
 import http.client
 import json
 import os
 import re
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -45,6 +45,7 @@ INSECURE_REDIRECT = "a fetch was redirected off HTTPS"
 MAX_ARTIFACT = 1 << 30
 MAX_DOCUMENT = 4 << 20
 MAX_REDIRECTS = 5
+WATCH_SECONDS = 0.05                # how often a fetch's repository is measured
 REDIRECTS = frozenset({301, 302, 303, 307, 308})
 NPM_REGISTRY = "https://registry.npmjs.org"
 PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")            # an asset name or a version
@@ -234,28 +235,31 @@ class Fetcher:
         return dataclasses.replace(artifact, signature_available=signed)
 
     def git(self, repo: str, commit: str) -> GitArtifact:
-        """`commit` of `repo` (an https URL, or an absolute local path outside every login directory) through
-        a bare cache, exported as `git archive` and `git cat-file commit` and checked with
-        `store_core.check_git`. No hook of the source or the cache runs."""
+        """`commit` of `repo` (an https URL, or an absolute local path outside every login directory),
+        fetched at depth 1 into a fresh bare repository in the cache whose size is bounded while git writes it
+        (`TOO_LARGE`), exported as `git archive` and `git cat-file commit`, and checked with
+        `store_core.check_git`. The repository is removed afterwards, whatever happened. No hook of the source
+        or the repository runs."""
         if not sc.COMMIT_ID.fullmatch(commit):
             raise FetchRefused(BAD_COMMIT)
         source = self._git_source(repo)
         end = self.clock() + self.deadline_seconds
         object_format = "sha1" if len(commit) == 40 else "sha256"
-        key = hashlib.sha256(source.encode("utf-8", "surrogateescape")).hexdigest()[:32]
-        bare = self._cache() / "git" / f"{key}-{object_format}.git"
-        if not bare.is_dir():
-            bare.parent.mkdir(mode=0o700, exist_ok=True)
-            self._run_git(["init", "-q", "--bare", f"--object-format={object_format}", str(bare)], end)
-        at = ["-C", str(bare)]
-        self._run_git([*at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", source, commit], end)
-        archive = self._run_git([*at, "-c", "tar.umask=022", "archive", "--format=tar", commit], end,
-                                to_file=True)
+        bare = Path(tempfile.mkdtemp(prefix="git-repo-", dir=self._cache()))
         try:
-            commit_object = self._run_git([*at, "cat-file", "commit", commit], end, to_file=True)
-        except BaseException:
-            archive.unlink()
-            raise
+            self._run_git(["init", "-q", "--bare", f"--object-format={object_format}", str(bare)], end)
+            at = ["-C", str(bare)]
+            fetch_args = ["fetch", "-q", "--depth=1", "--no-tags", "--no-write-fetch-head", source, commit]
+            self._run_git([*at, *fetch_args], end, watch=bare)
+            archive = self._run_git([*at, "-c", "tar.umask=022", "archive", "--format=tar", commit], end,
+                                    to_file=True)
+            try:
+                commit_object = self._run_git([*at, "cat-file", "commit", commit], end, to_file=True)
+            except BaseException:
+                archive.unlink()
+                raise
+        finally:
+            shutil.rmtree(bare, ignore_errors=True)
         try:
             fds = [os.open(archive, os.O_RDONLY | os.O_CLOEXEC),
                    os.open(commit_object, os.O_RDONLY | os.O_CLOEXEC)]
@@ -345,11 +349,12 @@ class Fetcher:
                 raise FetchRefused(INSIDE_LOGIN_DIR)
         return str(resolved)
 
-    def _run_git(self, args: list[str], end: float, *, to_file: bool = False) -> Path:
+    def _run_git(self, args: list[str], end: float, *, to_file: bool = False,
+                 watch: Path | None = None) -> Path:
         """`git` with no user or system config, no prompt and no hooks, in its own process group; its stdout
-        into a 0600 temp file in the cache if `to_file`, streamed and bounded as it is written (`TOO_LARGE`).
-        A failure is `GIT_FAILED`, a timeout `DEADLINE`; on any refusal the group is killed and git reaped
-        before the file is removed."""
+        into a 0600 temp file in the cache if `to_file`, streamed and bounded as it is written (`TOO_LARGE`);
+        and `watch`'s size bounded while it runs and once it ends (`TOO_LARGE`). A failure is `GIT_FAILED`, a
+        timeout `DEADLINE`; on any refusal the group is killed and git reaped before the file is removed."""
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GIT_CONFIG_GLOBAL": os.devnull,
                "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file:https",
                "LC_ALL": "C"}
@@ -358,35 +363,55 @@ class Fetcher:
         path = Path(name)
         try:
             try:
-                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.PIPE if to_file else subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, start_new_session=True)
-            except OSError:
-                raise FetchRefused(GIT_FAILED) from None
-            try:
-                if proc.stdout is not None:
-                    self._stream(proc.stdout.fileno(), out_fd, end)
-                try:
-                    returncode = proc.wait(timeout=self._remaining(end))
-                except subprocess.TimeoutExpired:
-                    raise FetchRefused(DEADLINE) from None
+                self._supervise(cmd, env, out_fd if to_file else None, end, watch)
             finally:
-                if proc.returncode is None:     # not reaped, so its group can't have been reused
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
-                if proc.stdout is not None:
-                    proc.stdout.close()
                 if to_file:
                     os.close(out_fd)
-            if returncode != 0:
-                raise FetchRefused(GIT_FAILED)
         except BaseException:
             if to_file:
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
             raise
         return path
+
+    def _supervise(self, cmd: list[str], env: dict[str, str], out_fd: int | None, end: float,
+                   watch: Path | None) -> None:
+        try:
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL if out_fd is None else subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            raise FetchRefused(GIT_FAILED) from None
+        try:
+            if proc.stdout is not None and out_fd is not None:
+                self._stream(proc.stdout.fileno(), out_fd, end)
+            returncode = self._wait(proc, end, watch)
+        finally:
+            if proc.returncode is None:         # not reaped, so its group can't have been reused
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+        if returncode != 0:
+            raise FetchRefused(GIT_FAILED)
+
+    def _wait(self, proc: subprocess.Popen[bytes], end: float, watch: Path | None) -> int:
+        """`proc`'s exit status within the deadline (`DEADLINE`), measuring `watch` every `WATCH_SECONDS`
+        and at the end (`TOO_LARGE` past `MAX_ARTIFACT`)."""
+        while True:
+            left = self._remaining(end)
+            try:
+                timeout = left if watch is None else min(left, WATCH_SECONDS)
+                returncode: int | None = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                returncode = None
+            if watch is not None and _tree_size(watch) > MAX_ARTIFACT:
+                raise FetchRefused(TOO_LARGE)
+            if returncode is not None:
+                return returncode
+            if watch is None:
+                raise FetchRefused(DEADLINE)
 
     def _stream(self, src: int, out_fd: int, end: float) -> None:
         """`src` to its end into `out_fd`, refusing past `MAX_ARTIFACT` bytes (`TOO_LARGE`) or the
@@ -403,6 +428,17 @@ class Fetcher:
             if written > MAX_ARTIFACT:
                 raise FetchRefused(TOO_LARGE)
             _write_all(out_fd, chunk)
+
+
+def _tree_size(root: Path) -> int:
+    """The bytes of the files under `root`, links not followed; a file git renames away meanwhile is
+    skipped."""
+    total = 0
+    for here, _, names in os.walk(root):
+        for name in names:
+            with contextlib.suppress(FileNotFoundError):
+                total += (Path(here) / name).lstat().st_size
+    return total
 
 
 def _https(url: str) -> bool:

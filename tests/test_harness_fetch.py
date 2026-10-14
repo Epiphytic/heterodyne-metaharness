@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from harness_env import make_repo, sri_of, tar_of
+from harness_env import fd_count, git, make_repo, sri_of, tar_of
 
 from heterodyne.harness import fetch
 from heterodyne.harness.resources import store_core as sc
@@ -410,3 +410,75 @@ esac
     with pytest.raises(ProcessLookupError):         # killed and reaped, not left writing
         os.kill(pid, 0)
     assert [p for p in cache_files(tmp_path) if p.name.startswith("git-")] == []
+
+
+def with_blob(repo: Path, size: int) -> str:
+    """A commit adding `size` incompressible bytes to `repo`; its ID."""
+    (repo / "blob.bin").write_bytes(os.urandom(size))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "blob")
+    return git(repo, "rev-parse", "HEAD").decode().strip()
+
+
+def groups_alive(pgids: set[int]) -> list[int]:
+    """The processes in any of the process groups `pgids`, read from /proc."""
+    alive: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                stat_line = (entry / "stat").read_text()
+            except OSError:
+                continue
+            if int(stat_line.rsplit(")", 1)[1].split()[2]) in pgids:
+                alive.append(int(entry.name))
+    return alive
+
+
+def test_a_git_fetch_is_bounded_while_it_writes_and_leaves_no_objects_or_git(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, _ = make_repo(tmp_path / "repo")
+    commit = with_blob(repo, 2 << 20)
+    pids, calls = tmp_path / "git.pids", tmp_path / "git.calls"
+    wrapper = tmp_path / "git-recording"
+    wrapper.write_text(f"""#!/bin/sh
+echo $$ >> '{pids}'
+echo "$*" >> '{calls}'
+exec git "$@"
+""")
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(fetch, "MAX_ARTIFACT", 64 << 10)
+    f = fetcher(tmp_path, Server({}), git=str(wrapper))
+    assert refused(lambda: f.git(str(repo), commit)) == fetch.TOO_LARGE
+    assert not any(" archive " in f" {line} " for line in calls.read_text().splitlines())  # the fetch's own
+    assert list((tmp_path / "cache").iterdir()) == []       # no repository, objects or temp file
+    assert groups_alive({int(line) for line in pids.read_text().split()}) == []
+
+
+def test_a_git_fetch_is_shallow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, _ = make_repo(tmp_path / "repo")
+    with_blob(repo, 2 << 20)
+    (repo / "blob.bin").unlink()                    # history holds the blob, the commit doesn't
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "no blob")
+    commit = git(repo, "rev-parse", "HEAD").decode().strip()
+    monkeypatch.setattr(fetch, "MAX_ARTIFACT", 64 << 10)
+    a = fetcher(tmp_path, Server({})).git(str(repo), commit)
+    assert a.commit == commit
+    assert sorted(p.name.split("-")[0] for p in (tmp_path / "cache").iterdir()) == ["git", "git"]
+
+
+def test_git_that_cannot_start_leaves_no_fd_or_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, commit = make_repo(tmp_path / "repo")
+    real = fetch.subprocess.Popen
+
+    def popen(cmd: list[str], **kw: object) -> object:
+        if "archive" in cmd:
+            raise OSError("no git")
+        return real(cmd, **kw)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(fetch.subprocess, "Popen", popen)
+    f = fetcher(tmp_path, Server({}))
+    fds = fd_count()
+    assert refused(lambda: f.git(str(repo), commit)) == fetch.GIT_FAILED
+    assert fd_count() == fds
+    assert list((tmp_path / "cache").iterdir()) == []
