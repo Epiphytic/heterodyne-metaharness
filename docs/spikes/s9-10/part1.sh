@@ -29,7 +29,7 @@ for V in plain e25; do
     "$PY" "$HERE/analyze.py" "$T" "$V" --part 1 > "$OUT/$V.result.txt" || failed=1
     cat "$OUT/$V.result.txt"
     for f in argv.json inside inside.tmp inside.packages server_ready server.log tui.screen rc result.json \
-             server.strace tui.strace; do
+             server.strace tui.strace server.strace.unended tui.strace.unended; do
         [ -e "$T/$f" ] && cp "$T/$f" "$OUT/$V.$f"
     done
     left=$(ps -eo pid=,args= | awk -v t="$T" 'index($0, t) && !/awk/ {print $1}')

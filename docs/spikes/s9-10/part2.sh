@@ -38,7 +38,8 @@ for V in plain e25; do
     cat "$OUT/$V.result.txt"
     for f in argv.json argv-resume.json inside inside.tmp inside.packages trust.txt server_ready server.log \
              composer answered thread resumed tui.screen tui-resume.screen rc result.json \
-             server.strace tui.strace tui-resume.strace; do
+             server.strace tui.strace tui-resume.strace server.strace.unended tui.strace.unended \
+             tui-resume.strace.unended; do
         [ -e "$T/$f" ] && cp "$T/$f" "$OUT/$V.$f"
     done
     left=$(ps -eo pid=,args= | awk -v t="$T" 'index($0, t) && !/awk/ {print $1}')

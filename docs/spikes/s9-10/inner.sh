@@ -45,16 +45,19 @@ run() { env -i HOME="$HOME_DIR" CODEX_HOME="$HOME_DIR/.codex" PATH="$CLI/bin:/us
 TRACE="-f -q -s 300 -xx -e trace=execve,connect,sendto,sendmmsg"
 # A single -q (a second drops it): strace writes each `+++ exited/killed +++` record; the analyzer requires
 # the root's, so a trace cut short fails. A signalled strace detaches without that record, so the harness
-# signals the traced root itself (the trace's first pid) and waits up to 5 s for the record.
+# signals the traced root itself (the trace's first pid) and waits up to 10 s for the record. With no
+# record by then, <trace>.unended is left, and the analyzer fails that trace.
 stop_root() {
     pid=$(awk 'NR == 1 {print $1; exit}' "$1" 2>/dev/null) || pid=
-    [ -n "$pid" ] || return 0
-    kill -"$2" "$pid" 2>/dev/null || true
-    i=0
-    while [ "$i" -lt 10 ]; do
-        awk -v p="$pid" '$1 == p && $2 == "+++" {f = 1} END {exit !f}' "$1" && return 0
-        sleep 0.5; i=$((i + 1))
-    done
+    if [ -n "$pid" ]; then
+        kill -"$2" "$pid" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 20 ]; do
+            awk -v p="$pid" '$1 == p && $2 == "+++" {f = 1} END {exit !f}' "$1" && return 0
+            sleep 0.5; i=$((i + 1))
+        done
+    fi
+    echo "no end record for pid ${pid:-<none>} within 10 s of SIG$2" > "$1.unended"
 }
 # shellcheck disable=SC2086
 run strace $TRACE -o "$R/server.strace" $SERVER > "$R/server.log" 2>&1 &

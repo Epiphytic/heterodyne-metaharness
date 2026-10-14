@@ -27,7 +27,7 @@ ENDED = re.compile(rb"(\d+) +\+\+\+ (?:exited with \d+|killed by (SIG[A-Z0-9]+)(
 GITHUB_API = b"\x03api\x06github\x03com"
 LOGIN_SCREEN = b"Sign in with ChatGPT"
 COMPOSER = "›".encode()                                      # Codex.prompt_marker
-# Each trace, with the file and key of the argv it traced, and the signal the harness stops it with.
+# Each trace, with the file and key of the argv it traced, and the signal the harness stops that command with.
 STOP = {"server.strace": b"SIGTERM", "tui.strace": b"SIGHUP", "tui-resume.strace": b"SIGHUP"}
 TRACES = {1: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new")},
           2: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new"),
@@ -95,16 +95,20 @@ def metadata(run: Path, part: int) -> tuple[dict[str, dict[str, Any]], list[str]
     return meta, bad
 
 
-def root(lines: list[bytes], argv: list[str], stop: bytes) -> tuple[bool, bool]:
-    """Whether the trace opens with the exec of exactly `argv`, and whether it holds that process's end."""
+def root(raw: bytes, argv: list[str], stop: bytes) -> tuple[bool, bool]:
+    """Whether the trace opens with the exec of exactly `argv`, and whether its last event for that process
+    is the process's end, on a whole last line."""
+    lines = raw.splitlines()
     first = EXEC.fullmatch(lines[0]) if lines else None
     if first is None or strings(first.group(2)) != [a.encode() for a in argv]:
         return False, False
     pid = first.group(1)
-    ends = [m for ln in lines if (m := ENDED.fullmatch(ln)) and m.group(1) == pid]
-    # `exited with N` (we stop it, so any N); killed only by the harness's stop signal, without a core.
-    return True, len(ends) == 1 and (ends[0].group(2) is None or (ends[0].group(2) == stop
-                                                                    and ends[0].group(3) is None))
+    own = [ln for ln in lines if ln.split(b" ", 1)[0] == pid]
+    last = ENDED.fullmatch(own[-1])
+    ends = sum(1 for ln in own if ENDED.fullmatch(ln))
+    # `exited with N` (we stop it, so any N); killed only by this command's own stop signal, without a core.
+    return True, (raw.endswith(b"\n") and last is not None and ends == 1
+                  and (last.group(2) is None or (last.group(2) == stop and last.group(3) is None)))
 
 
 def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
@@ -122,9 +126,12 @@ def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
     checks: dict[str, bool] = {}
     traced: dict[str, list[bytes]] = {}
     for trace, (source, key) in TRACES[part].items():
-        traced[trace] = (run / trace).read_bytes().splitlines()
-        checks[f"{trace}_shows_its_exec"], checks[f"{trace}_ran_to_its_end"] = root(
-            traced[trace], meta[source][key], STOP[trace])
+        raw = (run / trace).read_bytes()
+        traced[trace] = raw.splitlines()
+        shown, ended = root(raw, meta[source][key], STOP[trace])
+        # The wrapper's marker: the record didn't come within stop_root's bound.
+        checks[f"{trace}_shows_its_exec"] = shown
+        checks[f"{trace}_ran_to_its_end"] = ended and not (run / f"{trace}.unended").exists()
     complete = all(checks.values())                          # every check below needs all of the above
     # rc 124 is the cap; anything else, a failed step.
     checks = {"evidence_complete": complete, **checks, "ended_by_itself": complete and rc == "0"}
