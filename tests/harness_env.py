@@ -3,6 +3,7 @@ the process's open file-descriptor count. Checksums are computed here at run tim
 
 import base64
 import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -149,7 +150,9 @@ def tar_of(spec: Mapping[str, Spec], *, prefix: str = "", gz: bool = True,
     """A tar (gzipped unless `gz` is false) of `spec`, each name under `prefix`, with a directory member
     before each directory's contents (unless `dirs` is false), then the members in `extra` (empty)."""
     out = io.BytesIO()
-    with tarfile.open(fileobj=out, mode="w:gz" if gz else "w", format=tarfile.PAX_FORMAT) as t:
+    # The gzip header's mtime is 0, not now: the same spec always makes the same bytes, and checksum.
+    zipped = gzip.GzipFile(fileobj=out, mode="wb", mtime=0) if gz else contextlib.nullcontext(out)
+    with zipped as z, tarfile.open(fileobj=z, mode="w", format=tarfile.PAX_FORMAT) as t:
         made: set[str] = set()
         for name, what in spec.items():
             parts = name.split("/")

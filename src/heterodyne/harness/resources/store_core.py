@@ -1903,6 +1903,7 @@ def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str,
             raise Refused(NAME_CONFLICT)
         if statx_at(root_fd, "").mode != 0o555:     # a crash between the rename's two chmods left it 0755
             os.fchmod(root_fd, 0o555)
+            os.fsync(root_fd)
         r1 = record(root_fd)
         hook("R1")
         rehash(root_fd, m, read=read)
@@ -1966,15 +1967,24 @@ def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str,
 
 def _reverify(store_fd: int, intent: Intent, m: Manifest, r2: Record, hook: Hook, read: Reader) -> Record:
     """Recovery's check of a renamed tree (E21), with no new baseline: R3 is R2 but for the root's change
-    time, the rehash and the structure pass, and R4 is R3. The record to write: R2 with R3's root."""
+    time, the rehash and the structure pass, and R4 is R3. The record to write: R2 with R3's root. The
+    opened root must be the intent's before anything changes it, and its seal is `fsync`ed before P3."""
     adapter_fd = _open(intent.adapter, DIR_FLAGS, store_fd)
     try:
         root_fd = _open(intent.install, DIR_FLAGS | os.O_NOFOLLOW, adapter_fd)
+    except OSError as exc:          # replaced since its check, by a symlink, a file or nothing
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            raise Refused(RECOVERY_FAILED) from None
+        raise
     finally:
         os.close(adapter_fd)
     try:
-        if statx_at(root_fd, "").mode != 0o555:     # a crash between the rename's two chmods
+        st = statx_at(root_fd, "")
+        if st.kind != "dir" or (st.dev, st.ino) != intent.root:
+            raise Refused(RECOVERY_FAILED)
+        if st.mode != 0o555:        # a crash between the rename's two chmods
             os.fchmod(root_fd, 0o555)
+        os.fsync(root_fd)
         r3 = record(root_fd)
         if ({k: v for k, v in r3.items() if k} != {k: v for k, v in r2.items() if k}
                 or r3[""][:2] != r2[""][:2]):
@@ -1990,6 +2000,16 @@ def _reverify(store_fd: int, intent: Intent, m: Manifest, r2: Record, hook: Hook
         return {**r2, "": r3[""]}
     finally:
         os.close(root_fd)
+
+
+def _committed_agree(store_fd: int, intent: Intent, data: bytes, rec: Record) -> None:
+    """Meta files P3 or P4 already wrote must be the ones recovery would write (E21: conflicting metadata
+    fails closed), and a meta record never stands without its manifest."""
+    manifest = _meta(store_fd, intent.adapter, intent.install, "manifest")
+    committed = _meta(store_fd, intent.adapter, intent.install, "record")
+    if ((manifest is not None and manifest != data)
+            or (committed is not None and (manifest is None or committed != _record_bytes(rec)))):
+        raise Refused(RECOVERY_FAILED)
 
 
 def _recover_one(store_fd: int, staging_id: str, hook: Hook, read: Reader) -> str:
@@ -2058,7 +2078,9 @@ def _recover_one(store_fd: int, staging_id: str, hook: Hook, read: Reader) -> st
             os.close(adapter_fd)
         if at.kind != "dir" or (at.dev, at.ino) != intent.root:
             raise Refused(RECOVERY_FAILED)
+        hook("RECOVER.FOUND")
         rec = _reverify(store_fd, intent, m, r2, hook, read)
+        _committed_agree(store_fd, intent, data, rec)
     except Refused as exc:
         _abandon(store_fd, intent, exc.constant)
         return f"failed:{exc.constant}"
@@ -2524,7 +2546,10 @@ def decode_request(data: bytes) -> Request:
 REQUEST_FIELDS = frozenset({"op", "store", "args"})
 STAGE_FIELDS = frozenset({"adapter", "layout", "parts", "login_names", "verity", "target"})
 INSTALL_ARGS: dict[str, type] = {"adapter": str, "install": str}
-OPS = frozenset({"stage", "publish", "outcome", "state", "verify", "remove", "recover", "list"})
+OP_ARGS: dict[str, dict[str, type]] = {
+    "publish": {"id": str, "digest": str}, "outcome": {"id": str}, "state": INSTALL_ARGS,
+    "verify": INSTALL_ARGS, "remove": INSTALL_ARGS, "recover": {}, "list": {}}
+OPS = frozenset({"stage", *OP_ARGS})
 
 
 def handle(store: Path, request: Request, fds: Sequence[int], *, now: float, hours: float,
@@ -2535,33 +2560,28 @@ def handle(store: Path, request: Request, fds: Sequence[int], *, now: float, hou
     op, args = request.op, request.args
     if op != "stage" and fds:
         raise _bad()
+    # The whole request is decoded before the lock: a malformed one changes nothing.
     run_stage = _stage_request(store, args, fds, deadline) if op == "stage" else None
+    values = [] if run_stage is not None else [cast(str, v) for v in _args(args, OP_ARGS[op])]
+    if op == "publish" and not STAGING_ID.fullmatch(values[0]):
+        raise Refused(NO_SUCH_STAGING)
     with store_lock(store, deadline=deadline) as store_fd:
         recovered = _recover(store_fd, _nothing, os.read)
         _sweep(store_fd, now, hours)
-        match op:
-            case "publish":
-                sid, dig = _args(args, {"id": str, "digest": str})
-                if not STAGING_ID.fullmatch(cast(str, sid)):
-                    raise Refused(NO_SUCH_STAGING)
-                return _publish(store_fd, cast(str, sid), cast(str, dig), _nothing, os.read, statx_at)
-            case "outcome":
-                [sid] = _args(args, {"id": str})
-                return _outcome(store_fd, cast(str, sid))
-            case "state":
-                adapter_, install = _args(args, INSTALL_ARGS)
-                return _state(store_fd, cast(str, adapter_), cast(str, install))
-            case "verify":
-                adapter_, install = _args(args, INSTALL_ARGS)
-                return _verify(store_fd, cast(str, adapter_), cast(str, install), _nothing, os.read)
-            case "remove":
-                adapter_, install = _args(args, INSTALL_ARGS)
-                return _remove_install(store_fd, cast(str, adapter_), cast(str, install), _nothing)
-            case "recover":
-                _args(args, {})
+        match op, values:
+            case "publish", [sid, dig]:
+                return _publish(store_fd, sid, dig, _nothing, os.read, statx_at)
+            case "outcome", [sid]:
+                return _outcome(store_fd, sid)
+            case "state", [adapter_, install]:
+                return _state(store_fd, adapter_, install)
+            case "verify", [adapter_, install]:
+                return _verify(store_fd, adapter_, install, _nothing, os.read)
+            case "remove", [adapter_, install]:
+                return _remove_install(store_fd, adapter_, install, _nothing)
+            case "recover", []:
                 return recovered
-            case "list":
-                _args(args, {})
+            case "list", []:
                 return _installs(store_fd)
             case _:
                 pass

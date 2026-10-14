@@ -22,7 +22,9 @@ from harness_env import (
     artifact_fds,
     codex_part,
     fd_count,
+    stage,
     staged_manifest,
+    staged_root,
     store_dir,
     unseal,
 )
@@ -134,6 +136,20 @@ def test_a_refusal_comes_back_as_its_constant_alone(tmp_path: Path) -> None:
     with artifact_fds(tmp_path / "artifacts", [b"x"]) as fds:
         assert serve(cfg, sc.encode_request("list", cfg.store, {}), fds) == {"ok": False,
                                                                             "refused": sc.BAD_REQUEST}
+
+
+@pytest.mark.parametrize(("op", "args"), [("list", {"extra": 1}), ("publish", {"id": "0" * 32})])
+def test_a_malformed_request_is_refused_before_recovery_or_the_sweep_changes_anything(
+        tmp_path: Path, op: str, args: dict[str, object]) -> None:
+    cfg = config(tmp_path)
+    staged = stage(tmp_path, CODEX_LAYOUT, [codex_part()])
+    expired = time.time() + 1000 * 3600 * cfg.staging_hours
+    reply = serve(cfg, sc.encode_request(op, cfg.store, args), clock=lambda: expired)
+    assert reply == {"ok": False, "refused": sc.BAD_REQUEST}
+    assert staged_root(tmp_path, staged).is_dir()
+    assert serve(cfg, sc.encode_request("list", cfg.store, {}), clock=lambda: expired) == {"ok": True,
+                                                                                         "result": []}
+    assert not staged_root(tmp_path, staged).exists()        # the sweep would have removed it
 
 
 def test_a_request_for_another_store_is_refused(tmp_path: Path) -> None:

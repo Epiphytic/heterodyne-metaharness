@@ -723,3 +723,77 @@ def test_an_install_whose_root_is_not_0555_is_never_published_or_verified(tmp_pa
     with pytest.raises(sc.Mismatch) as e:
         check_published(tmp_path, name)
     assert e.value.constant == sc.ENTRY_CHANGED
+
+
+@pytest.mark.parametrize("point", ["P2.renamed", "P2"])
+def test_recovery_makes_the_roots_seal_durable_before_it_commits_the_meta(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, point: str) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], point)
+    real = os.fsync
+    base = str(store.resolve())
+    seen: list[str] = []
+
+    def fsync(fd: int) -> None:
+        path = str(Path(f"/proc/self/fd/{fd}").readlink())
+        seen.append(path.removeprefix(base).lstrip("/"))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    assert sc.recover(store) == [(staged.id, "published")]
+    monkeypatch.setattr(os, "fsync", real)
+    m = f"codex/.meta/{name}"
+    assert f"codex/{name}" in seen
+    assert seen.index(f"codex/{name}") < seen.index(f"{m}.manifest.json.tmp")
+    assert modes(install_root(tmp_path, name))[""] == 0o555
+
+
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_recovery_never_changes_a_root_that_replaced_the_install_after_its_check(
+        tmp_path: Path, replacement: str) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], "P2.renamed")
+    root = install_root(tmp_path, name)
+    theirs = tmp_path / "theirs"
+    theirs.mkdir(mode=0o755)
+    theirs.chmod(0o755)
+
+    def hook(point: str) -> None:
+        if point == "RECOVER.FOUND":
+            root.rename(tmp_path / "moved")
+            if replacement == "directory":
+                theirs.rename(root)
+            else:
+                root.symlink_to(theirs)
+
+    assert sc.recover(store, hook=hook) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
+    kept = root if replacement == "directory" else theirs
+    assert modes(kept)[""] == 0o755
+    assert modes(tmp_path / "moved")[""] == 0o755
+    assert sc.outcome(store, staged.id) == f"failed:{sc.RECOVERY_FAILED}"
+    unseal(tmp_path / "moved")
+
+
+@pytest.mark.parametrize("what", ["manifest", "record"])
+def test_recovery_refuses_committed_meta_that_conflicts_with_its_intent(tmp_path: Path, what: str) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], "P4")
+    path = meta_path(tmp_path, name, what)
+    if what == "manifest":
+        conflicting = sc.canonical(sample_manifest())
+    else:
+        doc = json.loads(path.read_bytes())
+        doc["record"][""][2] += 1
+        conflicting = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
+    path.chmod(0o644)
+    path.write_bytes(conflicting)
+    assert sc.recover(store) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
+    assert_gone(tmp_path, name)
+    assert sc.outcome(store, staged.id) == f"failed:{sc.RECOVERY_FAILED}"
+    assert sc.list_installs(store) == []
