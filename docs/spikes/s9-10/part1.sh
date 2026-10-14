@@ -1,21 +1,35 @@
 #!/bin/sh
 # S9-10 Part 1 (plan 4c Amendment 1 §4.5): the launcher's Codex launch shape, with no network and no login.
 #
-#   sh docs/spikes/s9-10/part1.sh <store-cli>
+#   sh docs/spikes/s9-10/part1.sh <store-cli> <results-dir>
 #
-# <store-cli> is an unpacked codex 0.160.0 package tree (bin/codex, codex-package.json). Runs twice, without
-# and then with E25's binds, each in its own `unshare -rmn` namespace (plus a PID namespace, so nothing the
-# run starts outlives it). Every argv comes from the candidate adapter (generate.py); the results are judged
-# by analyze.py. Needs no Podman, no root and no login file.
+# <store-cli> is the unpacked, checksum-verified codex 0.160.0 package (bin/codex, codex-package.json). Runs
+# twice, without and then with E25's binds, each in its own `unshare -rmn` namespace plus a PID namespace (so
+# nothing a run starts outlives it), capped at 40 s. Every argv comes from the candidate adapter (generate.py);
+# analyze.py judges the run. The traces and the summary go to <results-dir>; the run's home is deleted.
 set -eu
 CLI=$(cd "$1" && pwd)
+OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d -p "$XDG_RUNTIME_DIR" s9-10.XXXXXX)
-echo "run directory: $T"
+REPO=$(cd "$HERE/../../.." && pwd)
+PY=$REPO/.venv/bin/python
+mkdir -p "$OUT"
 
 for V in plain e25; do
-    mkdir "$T/$V"
-    uv run python "$HERE/generate.py" "$T/$V" "$CLI" > "$T/$V/generated.txt"
-    unshare -rmnpf --mount-proc --kill-child sh "$HERE/inner.sh" "$T/$V" "$CLI" "$V"
-    python3 "$HERE/analyze.py" "$T/$V" "$V"
+    T=$(mktemp -d -p "$XDG_RUNTIME_DIR" s9-10.XXXXXX)
+    "$PY" "$HERE/generate.py" "$T" "$CLI" $([ "$V" = e25 ] && echo --e25) > "$OUT/$V.generated.txt"
+    rc=0
+    timeout -k 5 40 unshare -rmnpf --mount-proc --kill-child sh "$HERE/inner.sh" "$T" "$CLI" "$V" "$PY" \
+        || rc=$?
+    echo "$rc" > "$T/rc"
+    "$PY" "$HERE/analyze.py" "$T" "$V" | tee "$OUT/$V.result.txt"
+    for f in argv.json inside inside.tmp inside.packages server_ready server.log tui.screen rc result.json \
+             server.strace tui.strace; do
+        [ -e "$T/$f" ] && cp "$T/$f" "$OUT/$V.$f"
+    done
+    left=$(ps -eo pid=,args= | awk -v t="$T" 'index($0, t) && !/awk/ {print $1}')
+    echo "leftover pids: ${left:-none}" | tee -a "$OUT/$V.result.txt"
+    [ -z "$left" ] || { kill $left; sleep 1; }
+    chmod -R u+w "$T" && rm -rf "$T"
+    [ ! -e "$T" ] && echo "run home deleted" | tee -a "$OUT/$V.result.txt"
 done

@@ -45,12 +45,16 @@ def main() -> None:
     app = meta["app_socket"].removeprefix("unix://")
     tui_connected = any(app in s or "codex-daemon" in s for s in sockets)
     packages = Path(meta["home"]) / ".codex" / "packages"
-    left = (sorted(str(p.relative_to(packages)) for p in packages.rglob("*")) if packages.is_dir()
-            else ["<missing>"])
+    host_left = (sorted(str(p.relative_to(packages)) for p in packages.rglob("*")) if packages.is_dir()
+                 else [])
+    inside = run / "inside.packages"
+    inside_left = inside.read_text().splitlines() if inside.exists() else ["<not listed>"]
+    left = host_left + [ln for ln in inside_left if "No such file" not in ln]
     screen = (run / "tui.screen").read_bytes() if (run / "tui.screen").exists() else b""
-    composer = "›".encode() in screen
+    composer = "›".encode() in screen                       # Codex.prompt_marker
+    ready = run / "server_ready"
     checks = {
-        "server_ready": (run / "server_ready").read_text().strip() == "yes",
+        "server_ready": ready.exists() and ready.read_text().strip() == "yes",
         "tui_connected_to_app_socket": tui_connected,
         "tui_screen_shows_composer": composer,
         "packages_empty_on_host": left == [],
