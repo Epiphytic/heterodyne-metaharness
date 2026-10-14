@@ -37,6 +37,9 @@ class Link(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     url: str
 
 
+PURPOSES = (None, "design", "execution")
+
+
 class Readout(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """Task 1's `--json`, field for field."""
     format: Literal[1]
@@ -63,6 +66,9 @@ class Readout(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     gate_reasons: list[str]
     links: list[Link]
     readout: dict[str, list[str]]
+    # cxmkf K17: the bead's `ask.purpose`, digest-bound; absent from an approve-bead that predates it.
+    # admind renders the card label from it and nothing else; any value but these two is a gap.
+    purpose: str | None = None
 
 
 class Busy(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -240,6 +246,9 @@ def postable(r: Readout) -> str | None:
         return "the bead is not a kind:approval bead"
     if r.gaps:
         return f"the bead is not approvable as written; send it back for grooming: {gaps}"
+    if r.purpose not in PURPOSES:       # the value itself is not echoed
+        return ("the bead is not approvable as written; send it back for grooming: its purpose must be "
+                "design or execution")
     if r.design_review_valid is False:
         return "the bead's design_review is not in valid two-LLM format"
     if r.posted_digest is not None and r.posted_digest != r.digest:

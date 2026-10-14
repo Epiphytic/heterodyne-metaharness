@@ -39,6 +39,7 @@ from heterodyne.admind import (
     ctl,
     guard,
     membership,
+    notices,
     summarize,
     verbs,
 )
@@ -58,6 +59,7 @@ from heterodyne.admind.hook import (
     same_prompt,
     transcript_size,
 )
+from heterodyne.admind.notices import NoticePost
 from heterodyne.admind.redact import redact
 from heterodyne.admind.settings import AdmindSettings, Operator
 from heterodyne.admind.store import REACTION_PREFIX, AskRow, Store, TurnRow, now
@@ -517,11 +519,18 @@ class Admind:
         if not self.latched():
             self.reply(mid, UNVERIFIED, "unverified")
 
-    def post(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> None:
+    def post(self, key: str, text: str, reply_to: str | None, lane: int = 1,
+             thread_key: str | None = None) -> None:
         """Queue one message. Everything admind posts is redacted here (B1); callers that chunk redact the
-        whole text first, so a value can't escape redaction by straddling a chunk boundary."""
-        if self.store.enqueue(key, redact(text), reply_to, lane):
+        whole text first, so a value can't escape redaction by straddling a chunk boundary. A continuation
+        chunk names its chunk 0 as `thread_key`, resolved to a reply target when it is sent (K22)."""
+        if self.store.enqueue(key, redact(text), reply_to, lane, thread_key):
             self.wake.set()
+
+    def post_parts(self, prefix: str, parts: list[str], lane: int = 1) -> None:
+        """A top-level post in parts: chunk 0 top-level, chunks 1.. threaded under it when sent (K22)."""
+        for i, part in enumerate(parts):
+            self.post(f"{prefix}:{i}", part, None, lane, None if i == 0 else f"{prefix}:0")
 
     def reply(self, mid: str, text: str, tag: str) -> None:
         """Answer inbound `mid` in its thread: a message's own, a reaction's reacted message (delta §5). A
@@ -539,6 +548,8 @@ class Admind:
         # lost, or arrive later). Close it out; a late Stop then has no anchor and posts top-level.
         self.abandon_in_flight("admind restarted during this turn; a late reply may appear unthreaded")
         self.store.discard_details()    # a !details in preparation died with the process
+        # Notices whose delivery ended a week ago (K7); posting a notice prunes too.
+        self.store.prune_notices(asks.stamp(asks.now() - timedelta(days=notices.NOTICE_RETENTION_DAYS)))
         # `busy` is kept: an adopted session may still be mid-turn. Its Stop, a SessionStart (a launched
         # or resumed agent), or the operator's !interrupt clears it.
         # Received (held, never pasted) or executing (a command that may not have run to the end): each
@@ -635,6 +646,9 @@ class Admind:
         latched (R17); a post does not."""
         if isinstance(req, asks.AskPost):
             return await self.serialised_post(req, peer)
+        if isinstance(req, NoticePost):
+            async with self.ask_post_lock:
+                return self.post_notice(req, peer)
         if isinstance(req, asks.AskList):
             rows = self.store.asks_with_status(*asks.ACTIVE) + self.store.recent_asks(20)
             return asks.AskReply("ok", f"{len(rows)} asks", asks=[self.ask_summary(r) for r in rows])
@@ -669,19 +683,67 @@ class Admind:
         if self.store.ask_posted_since(asks.hour_ago()) >= asks.MAX_PER_HOUR:
             return asks.refused(ASK_TOO_OFTEN)
         at = asks.stamp(asks.now())
+        question_form, choices = asks.stored_form(req)
         row = AskRow(asks.new_id(lambda i: self.store.ask(i) is not None), req.kind, req.poster, req.title,
-                     req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at)
-        text, truncated = asks.question_card(row)
-        parts = chunk.split(text, self.s.chunk_chars)
+                     req.body, req.pr_url, req.head_sha, req.bead, None, False, 0, "open", None, None, at, at,
+                     question_form=question_form, choices=choices, links=asks.stored_links(req.links))
+        try:
+            parts, truncated = asks.card_chunks(row, self.s.chunk_chars)
+        except chunk.TooWide:
+            self.audit.write("ask", action="refused", ask_kind=row.kind, poster=row.poster, pid=peer.pid,
+                             reason="link too long")
+            return asks.refused(asks.ASK_LINK_TOO_LONG)
         row = dataclasses.replace(row, truncated=truncated, card_parts=len(parts))
         with self.store.transaction():
             self.store.insert_ask(row, peer.pid)
-            for i, part in enumerate(parts):
-                self.post(f"ask:{row.ask_id}:{i}", part, None)
+            self.post_parts(f"ask:{row.ask_id}", parts)
         self.audit.write("ask", action="posted", ask_id=row.ask_id, ask_kind=row.kind, poster=row.poster,
                          pid=peer.pid, parts=len(parts), truncated=truncated, title_chars=len(row.title),
-                         body_chars=len(row.body))
-        return asks.AskReply("posted", f"ask {row.ask_id} posted", ask=self.ask_view(row))
+                         body_chars=len(row.body), form=req.form, choices=len(req.choices),
+                         links=len(req.links))
+        message = f"ask {row.ask_id} posted"
+        if row.kind == "question" and req.form is None:     # the K14 grace window
+            message += "\n" + asks.FORM_WARNING
+        return asks.AskReply("posted", message, ask=self.ask_view(row))
+
+    def post_notice(self, req: NoticePost, peer: ctl.Peer) -> asks.AskReply:
+        """Under `ask_post_lock` (K6): the latch, the K4 render and measure, the K5 counts, the `notices` row
+        and every outbox row, in one transaction with no await. Never an ask (K2). Audited once, with a fixed
+        `why` code on a refusal, never text (K9)."""
+        fields: dict[str, object] = {"poster": req.poster, "peer_pid": peer.pid,
+                                     "title_chars": len(req.title), "body_chars": len(req.body),
+                                     "links": len(req.links)}
+        try:
+            result = self.admit_notice(req, peer)
+        except Exception as exc:  # noqa: BLE001 - audited as `internal` by class name only (K9)
+            self.audit.write("notice", action="refused", why="internal", error=type(exc).__name__, **fields)
+            return asks.failed()
+        if isinstance(result, str):
+            self.audit.write("notice", action="refused", why=result, **fields)
+            return asks.refused(notices.MESSAGES[result])
+        notice_id, parts = result
+        self.audit.write("notice", action="posted", notice_id=notice_id, parts=parts, **fields)
+        return asks.AskReply("posted", f"posted {notice_id}")
+
+    def admit_notice(self, req: NoticePost, peer: ctl.Peer) -> tuple[str, int] | str:
+        """`post_notice`'s checks and writes: (notice ID, parts), or the K9 code it is refused for."""
+        if self.latched():
+            return "latched"
+        admitted = notices.admit(req, self.s.chunk_chars)
+        if isinstance(admitted, str):
+            return admitted
+        at = asks.now()
+        with self.store.transaction():
+            self.store.prune_notices(asks.stamp(at - timedelta(days=notices.NOTICE_RETENTION_DAYS)))
+            if self.store.notices_since(asks.stamp(at - timedelta(hours=1))) >= notices.NOTICE_PER_HOUR:
+                return "rate-hour"
+            if self.store.undelivered_notices() >= notices.NOTICE_UNDELIVERED:
+                return "undelivered"
+            notice_id = notices.new_id(self.store.notice_exists)
+            self.store.insert_notice(notice_id, req.poster, peer.pid, len(req.title), len(req.body),
+                                     len(req.links), len(admitted.chunks), asks.stamp(at))
+            self.post_parts(f"notice:{notice_id}", admitted.chunks, lane=2)
+        return notice_id, len(admitted.chunks)
 
     def approval_post_refusal(self, bead: str, retiring: tuple[str, str] | None = None) -> str | None:
         """Spec §8 "Post", steps 1 and 4 (R15, R17, R22): checked before the read and again after it. A
@@ -749,7 +811,8 @@ class Admind:
                                    if o.bead != bead and (retiring is None or o.ask_id != retiring[0]))
         card = asks.approval_card(row, r, self.s.chunk_chars, others)
         if isinstance(card, str):
-            return card, "redaction" if card == ASK_REDACTED else "too long"
+            return card, ("redaction" if card == ASK_REDACTED else "too long" if card == asks.TOO_LONG
+                          else "link too long")
         refusal = self.approval_post_refusal(bead, retiring)
         if refusal is not None:
             return refusal, "limits"
@@ -769,8 +832,7 @@ class Admind:
                     self.ask_notice(old.ask_id, "superseded", row.ask_id, ASK_SUPERSEDED_NOTICE.format(
                         old=old.ask_id, new=row.ask_id, bead=bead))
             self.store.insert_ask(row, peer_pid)
-            for i, part in enumerate(fresh.card.card_chunks):     # the checked chunks, as they are (R21)
-                self.post(f"ask:{row.ask_id}:{i}", part, None)
+            self.post_parts(f"ask:{row.ask_id}", fresh.card.card_chunks)    # the checked chunks (R21)
         return superseded
 
     def audit_posted(self, fresh: FreshCard, pid: int | None, superseded: list[str]) -> None:
@@ -816,7 +878,7 @@ class Admind:
     def operator_name(self, mid: str) -> str:
         return self.operators.get(self.senders.get(mid, ""), "?")
 
-    async def ask_reply(self, mid: str, ask_id: str, text: str) -> None:
+    async def ask_reply(self, mid: str, ask_id: str, text: str, reaction: bool = False) -> None:
         """A plain reply (or a reaction) to a card (R13, R14), never pasted to the agent: on an approval card,
         an approve or a deny when R28 reads it as one; otherwise stored as the answer or a note."""
         self.store.set_inbound(mid, "executing")
@@ -832,10 +894,12 @@ class Admind:
                 return
             await self.decide_card(mid, row, reading.action, reason)
             return
-        self.answer_ask(mid, ask_id, text)
+        self.answer_ask(mid, ask_id, text, reaction)
 
-    def answer_ask(self, mid: str, ask_id: str, text: str) -> None:
-        """Store an operator's answer to a question or merge ask and reply in thread, as one step."""
+    def answer_ask(self, mid: str, ask_id: str, text: str, reaction: bool = False) -> None:
+        """Store an operator's answer to a question or merge ask and reply in thread, as one step. On a
+        question with a form, the reaction or reply is mapped to a choice (K17q, K18q) and the reply says so
+        (K19); the answer text is stored verbatim either way."""
         row = self.store.ask(ask_id)
         if row is None:
             self.finish(mid, "done", f"No ask {ask_id}.", "ask")
@@ -855,13 +919,20 @@ class Admind:
             self.audit.write("ask", action="noted", message_id=mid, ask_id=ask_id, chars=len(text))
             return
         again = row.status == "answered"
+        choice = asks.map_reaction(row, text) if reaction else asks.map_reply(row, text)
+        if choice is not None:
+            said = asks.recorded(row, choice, text)
+        elif again:
+            said = f"Added to ask {ask_id}; it was already answered, and the poster sees both."
+        else:
+            said = f"Answer recorded for ask {ask_id}."
         with self.store.transaction():
-            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text)
+            self.store.add_answer(ask_id, "answer", self.operator_name(mid), mid, text, choice)
             self.store.set_ask(ask_id, "answered")
             self.touch(ask_id)
-            self.finish(mid, "done", (f"Added to ask {ask_id}; it was already answered, and the poster sees "
-                                      "both.") if again else f"Answer recorded for ask {ask_id}.", "ask")
-        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text))
+            self.finish(mid, "done", said, "ask")
+        self.audit.write("ask", action="answered", message_id=mid, ask_id=ask_id, chars=len(text),
+                         choice=choice)
 
     def answer_refusal(self, row: AskRow, text: str) -> str | None:
         """Why an answer is not stored (R15): fixed wording, or None."""
@@ -971,9 +1042,8 @@ class Admind:
         if row.kind == "approval":
             parts = asks.stored_details(row)
         else:
-            parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
-        for i, part in enumerate(parts):
-            self.post(f"askr:{row.ask_id}:{mid}:{i}", part, None)
+            parts = asks.full_chunks(row, self.s.chunk_chars)
+        self.post_parts(f"askr:{row.ask_id}:{mid}", parts)
         self.store.add_repeat(row.ask_id, mid, len(parts), asks.stamp(at))
 
     def touch(self, ask_id: str) -> None:
@@ -1020,7 +1090,7 @@ class Admind:
         if row.kind == "approval":     # the chunks checked when it was posted, as they are (R21, r2-1)
             parts = asks.stored_details(row)
         else:
-            parts = chunk.split(asks.full_text(row), self.s.chunk_chars)
+            parts = asks.full_chunks(row, self.s.chunk_chars)
         with self.store.transaction():
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)
@@ -1883,7 +1953,7 @@ class Admind:
             self.audit.write("event", action="ignored", what="reaction", message_id=mid, ask_id=ask_id)
             return
         if row.kind != "approval":
-            await self.ask_reply(mid, row.ask_id, emoji)
+            await self.ask_reply(mid, row.ask_id, emoji, reaction=True)
             return
         action = verbs.emoji_action(emoji)
         card = self.approval_card_for(target)
@@ -2807,9 +2877,14 @@ class Admind:
                 timer = self._backoff.get(row.seq)
                 if timer is not None and not timer.done():
                     return                  # its retry is not due; its timer or a new row wakes the loop
+                reply_to = row.reply_to
+                if row.thread_key is not None:      # resolved and stored before the send, never awaited (K22)
+                    reply_to, why, parent = self.store.resolve_thread(row.seq)
+                    if why is not None:
+                        self.audit.write("thread_fallback", key=row.key, parent=parent, why=why)
                 try:
                     sent = await self.client.send_final(self.account, self.group, redact(row.text),
-                                                        row.reply_to, row.key)
+                                                        reply_to, row.key)
                 except ControlError as exc:
                     attempts = self.store.mark_attempt(row.seq)
                     if not (exc.retryable and attempts < MAX_SEND_ATTEMPTS):
