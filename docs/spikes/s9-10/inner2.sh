@@ -48,7 +48,20 @@ awk -v b="$BRIDGE_INSIDE" -v h="$HOME_DIR/.codex/" '$5 == b || $5 ~ /^\/tmp\/cod
 
 cd "$WT"
 ENV="env -i HOME=$HOME_DIR CODEX_HOME=$HOME_DIR/.codex PATH=$CLI/bin:/usr/bin:/bin TERM=xterm-256color"
-TRACE="-f -qq -s 300 -xx -e trace=execve,connect,sendto,sendmmsg"
+TRACE="-f -q -s 300 -xx -e trace=execve,connect,sendto,sendmmsg"
+# A single -q (a second drops it): strace writes each `+++ exited/killed +++` record; the analyzer requires
+# the root's, so a trace cut short fails. A signalled strace detaches without that record, so the harness
+# signals the traced root itself (the trace's first pid) and waits up to 5 s for the record.
+stop_root() {
+    pid=$(awk 'NR == 1 {print $1; exit}' "$1" 2>/dev/null) || pid=
+    [ -n "$pid" ] || return 0
+    kill -"$2" "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 10 ]; do
+        awk -v p="$pid" '$1 == p && $2 == "+++" {f = 1} END {exit !f}' "$1" && return 0
+        sleep 0.5; i=$((i + 1))
+    done
+}
 "$PY" "$HERE/part2_steps.py" trust "$SESSION" "$CLI" "$WT" > "$R/trust.txt" 2>&1 || {
     cat "$R/trust.txt"; exit 1; }
 # shellcheck disable=SC2086
@@ -92,6 +105,7 @@ done
 echo "$answered" > "$R/answered"
 sleep 3
 tm capture-pane -p -t 0 > "$R/tui.screen" 2>&1
+stop_root "$R/tui.strace" HUP
 tm kill-server 2>/dev/null
 sleep 1
 
@@ -104,8 +118,10 @@ if [ -n "$THREAD" ]; then
     until_shown 60 "$PROMPT" && echo yes > "$R/resumed" || echo no > "$R/resumed"
     sleep 3
     tm capture-pane -p -t 0 > "$R/tui-resume.screen" 2>&1
+    stop_root "$R/tui-resume.strace" HUP
     tm kill-server 2>/dev/null
 fi
+stop_root "$R/server.strace" TERM
 kill "$SP" 2>/dev/null || true
 wait "$SP" 2>/dev/null || true
 for p in tmp packages; do

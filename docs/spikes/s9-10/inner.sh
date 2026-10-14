@@ -42,7 +42,20 @@ cd "$WT"
 # §4.5's environment: HOME, CODEX_HOME, PATH, TERM and nothing else (tool_env names no values; see the doc).
 run() { env -i HOME="$HOME_DIR" CODEX_HOME="$HOME_DIR/.codex" PATH="$CLI/bin:/usr/bin:/bin" \
     TERM=xterm-256color "$@"; }
-TRACE="-f -qq -s 300 -xx -e trace=execve,connect,sendto,sendmmsg"
+TRACE="-f -q -s 300 -xx -e trace=execve,connect,sendto,sendmmsg"
+# A single -q (a second drops it): strace writes each `+++ exited/killed +++` record; the analyzer requires
+# the root's, so a trace cut short fails. A signalled strace detaches without that record, so the harness
+# signals the traced root itself (the trace's first pid) and waits up to 5 s for the record.
+stop_root() {
+    pid=$(awk 'NR == 1 {print $1; exit}' "$1" 2>/dev/null) || pid=
+    [ -n "$pid" ] || return 0
+    kill -"$2" "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 10 ]; do
+        awk -v p="$pid" '$1 == p && $2 == "+++" {f = 1} END {exit !f}' "$1" && return 0
+        sleep 0.5; i=$((i + 1))
+    done
+}
 # shellcheck disable=SC2086
 run strace $TRACE -o "$R/server.strace" $SERVER > "$R/server.log" 2>&1 &
 SP=$!
@@ -63,7 +76,9 @@ TMUX_TMPDIR=/tmp tmux -L s9-10 -f /dev/null new-session -d -x 160 -y 48 \
     "$ENV strace $TRACE -o $R/tui.strace $TUI"
 sleep 14
 TMUX_TMPDIR=/tmp tmux -L s9-10 capture-pane -p -t 0 > "$R/tui.screen" 2>&1 || true
+stop_root "$R/tui.strace" HUP
 TMUX_TMPDIR=/tmp tmux -L s9-10 kill-server 2>/dev/null || true
+stop_root "$R/server.strace" TERM
 kill "$SP" 2>/dev/null || true
 wait "$SP" 2>/dev/null || true
 for p in tmp packages; do
