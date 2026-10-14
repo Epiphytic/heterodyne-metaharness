@@ -150,16 +150,18 @@ def test_normalise_id() -> None:
 def test_question_card() -> None:
     text, truncated = asks.question_card(row())
     lines = text.split("\n")
-    assert lines[0] == "❓ Ask k7m2 · question · posted by controller (a local process; unverified)"
-    assert lines[1] == "Which relay?" and BODY in text and not truncated
+    assert lines[0] == "QUESTION"           # a form-less question: the K14 grace window
+    assert lines[1] == "❓ Ask k7m2 · question · posted by controller (a local process; unverified)"
+    assert lines[2] == "Which relay?" and BODY in text and not truncated
     assert lines[-1] == "Answer by replying or reacting to this message, or send !answer k7m2 <text>"
 
 
 def test_merge_card() -> None:
     text, _ = asks.question_card(row(kind="merge", title="Merge plan 3 (wsd intake)"))
     lines = text.split("\n")
-    assert lines[0] == "🔀 Ask k7m2 · merge request · posted by controller (a local process; unverified)"
-    assert lines[1:4] == ["Merge plan 3 (wsd intake)", f"PR: {PR}", f"Head: {HEAD}"]
+    assert lines[0] == "ACTION: merge"
+    assert lines[1] == "🔀 Ask k7m2 · merge request · posted by controller (a local process; unverified)"
+    assert lines[2:5] == ["Merge plan 3 (wsd intake)", f"PR: {PR}", f"Head: {HEAD}"]
     assert lines[-1] == ("Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it "
                          "is merged, or reply with what to change.")
 
@@ -355,7 +357,7 @@ def test_ask_socket_round_trip_limits_and_mode(tmp_path: Path) -> None:
             reply = await ctl.request(path, big, reply_type=asks.AskReply, max_reply=asks.MAX_REPLY)
             assert reply.message == str(100 * 1024)
             # exactly the limit is read; one byte over is refused unseen
-            base = len(msgspec.json.encode(question(body="")))
+            base = len(msgspec.json.encode(question(body="c"))) - 1     # "" is a default, omitted
             fits = question(body="c" * (asks.MAX_REQUEST - base))
             assert len(msgspec.json.encode(fits)) == asks.MAX_REQUEST
             assert (await raw(path, msgspec.json.encode(fits) + b"\n")).result == "ok"
@@ -516,7 +518,8 @@ def test_question_answered_by_reply(tmp_path: Path) -> None:
         await joined(h)
         ask_id = await posted(h, question())
         card = await card_sent(h, ask_id)
-        assert any(t.startswith(f"❓ Ask {ask_id} · question · posted by controller") for t in h.texts())
+        assert any(t.startswith(f"QUESTION\n❓ Ask {ask_id} · question · posted by controller")
+                   for t in h.texts())
         answer = await say_to(h, "use the first one", reply_to=card)
         await h.until(lambda: answered_texts(h, f"Answer recorded for ask {ask_id}."))
         reply = next(r for r in h.fake.sent if r["idempotency_key"] == f"ask:{answer}:0")
@@ -615,7 +618,7 @@ def test_merge_card_shows_url_and_never_merges(tmp_path: Path) -> None:
         ask_id = reply.ask.summary.ask_id
         card = await card_sent(h, ask_id)
         text = next(r["text"] for r in h.fake.sent if r["idempotency_key"] == f"ask:{ask_id}:0")
-        assert text.startswith(f"🔀 Ask {ask_id} · merge request · posted by controller")
+        assert text.startswith(f"ACTION: merge\n🔀 Ask {ask_id} · merge request · posted by controller")
         assert f"PR: {PR}\nHead: {HEAD}\n" in text and "admind never merges" in text
         await say_to(h, "merged", reply_to=card)
         await h.until(lambda: answered_texts(h, f"Answer recorded for ask {ask_id}."))
@@ -911,6 +914,7 @@ def test_cli_post_get_list_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     run_with(tmp_path, scenario)
     ask_id = out["id"]
     assert out["post"][0] == 0 and out["post"][1].out == f"ask {ask_id} posted\n"
+    assert f"admind: {asks.FORM_WARNING}\n" in out["post"][1].err      # K14: on stderr, not with the ID
     assert out["merge"][0] == 0 and json.loads(out["merge"][1].out)["result"] == "posted"
     assert out["get"][0] == 0 and out["get"][1].out.startswith(f"ask {ask_id} · question · open")
     assert out["list"][0] == 0 and len(json.loads(out["list"][1].out)["asks"]) == 2

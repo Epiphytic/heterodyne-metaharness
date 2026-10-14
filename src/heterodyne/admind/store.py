@@ -11,6 +11,9 @@
 - `asks`, `ask_answers`, `ask_details`, `ask_attempts`: the asks relay (relay spec §5). A card's chunks are
   outbox rows keyed `ask:<id>:<i>`, an ask's `!details` rows `askd:<id>:<request mid>:<i>`. A decision
   attempt is persisted before approve-bead starts, and `asks.attempt` names the current one (R23).
+- `notices`: FYI notices (cxmkf K7), lengths only; their text lives only in their outbox rows,
+  `notice:<id>:<i>`. A card's continuation chunks carry `thread_key`, chunk 0's key, until the send resolves
+  it to a reply target (K22).
 """
 
 import contextlib
@@ -46,7 +49,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     text TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
-    message_id TEXT);
+    message_id TEXT,
+    thread_key TEXT);       -- chunk 0's key, until outbox_pass resolves it into reply_to (cxmkf K22)
 -- parts of a `!details` reply being prepared: invisible to the outbox until publish_details moves them
 CREATE TABLE IF NOT EXISTS details_stage (
     token TEXT NOT NULL, idx INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (token, idx));
@@ -95,11 +99,15 @@ CREATE TABLE IF NOT EXISTS asks (
     decided_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     refreshed_from TEXT,        -- the stale ask this fresh card replaced (relay delta R29)
-    last_activity_at TEXT);     -- the automatic-bump clock, moved only forward (asks bump B14)
+    last_activity_at TEXT,      -- the automatic-bump clock, moved only forward (asks bump B14)
+    question_form TEXT,         -- 'choices' or 'yes-no' (cxmkf K13), NULL for a form-less question
+    choices TEXT,               -- JSON {"choices": [...], "recommended": "A"}
+    links TEXT);                -- JSON [{"label": ..., "url": ...}] (K20)
 CREATE TABLE IF NOT EXISTS ask_answers (
     ask_id TEXT NOT NULL, seq INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('answer', 'note')),
     operator TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, at TEXT NOT NULL,
+    choice TEXT,                -- A-F, yes, no or none: what the answer mapped to (K19)
     PRIMARY KEY (ask_id, seq));
 CREATE TABLE IF NOT EXISTS ask_details (
     ask_id TEXT NOT NULL, operator TEXT NOT NULL, message_id TEXT NOT NULL,
@@ -117,8 +125,22 @@ CREATE TABLE IF NOT EXISTS ask_repeats (
     parts INTEGER NOT NULL,             -- this repeat's own chunk count (asks bump B11, B12)
     created_at TEXT NOT NULL,
     PRIMARY KEY (ask_id, request));
+CREATE TABLE IF NOT EXISTS notices (
+    notice_id TEXT PRIMARY KEY,
+    poster TEXT NOT NULL,
+    peer_pid INTEGER,
+    title_chars INTEGER NOT NULL,
+    body_chars INTEGER NOT NULL,
+    links INTEGER NOT NULL,
+    parts INTEGER NOT NULL,
+    created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_message_id ON outbox(message_id);
 """
+# cxmkf K26: columns added to a database from before card kinds, in one transaction.
+_CXMKF_COLUMNS = (("outbox", "thread_key"), ("asks", "question_form"), ("asks", "choices"), ("asks", "links"),
+                  ("ask_answers", "choice"))
+_NOTICE_KEY = re.compile(r"\Anotice:([2-9a-hjkmnp-z]{6}):\d+\Z")
+THREAD_FALLBACKS = ("no-message-id", "parent-failed", "parent-missing", "parent-pending")
 REACTION_PREFIX = "r:"      # a reaction's inbound key is `r:<event id>` (relay delta R27)
 # Statuses that count toward the open-ask limit (relay spec R15). `blocked` is terminal and does not.
 ASK_ACTIVE = ("open", "answered", "deciding", "uncertain")
@@ -145,6 +167,7 @@ class OutboxRow:
     text: str
     attempts: int
     lane: int
+    thread_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +212,9 @@ class AskRow:
     updated_at: str
     refreshed_from: str | None = None
     last_activity_at: str | None = None     # set from created_at when the ask is stored (B14)
+    question_form: str | None = None        # cxmkf K13
+    choices: str | None = None
+    links: str | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +224,7 @@ class AnswerRow:
     message_id: str
     text: str
     at: str
+    choice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -213,13 +240,23 @@ _TURN = ("turn_id, key, session, reply_to, origin, text, transcript, transcript_
 
 
 _ASK = ("ask_id, kind, poster, title, body, pr_url, head_sha, bead, digest, truncated, card_parts, status, "
-        "outcome, decided_by, created_at, updated_at, refreshed_from, last_activity_at")   # fixed, as _TURN
+        "outcome, decided_by, created_at, updated_at, refreshed_from, last_activity_at, question_form, "
+        "choices, links")   # fixed, as _TURN
 
 
 def _ask(r: tuple[object, ...]) -> AskRow:
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]), _opt_str(r[6]),
                   _opt_str(r[7]), _opt_str(r[8]), bool(r[9]), int(cast(int, r[10])), str(r[11]),
-                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]))
+                  _opt_str(r[12]), _opt_str(r[13]), str(r[14]), str(r[15]), _opt_str(r[16]), _opt_str(r[17]),
+                  _opt_str(r[18]), _opt_str(r[19]), _opt_str(r[20]))
+
+
+_OUTBOX = "seq, key, reply_to, text, attempts, lane, thread_key"     # fixed, as _TURN
+
+
+def _outbox(r: tuple[object, ...]) -> OutboxRow:
+    return OutboxRow(int(cast(int, r[0])), str(r[1]), _opt_str(r[2]), str(r[3]), int(cast(int, r[4])),
+                     int(cast(int, r[5])), _opt_str(r[6]))
 
 
 def _opt_int(v: object) -> int | None:
@@ -301,6 +338,12 @@ class Store:
             with self.transaction():
                 self.db.execute("ALTER TABLE asks ADD COLUMN last_activity_at TEXT")
                 self.db.execute("UPDATE asks SET last_activity_at = ?", (now(),))
+        # A database from before card kinds (cxmkf K26): nullable columns, all or none, each added once. The
+        # notices table is in SCHEMA. No backfill: existing rows keep NULLs and mean what they meant.
+        with self.transaction():
+            for table, column in _CXMKF_COLUMNS:
+                if column not in {str(r[1]) for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
     @_locked
     def close(self) -> None:
@@ -353,10 +396,35 @@ class Store:
         return [str(r[0]) for r in rows]
 
     @_locked
-    def enqueue(self, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
-        cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane) "
-                              "VALUES (?, ?, ?, 'pending', ?)", (key, reply_to, text, lane))
+    def enqueue(self, key: str, text: str, reply_to: str | None, lane: int = 1,
+                thread_key: str | None = None) -> bool:
+        """Queue one message. A continuation chunk of a top-level post names chunk 0's key as `thread_key`
+        and no `reply_to`; its target is resolved when it is sent (K22)."""
+        cur = self.db.execute("INSERT OR IGNORE INTO outbox(key, reply_to, text, status, lane, thread_key) "
+                              "VALUES (?, ?, ?, 'pending', ?, ?)", (key, reply_to, text, lane, thread_key))
         return cur.rowcount == 1
+
+    @_locked
+    def resolve_thread(self, seq: int) -> tuple[str | None, str | None, str]:
+        """K22: settle where pending row `seq` (which has a `thread_key`) goes, and store it before it is
+        sent, in one transaction: (reply_to, fallback reason or None, the parent key). Its parent sent with a
+        message ID is the target; sent without one, failed, missing or (never in normal operation) still
+        pending, the row goes top-level. Never waits."""
+        with self.transaction():
+            r = self.db.execute("SELECT thread_key FROM outbox WHERE seq = ?", (seq,)).fetchone()
+            parent = "" if r is None or r[0] is None else str(r[0])
+            p = self.db.execute("SELECT status, message_id FROM outbox WHERE key = ?", (parent,)).fetchone()
+            target: str | None = None
+            why: str | None
+            if p is None:
+                why = "parent-missing"
+            elif p[0] == "sent":
+                target = _opt_str(p[1])
+                why = None if target is not None else "no-message-id"
+            else:
+                why = "parent-failed" if p[0] == "failed" else "parent-pending"
+            self.db.execute("UPDATE outbox SET reply_to = ?, thread_key = NULL WHERE seq = ?", (target, seq))
+        return target, why, parent
 
     @_locked
     def stage_details(self, token: str, first: int, parts: list[str]) -> None:
@@ -387,19 +455,17 @@ class Store:
 
     @_locked
     def pending(self) -> list[OutboxRow]:
-        rows = self.db.execute("SELECT seq, key, reply_to, text, attempts, lane FROM outbox "
+        rows = self.db.execute(f"SELECT {_OUTBOX} FROM outbox "  # noqa: S608 - a fixed column list
                                "WHERE status = 'pending' ORDER BY lane, seq").fetchall()
-        return [OutboxRow(int(r[0]), str(r[1]), None if r[2] is None else str(r[2]), str(r[3]), int(r[4]),
-                          int(r[5])) for r in rows]
+        return [_outbox(r) for r in rows]
 
     @_locked
     def next_pending(self) -> OutboxRow | None:
         """The next message to send: lane 1 (commands, alerts, notices, summaries, batches, verbatim
         replies) before lane 2 (`!details`), each in order (B14)."""
-        r = self.db.execute("SELECT seq, key, reply_to, text, attempts, lane FROM outbox "
+        r = self.db.execute(f"SELECT {_OUTBOX} FROM outbox "  # noqa: S608 - a fixed column list
                             "WHERE status = 'pending' ORDER BY lane, seq LIMIT 1").fetchone()
-        return None if r is None else OutboxRow(int(r[0]), str(r[1]), None if r[2] is None else str(r[2]),
-                                                str(r[3]), int(r[4]), int(r[5]))
+        return None if r is None else _outbox(r)
 
     @_locked
     def redact_pending_outbox(self, chunk_chars: int) -> int:
@@ -456,6 +522,18 @@ class Store:
         self.db.execute("UPDATE outbox SET attempts = attempts + 1 WHERE seq = ?", (seq,))
         row = self.db.execute("SELECT attempts FROM outbox WHERE seq = ?", (seq,)).fetchone()
         return int(row[0])
+
+    @_locked
+    def outbox_text(self, key: str) -> str | None:
+        r = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
+        return None if r is None else str(r[0])
+
+    @_locked
+    def sent_message_id(self, key: str) -> str | None:
+        """The message ID outbox row `key` was sent as, or None (not sent, or sent without one)."""
+        r = self.db.execute("SELECT message_id FROM outbox WHERE key = ? AND status = 'sent'",
+                            (key,)).fetchone()
+        return None if r is None else _opt_str(r[0])
 
     @_locked
     def mark_failed(self, seq: int) -> None:
@@ -580,11 +658,12 @@ class Store:
     @_locked
     def insert_ask(self, row: AskRow, peer_pid: int | None) -> None:
         self.db.execute(f"INSERT INTO asks({_ASK}, peer_pid) "  # noqa: S608 - a fixed column list
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (row.ask_id, row.kind, row.poster, row.title, row.body, row.pr_url, row.head_sha,
                          row.bead, row.digest, int(row.truncated), row.card_parts, row.status, row.outcome,
                          row.decided_by, row.created_at, row.updated_at, row.refreshed_from,
-                         row.last_activity_at or row.created_at, peer_pid))
+                         row.last_activity_at or row.created_at, row.question_form, row.choices, row.links,
+                         peer_pid))
 
     @_locked
     def touch_ask(self, ask_id: str, at: str) -> None:
@@ -624,16 +703,19 @@ class Store:
                         "WHERE ask_id = ?", (status, outcome, decided_by, now(), ask_id))
 
     @_locked
-    def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str) -> None:
-        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at) "
+    def add_answer(self, ask_id: str, kind: str, operator: str, message_id: str, text: str,
+                   choice: str | None = None) -> None:
+        self.db.execute("INSERT INTO ask_answers(ask_id, seq, kind, operator, message_id, text, at, choice) "
                         "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ask_answers WHERE ask_id = ?), "
-                        "?, ?, ?, ?, ?)", (ask_id, ask_id, kind, operator, message_id, text, now()))
+                        "?, ?, ?, ?, ?, ?)",
+                        (ask_id, ask_id, kind, operator, message_id, text, now(), choice))
 
     @_locked
     def answers(self, ask_id: str) -> list[AnswerRow]:
-        rows = self.db.execute("SELECT kind, operator, message_id, text, at FROM ask_answers "
+        rows = self.db.execute("SELECT kind, operator, message_id, text, at, choice FROM ask_answers "
                                "WHERE ask_id = ? ORDER BY seq", (ask_id,)).fetchall()
-        return [AnswerRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4])) for r in rows]
+        return [AnswerRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), _opt_str(r[5]))
+                for r in rows]
 
     @_locked
     def answer_totals(self, ask_id: str) -> tuple[int, int]:
@@ -819,6 +901,40 @@ class Store:
                                "WHERE status IN ('deciding', 'uncertain') AND attempt IS NOT NULL "
                                "ORDER BY created_at, rowid").fetchall()
         return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+    # --- notices (cxmkf K5, K7) ------------------------------------------------------------------
+    @_locked
+    def insert_notice(self, notice_id: str, poster: str, peer_pid: int | None, title_chars: int,
+                      body_chars: int, links: int, parts: int, created_at: str) -> None:
+        self.db.execute("INSERT INTO notices(notice_id, poster, peer_pid, title_chars, body_chars, links, "
+                        "parts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (notice_id, poster, peer_pid, title_chars, body_chars, links, parts, created_at))
+
+    @_locked
+    def notice_exists(self, notice_id: str) -> bool:
+        row = self.db.execute("SELECT 1 FROM notices WHERE notice_id = ?", (notice_id,)).fetchone()
+        return row is not None
+
+    @_locked
+    def notices_since(self, iso: str) -> int:
+        row = self.db.execute("SELECT COUNT(*) FROM notices WHERE created_at >= ?", (iso,)).fetchone()
+        return int(row[0])
+
+    @_locked
+    def undelivered_notices(self) -> int:
+        """How many notices have a chunk still pending, read from the outbox itself (K5), so pruning the
+        `notices` table can never hide one."""
+        rows = self.db.execute("SELECT key FROM outbox WHERE status = 'pending' AND key LIKE 'notice:%'")
+        return len({m.group(1) for (key,) in rows if (m := _NOTICE_KEY.match(str(key)))})
+
+    @_locked
+    def prune_notices(self, before: str) -> int:
+        """Delete the `notices` rows created before `before` whose delivery has ended: none of their outbox
+        rows is pending (K7). Returns how many."""
+        cur = self.db.execute("DELETE FROM notices WHERE created_at < ? AND NOT EXISTS (SELECT 1 FROM outbox "
+                              "WHERE status = 'pending' AND key LIKE 'notice:' || notice_id || ':%')",
+                              (before,))
+        return cur.rowcount
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[None]:

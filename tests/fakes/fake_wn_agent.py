@@ -32,6 +32,7 @@ class FakeWnAgent:
         self.requests: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
         self.fail_sends = 0          # the next N send_final calls fail with a retryable error
+        self.fail_key: Callable[[str], bool] | None = None   # sends of a matching key always fail (retryable)
         self.fail_group_info = False
         self.membership_mode = "ok"         # ok, fail, ok-no-count, fail-count, hang, lost, gated
         self.membership_gate = asyncio.Event()      # "gated": the request waits until the test sets it
@@ -184,8 +185,11 @@ class FakeWnAgent:
     async def _send_final(self, writer: asyncio.StreamWriter, rid: str, req: dict[str, Any]) -> None:
         if self.send_gate is not None:
             await self.send_gate.wait()
-        if self.fail_sends > 0:
+        failing = self.fail_key is not None and self.fail_key(str(req.get("idempotency_key")))
+        if not failing and self.fail_sends > 0:
             self.fail_sends -= 1
+            failing = True
+        if failing:
             await self._reply(writer, rid, {"type": "error", "code": "relay_unavailable",
                                             "message": "try later", "retryable": True})
             return

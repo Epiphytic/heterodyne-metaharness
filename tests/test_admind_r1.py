@@ -338,10 +338,11 @@ def test_membership_event_latches_while_a_slow_restart_runs(
         real_latch(why)
         latched.set()
 
-    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
+    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1,
+                thread_key: str | None = None) -> bool:
         if text.startswith("Restarted"):
             restart_replied.set()
-        return real_enqueue(key, text, reply_to, lane)
+        return real_enqueue(key, text, reply_to, lane, thread_key)
     monkeypatch.setattr(u.daemon, "latch", latch)
     monkeypatch.setattr(u.store, "enqueue", enqueue)
     u.client.on_subscribe = subscribed.set
@@ -595,11 +596,12 @@ def fail_nth_enqueue(u: Unit, monkeypatch: pytest.MonkeyPatch, n: int) -> None:
     real = u.store.enqueue
     calls = [0]
 
-    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
+    def enqueue(key: str, text: str, reply_to: str | None, lane: int = 1,
+                thread_key: str | None = None) -> bool:
         calls[0] += 1
         if calls[0] == n:
             raise Crash
-        return real(key, text, reply_to, lane)
+        return real(key, text, reply_to, lane, thread_key)
     monkeypatch.setattr(u.store, "enqueue", enqueue)
 
 
