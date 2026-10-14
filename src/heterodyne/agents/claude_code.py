@@ -148,14 +148,15 @@ class ClaudeCode:
     # E9: dropped from the defaults and, where the launcher has a value, written over them. The
     # connectors' switch is ENABLE_CLAUDEAI_MCP_SERVERS; the plugin and sandbox keys are the launcher's.
     # The CLI runs apiKeyHelper .. subagentStatusLine as commands (its own list of them, 2.1.286), and
-    # the two .mcp.json switches start the worktree's servers without asking.
+    # the two .mcp.json switches start the worktree's servers without asking. MCP comes only from content
+    # items, so a settings-file mcpServers is dropped too.
     owned_keys = frozenset({
         "hooks", "statusLine", "skipDangerousModePermissionPrompt", "disableAllHooks",
         "permissions.defaultMode", "enabledPlugins", "extraKnownMarketplaces", "sandbox",
         "env.DISABLE_AUTOUPDATER", "env.DISABLE_UPDATES", "env.ENABLE_CLAUDEAI_MCP_SERVERS",
         "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "otelHeadersHelper",
         "proxyAuthHelper", "processWrapper", "policyHelpers", "fileSuggestion", "subagentStatusLine",
-        "enableAllProjectMcpServers", "enabledMcpjsonServers"})
+        "enableAllProjectMcpServers", "enabledMcpjsonServers", "mcpServers"})
     # Any other env entry is refused: PATH picks the hooks' python3, CLAUDE_CODE_SHELL_PREFIX wraps
     # them and CLAUDE_CODE_PLUGIN_DIRS loads plugins, and the CLI reads many more. None is needed yet.
     env_allowed: frozenset[str] = frozenset()

@@ -126,11 +126,12 @@ class Codex:
     # E9: written, or dropped, after the defaults. `features.apps` is the connectors; `profile` and
     # `profiles` are never written, so no config profile can turn a key back on. The rest of 0.160's
     # ConfigToml that changes what its commands see and how they start, where its traffic and logins
-    # go, or which plugins and state it keeps outside the home is dropped too.
+    # go, or which plugins and state it keeps outside the home is dropped too. So is every MCP server
+    # (its command, env and http_headers_helper): MCP comes only from content items, which are checked.
     owned_keys = frozenset({
         "approval_policy", "sandbox_mode", "check_for_update_on_startup", "projects", "notify", "hooks",
         "features.apps", "features.daemon_auto_start", "features.plugins", "features.in_app_updates",
-        "profile", "profiles", *(f"mcp_servers.{n}" for n in RESERVED_MCP),
+        "profile", "profiles", "mcp_servers",
         "shell_environment_policy", "allow_login_shell", "zsh_path", "sandbox_workspace_write",
         "default_permissions", "permissions", "js_repl_node_path", "js_repl_node_module_dirs",
         "browser_use", "computer_use", "agents", "orchestrator",
@@ -183,8 +184,6 @@ class Codex:
                              install: Path) -> tuple[exec_dirs.Cleared, ...]:
         tree = self._defaults(install)
         servers = self._content_servers(install)
-        if set(servers) & set(cast(dict[str, Any], tree.get("mcp_servers") or {})):
-            raise AdapterError(CONTENT_MALFORMED)
         if servers:
             merge(tree, {"mcp_servers": servers})
         merge(tree, self.launcher_config(worktree))
