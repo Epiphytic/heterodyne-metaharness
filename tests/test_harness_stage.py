@@ -3,6 +3,8 @@ asserted by `store_core`'s own constant, and every artifact is built here at run
 
 import dataclasses
 import errno
+import gzip
+import io
 import json
 import os
 import stat
@@ -497,3 +499,98 @@ def test_an_artifact_that_grows_while_it_is_copied_is_refused(tmp_path: Path,
 
     monkeypatch.setattr(os, "sendfile", growing)
     assert refusal(tmp_path, CODEX_LAYOUT, [(part, data)]) == sc.TOO_MANY_BYTES
+
+
+def pax_tar(comments: list[int], tree: dict[str, Spec] | None = None) -> bytes:
+    """An uncompressed tar of `tree` beside the CLI, then an empty file for each of `comments` with a pax
+    `comment` of that many bytes."""
+    extra: list[tarfile.TarInfo] = []
+    for i, n in enumerate(comments):
+        info = member(f"pax-{i}")
+        info.pax_headers = {"comment": "x" * n}
+        extra.append(info)
+    return tar_of(with_cli(tree or {}), gz=False, extra=extra)
+
+
+def extension_sizes(raw: bytes) -> list[int]:
+    """The payload sizes of `raw`'s pax and GNU long-name headers, read from the headers themselves."""
+    sizes: list[int] = []
+    offset = 0
+    while offset + tarfile.BLOCKSIZE <= len(raw) and raw[offset:offset + tarfile.BLOCKSIZE].strip(b"\0"):
+        size = int(raw[offset + 124:offset + 136].strip(b"\0 ") or b"0", 8)
+        if raw[offset + 156:offset + 157] in (b"x", b"g", b"L", b"K"):
+            sizes.append(size)
+        offset += tarfile.BLOCKSIZE + -(-size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+    return sizes
+
+
+def regnu(raw: bytes) -> bytes:
+    """`raw` rewritten in the GNU format, so a long name is a GNU long-name header rather than pax."""
+    out = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as src, \
+            tarfile.open(fileobj=out, mode="w", format=tarfile.GNU_FORMAT) as dst:
+        for info in src:
+            dst.addfile(info, src.extractfile(info) if info.isreg() else None)
+    return out.getvalue()
+
+
+def staged_or_refused(tmp_path: Path, raw: bytes) -> str | None:
+    data = gzip.compress(raw)
+    parts = [(part_of("cli", data), data)]
+    try:
+        stage(tmp_path / "ok", CODEX_LAYOUT, parts)
+    except sc.Refused:
+        return refusal(tmp_path / "refused", CODEX_LAYOUT, parts)
+    return None
+
+
+def test_a_checksum_valid_gzip_of_megabytes_of_pax_metadata_is_refused(tmp_path: Path) -> None:
+    raw = pax_tar([8 << 20])
+    assert len(gzip.compress(raw)) < 64 << 10           # small on the wire, 8 MiB once inflated
+    assert staged_or_refused(tmp_path, raw) == sc.TOO_MANY_BYTES
+
+
+def test_one_extension_header_is_bounded_and_accepted_at_the_limit(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    long_name = "d/" + "n" * 150
+    gnu = regnu(tar_of(with_cli({long_name: b"x"}), gz=False))
+    for kind, raw in (("pax", pax_tar([1000])), ("gnu", gnu)):
+        (size,) = extension_sizes(raw)
+        monkeypatch.setattr(sc, "MAX_TAR_EXTENSION", size)
+        assert staged_or_refused(tmp_path / kind / "at", raw) is None
+        monkeypatch.setattr(sc, "MAX_TAR_EXTENSION", size - 1)
+        assert staged_or_refused(tmp_path / kind / "over", raw) == sc.TOO_MANY_BYTES
+
+
+def test_all_a_tars_extension_headers_are_bounded_together(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = pax_tar([1000, 1000, 1000])
+    total = sum(extension_sizes(raw))
+    monkeypatch.setattr(sc, "MAX_TAR_EXTENSIONS", total)
+    assert staged_or_refused(tmp_path / "at", raw) is None
+    monkeypatch.setattr(sc, "MAX_TAR_EXTENSIONS", total - 1)
+    assert staged_or_refused(tmp_path / "over", raw) == sc.TOO_MANY_BYTES
+
+
+def test_the_uncompressed_tar_is_bounded_before_it_is_inflated(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = pax_tar([], {"a": bytes(ZEROS)})
+    monkeypatch.setattr(sc, "MAX_TAR_BYTES", len(raw))
+    assert staged_or_refused(tmp_path / "at", raw) is None
+    monkeypatch.setattr(sc, "MAX_TAR_BYTES", ZEROS // 2)
+    assert staged_or_refused(tmp_path / "over", raw) == sc.TOO_MANY_BYTES
+
+
+@pytest.mark.parametrize("sparse", [
+    {"GNU.sparse.size": "10", "GNU.sparse.numblocks": "1", "GNU.sparse.offset": "0",
+     "GNU.sparse.numbytes": "0"},
+    {"GNU.sparse.map": "0,0", "GNU.sparse.size": "10"},
+    {"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.name": "s", "GNU.sparse.realsize": "10"},
+    None,
+], ids=["pax-0.0", "pax-0.1", "pax-1.0", "gnu"])
+def test_a_sparse_member_is_refused_before_its_map_is_read(tmp_path: Path,
+                                                           sparse: dict[str, str] | None) -> None:
+    info = member("s", tarfile.GNUTYPE_SPARSE if sparse is None else tarfile.REGTYPE)
+    info.pax_headers = sparse or {}
+    raw = tar_of(with_cli({}), gz=False, extra=[info])
+    assert staged_or_refused(tmp_path, raw) == sc.BAD_MEMBER

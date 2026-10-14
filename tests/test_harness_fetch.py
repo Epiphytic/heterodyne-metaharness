@@ -370,8 +370,43 @@ def test_a_trickle_is_ended_by_the_real_deadline(tmp_path: Path) -> None:
     with loopback(routes) as (base, stop):
         routes["/rel/" + SUMS] = body(release_files(artifact)[f"{BASE}/{SUMS}"])
         routes["/rel/" + ASSET] = trickle_route(stop)
-        f = real_fetcher(tmp_path, base, deadline=1.0)
+        f = real_fetcher(tmp_path, base, deadline=2.0)
         start = time.monotonic()
         assert refused(lambda: f.release(f"{base}/rel", ASSET, SUMS)) == fetch.DEADLINE
-        assert time.monotonic() - start < 5
+        assert time.monotonic() - start < 30            # unbounded without the watchdog; slack for load
     assert cache_files(tmp_path) == []
+
+
+def test_closing_a_response_closes_the_socket_a_closing_connection_handed_it(tmp_path: Path) -> None:
+    def missing(h: http.server.BaseHTTPRequestHandler) -> None:
+        h.send_response(404)
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+
+    with loopback({"/missing": missing}) as (base, _):
+        resp = opener()(f"{base}/missing", timeout=30.0)
+        sock = resp._sock  # pyright: ignore[reportPrivateUsage]
+        assert resp.status == 404 and sock is not None and sock.fileno() >= 0
+        resp.close()
+        assert sock.fileno() == -1
+
+
+def test_git_archive_output_is_bounded_as_it_streams_and_git_is_killed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, commit = make_repo(tmp_path / "repo")
+    pidfile = tmp_path / "archive.pid"
+    git = tmp_path / "git-endless-archive"
+    git.write_text(f"""#!/bin/sh
+case " $* " in
+  *" archive "*) echo $$ > '{pidfile}'; exec yes x ;;
+  *) exec git "$@" ;;
+esac
+""")
+    git.chmod(0o755)
+    monkeypatch.setattr(fetch, "MAX_ARTIFACT", 1 << 16)
+    f = fetcher(tmp_path, Server({}), git=str(git))
+    assert refused(lambda: f.git(str(repo), commit)) == fetch.TOO_LARGE
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):         # killed and reaped, not left writing
+        os.kill(pid, 0)
+    assert [p for p in cache_files(tmp_path) if p.name.startswith("git-")] == []

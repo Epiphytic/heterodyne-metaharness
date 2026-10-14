@@ -30,7 +30,7 @@ import tarfile
 import zlib
 from collections.abc import Callable, Generator, Iterator, Sequence
 from pathlib import Path
-from typing import IO, Literal, cast
+from typing import IO, Any, Literal, cast
 
 MAX_ENTRIES = 200_000           # entries in one install, the root uncounted; at the limit is accepted
 MAX_DEPTH = 64                  # components in an entry's path; at the limit is accepted
@@ -38,6 +38,12 @@ MAX_LINK_HOPS = 40              # links followed resolving one link, the link it
 MAX_ARTIFACT_BYTES = 1 << 30    # one artifact handed to `stage`; at the limit is accepted
 MAX_FILE_BYTES = 1 << 30        # one file unpacked; at the limit is accepted
 MAX_INSTALL_BYTES = 4 << 30     # all the files of one install; at the limit is accepted
+MAX_TAR_EXTENSION = 64 << 10    # one pax or GNU long-name header's payload; at the limit is accepted
+MAX_TAR_EXTENSIONS = 64 << 20   # one tar's extension payloads in all (tarfile keeps them); at the limit too
+# the uncompressed bytes of one tar: its files, its extensions, and four blocks a member for the headers and
+# padding; at the limit is accepted
+MAX_TAR_BYTES = (MAX_INSTALL_BYTES + MAX_TAR_EXTENSIONS
+                 + (MAX_ENTRIES + MAX_DEPTH + 1) * 4 * tarfile.BLOCKSIZE)
 FORMAT = 1
 CHUNK = 1 << 20
 
@@ -701,15 +707,80 @@ def _plain_path(path: str) -> bool:
     return valid_path(path) and _utf8(path)
 
 
+class _Capped:
+    """A reader that refuses (`TOO_MANY_BYTES`) to go past `MAX_TAR_BYTES` of `inner`, before it reads or
+    seeks there: a gzip is decompressed only as far as the cap."""
+
+    def __init__(self, inner: IO[bytes] | gzip.GzipFile) -> None:
+        self.inner = inner
+
+    def tell(self) -> int:
+        return self.inner.tell()
+
+    def read(self, n: int = -1) -> bytes:
+        pos = self.inner.tell()
+        if pos >= MAX_TAR_BYTES and n != 0:
+            if self.inner.read(1):
+                raise Refused(TOO_MANY_BYTES)
+            return b""
+        room = MAX_TAR_BYTES - pos
+        chunk = self.inner.read(room + 1 if n < 0 or n > room else n)
+        if len(chunk) > room:
+            raise Refused(TOO_MANY_BYTES)
+        return chunk
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        base = 0 if whence == os.SEEK_SET else self.inner.tell() if whence == os.SEEK_CUR else None
+        target = -1 if base is None else base + offset
+        if target < 0 or target > MAX_TAR_BYTES:
+            raise Refused(TOO_MANY_BYTES)
+        return self.inner.seek(target)
+
+
+EXTENSIONS = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE, tarfile.GNUTYPE_LONGNAME,
+              tarfile.GNUTYPE_LONGLINK)
+
+
+class _BoundedTar(tarfile.TarFile):
+    extension_bytes = 0
+
+
+class _BoundedInfo(tarfile.TarInfo):
+    """Refuses an extension header's payload over `MAX_TAR_EXTENSION`, or one that brings the tar's past
+    `MAX_TAR_EXTENSIONS` (`TOO_MANY_BYTES`), before tarfile reads it; and a sparse member (`BAD_MEMBER`)
+    before tarfile reads its map."""
+
+    # `_proc_member` is the hook `TarInfo.fromtarfile` calls once it has the header block and before it reads
+    # any payload (CPython 3.12's tarfile); the bounds tests fail if it stops being called
+    def _proc_member(self, tf: tarfile.TarFile) -> tarfile.TarInfo:
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise Refused(BAD_MEMBER)
+        if self.type in EXTENSIONS:
+            total = getattr(tf, "extension_bytes", 0) + self.size
+            if self.size > MAX_TAR_EXTENSION or total > MAX_TAR_EXTENSIONS:
+                raise Refused(TOO_MANY_BYTES)
+            if isinstance(tf, _BoundedTar):
+                tf.extension_bytes = total
+        base: Any = super()
+        return base._proc_member(tf)
+
+    def _proc_gnusparse_00(self, *args: object) -> None:
+        raise Refused(BAD_MEMBER)
+
+    _proc_gnusparse_01 = _proc_gnusparse_10 = _proc_gnusparse_00
+
+
 @contextlib.contextmanager
 def _tar(fd: int, *, gz: bool) -> Generator[tarfile.TarFile]:
-    """A tar reader on `fd` from offset 0, names decoded as UTF-8 with surrogates; `fd` stays open."""
+    """A tar reader on `fd` from offset 0, names decoded as UTF-8 with surrogates, and its uncompressed bytes
+    and extension headers bounded; `fd` stays open."""
     os.lseek(fd, 0, os.SEEK_SET)
-    with open(fd, "rb", closefd=False) as f:
+    with contextlib.ExitStack() as stack:
+        raw: IO[bytes] | gzip.GzipFile = stack.enter_context(open(fd, "rb", closefd=False))
         if gz:
-            t = tarfile.open(fileobj=f, mode="r:gz", encoding="utf-8", errors="surrogateescape")
-        else:
-            t = tarfile.open(fileobj=f, mode="r:", encoding="utf-8", errors="surrogateescape")
+            raw = stack.enter_context(gzip.GzipFile(fileobj=raw, mode="rb"))
+        t = _BoundedTar(fileobj=cast(IO[bytes], _Capped(raw)), mode="r", tarinfo=_BoundedInfo,
+                        encoding="utf-8", errors="surrogateescape")
         with t:
             yield t
 
@@ -729,7 +800,9 @@ def git_members(archive_fd: int, algo: GitAlgo) -> list[GitMember]:
     dirs: set[str] = set()
     try:
         with _tar(archive_fd, gz=False) as t:
-            for info in t:
+            for members, info in enumerate(t, 1):
+                if members > MAX_ENTRIES + MAX_DEPTH:
+                    raise Refused(TOO_MANY_ENTRIES)
                 name = info.name
                 if not _plain_path(name) or name in seen:
                     raise Refused(GIT_MISMATCH)

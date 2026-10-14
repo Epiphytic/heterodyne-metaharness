@@ -17,6 +17,8 @@ import http.client
 import json
 import os
 import re
+import select
+import signal
 import socket
 import subprocess
 import tempfile
@@ -164,6 +166,8 @@ class HttpsResponse:
 
     def close(self) -> None:
         self._watchdog.cancel()
+        if self._resp is not None:              # a closing connection's socket is the response's alone
+            self._resp.close()
         self.conn.close()
 
 
@@ -342,8 +346,10 @@ class Fetcher:
         return str(resolved)
 
     def _run_git(self, args: list[str], end: float, *, to_file: bool = False) -> Path:
-        """`git` with no user or system config, no prompt and no hooks; its stdout into a 0600 temp file in
-        the cache if `to_file`. A failure is `GIT_FAILED`, a timeout `DEADLINE`."""
+        """`git` with no user or system config, no prompt and no hooks, in its own process group; its stdout
+        into a 0600 temp file in the cache if `to_file`, streamed and bounded as it is written (`TOO_LARGE`).
+        A failure is `GIT_FAILED`, a timeout `DEADLINE`; on any refusal the group is killed and git reaped
+        before the file is removed."""
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GIT_CONFIG_GLOBAL": os.devnull,
                "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file:https",
                "LC_ALL": "C"}
@@ -352,26 +358,51 @@ class Fetcher:
         path = Path(name)
         try:
             try:
-                done = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL,
-                                      stdout=out_fd if to_file else subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL, timeout=self._remaining(end), check=False)
-            except subprocess.TimeoutExpired:
-                raise FetchRefused(DEADLINE) from None
+                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE if to_file else subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError:
                 raise FetchRefused(GIT_FAILED) from None
+            try:
+                if proc.stdout is not None:
+                    self._stream(proc.stdout.fileno(), out_fd, end)
+                try:
+                    returncode = proc.wait(timeout=self._remaining(end))
+                except subprocess.TimeoutExpired:
+                    raise FetchRefused(DEADLINE) from None
             finally:
+                if proc.returncode is None:     # not reaped, so its group can't have been reused
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                if proc.stdout is not None:
+                    proc.stdout.close()
                 if to_file:
                     os.close(out_fd)
-            if done.returncode != 0:
+            if returncode != 0:
                 raise FetchRefused(GIT_FAILED)
-            if to_file and path.stat().st_size > MAX_ARTIFACT:
-                raise FetchRefused(TOO_LARGE)
         except BaseException:
             if to_file:
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
             raise
         return path
+
+    def _stream(self, src: int, out_fd: int, end: float) -> None:
+        """`src` to its end into `out_fd`, refusing past `MAX_ARTIFACT` bytes (`TOO_LARGE`) or the
+        deadline."""
+        written = 0
+        while True:
+            ready, _, _ = select.select([src], [], [], self._remaining(end))
+            if not ready:
+                raise FetchRefused(DEADLINE)
+            chunk = os.read(src, sc.CHUNK)
+            if not chunk:
+                return
+            written += len(chunk)
+            if written > MAX_ARTIFACT:
+                raise FetchRefused(TOO_LARGE)
+            _write_all(out_fd, chunk)
 
 
 def _https(url: str) -> bool:
