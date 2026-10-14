@@ -1,5 +1,7 @@
 """S9-10's analyzer and wrappers (docs/spikes/s9-10/), offline on crafted run directories: missing or empty
-evidence, a capped run or any failed check gives a non-zero exit, and both wrappers pass that on (r2)."""
+evidence, a capped run or any failed check gives a non-zero exit, and both wrappers pass that on (r2). Every
+metadata field a check reads must be there with its type, and each trace must open with the exec of its exact
+argv and end with strace's record of that process ending (r3)."""
 
 import json
 import subprocess
@@ -23,8 +25,18 @@ def dns(name: str) -> bytes:
     return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00\x00\x01\x00\x01"
 
 
-def execve(path: str) -> str:
-    return f'7 execve("{hx(path)}", ["{hx(path)}"], 0x7ffd /* 4 vars */) = 0'
+def execve(argv: list[str], pid: int = 7) -> str:
+    args = ", ".join(f'"{hx(a)}"' for a in argv)
+    return f'{pid} execve("{hx(argv[0])}", [{args}], 0x7ffd /* 4 vars */) = 0'
+
+
+def ended(how: str = "exited with 0", pid: int = 7) -> str:
+    return f"{pid} +++ {how} +++"
+
+
+def trace(argv: list[str], *body: str, end: str | None = "exited with 0") -> str:
+    """A trace of `argv`: its exec, `body`, then (unless `end` is None) strace's record of it ending."""
+    return "\n".join([execve(argv), *body, *([ended(end)] if end else [])]) + "\n"
 
 
 def connect(path: str) -> str:
@@ -44,20 +56,21 @@ def evidence(run: Path, part: int, meta: dict[str, object] | None = None) -> Pat
     """A run directory with everything a passing run of `part` leaves."""
     run.mkdir(parents=True, exist_ok=True)
     meta = meta or argv_json(run)
-    server, tui = cast_list(meta["server"])[0], cast_list(meta["tui_new"])[0]
+    server, tui = cast_list(meta["server"]), cast_list(meta["tui_new"])
     files = {
         "argv.json": json.dumps(meta), "rc": "0\n", "server_ready": "yes\n", "inside": "uid=0\n",
         "inside.packages": "",
-        "server.strace": "\n".join([execve(server), sendto("raw.githubusercontent.com")]) + "\n",
-        "tui.strace": "\n".join([execve(tui), connect(SOCK)]) + "\n",
+        "server.strace": trace(server, sendto("raw.githubusercontent.com"), end="killed by SIGTERM"),
+        "tui.strace": trace(tui, connect(SOCK), end="killed by SIGHUP"),
         "tui.screen": "Welcome to Codex\nSign in with ChatGPT\n",
     }
     if part == 2:
         files.update({
-            "argv-resume.json": json.dumps({"tui_resume": [tui, "resume", "t-1"]}), "trust.txt": "listed 0\n",
+            "argv-resume.json": json.dumps({"tui_resume": [tui[0], "resume", "t-1"]}),
+            "trust.txt": "listed 0\n",
             "tui.screen": "› Reply with only the word pong.\n", "composer": "yes\n", "answered": "yes\n",
             "thread": "t-1\n", "resumed": "yes\n", "tui-resume.screen": "› Reply with only the word pong.\n",
-            "tui-resume.strace": execve(tui) + "\n",
+            "tui-resume.strace": trace([tui[0], "resume", "t-1"], end="killed by SIGHUP"),
         })
     for name, text in files.items():
         (run / name).write_text(text)
@@ -112,7 +125,7 @@ def test_an_empty_trace_or_screen_fails(tmp_path: Path, name: str) -> None:
 
 def test_a_trace_of_some_other_command_fails(tmp_path: Path) -> None:
     run = evidence(tmp_path / "r", 1)
-    (run / "server.strace").write_text(execve("/usr/bin/true") + "\n")
+    (run / "server.strace").write_text(trace(["/usr/bin/true"]))
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["server.strace_shows_its_exec"]
     assert not checks(run)["no_exec_under_home"]
@@ -151,16 +164,171 @@ def test_part_1_evidence_does_not_pass_part_2(tmp_path: Path) -> None:
 def test_an_exec_under_the_home_fails(tmp_path: Path) -> None:
     run = evidence(tmp_path / "r", 1)
     home = argv_json(run)["home"]
-    with (run / "server.strace").open("a") as f:
-        f.write(execve(f"{home}/.codex/tmp/arg0/x/getconf").replace(" = 0", " = -1 ENOENT") + "\n")
+    tried = execve([f"{home}/.codex/tmp/arg0/x/getconf"], pid=8).replace(" = 0", " = -1 ENOENT")
+    (run / "server.strace").write_text(trace([CLI, "app-server"], tried))
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["no_exec_under_home"]
 
 
 def test_an_api_github_lookup_fails(tmp_path: Path) -> None:
     run = evidence(tmp_path / "r", 1)
-    with (run / "tui.strace").open("a") as f:
-        f.write(sendto("api.github.com") + "\n")
+    (run / "tui.strace").write_text(trace(cast_list(argv_json(run)["tui_new"]), connect(SOCK),
+                                          sendto("api.github.com")))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["no_api_github_lookup"]
+
+
+# --- r3: metadata fields, the exact argv, and a trace that ran to its end ---
+
+@pytest.mark.parametrize("part", [1, 2])
+@pytest.mark.parametrize("field", ["home", "app_socket", "server", "tui_new"])
+@pytest.mark.parametrize("bad", ["deleted", "", None, ["x"], [], "relative"])
+def test_a_missing_or_malformed_metadata_field_fails_everything(tmp_path: Path, part: int, field: str,
+                                                                bad: object) -> None:
+    if bad == "relative" and field not in ("home", "server", "tui_new"):
+        pytest.skip("only paths must be absolute")
+    run = evidence(tmp_path / "r", part)
+    meta = json.loads((run / "argv.json").read_text())
+    if bad == "deleted":
+        del meta[field]
+    elif bad == "relative":
+        meta[field] = "home" if field == "home" else ["codex", *meta[field][1:]]
+    elif bad == ["x"] and field in ("server", "tui_new"):
+        meta[field] = [meta[field][0], 7]                    # a list, but not of strings
+    else:
+        meta[field] = bad
+    (run / "argv.json").write_text(json.dumps(meta))
+    assert analyze(run, "--part", str(part)).returncode == 1
+    found = checks(run)
+    assert not found["evidence_complete"]
+    assert not any(found.values())                           # nothing passes on incomplete evidence
+
+
+def test_a_deleted_home_still_finds_the_home_execs(tmp_path: Path) -> None:
+    """r3's case: the plain run's six home execs must not pass once `home` is gone from argv.json."""
+    run = evidence(tmp_path / "r", 1)
+    home = argv_json(run)["home"]
+    tried = execve([f"{home}/.codex/tmp/arg0/x/getconf"], pid=8).replace(" = 0", " = -1 ENOENT")
+    (run / "server.strace").write_text(trace([CLI, "app-server"], tried))
+    meta = json.loads((run / "argv.json").read_text())
+    del meta["home"]
+    (run / "argv.json").write_text(json.dumps(meta))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["no_exec_under_home"]
+
+
+@pytest.mark.parametrize("bad", ["deleted", "", ["x"], []])
+def test_a_missing_or_malformed_resume_argv_fails_part_2(tmp_path: Path, bad: object) -> None:
+    run = evidence(tmp_path / "r", 2)
+    (run / "argv-resume.json").write_text(json.dumps({} if bad == "deleted" else {"tui_resume": bad}))
+    assert analyze(run, "--part", "2").returncode == 1
+    assert not any(checks(run).values())
+
+
+@pytest.mark.parametrize("name", ["argv.json", "argv-resume.json"])
+def test_metadata_that_is_not_a_json_object_fails(tmp_path: Path, name: str) -> None:
+    run = evidence(tmp_path / "r", 2)
+    (run / name).write_text("[1, 2]" if name == "argv.json" else "{not json")
+    assert analyze(run, "--part", "2").returncode == 1
+    assert not checks(run)["evidence_complete"]
+
+
+@pytest.mark.parametrize("argv", [[CLI, "--help"], [CLI], [CLI, "app-server", "--extra"], ["/other/codex",
+                                                                                          "app-server"]])
+def test_a_trace_of_the_same_binary_with_other_arguments_fails(tmp_path: Path, argv: list[str]) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(trace(argv, sendto("raw.githubusercontent.com")))
+    assert analyze(run, "--part", "1").returncode == 1
+    found = checks(run)
+    assert not found["server.strace_shows_its_exec"] and not found["no_api_github_lookup"]
+
+
+def test_the_exact_exec_must_open_the_trace(tmp_path: Path) -> None:
+    """The traced root is the trace's first process; a child's exec of the same argv later doesn't count."""
+    run = evidence(tmp_path / "r", 1)
+    lines = [execve(["/bin/sh", "-c", "x"]), execve([CLI, "app-server"], 8), ended()]
+    (run / "server.strace").write_text("\n".join(lines) + "\n")
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_shows_its_exec"]
+
+
+def test_a_failed_root_exec_fails(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"]).replace(") = 0", ") = -1 ENOENT"))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_shows_its_exec"]
+
+
+def test_an_abbreviated_argv_fails(tmp_path: Path) -> None:
+    """strace marks a cut string or array with `...`: that argv can't be shown to match."""
+    run = evidence(tmp_path / "r", 1)
+    line = execve([CLI, "app-server"]).replace(f'"{hx("app-server")}"', f'"{hx("app-ser")}"...')
+    (run / "server.strace").write_text("\n".join([line, ended()]) + "\n")
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_shows_its_exec"]
+
+
+@pytest.mark.parametrize("part", [1, 2])
+@pytest.mark.parametrize("name", ["server.strace", "tui.strace", "tui-resume.strace"])
+def test_a_trace_cut_to_its_first_line_fails(tmp_path: Path, part: int, name: str) -> None:
+    run = evidence(tmp_path / "r", part)
+    if not (run / name).is_file():
+        pytest.skip("part 1 has no resume")
+    first = (run / name).read_text().splitlines()[0]
+    (run / name).write_text(first + "\n")
+    assert analyze(run, "--part", str(part)).returncode == 1
+    found = checks(run)
+    assert not found["evidence_complete"] and not found[f"{name}_ran_to_its_end"]
+    assert not any(v for k, v in found.items() if not k.endswith(("_shows_its_exec", "_ran_to_its_end")))
+
+
+@pytest.mark.parametrize("part", [1, 2])
+def test_an_api_github_lookup_fails_cut_off_or_not(tmp_path: Path, part: int) -> None:
+    """r3's case: the lookup fails the run, and cutting the trace before the lookup fails it too."""
+    run = evidence(tmp_path / "r", part)
+    argv = cast_list(argv_json(run)["tui_new"])
+    looked = sendto("api.github.com")
+    (run / "tui.strace").write_text(trace(argv, connect(SOCK), looked, end="killed by SIGHUP"))
+    assert analyze(run, "--part", str(part)).returncode == 1
+    assert not checks(run)["no_api_github_lookup"]
+    (run / "tui.strace").write_text("\n".join([execve(argv), connect(SOCK)]) + "\n")
+    assert analyze(run, "--part", str(part)).returncode == 1
+    assert not checks(run)["evidence_complete"] and not checks(run)["no_api_github_lookup"]
+
+
+@pytest.mark.parametrize(("name", "end"), [
+    ("server.strace", "killed by SIGKILL"), ("server.strace", "killed by SIGSEGV (core dumped)"),
+    ("server.strace", "killed by SIGHUP"), ("tui.strace", "killed by SIGTERM"),
+    ("tui.strace", "killed by SIGABRT"),
+])
+def test_a_root_killed_by_anything_but_the_harness_stop_fails(tmp_path: Path, name: str, end: str) -> None:
+    run = evidence(tmp_path / "r", 1)
+    argv = cast_list(argv_json(run)["server" if name == "server.strace" else "tui_new"])
+    (run / name).write_text(trace(argv, connect(SOCK), end=end))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)[f"{name}_ran_to_its_end"]
+
+
+@pytest.mark.parametrize("code", ["0", "1", "143"])
+def test_a_root_that_exited_ran_to_its_end(tmp_path: Path, code: str) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"], end=f"exited with {code}"))
+    done = analyze(run, "--part", "1")
+    assert done.returncode == 0, done.stdout
+
+
+def test_only_the_root_s_end_counts(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text("\n".join([execve([CLI, "app-server"]), ended(pid=8)]) + "\n")
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_ran_to_its_end"]
+
+
+def test_lines_after_the_root_s_end_are_still_read(tmp_path: Path) -> None:
+    """A child can outlive the root: its lookups still count."""
+    run = evidence(tmp_path / "r", 1)
+    child = sendto("api.github.com").replace("7", "8", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"]) + child + "\n")
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["no_api_github_lookup"]
 
@@ -216,3 +384,12 @@ def test_a_wrapper_passes_when_both_variants_pass(tmp_path: Path, script: str) -
     assert done.returncode == 0, done.stdout + done.stderr
     assert done.stdout.count("verdict: PASS") == 2
     assert list(runtime.iterdir()) == []
+
+
+@pytest.mark.parametrize("script", ["inner.sh", "inner2.sh"])
+def test_the_wrappers_keep_strace_s_exit_records(script: str) -> None:
+    """`-qq` drops the `+++ exited/killed +++` records the analyzer needs; the harness signals each traced
+    root itself (strace signalled would detach without one) and waits for its record."""
+    text = (SPIKE / script).read_text()
+    assert 'TRACE="-f -q -s 300' in text and "-qq" not in text
+    assert "stop_root" in text
