@@ -43,14 +43,38 @@ These are left out, each for a reason:
 
 ### One sleeper: `tests/fakes/sleeper.py`
 
-This is a standalone stdlib script: no imports from tests, and safe under `python -I` and a scrubbed environment. Every descendant in the survey table becomes this sleeper, run as `[sys.executable, "-I", SLEEPER, <use-dir>, *opts]`. The options are `--new-session` (call `os.setsid()` first) and `--ready-fd N` (write one byte once the steps below are done). Its steps:
+This is a standalone stdlib script: no imports from tests, and safe under `python -I` and a scrubbed environment. Every descendant in the survey table becomes this sleeper, run as `[sys.executable, "-I", SLEEPER, <use-dir>, *opts]`. Its options:
+- `--new-session`: call `os.setsid()` first.
+- `--census-fd N`: the census lock is already held on fd N; see "Spawning".
+- `--ready-fd N`: write one byte once the steps below are done.
 
-1. If `--new-session` is given, it calls `os.setsid()`.
-2. **Census.** It opens `<use-dir>/census` with O_RDONLY|O_CLOEXEC and takes `flock(LOCK_SH | LOCK_NB)`. If either step fails, it exits 0 at once. A census that is missing or locked exclusively means the test has already been torn down.
+Its steps:
+
+1. If `--new-session` is given, it calls `os.setsid()`. setsid changes the session and the group, not the open files, so the census lock is untouched.
+2. **Census.**
+   - With `--census-fd N`, it keeps fd N, marks it close-on-exec, and checks with `fstat` that it is the use directory's `census`. If that check fails, it exits 0 at once.
+   - Without it (only the two shell sites; see "Edge cases"), it opens `<use-dir>/census` with O_RDONLY|O_CLOEXEC and takes `flock(LOCK_SH | LOCK_NB)`. If either step fails, it exits 0 at once: a census that is missing or locked exclusively means the test has already been torn down.
+   This is the first thing the sleeper does. Before it, it doesn't wait, block or write anything.
 3. It creates `<use-dir>/pids/<pid>`, an empty file used only for reports, and writes the ready byte if asked.
 4. **Lifeline.** It opens `<use-dir>/lifeline` with O_RDONLY|O_CLOEXEC, then every 50 ms tries `flock(LOCK_SH | LOCK_NB)` on it. Once that succeeds, or the open fails, the sleeper exits 0. It exits 0 after 60 s regardless. That cap is defence in depth only: no proof relies on it.
 
 While the test runs, the fixture holds the lifeline with an exclusive lock, so the sleeper waits. Once the fixture releases the lock, or its process dies (the kernel drops a dead process's flock locks, even after SIGKILL or an xdist worker crash), each sleeper's next poll succeeds and it exits. The census lock is held for the sleeper's whole life and dropped by the kernel when it exits. So taking the census exclusively proves that no sleeper of this use is still alive.
+
+### Spawning: the census lock is held before the child exists
+
+`sleeper.py` also provides the two ways a Python spawner starts a sleeper. Every Python spawn path in the survey uses one of them.
+- **`spawn(use_dir, *, new_session=False, **popen) -> Popen`**
+  1. It opens `<use-dir>/census` O_RDONLY, as an inheritable fd, and takes `flock(LOCK_SH | LOCK_NB)`. If either step fails, it raises before any spawn: the test is being torn down, or the directory was never set.
+  2. It runs `Popen(argv(use_dir, "--census-fd", fd, ...), pass_fds=(fd, ...), ...)`.
+  3. It closes its own copy of the fd, in a `finally`.
+- **`fork_held(use_dir) -> int`**
+  1. It takes the same lock on an inheritable fd, then calls `os.fork()`.
+  2. In the child, it returns 0. The caller redirects its output and execs `argv(use_dir, "--census-fd", fd)`.
+  3. In the parent, it closes its copy and returns the child's PID.
+
+flock locks belong to the open file description, not to the fd or the process. A child created by fork, or by Popen (fork plus exec, with the fd kept by `pass_fds`), shares the spawner's description, so it holds the same lock from the instant it exists. The spawner closing its own fd doesn't release the lock while the child still has it open. So for every Python spawn path, there is no moment when a sleeper exists without the census lock.
+
+The spawner holds the lock only between taking it and closing its copy, so `end` also waits for a spawner caught in that window. The spawners are the fakes and the test scripts, all of them our own processes.
 
 ### The fixture: `tests/escapes.py`
 
@@ -68,7 +92,7 @@ class Escapes:
 def escapes() -> Iterator[Escapes]: ...     # teardown: end()
 ```
 
-- **Setup.** The fixture creates a run directory once per pytest process, using `tempfile.mkdtemp(prefix="hze")`, so each xdist worker has its own. Inside it, each use gets `<run-dir>/<n>`, where `n` counts uses. The fixture creates `census` and `lifeline` in that directory and takes `LOCK_EX` on `lifeline`, through an O_CLOEXEC fd that the fixture keeps.
+- **Setup.** The fixture creates a run directory once per pytest process, using `tempfile.mkdtemp(prefix="hze")`. That makes it private (mode 0700), uniquely named and created for this process alone, and each xdist worker gets its own. No lock file is ever at a fixed or shared path, and nothing outside this run opens them. The run directory is deliberately not under `tmp_path`: a test's `tmp_path` can be removed while a late sleeper is still starting, and that sleeper must then find its census missing and exit, not a census somewhere else. Inside it, each use gets `<run-dir>/<n>`, where `n` counts uses. The fixture creates `census` and `lifeline` in that directory and takes `LOCK_EX` on `lifeline`, through an O_CLOEXEC fd that the fixture keeps.
 - **`end(bound)`.**
   1. It closes the lifeline fd, which releases the lifeline.
   2. Every 50 ms it tries `flock(LOCK_EX | LOCK_NB)` on the census, until the lock is taken or `bound` seconds have passed. Every step is a non-blocking call on a local file, so the bound holds without a subprocess or a timeout.
@@ -81,20 +105,36 @@ def escapes() -> Iterator[Escapes]: ...     # teardown: end()
 
 ### The fakes and scripts
 
-Each spawn path in the table builds its sleeper with `sleeper.argv(use_dir, ...)`, a function in tests/fakes/sleeper.py. It raises before any spawn if `use_dir` is unset, so an unlifelined sleeper can't be started.
-- **fake_agent_cli.py (`orphan`, `escaped`).** It reads the use directory from `HZ_ESCAPE_DIR`, the way it reads its other `HZ_FAKE_*` settings (the tests already pass these through codex_usage and hostread). It spawns `sleeper.argv(...)`, with `start_new_session` set for `escaped`. It writes the PID file atomically: a temp file, then `os.replace`.
+Each Python spawn path uses `spawn` or `fork_held`, both of which raise before any spawn if `use_dir` is unset. So no sleeper can start without a lifeline and a census.
+- **fake_agent_cli.py (`orphan`, `escaped`).** It reads the use directory from `HZ_ESCAPE_DIR`, the way it reads its other `HZ_FAKE_*` settings (the tests already pass these through codex_usage and hostread). It calls `spawn(...)`, with `new_session` set for `escaped`. It writes the PID file atomically: a temp file, then `os.replace`.
 - **fake_approve_bead.py.** `approve_bead_wrapper(tmp_path, escape_dir=...)` (tests/admind_asks_fixture.py) puts `HZ_ESCAPE_DIR=<dir>` in the wrapper beside `FAKE_BTQ_DB`. That is an environment setting, so the fake's argv, its argument parsing and the logged calls are unchanged.
-  - `hold_stdout` runs `sleeper.argv(dir, "--new-session", "--ready-fd", N)` in place of its inline `setsid` code.
-  - `descendant` forks as before. The forked child redirects its output, then calls `os.execv` into `sleeper.argv(dir)`. That gives the forked child the sleeper's own argv and lifeline, so it doesn't inherit and rely on the fake's argv (finding 3). It stays in the fake's group, and its PID is unchanged, so the parent's PID file still names it.
+  - `hold_stdout` calls `spawn(dir, new_session=True)` with `--ready-fd N`, in place of its inline `setsid` code.
+  - `descendant` calls `fork_held(dir)` in place of `os.fork()`. The forked child redirects its output, then calls `os.execv` into `argv(dir, "--census-fd", fd)`. That gives the forked child the sleeper's own argv and lifeline, so it doesn't inherit and rely on the fake's argv (finding 3). It stays in the fake's group, and its PID is unchanged, so the parent's PID file still names it.
   - Both write their PID files atomically.
-- **`DESCENDANT` (approvals), `ESCAPED` (r13 summary) and the probe's grandchild** are test-authored scripts. They take the sleeper argv as an argument or as formatted text, and exec or spawn it in place of `time.sleep` or `sleep`. `ESCAPED` still calls `os.setsid` and writes its PID file before exec'ing the sleeper. The probe's grandchild is `Popen(sleeper argv)`.
+- **`DESCENDANT` (approvals), `ESCAPED` (r13 summary) and the probe's grandchild** are test-authored Python. Each puts tests/fakes on its `sys.path` and uses `fork_held` or `spawn`.
+  - `DESCENDANT` and `ESCAPED` fork with `fork_held`.
+  - `ESCAPED`'s child still calls `os.setsid` and writes its PID file before exec'ing the sleeper.
+  - The probe's grandchild is started with `spawn`.
 - **The r13 summary scripts at :160 and :354.** `sleep 30 &` and `(sleep 60) &` become `"$PY" -I "$SLEEPER" "$DIR" &` and `("$PY" -I "$SLEEPER" "$DIR") &`, so `$!` and `$$` still name the same processes the tests read back.
 
 Each site takes `escapes`, passes its directory, and drops its own `finally` kill or `kill_quietly`. The exception is `orphan.pid`, as noted in the survey. Every existing assertion stays the same: the sleeper keeps the descendant's PID, group, session and open output, and stays alive until teardown, so `alive` and `gone` checks in the test body hold as before. The fixture's teardown runs after the test body, whether it passed, failed or errored.
 
+## Edge cases
+
+- **A sleeper that can't poll.** A sleeper can be stopped (SIGSTOP), frozen (cgroup freezer), or kept off the CPU. If so, it still holds the census, so `end` can't take it exclusively and raises at its bound, naming the PIDs under `pids/`. It never waits silently. The bound is a monotonic deadline over non-blocking lock attempts, so the wait itself can't hang.
+  The code under test can't block a sleeper any other way: a sleeper never reads its stdin and never writes its stdout or stderr. Its one write is the single ready byte, to a fresh pipe of its own. (The code under test may close the output the sleeper holds open; the sleeper never touches it.)
+  The run-end check reports the same way.
+- **Inheritance across fork, exec and setsid.**
+  - The census lock is shared through the inherited open file description: fork shares it, exec keeps the fd (it is inheritable until the sleeper marks it close-on-exec, after the exec), and setsid doesn't touch open files.
+  - The lifeline is never inherited. The fixture's fd is O_CLOEXEC, and each sleeper opens the lifeline for itself, only ever trying a shared lock. So no child can hold the lifeline on the fixture's behalf.
+  - The sleeper's own census fd is close-on-exec, and the sleeper starts nothing. So nothing beyond the sleeper can extend the census.
+  - A Popen spawner passes only the census fd (`pass_fds`), so the code under test's other processes never get it. A fork spawner's child execs at once, so the fd isn't held by anything but the sleeper.
+- **The census proof is complete.** Every Python-spawned sleeper holds the census from the moment it exists ("Spawning"). The two shell sites are the exception: the r13 summary at :160 and :354, where `sh` starts the sleeper as a background job and summarize's `reap.spawn` closes every inherited fd. Each of their sleepers takes the census as its first action. A sleeper there that hasn't yet done so when `end` runs is not counted, but it doesn't wait either: its first action finds the census held exclusively, or gone, and it exits. So `end` proves this: no sleeper of the use is alive, except one that hasn't yet run its first step, and that one exits as soon as it does. Both shell tests run their script for at least 1 s before teardown, so in practice the case doesn't arise. The design still doesn't rely on that.
+- **Lock files** live only in the use directory, inside the private per-run directory.
+
 ## How it is proven
 
-- **No sleeper outlives its test while pytest lives.** `end` takes the census exclusively or raises. A lock that is free proves no process holds the census, and every sleeper holds it for its whole life.
+- **No sleeper outlives its test while pytest lives.** `end` takes the census exclusively, or raises. A free lock proves no process holds the census. Every Python-spawned sleeper holds it from before it exists until it exits. A shell-spawned sleeper holds it from its first step, and if it was late, it exits at that step (see "Edge cases").
 - **No sleeper outlives its pytest process.** Its lifeline lock goes with the process, however that process ends, and the sleeper's next poll then exits it. The 60 s cap is a backstop and is never part of the proof.
 - **Cleanup touches no other process.** It signals nothing. Only the sleepers themselves act, by exiting.
 - **Every claim has a positive control.** Each test below first shows that a sleeper did start (`started()` names it, or the census is held), then shows that it ended. That way a sleeper that never started can't pass as cleaned up.
@@ -109,6 +149,7 @@ Each site takes `escapes`, passes its directory, and drops its own `finally` kil
    For each, the PID publication is broken: its path is in a directory that doesn't exist, so the parent fails after the spawn or fork and before the write. The test shows `started()` names a PID, then that `end()` succeeds. For the fork paths, this is the regression for finding 3.
 3. **A killed holder.** A small Python harness process, the test's own child, holds an `Escapes` use's lifeline and starts an escaped sleeper. The test SIGKILLs the harness by its handle. Within the bound, the test can take the census itself.
 4. **A stuck sleeper is reported, never signalled.** The test starts a sleeper by its own handle and SIGSTOPs it. `end(bound=0.5)` raises within 1.5 s and names the sleeper's PID. The sleeper is still there, stopped. The test then sends SIGCONT, and the sleeper exits 0 on its own.
+5a. **The census is held before the child runs.** Right after `spawn` returns, and right after `fork_held` returns in the parent, the test's attempt at `LOCK_EX | LOCK_NB` on the census fails. That holds before the child could have run, and with the child SIGSTOPped by the test's own handle the moment it is spawned. Covered for `new_session` too. After the spawner's copy is closed, the lock is still held. Once the child exits, it is free.
 5. **A late sleeper never waits.** A sleeper started after `end`, on the removed directory, exits 0 within 2 s. So does one started while the census is held exclusively.
 6. **Teardown after a failure.** A child pytest run, in the style of test_tmux_watchdog.py's `Child`, has one test that starts an escaped sleeper and then fails. Its report shows the test failed and teardown passed, and no census of its run directory is still held.
 7. **A use left without teardown fails the run.** In a child pytest run, a test makes an `Escapes` use without the fixture, starts a sleeper, and passes. The run-end check ends the sleeper, reports the use, and the run exits non-zero.
