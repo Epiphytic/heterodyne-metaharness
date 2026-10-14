@@ -2,6 +2,8 @@ import os
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from fakes.checkpoints import CrashAt, PauseAt, Recorder, SimulatedCrash
@@ -10,7 +12,8 @@ from wsd_env import WS, Rig, Worker, finish, git_repo, make_rig
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import HELD, NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsUnavailable
-from heterodyne.wsd.journal import JournalBusy, Op, OpKind
+from heterodyne.wsd.daemon import Wsd
+from heterodyne.wsd.journal import JournalBusy, Op, OpKind, ResolvedEnd
 from heterodyne.wsd.park import (
     DEFER_STEPS,
     ESCALATE_POINTS,
@@ -24,7 +27,7 @@ from heterodyne.wsd.park import (
     NotReleasable,
     resumable,
 )
-from heterodyne.wsd.runtime import EndCause, LaunchSpec, Liveness, Started
+from heterodyne.wsd.runtime import EndCause, Ended, LaunchSpec, Liveness, Started
 from heterodyne.wsd.states import Reason
 from heterodyne.wsd.workstream import REPO_KEY, ConfigInvalid, Limits, place
 
@@ -1063,6 +1066,43 @@ def test_crash_at_every_accounting_point_counts_once(tmp_path: Path, monkeypatch
     assert escalations == (1,)
 
 
+@pytest.mark.parametrize("point", ["inside", "accounted"])
+@pytest.mark.parametrize("kind", ["resume", "undefer"])
+def test_crash_at_every_accounting_point_counts_a_resolved_end_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, point: str) -> None:
+    """btq-wpyv5: the carried end is read inside the accounting transaction and never changed, so a replay
+    of the guard decides the same way: one `lifetime` row, which resets the count."""
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()                                               # generation 2, one death counted
+    rig.runtime.lifetime(rig.key("btq-1"))
+    resolve(rig)
+    if kind == "undefer":
+        rig.parker.defer("btq-1", QUOTA, rig.clock() + 3600)
+        rig.clock.advance(3600)
+    if point == "inside":
+        real = rig.journal.crash_account
+
+        def torn(*args: object) -> int:
+            real(*args)  # pyright: ignore[reportArgumentType]
+            raise SimulatedCrash("inside the accounting transaction")
+
+        monkeypatch.setattr(rig.journal, "crash_account", torn)
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+        monkeypatch.undo()
+        assert rig.journal.crash_count(WS, "btq-1") == 1 and classes(rig)[-1] is None     # rolled back
+    else:
+        rig.restart(CrashAt("resume.accounted"))
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+    rig.restart()
+    rig.replay_open()
+    rig.pickup()
+    assert classes(rig)[:2] == ["died", "lifetime"] and rig.journal.crash_count(WS, "btq-1") == 0
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 3
+
+
 def test_a_new_claims_guard_has_nothing_to_account(tmp_path: Path) -> None:
     """The third kind of operation, pickup, never reaches the accounting point: a new claim's intent
     accounts every earlier generation `reset` before its guard runs."""
@@ -1131,22 +1171,129 @@ def test_release_resets_and_accounts_pending_generations_as_reset(tmp_path: Path
     assert other.state("btq-1") == "running" and other.journal.crash_count(WS, "btq-1") == 0
 
 
-@pytest.mark.parametrize("released", [False, True])
-def test_a_resolved_generation_counts_one_death_unless_a_release_resets_first(tmp_path: Path,
-                                                                             released: bool) -> None:
-    """g08sd's rule for a removed session directory holds for `wsctl resolve` too (docs/wsd.md §5): its
-    record goes, so the next guard has no end to read and counts a death, even after a live stop."""
+def resolve(rig: Rig) -> None:
+    """btq-wpyv5: `wsctl resolve --discard` of btq-1's latest generation, through Wsd.resolve_one on the
+    rig's own scheduler and journal: the fake's Resolution carries the end, and its record goes."""
+    key = rig.key("btq-1")
+    generation = rig.runtime.generations[key]
+    parts = SimpleNamespace(schedulers={WS: rig.sched}, journal=rig.journal)
+    reply = Wsd.resolve_one(cast(Wsd, SimpleNamespace(parts=parts)), WS, short_id(key), generation, "discard",
+                            None)
+    assert reply.result == "ok", reply.message
+    assert rig.runtime.ended(key) is None and rig.runtime.intents == {}
+
+
+def never_ran(rig: Rig) -> None:
+    key = rig.key("btq-1")
+    del rig.runtime.listed[key]
+    rig.runtime.ends[key] = Ended(rig.runtime.generations[key], EndCause.STOPPED, False, None)
+
+
+@pytest.mark.parametrize("ending, klass, count", [
+    ("stopped", "stopped", 1), ("lifetime", "lifetime", 0), ("died", "died", 2), ("never ran", "died", 2)])
+def test_a_resolved_generation_is_accounted_from_its_end(tmp_path: Path, ending: str, klass: str,
+                                                         count: int) -> None:
+    """A resolve removes the session's record, but carries its end into the journal (docs/wsd.md §5), so
+    the next guard accounts the generation as it would have from the record."""
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()                                               # generation 2, one death counted
+    key = rig.key("btq-1")
+    if ending == "never ran":
+        never_ran(rig)
+    else:
+        rig.runtime.end(key, EndCause(ending))                 # its commits couldn't land
+    resolve(rig)
+    rig.pickup()
+    assert classes(rig)[:2] == ["died", klass] and rig.journal.crash_count(WS, "btq-1") == count
+    if count == 2:
+        crash_looped(rig)
+    else:
+        assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 3
+
+
+def test_a_release_before_the_next_launch_still_resets_a_resolved_generation(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()
+    rig.runtime.end(rig.key("btq-1"))
+    resolve(rig)
+    rig.parker.escalate("btq-1", Reason.LAUNCH_FAILED)
+    rig.parker.release("btq-1")
+    assert classes(rig) == ["died", "reset"] and rig.journal.crash_count(WS, "btq-1") == 0
+    rig.replay_open()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 3
+    assert classes(rig) == ["died", "reset", None]
+
+
+def test_a_resolved_death_at_the_bound_escalates_before_the_next_launch(tmp_path: Path) -> None:
+    """The case accounting at resolve time would get wrong: the guard has the death to account, so it
+    escalates, and launch 3 never happens."""
+    rig = picked(tmp_path)
+    dies(rig)
+    rig.pickup()
+    assert rig.journal.crash_count(WS, "btq-1") == 1
+    dies(rig)
+    resolve(rig)
+    rig.pickup()
+    crash_looped(rig)
+    assert classes(rig) == ["died", "died"]
+
+
+def test_two_resolved_live_stops_do_not_escalate(tmp_path: Path) -> None:
+    rig = picked(tmp_path)
+    for _ in range(2):
+        rig.runtime.end(rig.key("btq-1"), EndCause.STOPPED)    # a live stop whose land was refused
+        resolve(rig)
+        rig.pickup()
+    assert rig.state("btq-1") == "running" and len(rig.runtime.launches) == 3
+    assert rig.journal.crash_count(WS, "btq-1") == 0 and classes(rig) == ["stopped", "stopped", None]
+
+
+LIFETIME_END = ResolvedEnd(cause="lifetime", reached_running=True, ran_seconds=60)
+
+
+def test_a_resolved_end_is_only_for_its_own_generation(tmp_path: Path) -> None:
     rig = picked(tmp_path)
     key = rig.key("btq-1")
-    rig.runtime.end(key, EndCause.STOPPED)                  # a live stop whose commits couldn't land
-    assert rig.runtime.ended(key) is not None
-    rig.runtime.resolve_unlanded(WS, short_id(key), 1, "discard", None)
-    rig.runtime.finish_resolution(WS, short_id(key), 1)
-    assert rig.runtime.ended(key) is None
+    dies(rig)
+    del rig.runtime.ends[key]                                  # no end of its own: removed by hand
+    j = rig.journal
+    for ws, bead, other, generation in ((WS, "btq-1", key, 2), (WS, "btq-1", "sk-other", 1),
+                                        (WS, "btq-2", key, 1), ("beta", "btq-1", key, 1)):
+        j.emit_resolved(ws, bead, "action=discard tip=none", f"{ws}-{bead}-{other}-{generation}", other,
+                        generation, LIFETIME_END)
+    rig.pickup()
+    assert classes(rig) == ["died", None] and j.crash_count(WS, "btq-1") == 1
+
+    j.db.execute("DELETE FROM meta WHERE key LIKE 'crash_gen:%' OR key LIKE 'crash_run:%'")   # pre-g08sd
+    j.emit_resolved(WS, "btq-1", "action=discard tip=none", "older", key, 1, LIFETIME_END)
+    dies(rig)
+    rig.pickup()
+    assert classes(rig) == ["legacy", "died", None]            # an older generation's row is never read
+
+    other = picked(tmp_path / "rebuilt")
+    okey = other.key("btq-1")
+    dies(other)
+    del other.runtime.ends[okey]
+    other.journal.emit_resolved(WS, "btq-1", "action=discard tip=none", "rebuilt", okey, 1, LIFETIME_END)
+    other.journal.db.execute("UPDATE launches SET rebuilt_at = '2026-10-14T00:00:00Z' WHERE session_key = ? "
+                             "AND generation = 1", (okey,))
+    other.pickup()
+    assert classes(other)[0] == "reset" and other.journal.crash_count(WS, "btq-1") == 0
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_a_hand_removed_directory_still_counts_one_death(tmp_path: Path, released: bool) -> None:
+    """Manual step 4 with wsd not running: nothing carries the end, so the next guard counts a death, even
+    after a live stop, unless a release resets first."""
+    rig = picked(tmp_path)
+    key = rig.key("btq-1")
+    rig.runtime.end(key, EndCause.STOPPED)
+    del rig.runtime.ends[key]                                  # the directory, record and all, removed
     if released:
         rig.parker.escalate("btq-1", Reason.LAUNCH_FAILED)
         rig.parker.release("btq-1")
-        assert classes(rig) == ["reset"] and rig.journal.crash_count(WS, "btq-1") == 0
         rig.replay_open()
     else:
         rig.pickup()

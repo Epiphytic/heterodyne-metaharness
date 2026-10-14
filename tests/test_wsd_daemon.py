@@ -24,12 +24,13 @@ from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repo
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
+from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import cli, ctl, daemon, ids, journal, park, scheduler
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
-from heterodyne.wsd.runtime import ResolveFailed, ResolveRefused, Session, UnlandedView
+from heterodyne.wsd.runtime import EndCause, Ended, ResolveFailed, ResolveRefused, Session, UnlandedView
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
@@ -2437,10 +2438,11 @@ def test_a_failed_journal_write_leaves_the_intent_and_the_hold(tmp_path: Path,
     def busy(*args: object) -> bool:
         raise JournalBusy("SQLITE_BUSY")
 
-    monkeypatch.setattr(wsd.parts.journal, "emit_once", busy)
+    monkeypatch.setattr(wsd.parts.journal, "emit_resolved", busy)
     reply = wsd.resolve_one(WS, SID, 1, "discard", None)
     assert reply.result == "failed" and "JournalBusy" in reply.message and "again" in reply.message
     assert (SID, 1) in runtime.intents and runtime.finished == []
+    assert crash_ends(wsd.parts.journal) == []
     with pytest.raises(daemon.RuntimeUnavailable, match="unfinished"):
         runtime.sessions(WS)                                                # the hold stays
     monkeypatch.undo()
@@ -2465,6 +2467,32 @@ def test_a_crash_around_the_journal_entry_replays_once(tmp_path: Path, monkeypat
     [event] = resolved_events(wsd.parts.journal)
     assert (event.ws, event.bead, event.ref) == (WS, "btq-1", f"{SID}-g1")
     assert event.detail == f"action=keep tip={TIP} ref=refs/heads/unlanded/btq-1/{SID}-g1"
+
+
+def crash_ends(j: Journal) -> list[tuple[str, str]]:
+    rows = j.db.execute("SELECT key, value FROM meta WHERE key LIKE 'crash_end:%' ORDER BY key").fetchall()
+    return [(str(k), str(v)) for k, v in rows]
+
+
+@pytest.mark.parametrize("point", ["resolve.resolved", "resolve.journaled"])
+def test_resolve_journals_its_end_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, point: str) -> None:
+    """btq-wpyv5: the Resolution's end goes into the journal with the event, in one transaction, before
+    the hold clears; a retry after a crash on either side of it writes neither again."""
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch, cp=CrashAt(point))
+    key = "sk-resolved"
+    sid = short_id(key)
+    runtime.generations[key] = 1
+    runtime.ends[key] = Ended(1, EndCause.STOPPED, True, 60)
+    with pytest.raises(SimulatedCrash):
+        wsd.resolve_one(WS, sid, 1, "discard", None)
+    assert (sid, 1) in runtime.intents
+    assert len(crash_ends(wsd.parts.journal)) == (point == "resolve.journaled")
+    reply = wsd.resolve_one(WS, sid, 1, "discard", None)
+    assert reply.result == "ok" and runtime.intents == {} and runtime.sessions(WS) == []
+    assert [e.ref for e in resolved_events(wsd.parts.journal)] == [f"{sid}-g1"]
+    [(row, value)] = crash_ends(wsd.parts.journal)
+    assert row == f"crash_end:{WS}:btq-1:{key}:1"
+    assert msgspec.json.decode(value) == {"cause": "stopped", "reached_running": True, "ran_seconds": 60}
 
 
 def test_a_clean_resolve_job_passes_its_points(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
