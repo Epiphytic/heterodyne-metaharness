@@ -19,7 +19,7 @@ Task 1 confirmed S9-1 to S9-4 and S9-9. Four findings were not confirmed:
 
 | Work | State until this amendment is approved | After approval |
 |---|---|---|
-| Task 6 (adapters) | Stopped for both adapters (S9-5, S9-6, S9-7) | Resumes with §4's text. It does not wait for Q1. Its PR merges only after S9-10 (§4.6) has passed and is recorded in the spike doc. |
+| Task 6 (adapters) | Stopped for both adapters (S9-5, S9-6, S9-7) | Resumes with §4's text. It does not wait for Q1. Its PR merges only after S9-10 (§4.5) has passed and is recorded in the spike doc. |
 | Task 8 (launcher) | Stopped (S9-8) | Resumes only when three things hold: Q1 is decided, that option's text is in the plan, and the ADR amendment (§6, Q2) is approved. Under option A (recommended) the plan text is this amendment. Under C or D the option needs its own review first. |
 | Tasks 9, 10, 11, 13 | Wait for Task 8, as before | As before |
 | Plan 4b Tasks 11b and 12 | Wait for Task 8, as before | As before |
@@ -127,8 +127,18 @@ Out of scope for every option: a mount added from inside the container's own nam
 
 > `empty_read_only: tuple[PurePosixPath, ...]` (E25), relative to the home. Codex has `(".codex/tmp", ".codex/packages")`. Claude Code has `()`. For each path, `prepare_install_home` does the following, working by fd from the home and following no link:
 >   - It refuses if the path exists and isn't a directory: a link, a file or anything else. The refusal is `AdapterError(EXEC_DIR_NOT_A_DIRECTORY)`, with the text `the home's <path> isn't a directory`.
->   - If the path is a directory with content, it removes that content (`shutil.rmtree` with `dir_fd`, which doesn't follow links). Homes from before this amendment hold a plan-4 daemon copy and alias directories there, and refusing them would stop every resume. Inside the sandbox the bind hides that content anyway. Clearing it keeps the host side honest.
+>   - If the path is a directory with content, it clears it, as described below under "Clearing an exec directory". Homes from before this amendment hold a plan-4 daemon copy and alias directories there, and refusing them would stop every resume. Inside the sandbox the bind hides that content anyway; clearing it keeps the host side honest. Clearing touches only disposable home state, so it never taints the install.
 >   - It creates the path if it's missing, mode 0700, so it ends up as an empty directory.
+>
+> **Clearing an exec directory.** It is fail-closed and never crosses a mount:
+>   1. **Order.** `prepare_install_home` runs only after the launcher has confirmed that the previous generation has ended. That is the existing check before a home is prepared, and it is unchanged. So no CLI from the home is running while it clears.
+>   2. **Mount boundary.** The home's root is opened `O_DIRECTORY | O_NOFOLLOW`, and its mount ID (`statx` `STATX_MNT_ID`, the same call T2's walk uses) and `st_dev` are the reference. The exec directory is opened from the home by fd, `O_DIRECTORY | O_NOFOLLOW`. Its mount ID and `st_dev` must equal the reference. A difference refuses with `AdapterError(EXEC_DIR_CROSSES_MOUNT)` (`the home's <path> crosses a mount`) before anything is deleted. A same-filesystem bind mount has the same `st_dev` but a different mount ID, so it is refused too.
+>   3. **Pre-scan, deleting nothing.** The scan walks the tree by fd. Each subdirectory is opened with `openat(O_DIRECTORY | O_NOFOLLOW)`, and its mount ID and `st_dev` are checked against the reference. Any crossing refuses with `EXEC_DIR_CROSSES_MOUNT`. More than 10000 entries or a depth past 32 refuses with `EXEC_DIR_TOO_LARGE`. The scan counts files, links, directories and bytes, and keeps the first 16 relative names, each cut to 128 characters with control characters escaped.
+>   4. **Delete pass.** The delete pass walks again. Every directory it opens is checked again (`O_NOFOLLOW`, mount ID and `st_dev`), so a mount or a link substituted after the pre-scan stops the pass at that directory. Files and links are removed with `unlinkat`, and removing a link never touches its target. Directories are removed with `unlinkat(AT_REMOVEDIR)` once empty. Nothing is opened by path. Any error refuses with `AdapterError(EXEC_DIR_NOT_CLEARED)` and the launch fails: a mount check that differs, `ELOOP`, `ENOTDIR`, `EBUSY`, `EACCES`, or an entry that appeared or vanished. Whatever was already removed was inside the same mount as the home.
+>   5. **Final check.** The exec directory is reopened by fd from the home. It must be an empty directory on the reference mount, or the launch is refused with `EXEC_DIR_NOT_CLEARED`.
+>   6. **Scope.** The clear runs in the host's namespace. It sees host mounts, which it refuses. A mount made only in Podman's namespace doesn't exist there, so the clear acts on the underlying directory, and inside the sandbox the E25 bind covers the path anyway.
+>
+>   `prepare_install_home` returns one `Cleared(path, files, links, dirs, bytes, names)` for each directory it cleared. Task 8's runtime writes each one to the journal as `exec_dir_cleared`, with the session key, the generation and the adapter. It holds no file contents and no names beyond the bounded 16. It is also logged at warning level.
 >
 > `profile_flags: Mapping[str, bool]`: the flags a profile's `args` may carry for this adapter, each mapped to whether it takes a value (Q4). Both adapters start with an empty mapping.
 
@@ -165,6 +175,11 @@ Out of scope for every option: a mount added from inside the container's own nam
 > - `tests/test_config_layers.py`: `test_config_load_refuses_a_profile_with_a_refused_arg`, run through `config.load`, so the caller can't be skipped.
 > - `test_profile_args_at_launch_refuses_what_config_refuses` (`agents.base.profile_args`), and `test_the_adapters_allowlists_match_the_config_table`.
 > - `test_install_home_clears_leftover_exec_dir_content`: a file, a nested directory and a link that points out of the home are each removed, and the link's target is untouched. Also `test_install_home_refuses_an_exec_dir_that_is_not_a_directory`: a link or a file at `.codex/tmp` or `.codex/packages` gives the exact `EXEC_DIR_NOT_A_DIRECTORY` text.
+> - The clearing controls in `tests/test_agents_content.py`. The mount cases run the clear in a child process under `unshare -rm`, with real mounts in that private namespace, and are skipped with the reason when unprivileged user namespaces aren't available:
+>   - `test_clear_refuses_a_mount_at_the_exec_dir` and `test_clear_refuses_a_mount_below_the_exec_dir`, each with a `tmpfs` and with a same-filesystem bind of an outside directory holding a canary file. Each refuses with `EXEC_DIR_CROSSES_MOUNT`, and nothing is deleted: the canary and every in-home entry are still there.
+>   - `test_a_mount_added_between_the_scan_and_the_delete_stops_the_clear`, using an injected hook between the passes. The result is `EXEC_DIR_NOT_CLEARED`, and the canary is intact.
+>   - `test_a_directory_swapped_for_a_link_during_the_clear_stops_it`. An injected hook replaces a subdirectory with a link to an outside directory that holds a canary. The result is `EXEC_DIR_NOT_CLEARED` (`ELOOP`), and the canary is intact.
+>   - `test_clear_refuses_a_tree_past_its_bounds` (`EXEC_DIR_TOO_LARGE`), `test_clear_ends_with_an_empty_directory`, and `test_clear_returns_a_bounded_summary_without_contents`.
 
 **Step 1**, the owned-keys test (adds to its parenthesis):
 
@@ -186,8 +201,15 @@ Out of scope for every option: a mount added from inside the container's own nam
 
 **Before the PR merges** (adds two gates):
 
-> 1. S9-10 has passed and is recorded in the spike doc (§4.6).
-> 2. The team lead runs `heterodyne config check` against the deployed configuration. If a profile uses `args`, either the allowlist gains those flags in this PR, under the review rule above, or the operator removes them before the live checkout moves past this merge.
+> 1. S9-10 has passed and is recorded in the spike doc (§4.5).
+> 2. The team lead runs the candidate's validator, not the deployed one, because today's `check_profiles` doesn't look at `args`:
+>    - Run it from a worktree at the Task 6 PR's head, with that worktree's own environment: `uv run heterodyne config check`.
+>    - Use the deployed configuration, reached through the same configuration-location environment the wsd and admind units set (`XDG_CONFIG_HOME` and any `HETERODYNE_*` location variable, as written in the units).
+>    - If a profile is refused, either the allowlist gains its flags in this PR, under the review rule above, or the operator migrates the profile.
+>    - After any migration, run the check again.
+>    - Record the passing run in the PR description: the PR head, the exit status and the check's summary line. Leave out values.
+>
+>    The live checkout doesn't move past this merge without that record.
 
 ### 4.3 Task 8
 
@@ -219,7 +241,11 @@ The test list replaces these entries. Each Codex run here uses no `-c` (E9), and
 >
 >   If the rollout shows no `apply_patch` call, for example because the model edited through the shell, the test fails with `apply_patch not invoked`, never passes. A failure means E25 needs an amendment (Q3).
 > - `test_codex_exec_dirs_are_empty_and_read_only_inside`: a new launch succeeds with E25's binds, and the probe passes `empty-read-only`. From inside, as the agent's user, creating a file in `.codex/tmp` and creating a directory in `.codex/packages` both fail with `errno == EROFS`. After exit, the host side of both directories is empty.
-> - `test_leftover_exec_dir_content_is_cleared_and_a_non_directory_is_refused`. A marker executable is placed in the host side of `.codex/packages`; when run, it writes a sentinel file outside the home. After a launch and a TUI exit, the marker is gone and the sentinel doesn't exist. With a link at `.codex/tmp`, the launch is refused with the exact text `the home's .codex/tmp isn't a directory`.
+> - **Markers and sentinels.** Each marker is a small executable that, when run, creates a sentinel file in `<worktree>/.hz-live-sentinels/`. That directory is made by the test, read-write for the agent's user, and visible on the host side.
+>   - Positive control: before each negative check, the test runs the same marker explicitly inside the same sandbox, as the agent's user (`sandbox exec`). The sentinel must appear. The test then removes it.
+>   - A check that finds no sentinel counts only after its positive control passed.
+> - `test_leftover_exec_dir_content_is_cleared_and_a_non_directory_is_refused`:
+>   - A marker is placed in the host side of `.codex/packages`. After a launch and a TUI exit, the marker is gone, no sentinel exists, and the journal has one `exec_dir_cleared` entry naming `.codex/packages` with a count of one file. With a link at `.codex/tmp`, the launch is refused with the exact text `the home's .codex/tmp isn't a directory`.
 > - `test_a_submount_hiding_a_file_and_a_bind_mount_inside_fail` is split by namespace (S9-8). Each half covers both a `tmpfs` hiding a file and a same-filesystem bind mount over a file:
 >   - `test_a_host_namespace_submount_is_refused_before_create`. It needs root: `HZ_LIVE_ROOT_HELPER`, with a sudo rule for exactly the mount commands the test prints; otherwise it's skipped with that reason. The launch is refused with `INSTALL_CHANGED` (`CROSSES_MOUNT`), and the install is tainted.
 >   - `test_a_podman_namespace_submount_is_refused_by_the_probe`. It uses `podman unshare mount` and needs no root. Verification passes, the probe reports `FAIL managed-install [MI_SUBMOUNT]`, the launch is refused, and no taint marker is written.
@@ -227,26 +253,33 @@ The test list replaces these entries. Each Codex run here uses no `-c` (E9), and
 > - `test_a_mount_added_under_the_store_after_launch_is_not_visible_inside` adds one mount in each namespace. The host's one needs `HZ_LIVE_ROOT_HELPER`. Neither appears in the running sandbox's `mountinfo`.
 > - `test_an_updater_write_into_the_synthetic_home_is_never_run`. The checks are on state and the egress log, not a snapshot of the process tree:
 >   - Codex: after a TUI launch and exit, the host side of `.codex/packages` and `.codex/tmp` is empty. The gateway's egress log for the sandbox has no `api.github.com` request. `shell_snapshots/` holds only files whose change time falls inside that launch.
->   - Claude Code: a marker executable at the native installer's path, `$HOME/.local/bin/claude`, is never run. Task 1 saw no write there, but it is where an update would land. The marker writes a sentinel when run: no sentinel exists after two launches of the same home. On the second launch, `claude --setting-sources= doctor` reports `Auto-updates: disabled (set by env: DISABLE_UPDATES)`, because the CLI checks `DISABLE_UPDATES` first. Under Q5's other choice it reports `(set by env: DISABLE_AUTOUPDATER)`.
+>   - Claude Code: a marker (above) at the native installer's path, `$HOME/.local/bin/claude`, is never run. Task 1 saw no write there, but it is where an update would land. After the positive control, no sentinel exists following two launches of the same home. On the second launch, `claude --setting-sources= doctor` reports `Auto-updates: disabled (set by env: DISABLE_UPDATES)`, because the CLI checks `DISABLE_UPDATES` first. Under Q5's other choice it reports `(set by env: DISABLE_AUTOUPDATER)`.
 
-### 4.6 S9-10: the launcher's own Codex launch shape (before Task 6 merges)
+### 4.5 S9-10: the launcher's own Codex launch shape (before Task 6 merges)
 
 S9-5 tested a bare TUI. The launcher runs `codex app-server --listen` and then the TUI with `--remote`, new and resumed, and relies on the socket under `/tmp/codex-daemon-<uid>/`. S9-10 is added to Task 1's table and recorded in the spike doc. It needs no Podman.
 
-- **Isolation.** Each run happens in a fresh user, mount and network namespace (`unshare -rmn`) with a private `tmpfs` on `/tmp`. The socket state can't meet the host's own Codex or an earlier run's, and nothing is left behind in the host's `/tmp`. The home is made with `mktemp -d -p "$XDG_RUNTIME_DIR"`. Its `config.toml` is exactly what Task 6's `prepare_home` writes, E9's keys included. No argv has `-c`.
-- **Runs.**
-  - A new launch: `app-server --listen <socket>`, then the TUI with `--remote <socket>`.
-  - A resumed launch: `resume <thread> --remote <socket>`, for a thread the first run created.
-  - The same two again, with `.codex/tmp` and `.codex/packages` each read-only bound to an empty directory (`bwrap --ro-bind`, as in S9-7).
-- **Pass.**
-  - Every run reaches a ready server and a TUI connected to it.
-  - `.codex/packages` stays empty, and `strace -f -e trace=execve` shows no exec of a path under the home.
-  - No `api.github.com` lookup is attempted.
-  - The resume opens the thread.
-- **Login.** If making or resuming a thread needs a login, the agent stops at that step and reports. The team lead then runs it with the live-test login and model budget. The agent never touches a login file.
+- **The argv and environment come from the adapter.** A short script runs from a worktree at the Task 6 PR's head. It calls the candidate adapter's `prepare_home(layout, worktree)`, `server_argv(cli)` and `tui_argv(cli, profile, native_id=..., resume=...)`, and prints the argv lists. The runs use them unchanged, including `--dangerously-bypass-approvals-and-sandbox` on a new session and `resume <thread> --remote` on a resume. Nothing is hand-written, and no argv has `-c`.
+- **The socket arrangement is production's.** Inside the run's private mount namespace, `layout.bridge` is bind-mounted at `BRIDGE_INSIDE`, so `APP_SOCKET` is the production path. `layout.daemon` is bind-mounted at `/tmp/codex-daemon-<uid>` for the namespace's uid, on a private `tmpfs` at `/tmp`. These are the two binds plan 4's `facts` declares. If `BRIDGE_INSIDE`'s parent doesn't exist, it is made on a private `tmpfs`. Socket state can't meet the host's own Codex or an earlier run's, and nothing is left in the host's `/tmp`.
+- **A clean environment.** `env -i` with `HOME=<home>`, `CODEX_HOME=<home>/.codex`, `PATH=<store cli bin>:/usr/bin:/bin`, `TERM=xterm-256color` and the adapter's declared `tool_env` for 0.160.0. Nothing else. The home is made with `mktemp -d -p "$XDG_RUNTIME_DIR"`.
+- **Part 1: the agent, with no network and no login.** Under `unshare -rmn`:
+  - the server starts and `server_ready` holds;
+  - a new-session TUI connects to it (the screen shows the composer);
+  - the same again with `.codex/tmp` and `.codex/packages` each read-only bound to an empty directory, as E25 does.
+
+  Pass when:
+  - `.codex/packages` stays empty;
+  - `strace -f -e trace=execve` shows no exec of a path under the home;
+  - the `strace` of `connect` and `sendto` shows no lookup of `api.github.com`.
+- **Part 2: the team lead, with a network and the live-test login.** A thread needs model traffic, and a fresh network namespace has no route, so Part 2 runs under `unshare -rm` without `-n`. It uses the same generated argv, the same socket binds and the live-test login and budget. The lead places the login the way the live tests do; the agent never touches a login file. A new session takes one short prompt, which makes the thread, and then a resume opens that thread. Each runs with and without E25's binds.
+
+  Pass when:
+  - Part 1's three conditions hold;
+  - the resume shows the first prompt's thread;
+  - the DNS names attempted (S9-5's `sendto` method) don't include `api.github.com`.
 - **If it fails.** Task 6 doesn't merge, and an amendment states the working shape.
 
-### 4.5 Parallelism
+### 4.6 Parallelism
 
 The Task 6 row's "Depends on" becomes "1 (S9-2 to S9-7, as amended by Amendment 1), 2, 3, 5; merges after S9-10". The Task 8 row's becomes "1 (S9-8 as decided by Amendment 1, S9-9), ADR r16 Amendment 1 approved, 4, 5, 6, 7, plan 4b T6 and T8". The wave diagram gets the same notes.
 
@@ -299,7 +332,7 @@ Recommended: A now, with C filed as a follow-up bead that blocks nothing.
 - **Set `DISABLE_UPDATES=1` beside `DISABLE_AUTOUPDATER=1`. Recommended.** It also blocks a manual `claude update` inside the session.
 - Set only `DISABLE_AUTOUPDATER=1`, the switch S9-6 names.
 
-S9-10 is no longer a question. The review made it a requirement before Task 6 merges (§4.6).
+S9-10 is no longer a question. The review made it a requirement before Task 6 merges (§4.5).
 
 ## 8. Not changed
 
