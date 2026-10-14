@@ -337,7 +337,7 @@ def test_clear_returns_a_bounded_summary_without_contents(tmp_path: Path) -> Non
     home = tmp_path / "home"
     secret = b"sk-not-a-real-secret"
     spec: dict[str, he.Spec] = {f"n{i:02}": secret for i in range(20)}
-    spec["\x1bctl\nname" + "x" * 300] = b""
+    spec["\x1bctl\nname" + "x" * 200] = b""
     he.make_tree(home / TMP, spec)
     (cleared,) = clear(home)
     assert len(cleared.names) == ed.MAX_NAMES == 16

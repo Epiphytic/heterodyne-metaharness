@@ -12,12 +12,18 @@ import shutil
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol, cast
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from heterodyne.sandbox.spec import AgentFacts, SessionLayout
+from heterodyne.config import profile_args as allowed_args
+from heterodyne.config.errors import ConfigError
+from heterodyne.harness.resources import store_core
+from heterodyne.sandbox.spec import AgentFacts, Bind, SessionLayout
 from heterodyne.session.server import UUID
 from heterodyne.wsd.usage import Observation
+
+if TYPE_CHECKING:
+    from heterodyne.agents.exec_dirs import Cleared  # exec_dirs raises AdapterError, so not at runtime
 
 # One fixed hook command for every launch (plan 4 D5): Codex's trusted hash stays valid, and the
 # session token is read from the file beside the socket, never from a command line.
@@ -34,6 +40,16 @@ PRE_TOOL_COMMAND = (f"sh -c '{HOOK_COMMAND} || "
 PRE_TOOL_TIMEOUT = 120
 
 
+# Plan 4c E11 and Amendment 1 Q4: content, a default or a profile's args setting what the launcher owns.
+OWNS_KEY = "the install's content or a profile sets a key the launcher owns"
+UNKNOWN_KIND = "the install holds a content kind the adapter doesn't declare"
+CONTENT_MALFORMED = "a content item is not in the form its kind needs"
+DEFAULTS_MALFORMED = "the install's defaults are not in the form the adapter reads"
+UNDECLARED_VERSION = "the install's version is not one the adapter declares"
+# MCP server names the launcher keeps for itself: content naming one refuses (E11).
+RESERVED_MCP = frozenset({"heterodyne"})
+
+
 class AdapterError(Exception):
     """The adapter can't do this for the launch. Fixed wording, no paths or secrets: LaunchFailed."""
 
@@ -43,6 +59,33 @@ class Cli:
     binary: Path        # canonical
     root: Path          # the install root, bound read-only
     version: str
+    install: str = ""   # the managed install's name and manifest digest (plan 4c); "" before Task 8
+    digest: str = ""
+
+
+@dataclass(frozen=True)
+class Declared:
+    """One CLI version the adapter declares (plan 4c E12): what it adds to its tools' environment (S5
+    item 11), and the content kinds it is presented with."""
+    tool_env: frozenset[str]
+    presentation: frozenset[str]
+
+
+@dataclass(frozen=True)
+class InstallLayout:
+    """Where an adapter's CLI comes from and how its tree reads (plan 4c E4, E5)."""
+    artifact: Literal["github-release", "npm"]
+    locator: str                # the release repository, or the npm package with `<target>` in it
+    layout: store_core.Layout
+    strip: str                  # the prefix every member of the artifact has
+
+
+@dataclass(frozen=True)
+class Presentation:
+    """How an install's content reaches the CLI (E10): arguments, read-only binds and environment."""
+    argv: tuple[str, ...]
+    binds: tuple[Bind, ...]
+    env: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -237,7 +280,29 @@ class Adapter(Protocol):
     assigns_id: bool                  # the CLI assigns the native ID itself (Codex's thread), else wsd does
     turn_end_events: tuple[str, ...]  # hook events that end a turn (plan 4b E14)
 
+    versions: Mapping[str, Declared]
+    install_layout: InstallLayout
+    content_kinds: frozenset[str]
+    owned_keys: frozenset[str]        # dotted keys the launcher writes, or drops, last (E9)
+    empty_read_only: tuple[PurePosixPath, ...]   # home-relative exec directories, presented empty (E25)
+    profile_flags: Mapping[str, bool]            # the flags a profile's args may carry (Q4)
+
     def locate(self, binary: str, path: str) -> Cli: ...
+
+    def check_content(self, kind: str, tree: Path) -> None:
+        """Refuse the content item at `tree`: UNKNOWN_KIND, OWNS_KEY or CONTENT_MALFORMED."""
+        ...
+
+    def present(self, layout: SessionLayout, install: Path, manifest: store_core.Manifest) -> Presentation:
+        """The install's content as the CLI is given it. Every path is inside `install`; every bind is
+        read-only."""
+        ...
+
+    def prepare_install_home(self, layout: SessionLayout, worktree: Path,
+                             install: Path) -> "tuple[Cleared, ...]":
+        """prepare_home for a managed install: `defaults/` merged under the launcher's keys, and each
+        `empty_read_only` path made an empty directory. Returns what it cleared."""
+        ...
 
     def facts(self, layout: SessionLayout, cli: Cli, uid: int) -> AgentFacts: ...
 
@@ -281,6 +346,26 @@ class Adapter(Protocol):
         ...
 
 
-def profile_args(profile: Mapping[str, Any]) -> list[str]:
+def profile_args(profile: Mapping[str, Any], adapter: str) -> list[str]:
+    """The profile's `args`, through the same allowlist `config` checks (Q4): a configuration loaded
+    before an upgrade still fails closed here."""
     args = profile.get("args", [])
-    return [str(a) for a in cast(list[Any], args)] if isinstance(args, list) else []
+    try:
+        allowed_args.check(adapter, args, "profile args")
+    except ConfigError:
+        raise AdapterError(OWNS_KEY) from None
+    return list(cast(list[str], args))
+
+
+def content_items(manifest: store_core.Manifest) -> list[tuple[str, str]]:
+    """The manifest's content items, `content/<kind>/<name>` directories, as sorted (kind, name) pairs."""
+    found: list[tuple[str, str]] = []
+    for entry in manifest.entries:
+        parts = entry.path.split("/")
+        if len(parts) == 3 and parts[0] == "content":
+            found.append((parts[1], parts[2]))
+            if entry.kind != "dir":
+                raise AdapterError(CONTENT_MALFORMED)
+        elif len(parts) == 2 and parts[0] == "content" and entry.kind != "dir":
+            raise AdapterError(CONTENT_MALFORMED)
+    return sorted(found)

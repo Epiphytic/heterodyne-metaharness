@@ -681,8 +681,8 @@ def test_an_install_without_defaults_is_the_launcher_alone(layout: SessionLayout
                                    "\U0001f600", "line\nbreak"])
 def test_the_generated_toml_round_trips_any_default_string(layout: SessionLayout, tmp_path: Path,
                                                            value: str) -> None:
-    default = (f"model = {json.dumps(value)}\n"
-               f"[tables.\"a b\"]\nlist = [1, 2.5, true, {{k = {json.dumps(value)}}}]\n")
+    quoted = json.dumps(value, ensure_ascii=False)          # TOML has no surrogate-pair escapes
+    default = f"model = {quoted}\n[tables.\"a b\"]\nlist = [1, 2.5, true, {{k = {quoted}}}]\n"
     # json.dumps escapes are TOML basic-string escapes, except \x7f, which TOML wants escaped too
     install = install_with_defaults(tmp_path, "config.toml", default.replace("\x7f", "\\u007f"))
     Codex().prepare_install_home(layout, tmp_path / "wt", install)

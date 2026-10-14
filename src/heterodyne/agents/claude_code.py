@@ -4,36 +4,54 @@ import contextlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from heterodyne.agents import exec_dirs
 from heterodyne.agents.base import (
+    CONTENT_MALFORMED,
+    DEFAULTS_MALFORMED,
     HOOK_EVENTS,
+    OWNS_KEY,
+    RESERVED_MCP,
     STATUS_COMMAND,
+    UNDECLARED_VERSION,
+    UNKNOWN_KIND,
     AdapterError,
     Cli,
+    Declared,
+    InstallLayout,
+    Presentation,
     UsageReport,
     checked_id,
+    content_items,
     epoch_or_none,
     find_binary,
     has_file,
     home_dir,
     hook_group,
     install_root,
+    profile_args,
     read_json,
     read_json_at,
     write_at,
 )
+from heterodyne.agents.config_files import has_entry, merge, open_dir_at, open_under, read_bounded_at, without
+from heterodyne.config.profile_args import FLAGS
+from heterodyne.harness.resources import store_core
 from heterodyne.sandbox.spec import RUN_INSIDE, AgentFacts, SessionLayout
 from heterodyne.wsd.usage import Observation
 
 
 def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str, resume: bool,
-                     settings_file: Path, name: str, isolated: bool = False) -> list[str]:
+                     settings_file: Path, name: str, isolated: bool = False,
+                     presented: Sequence[str] = ()) -> list[str]:
     """Launch (or resume) an interactive session with a fixed ID, hooks from `settings_file`, and
-    permission prompts bypassed. The profile's `args` are appended verbatim. `isolated` loads no user,
-    project or local settings, so only `settings_file` (and managed policy) applies: a worktree's
-    .claude/settings.json could otherwise disable every hook or add its own."""
+    permission prompts bypassed. `presented` (an install's content, E10) follows the launcher's flags, so
+    the launcher's `--settings` stays the last settings source; then the profile's `args`, which pass only
+    through the allowlist (Q4). `isolated` loads no user, project or local settings, so only
+    `settings_file` (and managed policy) applies: a worktree's .claude/settings.json could otherwise
+    disable every hook or add its own."""
     argv = [binary, "--resume" if resume else "--session-id", session_id]
     model = profile.get("model")
     if isinstance(model, str) and model:
@@ -43,10 +61,7 @@ def interactive_argv(binary: str, profile: Mapping[str, Any], *, session_id: str
         # line. Every 2.1.286 parser (its eager scan, commander) reads `--opt=` as the empty value.
         argv += ["--setting-sources="]
     argv += ["--permission-mode", "bypassPermissions", "--settings", str(settings_file), "--name", name]
-    args = profile.get("args", [])
-    if isinstance(args, list):
-        argv += [str(a) for a in cast(list[Any], args)]
-    return argv
+    return argv + list(presented) + profile_args(profile, "claude-code")
 
 
 def headless_argv(binary: str, profile: Mapping[str, Any]) -> list[str]:
@@ -70,6 +85,39 @@ CLAUDE_HOOK_EVENTS = (*HOOK_EVENTS, "StopFailure")
 STATUS_SOURCE = "claude.statusline"
 # The status line's windows (S7 (3)): its key, and the window's identity and label.
 CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
+DEFAULTS_FILE = "settings.json"
+MCP_FILE = "mcp.json"
+PLUGIN_DIR, PLUGIN_FILE, PLUGIN_MCP = ".claude-plugin", "plugin.json", ".mcp.json"
+KINDS = frozenset({"plugins", "mcp"})
+TOOL_ENV = frozenset({
+    "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT", "CLAUDE_PID", "COREPACK_ENABLE_AUTO_PIN", "GIT_EDITOR",
+    "NoDefaultCurrentDirectoryInExePath"})
+# E9 (S9-6): the CLI checks DISABLE_UPDATES first. Both are set in the environment and the settings file.
+UPDATER_ENV = {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+
+
+def _object(text: str | None) -> dict[str, Any] | None:
+    """`text` as a JSON object; None if missing. Raises ValueError for anything else."""
+    if text is None:
+        return None
+    data: Any = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+    return cast(dict[str, Any], data)
+
+
+def _servers(value: object) -> dict[str, Any]:
+    """An `mcpServers` table: server names to tables, none of them the launcher's (E11)."""
+    if not isinstance(value, dict):
+        raise AdapterError(CONTENT_MALFORMED)
+    if not all(isinstance(v, dict) for v in cast(dict[str, Any], value).values()):
+        raise AdapterError(CONTENT_MALFORMED)
+    if set(cast(dict[str, Any], value)) & RESERVED_MCP:
+        raise AdapterError(OWNS_KEY)
+    return cast(dict[str, Any], value)
 
 
 def claude_windows(limits: Mapping[str, Any]) -> tuple[Observation, ...]:
@@ -91,12 +139,20 @@ class ClaudeCode:
     login_names: tuple[str, ...] = (".credentials.json",)
     model_hosts: tuple[str, ...] = ("api.anthropic.com",)
     version_pin = "2.1.286"
-    tool_env = frozenset({
-        "AI_AGENT", "CLAUDECODE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_EFFORT", "CLAUDE_PID", "COREPACK_ENABLE_AUTO_PIN", "GIT_EDITOR",
-        "NoDefaultCurrentDirectoryInExePath"})
+    versions: Mapping[str, Declared] = {"2.1.286": Declared(TOOL_ENV, KINDS)}
+    tool_env = versions[version_pin].tool_env
+    install_layout = InstallLayout("npm", "@anthropic-ai/claude-code-<target>",
+                                   store_core.Layout("package.json", "version", None, None, "claude"),
+                                   "package/")
+    content_kinds = KINDS
+    # E9: dropped from the defaults and, where the launcher has a value, written over them. The
+    # connectors' switch is ENABLE_CLAUDEAI_MCP_SERVERS; the plugin and sandbox keys are the launcher's.
+    owned_keys = frozenset({
+        "hooks", "statusLine", "skipDangerousModePermissionPrompt", "disableAllHooks",
+        "permissions.defaultMode", "enabledPlugins", "extraKnownMarketplaces", "sandbox",
+        "env.DISABLE_AUTOUPDATER", "env.DISABLE_UPDATES", "env.ENABLE_CLAUDEAI_MCP_SERVERS"})
+    empty_read_only: tuple[PurePosixPath, ...] = ()
+    profile_flags = FLAGS["claude-code"]
     prompt_marker = "❯"
     assigns_id = False
     turn_end_events: tuple[str, ...] = ("Stop", "StopFailure")
@@ -112,7 +168,8 @@ class ClaudeCode:
     def facts(self, layout: SessionLayout, cli: Cli, uid: int) -> AgentFacts:
         return AgentFacts(cli_root=cli.root, cli_binary=cli.binary, config_var=self.config_var,
                           config_dir=layout.home / self.config_subdir, login_names=self.login_names,
-                          model_hosts=self.model_hosts, extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
+                          model_hosts=self.model_hosts,
+                          extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false", **UPDATER_ENV})
 
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
         conf = home_dir(layout.home, self.config_subdir)
@@ -135,13 +192,99 @@ class ClaudeCode:
         finally:
             os.close(conf)
 
-    def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
-        """The limit signal is the StopFailure hook, always installed, so `limits` adds nothing."""
+    def prepare_install_home(self, layout: SessionLayout, worktree: Path,
+                             install: Path) -> tuple[exec_dirs.Cleared, ...]:
+        """The defaults go into the run directory's settings file (run_files), not the home."""
+        self.prepare_home(layout, worktree)
+        return exec_dirs.prepare(layout.home, self.empty_read_only)
+
+    def run_files(self, *, usage: bool = False, limits: bool = False,
+                  install: Path | None = None) -> Mapping[str, str]:
+        """The limit signal is the StopFailure hook, always installed, so `limits` adds nothing. With an
+        `install`, its `defaults/settings.json` is merged under the launcher's keys."""
         hooks = {e: [hook_group(e, "*" if e == "PreToolUse" else None)] for e in CLAUDE_HOOK_EVENTS}
-        settings: dict[str, Any] = {"skipDangerousModePermissionPrompt": True, "hooks": hooks}
+        settings: dict[str, Any] = {"skipDangerousModePermissionPrompt": True, "hooks": hooks,
+                                    "env": dict(UPDATER_ENV)}
         if usage:
             settings["statusLine"] = {"type": "command", "command": STATUS_COMMAND}
+        if install is not None:
+            settings = merge(self._defaults(install), settings)
         return {SETTINGS_FILE: json.dumps(settings)}
+
+    def _defaults(self, install: Path) -> dict[str, Any]:
+        try:
+            fd = open_under(install, ("defaults",))
+            if fd is None:
+                return {}
+            try:
+                found = _object(read_bounded_at(fd, DEFAULTS_FILE))
+            finally:
+                os.close(fd)
+        except (OSError, ValueError):
+            raise AdapterError(DEFAULTS_MALFORMED) from None
+        return without(found, self.owned_keys) if found is not None else {}
+
+    def check_content(self, kind: str, tree: Path) -> None:
+        if kind not in self.content_kinds:
+            raise AdapterError(UNKNOWN_KIND)
+        try:
+            fd = open_dir_at(None, tree)
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        try:
+            if kind == "mcp":
+                found = _object(read_bounded_at(fd, MCP_FILE))
+                if found is None:
+                    raise AdapterError(CONTENT_MALFORMED)
+                if set(found) - {"mcpServers"}:
+                    raise AdapterError(OWNS_KEY)
+                _servers(found.get("mcpServers"))
+            else:
+                self._check_plugin(fd)
+        except (OSError, ValueError):
+            raise AdapterError(CONTENT_MALFORMED) from None
+        finally:
+            os.close(fd)
+
+    def _check_plugin(self, fd: int) -> None:
+        """A plugin is marked by .claude-plugin/plugin.json (S9-2). It may bring no hooks and no settings,
+        and no MCP server named like the launcher's (E11)."""
+        try:
+            meta = open_dir_at(fd, PLUGIN_DIR)
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        try:
+            plugin = _object(read_bounded_at(meta, PLUGIN_FILE))
+        finally:
+            os.close(meta)
+        if plugin is None:
+            raise AdapterError(CONTENT_MALFORMED)
+        if "hooks" in plugin or has_entry(fd, "hooks") or has_entry(fd, "settings.json"):
+            raise AdapterError(OWNS_KEY)
+        if "mcpServers" in plugin:
+            _servers(plugin["mcpServers"])
+        bundled = _object(read_bounded_at(fd, PLUGIN_MCP))
+        if bundled is not None:
+            _servers(bundled.get("mcpServers", bundled))
+
+    def present(self, layout: SessionLayout, install: Path, manifest: store_core.Manifest) -> Presentation:
+        """Each plugin as a `--plugin-dir` (S9-2), each MCP item's file as a `--mcp-config`, and always
+        `--strict-mcp-config`, which keeps a worktree's .mcp.json out (S9-3)."""
+        declared = self.versions.get(manifest.version)
+        if declared is None:
+            raise AdapterError(UNDECLARED_VERSION)
+        plugins: list[str] = []
+        mcp: list[str] = []
+        for kind, name in content_items(manifest):
+            if kind not in declared.presentation:
+                raise AdapterError(UNKNOWN_KIND)
+            source = install / "content" / kind / name
+            self.check_content(kind, source)
+            if kind == "plugins":
+                plugins += ["--plugin-dir", str(source)]
+            else:
+                mcp += ["--mcp-config", str(source / MCP_FILE)]
+        return Presentation((*plugins, *mcp, "--strict-mcp-config"), (), {})
 
     def usage_from_event(self, payload: Mapping[str, Any]) -> UsageReport | None:
         """S7 (5): a StopFailure with `error == "rate_limit"` is the limit signal; its reset is only in
