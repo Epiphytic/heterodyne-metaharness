@@ -38,8 +38,13 @@ class Selection:
 def load(config_dir: Path) -> Mapping[str, Selection]:
     """The selections in `config_dir/harnesses.toml`; none when the file doesn't exist."""
     path = config_dir / FILE
-    if not os.path.lexists(path):
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
         return {}
+    except OSError:
+        # Only a missing entry is "no selection"; one behind a directory that can't be searched may exist.
+        raise ConfigError(f"{FILE} exists but can't be read") from None
     try:
         text = path.read_text()
     except (OSError, UnicodeDecodeError):

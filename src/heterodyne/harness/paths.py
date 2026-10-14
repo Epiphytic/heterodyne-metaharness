@@ -45,37 +45,64 @@ def store_problems(store: Path, *, login_dirs: Iterable[Path], worktrees: Iterab
     it); one that can't be looked up, or a link loop, is `STORE_PATH_WRITABLE`.
 
     The store, found by that walk, must not be in or contain a login directory, a worktree or the state
-    directory (compared resolved, so a link can't hide one inside the other)."""
+    directory (compared resolved, so a link can't hide one inside the other). A path whose resolution can't
+    be established (a component that can't be looked up, a link loop) is both of its pair's problems. When
+    the store's own can't be, `STORE_PATH_WRITABLE` (already found) is the only problem: it refuses alone."""
     found: set[str] = set()
+    root: Path | None
     try:
         root = _walk(store, service_uid, owner_uid, fallback, lookup)
     except _Unsafe:
         found.add(STORE_PATH_WRITABLE)
-        root = _resolved(store)
-    for login in map(_resolved, login_dirs):
-        if _within(root, login):
-            found.add(STORE_IN_LOGIN_DIR)
-        if _within(login, root):
-            found.add(LOGIN_DIR_IN_STORE)
-    for worktree in map(_resolved, worktrees):
-        if _within(root, worktree):
-            found.add(STORE_IN_WORKTREE)
-        if _within(worktree, root):
-            found.add(WORKTREE_IN_STORE)
-    state = _resolved(state_dir)
-    if _within(root, state):
-        found.add(STORE_IN_STATE_DIR)
-    if _within(state, root):
-        found.add(STATE_DIR_IN_STORE)
+        root = _real(store)
+        if root is None:
+            return [STORE_PATH_WRITABLE]
+    pairs = [*((login, STORE_IN_LOGIN_DIR, LOGIN_DIR_IN_STORE) for login in login_dirs),
+             *((worktree, STORE_IN_WORKTREE, WORKTREE_IN_STORE) for worktree in worktrees),
+             (state_dir, STORE_IN_STATE_DIR, STATE_DIR_IN_STORE)]
+    for path, store_in, in_store in pairs:
+        other = _real(path)
+        if other is None or _within(root, other):
+            found.add(store_in)
+        if other is None or _within(other, root):
+            found.add(in_store)
     return [p for p in PROBLEMS if p in found]
 
 
-def _resolved(path: Path) -> Path:
-    """`path` with its symbolic links followed, or, for a loop, made absolute lexically."""
+def _real(path: Path, links: int = 0) -> Path | None:
+    """`path` with every symbolic link followed, dangling ones included; the part that doesn't exist yet
+    is kept as written. None when that can't be established: a component that can't be looked up, a link
+    loop or more than `MAX_LINKS` links."""
+    path = path if path.is_absolute() else Path.cwd() / path
     try:
-        return path.resolve(strict=False)
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        pass
     except (OSError, RuntimeError):
-        return Path(os.path.normpath(path))
+        return None
+    if path.parent == path:
+        return None
+    base = _real(path.parent, links)
+    if base is None:
+        return None
+    if path.name == "..":
+        return base.parent
+    candidate = base / path.name
+    try:
+        mode = os.lstat(candidate).st_mode
+    except FileNotFoundError:
+        return candidate
+    except OSError:
+        return None
+    if not stat.S_ISLNK(mode):
+        return candidate
+    if links >= MAX_LINKS:
+        return None
+    try:
+        target = candidate.readlink()
+    except OSError:
+        return None
+    return _real(base / target, links + 1)        # an absolute target replaces `base`
 
 
 def _within(path: Path, parent: Path) -> bool:
@@ -104,7 +131,9 @@ def _walk(store: Path, service_uid: int, owner_uid: int | None, fallback: bool,
         try:
             uid, mode = _look(current / name, lookup)
         except FileNotFoundError:
-            return _resolved(current.joinpath(name, *pending))   # the rest is made later, by the store
+            if ".." in pending:     # it would climb back among directories (and links) the walk never saw
+                raise _Unsafe from None
+            return current.joinpath(name, *pending)    # the rest is made later, by the store
         if stat.S_ISLNK(mode):
             links += 1
             if links > MAX_LINKS:

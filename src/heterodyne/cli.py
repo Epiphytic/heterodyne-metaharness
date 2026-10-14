@@ -63,7 +63,8 @@ def _harness_lines(cfg: hconfig.Config, env: Mapping[str, str]) -> list[str]:
     h = harness_settings.from_config(cfg, env)
     lines: list[str] = []
     if "harnesses.store" not in cfg.sources:
-        lines.append(f"harnesses.store = {str(h.store)!r}    (defaults{', fallback' if h.fallback else ''})")
+        source = "defaults, fallback" if h.fallback else "defaults"
+        lines.append(f"harnesses.store = {show(str(h.store))}    ({source})")
     chosen = selection.load(paths.config_dir(env))
     known = layers.string_list(cfg.get("adapters.known", []), "adapters.known")
     for adapter in sorted(set(known) | set(chosen)):
@@ -73,7 +74,7 @@ def _harness_lines(cfg: hconfig.Config, env: Mapping[str, str]) -> list[str]:
             shown = f"{sel.current.install} (digest {sel.current.digest[7:19]}, {len(sel.previous)} previous)"
         elif sel and sel.previous:
             shown = f"none ({len(sel.previous)} previous)"
-        lines.append(f"harnesses.selection.{adapter} = {shown}    ({selection.FILE})")
+        lines.append(f"harnesses.selection.{show(adapter, False)} = {shown}    ({selection.FILE})")
     try:
         owner_uid: int | None = pwd.getpwnam(h.owner).pw_uid
     except KeyError:
@@ -99,8 +100,20 @@ def _worktrees(env: Mapping[str, str]) -> list[Path]:
         for value in layers.table_at(ws.values, "repos", f"workstreams/{name}.toml").values():
             if isinstance(value, str):
                 repo = paths.expand(value, env)
-                found += [repo, *repo.parent.glob(f"{repo.name}-btq-*")]
+                found += [repo, *_btq_worktrees(repo)]
     return found
+
+
+def _btq_worktrees(repo: Path) -> list[Path]:
+    """`repo`'s btq worktree siblings. When its parent can't be listed (glob would quietly find none), the
+    parent stands in for them, so a store there still counts as in a worktree."""
+    try:
+        names = [p.name for p in repo.parent.iterdir()]
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [repo.parent]
+    return [repo.parent / n for n in sorted(names) if n.startswith(f"{repo.name}-btq-")]
 
 
 def _is_login_dir(key: str) -> bool:

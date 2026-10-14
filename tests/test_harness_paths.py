@@ -200,7 +200,8 @@ def test_a_path_that_cant_be_resolved_is_both_containment_problems(tmp_path: Pat
     where = locked / "link"
     locked.chmod(0o000)
     try:
-        found = problems(tmp_path, store, **{kind: where if kind == "state_dir" else [where]})
+        overrides: dict[str, Any] = {kind: where if kind == "state_dir" else [where]}
+        found = problems(tmp_path, store, **overrides)
     finally:
         locked.chmod(0o700)
     assert found == expected
