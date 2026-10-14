@@ -14,6 +14,8 @@ import pytest
 from heterodyne import units
 from heterodyne.admind import unit as admind_unit
 from heterodyne.marmot.nip19 import hex_to_npub
+from heterodyne.wsd import cli as wsd_cli
+from heterodyne.wsd import unit as wsd_unit
 
 T = "[Service]\nExecStart={python} -m x run\n{environment}[Install]\nWantedBy=default.target\n"
 C = "a" * 40
@@ -136,3 +138,45 @@ def test_the_admind_render_passes_systemd_analyze_verify(tmp_path: Path) -> None
                          text=True, timeout=120, check=False)
     assert out.returncode == 0, out.stdout + out.stderr
     assert parsed(f.read_text())["Service"]["ExecStart"] == f"{sys.executable} -m heterodyne.admind run"
+
+
+def test_the_wsd_unit_is_the_designs() -> None:
+    text = wsd_unit.render("/r/py", {"PATH": "/usr/bin"}, config_dir="/c", state_dir="/s", release=C)
+    s = parsed(text)["Service"]
+    assert s["ExecStart"] == "/r/py -m heterodyne.wsd run"
+    assert int(s["TimeoutStopSec"]) > 120      # wsd's own drain on SIGTERM (docs/wsd.md)
+    assert (s["Type"], s["Restart"], s["KillMode"], s["RestartSec"], s["RestartPreventExitStatus"],
+            s["UMask"]) == ("simple", "always", "control-group", "5", "78", "0077")
+    assert parsed(text)["Install"]["WantedBy"] == "default.target"
+
+
+def test_wsd_unit_never_sets_btq_repo_and_needs_no_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("BTQ_REPO", "/some/repo")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(tmp_path / "absent"))
+    assert wsd_cli.wsd_main(["unit", "--python", "/r/py", "--config-dir", "/c", "--state-dir", "/s"]) == 0
+    out = capsys.readouterr().out
+    assert not [line for line in out.splitlines() if line.startswith("Environment=BTQ_REPO=")]
+    assert "UnsetEnvironment=BTQ_REPO " in out
+
+
+def test_wsd_unit_refuses_a_bad_value_with_78(capsys: pytest.CaptureFixture[str]) -> None:
+    assert wsd_cli.wsd_main(["unit", "--python", "/r/my py", "--config-dir", "/c", "--state-dir", "/s"]) == 78
+    assert "python" in capsys.readouterr().err
+
+
+def test_python_dash_m_heterodyne_wsd_runs_the_cli() -> None:
+    out = subprocess.run([sys.executable, "-m", "heterodyne.wsd", "--help"], capture_output=True, text=True,
+                         timeout=60, check=False)
+    assert out.returncode == 0 and "unit" in out.stdout and "run" in out.stdout
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd-analyze is not installed")
+def test_the_wsd_render_passes_systemd_analyze_verify(tmp_path: Path) -> None:
+    f = tmp_path / "heterodyne-wsd.service"
+    f.write_text(wsd_unit.render(sys.executable, {"PATH": "/usr/bin:/bin"}, config_dir=str(tmp_path),
+                                 state_dir=str(tmp_path), release=C))
+    out = subprocess.run(["systemd-analyze", "--user", "verify", "--man=no", str(f)], capture_output=True,
+                         text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stdout + out.stderr

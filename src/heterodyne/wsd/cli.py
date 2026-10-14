@@ -1,8 +1,10 @@
-"""`wsd` (run, tick) and `wsctl` (pause, resume, status, reload) command lines (ADR 0001 §4.3, §9, §16).
+"""`wsd` (run, tick, unit) and `wsctl` (pause, resume, status, reload) command lines (ADR 0001 §4.3, §9,
+§16).
 
-Every command except `wsd run` asks the running wsd over its control socket. `wsctl pause` goes through
-wsd as §4.3 requires: wsd sets btq's shared pause flag under the workstream's claim lock, so a pause is
-acknowledged only once no claim can start. With wsd stopped nothing claims, and nothing is acknowledged.
+Every command except `wsd run` and `wsd unit` (which prints the systemd user unit and reads no settings)
+asks the running wsd over its control socket. `wsctl pause` goes through wsd as §4.3 requires: wsd sets
+btq's shared pause flag under the workstream's claim lock, so a pause is acknowledged only once no claim
+can start. With wsd stopped nothing claims, and nothing is acknowledged.
 
 A journal locked by another process (JournalBusy) at startup ends `wsd run` with exit 1, not EX_CONFIG:
 nothing was changed, so the unit's restart retries safely. Something other than a socket at the control
@@ -28,10 +30,12 @@ import signal
 import sys
 from collections.abc import Callable, Sequence
 
+from heterodyne import units
 from heterodyne.config import ConfigError
 from heterodyne.sandbox import hostread
 from heterodyne.sandbox.build import build_runtime, build_usage_reader
 from heterodyne.wsd import btq, ctl, upgrade
+from heterodyne.wsd import unit as wsd_unit
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
@@ -159,7 +163,10 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
     tick = sub.add_parser("tick", help="ask the running wsd to run a job now (timers call this)")
     tick.add_argument("job", choices=["pickup", "reconcile"])
     tick.add_argument("--ws", default=None)
+    units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
     args = parser.parse_args(argv)
+    if args.cmd == "unit":      # needs no settings: the installer renders it before the config is checked
+        return units.command(wsd_unit.render, args, os.environ)
     try:
         s = _settings()
         if args.cmd == "run":
