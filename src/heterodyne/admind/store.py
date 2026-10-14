@@ -524,6 +524,18 @@ class Store:
         return int(row[0])
 
     @_locked
+    def outbox_text(self, key: str) -> str | None:
+        r = self.db.execute("SELECT text FROM outbox WHERE key = ?", (key,)).fetchone()
+        return None if r is None else str(r[0])
+
+    @_locked
+    def sent_message_id(self, key: str) -> str | None:
+        """The message ID outbox row `key` was sent as, or None (not sent, or sent without one)."""
+        r = self.db.execute("SELECT message_id FROM outbox WHERE key = ? AND status = 'sent'",
+                            (key,)).fetchone()
+        return None if r is None else _opt_str(r[0])
+
+    @_locked
     def mark_failed(self, seq: int) -> None:
         self.db.execute("UPDATE outbox SET status = 'failed' WHERE seq = ?", (seq,))
 

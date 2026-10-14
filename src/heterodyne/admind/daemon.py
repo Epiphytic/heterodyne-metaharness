@@ -146,6 +146,10 @@ BUMP_HINT = ("That was a reminder. React or reply on ask {ask_id}'s card (the me
              "to).")
 CARD_COMMANDS = (["approve"], ["deny"], ["details"])     # what B6 intercepts on a bump, as parse names them
 MAX_SEND_ATTEMPTS = 10
+# A continuation part of a top-level post (K22): an ask card, a repeat or a notice, part 2 or later.
+_CONTINUATION = re.compile(r"\A((?:ask|askr|notice):.+):[1-9][0-9]*\Z")
+_PART = re.compile(r"\A↳ part ([0-9]+)/([0-9]+)\n")
+PART_FAILED = "part {k}/{n} failed to deliver, ask the poster to repeat"      # Amendment 1 §2 (K22f)
 AGENT_POLL = 5.0        # seconds between checks that the admin agent's pane is still alive
 READY_TIMEOUT = 120.0   # seconds after a launch with no SessionStart before the agent is relaunched
 AGENT_STUCK_NOTICE = "The admin agent is not running ({why}). Use !tail, then !new."
@@ -2926,6 +2930,7 @@ class Admind:
         queued = reopened = None
         with self.store.transaction():
             self.store.mark_failed(seq)
+            part_parent = self.report_part(key)
             post = self.store.post_record(key)
             turn = None if post is None or post.turn_id is None else self.store.turn(post.turn_id)
             if turn is not None and turn.status in ("verbatim", "summarized"):
@@ -2938,6 +2943,22 @@ class Admind:
             self.audit_quietly("backstop", action="queued", turn=queued, why="send-failed")
         if reopened is not None:
             self.audit_quietly("backstop", action="reopened", batch=reopened, why="send-failed")
+        if part_parent is not None:
+            self.audit_quietly("part_failed", key=key, parent=part_parent)
+
+    def report_part(self, key: str) -> str | None:
+        """K22f, in the caller's transaction: a continuation part that failed for good gets one fixed reply
+        under part 1 (top-level if part 1 has no message ID), so the operator knows the post is incomplete.
+        Returns part 1's key when it queued one. Part 1 itself and `!details` parts are not reported."""
+        m = _CONTINUATION.fullmatch(key)
+        text = None if m is None else self.store.outbox_text(key)
+        part = None if text is None else _PART.match(text)
+        if m is None or part is None:
+            return None
+        parent = f"{m.group(1)}:0"
+        self.post(f"partfail:{key}", PART_FAILED.format(k=part.group(1), n=part.group(2)),
+                  self.store.sent_message_id(parent))
+        return parent
 
     async def alerts_loop(self) -> None:
         while True:

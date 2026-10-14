@@ -448,14 +448,14 @@ Answer: 👍 = A (recommended) · 👎 = none · or reply with a letter or your 
 Choices: A = rerun on bel-ci (recommended) · B = rerun on laptop-ci · C = skip the rerun
 ```
 
-A yes/no question ends `Answer: 👍 = yes (recommended) · 👎 = no · or reply with your own answer (!answer p3qz <text>)` and `Choices: yes (recommended) · no`. The `Choices:` footer is always the very last line of the card. When it is wider than a chunk, it is shortened to the letters (`Choices: A (recommended) · B · C`). A choice is one line of 1 to 80 characters, without controls, `·` or `=`, and must not be changed by redaction ("choice B would be redacted; reword it"). Choices are never cut: when a card is over the budget, the body is.
+A yes/no question ends `Answer: 👍 = yes (recommended) · 👎 = no · or reply with your own answer (!answer p3qz <text>)` and `Choices: yes (recommended) · no`; with `--recommended no`, `Answer: 👍 = no (recommended) · 👎 = yes · …` and `Choices: yes · no (recommended)`. The `Choices:` footer is always the very last line of the card. When it is wider than a chunk, it is shortened to the letters (`Choices: A (recommended) · B · C`). A choice is one line of 1 to 80 characters, without controls, `·` or `=`, and must not be changed by redaction ("choice B would be redacted; reword it"). Choices are never cut: when a card is over the budget, the body is.
 
 **How an answer is read on a question with choices** (on a question without them, as before: the reply or emoji is the answer):
 
 | You send | Recorded as |
 |---|---|
 | 👍 (any skin tone), ✅, ❤️ or ♥️ | the recommended choice |
-| 👎 (any skin tone) or ❌ | `no` on a yes/no card, `none` ("none of these") on a multiple-choice card |
+| 👎 (any skin tone) or ❌ | the option not recommended on a yes/no card (`no`, or `yes` when `no` is recommended), `none` ("none of these") on a multiple-choice card |
 | a reply that is one choice letter (`a`, `B.`, `(c)`) | that letter |
 | on a yes/no card: `yes` or `y`; `no` or `n` | `yes`; `no` (whichever is recommended) |
 | on a multiple-choice card: `yes`, `y`, `ok`, `okay`, `lgtm`, `approve`, `approved` | the recommended choice |
@@ -494,7 +494,7 @@ PR #69: https://github.com/<owner>/<repo>/pull/69
 
 ### Parts and threads
 
-A card or notice too long for one message is split into parts. Chunk 0 is posted top-level; each later part starts with `↳ part <i>/<n>` and is posted as a reply to chunk 0, once chunk 0 is sent. If chunk 0 failed, or was sent without a message ID, the later parts go top-level instead (audited as `thread_fallback`); the outbox never waits for it. Every part is at most `chunk_chars`, marker included. Lines are kept whole where they can be: the label, the head, link lines, choices, the answer line and the footer are never cut, and the choices block stays in the last part when it fits. A reaction or reply on any part counts as on the card, and a card counts as delivered only when all its parts are sent, as before.
+A card or notice too long for one message is split into parts. Chunk 0 is posted top-level and ends with `↳ part 1/<n>` (its label stays the first line); each later part starts with `↳ part <i>/<n>` and is posted as a reply to chunk 0, once chunk 0 is sent. If chunk 0 failed, or was sent without a message ID, the later parts go top-level instead (audited as `thread_fallback`); the outbox never waits for it. If a later part of a card, a repeat or a notice fails after all its retries, admind posts `part <k>/<n> failed to deliver, ask the poster to repeat` under chunk 0 (top-level if chunk 0 has no message ID), once, and audits `part_failed`. That message is not a card: nothing on it answers or decides anything. A failed chunk 0 is not reported this way (the card stays undelivered; `!asks repeat` sends it again), and neither are `!details` parts. Every part is at most `chunk_chars`, marker included. Lines are kept whole where they can be: the label, the head, link lines, choices, the answer line and the footer are never cut, and the choices block stays in the last part when it fits. A reaction or reply on any part counts as on the card, and a card counts as delivered only when all its parts are sent, as before.
 
 ### Answering and deciding
 
@@ -628,6 +628,7 @@ Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, ne
 - `bump-hint`: a reply or a decision emoji on a reminder was answered with the hint (`message_id`, `ask_id`).
 - `answered` has `choice` (the choice an answer was read as, or null).
 - A notice is one record of kind `notice`: `action` `posted` or `refused`, `poster`, `peer_pid`, `title_chars`, `body_chars`, `links`, and `notice_id` and `parts` when posted, or `why` when refused. `why` is a fixed code: `latched`, `title`, `body-too-long`, `notice-too-long`, `too-many-parts`, `too-many-links`, `link-label`, `link-format`, `link-too-long`, `link-line-too-long`, `link-redacted`, `rate-hour`, `undelivered`, or `internal` with the exception's class name as `error`. No notice text is ever audited.
+- `part_failed` (kind of its own): a later part failed for good and its report was queued; `key` (the failed part) and `parent` (chunk 0's key).
 - `thread_fallback` (kind of its own): a later part went top-level; `key`, `parent` (chunk 0's key) and `why` (`no-message-id`, `parent-failed`, `parent-missing` or `parent-pending`).
 - Also `reaction-ignored` (an emoji that decides nothing, on an approval card), `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-unverified` (the notice above was sent because `approve_bead` is not set), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
 

@@ -349,8 +349,16 @@ def _mark(name: str, f: Form) -> str:
     return " (recommended)" if name == f.recommended else ""
 
 
+def _rejected(f: Form) -> str:
+    """What a deny-set reaction records (K17q, Amendment 1 §1): `none` on a multiple-choice card, the option
+    not recommended on a yes/no card."""
+    if f.kind == "choices":
+        return NONE_OF_THESE
+    return "yes" if f.recommended == "no" else "no"
+
+
 def answer_line(row: AskRow, f: Form) -> str:
-    deny = NONE_OF_THESE if f.kind == "choices" else "no"
+    deny = _rejected(f)
     how = "a letter or your own answer" if f.kind == "choices" else "your own answer"
     return (f"Answer: 👍 = {f.recommended} (recommended) · 👎 = {deny} · or reply with {how} "
             f"(!answer {row.ask_id} <text>)")
@@ -434,14 +442,15 @@ def full_chunks(row: AskRow, chunk_chars: int) -> list[str]:
 # --- answers on question cards (K17q, K18q, K19) -------------------------------------------------
 def map_reaction(row: AskRow, emoji: str) -> str | None:
     """The choice a reaction records: an approve-set emoji is the recommended option; a deny-set emoji is
-    `no` on a yes/no card and `none` on a multiple-choice card; anything else, or no form, is no choice."""
+    the other option on a yes/no card and `none` on a multiple-choice card; anything else, or no form, is no
+    choice."""
     f = form(row)
     action = verbs.emoji_action(emoji)
     if f is None or action is None:
         return None
     if action == "approve":
         return f.recommended
-    return "no" if f.kind == "yes-no" else NONE_OF_THESE
+    return _rejected(f)
 
 
 def _short(text: str) -> str:

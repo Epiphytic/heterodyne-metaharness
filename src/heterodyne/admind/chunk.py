@@ -24,7 +24,7 @@ def split(text: str, limit: int) -> list[str]:
 
 # --- cards (cxmkf K23) ---------------------------------------------------------------------------
 Kind = Literal["body", "atomic", "closing"]
-MARKER_ROOM = 16        # room kept in every chunk for `↳ part <i>/<n>` and its newline (n ≤ 999)
+MARKER_ROOM = 16        # room in every chunk for `↳ part <i>/<n>` and a newline (n ≤ 999), first or last line
 MAX_PARTS = 999
 
 
@@ -46,11 +46,17 @@ def marker(i: int, n: int) -> str:
     return f"↳ part {i}/{n}\n"
 
 
+def first(n: int) -> str:
+    """The last line of chunk 0 of `n` > 1 (Amendment 1 §2): the label stays its first line (K11)."""
+    return f"\n↳ part 1/{n}"
+
+
 def pack(lines: list[tuple[str, Kind]], chunk_chars: int) -> list[str]:
     """A card's lines as chunks of at most `chunk_chars` characters, markers included (K23). Each chunk is
-    packed to `usable(chunk_chars)` characters, then every chunk after the first gets its marker. A body line
-    that fits in a chunk is never cut: it starts a new chunk instead; a longer one is cut as `split` cuts
-    (a partly filled chunk is closed first when it is at least half full, else filled). An atomic line is
+    packed to `usable(chunk_chars)` characters, then every chunk after the first gets its marker and chunk 0
+    its count (Amendment 1 §2). A body line that fits in a chunk is never cut: it starts a new chunk instead;
+    a longer one is cut as `split` cuts (a partly filled chunk is closed first when it is at least half
+    full, else filled). An atomic line is
     never cut (TooWide if it can't fit). The closing lines, which must come last, stay together in the
     last chunk when they fit in one; otherwise they are packed line by line, so the last of them is always
     the final line of the final chunk."""
@@ -115,4 +121,6 @@ def pack(lines: list[tuple[str, Kind]], chunk_chars: int) -> list[str]:
     if len(chunks) > MAX_PARTS:
         raise ValueError("too many parts")
     n = len(chunks)
-    return [c if i == 0 else marker(i + 1, n) + c for i, c in enumerate(chunks)] if n > 1 else chunks
+    if n == 1:
+        return chunks
+    return [c + first(n) if i == 0 else marker(i + 1, n) + c for i, c in enumerate(chunks)]

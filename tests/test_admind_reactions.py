@@ -1021,8 +1021,10 @@ def test_a_changed_pinned_bead_gets_its_updated_content_marked_undecidable(tmp_p
                                   "ORDER BY seq", (f"askd:{ask_id}:%",)).fetchall()
         assert rows and all(r[0].startswith(f"askd:{ask_id}:{hexid}:") for r in rows)     # bare hex, no r:
         assert all(r[2] == last and r[3] == 2 for r in rows)          # threaded to the reacted chunk
-        # Continuation chunks carry a part marker (cxmkf K23), and a boundary newline is not in either chunk.
-        content = "".join(re.sub(r"\A↳ part \d+/\d+\n", "", r[1]) for r in rows).replace("\n", "")
+        # Continuation chunks carry a part marker and part 1 its count (cxmkf K23, Amendment 1 §2), and a
+        # boundary newline is not in either chunk.
+        content = "".join(re.sub(r"\A↳ part \d+/\d+\n|\n↳ part 1/\d+\Z", "", r[1])
+                          for r in rows).replace("\n", "")
         assert content.startswith(f"Updated content of {BEAD} (now {D2[:12]}). It cannot be decided yet: its "
                                   "stored pin no longer matches, so its originator must renew the pin and "
                                   "post it again. Reactions and replies here decide nothing.")

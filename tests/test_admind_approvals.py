@@ -647,8 +647,9 @@ def test_approval_card_is_the_readout_verbatim() -> None:
 
 
 def unmarked(parts: list[str]) -> str:
-    """The chunks' text without their part markers (cxmkf K23) or the newlines a boundary drops."""
-    return "".join(re.sub(r"\A↳ part \d+/\d+\n", "", p) for p in parts).replace("\n", "")
+    """The chunks' text without their part markers (cxmkf K23; part 1's count, Amendment 1 §2) or the
+    newlines a boundary drops."""
+    return "".join(re.sub(r"\A↳ part \d+/\d+\n|\n↳ part 1/\d+\Z", "", p) for p in parts).replace("\n", "")
 
 
 def test_approval_card_chunks_are_what_is_queued() -> None:
@@ -659,6 +660,7 @@ def test_approval_card_chunks_are_what_is_queued() -> None:
     assert all(len(p) <= 200 for p in card.card_chunks)
     assert unmarked(card.card_chunks) == text.replace("\n", "")
     assert all(p.startswith(f"↳ part {i + 1}/{n}\n") for i, p in enumerate(card.card_chunks) if i)
+    assert card.card_chunks[0].endswith(f"\n↳ part 1/{n}") and card.card_chunks[0].startswith(TOP[0])
     for line in (t for t in LINKED if "link: " in t):          # a link line is never cut (K23)
         assert any(line in p.split("\n") for p in card.card_chunks)
 
