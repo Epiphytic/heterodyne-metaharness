@@ -1,5 +1,6 @@
-"""The managed install store's core (ADR r16 §7 Managed installs; plan 4c E1, E8): the manifest and its
-canonical encoding and digest, `statx`, the fd walk, the record and the fast verification. Standard library
+"""The managed install store's core (ADR r16 §7 Managed installs; plan 4c E1, E2, E6, E8, E20, E21): the
+manifest and its canonical encoding and digest, `statx`, the fd walk, the record and the fast verification,
+the checksums and git trees of sources, and `stage`. Standard library
 only, and nothing from `heterodyne`: root installs a copy of this one file that the service user can't
 write, runs it with `python3 -I` as the store helper, and `wsd` imports the same file for the fallback and
 for verification, so there is one manifest implementation.
@@ -10,27 +11,46 @@ in a `finally`. Refusals carry their constant as `.constant`, and their message 
 nothing here names a path, a digest or a file's content in an error.
 """
 
+import base64
+import binascii
 import contextlib
 import ctypes
 import dataclasses
 import errno
+import fcntl
+import gzip
 import hashlib
 import json
 import os
+import re
+import secrets
 import stat
-from collections.abc import Callable, Generator
-from typing import Literal, cast
+import struct
+import tarfile
+import zlib
+from collections.abc import Callable, Generator, Iterator, Sequence
+from pathlib import Path
+from typing import IO, Any, Literal, cast
 
 MAX_ENTRIES = 200_000           # entries in one install, the root uncounted; at the limit is accepted
 MAX_DEPTH = 64                  # components in an entry's path; at the limit is accepted
 MAX_LINK_HOPS = 40              # links followed resolving one link, the link itself included
+MAX_ARTIFACT_BYTES = 1 << 30    # one artifact handed to `stage`; at the limit is accepted
+MAX_FILE_BYTES = 1 << 30        # one file unpacked; at the limit is accepted
+MAX_INSTALL_BYTES = 4 << 30     # all the files of one install; at the limit is accepted
+MAX_TAR_EXTENSION = 64 << 10    # one pax or GNU long-name header's payload; at the limit is accepted
+MAX_TAR_EXTENSIONS = 64 << 20   # one tar's extension payloads in all (tarfile keeps them); at the limit too
+# the uncompressed bytes of one tar: its files, its extensions, and four blocks a member for the headers and
+# padding; at the limit is accepted
+MAX_TAR_BYTES = (MAX_INSTALL_BYTES + MAX_TAR_EXTENSIONS
+                 + (MAX_ENTRIES + MAX_DEPTH + 1) * 4 * tarfile.BLOCKSIZE)
 FORMAT = 1
 CHUNK = 1 << 20
 
 TOO_MANY_ENTRIES = "the install has more entries than the store accepts"
 TOO_DEEP = "the install is nested deeper than the store accepts"
 BAD_TYPE = "the install holds an entry that is not a directory, a regular file or a symbolic link"
-BAD_NAME = "the install holds an entry whose name is not UTF-8"
+BAD_NAME = "the install holds an entry whose name is empty, `.` or `..`, holds a NUL or is not UTF-8"
 HARD_LINK = "the install holds a hard link"
 BAD_LINK = "the install holds a link that is absolute, dangles, loops or leaves the install"
 NO_MOUNT_ID = "statx returned no mount ID"
@@ -40,6 +60,16 @@ ENTRY_ADDED = "the install has an entry its manifest does not"
 ENTRY_MISSING = "the install lacks an entry its manifest has"
 CONTENT_CHANGED = "an install file's content changed"
 MANIFEST_MALFORMED = "the manifest is not in its canonical form"
+LOGIN_NAME = "the install holds an entry named as a login file"
+CHECKSUM_MISMATCH = "an artifact's bytes are not the ones its checksum names"
+GIT_MISMATCH = "a git archive or commit object is not the one its commit ID names"
+GIT_SUBMODULE = "a git source holds a submodule"
+BAD_MEMBER = ("an archive holds a member that is not a directory, a regular file or a symbolic link, or one "
+              "that replaces or passes through another")
+NO_VERSION = "the CLI's metadata gives no plain version, or its entry point is not an executable file"
+BAD_PART = "a part, its source, its artifact or its layout is not one the store accepts"
+TARGET_MISMATCH = "the CLI's metadata names another target than the recipe's"
+TOO_MANY_BYTES = "an artifact, a file or the install is larger than the store accepts"
 
 Kind = Literal["dir", "file", "link"]
 KINDS: tuple[Kind, ...] = ("dir", "file", "link")
@@ -198,10 +228,11 @@ def parse(data: bytes) -> Manifest:
         doc = _object(json.loads(data.decode("utf-8")), MANIFEST_FIELDS)
         if doc["format"] != FORMAT or type(doc["format"]) is not int:
             raise Mismatch(MANIFEST_MALFORMED)
-        entry_point = doc["entry_point"]
-        if not valid_path(entry_point):
+        entry_point, target = doc["entry_point"], doc["target"]
+        if (not valid_path(entry_point) or not isinstance(target, str)
+                or (target and not PLAIN.fullmatch(target))):
             raise Mismatch(MANIFEST_MALFORMED)
-        m = Manifest(_text(doc["adapter"]), _text(doc["version"]), _text(doc["target"]), str(entry_point),
+        m = Manifest(_text(doc["adapter"]), _text(doc["version"]), target, str(entry_point),
                      tuple(_source(s) for s in _list(doc["sources"])),
                      tuple(_entry(e) for e in _list(doc["entries"])))
         if len({e.path for e in m.entries}) != len(m.entries) or canonical(m) != data:
@@ -600,3 +631,792 @@ def _hash_file(root_fd: int, path: str, read: Reader, fits: Callable[[Stat], boo
             os.close(fd)
         if dirfd != root_fd:
             os.close(dirfd)
+
+
+# --- checksums (plan 4c E5) ---
+
+SHA256_PREFIX = "sha256:"
+SRI_PREFIX = "sha512-"
+
+
+def _is_hex(s: str, n: int) -> bool:
+    return len(s) == n and set(s) <= HEX
+
+
+def _chunks(fd: int) -> Iterator[bytes]:
+    """`fd`'s bytes from offset 0 by `pread`, whatever its file offset."""
+    offset = 0
+    while chunk := os.pread(fd, CHUNK, offset):
+        offset += len(chunk)
+        yield chunk
+
+
+def _read_bounded(fd: int, limit: int) -> bytes | None:
+    """`fd`'s bytes from offset 0, or None if there are more than `limit`."""
+    out = bytearray()
+    for chunk in _chunks(fd):
+        out += chunk
+        if len(out) > limit:
+            return None
+    return bytes(out)
+
+
+def verify_checksum(fd: int, checksum: str) -> None:
+    """`fd`'s bytes are the ones `checksum` names: `sha256:<64 lowercase hex>`, or an SRI `sha512-<base64>`.
+    Any other form, or other bytes, refuses (`CHECKSUM_MISMATCH`)."""
+    if checksum.startswith(SHA256_PREFIX) and _is_hex(checksum[len(SHA256_PREFIX):], 64):
+        algo, want = "sha256", bytes.fromhex(checksum[len(SHA256_PREFIX):])
+    elif checksum.startswith(SRI_PREFIX):
+        try:
+            algo, want = "sha512", base64.b64decode(checksum[len(SRI_PREFIX):], validate=True)
+        except binascii.Error:
+            raise Refused(CHECKSUM_MISMATCH) from None
+        if len(want) != 64:
+            raise Refused(CHECKSUM_MISMATCH)
+    else:
+        raise Refused(CHECKSUM_MISMATCH)
+    h = hashlib.new(algo)
+    for chunk in _chunks(fd):
+        h.update(chunk)
+    if h.digest() != want:
+        raise Refused(CHECKSUM_MISMATCH)
+
+
+# --- git sources, checked without git (plan 4c E6) ---
+
+GitAlgo = Literal["sha1", "sha256"]
+GitMember = tuple[str, bytes, bytes]           # path, mode, raw object ID
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+MAX_COMMIT_OBJECT = 1 << 20
+GIT_FILE, GIT_EXECUTABLE, GIT_LINK, GIT_TREE = b"100644", b"100755", b"120000", b"40000"
+# the modes `git archive` writes for a blob, under `tar.umask` 022 (the fetcher's) or 002 (git's default)
+GIT_TAR_MODES = {0o644: GIT_FILE, 0o664: GIT_FILE, 0o755: GIT_EXECUTABLE, 0o775: GIT_EXECUTABLE}
+_TAR_ERRORS = (tarfile.TarError, EOFError, zlib.error, gzip.BadGzipFile)
+
+
+def _utf8(s: str) -> bool:
+    """False for a name that came from a tar header undecoded: it holds surrogates."""
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _plain_path(path: str) -> bool:
+    return valid_path(path) and _utf8(path)
+
+
+class _Capped:
+    """A reader that refuses (`TOO_MANY_BYTES`) to go past `MAX_TAR_BYTES` of `inner`, before it reads or
+    seeks there: a gzip is decompressed only as far as the cap."""
+
+    def __init__(self, inner: IO[bytes] | gzip.GzipFile) -> None:
+        self.inner = inner
+
+    def tell(self) -> int:
+        return self.inner.tell()
+
+    def read(self, n: int = -1) -> bytes:
+        pos = self.inner.tell()
+        if pos >= MAX_TAR_BYTES and n != 0:
+            if self.inner.read(1):
+                raise Refused(TOO_MANY_BYTES)
+            return b""
+        room = MAX_TAR_BYTES - pos
+        chunk = self.inner.read(room + 1 if n < 0 or n > room else n)
+        if len(chunk) > room:
+            raise Refused(TOO_MANY_BYTES)
+        return chunk
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        base = 0 if whence == os.SEEK_SET else self.inner.tell() if whence == os.SEEK_CUR else None
+        target = -1 if base is None else base + offset
+        if target < 0 or target > MAX_TAR_BYTES:
+            raise Refused(TOO_MANY_BYTES)
+        return self.inner.seek(target)
+
+
+EXTENSIONS = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE, tarfile.GNUTYPE_LONGNAME,
+              tarfile.GNUTYPE_LONGLINK)
+
+
+class _BoundedTar(tarfile.TarFile):
+    extension_bytes = 0
+
+
+class _BoundedInfo(tarfile.TarInfo):
+    """Refuses an extension header's payload over `MAX_TAR_EXTENSION`, or one that brings the tar's past
+    `MAX_TAR_EXTENSIONS` (`TOO_MANY_BYTES`), before tarfile reads it; and a sparse member (`BAD_MEMBER`)
+    before tarfile reads its map."""
+
+    # `_proc_member` is the hook `TarInfo.fromtarfile` calls once it has the header block and before it reads
+    # any payload (CPython 3.12's tarfile); the bounds tests fail if it stops being called
+    def _proc_member(self, tf: tarfile.TarFile) -> tarfile.TarInfo:
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise Refused(BAD_MEMBER)
+        if self.type in EXTENSIONS:
+            total = getattr(tf, "extension_bytes", 0) + self.size
+            if self.size > MAX_TAR_EXTENSION or total > MAX_TAR_EXTENSIONS:
+                raise Refused(TOO_MANY_BYTES)
+            if isinstance(tf, _BoundedTar):
+                tf.extension_bytes = total
+        base: Any = super()
+        return base._proc_member(tf)
+
+    def _proc_gnusparse_00(self, *args: object) -> None:
+        raise Refused(BAD_MEMBER)
+
+    _proc_gnusparse_01 = _proc_gnusparse_10 = _proc_gnusparse_00
+
+
+@contextlib.contextmanager
+def _tar(fd: int, *, gz: bool) -> Generator[tarfile.TarFile]:
+    """A tar reader on `fd` from offset 0, names decoded as UTF-8 with surrogates, and its uncompressed bytes
+    and extension headers bounded; `fd` stays open."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    with contextlib.ExitStack() as stack:
+        raw: IO[bytes] | gzip.GzipFile = stack.enter_context(open(fd, "rb", closefd=False))
+        if gz:
+            raw = stack.enter_context(gzip.GzipFile(fileobj=raw, mode="rb"))
+        t = _BoundedTar(fileobj=cast(IO[bytes], _Capped(raw)), mode="r", tarinfo=_BoundedInfo,
+                        encoding="utf-8", errors="surrogateescape")
+        with t:
+            yield t
+
+
+def _git_hash(algo: GitAlgo, kind: bytes, body: bytes) -> bytes:
+    return hashlib.new(algo, b"%s %d\0" % (kind, len(body)) + body).digest()
+
+
+def git_members(archive_fd: int, algo: GitAlgo) -> list[GitMember]:
+    """The blobs of the `git archive --format=tar` at `archive_fd`, as `(path, mode, object ID)`: a file is
+    100755 if its member's mode is 0755 or 0775, 100644 if it is 0644 or 0664, and any other mode is
+    `GIT_MISMATCH`; a link is 120000 with its target as its content. An empty directory is a submodule,
+    which `git archive` writes as one (`GIT_SUBMODULE`); any other member type, a duplicate or bad name, or a
+    malformed archive is `GIT_MISMATCH`."""
+    out: list[GitMember] = []
+    seen: set[str] = set()
+    dirs: set[str] = set()
+    try:
+        with _tar(archive_fd, gz=False) as t:
+            for members, info in enumerate(t, 1):
+                if members > MAX_ENTRIES + MAX_DEPTH:
+                    raise Refused(TOO_MANY_ENTRIES)
+                name = info.name
+                if not _plain_path(name) or name in seen:
+                    raise Refused(GIT_MISMATCH)
+                if name.count("/") >= MAX_DEPTH:
+                    raise Refused(TOO_DEEP)
+                seen.add(name)
+                if info.type == tarfile.DIRTYPE:
+                    dirs.add(name)
+                elif info.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                    f = t.extractfile(info)
+                    if f is None:
+                        raise Refused(GIT_MISMATCH)
+                    h = hashlib.new(algo, b"blob %d\0" % info.size)
+                    length = 0
+                    while chunk := f.read(CHUNK):
+                        h.update(chunk)
+                        length += len(chunk)
+                    if length != info.size:
+                        raise Refused(GIT_MISMATCH)
+                    mode = GIT_TAR_MODES.get(info.mode)
+                    if mode is None:            # a mode git can't have written: the tree can't vouch for it
+                        raise Refused(GIT_MISMATCH)
+                    out.append((name, mode, h.digest()))
+                elif info.type == tarfile.SYMTYPE:
+                    target = info.linkname.encode("utf-8", "surrogateescape")
+                    out.append((name, GIT_LINK, _git_hash(algo, b"blob", target)))
+                else:
+                    raise Refused(GIT_MISMATCH)
+    except _TAR_ERRORS:
+        raise Refused(GIT_MISMATCH) from None
+    parents = {p.rsplit("/", 1)[0] for p in seen if "/" in p}
+    ancestors = {"/".join(p.split("/")[:i]) for p in parents for i in range(1, p.count("/") + 2)}
+    if dirs - ancestors:
+        raise Refused(GIT_SUBMODULE)
+    return out
+
+
+@dataclasses.dataclass
+class _Tree:
+    children: dict[str, "_Tree | tuple[bytes, bytes]"] = dataclasses.field(
+        default_factory=dict[str, "_Tree | tuple[bytes, bytes]"])
+
+
+def git_tree_id(members: Sequence[GitMember], *, algo: GitAlgo = "sha1") -> str:
+    """The ID of the git tree that holds exactly `members`, with the directories their paths imply, in git's
+    own order and encoding. A path that is both a blob and a directory, or twice a blob, is `GIT_MISMATCH`."""
+    root = _Tree()
+    for path, mode, oid in members:
+        *dirs, name = path.split("/")
+        node = root
+        for d in dirs:
+            child = node.children.setdefault(d, _Tree())
+            if not isinstance(child, _Tree):
+                raise Refused(GIT_MISMATCH)
+            node = child
+        if name in node.children:
+            raise Refused(GIT_MISMATCH)
+        node.children[name] = (mode, oid)
+    return _tree_id(root, algo).hex()
+
+
+def _tree_id(tree: _Tree, algo: GitAlgo) -> bytes:
+    rows: list[tuple[bytes, bytes]] = []
+    for name, child in tree.children.items():
+        raw = name.encode("utf-8")
+        if isinstance(child, _Tree):           # git sorts a tree as if its name ended in `/`
+            rows.append((raw + b"/", GIT_TREE + b" " + raw + b"\0" + _tree_id(child, algo)))
+        else:
+            rows.append((raw, child[0] + b" " + raw + b"\0" + child[1]))
+    return _git_hash(algo, b"tree", b"".join(row for _, row in sorted(rows)))
+
+
+def check_git(archive_fd: int, commit_fd: int, commit_id: str) -> None:
+    """The commit object at `commit_fd` hashes to `commit_id` (lowercase hex: 40 digits for sha1, 64 for
+    sha256), and the tree it names is the one the archive at `archive_fd` holds. Anything else is
+    `GIT_MISMATCH` (or `GIT_SUBMODULE`)."""
+    if not COMMIT_ID.fullmatch(commit_id):
+        raise Refused(GIT_MISMATCH)
+    n = len(commit_id)
+    algo: GitAlgo = "sha1" if n == 40 else "sha256"
+    body = _read_bounded(commit_fd, MAX_COMMIT_OBJECT)
+    if body is None or _git_hash(algo, b"commit", body).hex() != commit_id:
+        raise Refused(GIT_MISMATCH)
+    head = body[:n + 6]
+    tree = head[5:n + 5].decode("ascii", "replace")
+    if head[:5] != b"tree " or head[n + 5:] != b"\n" or not _is_hex(tree, n):
+        raise Refused(GIT_MISMATCH)
+    if git_tree_id(git_members(archive_fd, algo), algo=algo) != tree:
+        raise Refused(GIT_MISMATCH)
+
+
+# --- fs-verity (plan 4c E20) ---
+
+FS_IOC_ENABLE_VERITY = 0x40806685
+# struct fsverity_enable_arg: version 1, sha256, 4096-byte blocks, no salt and no signature
+VERITY_ARG = struct.pack("=IIIIQIIQ88x", 1, 1, 4096, 0, 0, 0, 0, 0)
+
+
+def _ioctl(fd: int, request: int, arg: bytes) -> bytes:
+    return fcntl.ioctl(fd, request, arg)
+
+
+def enable_verity(fd: int) -> bool:
+    """fs-verity on the file at `fd`, which must be open read-only and still writable by its owner. False
+    where the filesystem has no verity (`EOPNOTSUPP`, `ENOTTY`); any other error raises."""
+    try:
+        _ioctl(fd, FS_IOC_ENABLE_VERITY, VERITY_ARG)
+    except OSError as exc:
+        if exc.errno in (errno.EOPNOTSUPP, errno.ENOTTY):
+            return False
+        raise OSError(exc.errno, "verity") from None
+    return True
+
+
+# --- stage (plan 4c E2, E4, E7, E20, E21) ---
+
+PartFormat = Literal["tar.gz", "tgz", "tar", "file"]
+PART_FORMATS: tuple[PartFormat, ...] = ("tar.gz", "tgz", "tar", "file")
+STAGING, STAGED, LOCK = ".staging", ".staged", ".lock"
+MAX_METADATA = 1 << 20
+PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")      # a version, a target or an adapter
+WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+@dataclasses.dataclass(frozen=True)
+class Layout:
+    """Where a CLI's version, target and entry point are read, all under `cli/` (plan 4c E7). Exactly one of
+    `entry_field` (a field of the metadata file) and `entry_point` (a fixed path) is set; with no
+    `target_field` the target is ""."""
+    version_file: str
+    version_field: str
+    target_field: str | None
+    entry_field: str | None
+    entry_point: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class Part:
+    part: str                   # `cli`, `defaults` or `content/<kind>/<name>`
+    format: PartFormat
+    strip: str                  # "" or a prefix every member has, ending in `/`; a `file` part's file name
+    checksum: str               # `sha256:<hex>`, an SRI `sha512-<base64>`, or a git part's `git:<commit>`
+    origin: str
+    signature_available: bool
+    source: Source
+    git_commit: str | None      # a git part's commit; it takes two fds, the archive and the commit object
+
+
+@dataclasses.dataclass(frozen=True)
+class Staged:
+    id: str
+    digest: str
+    entries: int
+    size: int
+    verity: bool                # every file has fs-verity on
+
+
+def _bad_component(c: str) -> bool:
+    return not _plain_path(c) or "/" in c
+
+
+def _layout_ok(layout: Layout) -> bool:
+    return (valid_path(layout.version_file) and bool(layout.version_field)
+            and (layout.entry_field is None) != (layout.entry_point is None)
+            and (layout.entry_point is None or valid_path(layout.entry_point)))
+
+
+def _check_parts(adapter: str, layout: Layout, parts: Sequence[Part], fds: Sequence[int],
+                 login_names: frozenset[str]) -> list[tuple[Part, list[int]]]:
+    """Each part with its fds, once the parts are ones the store accepts (`BAD_PART`, `LOGIN_NAME`)."""
+    names = [p.part for p in parts]
+    if (not PLAIN.fullmatch(adapter) or not _layout_ok(layout) or "cli" not in names
+            or len(set(names)) != len(names)):
+        raise Refused(BAD_PART)
+    out: list[tuple[Part, list[int]]] = []
+    for p in parts:
+        comps = p.part.split("/")
+        if p.part not in ("cli", "defaults") and (len(comps) != 3 or comps[0] != "content"
+                                                  or any(_bad_component(c) for c in comps)):
+            raise Refused(BAD_PART)
+        if any(c in login_names for c in comps):
+            raise Refused(LOGIN_NAME)
+        s = p.source
+        git = s.kind == "git"
+        if ((s.part, s.checksum, s.origin, s.signature_available, s.signature_verified)
+                != (p.part, p.checksum, p.origin, p.signature_available, False)
+                or s.kind not in SOURCE_KINDS or p.format not in PART_FORMATS
+                or git != (p.git_commit is not None)
+                or (git and (p.format != "tar" or p.strip or p.checksum != f"git:{p.git_commit}"))):
+            raise Refused(BAD_PART)
+        if p.format == "file":
+            if _bad_component(p.strip):
+                raise Refused(BAD_PART)
+            if p.strip in login_names:
+                raise Refused(LOGIN_NAME)
+        elif p.strip and not (p.strip.endswith("/") and _plain_path(p.strip[:-1])):
+            raise Refused(BAD_PART)
+        taken = sum(len(f) for _, f in out)
+        mine = list(fds[taken:taken + (2 if git else 1)])
+        if len(mine) != (2 if git else 1):
+            raise Refused(BAD_PART)
+        out.append((p, mine))
+    if sum(len(f) for _, f in out) != len(fds):
+        raise Refused(BAD_PART)
+    return out
+
+
+def _open_path(root_fd: int, path: str, flags: int) -> int:
+    """`path` under `root_fd`, opened component by component without following a link."""
+    *dirs, name = path.split("/")
+    dirfd = root_fd
+    try:
+        for comp in dirs:
+            nxt = _open(comp, DIR_FLAGS, dirfd)
+            if dirfd != root_fd:
+                os.close(dirfd)
+            dirfd = nxt
+        return _open(name, flags, dirfd)
+    finally:
+        if dirfd != root_fd:
+            os.close(dirfd)
+
+
+@contextlib.contextmanager
+def _parent(root_fd: int, path: str) -> Generator[tuple[int, str]]:
+    """The fd of `path`'s parent under `root_fd`, and `path`'s last component."""
+    head, _, name = path.rpartition("/")
+    if not head:
+        yield root_fd, name
+        return
+    fd = _open_path(root_fd, head, DIR_FLAGS)
+    try:
+        yield fd, name
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+class _Unpacker:
+    """Writes parts into the staging root by fd: every name checked component by component before anything
+    is written, every directory made 0700, every file made by `O_EXCL | O_NOFOLLOW` at 0600 and a new inode,
+    and nothing replaced or passed through. `tarfile.extract` is never used."""
+
+    def __init__(self, root_fd: int, login_names: frozenset[str]) -> None:
+        self.root_fd = root_fd
+        self.login_names = login_names
+        self.kinds: dict[str, Kind] = {}
+        self.modes: dict[str, int] = {}             # each file's final mode (E20)
+        self.size = 0                               # bytes written to files so far
+
+    def _claim(self, path: str, kind: Kind) -> bool:
+        """`path` recorded as `kind`; False if it is a directory already. Anything else there is
+        `BAD_MEMBER`."""
+        held = self.kinds.get(path)
+        if held is not None:
+            if held == kind == "dir":
+                return False
+            raise Refused(BAD_MEMBER)
+        if len(self.kinds) >= MAX_ENTRIES:
+            raise Refused(TOO_MANY_ENTRIES)
+        self.kinds[path] = kind
+        return True
+
+    def _mkdir(self, path: str) -> None:
+        if self._claim(path, "dir"):
+            with _parent(self.root_fd, path) as (fd, name):
+                os.mkdir(name, 0o700, dir_fd=fd)
+
+    def _prepare(self, path: str) -> None:
+        """The checks on `path`'s components, then its parents, made where they are missing."""
+        comps = path.split("/")
+        if any(c in self.login_names for c in comps):
+            raise Refused(LOGIN_NAME)
+        if len(comps) > MAX_DEPTH:
+            raise Refused(TOO_DEEP)
+        for i in range(1, len(comps)):
+            self._mkdir("/".join(comps[:i]))
+
+    def directory(self, path: str) -> None:
+        self._prepare(path)
+        self._mkdir(path)
+
+    def file(self, path: str, src: IO[bytes], size: int, executable: bool) -> None:
+        """A file of `size` bytes from `src`; the byte bounds are checked before the first write and against
+        every chunk (`TOO_MANY_BYTES`), and a length that isn't `size` is `BAD_PART`."""
+        self._prepare(path)
+        if size > MAX_FILE_BYTES or self.size + size > MAX_INSTALL_BYTES:
+            raise Refused(TOO_MANY_BYTES)
+        self._claim(path, "file")
+        with _parent(self.root_fd, path) as (dirfd, name):
+            fd = os.open(name, WRITE_FLAGS, 0o600, dir_fd=dirfd)
+        try:
+            written = 0
+            while chunk := src.read(CHUNK):
+                written += len(chunk)
+                if written > size:
+                    raise Refused(BAD_PART)
+                _write_all(fd, chunk)
+            if written != size:
+                raise Refused(BAD_PART)
+        finally:
+            os.close(fd)
+        self.size += written
+        self.modes[path] = 0o555 if executable else 0o444
+
+    def link(self, path: str, target: str) -> None:
+        if not target or "\0" in target or not _utf8(target):
+            raise Refused(BAD_LINK)             # the walk refuses one that is absolute or leaves the install
+        self._prepare(path)
+        self._claim(path, "link")
+        with _parent(self.root_fd, path) as (fd, name):
+            os.symlink(target, name, dir_fd=fd)
+
+    def part(self, p: Part, fd: int) -> None:
+        self.directory(p.part)
+        if p.format == "file":
+            os.lseek(fd, 0, os.SEEK_SET)
+            with open(fd, "rb", closefd=False) as f:
+                self.file(f"{p.part}/{p.strip}", f, os.fstat(fd).st_size, False)
+            return
+        try:
+            with _tar(fd, gz=p.format != "tar") as t:
+                for members, info in enumerate(t, 1):
+                    if members > MAX_ENTRIES + MAX_DEPTH:      # repeated directories create no entry
+                        raise Refused(TOO_MANY_ENTRIES)
+                    self._member(p, t, info)
+        except _TAR_ERRORS:
+            raise Refused(BAD_PART) from None
+
+    def _member(self, p: Part, t: tarfile.TarFile, info: tarfile.TarInfo) -> None:
+        name = info.name
+        if not _plain_path(name):
+            raise Refused(BAD_NAME)
+        if p.strip:
+            if info.type == tarfile.DIRTYPE and p.strip.startswith(name + "/"):
+                return                              # the strip prefix's own directories
+            if not name.startswith(p.strip):
+                raise Refused(BAD_PART)
+            name = name[len(p.strip):]
+        path = f"{p.part}/{name}"
+        if info.type == tarfile.DIRTYPE:
+            self.directory(path)
+        elif info.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+            src = t.extractfile(info)
+            if src is None:
+                raise Refused(BAD_MEMBER)
+            # a git part's member is executable as git classified it when `check_git` authenticated it
+            executable = info.mode & (0o100 if p.git_commit is not None else 0o111)
+            self.file(path, src, info.size, bool(executable))
+        elif info.type == tarfile.SYMTYPE:
+            self.link(path, info.linkname)
+        else:
+            raise Refused(BAD_MEMBER)
+
+
+def _copy(fd: int, dirfd: int, name: str) -> int:
+    """A staging-private copy of the regular file at `fd`, from offset 0, open read-write at `name`. More
+    than `MAX_ARTIFACT_BYTES`, at the start or while it is copied (a file that grows), is `TOO_MANY_BYTES`."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused(BAD_PART)
+    if st.st_size > MAX_ARTIFACT_BYTES:
+        raise Refused(TOO_MANY_BYTES)
+    out = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                  dir_fd=dirfd)
+    try:
+        offset = 0
+        try:
+            while sent := os.sendfile(out, fd, offset, min(CHUNK, MAX_ARTIFACT_BYTES + 1 - offset)):
+                offset += sent
+                if offset > MAX_ARTIFACT_BYTES:
+                    raise Refused(TOO_MANY_BYTES)
+        except OSError as exc:
+            if exc.errno not in (errno.EINVAL, errno.ENOSYS) or offset:
+                raise
+            while chunk := os.pread(fd, min(CHUNK, MAX_ARTIFACT_BYTES + 1 - offset), offset):
+                offset += len(chunk)
+                if offset > MAX_ARTIFACT_BYTES:
+                    raise Refused(TOO_MANY_BYTES) from None
+                _write_all(out, chunk)
+        return out
+    except BaseException:
+        os.close(out)
+        raise
+
+
+def _unpack(staging_fd: int, src_name: str, planned: list[tuple[Part, list[int]]],
+            unpacker: _Unpacker) -> None:
+    """Each part copied into `src_name` first, its checksum (or its git tree) checked on that copy, then
+    unpacked from it: the bytes checked are the bytes unpacked."""
+    src_fd = _open(src_name, DIR_FLAGS, staging_fd)
+    try:
+        for n, (p, fds) in enumerate(planned):
+            copies: list[int] = []
+            try:
+                for k, fd in enumerate(fds):
+                    copies.append(_copy(fd, src_fd, f"{n}.{k}"))
+                if p.git_commit is None:
+                    verify_checksum(copies[0], p.checksum)
+                else:
+                    check_git(copies[0], copies[1], p.git_commit)
+                unpacker.part(p, copies[0])
+            finally:
+                for c in copies:
+                    os.close(c)
+    finally:
+        os.close(src_fd)
+
+
+def _version(root_fd: int, layout: Layout, unpacker: _Unpacker, expected_target: str) -> tuple[str, str]:
+    """The version, target and entry point from the CLI's metadata (E7): a regular file, not a link, of
+    bounded size, holding a JSON object whose version (and target) is a plain name, and an entry point that
+    is an executable regular file under `cli/`. Anything else is `NO_VERSION`; a target the metadata names
+    that isn't `expected_target` is `TARGET_MISMATCH`."""
+    meta = f"cli/{layout.version_file}"
+    if unpacker.kinds.get(meta) != "file":
+        raise Refused(NO_VERSION)
+    fd = _open_path(root_fd, meta, FILE_FLAGS)
+    try:
+        data = _read_bounded(fd, MAX_METADATA)
+    finally:
+        os.close(fd)
+    try:
+        doc: object = json.loads(data) if data is not None else None
+    except (ValueError, RecursionError):
+        raise Refused(NO_VERSION) from None
+    if not isinstance(doc, dict):
+        raise Refused(NO_VERSION)
+    fields = cast(dict[str, object], doc)
+    version = fields.get(layout.version_field)
+    target = fields.get(layout.target_field, "") if layout.target_field is not None else ""
+    entry = layout.entry_point if layout.entry_field is None else fields.get(layout.entry_field)
+    if (not isinstance(version, str) or not PLAIN.fullmatch(version) or not isinstance(target, str)
+            or (layout.target_field is not None and not PLAIN.fullmatch(target))
+            or not isinstance(entry, str) or not valid_path(entry)):
+        raise Refused(NO_VERSION)
+    entry = f"cli/{entry}"
+    if unpacker.kinds.get(entry) != "file" or unpacker.modes.get(entry) != 0o555:
+        raise Refused(NO_VERSION)
+    if layout.target_field is not None and target != expected_target:
+        raise Refused(TARGET_MISMATCH)
+    return version, entry
+
+
+def _seal(root_fd: int, unpacker: _Unpacker, verity: bool) -> bool:
+    """The final modes and the tree made durable (E20, E21): every file gets fs-verity (if asked, while
+    the filesystem has it), its mode and an `fsync`; then every directory, deepest first, 0555 and an
+    `fsync`; then the root. True if every file has verity."""
+    on = verity
+    for path, kind in unpacker.kinds.items():
+        if kind != "file":
+            continue
+        fd = _open_path(root_fd, path, FILE_FLAGS)
+        try:
+            if on:
+                on = enable_verity(fd)
+            os.fchmod(fd, unpacker.modes[path])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    dirs = sorted((p for p, k in unpacker.kinds.items() if k == "dir"), key=lambda p: -p.count("/"))
+    for path in dirs:
+        fd = _open_path(root_fd, path, DIR_FLAGS)
+        try:
+            os.fchmod(fd, 0o555)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    os.fchmod(root_fd, 0o555)
+    os.fsync(root_fd)
+    return on
+
+
+@contextlib.contextmanager
+def _store_lock(store_fd: int) -> Generator[None]:
+    """The store's exclusive lock on `<store>/.lock` (E21) for the block. Task 4's `store_lock` adds its
+    deadline."""
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=store_fd)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _make_dir(parent_fd: int, name: str, mode: int) -> int:
+    """`name` under `parent_fd`, opened; if it is new, made with `mode` and its parent `fsync`ed."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        new = True
+    except FileExistsError:
+        new = False
+    fd = _open(name, DIR_FLAGS, parent_fd)
+    try:
+        if new:
+            os.fchmod(fd, mode)
+            os.fsync(parent_fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _remove(dirfd: int, name: str) -> None:
+    """`name` under `dirfd` and everything below it, by fd, never following a link; each directory is made
+    writable by its owner first. Gone already is fine."""
+    try:
+        st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        os.unlink(name, dir_fd=dirfd)
+        return
+    fd = _open(name, DIR_FLAGS, dirfd)
+    try:
+        os.fchmod(fd, 0o700)
+        with os.scandir(fd) as it:
+            children = [e.name for e in it]
+        for child in children:
+            _remove(fd, child)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=dirfd)
+
+
+def _commit(store_fd: int, staging_id: str, data: bytes) -> None:
+    """Under the store lock (E21): `.staged/<id>.json` written by `O_EXCL`, made 0444 and `fsync`ed, then
+    `.staged` `fsync`ed."""
+    with _store_lock(store_fd):
+        staged_fd = _make_dir(store_fd, STAGED, 0o755)
+        try:
+            fd = os.open(f"{staging_id}.json", WRITE_FLAGS, 0o444, dir_fd=staged_fd)
+            try:
+                _write_all(fd, data)
+                os.fchmod(fd, 0o444)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(staged_fd)
+        finally:
+            os.close(staged_fd)
+
+
+def _discard(store_fd: int, staging_fd: int, staging_id: str) -> None:
+    for name in (staging_id, f"{staging_id}.src", f"{staging_id}.lock"):
+        _remove(staging_fd, name)
+    try:
+        staged_fd = _open(STAGED, DIR_FLAGS, store_fd)
+    except FileNotFoundError:
+        return
+    try:
+        _remove(staged_fd, f"{staging_id}.json")
+    finally:
+        os.close(staged_fd)
+
+
+def stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds: Sequence[int],
+          login_names: frozenset[str], *, verity: bool, target: str) -> Staged:
+    """Unpack `parts` from `fds` (one per part, two for a git part: the archive and the commit object) into
+    `<store>/.staging/<id>/<part>/`, and write the staged manifest to `<store>/.staged/<id>.json`.
+
+    Each artifact is copied first (at most `MAX_ARTIFACT_BYTES`; the files unpacked at most `MAX_FILE_BYTES`
+    each and `MAX_INSTALL_BYTES` in all), and its checksum (or git tree) is checked on the copy it is unpacked
+    from. Before the tree is walked and hashed it has its final modes (E20: directories and the root 0555, a
+    file 0555 if its member had any execute bit, else 0444) and is durable (E21), so the staged manifest
+    holds the modes the install will have. `target` is the recipe's: the manifest records it, and a target
+    the CLI's metadata names must be it. The unpack and the hash hold only `.staging/<id>.lock`; the
+    manifest is written under the store lock. Nothing in an artifact is run. Any exception removes
+    `.staging/<id>` and `.staged/<id>.json` before it propagates."""
+    if not PLAIN.fullmatch(target):
+        raise Refused(BAD_PART)
+    planned = _check_parts(adapter, layout, parts, fds, login_names)
+    staging_id = secrets.token_hex(16)
+    try:
+        store_fd = os.open(store, DIR_FLAGS)
+    except OSError as exc:
+        raise OSError(exc.errno, "open") from None
+    staging_fd = root_fd = lock_fd = -1
+    try:
+        try:
+            with _store_lock(store_fd):
+                staging_fd = _make_dir(store_fd, STAGING, 0o700)
+                os.mkdir(staging_id, 0o700, dir_fd=staging_fd)
+                os.mkdir(f"{staging_id}.src", 0o700, dir_fd=staging_fd)
+                lock_fd = os.open(f"{staging_id}.lock", WRITE_FLAGS, 0o600, dir_fd=staging_fd)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                os.fsync(staging_fd)
+            root_fd = _open(staging_id, DIR_FLAGS, staging_fd)
+            unpacker = _Unpacker(root_fd, login_names)
+            _unpack(staging_fd, f"{staging_id}.src", planned, unpacker)
+            _remove(staging_fd, f"{staging_id}.src")
+            version, entry_point = _version(root_fd, layout, unpacker, target)
+            on = _seal(root_fd, unpacker, verity)
+            os.fsync(staging_fd)
+            entries = entries_of(root_fd)
+            sources = tuple(sorted((p.source for p in parts), key=lambda s: _path_key(s.part)))
+            m = Manifest(adapter, version, target, entry_point, sources, entries)
+            data = canonical(m)
+            parse(data)                         # the staged manifest is one the store will read back
+            _commit(store_fd, staging_id, data)
+            os.unlink(f"{staging_id}.lock", dir_fd=staging_fd)
+        except BaseException:
+            if staging_fd >= 0:
+                with contextlib.suppress(OSError):
+                    _discard(store_fd, staging_fd, staging_id)
+            raise
+    finally:
+        for fd in (root_fd, lock_fd, staging_fd, store_fd):
+            if fd >= 0:
+                os.close(fd)
+    size = sum(e.size for e in entries if e.kind == "file")
+    return Staged(staging_id, digest(m), len(entries), size, on)
