@@ -6,28 +6,38 @@ import stat
 import subprocess
 import sys
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any, cast
 
+import harness_env as he
 import pytest
 from sandbox_env import config_env, fake_jwt, install_fake_cli, short_dir
 
+from heterodyne.agents import codex as codex_mod
+from heterodyne.agents import config_files
 from heterodyne.agents.base import (
+    DEFAULTS_MALFORMED,
     HOOK_EVENTS,
+    OWNS_KEY,
     PRE_TOOL_COMMAND,
     PRE_TOOL_TIMEOUT,
     AdapterError,
+    find_binary,
     hook_command,
     hook_group,
+    install_root,
     pre_tool_command,
+    profile_args,
     write_at,
 )
-from heterodyne.agents.claude_code import CLAUDE_HOOK_EVENTS, SETTINGS_FILE, ClaudeCode
+from heterodyne.agents.claude_code import CLAUDE_HOOK_EVENTS, SETTINGS_FILE, ClaudeCode, interactive_argv
 from heterodyne.agents.codex import APP_SOCKET, Codex
-from heterodyne.agents.registry import ADAPTERS
+from heterodyne.agents.registry import ADAPTERS, login_names
 from heterodyne.config import ConfigError
+from heterodyne.config import profile_args as pa
 from heterodyne.sandbox import settings
-from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, SessionLayout
+from heterodyne.sandbox.spec import BRIDGE_INSIDE, LAUNCHER_ENV, RUN_INSIDE, SessionLayout
 from heterodyne.session import shim
 
 ID = "0b1d8c5e-3f7a-4c2d-9e6b-7a8f9c0d1e2f"
@@ -171,8 +181,10 @@ def test_codex_home_is_rewritten_and_stale_sockets_go(layout: SessionLayout, tmp
     Codex().prepare_home(layout, tmp_path / "wt")
     config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
     assert config == {"approval_policy": "never", "sandbox_mode": "danger-full-access",
+                      "check_for_update_on_startup": False,
                       "projects": {str(tmp_path / "wt"): {"trust_level": "untrusted"}},
-                      "features": {"apps": False}}
+                      "features": {"apps": False, "daemon_auto_start": False, "plugins": False,
+                                   "in_app_updates": False}}
     assert not (layout.bridge / "app.sock").exists()
     assert layout.daemon.stat().st_mode & 0o777 == 0o700
     hooks = json.loads((layout.home / ".codex" / "hooks.json").read_text())["hooks"]
@@ -277,10 +289,10 @@ def test_tui_argv(tmp_path: Path) -> None:
     assert ClaudeCode().tui_argv(claude, {}, native_id=ID, resume=True, label="x")[1:3] == ["--resume", ID]
     assert Codex().tui_argv(codex, {}, native_id=None, resume=False, label="x") == [
         str(codex.binary), "--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox"]
-    pinned = {"model": "m-2", "args": ["-c", "k=v"]}
+    pinned = {"model": "m-2", "args": []}
     assert Codex().tui_argv(codex, pinned, native_id=None, resume=False, label="x") == [
         str(codex.binary), "--remote", APP_SOCKET, "--dangerously-bypass-approvals-and-sandbox",
-        "--model", "m-2", "-c", "k=v"]
+        "--model", "m-2"]
     # A remote resume takes no permission override (0.160.0 refuses one): the thread keeps its own policy.
     assert Codex().tui_argv(codex, {"model": "m-2"}, native_id=ID, resume=True, label="x") == [
         str(codex.binary), "resume", ID, "--remote", APP_SOCKET, "--model", "m-2"]
@@ -514,3 +526,378 @@ def test_turn_end_events_per_adapter() -> None:
     assert ClaudeCode().turn_end_events == ("Stop", "StopFailure")
     assert Codex().turn_end_events == ("Stop",)
     assert "StopFailure" not in HOOK_EVENTS            # Codex's trusted hook set is unchanged
+
+
+# --- plan 4c Task 6 (with Amendment 1 §4): declared versions, layouts, owned keys and updaters ---
+
+def test_each_adapter_declares_its_s7_pin() -> None:
+    assert set(Codex().versions) == {"0.160.0"} and Codex().version_pin == "0.160.0"
+    assert set(ClaudeCode().versions) == {"2.1.286"} and ClaudeCode().version_pin == "2.1.286"
+
+
+@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
+def test_tool_env_is_per_declared_version(adapter: str) -> None:
+    a = ADAPTERS[adapter]
+    assert a.tool_env == a.versions[a.version_pin].tool_env
+    assert all(d.presentation <= a.content_kinds for d in a.versions.values())
+
+
+@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
+def test_the_layouts_read_version_target_and_entry_point_from_fixture_releases(tmp_path: Path,
+                                                                                adapter: str) -> None:
+    a = ADAPTERS[adapter]
+    if adapter == "codex":
+        expected = ("github-release", "openai/codex", he.CODEX_LAYOUT, he.CODEX_STRIP)
+        part, data = he.codex_part()
+        version, target, entry = "0.160.0", "x86_64-unknown-linux-musl", "cli/bin/codex"
+    else:
+        expected = ("npm", "@anthropic-ai/claude-code-<target>", he.CLAUDE_LAYOUT, he.CLAUDE_STRIP)
+        part, data = he.claude_part()
+        version, target, entry = "2.1.286", he.CLAUDE_TARGET, "cli/claude"
+    il = a.install_layout
+    assert (il.artifact, il.locator, il.layout, il.strip) == expected
+    staged = he.stage(tmp_path, il.layout, [(part, data)], adapter=adapter)
+    m = he.staged_manifest(tmp_path, staged)
+    assert (m.adapter, m.version, m.target, m.entry_point) == (adapter, version, target, entry)
+    assert m.version in a.versions
+
+
+def test_codex_names_its_release_assets() -> None:
+    assert codex_mod.RELEASE_ASSET.format(target="x86_64-unknown-linux-musl") == \
+        "codex-package-x86_64-unknown-linux-musl.tar.gz"
+    assert codex_mod.RELEASE_SUMS == "codex-package_SHA256SUMS"
+
+
+def test_registry_login_names_is_the_union_of_the_adapters() -> None:
+    assert login_names() == frozenset({"auth.json", ".credentials.json"}) == he.LOGIN_NAMES
+    assert login_names() == frozenset(n for a in ADAPTERS.values() for n in a.login_names)
+
+
+@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
+def test_the_old_lookup_still_works_and_agrees_with_the_declared_versions(tmp_path: Path,
+                                                                           adapter: str) -> None:
+    binary = install_fake_cli(tmp_path, adapter)
+    cli = ADAPTERS[adapter].locate(binary.name, str(binary.parent))
+    assert cli.version in ADAPTERS[adapter].versions
+    assert (cli.install, cli.digest) == ("", "")
+    assert install_root(find_binary(str(binary), "")) == cli.root
+
+
+def install_with_defaults(tmp_path: Path, name: str, text: str) -> Path:
+    install = tmp_path / "install"
+    (install / "defaults").mkdir(parents=True)
+    (install / "defaults" / name).write_text(text)
+    return install
+
+
+def owned_tree(owned: frozenset[str], value: object) -> dict[str, Any]:
+    """A tree that sets every dotted key of `owned` to `value`."""
+    tree: dict[str, Any] = {}
+    for key in sorted(owned):
+        *parents, leaf = key.split(".")
+        here = tree
+        for p in parents:
+            here = here.setdefault(p, {})
+        here[leaf] = value
+    return tree
+
+
+def at(tree: Mapping[str, Any], key: str) -> object:
+    here: Any = tree
+    for p in key.split("."):
+        if not isinstance(here, dict) or p not in here:
+            return "<absent>"
+        here = cast(dict[str, Any], here)[p]
+    return here
+
+
+def codex_generated(layout: SessionLayout, tmp_path: Path, defaults: str | None) -> dict[str, Any]:
+    install = install_with_defaults(tmp_path / ("d" if defaults else "n"), "config.toml", defaults or "")
+    Codex().prepare_install_home(layout, tmp_path / "wt", install)
+    return tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+
+
+def toml_value(value: object) -> str:
+    return json.dumps(value) if isinstance(value, str) else str(value).lower()
+
+
+def test_defaults_that_set_every_owned_key_lose_to_the_launcher_codex(layout: SessionLayout,
+                                                                       tmp_path: Path) -> None:
+    owned = Codex().owned_keys
+    assert {"approval_policy", "sandbox_mode", "check_for_update_on_startup", "features.apps",
+            "features.daemon_auto_start", "features.plugins", "features.in_app_updates", "hooks", "projects",
+            "profile", "profiles", "notify"} <= owned
+    plain = codex_generated(layout, tmp_path, None)
+    lines = ['check_for_update_on_startup = true', 'profile = "x"', 'approval_policy = "on-request"',
+             'sandbox_mode = "workspace-write"', 'notify = ["sh", "-c", "x"]', 'model = "kept"',
+             '[features]', 'apps = true', 'daemon_auto_start = true', 'plugins = true',
+             'in_app_updates = true', 'other_feature = true',
+             '[profiles.x.features]', 'plugins = true',
+             '[projects."/elsewhere"]', 'trust_level = "trusted"',
+             '[hooks.state."k"]', 'trusted_hash = "h"']
+    merged = codex_generated(layout, tmp_path, "\n".join(lines) + "\n")
+    for key in owned:
+        assert at(merged, key) == at(plain, key), key
+    assert "profile" not in merged and "profiles" not in merged and "notify" not in merged
+    assert merged["check_for_update_on_startup"] is False
+    assert merged["features"] == {"apps": False, "daemon_auto_start": False, "plugins": False,
+                                  "in_app_updates": False, "other_feature": True}
+    assert merged["projects"] == {str(tmp_path / "wt"): {"trust_level": "untrusted"}}
+    assert merged["model"] == "kept"                         # a key the launcher doesn't own is kept
+
+
+def test_defaults_that_set_every_owned_key_lose_to_the_launcher_claude(tmp_path: Path) -> None:
+    owned = ClaudeCode().owned_keys
+    assert {"hooks", "statusLine", "skipDangerousModePermissionPrompt", "env.DISABLE_AUTOUPDATER",
+            "env.DISABLE_UPDATES", "env.ENABLE_CLAUDEAI_MCP_SERVERS", "disableAllHooks",
+            "permissions.defaultMode", "enabledPlugins", "extraKnownMarketplaces", "sandbox"} <= owned
+    plain = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
+    defaults = owned_tree(owned, "")
+    defaults["permissions"]["allow"] = ["Read"]
+    install = install_with_defaults(tmp_path, "settings.json", json.dumps(defaults))
+    merged = json.loads(ClaudeCode().run_files(usage=True, install=install)[SETTINGS_FILE])
+    for key in owned:
+        assert at(merged, key) == at(plain, key), key
+    assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+    assert merged["permissions"] == {"allow": ["Read"]}
+
+
+# One install per owned key, setting only that key the way an install would turn it back on.
+CODEX_SET = {
+    "approval_policy": "on-request", "sandbox_mode": "workspace-write",
+    "check_for_update_on_startup": True, "projects": {"/elsewhere": {"trust_level": "trusted"}},
+    "notify": ["sh", "-c", "x"], "hooks": {"state": {"k": {"trusted_hash": "h"}}},
+    "features.apps": True, "features.daemon_auto_start": True, "features.plugins": True,
+    "features.in_app_updates": True, "profile": "x", "profiles": {"x": {"features": {"plugins": True}}},
+    # MCP comes only through content items, which check_content sees (r2): any name, its command, its env
+    # and its http_headers_helper (a RawMcpServerConfig field in 0.160.0)
+    "mcp_servers": {"unchecked": {"command": "/planted/command", "env": {"PATH": "/planted"},
+                                  "http_headers_helper": "/planted/helper"}},
+    # what the commands it runs see, and how it starts and confines them
+    "shell_environment_policy": {"inherit": "all", "set": {"PATH": "/planted"}},
+    "allow_login_shell": True, "zsh_path": "/planted/zsh",
+    "sandbox_workspace_write": {"writable_roots": ["/"], "network_access": True},
+    "default_permissions": "x", "permissions": {"x": {"network": {"proxy_url": "http://planted"}}},
+    "js_repl_node_path": "/planted/node", "js_repl_node_module_dirs": ["/planted"],
+    "browser_use": {"full_cdp_access": True}, "computer_use": {"enabled": True},
+    "agents": {"r": {"config_file": "/planted.toml"}}, "orchestrator": {"x": "y"},
+    # where its traffic and its logins go
+    "model_provider": "x", "model_providers": {"x": {"base_url": "http://planted", "env_key": "K"}},
+    "openai_base_url": "http://planted", "chatgpt_base_url": "http://planted", "oss_provider": "ollama",
+    "experimental_realtime_ws_base_url": "ws://planted",
+    "experimental_realtime_webrtc_call_base_url": "http://planted",
+    "experimental_thread_store_endpoint": "http://planted", "experimental_thread_store": {"type": "x"},
+    "otel": {"exporter": "x"}, "forced_login_method": "api", "forced_chatgpt_workspace_id": "w",
+    "cli_auth_credentials_store": "keyring", "mcp_oauth_credentials_store": "file",
+    "mcp_oauth_callback_port": 1, "mcp_oauth_callback_url": "http://planted",
+    "mcp_enterprise_managed_auth": True,
+    # the plugins it fetches and the state it keeps outside the home
+    "plugins": {"p": {"enabled": True}}, "marketplaces": {"m": {"source": "x"}},
+    "allow_symlinked_codex_home": True, "sqlite_home": "/planted", "log_dir": "/planted",
+}
+CLAUDE_SET = {
+    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]},
+    "statusLine": {"type": "command", "command": "x"}, "skipDangerousModePermissionPrompt": False,
+    "disableAllHooks": True, "permissions.defaultMode": "default", "enabledPlugins": {"p@m": True},
+    "extraKnownMarketplaces": {"m": {"source": {"source": "github", "repo": "x/y"}}},
+    "sandbox": {"enabled": False}, "env.DISABLE_AUTOUPDATER": "0", "env.DISABLE_UPDATES": "0",
+    "env.ENABLE_CLAUDEAI_MCP_SERVERS": "1",
+    # the settings the CLI runs as commands (its own list of them in 2.1.286)
+    "apiKeyHelper": "x", "awsAuthRefresh": "x", "awsCredentialExport": "x", "gcpAuthRefresh": "x",
+    "otelHeadersHelper": "x", "proxyAuthHelper": "x", "processWrapper": "x", "policyHelpers": ["x"],
+    "fileSuggestion": {"type": "command", "command": "x"},
+    "subagentStatusLine": {"type": "command", "command": "x"},
+    # the worktree's own .mcp.json servers, started without asking
+    "enableAllProjectMcpServers": True, "enabledMcpjsonServers": ["s"],
+    # MCP only through content items (r2): no settings-file server, whatever the CLI reads
+    "mcpServers": {"unchecked": {"command": "/planted/command"}},
+}
+
+
+def test_each_owned_key_has_an_install_case() -> None:
+    assert set(CODEX_SET) == Codex().owned_keys
+    assert set(CLAUDE_SET) == ClaudeCode().owned_keys
+
+
+@pytest.mark.parametrize("key", sorted(CODEX_SET))
+def test_an_install_that_sets_one_owned_key_is_overridden_codex(layout: SessionLayout, tmp_path: Path,
+                                                                 key: str) -> None:
+    plain = codex_generated(layout, tmp_path, None)
+    merged = codex_generated(layout, tmp_path,
+                             config_files.toml_text(owned_tree(frozenset({key}), CODEX_SET[key])))
+    assert at(merged, key) == at(plain, key)
+    assert at(merged, key) != CODEX_SET[key]
+
+
+@pytest.mark.parametrize("key", sorted(CLAUDE_SET))
+def test_an_install_that_sets_one_owned_key_is_overridden_claude(tmp_path: Path, key: str) -> None:
+    plain = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
+    install = install_with_defaults(tmp_path, "settings.json",
+                                    json.dumps(owned_tree(frozenset({key}), CLAUDE_SET[key])))
+    merged = json.loads(ClaudeCode().run_files(usage=True, install=install)[SETTINGS_FILE])
+    assert at(merged, key) == at(plain, key)
+    assert at(merged, key) != CLAUDE_SET[key]
+
+
+def test_the_launcher_hooks_run_python3_from_path() -> None:
+    """Why PATH in an install's env matters: the hook command names python3, not a path to it."""
+    hooks = json.loads(ClaudeCode().run_files()[SETTINGS_FILE])["hooks"]
+    assert hooks["Stop"][0]["hooks"][0]["command"].startswith("python3 ")
+
+
+@pytest.mark.parametrize("env", [
+    "PATH",                             # a planted python3 runs instead of the launcher's hook
+    "CLAUDE_CODE_SHELL_PREFIX",         # wraps every hook and tool command
+    "CLAUDE_CODE_PLUGIN_DIRS",          # loads plugins that check_content never saw
+    "HZ_NOT_A_CLAUDE_VARIABLE",         # and anything else: the allowlist is empty
+])
+def test_an_install_env_entry_is_refused(tmp_path: Path, env: str) -> None:
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "python3").write_text("#!/bin/sh\nexit 0\n")
+    (planted / "python3").chmod(0o755)
+    value = f"{planted}:/usr/bin:/bin" if env == "PATH" else str(planted)
+    install = install_with_defaults(tmp_path, "settings.json", json.dumps({"env": {env: value}}))
+    with pytest.raises(AdapterError) as refused:
+        ClaudeCode().run_files(install=install)
+    assert str(refused.value) == OWNS_KEY
+
+
+def test_an_install_env_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
+    install = install_with_defaults(tmp_path, "settings.json", json.dumps({"env": ["PATH=/planted"]}))
+    with pytest.raises(AdapterError) as refused:
+        ClaudeCode().run_files(install=install)
+    assert str(refused.value) == DEFAULTS_MALFORMED
+
+
+def test_an_install_env_of_only_launcher_keys_is_overridden_not_refused(tmp_path: Path) -> None:
+    install = install_with_defaults(tmp_path, "settings.json",
+                                    json.dumps({"env": {"DISABLE_UPDATES": "0"}, "model": "kept"}))
+    merged = json.loads(ClaudeCode().run_files(install=install)[SETTINGS_FILE])
+    assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+    assert merged["model"] == "kept"
+
+
+@pytest.mark.parametrize(("adapter", "name", "text"), [
+    ("codex", "config.toml", "x = [\n"), ("codex", "config.toml", "when = 1979-05-27T07:32:00Z\n"),
+    ("claude-code", "settings.json", "[1]"), ("claude-code", "settings.json", "{"),
+])
+def test_defaults_the_adapter_cant_read_are_refused(layout: SessionLayout, tmp_path: Path, adapter: str,
+                                                    name: str, text: str) -> None:
+    install = install_with_defaults(tmp_path, name, text)
+    with pytest.raises(AdapterError) as refused:
+        if adapter == "codex":
+            Codex().prepare_install_home(layout, tmp_path / "wt", install)
+        else:
+            ClaudeCode().run_files(install=install)
+    assert str(refused.value) == DEFAULTS_MALFORMED
+
+
+def test_a_linked_defaults_file_is_refused_not_followed(layout: SessionLayout, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.toml"
+    outside.write_text('model = "planted"\n')
+    install = tmp_path / "install"
+    (install / "defaults").mkdir(parents=True)
+    (install / "defaults" / "config.toml").symlink_to(outside)
+    with pytest.raises(AdapterError) as refused:
+        Codex().prepare_install_home(layout, tmp_path / "wt", install)
+    assert str(refused.value) == DEFAULTS_MALFORMED
+
+
+def test_an_install_without_defaults_is_the_launcher_alone(layout: SessionLayout, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    install.mkdir()
+    Codex().prepare_install_home(layout, tmp_path / "wt", install)
+    Codex().prepare_home(layout, tmp_path / "wt2")
+    first = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+    assert first["features"]["plugins"] is False
+    assert json.loads(ClaudeCode().run_files(install=install)[SETTINGS_FILE]) == json.loads(
+        ClaudeCode().run_files()[SETTINGS_FILE])
+
+
+@pytest.mark.parametrize("value", ["tab\there", "nul\x00", "del\x7f", "quote\"back\\slash", "é ✓",
+                                   "\U0001f600", "line\nbreak"])
+def test_the_generated_toml_round_trips_any_default_string(layout: SessionLayout, tmp_path: Path,
+                                                           value: str) -> None:
+    quoted = json.dumps(value, ensure_ascii=False)          # TOML has no surrogate-pair escapes
+    default = f"model = {quoted}\n[tables.\"a b\"]\nlist = [1, 2.5, true, {{k = {quoted}}}]\n"
+    # json.dumps escapes are TOML basic-string escapes, except \x7f, which TOML wants escaped too
+    install = install_with_defaults(tmp_path, "config.toml", default.replace("\x7f", "\\u007f"))
+    Codex().prepare_install_home(layout, tmp_path / "wt", install)
+    merged = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+    assert merged["model"] == value
+    assert merged["tables"]["a b"]["list"] == [1, 2.5, True, {"k": value}]
+
+
+def test_the_updater_is_off_in_what_the_adapter_generates(layout: SessionLayout, tmp_path: Path) -> None:
+    for prepare in (lambda: Codex().prepare_home(layout, tmp_path / "wt"),
+                    lambda: Codex().prepare_install_home(layout, tmp_path / "wt", tmp_path)):
+        prepare()
+        text = (layout.home / ".codex" / "config.toml").read_text()
+        top = text.split("\n[", 1)[0]
+        assert "check_for_update_on_startup = false" in top.splitlines()
+        features = tomllib.loads(text)["features"]
+        assert {k: features[k] for k in ("daemon_auto_start", "plugins", "in_app_updates", "apps")} == {
+            "daemon_auto_start": False, "plugins": False, "in_app_updates": False, "apps": False}
+    binary = install_fake_cli(tmp_path, "claude-code")
+    facts = ClaudeCode().facts(layout, ClaudeCode().locate("claude", str(binary.parent)), 1234)
+    assert facts.extra_env == {"ENABLE_CLAUDEAI_MCP_SERVERS": "false", "DISABLE_AUTOUPDATER": "1",
+                               "DISABLE_UPDATES": "1"}
+    assert set(facts.extra_env) <= LAUNCHER_ENV
+    for usage in (False, True):
+        settings = json.loads(ClaudeCode().run_files(usage=usage)[SETTINGS_FILE])
+        assert settings["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+
+
+OVERRIDES = ("-c", "--config", "--enable", "--disable")
+
+
+def test_codex_argv_carries_no_config_override(tmp_path: Path) -> None:
+    codex = Codex().locate("codex", str(install_fake_cli(tmp_path, "codex").parent))
+    argvs = [Codex().server_argv(codex) or [],
+             Codex().tui_argv(codex, {"model": "m"}, native_id=None, resume=False, label="x"),
+             Codex().tui_argv(codex, {"model": "m"}, native_id=ID, resume=True, label="x")]
+    for argv in argvs:
+        assert not [a for a in argv if a in OVERRIDES or a.startswith(("-c", "--config=", "--enable=",
+                                                                       "--disable="))], argv
+
+
+@pytest.mark.parametrize(("adapter", "args"), [
+    ("codex", ["-c", "features.plugins=true"]), ("codex", ["--enable=plugins"]), ("codex", "-c k=v"),
+    ("claude-code", ["--settings", "{}"]), ("claude-code", ["--verbose"]), ("claude-code", [3]),
+])
+def test_profile_args_at_launch_refuses_what_config_refuses(tmp_path: Path, adapter: str,
+                                                            args: object) -> None:
+    profile = {"adapter": adapter, "args": args}
+    with pytest.raises(ConfigError):
+        pa.check(adapter, args, "profiles.p.args")
+    with pytest.raises(AdapterError) as refused:
+        profile_args(profile, adapter)
+    assert str(refused.value) == OWNS_KEY
+    binary = install_fake_cli(tmp_path, adapter)
+    cli = ADAPTERS[adapter].locate(binary.name, str(binary.parent))
+    native = None if adapter == "codex" else ID
+    with pytest.raises(AdapterError):
+        ADAPTERS[adapter].tui_argv(cli, profile, native_id=native, resume=False, label="x")
+    if adapter == "claude-code":
+        with pytest.raises(AdapterError):
+            interactive_argv("claude", profile, session_id=ID, resume=False, settings_file=Path("/s"),
+                             name="n")
+
+
+def test_profile_args_pass_with_no_args() -> None:
+    assert profile_args({}, "codex") == [] and profile_args({"args": []}, "claude-code") == []
+
+
+@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
+def test_the_adapters_allowlists_match_the_config_table(adapter: str) -> None:
+    assert ADAPTERS[adapter].profile_flags == pa.FLAGS[adapter]
+    assert set(pa.FLAGS) == set(ADAPTERS)
+
+
+def test_claude_presentation_argv_follows_the_launchers_flags() -> None:
+    argv = interactive_argv("claude", {}, session_id=ID, resume=False, settings_file=Path("/s"), name="n",
+                            isolated=True, presented=("--plugin-dir", "/i/content/plugins/p",
+                                                      "--strict-mcp-config"))
+    assert argv[argv.index("--settings"):] == ["--settings", "/s", "--name", "n", "--plugin-dir",
+                                               "/i/content/plugins/p", "--strict-mcp-config"]

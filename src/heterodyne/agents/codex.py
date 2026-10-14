@@ -6,16 +6,28 @@ import json
 import os
 import re
 import stat
+import tomllib
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from heterodyne.agents import exec_dirs
 from heterodyne.agents.base import (
+    CONTENT_MALFORMED,
+    DEFAULTS_MALFORMED,
     HOOK_EVENTS,
+    OWNS_KEY,
+    RESERVED_MCP,
+    UNDECLARED_VERSION,
+    UNKNOWN_KIND,
     AdapterError,
     Cli,
+    Declared,
+    InstallLayout,
+    Presentation,
     UsageReport,
     checked_id,
+    content_items,
     epoch_or_none,
     find_binary,
     has_file,
@@ -28,6 +40,9 @@ from heterodyne.agents.base import (
     read_text_at,
     write_at,
 )
+from heterodyne.agents.config_files import merge, open_dir_at, open_under, read_bounded_at, toml_text, without
+from heterodyne.config.profile_args import FLAGS
+from heterodyne.harness.resources import store_core
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, AgentFacts, Bind, SessionLayout
 from heterodyne.session.shim import MAX_DEPTH, MAX_LINE, json_depth
 from heterodyne.wsd.usage import Observation
@@ -43,6 +58,15 @@ HOST_SOURCE = "codex.host-read"
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 KEY_TEXT = re.compile(r'[^"\\\x00-\x1f\x7f]{1,400}')
 HASH = re.compile(r"(sha256:)?[0-9a-f]{16,64}")
+# The release's assets (plan 4c E5): the package archive for a target, and its checksums.
+RELEASE_ASSET = "codex-package-{target}.tar.gz"
+RELEASE_SUMS = "codex-package_SHA256SUMS"
+DEFAULTS_FILE = "config.toml"
+MCP_FILE = "mcp.toml"
+SKILL_FILE = "SKILL.md"
+TOOL_ENV = frozenset({"CODEX_CI", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_VERSION", "COLORTERM",
+                      "GH_PAGER", "GIT_PAGER", "LC_ALL", "LC_CTYPE", "NO_COLOR", "PAGER"})
+KINDS = frozenset({"skills", "mcp"})
 
 
 def _duration(minutes: int) -> str:
@@ -93,8 +117,34 @@ class Codex:
     login_names: tuple[str, ...] = ("auth.json",)
     model_hosts: tuple[str, ...] = ("chatgpt.com",)
     version_pin = "0.160.0"
-    tool_env = frozenset({"CODEX_CI", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_VERSION", "COLORTERM",
-                          "GH_PAGER", "GIT_PAGER", "LC_ALL", "LC_CTYPE", "NO_COLOR", "PAGER"})
+    versions: Mapping[str, Declared] = {"0.160.0": Declared(TOOL_ENV, KINDS)}
+    tool_env = versions[version_pin].tool_env
+    install_layout = InstallLayout("github-release", "openai/codex",
+                                   store_core.Layout("codex-package.json", "version", "target", "entrypoint",
+                                                     None), "")
+    content_kinds = KINDS
+    # E9: written, or dropped, after the defaults. `features.apps` is the connectors; `profile` and
+    # `profiles` are never written, so no config profile can turn a key back on. The rest of 0.160's
+    # ConfigToml that changes what its commands see and how they start, where its traffic and logins
+    # go, or which plugins and state it keeps outside the home is dropped too. So is every MCP server
+    # (its command, env and http_headers_helper): MCP comes only from content items, which are checked.
+    owned_keys = frozenset({
+        "approval_policy", "sandbox_mode", "check_for_update_on_startup", "projects", "notify", "hooks",
+        "features.apps", "features.daemon_auto_start", "features.plugins", "features.in_app_updates",
+        "profile", "profiles", "mcp_servers",
+        "shell_environment_policy", "allow_login_shell", "zsh_path", "sandbox_workspace_write",
+        "default_permissions", "permissions", "js_repl_node_path", "js_repl_node_module_dirs",
+        "browser_use", "computer_use", "agents", "orchestrator",
+        "model_provider", "model_providers", "openai_base_url", "chatgpt_base_url", "oss_provider",
+        "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url",
+        "experimental_thread_store_endpoint", "experimental_thread_store", "otel",
+        "forced_login_method", "forced_chatgpt_workspace_id", "cli_auth_credentials_store",
+        "mcp_oauth_credentials_store", "mcp_oauth_callback_port", "mcp_oauth_callback_url",
+        "mcp_enterprise_managed_auth",
+        "plugins", "marketplaces", "allow_symlinked_codex_home", "sqlite_home", "log_dir"})
+    # E25: the PATH aliases (tmp/arg0/) and the daemon copy (packages/), which the CLI runs.
+    empty_read_only = (PurePosixPath(".codex/tmp"), PurePosixPath(".codex/packages"))
+    profile_flags = FLAGS["codex"]
     prompt_marker = "›"
     assigns_id = True
     turn_end_events: tuple[str, ...] = ("Stop",)
@@ -117,7 +167,35 @@ class Codex:
                                  Bind(layout.daemon, Path(f"/tmp/codex-daemon-{uid}"), False)),  # noqa: S108
                           read_write=(str(BRIDGE_INSIDE),))
 
+    def launcher_config(self, worktree: Path) -> dict[str, Any]:
+        """The launcher's own config.toml keys, written last (E9). `check_for_update_on_startup` is the
+        update switch; `daemon_auto_start` stops the CLI copying itself into packages/ and running the
+        copy; `plugins` stops the curated plugin sync; `in_app_updates` keeps a later in-app updater off."""
+        return {"approval_policy": "never", "sandbox_mode": "danger-full-access",
+                "check_for_update_on_startup": False,
+                "projects": {str(worktree): {"trust_level": "untrusted"}},
+                "features": {"apps": False, "daemon_auto_start": False, "plugins": False,
+                             "in_app_updates": False}}
+
     def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
+        self._write_home(layout, toml_text(self.launcher_config(worktree)))
+
+    def prepare_install_home(self, layout: SessionLayout, worktree: Path,
+                             install: Path) -> tuple[exec_dirs.Cleared, ...]:
+        tree = self._defaults(install)
+        servers = self._content_servers(install)
+        if servers:
+            merge(tree, {"mcp_servers": servers})
+        merge(tree, self.launcher_config(worktree))
+        try:
+            text = toml_text(tree)
+        except ValueError:
+            raise AdapterError(DEFAULTS_MALFORMED) from None
+        cleared = exec_dirs.prepare(layout.home, self.empty_read_only)
+        self._write_home(layout, text)
+        return cleared
+
+    def _write_home(self, layout: SessionLayout, config: str) -> None:
         for folder in (layout.bridge, layout.daemon):          # host-side session directories, not the home
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
             folder.chmod(0o700)                # codex refuses a socket directory that is not 0700
@@ -127,16 +205,104 @@ class Codex:
         hooks = {e: [hook_group(e)] for e in HOOK_EVENTS}
         conf = home_dir(layout.home, self.config_subdir)
         try:
-            # JSON string escapes are valid TOML basic-string escapes.
-            write_at(conf, "config.toml",
-                     'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
-                     f"[projects.{json.dumps(str(worktree))}]\ntrust_level = \"untrusted\"\n"
-                     "[features]\napps = false\n")
+            write_at(conf, "config.toml", config)
             write_at(conf, HOOKS_FILE, json.dumps({"hooks": hooks}))
         except OSError:
             raise AdapterError("the synthetic home can't be prepared") from None
         finally:
             os.close(conf)
+
+    def _defaults(self, install: Path) -> dict[str, Any]:
+        """`defaults/config.toml` without the owned keys; {} if the install has none."""
+        try:
+            fd = open_under(install, ("defaults",))
+            if fd is None:
+                return {}
+            try:
+                text = read_bounded_at(fd, DEFAULTS_FILE)
+            finally:
+                os.close(fd)
+            return without(tomllib.loads(text), self.owned_keys) if text is not None else {}
+        except (OSError, ValueError):            # tomllib's and UTF-8's errors are ValueErrors
+            raise AdapterError(DEFAULTS_MALFORMED) from None
+
+    def _content_servers(self, install: Path) -> dict[str, Any]:
+        """Every `content/mcp/<name>/mcp.toml`'s servers, in name order; a name given twice refuses."""
+        try:
+            fd = open_under(install, ("content", "mcp"))
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        if fd is None:
+            return {}
+        servers: dict[str, Any] = {}
+        try:
+            for name in sorted(os.listdir(fd)):  # noqa: PTH208 - by descriptor, never by path
+                found = self._mcp_servers(fd, name)
+                if set(found) & set(servers):
+                    raise AdapterError(CONTENT_MALFORMED)
+                servers.update(found)
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        finally:
+            os.close(fd)
+        return servers
+
+    def _mcp_servers(self, parent: int | None, item: str | Path) -> dict[str, Any]:
+        """An MCP item's servers. Its file holds `[mcp_servers.<name>]` tables and nothing else (E11)."""
+        try:
+            fd = open_dir_at(parent, item)
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        try:
+            text = read_bounded_at(fd, MCP_FILE)
+            data: dict[str, Any] = tomllib.loads(text) if text is not None else {}
+        except (OSError, ValueError):
+            raise AdapterError(CONTENT_MALFORMED) from None
+        finally:
+            os.close(fd)
+        if set(data) - {"mcp_servers"}:
+            raise AdapterError(OWNS_KEY)
+        servers: Any = data.get("mcp_servers")
+        if not isinstance(servers, dict) or not servers or not all(
+                isinstance(v, dict) for v in cast(dict[str, Any], servers).values()):
+            raise AdapterError(CONTENT_MALFORMED)
+        if set(cast(dict[str, Any], servers)) & RESERVED_MCP:
+            raise AdapterError(OWNS_KEY)
+        return cast(dict[str, Any], servers)
+
+    def check_content(self, kind: str, tree: Path) -> None:
+        if kind not in self.content_kinds:
+            raise AdapterError(UNKNOWN_KIND)
+        if kind == "mcp":
+            self._mcp_servers(None, tree)
+            return
+        try:
+            fd = open_dir_at(None, tree)
+        except OSError:
+            raise AdapterError(CONTENT_MALFORMED) from None
+        try:
+            if read_bounded_at(fd, SKILL_FILE) is None:
+                raise AdapterError(CONTENT_MALFORMED)
+        except (OSError, ValueError):
+            raise AdapterError(CONTENT_MALFORMED) from None
+        finally:
+            os.close(fd)
+
+    def present(self, layout: SessionLayout, install: Path, manifest: store_core.Manifest) -> Presentation:
+        """Each skill as a read-only bind at $CODEX_HOME/skills/<name> (S9-4: skills/ itself stays
+        writable, for the CLI's .system skills). MCP servers go into config.toml instead."""
+        declared = self.versions.get(manifest.version)
+        if declared is None:
+            raise AdapterError(UNDECLARED_VERSION)
+        binds: list[Bind] = []
+        for kind, name in content_items(manifest):
+            if kind not in declared.presentation:
+                raise AdapterError(UNKNOWN_KIND)
+            source = install / "content" / kind / name
+            self.check_content(kind, source)
+            if kind == "skills":
+                binds.append(Bind(source, layout.home / self.config_subdir / "skills" / name, True))
+        return Presentation((), tuple(binds), {})
 
     def run_files(self, *, usage: bool = False, limits: bool = False) -> Mapping[str, str]:
         files = {TRUST_SCRIPT.name: TRUST_SOURCE.read_text()}
@@ -193,7 +359,7 @@ class Codex:
         model = profile.get("model")
         if isinstance(model, str) and model:
             argv += ["--model", model]
-        return argv + profile_args(profile)
+        return argv + profile_args(profile, self.name)
 
     def trust_argv(self, cli: Cli, worktree: Path) -> list[str] | None:
         return ["python3", "-I", str(TRUST_SCRIPT), str(cli.binary), str(worktree)]

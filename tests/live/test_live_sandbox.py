@@ -50,6 +50,7 @@ from probe_verdicts import (  # noqa: E402
 from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
+from heterodyne.agents.codex import Codex  # noqa: E402
 from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
 from heterodyne.sandbox import channel as probe_channel  # noqa: E402
 from heterodyne.sandbox import openshell_selftest  # noqa: E402
@@ -76,7 +77,7 @@ from heterodyne.sandbox.runtime import (  # noqa: E402
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed  # noqa: E402
 from heterodyne.sandbox.settings import SandboxSettings, sandbox_settings  # noqa: E402
-from heterodyne.sandbox.spec import sandbox_name  # noqa: E402
+from heterodyne.sandbox.spec import SessionLayout, sandbox_name  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
@@ -90,7 +91,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("HZ_LIVE_SANDBOX") != "1",
 PROFILES = {"claude": "p-one", "codex": "p-live-codex"}
 MODELS = {"claude": os.environ.get("HZ_LIVE_SANDBOX_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
           "codex": os.environ.get("HZ_LIVE_SANDBOX_CODEX_MODEL", "gpt-6-luna")}
-CODEX_EFFORT = 'model_reasoning_effort="low"'
+CODEX_EFFORT = 'model_reasoning_effort = "low"\n'
 CODEX_HEADER = f"{MODELS['codex'].lower()} low"   # the TUI status line, lowercased
 CLIS = {profile: cli for cli, profile in PROFILES.items()}
 PIN_SECONDS = 90
@@ -283,13 +284,31 @@ class PinnedSelfTest(OpenShellSelfTest):
         super().agent_path(ctx)
 
 
+class LiveCodex(Codex):
+    """Test-only: the effort is an install's `defaults/config.toml`, merged under the launcher's keys by
+    `prepare_install_home`, since Q4 refuses profile args and no argv carries `-c`. The runtime calls
+    `prepare_home` until Task 8 wires the install in, so this routes it there."""
+
+    def __init__(self, install: Path) -> None:
+        self.install = install
+
+    def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
+        self.prepare_install_home(layout, worktree, self.install)
+
+
+def live_install(root: Path) -> Path:
+    (root / "defaults").mkdir(parents=True)
+    (root / "defaults" / "config.toml").write_text(CODEX_EFFORT)
+    return root
+
+
 def host_config() -> str:
     tool_env = {"PATH": os.environ["HZ_LIVE_SANDBOX_PATH"]}
     if os.environ.get("HZ_LIVE_SANDBOX_CONTAINERS_CONF"):
         tool_env["CONTAINERS_CONF"] = os.environ["HZ_LIVE_SANDBOX_CONTAINERS_CONF"]
     pairs = ", ".join(f'{k} = "{v}"' for k, v in tool_env.items())
     image = os.environ["HZ_LIVE_SANDBOX_IMAGE"]
-    return (f'\n[profiles.p-live-codex]\nadapter = "codex"\nargs = ["-c", {CODEX_EFFORT!r}]\n'
+    return ('\n[profiles.p-live-codex]\nadapter = "codex"\n'
             f'\n[platform]\nsandbox = "openshell"\n\n[sandbox]\nimage = "{image}"\n'
             f'egress_approved = ["github.com", "pypi.org"]\ntool_env = {{ {pairs} }}\n')
 
@@ -452,7 +471,8 @@ def live() -> Iterator[Live]:
             sessions=root / "s", credlocks=root / "k",
             settings=settings, accounts=accounts, real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
-            tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now)
+            tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now,
+            adapters={**REGISTRY, "codex": LiveCodex(live_install(root / "i"))})
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
                     tiny_repo(root / "r"), artifact)
         yield live

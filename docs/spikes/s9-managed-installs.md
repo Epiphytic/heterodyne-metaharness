@@ -1,6 +1,6 @@
 # Spike S9: content, updaters and the backend's bind on the pinned versions
 
-Status: **done.** S9-1 to S9-4 and S9-9 are confirmed; S9-5, S9-6 and S9-7 changed; S9-8 refuted. This is plan 4c Task 1. Each finding below is marked **confirmed**, **refuted** or **changed**, gives the exact flag, key or field and the command that showed it, and names the consumer's stop rule when the result isn't "confirmed".
+Status: **done.** S9-1 to S9-4 and S9-9 are confirmed; S9-5, S9-6 and S9-7 changed; S9-8 refuted. S9-10 (Amendment 1 §4.5, the launcher's own Codex launch shape) Part 1 passed with E25's binds on 2026-10-14; Part 2 is the team lead's run. This is plan 4c Task 1. Each finding below is marked **confirmed**, **refuted** or **changed**, gives the exact flag, key or field and the command that showed it, and names the consumer's stop rule when the result isn't "confirmed".
 
 Versions: codex-cli 0.160.0 (`rust-v0.160.0`, target `x86_64-unknown-linux-musl`) and Claude Code 2.1.286 (npm platform package `@anthropic-ai/claude-code-linux-x64`), OpenShell 0.1.2 with the Podman driver on rootless Podman 5.8.8. The installed CLIs were neither upgraded nor replaced.
 
@@ -25,6 +25,7 @@ Versions: codex-cli 0.160.0 (`rust-v0.160.0`, target `x86_64-unknown-linux-musl`
 | S9-7 | **changed** | aliases in `$CODEX_HOME/tmp/arg0/codex-arg0<random>/`, prepended to `PATH`; the daemon copy in `$CODEX_HOME/packages/` is executed unless `daemon_auto_start = false` | amends T6, T8, T13 |
 | S9-8 | **refuted** | bind fields are only `type`, `source`, `target`, `read_only`, `selinux_label`; Podman always gets `ro,rbind,rprivate`: private, but recursive, and a carried submount stays `rw` | T8 stops (E24) |
 | S9-9 | **confirmed** | `st_dev`, `st_ino`, `st_mode`, `st_nlink`, `st_size`, `st_ctime_ns` and the link target are identical inside; only the mount ID differs | T8 probe |
+| S9-10 | Part 1 **confirmed** (with E25); Part 2 pending | the adapter's own `server_argv` / `tui_argv` and home, production's socket binds, no `-c`: with `.codex/tmp` and `.codex/packages` empty and read-only, no exec under the home, `packages/` empty, no `api.github.com` | Task 6 merge gate |
 
 ## S9-1: the Codex archive's layout (confirmed)
 
@@ -274,6 +275,164 @@ In the S9-8 sandbox (s9-b1), `$T/s98/stat.py` `lstat`ed the tree's root and ever
 All seven fields are identical inside for every entry on the bound file system, including `st_dev` (the ext4 device 259:2) and `st_ctime_ns` to the nanosecond. The only difference for `sub` is the expected one: the host's own namespace doesn't have the tmpfs, so it sees the directory underneath. The mount ID is not one of the fields; it differs inside by construction (each namespace numbers its mounts), so T8's probe can compare `mnt_id` only within one side (entry vs root), never across.
 
 **Verdict: confirmed.** T8's probe may compare `st_dev`, `st_ino`, `st_mode`, `st_nlink`, `st_size`, `st_ctime_ns` and the link target against the host record; none is dropped.
+
+## S9-10: the launcher's own Codex launch shape (Part 1 confirmed with E25; Part 2 pending)
+
+Amendment 1 §4.5. Part 1 is the worker's run: no network, no login. It ran on 2026-10-14 from the Task 6 worktree (branch `p4c-t6`, PR #86) with the scripts in `docs/spikes/s9-10/`. Part 2 (network plus the live-test login, a new session's prompt, then a resume) is the team lead's run and isn't recorded yet.
+
+**The CLI.** `gh release download rust-v0.160.0 -R openai/codex -p codex-package-x86_64-unknown-linux-musl.tar.gz -p codex-package_SHA256SUMS` into a fresh `mktemp -d -p "$XDG_RUNTIME_DIR"` directory, then `sha256sum -c --ignore-missing codex-package_SHA256SUMS`: `codex-package-x86_64-unknown-linux-musl.tar.gz: OK`. Unpacked with `tar -xzf` into `cli/`. `codex-package.json` gives version `0.160.0`, target `x86_64-unknown-linux-musl` and entrypoint `bin/codex`. That download was the only network access.
+
+**Commands.**
+
+```sh
+sh docs/spikes/s9-10/part1.sh <dl>/cli <results>
+# for V in plain e25, each with a fresh T=$(mktemp -d -p "$XDG_RUNTIME_DIR" s9-10.XXXXXX):
+.venv/bin/python docs/spikes/s9-10/generate.py $T <dl>/cli [--e25]     # Codex.prepare_home (+ exec_dirs.prepare)
+timeout -k 5 40 unshare -rmnpf --mount-proc --kill-child sh docs/spikes/s9-10/inner.sh $T <dl>/cli $V <python>
+.venv/bin/python docs/spikes/s9-10/analyze.py $T $V --part 1
+```
+
+- **`generate.py`** calls the candidate adapter.
+  - It runs `Codex.prepare_home(SessionLayout($T/s), $T/wt)`.
+  - With `--e25` it also runs `exec_dirs.prepare(home, Codex.empty_read_only)`, which is what `prepare_install_home` adds.
+  - It writes `server_argv(cli)` and `tui_argv(cli, {}, native_id=None, resume=False, …)` to `argv.json`.
+  - It refuses any argv that has `-c`/`--config`.
+- **`inner.sh`** runs in a fresh user, mount, network and PID namespace (uid 0 inside). In order:
+  1. `mount --make-rprivate /`, then a `tmpfs` on `/tmp`.
+  2. `BRIDGE_INSIDE`'s parent `/run` can't be written from a user namespace, so a `tmpfs` goes on `/run` and each host `/run` entry is bound back (`--rbind`).
+  3. `layout.bridge` is bound at `/run/hz-bridge` and `layout.daemon` at `/tmp/codex-daemon-0`, the two binds `Codex.facts` declares.
+  4. For `e25`, one fresh empty directory is bound read-only at `.codex/tmp` and at `.codex/packages`.
+  5. The server starts under `strace -f -q -s 300 -xx -e trace=execve,connect,sendto,sendmmsg` (`-qq` until r3, which dropped the exit records). Readiness is the adapter's own `Codex.server_ready(layout)`, polled every 0.5 s for up to 10 s.
+  6. The TUI runs in a private tmux server: `tmux -L s9-10 -f /dev/null new-session -d -x 160 -y 48`, with its socket on the run's private `/tmp`. Its screen is captured after 14 s. Since r3 the harness then sends SIGHUP to the TUI's traced root and SIGTERM to the server's, and waits up to 10 s for each one's `+++` end record. A signalled strace would detach without writing one. With no record, it leaves `<trace>.unended`. The tmux server is killed after the TUI's stop.
+- **`analyze.py`** decodes the `-xx` buffers. Since r2 it fails closed: it needs `--part 1|2`, every file a check reads must be there (and hold something, except `inside.packages`), each trace must open with a successful exec of exactly the argv it traced, every argument (since r3), and the run must have ended by itself (`rc` 0, not the cap's 124). With any of that missing, no later check passes. It exits 1 on any FAIL. Since r3:
+  - every `argv.json`/`argv-resume.json` field a check reads must be present with its type (an absolute `home`, a `unix://` `app_socket`, argvs of strings by full path), or every check fails;
+  - each trace must end on a whole line, and the root pid's last event must be its one end record: `exited with N` for any N, or, for a TUI only, `killed by SIGHUP`;
+  - a server killed by any signal fails, and so does SIGKILL, a core, a child-only record, no record, or a `.unended` marker.
+
+  Part 1's screen check is the login screen, which is what the TUI shows without a login; Part 2 checks the composer. `part1.sh` and `part2.sh` keep its status (no pipe, since `sh` has no `pipefail`), also fail on a leftover process or an undeleted home, and exit non-zero unless both variants pass.
+
+**The argv**, unchanged from the adapter (both variants; `<dl>` is the download directory):
+
+```
+server:  <dl>/cli/bin/codex app-server --listen unix:///run/hz-bridge/app.sock
+tui_new: <dl>/cli/bin/codex --remote unix:///run/hz-bridge/app.sock --dangerously-bypass-approvals-and-sandbox
+```
+
+No argv has `-c`. The home's `config.toml` is the adapter's: `approval_policy`, `sandbox_mode`, `check_for_update_on_startup = false`, the worktree's `projects` entry, and `[features]` with `apps`, `daemon_auto_start`, `plugins` and `in_app_updates` all false.
+
+**The environment** is `env -i HOME=<home> CODEX_HOME=<home>/.codex PATH=<dl>/cli/bin:/usr/bin:/bin TERM=xterm-256color`, for both the server and the TUI pane. `Codex.versions["0.160.0"].tool_env` names the variables 0.160.0 sets for its own children: `CODEX_CI`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_VERSION`, `COLORTERM`, `GH_PAGER`, `GIT_PAGER`, `LC_ALL`, `LC_CTYPE`, `NO_COLOR` and `PAGER`. It gives no values, and the launcher passes none of them, so the run added none.
+
+**Mounts inside** (from `/proc/self/mountinfo`): `/run/hz-bridge rw` and `/tmp/codex-daemon-0 rw` in both runs. `e25` adds `<home>/.codex/tmp ro` and `<home>/.codex/packages ro`.
+
+**Results**
+
+| | `plain` (no E25 binds) | `e25` (E25's binds) |
+|---|---|---|
+| `server_ready` (the adapter's) | yes | yes |
+| TUI's Unix connects | `/run/hz-bridge/app.sock` (and `/run/user/0/bus`, which fails: no session bus) | the same |
+| TUI screen | the login screen ("Welcome to Codex … Sign in with ChatGPT … Press enter to continue") | the same |
+| `.codex/packages` | never created | empty (inside and on the host) |
+| exec of a path under the home | 6 attempts, all ENOENT: `.codex/tmp/arg0/codex-arg0<random>/lsb_release` and `…/getconf`, from the server and the TUI | none |
+| `.codex/tmp` after the run | `arg0/codex-arg0<random>/` with `apply_patch`, `applypatch`, `codex-linux-sandbox`, `codex-execve-wrapper` and `.lock`, per process | empty |
+| DNS names attempted (`sendto`) | `raw.githubusercontent.com` only (from the TUI) | the same |
+| `api.github.com` in `connect` / `sendto` | none | none |
+| CLI warning | none | `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)` (server and TUI) |
+
+What this shows:
+- **The production arrangement works.** The server reaches the adapter's `server_ready` through the bridge and daemon binds, and the TUI connects to `APP_SOCKET` over `--remote`. With no login, the TUI shows its login screen instead of the composer. That is expected, and Part 2 covers the logged-in path.
+- **E9 reaches the CLI with no `-c`.** No `packages/` appears and nothing is executed from it (`daemon_auto_start = false`). There is no `api.github.com` (`check_for_update_on_startup = false`). The plugin sync's `github.com`, `chatgpt.com` and `ab.chatgpt.com` are gone too (`plugins = false`). The one name left, `raw.githubusercontent.com`, is the announcement tip (S9-5). It isn't an updater, and managed egress denies it.
+- **E25 is what makes the exec condition hold.** Without it, the CLI makes its PATH aliases under `.codex/tmp/arg0/` and resolves commands through them first (S9-7). This run only shows failed lookups (ENOENT), but a file planted there under a common command name would run. With E25's read-only empty directory, no aliases are made and there's no exec attempt under the home.
+
+**Verdict: Part 1 confirmed for the shape Task 6 ships (with E25's binds).** All three pass conditions hold in `e25`: `.codex/packages` stays empty, there's no exec of a path under the home, and there's no `api.github.com` lookup. The `plain` run is the baseline without E25. It meets two of the three, and its exec attempts under `.codex/tmp/arg0/` are the reason E25 exists. Reading `plain` as a control rather than a variant that must also pass is pending Liam's decision. Still open for Part 2 / Task 13: whether `apply_patch` works without its shell alias (S9-7), because no Part 1 run invokes a tool.
+
+**r2 re-check (2026-10-14).** Review r2 found the first analyzer could pass on missing evidence: a missing trace read as no execs and no lookups, Part 2's checks vanished without `answered`, and neither the analyzer nor the wrapper's `tee` pipeline passed a failure on. So the record above was checked again:
+- **The first run's evidence was complete.** Nothing was missing. Both variants had non-empty `server.strace` (70 and 66 lines) and `tui.strace` (48 and 45 lines), each showing the exec of its own argv, `rc` 0, `server_ready` `yes`, the screen and the `inside` listings. Re-analyzed with the fixed analyzer, the kept files give the same results: `e25` PASS, and `plain` FAIL on `no_exec_under_home` alone.
+- **Part 1 was run again** at `f5a590b` with the fixed scripts, in the same scope: the same checksum-verified CLI (`sha256sum -c` OK again, no download), `unshare -rmnpf`, no login, `env -i`, 40 s caps. The results match the table above. `e25`: every check passes (exit 0). `plain`: every check passes except `no_exec_under_home`, with the same 6 ENOENT attempts under `.codex/tmp/arg0/` (exit 1). `packages/` was never created in `plain` and stayed empty in `e25`. The DNS names were `raw.githubusercontent.com` only, with no `api.github.com`. `part1.sh` now exits 1 because `plain` fails. Whether that run is a control is the decision pending with Liam. No process was left, both homes were deleted, and the traces are kept under `$XDG_RUNTIME_DIR`.
+
+**r3 re-check (2026-10-14).** Review r3 found two more false passes. Deleting `home` from `argv.json` turned off the home-exec check, because of an empty-string fallback. And the exec check matched only `argv[0]` on any line, so a trace cut to its first line passed, as did `--help`. The analyzer now validates the metadata, matches the root's exact argv, and needs the root's end record, as described above. The wrappers' `-qq` had suppressed those records, so none of the earlier traces holds one:
+- **The kept traces now fail by design.** Both `s9-10-results.lfencF` (the first run) and `s9-10-results-r2.4mTytA` (the r2 run) have 0 `+++` lines. Re-analyzed, every variant there fails `evidence_complete` and every check gated on it. Their metadata is valid, and each trace's first line is the exec of its exact argv.
+- **Part 1 was run again** at `e0716b6` under the same conditions as r2 (`sha256sum -c` OK on the same CLI, `unshare -rmnpf`, no login, `env -i`, 40 s caps). The results are in `$XDG_RUNTIME_DIR/s9-10-results-r3.7JL8Lw`. Re-analyzed with the final analyzer, they give the same verdicts as the run:
+  - `e25`: every check passes (exit 0).
+  - `plain`: every check passes except `no_exec_under_home`, with the same 6 ENOENT attempts under `.codex/tmp/arg0/` (exit 1).
+  - DNS: `raw.githubusercontent.com` only. No process was left, both homes were deleted, and no `.unended` marker was written.
+- **Root ends seen.** In both variants the app-server's root shows `+++ exited with 0 +++` after the harness's SIGTERM. So the server's rule was tightened to `exited with` only. The TUI's root shows `+++ killed by SIGHUP +++`, which a TUI is allowed. In each trace that record is the root's last event, and the file ends on a whole line.
+- **Limit, accepted for the PoC.** The proof covers the root's whole lifetime only. A child still running when the root ends is traced until the namespace teardown kills strace, so its last lines can be lost. Nothing requires those lines to be there.
+
+**Harness notes.** Two first attempts were discarded because of harness bugs, not CLI behaviour:
+- `server_ready` got a `str` instead of a `Path`, so readiness was never seen.
+- `script -qfec … </dev/null` gave the TUI no terminal to answer its cursor and colour queries (`CSI 6n`, OSC 10/11), so it drew nothing. The tmux pane fixes that.
+
+The CLI results of those attempts (DNS names, execs, `packages/`) matched the run above.
+
+**Cleanup.**
+- After each run `ps` showed no process whose arguments contain the run directory, and none was left to kill. The PID namespace with `--kill-child` takes the server, the TUI and tmux down with it.
+- Each `$T` (home, worktree, session layout) was deleted, and `ls -d "$XDG_RUNTIME_DIR"/s9-10.*` finds nothing.
+- `/tmp/codex-daemon-*` on the host wasn't touched: every socket was on the run's private `/tmp`.
+- `~/.codex` and `~/.claude` weren't read or written.
+- The download directory and the results directory (traces, screens, `result.json`) are kept under `$XDG_RUNTIME_DIR` for Part 2 and the review.
+
+**Part 2: the script, for the lead's run.** `S9_10_LOGIN=<live-test codex auth.json> sh docs/spikes/s9-10/part2.sh <dl>/cli <results>`. Supporting files: `inner2.sh`, `part2_steps.py`, and `generate.py`'s `--install` and `--resume` flags. Part 1's path through `generate.py` is unchanged.
+- **Namespaces:** `unshare -rmpf`, with no `-n`. The binds are Part 1's.
+- **Login:** bound read-only at `<home>/.codex/auth.json`, inside the namespace only. The script never reads it.
+- **Model:** `HZ_LIVE_SANDBOX_CODEX_MODEL` (default `gpt-6-luna`) through `tui_argv`'s `--model`.
+- **Effort:** `model_reasoning_effort = "low"` comes from an install's `defaults/config.toml` through `prepare_install_home`. Q4 refuses profile args, and no argv may carry `-c`, so that's the only route.
+- **Steps for each variant (plain, then E25):**
+  1. The hook trust from `runtime._trust`: the adapter's `run_files`, `trust_argv` and `apply_trust`.
+  2. The server.
+  3. A new session, which gets the prompt "Reply with only the word pong.". The answer is read from the rollout.
+  4. The thread ID, taken from the rollout and checked with `has_state`.
+  5. `tui_argv(resume=True)`. It passes when the resumed screen shows the first prompt.
+- **Cap:** 240 s per variant.
+
+`S9_10_DRY=1` adds `-n` for a harness check. It was run once that way, with a stand-in `{}` login in a temp directory.
+- Trust listed 4 hooks, seeded them, then listed 0.
+- `server_ready` held, and the TUI connected to `APP_SOCKET`.
+- The TUI then exited, as it should on that stand-in: `account/read failed: plan type is required for chatgpt authentication`.
+- With a login file present, the DNS names attempted were `ab.chatgpt.com`, `chatgpt.com` and `raw.githubusercontent.com`. There was no `api.github.com`.
+- Resume wasn't reached, because that needs a real thread.
+
+**The first Part 2 run (2026-10-14, the lead's, under ask yvkg at `e86854e`; results in `$XDG_RUNTIME_DIR/s9-10-part2.EDZixy`) failed on the harness, not the CLI.**
+- **What failed.** Both variants failed `new_session_answered` and `resume_shows_the_first_prompt`, and nothing else.
+- **What passed.** Every launch-shape check passed. `e25` had no exec under the home and no `api.github.com`. The DNS names were `ab.chatgpt.com`, `chatgpt.com` and `raw.githubusercontent.com`. `rc` was 0, no process was left, and both homes were deleted. `plain` repeated its arg0 ENOENT attempts.
+- **Why.** The screen shows "Hook failed / hook exited with code 2 / Blocked by hook / python3: can't open file '/run/hz/shim.py'". The generated hooks run `python3 -I /run/hz/shim.py hook` (`HOOK_COMMAND`), but `inner2.sh` put only `Codex.run_files()` into `/run/hz`. Production also writes the shim there (`runtime.py`, `SHIM_SOURCE`).
+- **The fix.** `run-files` now also writes the shipped `session/shim.py`, byte for byte. It writes no token, no `shim.json` and no `HZ_SESSION_SOCKET`. With no socket, the shim takes production's control-plane-down path: `SessionStart`, `UserPromptSubmit` and `Stop` are spooled to `$HOME/.hz/spool.jsonl` and exit 0, and any tool call is denied. The pong prompt needs no tool.
+- **New Part 2 checks.**
+  - `inner2.sh` writes the spooled event names (names only, since the events carry the prompt) to `hooks`.
+  - `hooks_ran` needs `UserPromptSubmit` there.
+  - `no_hook_failure` fails a "Hook failed", "Blocked by hook" or "hook exited with code" on either screen.
+  - Both are gated on complete evidence, and `hooks` must exist. Part 1's checks are unchanged.
+- **Not tested by Part 2.** The hook round trip to wsd (the token, `shim.json`, the session socket and wsd's decisions). That is T14 / Task 13.
+
+**Part 2 re-run (2026-10-14, the lead's, approved by Liam as ask 8mhc on btq-cjwn3, at `047f518`; results in `$XDG_RUNTIME_DIR/s9-10-part2r.mbaqNX`): the gate passed, but the pass is void (see the next run).**
+- **`e25` PASSES every Part 2 check.** That covers the launch shape, `new_session_answered`, `thread_found`, `resume_shows_the_first_prompt`, `no_hook_failure` and `hooks_ran`. The run:
+  - The hook trust listed 4 hooks, seeded them, then listed 0.
+  - The spooled hook events were `SessionStart`, `UserPromptSubmit` and `Stop`.
+  - The thread was `01a13c1e-199…`.
+  - The DNS names were `chatgpt.com` and `raw.githubusercontent.com` only. There was no `api.github.com`, and no exec under the home. `.codex/packages` stayed empty.
+- **`plain` (the control) failed only `no_exec_under_home`.** It made 12 ENOENT attempts at `.codex/tmp/arg0/codex-arg0<random>/lsb_release` and `…/getconf`, the arg0 aliases E25 exists to stop. Every other check passed, the hook checks included.
+- **Root ends, both variants.** The server shows `exited with 0` after SIGTERM. The TUI and the resume TUI each show `killed by SIGHUP`.
+- **Clean-up.** `rc` was 0, no process was left, and both run homes were deleted.
+- **Gate result.** `part2.sh`'s last line reads `S9-10 Part 2: FAIL` because it requires both variants to pass. Under Decision 1 (option A), `plain` is the control and `e25` is the gate, so **S9-10 Part 2 passes**. With Part 1's `e25` pass, S9-10 is confirmed for the shape Task 6 ships.
+- **An oddity, as a follow-up and not fixed here.** `plain`'s DNS list has a third, binary entry. `qname` reads any `sendto` buffer as a DNS packet, so a non-DNS payload whose bytes happen to parse as labels slips through. It is most likely the TLS handshake on a TCP socket. It doesn't affect `e25` or any verdict, because `no_api_github_lookup` matches the name's bytes in every buffer anyway. The analyzer should filter it. It could accept a buffer as a query only with a DNS header (QDCOUNT 1, no answers), hostname-character labels and a terminating zero label, or only on a socket connected to port 53.
+
+**Part 2 at the merged head (2026-10-14, the lead's, approved by Liam as ask wskr on btq-j2015, at `9ab753e`; results in `$XDG_RUNTIME_DIR/s9-10-part2s.cwgabc`): the gate passes.**
+- **Why the `047f518` pass is void.** Merging main (btq-rcose) changed two things. The hook command is now `hook_command(event)`, which is `python3 -I /run/hz/shim.py hook <event>`. The shipped shim now takes the event from that argument. Both are in the Codex adapter's hooks and in the shim Part 2 runs, so ask 8mhc's terms needed a new run at the merged head. The harness itself didn't change. It copies the shipped shim byte for byte and takes the hooks from the adapter, and it hard-codes neither the command nor a trust count.
+- **`e25` PASSES all 19 Part 2 checks.** The run:
+  - The hook trust listed 4 hooks, then 0 after seeding.
+  - The spooled hook events were `SessionStart`, `UserPromptSubmit` and `Stop`.
+  - The real DNS queries were `chatgpt.com` and `raw.githubusercontent.com` only, with no `api.github.com`.
+  - Nothing was exec'd under the home, and `.codex/packages` stayed empty.
+- **`plain` (the control) failed only `no_exec_under_home`.** It made the same 12 attempts at the arg0 `lsb_release` and `getconf`. Every other check passed, the hook checks included.
+- **Root ends, both variants.** The server shows `exited with 0`. The TUI and the resume TUI each show `killed by SIGHUP`.
+- **Clean-up.** `rc` was 0, no process was left, and both run homes were deleted.
+- **Gate result.** The script's last line again reads `S9-10 Part 2: FAIL`, because it requires both variants to pass. Under Decision 1 (option A), **S9-10 Part 2 passes at `9ab753e`**.
+- **The DNS oddity, again.** This time `e25`'s list has three binary entries and `plain`'s has none. I checked the bytes only, without printing them.
+  - All three come from `sendto` calls in the server's trace, on three different sockets, with no destination address.
+  - Each buffer starts with a TLS record header (content type 0x14 to 0x17, then 0x03). Two are 300-byte handshake-sized writes and one is 24 bytes.
+  - Read as DNS, their QDCOUNT is not 1.
+  - The two real names, by contrast, have QDCOUNT 1 and a port-53 destination on the line.
+
+  So it is the same artifact, and no verdict changes. The follow-up filter above (QDCOUNT 1, or a port-53 destination) would drop all three.
 
 ## Cleanup
 

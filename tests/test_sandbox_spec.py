@@ -128,6 +128,20 @@ def test_refusals(tmp_path: Path, change: dict[str, object], needle: str) -> Non
         build_spec(spec_input(tmp_path, "coder", **change))
 
 
+def test_the_updater_variables_pass_as_extra_env(tmp_path: Path) -> None:
+    i = spec_input(tmp_path)
+    agent = replace(i.agent, extra_env={"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"})
+    assert build_spec(replace(i, agent=agent)).env["DISABLE_UPDATES"] == "1"
+
+
+@pytest.mark.parametrize("name", ["DISABLE_TELEMETRY", "LD_PRELOAD", "CODEX_CI", "DISABLE_UPDATES_X"])
+def test_any_other_new_extra_env_key_is_refused(tmp_path: Path, name: str) -> None:
+    i = spec_input(tmp_path)
+    agent = replace(i.agent, extra_env={"DISABLE_UPDATES": "1", name: "1"})
+    with pytest.raises(SpecRefused, match="outside the launcher's allowlist"):
+        build_spec(replace(i, agent=agent))
+
+
 def test_long_socket_path_is_refused(tmp_path: Path) -> None:
     deep = tmp_path / ("d" * 90)
     i = spec_input(tmp_path)

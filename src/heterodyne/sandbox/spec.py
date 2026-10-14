@@ -43,7 +43,8 @@ NAME = re.compile(r"hz[0-9a-f]{12}g[0-9]{1,4}")
 BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 # Every variable a spec may set (D4). The adapter's config variable and fixed extras are among them.
 LAUNCHER_ENV = frozenset({"HOME", "PATH", "LANG", "TERM", "USER", "HZ_SESSION_SOCKET", "CLAUDE_CONFIG_DIR",
-                          "CODEX_HOME", "ENABLE_CLAUDEAI_MCP_SERVERS"})
+                          "CODEX_HOME", "ENABLE_CLAUDEAI_MCP_SERVERS", "DISABLE_AUTOUPDATER",
+                          "DISABLE_UPDATES"})
 
 
 class SpecRefused(Exception):

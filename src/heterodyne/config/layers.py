@@ -6,7 +6,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.config import secret_scan
+from heterodyne.config import profile_args, secret_scan
 from heterodyne.config.errors import ConfigError
 from heterodyne.config.policy import POLICY_KEYS
 from heterodyne.config.secret_scan import show
@@ -152,6 +152,7 @@ def check_profiles(merged: Mapping[str, Any]) -> None:
         if not isinstance(adapter, str) or adapter not in known:
             raise ConfigError(f"profiles.{show(name, False)}: adapter {show(adapter)} "
                               f"is not one of {sorted(known)}")
+        profile_args.check(adapter, profile.get("args", []), f"profiles.{show(name, False)}.args")
 
 
 def as_table(value: Any) -> Mapping[str, Any] | None:
