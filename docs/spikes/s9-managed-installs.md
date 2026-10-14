@@ -403,6 +403,18 @@ The CLI results of those attempts (DNS names, execs, `packages/`) matched the ru
   - Both are gated on complete evidence, and `hooks` must exist. Part 1's checks are unchanged.
 - **Not tested by Part 2.** The hook round trip to wsd (the token, `shim.json`, the session socket and wsd's decisions). That is T14 / Task 13.
 
+**Part 2 re-run (2026-10-14, the lead's, approved by Liam as ask 8mhc on btq-cjwn3, at `047f518`; results in `$XDG_RUNTIME_DIR/s9-10-part2r.mbaqNX`): the gate passes.**
+- **`e25` PASSES every Part 2 check.** That covers the launch shape, `new_session_answered`, `thread_found`, `resume_shows_the_first_prompt`, `no_hook_failure` and `hooks_ran`. The run:
+  - The hook trust listed 4 hooks, seeded them, then listed 0.
+  - The spooled hook events were `SessionStart`, `UserPromptSubmit` and `Stop`.
+  - The thread was `01a13c1e-199…`.
+  - The DNS names were `chatgpt.com` and `raw.githubusercontent.com` only. There was no `api.github.com`, and no exec under the home. `.codex/packages` stayed empty.
+- **`plain` (the control) failed only `no_exec_under_home`.** It made 12 ENOENT attempts at `.codex/tmp/arg0/codex-arg0<random>/lsb_release` and `…/getconf`, the arg0 aliases E25 exists to stop. Every other check passed, the hook checks included.
+- **Root ends, both variants.** The server shows `exited with 0` after SIGTERM. The TUI and the resume TUI each show `killed by SIGHUP`.
+- **Clean-up.** `rc` was 0, no process was left, and both run homes were deleted.
+- **Gate result.** `part2.sh`'s last line reads `S9-10 Part 2: FAIL` because it requires both variants to pass. Under Decision 1 (option A), `plain` is the control and `e25` is the gate, so **S9-10 Part 2 passes**. With Part 1's `e25` pass, S9-10 is confirmed for the shape Task 6 ships.
+- **An oddity, as a follow-up and not fixed here.** `plain`'s DNS list has a third, binary entry. `qname` reads any `sendto` buffer as a DNS packet, so a non-DNS payload whose bytes happen to parse as labels slips through. It is most likely the TLS handshake on a TCP socket. It doesn't affect `e25` or any verdict, because `no_api_github_lookup` matches the name's bytes in every buffer anyway. The analyzer should filter it. It could accept a buffer as a query only with a DNS header (QDCOUNT 1, no answers), hostname-character labels and a terminating zero label, or only on a socket connected to port 53.
+
 ## Cleanup
 
 Everything is under `$T` and the `mktemp -d -p "$XDG_RUNTIME_DIR"` homes. No process from the spike is left running. The S9-8 run ended with zero `s9-*` sandboxes or containers, both `tmpfs` mounts unmounted in Podman's namespace, and no `conmon` left.
