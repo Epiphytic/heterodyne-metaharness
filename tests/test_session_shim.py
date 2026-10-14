@@ -768,3 +768,23 @@ def test_run_hook_denies_input_over_the_bound_unparsed(run: Path, live: SessionS
     assert denied(shim.run_hook(raw, env_for(run), clock=t.clock, sleep=t.sleep)[1]) == shim.TOO_LARGE_REASON
     assert shim.run_hook(raw, env_for(run), event="Stop", clock=t.clock, sleep=t.sleep) == (0, "")
     assert live.served == 0 and not spool_exists(run)
+
+
+def test_a_bare_hook_takes_a_readable_payload_by_its_own_event(run: Path, live: SessionServer) -> None:
+    """Deviation 1: a settings file from an older harness (`hook`, no argument) keeps today's answers for
+    readable input: a Stop is recorded and prints nothing, never a PreToolUse decision Codex would reject."""
+    for args in ((), ("Bogus",), ("Stop", "extra")):
+        proc = subprocess.run(standalone(*args), env=env_for(run), input=b'{"hook_event_name": "Stop"}',
+                              capture_output=True, timeout=60, check=False)
+        assert (proc.returncode, proc.stdout) == (0, b"")
+    assert live.turns().stops == 3
+
+
+def test_a_bare_hook_denies_oversized_or_late_input(run: Path, live: SessionServer) -> None:
+    """Deviation 1: with no argument, input the shim can't trust fails closed as a PreToolUse."""
+    rc, out = Fed(standalone(), env_for(run), huge_write()).result(timeout=60)
+    assert rc == 0 and denied(out.decode()) == shim.TOO_LARGE_REASON
+    late = Fed(standalone(), env_for(run), b'{"hook_event_name": "Stop"}', close=False)
+    rc, out = late.result(timeout=shim.HOOK_INPUT_WAIT + 30)
+    assert rc == 0 and denied(out.decode()) == shim.DENY_REASON
+    assert live.served == 0 and not spool_exists(run)
