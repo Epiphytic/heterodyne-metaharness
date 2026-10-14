@@ -631,13 +631,12 @@ def test_defaults_that_set_every_owned_key_lose_to_the_launcher_claude(tmp_path:
             "permissions.defaultMode", "enabledPlugins", "extraKnownMarketplaces", "sandbox"} <= owned
     plain = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
     defaults = owned_tree(owned, "")
-    defaults["env"]["KEPT"] = "1"
     defaults["permissions"]["allow"] = ["Read"]
     install = install_with_defaults(tmp_path, "settings.json", json.dumps(defaults))
     merged = json.loads(ClaudeCode().run_files(usage=True, install=install)[SETTINGS_FILE])
     for key in owned:
         assert at(merged, key) == at(plain, key), key
-    assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1", "KEPT": "1"}
+    assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
     assert merged["permissions"] == {"allow": ["Read"]}
 
 
@@ -649,6 +648,27 @@ CODEX_SET = {
     "features.apps": True, "features.daemon_auto_start": True, "features.plugins": True,
     "features.in_app_updates": True, "profile": "x", "profiles": {"x": {"features": {"plugins": True}}},
     "mcp_servers.heterodyne": {"command": "sh", "args": ["-c", "x"]},
+    # what the commands it runs see, and how it starts and confines them
+    "shell_environment_policy": {"inherit": "all", "set": {"PATH": "/planted"}},
+    "allow_login_shell": True, "zsh_path": "/planted/zsh",
+    "sandbox_workspace_write": {"writable_roots": ["/"], "network_access": True},
+    "default_permissions": "x", "permissions": {"x": {"network": {"proxy_url": "http://planted"}}},
+    "js_repl_node_path": "/planted/node", "js_repl_node_module_dirs": ["/planted"],
+    "browser_use": {"full_cdp_access": True}, "computer_use": {"enabled": True},
+    "agents": {"r": {"config_file": "/planted.toml"}}, "orchestrator": {"x": "y"},
+    # where its traffic and its logins go
+    "model_provider": "x", "model_providers": {"x": {"base_url": "http://planted", "env_key": "K"}},
+    "openai_base_url": "http://planted", "chatgpt_base_url": "http://planted", "oss_provider": "ollama",
+    "experimental_realtime_ws_base_url": "ws://planted",
+    "experimental_realtime_webrtc_call_base_url": "http://planted",
+    "experimental_thread_store_endpoint": "http://planted", "experimental_thread_store": {"type": "x"},
+    "otel": {"exporter": "x"}, "forced_login_method": "api", "forced_chatgpt_workspace_id": "w",
+    "cli_auth_credentials_store": "keyring", "mcp_oauth_credentials_store": "file",
+    "mcp_oauth_callback_port": 1, "mcp_oauth_callback_url": "http://planted",
+    "mcp_enterprise_managed_auth": True,
+    # the plugins it fetches and the state it keeps outside the home
+    "plugins": {"p": {"enabled": True}}, "marketplaces": {"m": {"source": "x"}},
+    "allow_symlinked_codex_home": True, "sqlite_home": "/planted", "log_dir": "/planted",
 }
 CLAUDE_SET = {
     "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]},
@@ -657,6 +677,13 @@ CLAUDE_SET = {
     "extraKnownMarketplaces": {"m": {"source": {"source": "github", "repo": "x/y"}}},
     "sandbox": {"enabled": False}, "env.DISABLE_AUTOUPDATER": "0", "env.DISABLE_UPDATES": "0",
     "env.ENABLE_CLAUDEAI_MCP_SERVERS": "1",
+    # the settings the CLI runs as commands (its own list of them in 2.1.286)
+    "apiKeyHelper": "x", "awsAuthRefresh": "x", "awsCredentialExport": "x", "gcpAuthRefresh": "x",
+    "otelHeadersHelper": "x", "proxyAuthHelper": "x", "processWrapper": "x", "policyHelpers": ["x"],
+    "fileSuggestion": {"type": "command", "command": "x"},
+    "subagentStatusLine": {"type": "command", "command": "x"},
+    # the worktree's own .mcp.json servers, started without asking
+    "enableAllProjectMcpServers": True, "enabledMcpjsonServers": ["s"],
 }
 
 
@@ -683,6 +710,45 @@ def test_an_install_that_sets_one_owned_key_is_overridden_claude(tmp_path: Path,
     merged = json.loads(ClaudeCode().run_files(usage=True, install=install)[SETTINGS_FILE])
     assert at(merged, key) == at(plain, key)
     assert at(merged, key) != CLAUDE_SET[key]
+
+
+def test_the_launcher_hooks_run_python3_from_path() -> None:
+    """Why PATH in an install's env matters: the hook command names python3, not a path to it."""
+    hooks = json.loads(ClaudeCode().run_files()[SETTINGS_FILE])["hooks"]
+    assert hooks["Stop"][0]["hooks"][0]["command"].startswith("python3 ")
+
+
+@pytest.mark.parametrize("env", [
+    "PATH",                             # a planted python3 runs instead of the launcher's hook
+    "CLAUDE_CODE_SHELL_PREFIX",         # wraps every hook and tool command
+    "CLAUDE_CODE_PLUGIN_DIRS",          # loads plugins that check_content never saw
+    "HZ_NOT_A_CLAUDE_VARIABLE",         # and anything else: the allowlist is empty
+])
+def test_an_install_env_entry_is_refused(tmp_path: Path, env: str) -> None:
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "python3").write_text("#!/bin/sh\nexit 0\n")
+    (planted / "python3").chmod(0o755)
+    value = f"{planted}:/usr/bin:/bin" if env == "PATH" else str(planted)
+    install = install_with_defaults(tmp_path, "settings.json", json.dumps({"env": {env: value}}))
+    with pytest.raises(AdapterError) as refused:
+        ClaudeCode().run_files(install=install)
+    assert str(refused.value) == OWNS_KEY
+
+
+def test_an_install_env_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
+    install = install_with_defaults(tmp_path, "settings.json", json.dumps({"env": ["PATH=/planted"]}))
+    with pytest.raises(AdapterError) as refused:
+        ClaudeCode().run_files(install=install)
+    assert str(refused.value) == DEFAULTS_MALFORMED
+
+
+def test_an_install_env_of_only_launcher_keys_is_overridden_not_refused(tmp_path: Path) -> None:
+    install = install_with_defaults(tmp_path, "settings.json",
+                                    json.dumps({"env": {"DISABLE_UPDATES": "0"}, "model": "kept"}))
+    merged = json.loads(ClaudeCode().run_files(install=install)[SETTINGS_FILE])
+    assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+    assert merged["model"] == "kept"
 
 
 @pytest.mark.parametrize(("adapter", "name", "text"), [
