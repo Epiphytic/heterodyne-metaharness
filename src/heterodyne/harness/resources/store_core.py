@@ -32,7 +32,7 @@ import struct
 import tarfile
 import time
 import zlib
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from pathlib import Path
 from typing import IO, Any, Literal, cast, get_args, get_origin
 
@@ -1747,19 +1747,67 @@ def _structure(root_fd: int, m: Manifest) -> None:
     check_fast(root_fd, m, record(root_fd))
 
 
-def _remove_tree(store_fd: int, parent: str, name: str, root: tuple[int, int]) -> None:
-    """`<parent>/<name>` removed only if it is a directory whose `(dev, ino)` is `root` (E21)."""
+def _open_named(dirfd: int, name: str, roots: Collection[tuple[int, int]]) -> int | None:
+    """`name` under `dirfd`, opened once as a directory and never through a link, if the opened directory's
+    `(dev, ino)` is one of `roots`; None if nothing is there. Anything else there is no tree a receipt or an
+    intent names (`INSTALL_BROKEN`)."""
+    try:
+        fd = _open(name, DIR_FLAGS, dirfd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise Refused(INSTALL_BROKEN) from None
+        raise
+    try:
+        st = statx_at(fd, "")
+        if (st.dev, st.ino) not in roots:
+            raise Refused(INSTALL_BROKEN)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _remove_opened(dirfd: int, name: str, fd: int, hook: Hook) -> bool:
+    """The tree open at `fd`, `name` under `dirfd`, emptied through `fd` alone, then `name` removed if it is
+    still that directory: `rmdir` takes a path, so the path is checked just before it, and `rmdir` only
+    ever removes an empty directory. False if `name` is no longer the tree."""
+    hook("TREE.OPENED")
+    os.fchmod(fd, 0o700)
+    with os.scandir(fd) as it:
+        children = [e.name for e in it]
+    for child in children:
+        _remove(fd, child)
+    mine = statx_at(fd, "")
+    try:
+        st = statx_at(dirfd, name)
+    except FileNotFoundError:
+        return False
+    if (st.dev, st.ino) != (mine.dev, mine.ino):
+        return False
+    os.rmdir(name, dir_fd=dirfd)
+    return True
+
+
+def _remove_tree(store_fd: int, parent: str, name: str, root: tuple[int, int], hook: Hook) -> None:
+    """`<parent>/<name>` removed only if it is a directory whose `(dev, ino)` is `root` (E21), checked on
+    the fd the removal goes through; anything else there is kept."""
     fd = _opt_dir(store_fd, parent)
     if fd is None:
         return
     try:
         try:
-            st = statx_at(fd, name)
-        except FileNotFoundError:
+            tree = _open_named(fd, name, (root,))
+        except Refused:
             return
-        if st.kind == "dir" and (st.dev, st.ino) == root:
-            _remove(fd, name)
+        if tree is None:
+            return
+        try:
+            _remove_opened(fd, name, tree, hook)
             os.fsync(fd)
+        finally:
+            os.close(tree)
     finally:
         os.close(fd)
 
@@ -1819,20 +1867,50 @@ def _fail(store_fd: int, staging_id: str, constant: str) -> None:
     _discard_staging(store_fd, staging_id, tree=True)
 
 
-def _abandon(store_fd: int, intent: Intent, constant: str) -> None:
+def _meta_is_ours(what: str, raw: bytes, intent: Intent, r2: Record | None) -> bool:
+    """A meta file this intent's P3 or P4 wrote: the manifest with the intent's digest (`parse` takes only
+    canonical bytes), or the record that is R2 but for the root's change time."""
+    try:
+        if what == "manifest":
+            return digest(parse(raw)) == intent.digest
+        rec = _record_of(raw)
+    except Refused:
+        return False
+    return (r2 is not None and raw == _record_bytes(rec) and rec[""][:2] == intent.root
+            and {k: v for k, v in rec.items() if k} == {k: v for k, v in r2.items() if k})
+
+
+def _intent_record(store_fd: int, staging_id: str) -> Record | None:
+    """The intent's R2 (`.publishing/<id>.record.json`), or None if it is gone or unreadable."""
+    try:
+        raw = _read_at(store_fd, PUBLISHING, f"{staging_id}.record.json", MAX_STORE_FILE)
+        return None if raw is None else _record_of(raw)
+    except Refused:
+        return None
+
+
+def _abandon(store_fd: int, intent: Intent, constant: str, hook: Hook = _nothing) -> None:
     """A publish that can't finish (E21, "anything else"): `.failed/<id>.json` first, so the intent is never
     the only evidence removed; then the tree, wherever it is, only if its root is the intent's; this
-    install's meta files only if no receipt names it; then the staging's leftovers and the intent."""
+    install's meta files only if no receipt names them and they are the ones this intent wrote; then the
+    staging's leftovers and the intent. Whatever isn't the intent's stays, and holds the name."""
     _write_at(store_fd, FAILED, f"{intent.id}.json", _dump({"id": intent.id, "refused": constant}))
-    _remove_tree(store_fd, STAGING, intent.id, intent.root)
-    _remove_tree(store_fd, intent.adapter, intent.install, intent.root)
+    _remove_tree(store_fd, STAGING, intent.id, intent.root, hook)
+    _remove_tree(store_fd, intent.adapter, intent.install, intent.root, hook)
     if not _naming(_receipts(store_fd), intent.adapter, intent.install):
+        r2 = _intent_record(store_fd, intent.id)
         fd = _opt_dir(store_fd, intent.adapter)
         meta_fd = _opt_dir(fd, META) if fd is not None else None
         try:
             if meta_fd is not None:
                 for what in ("record", "manifest"):
-                    _unlink_durable(meta_fd, f"{intent.install}.{what}.json")
+                    name = f"{intent.install}.{what}.json"
+                    try:
+                        raw = _read_file(meta_fd, name, MAX_STORE_FILE)
+                    except Refused:             # not a regular file this intent wrote
+                        continue
+                    if raw is not None and _meta_is_ours(what, raw, intent, r2):
+                        _unlink_durable(meta_fd, name)
         finally:
             for f in (meta_fd, fd):
                 if f is not None:
@@ -1960,7 +2038,7 @@ def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str,
     except Interrupted:
         raise
     except Refused as exc:
-        _abandon(store_fd, intent, exc.constant)
+        _abandon(store_fd, intent, exc.constant, hook)
         raise
     return name
 
@@ -2037,7 +2115,7 @@ def _recover_one(store_fd: int, staging_id: str, hook: Hook, read: Reader) -> st
     failed = _read_at(store_fd, FAILED, f"{staging_id}.json")
     if failed is not None:          # an abandonment was interrupted: finish it
         constant = _failure_of(failed, staging_id)
-        _abandon(store_fd, intent, constant)
+        _abandon(store_fd, intent, constant, hook)
         return f"failed:{constant}"
     try:
         rec_raw = _read_at(store_fd, PUBLISHING, f"{staging_id}.record.json", MAX_STORE_FILE)
@@ -2082,7 +2160,7 @@ def _recover_one(store_fd: int, staging_id: str, hook: Hook, read: Reader) -> st
         rec = _reverify(store_fd, intent, m, r2, hook, read)
         _committed_agree(store_fd, intent, data, rec)
     except Refused as exc:
-        _abandon(store_fd, intent, exc.constant)
+        _abandon(store_fd, intent, exc.constant, hook)
         return f"failed:{exc.constant}"
     _complete(store_fd, intent, data, rec, _nothing)
     return "published"
@@ -2216,26 +2294,35 @@ def _verify(store_fd: int, adapter: str, install: str, hook: Hook, read: Reader)
 
 def _remove_install(store_fd: int, adapter: str, install: str, hook: Hook) -> None:
     """The meta record, the meta manifest, the tree bottom-up, then the receipt (E21); a rerun finishes a
-    partial removal."""
+    partial removal. The tree is opened first and must be one a receipt or an intent names
+    (`INSTALL_BROKEN` and nothing changed otherwise); it is removed through that fd."""
     if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
         raise Refused(NO_SUCH_INSTALL)
     receipts = _naming(_receipts(store_fd), adapter, install)
     if not receipts and not _held(store_fd, adapter, install):
         raise Refused(NO_SUCH_INSTALL)
+    roots = {i.root for i in receipts + _naming(_intents(store_fd), adapter, install)}
     adapter_fd = _opt_dir(store_fd, adapter)
     if adapter_fd is not None:
         try:
-            meta_fd = _opt_dir(adapter_fd, META)
-            if meta_fd is not None:
-                try:
-                    _unlink_durable(meta_fd, f"{install}.record.json")
-                    hook("REMOVE.record")
-                    _unlink_durable(meta_fd, f"{install}.manifest.json")
-                    hook("REMOVE.manifest")
-                finally:
-                    os.close(meta_fd)
-            _remove(adapter_fd, install)
-            os.fsync(adapter_fd)
+            tree = _open_named(adapter_fd, install, roots)
+            try:
+                meta_fd = _opt_dir(adapter_fd, META)
+                if meta_fd is not None:
+                    try:
+                        _unlink_durable(meta_fd, f"{install}.record.json")
+                        hook("REMOVE.record")
+                        _unlink_durable(meta_fd, f"{install}.manifest.json")
+                        hook("REMOVE.manifest")
+                    finally:
+                        os.close(meta_fd)
+                if tree is not None:
+                    if not _remove_opened(adapter_fd, install, tree, hook):
+                        raise Refused(INSTALL_BROKEN)
+                    os.fsync(adapter_fd)
+            finally:
+                if tree is not None:
+                    os.close(tree)
             hook("REMOVE.tree")
         finally:
             os.close(adapter_fd)

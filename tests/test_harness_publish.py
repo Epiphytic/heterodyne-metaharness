@@ -794,6 +794,106 @@ def test_recovery_refuses_committed_meta_that_conflicts_with_its_intent(tmp_path
     path.chmod(0o644)
     path.write_bytes(conflicting)
     assert sc.recover(store) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
-    assert_gone(tmp_path, name)
     assert sc.outcome(store, staged.id) == f"failed:{sc.RECOVERY_FAILED}"
-    assert sc.list_installs(store) == []
+    assert not os.path.lexists(install_root(tmp_path, name))
+    if what == "manifest":      # not the intent's, so abandonment keeps it, and it holds the name
+        assert path.read_bytes() == conflicting
+        assert not os.path.lexists(meta_path(tmp_path, name, "record"))
+    else:                       # R2 but for the root's change time: the intent's, so it goes
+        assert_gone(tmp_path, name)
+        assert sc.list_installs(store) == []
+
+
+@pytest.mark.parametrize("replaced", ["manifest", "record", "both"])
+def test_abandonment_keeps_meta_files_another_install_wrote(tmp_path: Path, replaced: str) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], "P4")
+    root = install_root(tmp_path, name)
+    root.chmod(0o755)
+    root.rename(tmp_path / "moved")
+    root.mkdir()
+    (root / "theirs").write_bytes(b"another install\n")
+    theirs: dict[str, bytes] = {}
+    if replaced in ("manifest", "both"):
+        theirs["manifest"] = sc.canonical(sample_manifest())
+    if replaced in ("record", "both"):
+        doc = json.loads(meta_path(tmp_path, name, "record").read_bytes())
+        doc["record"][""][:2] = [root.stat().st_dev, root.stat().st_ino]
+        theirs["record"] = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
+    for what, data in theirs.items():
+        path = meta_path(tmp_path, name, what)
+        path.chmod(0o644)
+        path.write_bytes(data)
+    assert sc.recover(store) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
+    assert (root / "theirs").read_bytes() == b"another install\n"
+    for what in ("manifest", "record"):
+        path = meta_path(tmp_path, name, what)
+        if what in theirs:
+            assert path.read_bytes() == theirs[what]
+        else:                   # the intent's own, written at P3 or P4
+            assert not os.path.lexists(path)
+    assert sc.outcome(store, staged.id) == f"failed:{sc.RECOVERY_FAILED}"
+    unseal(tmp_path / "moved")
+
+
+def swap_in_theirs(root: Path, moved: Path) -> Callable[[str], None]:
+    """A hook that, once the tree at `root` is open for removal, moves it to `moved` and puts another
+    directory with a file at `root`."""
+    def hook(point: str) -> None:
+        if point == "TREE.OPENED" and not moved.exists():
+            root.chmod(0o755)               # a move to another parent rewrites the directory's `..`
+            root.rename(moved)
+            root.mkdir()
+            (root / "theirs").write_bytes(b"another install\n")
+    return hook
+
+
+def test_abandonment_never_removes_a_tree_that_replaced_the_intents_after_it_was_opened(
+        tmp_path: Path) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], "P3")
+    root = install_root(tmp_path, name)
+    rewrite(root / FIRST_FILE)                  # recovery refuses, so the publish is abandoned
+    hook = swap_in_theirs(root, tmp_path / "moved")
+    assert sc.recover(store, hook=hook) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
+    assert (root / "theirs").read_bytes() == b"another install\n"
+    assert modes(root)[""] == 0o755
+    assert list((tmp_path / "moved").iterdir()) == []     # the intent's own tree, emptied through its fd
+    unseal(tmp_path / "moved")
+
+
+def test_remove_never_removes_a_tree_that_replaced_the_install_after_it_was_opened(tmp_path: Path) -> None:
+    store = store_of(tmp_path)
+    _, name = published(tmp_path)
+    root = install_root(tmp_path, name)
+    hook = swap_in_theirs(root, tmp_path / "moved")
+    assert refused(lambda: sc.remove(store, "codex", name, hook=hook)) == sc.INSTALL_BROKEN
+    assert (root / "theirs").read_bytes() == b"another install\n"
+    assert modes(root)[""] == 0o755
+    assert list((tmp_path / "moved").iterdir()) == []
+    assert sc.state(store, "codex", name) == "broken"      # the receipt stays, so it is still visible
+    unseal(tmp_path / "moved")
+
+
+@pytest.mark.parametrize("theirs", ["directory", "file"])
+def test_remove_refuses_and_changes_nothing_when_the_install_path_is_not_the_installs(
+        tmp_path: Path, theirs: str) -> None:
+    store = store_of(tmp_path)
+    _, name = published(tmp_path)
+    root = install_root(tmp_path, name)
+    root.chmod(0o755)
+    root.rename(tmp_path / "moved")
+    if theirs == "directory":
+        root.mkdir()
+        (root / "theirs").write_bytes(b"another install\n")
+    else:
+        root.write_bytes(b"another install\n")
+    record = meta_path(tmp_path, name, "record").read_bytes()
+    assert refused(lambda: sc.remove(store, "codex", name)) == sc.INSTALL_BROKEN
+    assert meta_path(tmp_path, name, "record").read_bytes() == record
+    assert (root / "theirs" if theirs == "directory" else root).read_bytes() == b"another install\n"
+    unseal(tmp_path / "moved")
