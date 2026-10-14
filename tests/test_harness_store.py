@@ -3,7 +3,6 @@ to `serve` threads on a Unix socket in `short_dir()`, and against `LocalStore` o
 `store_core`, so both must answer alike."""
 
 import contextlib
-import dataclasses
 import os
 import socket
 import threading
@@ -28,6 +27,7 @@ from sandbox_env import short_dir
 
 from heterodyne.harness import store as hs
 from heterodyne.harness.resources import store_core as sc
+from heterodyne.harness.settings import HarnessSettings
 
 KINDS = ["helper", "local"]
 TARGET = "x86_64-unknown-linux-musl"
@@ -184,19 +184,17 @@ def test_an_unanswered_helper_is_a_refusal(tmp_path: Path) -> None:
             thread.join(timeout=120)
 
 
-@dataclasses.dataclass(frozen=True)
-class Settings:
-    store: Path
-    fallback: bool
-    helper_socket: Path
-    helper_timeout: float = 30.0
+def settings(store: Path, *, fallback: bool, sock: Path) -> HarnessSettings:
+    return HarnessSettings(store=store, fallback=fallback, owner="openclaw", helper_socket=sock,
+                           helper_copy=sock.with_name("store_core.py"), staging_hours=6,
+                           approval_workstream="", recipes={})
 
 
 def test_open_store_takes_the_fallback_only_when_it_is_set(tmp_path: Path) -> None:
     root = store_dir(tmp_path)
-    local = hs.open_store(Settings(root, True, tmp_path / "s.sock"))
+    local = hs.open_store(settings(root, fallback=True, sock=tmp_path / "s.sock"))
     assert isinstance(local, hs.LocalStore) and local.fallback and local.root == root
-    helper = hs.open_store(Settings(root, False, tmp_path / "s.sock"))
+    helper = hs.open_store(settings(root, fallback=False, sock=tmp_path / "s.sock"))
     assert isinstance(helper, hs.HelperStore) and not helper.fallback and helper.root == root
 
 

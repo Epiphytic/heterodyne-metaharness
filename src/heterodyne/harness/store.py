@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from heterodyne.harness.resources import store_core as sc
+from heterodyne.harness.settings import HarnessSettings
 
 MAX_REPLY = 64 << 20            # a reply's bytes: a list of every install is the largest
+HELPER_TIMEOUT = 30.0           # seconds a request to the helper may take, the lock wait included
 
 
 class StoreRefused(Exception):
@@ -184,24 +186,9 @@ class HelperStore(_Client):
         raise StoreRefused(refused if r.get("ok") is False and isinstance(refused, str) else sc.HELPER_FAILED)
 
 
-class StoreSettings(Protocol):
-    """What `open_store` reads from the harness settings."""
-
-    @property
-    def store(self) -> Path: ...
-
-    @property
-    def fallback(self) -> bool: ...
-
-    @property
-    def helper_socket(self) -> Path: ...
-
-    @property
-    def helper_timeout(self) -> float: ...
-
-
-def open_store(settings: StoreSettings) -> LocalStore | HelperStore:
+def open_store(settings: HarnessSettings, *,
+               helper_timeout: float = HELPER_TIMEOUT) -> LocalStore | HelperStore:
     """The local store only when the settings turn the fallback on; the helper otherwise (plan 4c E3)."""
     if settings.fallback:
-        return LocalStore(settings.store)
-    return HelperStore(settings.helper_socket, settings.store, timeout=settings.helper_timeout)
+        return LocalStore(settings.store, staging_hours=settings.staging_hours)
+    return HelperStore(settings.helper_socket, settings.store, timeout=helper_timeout)

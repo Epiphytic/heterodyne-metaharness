@@ -1467,6 +1467,7 @@ NO_SUCH_INSTALL = "the store has no install of that name"
 INSTALL_BROKEN = "the install is not in its published state"
 RECOVERY_FAILED = "an interrupted publish could not be recovered"
 RECORD_MALFORMED = "a record, an intent, a receipt or a failure is not in the store's form"
+PUBLISH_INTERRUPTED = "the install root's mode could not be restored after the rename; recovery finishes it"
 
 PUBLISHING, PUBLISHED, FAILED, META = ".publishing", ".published", ".failed", ".meta"
 STORE_DIR_MODE = 0o755
@@ -1483,6 +1484,19 @@ _renameat2 = getattr(_libc, "renameat2", None)
 if _renameat2 is not None:
     _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     _renameat2.restype = ctypes.c_int
+
+
+class Interrupted(Refused):
+    """A publish stopped with its intent in place and nothing abandoned: the next recovery decides it."""
+
+
+def _seal_root(root_fd: int) -> None:
+    """The root back to 0555 after the rename. If that fails the publish stops short of every later phase
+    (`Interrupted`), so the tree is never published writable; recovery seals and re-verifies it."""
+    try:
+        os.fchmod(root_fd, 0o555)
+    except OSError:
+        raise Interrupted(PUBLISH_INTERRUPTED) from None
 
 
 def _nothing(point: str) -> None:
@@ -1915,15 +1929,18 @@ def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str,
         try:
             # Moving a directory to another parent rewrites its `..`, which needs write permission on it: the
             # root alone is made writable for the rename. Its change time is the one E20 lets move.
+            # A deviation from E20, which has no mode change: nothing at the install path is ever published
+            # with a root that isn't 0555, since `check_fast` (step 6, `state`, `verify`) refuses one.
             os.fchmod(root_fd, 0o755)
             try:
                 _rename_noreplace(staging_fd, staging_id, adapter_fd, name)
             except OSError as exc:
+                _seal_root(root_fd)
                 if exc.errno == errno.EEXIST:
                     raise Refused(NAME_CONFLICT) from None
                 raise
-            finally:
-                os.fchmod(root_fd, 0o555)
+            hook("P2.renamed")
+            _seal_root(root_fd)
             os.fsync(adapter_fd)
             os.fsync(staging_fd)
             os.fsync(root_fd)
@@ -1939,6 +1956,8 @@ def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str,
         finally:
             os.close(adapter_fd)
         _complete(store_fd, intent, data, rec, hook)
+    except Interrupted:
+        raise
     except Refused as exc:
         _abandon(store_fd, intent, exc.constant)
         raise

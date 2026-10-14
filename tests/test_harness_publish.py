@@ -277,6 +277,7 @@ def test_only_the_roots_change_time_may_move_at_the_rename(tmp_path: Path) -> No
 CRASH_POINTS = {
     "P1.record": "restarted",   # the intent's record, not yet the intent
     "P1.intent": "restarted",   # the intent; the tree is still in .staging
+    "P2.renamed": "published",  # the rename, before the root is 0555 again
     "P2": "published",          # the rename
     "P3": "published",
     "P4": "published",
@@ -670,3 +671,55 @@ def test_a_temp_file_left_by_a_crash_mid_write_is_removed_by_recovery(tmp_path: 
     assert sc.recover(store) == []
     assert list(publishing.iterdir()) == []
     assert sc.outcome(store, staged.id) == "staged"
+
+
+def test_a_crash_between_the_rename_and_the_roots_seal_recovers_to_a_0555_root(tmp_path: Path) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    crash(tmp_path, "publish", [staged.id, staged.digest], "P2.renamed")
+    assert modes(install_root(tmp_path, name))[""] == 0o755
+    assert sc.state(store, "codex", name) == "publishing"
+    assert sc.recover(store) == [(staged.id, "published")]
+    assert modes(install_root(tmp_path, name))[""] == 0o555
+    assert sc.state(store, "codex", name) == "published"
+    check_published(tmp_path, name)
+
+
+def test_a_root_that_cant_be_sealed_after_the_rename_is_left_for_recovery(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    name = install_name(tmp_path, staged)
+    real = os.fchmod
+    opened = [False]
+
+    def fchmod(fd: int, mode: int) -> None:
+        if mode == 0o755 and sc.statx_at(fd, "").mode == 0o555 and not opened[0]:
+            opened[0] = True                    # the publish's own opening of the root for the rename
+        elif mode == 0o555 and opened[0]:
+            raise PermissionError(1, "fchmod")
+        real(fd, mode)
+
+    monkeypatch.setattr(os, "fchmod", fchmod)
+    assert refused(lambda: sc.publish(store, staged.id, staged.digest)) == sc.PUBLISH_INTERRUPTED
+    monkeypatch.setattr(os, "fchmod", real)
+    assert modes(install_root(tmp_path, name))[""] == 0o755
+    assert not os.path.lexists(meta_path(tmp_path, name, "manifest"))
+    assert sc.state(store, "codex", name) == "publishing"
+    assert sc.outcome(store, staged.id) == "staged"
+    assert sc.recover(store) == [(staged.id, "published")]
+    assert modes(install_root(tmp_path, name))[""] == 0o555
+    check_published(tmp_path, name)
+
+
+def test_an_install_whose_root_is_not_0555_is_never_published_or_verified(tmp_path: Path) -> None:
+    store = store_of(tmp_path)
+    _, name = published(tmp_path)
+    install_root(tmp_path, name).chmod(0o755)
+    assert sc.state(store, "codex", name) == "broken"
+    assert [i["state"] for i in sc.list_installs(store)] == ["broken"]
+    assert refused(lambda: sc.verify(store, "codex", name)) == sc.ENTRY_CHANGED
+    with pytest.raises(sc.Mismatch) as e:
+        check_published(tmp_path, name)
+    assert e.value.constant == sc.ENTRY_CHANGED
