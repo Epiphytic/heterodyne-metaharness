@@ -1,0 +1,224 @@
+"""Plan 4c T5: the store's location and path-component checks (ADR 0001 §7 Managed installs)."""
+
+import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from heterodyne.harness import paths
+
+ME = os.getuid()
+SERVICE = ME + 1      # outside the fallback the test's own files belong to the store owner, not the service
+Lookup = Callable[[Path], tuple[int, int]]
+
+
+def above_tmp_is_root(tmp_path: Path) -> Lookup:
+    """The injected owner lookup: the real owner and mode inside `tmp_path`, and root's 0755 above it, so
+    each case is decided by the tree it builds (the host's /tmp is world-writable)."""
+    def lookup(p: Path) -> tuple[int, int]:
+        if p == tmp_path or tmp_path in p.parents:
+            st = os.lstat(p)
+            return st.st_uid, st.st_mode
+        return 0, 0o40755
+    return lookup
+
+
+def mkdir(p: Path, mode: int = 0o700) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
+    p.chmod(mode)
+    return p
+
+
+def problems(tmp_path: Path, store: Path, lookup: Lookup | None = None, **overrides: Any) -> list[str]:
+    args: dict[str, Any] = {"login_dirs": [tmp_path / "home" / ".codex"], "worktrees": [tmp_path / "repo"],
+                            "state_dir": tmp_path / "state", "service_uid": SERVICE, "owner_uid": ME,
+                            "fallback": False}
+    args.update(overrides)
+    return paths.store_problems(store, lookup=lookup or above_tmp_is_root(tmp_path), **args)
+
+
+def in_login(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "home" / ".codex" / "store"))
+
+
+def login_inside(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store"), login_dirs=[t / "store" / "logins" / ".claude"])
+
+
+def via_symlink(t: Path) -> list[str]:
+    mkdir(t / "home" / ".codex" / "store")
+    (t / "link").symlink_to(t / "home" / ".codex")
+    return problems(t, t / "link" / "store")
+
+
+def in_worktree(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "repo" / "store"))
+
+
+def in_state(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "state" / "harnesses"))
+
+
+def contains_worktree(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store"), worktrees=[t / "store" / "repo"])
+
+
+def contains_state(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store"), state_dir=t / "store" / "state")
+
+
+def _svc_owns(t: Path) -> Lookup:
+    """`tmp_path` is root's, `svc` the service user's (this test's uid) and everything else the owner's."""
+    def lookup(p: Path) -> tuple[int, int]:
+        if p == t or t not in p.parents:
+            return 0, 0o40755
+        st = os.lstat(p)
+        return (ME if p == t / "svc" else ME + 1), st.st_mode
+    return lookup
+
+
+def group_writable(t: Path) -> list[str]:
+    mkdir(t / "shared", 0o770)
+    return problems(t, mkdir(t / "shared" / "store"))
+
+
+def other_writable(t: Path) -> list[str]:
+    mkdir(t / "open", 0o707)
+    return problems(t, mkdir(t / "open" / "store"))
+
+
+def owned_by_service_user(t: Path) -> list[str]:
+    # Not the fallback: a component the service user owns is one it can rename, so the store is unsafe.
+    return problems(t, mkdir(t / "store", 0o755), service_uid=ME, owner_uid=ME + 1)
+
+
+def owner_is_service_user(t: Path) -> list[str]:
+    # Not the fallback, so the store owner must be another user, even before the store exists.
+    return problems(t, t / "missing" / "store", service_uid=ME, owner_uid=ME)
+
+
+def link_through_service_dir(t: Path) -> list[str]:
+    # The service user owns the directory holding a link to a protected store, so it can repoint the link.
+    protected = mkdir(t / "protected" / "store", 0o755)
+    mkdir(t / "svc", 0o755)
+    (t / "svc" / "store").symlink_to(protected)
+    return problems(t, t / "svc" / "store", lookup=_svc_owns(t), service_uid=ME, owner_uid=ME + 1)
+
+
+def link_loop(t: Path) -> list[str]:
+    (t / "loop").symlink_to(t / "loop")
+    return problems(t, t / "loop" / "store")
+
+
+def unreadable_component(t: Path) -> list[str]:
+    def lookup(p: Path) -> tuple[int, int]:
+        if p == t:
+            raise PermissionError(13, "denied")
+        return above_tmp_is_root(t)(p)
+    return problems(t, mkdir(t / "store"), lookup=lookup)
+
+
+def fallback_not_0700(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store", 0o750), fallback=True, service_uid=ME, owner_uid=None)
+
+
+def fallback_not_service_users(t: Path) -> list[str]:
+    real = above_tmp_is_root(t)
+
+    def lookup(p: Path) -> tuple[int, int]:
+        uid, mode = real(p)
+        return (ME + 1, mode) if p == t / "store" else (uid, mode)
+    return problems(t, mkdir(t / "store"), lookup=lookup, fallback=True, service_uid=ME, owner_uid=ME + 1)
+
+
+def helper_differs(t: Path) -> list[str]:
+    (t / "packaged.py").write_text("print(1)\n")
+    (t / "installed.py").write_text("print(2)\n")
+    return paths.helper_problems(t / "installed.py", t / "packaged.py")
+
+
+def helper_missing(t: Path) -> list[str]:
+    (t / "packaged.py").write_text("print(1)\n")
+    return paths.helper_problems(t / "installed.py", t / "packaged.py")
+
+
+CASES: list[tuple[str, Callable[[Path], list[str]]]] = [
+    ("STORE_IN_LOGIN_DIR", in_login), ("STORE_IN_LOGIN_DIR", via_symlink),
+    ("LOGIN_DIR_IN_STORE", login_inside),
+    ("STORE_IN_WORKTREE", in_worktree),
+    ("WORKTREE_IN_STORE", contains_worktree),
+    ("STORE_IN_STATE_DIR", in_state), ("STATE_DIR_IN_STORE", contains_state),
+    ("STORE_PATH_WRITABLE", group_writable), ("STORE_PATH_WRITABLE", other_writable),
+    ("STORE_PATH_WRITABLE", owned_by_service_user), ("STORE_PATH_WRITABLE", unreadable_component),
+    ("STORE_PATH_WRITABLE", owner_is_service_user), ("STORE_PATH_WRITABLE", link_through_service_dir),
+    ("STORE_PATH_WRITABLE", link_loop),
+    ("STORE_PATH_WRITABLE", fallback_not_0700), ("STORE_PATH_WRITABLE", fallback_not_service_users),
+    ("HELPER_DRIFT", helper_differs), ("HELPER_DRIFT", helper_missing),
+]
+
+
+@pytest.mark.parametrize("constant, case", CASES, ids=[f"{c}-{f.__name__}" for c, f in CASES])
+def test_store_problems(tmp_path: Path, constant: str, case: Callable[[Path], list[str]]) -> None:
+    assert getattr(paths, constant) == constant
+    assert case(tmp_path) == [constant]
+
+
+def test_every_constant_has_a_case() -> None:
+    assert {c for c, _ in CASES} == set(paths.PROBLEMS)
+
+
+def test_a_clean_store_has_no_problems(tmp_path: Path) -> None:
+    """The negative controls: each case's tree, minus the one thing that causes it."""
+    assert problems(tmp_path, mkdir(tmp_path / "store", 0o755)) == []
+    assert problems(tmp_path, tmp_path / "missing" / "store") == []      # created later, by the store
+    assert problems(tmp_path, mkdir(tmp_path / "fb"), fallback=True, service_uid=ME, owner_uid=None) == []
+    # A link in a directory only root can change, to a store only the owner can, is fine.
+    (tmp_path / "link").symlink_to(mkdir(tmp_path / "protected" / "store", 0o755))
+    assert problems(tmp_path, tmp_path / "link", lookup=_svc_owns(tmp_path), service_uid=ME,
+                    owner_uid=ME + 1) == []
+    assert problems(tmp_path, mkdir(tmp_path / "sib"), login_dirs=[tmp_path / "sibling"],
+                    worktrees=[tmp_path / "s"], state_dir=tmp_path / "st") == []
+    (tmp_path / "packaged.py").write_text("print(1)\n")
+    (tmp_path / "installed.py").write_text("print(1)\n")
+    assert paths.helper_problems(tmp_path / "installed.py", tmp_path / "packaged.py") == []
+
+
+@pytest.mark.parametrize("kind, expected", [
+    ("login_dirs", [paths.STORE_IN_LOGIN_DIR, paths.LOGIN_DIR_IN_STORE]),
+    ("worktrees", [paths.STORE_IN_WORKTREE, paths.WORKTREE_IN_STORE]),
+    ("state_dir", [paths.STORE_IN_STATE_DIR, paths.STATE_DIR_IN_STORE]),
+])
+def test_a_path_that_cant_be_resolved_is_both_containment_problems(tmp_path: Path, kind: str,
+                                                                   expected: list[str]) -> None:
+    # r2: `locked/link` points into the store, but `locked` can't be searched, so where it leads can't be
+    # established; a lexical comparison would call them apart.
+    store = mkdir(tmp_path / "store", 0o755)
+    locked = mkdir(tmp_path / "locked")
+    (locked / "link").symlink_to(store / "inner")
+    where = locked / "link"
+    locked.chmod(0o000)
+    try:
+        overrides: dict[str, Any] = {kind: where if kind == "state_dir" else [where]}
+        found = problems(tmp_path, store, **overrides)
+    finally:
+        locked.chmod(0o700)
+    assert found == expected
+
+
+def test_a_dangling_link_is_followed_into_a_store_not_yet_made(tmp_path: Path) -> None:
+    (tmp_path / "login").symlink_to(tmp_path / "missing" / "store" / "logins")
+    assert problems(tmp_path, tmp_path / "missing" / "store",
+                    login_dirs=[tmp_path / "login"]) == [paths.LOGIN_DIR_IN_STORE]
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")              # a loop can't be resolved either
+    assert problems(tmp_path, mkdir(tmp_path / "store"), worktrees=[tmp_path / "loop" / "repo"]) == [
+        paths.STORE_IN_WORKTREE, paths.WORKTREE_IN_STORE]
+
+
+def test_a_store_path_climbing_out_of_a_missing_directory_is_refused(tmp_path: Path) -> None:
+    # The walk stops at the first missing component; a `..` after it would land back among real
+    # directories (and links) the walk never checked.
+    mkdir(tmp_path / "home" / ".codex")
+    (tmp_path / "link").symlink_to(tmp_path / "home" / ".codex")
+    assert paths.STORE_PATH_WRITABLE in problems(tmp_path, tmp_path / "missing" / ".." / "link" / "store")
