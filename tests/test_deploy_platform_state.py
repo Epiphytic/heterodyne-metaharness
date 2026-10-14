@@ -31,9 +31,9 @@ def load() -> ModuleType:
 P = load()
 
 
-def run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, "-I", "-c", SCRIPT.read_text(), *args], capture_output=True,
-                          text=True, timeout=60, check=False)
+def run(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-I", "-c", SCRIPT.read_text(), *args], input=stdin,
+                          capture_output=True, text=True, timeout=60, check=False)
 
 
 class Paths:
@@ -364,3 +364,114 @@ def test_the_expected_identity_unescapes_percent() -> None:
 def test_a_render_without_exec_start_refuses() -> None:
     with pytest.raises(P.Refusal):
         P.expected(MARKED)
+
+
+# --- uninstall (D6) ---
+
+W = W_NAME
+
+
+def blocks(**states: tuple[str, str, str]) -> str:
+    """systemctl show output for both units: (LoadState, ActiveState, FragmentPath)."""
+    out = []
+    for unit in (W, U):
+        load, active, frag = states.get(unit.split("-")[1].split(".")[0], ("not-found", "inactive", ""))
+        out.append(f"Id={unit}\nLoadState={load}\nActiveState={active}\nFragmentPath={frag}\n")
+    return "\n".join(out)
+
+
+def classify(p: Paths, show_text: str, restore: bool = False) -> dict[str, tuple[str, str]]:
+    rows = P.classify(P.load_record(p.record), p.units, p.backups, show_text, restore)
+    return {u: (c, why) for u, c, why in rows}
+
+
+def test_nothing_installed_is_absent(p: Paths) -> None:
+    assert classify(p, blocks()) == {W: ("absent", ""), U: ("absent", "")}
+
+
+def test_a_written_marker_unit_is_managed(p: Paths) -> None:
+    adopt_through_created(p)
+    got = classify(p, blocks(admind=("loaded", "active", str(p.file))))
+    assert got[U] == ("managed", "")
+
+
+def test_a_hand_made_unit_never_adopted_is_not_managed(p: Paths) -> None:
+    p.file.write_text(HAND)
+    assert classify(p, blocks(admind=("loaded", "active", str(p.file))))[U] == ("not-managed", "")
+
+
+@pytest.mark.parametrize("case", ["marker-no-entry", "entry-no-marker", "writing", "fragment-elsewhere",
+                                  "loaded-no-file", "symlink"])
+def test_ambiguous_cases(p: Paths, tmp_path: Path, case: str) -> None:
+    show_text = blocks(admind=("loaded", "active", str(p.file)))
+    if case == "marker-no-entry":
+        p.file.write_text(MARKED)
+    elif case == "entry-no-marker":
+        adopt_through_created(p)
+        p.file.write_text(HAND)
+    elif case == "writing":
+        run("record-set", "--unit", U, "--state", "writing", "--record", str(p.record), "--origin", "created")
+        p.file.write_text(MARKED)
+    elif case == "fragment-elsewhere":
+        adopt_through_created(p)
+        show_text = blocks(admind=("loaded", "active", "/elsewhere/x.service"))
+    elif case == "loaded-no-file":
+        pass
+    elif case == "symlink":
+        p.file.symlink_to(tmp_path / "render")
+    assert classify(p, show_text)[U][0] == "ambiguous"
+
+
+def test_restore_needs_a_good_backup(p: Paths) -> None:
+    p.file.write_text(HAND)
+    adopt_through(p, "written")
+    show_text = blocks(admind=("loaded", "active", str(p.file)))
+    assert classify(p, show_text, restore=True)[U] == ("managed", "")
+    [b] = list(p.backups.iterdir())
+    b.write_text("other")
+    assert classify(p, show_text, restore=True)[U][0] == "ambiguous"
+    assert classify(p, show_text, restore=False)[U] == ("managed", "")
+
+
+def test_classify_exits_1_when_anything_is_ambiguous(p: Paths) -> None:
+    p.file.write_text(MARKED)
+    out = run("classify", "--record", str(p.record), "--unit-dir", str(p.units), "--backup-dir",
+              str(p.backups),
+              stdin=blocks(admind=("loaded", "active", str(p.file))))
+    assert out.returncode == 1 and out.stdout.splitlines()[0] == f"{W} absent"
+    assert out.stdout.splitlines()[1].startswith(f"{U} ambiguous ")
+
+
+def test_restore_puts_the_backup_back_0644(p: Paths) -> None:
+    p.file.write_text(HAND)
+    adopt_through(p, "written")
+    assert run("restore", "--unit", U, "--record", str(p.record), "--unit-dir", str(p.units), "--backup-dir",
+               str(p.backups)).returncode == 0
+    assert p.file.read_text() == HAND and p.file.stat().st_mode & 0o777 == 0o644
+
+
+
+def test_a_malformed_record_makes_classify_refuse(p: Paths) -> None:
+    p.install.mkdir()
+    p.record.write_text("{")
+    out = run("classify", "--record", str(p.record), "--unit-dir", str(p.units), "--backup-dir",
+              str(p.backups),
+              stdin=blocks())
+    assert out.returncode == 1 and out.stdout == "" and "install record" in out.stderr
+
+
+def test_a_unit_systemd_did_not_report_is_ambiguous(p: Paths) -> None:
+    only_wsd = blocks().split("\n\n")[0]
+    assert classify(p, only_wsd)[U] == ("ambiguous", "systemd's state can't be read")
+
+
+def test_a_not_found_but_active_unit_with_no_file_is_ambiguous(p: Paths) -> None:
+    assert classify(p, blocks(admind=("not-found", "active", "")))[U][0] == "ambiguous"
+
+
+def test_restore_refuses_without_a_verified_backup(p: Paths) -> None:
+    adopt_through_created(p)
+    out = run("restore", "--unit", U, "--record", str(p.record), "--unit-dir", str(p.units), "--backup-dir",
+              str(p.backups))
+    assert out.returncode == 1 and "no verified backup" in out.stderr
+    assert p.file.read_text() == p.render.read_text()

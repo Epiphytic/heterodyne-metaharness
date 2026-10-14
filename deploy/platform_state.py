@@ -286,6 +286,53 @@ def process_diff(proc: Path, pid: int, exp: Expected) -> list[str]:
     return diff
 
 
+def _blocks(show_text: str) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for block in show_text.strip().split("\n\n"):
+        props = {k: v for k, _, v in (line.partition("=") for line in block.splitlines())}
+        if "Id" in props:
+            out[props["Id"]] = props
+    return out
+
+
+def classify(rec: dict, unit_dir: Path, backups: Path, show_text: str,
+             restore: bool) -> list[tuple[str, str, str]]:
+    shown = _blocks(show_text)
+    rows = []
+    for unit in reversed(MANAGED):     # wsd first: uninstall stops it before admind
+        file = unit_dir / unit
+        kind = file_kind(file)
+        e = rec["units"].get(unit)
+        props = shown.get(unit)
+        if props is None:
+            rows.append((unit, "ambiguous", "systemd's state can't be read"))
+            continue
+        loaded = props.get("LoadState") != "not-found" or props.get("ActiveState") not in ("inactive", "")
+        if kind.startswith("refuse:"):
+            rows.append((unit, "ambiguous", kind.removeprefix("refuse:")))
+        elif kind == "absent" and e is None:
+            rows.append((unit, "ambiguous", "loaded with no file") if loaded else (unit, "absent", ""))
+        elif kind == "hand-made" and e is None:
+            rows.append((unit, "not-managed", ""))
+        elif kind == "marker" and e is not None and e["state"] == "written":
+            if props.get("FragmentPath") != str(file):
+                rows.append((unit, "ambiguous", "systemd loads it from elsewhere"))
+            elif restore and e["origin"] == "adopted" and not _backup_ok(e, backups):
+                rows.append((unit, "ambiguous", "the recorded backup is missing or changed"))
+            else:
+                rows.append((unit, "managed", ""))
+        else:
+            rows.append((unit, "ambiguous", "the file and the install record disagree"))
+    return rows
+
+
+def restore(unit: str, rec: dict, unit_dir: Path, backups: Path) -> None:
+    e = rec["units"].get(unit)
+    if e is None or e["origin"] != "adopted" or not _backup_ok(e, backups):
+        raise Refusal(f"{unit}: no verified backup to restore")
+    _atomic_write(unit_dir / unit, (backups / e["backup"]).read_bytes(), 0o644)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="platform_state.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -319,6 +366,13 @@ def main(argv: list[str]) -> int:
     pd.add_argument("--render", required=True)
     pd.add_argument("--proc", required=True)
     pd.add_argument("--pid", required=True, type=int)
+    c = sub.add_parser("classify")
+    for a in ("--record", "--unit-dir", "--backup-dir"):
+        c.add_argument(a, required=True)
+    c.add_argument("--restore-adopted", action="store_true")
+    rs = sub.add_parser("restore")
+    for a in ("--unit", "--record", "--unit-dir", "--backup-dir"):
+        rs.add_argument(a, required=True)
     args = ap.parse_args(argv)
     if getattr(args, "unit", None) is not None and args.unit not in MANAGED:
         ap.error("not a managed unit")
@@ -349,6 +403,14 @@ def main(argv: list[str]) -> int:
         elif args.cmd == "process-diff":
             for line in process_diff(Path(args.proc), args.pid, expected(Path(args.render).read_text())):
                 print(line)
+        elif args.cmd == "classify":
+            rows = classify(load_record(Path(args.record)), Path(args.unit_dir), Path(args.backup_dir),
+                            sys.stdin.read(), args.restore_adopted)
+            for unit, kind, why in rows:
+                print(f"{unit} {kind} {why}".rstrip())
+            return 1 if any(kind == "ambiguous" for _, kind, _ in rows) else 0
+        elif args.cmd == "restore":
+            restore(args.unit, load_record(Path(args.record)), Path(args.unit_dir), Path(args.backup_dir))
     except (Refusal, RecordError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
