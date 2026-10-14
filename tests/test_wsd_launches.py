@@ -30,6 +30,7 @@ from heterodyne.wsd.beads import (
     LaunchConflict,
 )
 from heterodyne.wsd.checkpoints import Checkpoint
+from heterodyne.wsd.daemon import selections_at
 from heterodyne.wsd.headroom import Mark, UsageCache, UsageSettings, Window, gate, quota_detail
 from heterodyne.wsd.journal import EntryConflict, Journal, OpKind
 from heterodyne.wsd.launches import (
@@ -714,15 +715,33 @@ def test_no_selection_journals_an_empty_pin_and_dispatches_unchanged(tmp_path: P
     assert INSTALL_UNPINNED and NOT_SELECTED and INSTALL_UNPINNED != NOT_SELECTED
 
 
-def test_an_unreadable_selection_is_config_invalid_and_launches_nothing(tmp_path: Path) -> None:
+def test_an_unreadable_selection_journals_an_empty_pin_and_launches_as_before(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """E23 (r1 finding 1): until Task 8 refuses it, an unreadable selection launches as before T7."""
     def unreadable(_adapter: str) -> InstallPin | None:
-        raise ConfigError("harnesses.toml exists but can't be read")
+        raise ConfigError(f"harnesses.toml exists but can't be read {PIN_A.install}")
     rig = started(tmp_path)
     rig.selections = unreadable
     rig.restart()
-    rig.pickup()
-    assert row_reason(rig) is Reason.CONFIG_INVALID and rig.runtime.calls == 0
-    assert rig.journal.launches_of(WS, "btq-1") == []
+    assert rig.pickup() is Outcome.STARTED
+    [spec] = rig.runtime.launches
+    assert (spec.install, spec.install_digest) == ("", "") and pins_of(rig) == [("", "")]
+    [warning] = [r for r in caplog.records if r.name == "heterodyne.wsd.park"]
+    assert warning.levelname == "WARNING" and PIN_A.install not in warning.getMessage()
+
+
+def test_a_malformed_selection_for_another_adapter_does_not_stop_this_launch(tmp_path: Path) -> None:
+    """The real harnesses.toml reader: a broken `[codex]` table fails the whole file, and the Claude
+    launch still goes ahead with an empty pin (E23)."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "harnesses.toml").write_text(f'[codex]\nuse = "{PIN_A.install}"\n')     # no digest
+    rig = started(tmp_path)
+    rig.selections = selections_at(config)
+    rig.restart()
+    assert rig.pickup() is Outcome.STARTED
+    [spec] = rig.runtime.launches
+    assert spec.install == "" and pins_of(rig) == [("", "")]
 
 
 def test_the_bead_copy_carries_the_pin_and_rebuilds_with_it(tmp_path: Path) -> None:

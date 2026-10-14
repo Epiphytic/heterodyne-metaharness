@@ -584,6 +584,26 @@ def test_the_upgrade_from_2_to_3_keeps_every_row_and_rolls_back_on_failure(tmp_p
     assert (path.parent / "wsd.db.v2.bak").exists()
 
 
+def test_repeating_the_upgrade_from_2_to_3_keeps_the_version_2_backup(tmp_path: Path) -> None:
+    """r1 finding 2: the source is checked before the backup is taken, so a retry after success is a no-op
+    and leaves the rollback copy alone; anything else is refused with the backup untouched."""
+    path = tmp_path / "state" / "wsd.db"
+    v2_journal(path)
+    upgrade.run_2_to_3(path)
+    backup = path.parent / "wsd.db.v2.bak"
+    kept, after = backup.read_bytes(), all_rows(path)
+    upgrade.run_2_to_3(path)
+    assert backup.read_bytes() == kept and all_rows(path) == after
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        db.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
+    finally:
+        db.close()
+    with pytest.raises(JournalCorrupt):
+        upgrade.run_2_to_3(path)
+    assert backup.read_bytes() == kept
+
+
 def test_startup_upgrades_version_2_without_the_hosts_accounts(tmp_path: Path) -> None:
     """2 to 3 only adds columns: it reads no bead and no account, unlike 1 to 2."""
     s = WsdSettings(tmp_path / "state", 1.0, 1.0, 1, tmp_path / "btq", {}, ())
