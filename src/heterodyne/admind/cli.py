@@ -16,6 +16,7 @@ from typing import NoReturn, cast
 import msgspec
 
 from heterodyne import config as hconfig
+from heterodyne import units
 from heterodyne.admind import approvals, asks, ctl, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
@@ -468,7 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ask_parser(sub.add_parser("ask", help="post a question or merge request to the operators and read "
                                            "the answers"))
     _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
-    sub.add_parser("unit", help="print a systemd user unit for this install")
+    units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")
     return parser
@@ -540,10 +541,5 @@ def _dispatch(argv: list[str]) -> int:
         return hook_main(argv[1:], sys.stdin.buffer.read())
     args = build_parser().parse_args(argv)
     if args.command == "unit":
-        try:
-            print(unit.render(sys.executable, os.environ), end="")
-        except ValueError as exc:
-            print(f"cannot render the unit: {show(str(exc), False)}", file=sys.stderr)
-            return EX_CONFIG
-        return 0
+        return units.command(unit.render, args, os.environ)
     return _with_settings(args)
