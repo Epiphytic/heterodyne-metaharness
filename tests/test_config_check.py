@@ -96,3 +96,22 @@ def test_config_check_redacts_the_derived_store(tmp_path: Path, monkeypatch: pyt
     assert rc == 0, err
     assert ident not in out + err
     assert "harnesses.store = <redacted hex key>    (defaults, fallback)" in out.splitlines()
+
+
+def test_config_check_counts_an_unlistable_repo_parent_as_a_worktree(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # The btq worktrees (`<repo>-btq-*`) are found by listing the repo's parent; when that can't be listed,
+    # the parent itself stands in for them rather than the store being judged clear of them.
+    parent = tmp_path / "src"
+    (parent / "repo").mkdir(parents=True)
+    store = parent / "repo-btq-1" / "store"
+    store.mkdir(parents=True)
+    env = config_env(tmp_path, f'[harnesses]\nstore = "{store}"\n',
+                     {"w": f'[repos]\nmain = "{parent / "repo"}"\n'})
+    parent.chmod(0o300)                                                 # searchable, not listable
+    try:
+        rc, out, err = check(env, monkeypatch, capsys)
+    finally:
+        parent.chmod(0o700)
+    assert rc == 0, err
+    assert f"harnesses problem: {paths.STORE_IN_WORKTREE}" in out.splitlines()
