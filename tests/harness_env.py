@@ -3,6 +3,8 @@ the process's open file-descriptor count. Checksums are computed here at run tim
 
 import base64
 import contextlib
+import gc
+import gzip
 import hashlib
 import io
 import json
@@ -111,6 +113,9 @@ def sample_manifest(paths: list[str] | None = None) -> sc.Manifest:
 
 
 def fd_count() -> int:
+    """This process's open fds, after a collection: garbage another test left (its sockets, pipes or files)
+    is closed now, not by a collection inside the count."""
+    gc.collect()
     return len(list(Path("/proc/self/fd").iterdir()))
 
 
@@ -149,7 +154,9 @@ def tar_of(spec: Mapping[str, Spec], *, prefix: str = "", gz: bool = True,
     """A tar (gzipped unless `gz` is false) of `spec`, each name under `prefix`, with a directory member
     before each directory's contents (unless `dirs` is false), then the members in `extra` (empty)."""
     out = io.BytesIO()
-    with tarfile.open(fileobj=out, mode="w:gz" if gz else "w", format=tarfile.PAX_FORMAT) as t:
+    # The gzip header's mtime is 0, not now: the same spec always makes the same bytes, and checksum.
+    zipped = gzip.GzipFile(fileobj=out, mode="wb", mtime=0) if gz else contextlib.nullcontext(out)
+    with zipped as z, tarfile.open(fileobj=z, mode="w", format=tarfile.PAX_FORMAT) as t:
         made: set[str] = set()
         for name, what in spec.items():
             parts = name.split("/")
@@ -286,3 +293,58 @@ def make_repo(root: Path, *, object_format: str = "sha1") -> tuple[Path, str]:
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "fixture")
     return root, git(root, "rev-parse", "HEAD").decode().strip()
+
+
+# --- publish, recovery and the stores (plan 4c Task 4) ---
+
+def store_of(tmp_path: Path) -> Path:
+    return tmp_path / "store"
+
+
+def install_name(tmp_path: Path, staged: sc.Staged) -> str:
+    m = staged_manifest(tmp_path, staged)
+    return sc.install_name(m.version, staged.digest)
+
+
+def install_root(tmp_path: Path, name: str, adapter: str = "codex") -> Path:
+    return store_of(tmp_path) / adapter / name
+
+
+def meta_path(tmp_path: Path, name: str, what: str, adapter: str = "codex") -> Path:
+    """The install's meta `manifest` or `record` file (plan 4c E2)."""
+    return store_of(tmp_path) / adapter / ".meta" / f"{name}.{what}.json"
+
+
+def rewrite(path: Path, data: bytes | None = None) -> None:
+    """`path` rewritten in place with the same size: its first byte flipped, or exactly `data`. The mode is
+    lifted for the write and then restored, as a writer that owns the file would."""
+    mode = path.stat().st_mode & 0o7777
+    old = path.read_bytes()
+    new = data if data is not None else bytes([old[0] ^ 1]) + old[1:]
+    assert len(new) == len(old)
+    path.chmod(0o644)
+    with path.open("r+b") as f:
+        f.write(new)
+    path.chmod(mode)
+
+
+class RewriteAfterFirstFile:
+    """A `read` for `rehash` that rewrites `path` (the first file hashed) once the next file is read: a
+    change made after that file was checked."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.eofs = 0
+        self.done = False
+
+    def __call__(self, fd: int, n: int) -> bytes:
+        if self.eofs == 1 and not self.done:
+            self.done = True
+            rewrite(self.path)
+        chunk = os.read(fd, n)
+        if not chunk:
+            self.eofs += 1
+        return chunk
+
+
+FIRST_FILE = "cli/bin/codex"          # the first file of CODEX_TREE in canonical order, the first one hashed

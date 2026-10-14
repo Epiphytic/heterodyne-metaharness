@@ -11,6 +11,7 @@ in a `finally`. Refusals carry their constant as `.constant`, and their message 
 nothing here names a path, a digest or a file's content in an error.
 """
 
+import argparse
 import base64
 import binascii
 import contextlib
@@ -24,13 +25,16 @@ import json
 import os
 import re
 import secrets
+import select
+import socket
 import stat
 import struct
 import tarfile
+import time
 import zlib
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from pathlib import Path
-from typing import IO, Any, Literal, cast
+from typing import IO, Any, Literal, cast, get_args, get_origin
 
 MAX_ENTRIES = 200_000           # entries in one install, the root uncounted; at the limit is accepted
 MAX_DEPTH = 64                  # components in an entry's path; at the limit is accepted
@@ -1281,16 +1285,47 @@ def _seal(root_fd: int, unpacker: _Unpacker, verity: bool) -> bool:
     return on
 
 
+LOCK_SECONDS = 30.0         # the longest a request waits for the store lock
+LOCK_POLL = 0.01
+STORE_BUSY = "the store lock was not free before the deadline"
+
+
 @contextlib.contextmanager
-def _store_lock(store_fd: int) -> Generator[None]:
-    """The store's exclusive lock on `<store>/.lock` (E21) for the block. Task 4's `store_lock` adds its
-    deadline."""
+def _lock(store_fd: int, *, shared: bool = False, deadline: float = LOCK_SECONDS) -> Generator[None]:
+    """The store's lock on `<store>/.lock` (E21) for the block, exclusive unless `shared`. Waiting longer
+    than `deadline` seconds refuses (`STORE_BUSY`). A flock dies with its process."""
     fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=store_fd)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        end = time.monotonic() + deadline
+        while True:
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    raise Refused(STORE_BUSY) from None
+                time.sleep(LOCK_POLL)
         yield
     finally:
         os.close(fd)
+
+
+def _open_store(store: Path) -> int:
+    try:
+        return os.open(store, DIR_FLAGS)
+    except OSError as exc:
+        raise OSError(exc.errno, "open") from None
+
+
+@contextlib.contextmanager
+def store_lock(store: Path, *, shared: bool = False, deadline: float = LOCK_SECONDS) -> Generator[int]:
+    """The store lock (E21) on `store` for the block, which gets the store's fd."""
+    store_fd = _open_store(store)
+    try:
+        with _lock(store_fd, shared=shared, deadline=deadline):
+            yield store_fd
+    finally:
+        os.close(store_fd)
 
 
 def _make_dir(parent_fd: int, name: str, mode: int) -> int:
@@ -1313,7 +1348,10 @@ def _make_dir(parent_fd: int, name: str, mode: int) -> int:
 
 def _remove(dirfd: int, name: str) -> None:
     """`name` under `dirfd` and everything below it, by fd, never following a link; each directory is made
-    writable by its owner first. Gone already is fine."""
+    writable by its owner first. Gone already is fine. A known residual race, accepted for the PoC: each
+    `rmdir` is by name, so an empty directory swapped in after the scan is removed instead. No content can
+    be lost (`rmdir` removes only an empty directory), and the swap needs write access to a directory the
+    store owns, made 0700 here, which could `rmdir` it anyway; Linux has no `rmdir` by fd."""
     try:
         st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1333,10 +1371,10 @@ def _remove(dirfd: int, name: str) -> None:
     os.rmdir(name, dir_fd=dirfd)
 
 
-def _commit(store_fd: int, staging_id: str, data: bytes) -> None:
+def _commit(store_fd: int, staging_id: str, data: bytes, deadline: float) -> None:
     """Under the store lock (E21): `.staged/<id>.json` written by `O_EXCL`, made 0444 and `fsync`ed, then
     `.staged` `fsync`ed."""
-    with _store_lock(store_fd):
+    with _lock(store_fd, deadline=deadline):
         staged_fd = _make_dir(store_fd, STAGED, 0o755)
         try:
             fd = os.open(f"{staging_id}.json", WRITE_FLAGS, 0o444, dir_fd=staged_fd)
@@ -1365,7 +1403,8 @@ def _discard(store_fd: int, staging_fd: int, staging_id: str) -> None:
 
 
 def stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds: Sequence[int],
-          login_names: frozenset[str], *, verity: bool, target: str) -> Staged:
+          login_names: frozenset[str], *, verity: bool, target: str,
+          deadline: float = LOCK_SECONDS) -> Staged:
     """Unpack `parts` from `fds` (one per part, two for a git part: the archive and the commit object) into
     `<store>/.staging/<id>/<part>/`, and write the staged manifest to `<store>/.staged/<id>.json`.
 
@@ -1375,20 +1414,18 @@ def stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds:
     file 0555 if its member had any execute bit, else 0444) and is durable (E21), so the staged manifest
     holds the modes the install will have. `target` is the recipe's: the manifest records it, and a target
     the CLI's metadata names must be it. The unpack and the hash hold only `.staging/<id>.lock`; the
-    manifest is written under the store lock. Nothing in an artifact is run. Any exception removes
+    manifest is written under the store lock, each section waiting at most `deadline` seconds for it
+    (`STORE_BUSY`). Nothing in an artifact is run. Any exception removes
     `.staging/<id>` and `.staged/<id>.json` before it propagates."""
     if not PLAIN.fullmatch(target):
         raise Refused(BAD_PART)
     planned = _check_parts(adapter, layout, parts, fds, login_names)
     staging_id = secrets.token_hex(16)
-    try:
-        store_fd = os.open(store, DIR_FLAGS)
-    except OSError as exc:
-        raise OSError(exc.errno, "open") from None
+    store_fd = _open_store(store)
     staging_fd = root_fd = lock_fd = -1
     try:
         try:
-            with _store_lock(store_fd):
+            with _lock(store_fd, deadline=deadline):
                 staging_fd = _make_dir(store_fd, STAGING, 0o700)
                 os.mkdir(staging_id, 0o700, dir_fd=staging_fd)
                 os.mkdir(f"{staging_id}.src", 0o700, dir_fd=staging_fd)
@@ -1407,7 +1444,7 @@ def stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds:
             m = Manifest(adapter, version, target, entry_point, sources, entries)
             data = canonical(m)
             parse(data)                         # the staged manifest is one the store will read back
-            _commit(store_fd, staging_id, data)
+            _commit(store_fd, staging_id, data, deadline)
             os.unlink(f"{staging_id}.lock", dir_fd=staging_fd)
         except BaseException:
             if staging_fd >= 0:
@@ -1420,3 +1457,1339 @@ def stage(store: Path, adapter: str, layout: Layout, parts: Sequence[Part], fds:
                 os.close(fd)
     size = sum(e.size for e in entries if e.kind == "file")
     return Staged(staging_id, digest(m), len(entries), size, on)
+
+
+# --- publish, recovery, verify, remove and the sweep (plan 4c E18, E20, E21) ---
+
+DIGEST_MISMATCH = "the manifest's digest is not the one asked for"
+CHANGED_DURING_PUBLISH = "the tree changed while it was published"
+CHANGED_DURING_VERIFY = "the install changed while it was verified"
+NAME_CONFLICT = "the install name is taken, or held by what an unfinished removal left"
+NO_SUCH_STAGING = "the store has no staging, receipt or failure for that staging ID"
+NO_SUCH_INSTALL = "the store has no install of that name"
+INSTALL_BROKEN = "the install is not in its published state"
+RECOVERY_FAILED = "an interrupted publish could not be recovered"
+RECORD_MALFORMED = "a record, an intent, a receipt or a failure is not in the store's form"
+PUBLISH_INTERRUPTED = "the install root's mode could not be restored after the rename; recovery finishes it"
+
+PUBLISHING, PUBLISHED, FAILED, META = ".publishing", ".published", ".failed", ".meta"
+STORE_DIR_MODE = 0o755
+STAGING_ID = re.compile(r"[0-9a-f]{32}")
+INSTALL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*-[0-9a-f]{12}")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+MAX_STORE_FILE = 1 << 30        # a manifest or a record of an install at the store's entry bound
+RENAME_NOREPLACE = 1
+Hook = Callable[[str], None]
+StatAt = Callable[[int, str], Stat]
+State = Literal["published", "publishing", "broken"]
+
+_renameat2 = getattr(_libc, "renameat2", None)
+if _renameat2 is not None:
+    _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    _renameat2.restype = ctypes.c_int
+
+
+class Interrupted(Refused):
+    """A publish stopped with its intent in place and nothing abandoned: the next recovery decides it."""
+
+
+def _seal_root(root_fd: int) -> None:
+    """The root back to 0555 after the rename. If that fails the publish stops short of every later phase
+    (`Interrupted`), so the tree is never published writable; recovery seals and re-verifies it."""
+    try:
+        os.fchmod(root_fd, 0o555)
+    except OSError:
+        raise Interrupted(PUBLISH_INTERRUPTED) from None
+
+
+def _nothing(point: str) -> None:
+    """No hook: tests pass one that acts at a named point of publish, recovery, verify or remove."""
+
+
+def _rename_noreplace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
+    if _renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2")
+    if _renameat2(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), RENAME_NOREPLACE) != 0:
+        raise OSError(ctypes.get_errno(), "renameat2")
+
+
+def install_name(version: str, manifest_digest: str) -> str:
+    """`<version>-<the digest's first 12 hex>` (plan 4c E2)."""
+    if not PLAIN.fullmatch(version) or not DIGEST.fullmatch(manifest_digest):
+        raise Mismatch(MANIFEST_MALFORMED)
+    return f"{version}-{manifest_digest.removeprefix(SHA256_PREFIX)[:12]}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Intent:
+    """A publish intent (`.publishing/<id>.json`), and, written at P5, its receipt
+    (`.published/<id>.json`)."""
+    id: str
+    adapter: str
+    install: str
+    digest: str
+    root: tuple[int, int]       # the staging root's (dev, ino), which the rename keeps
+
+
+def _dump(doc: dict[str, object]) -> bytes:
+    return json.dumps({"format": FORMAT, **doc}, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _load(data: bytes, fields: frozenset[str]) -> dict[str, object]:
+    try:
+        doc: object = json.loads(data)
+    except (ValueError, RecursionError):
+        raise Refused(RECORD_MALFORMED) from None
+    if not isinstance(doc, dict):
+        raise Refused(RECORD_MALFORMED)
+    d = cast(dict[str, object], doc)
+    if frozenset(d) != fields | {"format"} or d["format"] != FORMAT or type(d["format"]) is not int:
+        raise Refused(RECORD_MALFORMED)
+    return d
+
+
+def _ints(v: object, n: int) -> tuple[int, ...]:
+    if not isinstance(v, list):
+        raise Refused(RECORD_MALFORMED)
+    items = cast(list[object], v)
+    if len(items) != n or any(type(i) is not int or i < 0 for i in items):
+        raise Refused(RECORD_MALFORMED)
+    return tuple(cast(list[int], items))
+
+
+def _record_bytes(rec: Record) -> bytes:
+    return _dump({"record": {k: list(v) for k, v in rec.items()}})
+
+
+def _record_of(data: bytes) -> Record:
+    d = _load(data, frozenset({"record"}))
+    entries = d["record"]
+    if not isinstance(entries, dict):
+        raise Refused(RECORD_MALFORMED)
+    out: Record = {}
+    for k, v in cast(dict[str, object], entries).items():
+        if k and not valid_path(k):
+            raise Refused(RECORD_MALFORMED)
+        dev, ino, ctime = _ints(v, 3)
+        out[k] = (dev, ino, ctime)
+    if "" not in out:
+        raise Refused(RECORD_MALFORMED)
+    return out
+
+
+INTENT_FIELDS = frozenset({"id", "adapter", "install", "digest", "root"})
+
+
+def _intent_bytes(i: Intent) -> bytes:
+    return _dump({"id": i.id, "adapter": i.adapter, "install": i.install, "digest": i.digest,
+                  "root": list(i.root)})
+
+
+def _intent_of(data: bytes, staging_id: str) -> Intent:
+    d = _load(data, INTENT_FIELDS)
+    sid, adapter, install, dig = d["id"], d["adapter"], d["install"], d["digest"]
+    if (sid != staging_id or not isinstance(adapter, str) or not PLAIN.fullmatch(adapter)
+            or not isinstance(install, str) or not INSTALL.fullmatch(install)
+            or not isinstance(dig, str) or not DIGEST.fullmatch(dig)):
+        raise Refused(RECORD_MALFORMED)
+    dev, ino = _ints(d["root"], 2)
+    return Intent(staging_id, adapter, install, dig, (dev, ino))
+
+
+def _failure_of(data: bytes, staging_id: str) -> str:
+    d = _load(data, frozenset({"id", "refused"}))
+    constant = d["refused"]
+    if d["id"] != staging_id or not isinstance(constant, str) or not constant:
+        raise Refused(RECORD_MALFORMED)
+    return constant
+
+
+def _opt_dir(dirfd: int, name: str) -> int | None:
+    """The directory `name` under `dirfd`, opened, or None if it doesn't exist."""
+    try:
+        return _open(name, DIR_FLAGS, dirfd)
+    except FileNotFoundError:
+        return None
+
+
+def _read_file(dirfd: int, name: str, limit: int = MAX_METADATA) -> bytes | None:
+    """The regular file `name` under `dirfd`, or None if it doesn't exist. Anything else that can't be read
+    whole refuses (`RECORD_MALFORMED`) or raises: missing is the only absence."""
+    try:
+        fd = _open(name, FILE_FLAGS, dirfd)
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Refused(RECORD_MALFORMED)
+        data = _read_bounded(fd, limit)
+    finally:
+        os.close(fd)
+    if data is None:
+        raise Refused(RECORD_MALFORMED)
+    return data
+
+
+def _read_at(store_fd: int, directory: str, name: str, limit: int = MAX_METADATA) -> bytes | None:
+    fd = _opt_dir(store_fd, directory)
+    if fd is None:
+        return None
+    try:
+        return _read_file(fd, name, limit)
+    finally:
+        os.close(fd)
+
+
+def _write_durable(dirfd: int, name: str, data: bytes) -> None:
+    """`name` under `dirfd` replaced atomically by `data` (0444): a temp file written and `fsync`ed, renamed
+    over it, then the directory `fsync`ed."""
+    tmp = f"{name}.tmp"
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(tmp, dir_fd=dirfd)
+    fd = os.open(tmp, WRITE_FLAGS, 0o444, dir_fd=dirfd)
+    try:
+        _write_all(fd, data)
+        os.fchmod(fd, 0o444)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+    os.fsync(dirfd)
+
+
+def _unlink_durable(dirfd: int, name: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=dirfd)
+    os.fsync(dirfd)
+
+
+def _write_at(store_fd: int, directory: str, name: str, data: bytes) -> None:
+    fd = _make_dir(store_fd, directory, STORE_DIR_MODE)
+    try:
+        _write_durable(fd, name, data)
+    finally:
+        os.close(fd)
+
+
+def _ids(store_fd: int, directory: str) -> list[str]:
+    """The staging IDs that `directory`'s `<id>.json` files name, sorted; a stale temp file is skipped."""
+    fd = _opt_dir(store_fd, directory)
+    if fd is None:
+        return []
+    try:
+        names = _names(fd)
+    finally:
+        os.close(fd)
+    return sorted(n.removesuffix(".json") for n in names
+                  if n.endswith(".json") and STAGING_ID.fullmatch(n.removesuffix(".json")))
+
+
+def _receipts(store_fd: int) -> list[Intent]:
+    out: list[Intent] = []
+    for sid in _ids(store_fd, PUBLISHED):
+        data = _read_at(store_fd, PUBLISHED, f"{sid}.json")
+        if data is not None:
+            out.append(_intent_of(data, sid))
+    return out
+
+
+def _intents(store_fd: int) -> list[Intent]:
+    out: list[Intent] = []
+    for sid in _ids(store_fd, PUBLISHING):
+        data = _read_at(store_fd, PUBLISHING, f"{sid}.json")
+        if data is not None:
+            out.append(_intent_of(data, sid))
+    return out
+
+
+def _naming(intents: list[Intent], adapter: str, install: str) -> list[Intent]:
+    return [i for i in intents if (i.adapter, i.install) == (adapter, install)]
+
+
+def _meta(store_fd: int, adapter: str, install: str, what: str, limit: int = MAX_STORE_FILE) -> bytes | None:
+    fd = _opt_dir(store_fd, adapter)
+    if fd is None:
+        return None
+    try:
+        return _read_at(fd, META, f"{install}.{what}.json", limit)
+    finally:
+        os.close(fd)
+
+
+def _exists(dirfd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _held(store_fd: int, adapter: str, install: str) -> bool:
+    """Anything in the store holds the name: the install path, either meta file, a receipt or an intent."""
+    fd = _opt_dir(store_fd, adapter)
+    if fd is not None:
+        try:
+            if _exists(fd, install):
+                return True
+            meta_fd = _opt_dir(fd, META)
+            if meta_fd is not None:
+                try:
+                    if any(_exists(meta_fd, f"{install}.{w}.json") for w in ("manifest", "record")):
+                        return True
+                finally:
+                    os.close(meta_fd)
+        finally:
+            os.close(fd)
+    return bool(_naming(_receipts(store_fd), adapter, install)
+                or _naming(_intents(store_fd), adapter, install))
+
+
+def _structure(root_fd: int, m: Manifest) -> None:
+    """The structural part of `check_fast` (E20 step 2): the manifest's entries, types, modes, sizes, link
+    counts and targets, against a fresh record, so the record checks stay with the comparisons of R1, R2."""
+    check_fast(root_fd, m, record(root_fd))
+
+
+def _open_named(dirfd: int, name: str, roots: Collection[tuple[int, int]]) -> int | None:
+    """`name` under `dirfd`, opened once as a directory and never through a link, if the opened directory's
+    `(dev, ino)` is one of `roots`; None if nothing is there. Anything else there is no tree a receipt or an
+    intent names (`INSTALL_BROKEN`)."""
+    try:
+        fd = _open(name, DIR_FLAGS, dirfd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise Refused(INSTALL_BROKEN) from None
+        raise
+    try:
+        st = statx_at(fd, "")
+        if (st.dev, st.ino) not in roots:
+            raise Refused(INSTALL_BROKEN)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _remove_opened(dirfd: int, name: str, fd: int, hook: Hook) -> bool:
+    """The tree open at `fd`, `name` under `dirfd`, emptied through `fd` alone, then `name` removed if it is
+    still that directory: `rmdir` takes a path, so the path is checked just before it, and `rmdir` only
+    ever removes an empty directory. False if `name` is no longer the tree. A known residual race, accepted
+    for the PoC (Codex r3): the check and the `rmdir` are two steps, so an empty directory swapped in
+    between them is removed. No content can be lost, the swap needs write access to the install's parent,
+    which the store owner holds and could `rmdir` with directly, and Linux has no `rmdir` by fd."""
+    hook("TREE.OPENED")
+    os.fchmod(fd, 0o700)
+    with os.scandir(fd) as it:
+        children = [e.name for e in it]
+    for child in children:
+        _remove(fd, child)
+    mine = statx_at(fd, "")
+    try:
+        st = statx_at(dirfd, name)
+    except FileNotFoundError:
+        return False
+    if (st.dev, st.ino) != (mine.dev, mine.ino):
+        return False
+    os.rmdir(name, dir_fd=dirfd)
+    return True
+
+
+def _remove_tree(store_fd: int, parent: str, name: str, root: tuple[int, int], hook: Hook) -> None:
+    """`<parent>/<name>` removed only if it is a directory whose `(dev, ino)` is `root` (E21), checked on
+    the fd the removal goes through; anything else there is kept."""
+    fd = _opt_dir(store_fd, parent)
+    if fd is None:
+        return
+    try:
+        try:
+            tree = _open_named(fd, name, (root,))
+        except Refused:
+            return
+        if tree is None:
+            return
+        try:
+            _remove_opened(fd, name, tree, hook)
+            os.fsync(fd)
+        finally:
+            os.close(tree)
+    finally:
+        os.close(fd)
+
+
+def _discard_staging(store_fd: int, staging_id: str, *, tree: bool) -> None:
+    """`.staged/<id>.json`, then `.staging/<id>.src` and `<id>.lock` (and, with `tree`, `.staging/<id>`),
+    each directory `fsync`ed after."""
+    fd = _opt_dir(store_fd, STAGED)
+    if fd is not None:
+        try:
+            _unlink_durable(fd, f"{staging_id}.json")
+        finally:
+            os.close(fd)
+    fd = _opt_dir(store_fd, STAGING)
+    if fd is not None:
+        try:
+            for name in ((staging_id,) if tree else ()) + (f"{staging_id}.src", f"{staging_id}.lock"):
+                _remove(fd, name)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _cleanup(store_fd: int, staging_id: str, hook: Hook) -> None:
+    """P6: the staged manifest, the staging's leftovers, then the intent's record and the intent, each
+    followed by its directory's `fsync`."""
+    fd = _opt_dir(store_fd, STAGED)
+    if fd is not None:
+        try:
+            _unlink_durable(fd, f"{staging_id}.json")
+        finally:
+            os.close(fd)
+    hook("P6.staged")
+    fd = _opt_dir(store_fd, STAGING)
+    if fd is not None:
+        try:
+            for name in (f"{staging_id}.src", f"{staging_id}.lock"):
+                _remove(fd, name)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    hook("P6.staging")
+    fd = _opt_dir(store_fd, PUBLISHING)
+    if fd is not None:
+        try:
+            _unlink_durable(fd, f"{staging_id}.record.json")
+            hook("P6.record")
+            _unlink_durable(fd, f"{staging_id}.json")
+        finally:
+            os.close(fd)
+    hook("P6.intent")
+
+
+def _fail(store_fd: int, staging_id: str, constant: str) -> None:
+    """A publish refused before its intent: `.failed/<id>.json` first, then the staging is discarded."""
+    _write_at(store_fd, FAILED, f"{staging_id}.json", _dump({"id": staging_id, "refused": constant}))
+    _discard_staging(store_fd, staging_id, tree=True)
+
+
+def _meta_is_ours(what: str, raw: bytes, intent: Intent, r2: Record | None) -> bool:
+    """A meta file this intent's P3 or P4 wrote: the manifest with the intent's digest (`parse` takes only
+    canonical bytes), or the record that is R2 but for the root's change time."""
+    try:
+        if what == "manifest":
+            return digest(parse(raw)) == intent.digest
+        rec = _record_of(raw)
+    except Refused:
+        return False
+    return (r2 is not None and raw == _record_bytes(rec) and rec[""][:2] == intent.root
+            and {k: v for k, v in rec.items() if k} == {k: v for k, v in r2.items() if k})
+
+
+def _intent_record(store_fd: int, staging_id: str) -> Record | None:
+    """The intent's R2 (`.publishing/<id>.record.json`), or None if it is gone or unreadable."""
+    try:
+        raw = _read_at(store_fd, PUBLISHING, f"{staging_id}.record.json", MAX_STORE_FILE)
+        return None if raw is None else _record_of(raw)
+    except Refused:
+        return None
+
+
+def _abandon(store_fd: int, intent: Intent, constant: str, hook: Hook = _nothing) -> None:
+    """A publish that can't finish (E21, "anything else"): `.failed/<id>.json` first, so the intent is never
+    the only evidence removed; then the tree, wherever it is, only if its root is the intent's; this
+    install's meta files only if no receipt names them and they are the ones this intent wrote; then the
+    staging's leftovers and the intent. Whatever isn't the intent's stays, and holds the name."""
+    _write_at(store_fd, FAILED, f"{intent.id}.json", _dump({"id": intent.id, "refused": constant}))
+    _remove_tree(store_fd, STAGING, intent.id, intent.root, hook)
+    _remove_tree(store_fd, intent.adapter, intent.install, intent.root, hook)
+    if not _naming(_receipts(store_fd), intent.adapter, intent.install):
+        r2 = _intent_record(store_fd, intent.id)
+        fd = _opt_dir(store_fd, intent.adapter)
+        meta_fd = _opt_dir(fd, META) if fd is not None else None
+        try:
+            if meta_fd is not None:
+                for what in ("record", "manifest"):
+                    name = f"{intent.install}.{what}.json"
+                    try:
+                        raw = _read_file(meta_fd, name, MAX_STORE_FILE)
+                    except Refused:             # not a regular file this intent wrote
+                        continue
+                    if raw is not None and _meta_is_ours(what, raw, intent, r2):
+                        _unlink_durable(meta_fd, name)
+        finally:
+            for f in (meta_fd, fd):
+                if f is not None:
+                    os.close(f)
+    _cleanup(store_fd, intent.id, _nothing)
+
+
+def _complete(store_fd: int, intent: Intent, data: bytes, rec: Record, hook: Hook) -> None:
+    """P3 to P6: the meta manifest, the meta record, the receipt, then the cleanup."""
+    adapter_fd = _open(intent.adapter, DIR_FLAGS, store_fd)
+    try:
+        meta_fd = _make_dir(adapter_fd, META, STORE_DIR_MODE)
+        try:
+            _write_durable(meta_fd, f"{intent.install}.manifest.json", data)
+            hook("P3")
+            _write_durable(meta_fd, f"{intent.install}.record.json", _record_bytes(rec))
+            hook("P4")
+        finally:
+            os.close(meta_fd)
+    finally:
+        os.close(adapter_fd)
+    _write_at(store_fd, PUBLISHED, f"{intent.id}.json", _intent_bytes(intent))
+    hook("P5")
+    _cleanup(store_fd, intent.id, hook)
+
+
+def _publish(store_fd: int, staging_id: str, approved: str, hook: Hook, read: Reader, statx: StatAt) -> str:
+    receipt = _read_at(store_fd, PUBLISHED, f"{staging_id}.json")
+    if receipt is not None:
+        done = _intent_of(receipt, staging_id)
+        if done.digest != approved:
+            raise Refused(DIGEST_MISMATCH)
+        if _state(store_fd, done.adapter, done.install) != "published":
+            raise Refused(INSTALL_BROKEN)
+        return done.install
+    failed = _read_at(store_fd, FAILED, f"{staging_id}.json")
+    if failed is not None:
+        raise Refused(_failure_of(failed, staging_id))
+    data = _read_at(store_fd, STAGED, f"{staging_id}.json", MAX_STORE_FILE)
+    if data is None:
+        raise Refused(NO_SUCH_STAGING)
+    m = parse(data)
+    if digest(m) != approved:
+        raise Refused(DIGEST_MISMATCH)
+    if not PLAIN.fullmatch(m.adapter):
+        raise Mismatch(MANIFEST_MALFORMED)
+    name = install_name(m.version, approved)
+    staging_fd = _open(STAGING, DIR_FLAGS, store_fd)
+    try:
+        try:
+            root_fd = _open(staging_id, DIR_FLAGS, staging_fd)
+        except FileNotFoundError:
+            raise Refused(NO_SUCH_STAGING) from None
+        try:
+            return _publish_tree(store_fd, staging_fd, root_fd, staging_id, m, data, name, hook, read, statx)
+        finally:
+            os.close(root_fd)
+    finally:
+        os.close(staging_fd)
+
+
+def _publish_tree(store_fd: int, staging_fd: int, root_fd: int, staging_id: str, m: Manifest, data: bytes,
+                  name: str, hook: Hook, read: Reader, statx: StatAt) -> str:
+    """E20's steps inside E21's phases. A refusal before the intent fails the staging; one after it
+    abandons the publish, removing only what the intent identifies."""
+    try:
+        if _held(store_fd, m.adapter, name):
+            raise Refused(NAME_CONFLICT)
+        if statx_at(root_fd, "").mode != 0o555:     # a crash between the rename's two chmods left it 0755
+            os.fchmod(root_fd, 0o555)
+            os.fsync(root_fd)
+        r1 = record(root_fd)
+        hook("R1")
+        rehash(root_fd, m, read=read)
+        _structure(root_fd, m)
+        hook("REHASHED")
+        r2 = record(root_fd)
+        if r2 != r1:
+            raise Refused(CHANGED_DURING_PUBLISH)
+        hook("R2")
+    except Refused as exc:
+        _fail(store_fd, staging_id, exc.constant)
+        raise
+    intent = Intent(staging_id, m.adapter, name, digest(m), (r2[""][0], r2[""][1]))
+    publishing_fd = _make_dir(store_fd, PUBLISHING, STORE_DIR_MODE)
+    try:
+        _write_durable(publishing_fd, f"{staging_id}.record.json", _record_bytes(r2))
+        hook("P1.record")
+        _write_durable(publishing_fd, f"{staging_id}.json", _intent_bytes(intent))
+        hook("P1.intent")
+    finally:
+        os.close(publishing_fd)
+    try:
+        adapter_fd = _make_dir(store_fd, m.adapter, STORE_DIR_MODE)
+        try:
+            # Moving a directory to another parent rewrites its `..`, which needs write permission on it: the
+            # root alone is made writable for the rename. Its change time is the one E20 lets move.
+            # A deviation from E20, which has no mode change: nothing at the install path is ever published
+            # with a root that isn't 0555, since `check_fast` (step 6, `state`, `verify`) refuses one.
+            os.fchmod(root_fd, 0o755)
+            try:
+                _rename_noreplace(staging_fd, staging_id, adapter_fd, name)
+            except OSError as exc:
+                _seal_root(root_fd)
+                if exc.errno == errno.EEXIST:
+                    raise Refused(NAME_CONFLICT) from None
+                raise
+            hook("P2.renamed")
+            _seal_root(root_fd)
+            os.fsync(adapter_fd)
+            os.fsync(staging_fd)
+            os.fsync(root_fd)
+            hook("P2")
+            st = statx(adapter_fd, name)
+            if (st.dev, st.ino) != intent.root:
+                raise Refused(CHANGED_DURING_PUBLISH)
+            rec = {**r2, "": st.triple}
+            try:
+                check_fast(root_fd, m, rec)
+            except Mismatch:
+                raise Refused(CHANGED_DURING_PUBLISH) from None
+        finally:
+            os.close(adapter_fd)
+        _complete(store_fd, intent, data, rec, hook)
+    except Interrupted:
+        raise
+    except Refused as exc:
+        _abandon(store_fd, intent, exc.constant, hook)
+        raise
+    return name
+
+
+def _reverify(store_fd: int, intent: Intent, m: Manifest, r2: Record, hook: Hook, read: Reader) -> Record:
+    """Recovery's check of a renamed tree (E21), with no new baseline: R3 is R2 but for the root's change
+    time, the rehash and the structure pass, and R4 is R3. The record to write: R2 with R3's root. The
+    opened root must be the intent's before anything changes it, and its seal is `fsync`ed before P3."""
+    adapter_fd = _open(intent.adapter, DIR_FLAGS, store_fd)
+    try:
+        root_fd = _open(intent.install, DIR_FLAGS | os.O_NOFOLLOW, adapter_fd)
+    except OSError as exc:          # replaced since its check, by a symlink, a file or nothing
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            raise Refused(RECOVERY_FAILED) from None
+        raise
+    finally:
+        os.close(adapter_fd)
+    try:
+        st = statx_at(root_fd, "")
+        if st.kind != "dir" or (st.dev, st.ino) != intent.root:
+            raise Refused(RECOVERY_FAILED)
+        if st.mode != 0o555:        # a crash between the rename's two chmods
+            os.fchmod(root_fd, 0o555)
+        os.fsync(root_fd)
+        r3 = record(root_fd)
+        if ({k: v for k, v in r3.items() if k} != {k: v for k, v in r2.items() if k}
+                or r3[""][:2] != r2[""][:2]):
+            raise Refused(RECOVERY_FAILED)
+        try:
+            rehash(root_fd, m, read=read)
+            _structure(root_fd, m)
+        except Mismatch:
+            raise Refused(RECOVERY_FAILED) from None
+        hook("RECOVER.REHASHED")
+        if record(root_fd) != r3:
+            raise Refused(RECOVERY_FAILED)
+        return {**r2, "": r3[""]}
+    finally:
+        os.close(root_fd)
+
+
+def _committed_agree(store_fd: int, intent: Intent, data: bytes, rec: Record) -> None:
+    """Meta files P3 or P4 already wrote must be the ones recovery would write (E21: conflicting metadata
+    fails closed), and a meta record never stands without its manifest."""
+    manifest = _meta(store_fd, intent.adapter, intent.install, "manifest")
+    committed = _meta(store_fd, intent.adapter, intent.install, "record")
+    if ((manifest is not None and manifest != data)
+            or (committed is not None and (manifest is None or committed != _record_bytes(rec)))):
+        raise Refused(RECOVERY_FAILED)
+
+
+def _recover_one(store_fd: int, staging_id: str, hook: Hook, read: Reader) -> str:
+    raw = _read_at(store_fd, PUBLISHING, f"{staging_id}.json")
+    if raw is None:                 # P1 stopped between its two writes: the tree never left .staging
+        fd = _open(PUBLISHING, DIR_FLAGS, store_fd)
+        try:
+            _unlink_durable(fd, f"{staging_id}.record.json")
+        finally:
+            os.close(fd)
+        return "restarted"
+    try:
+        intent = _intent_of(raw, staging_id)
+    except Refused:                 # nothing it names can be trusted: no tree is touched
+        failure = _dump({"id": staging_id, "refused": RECOVERY_FAILED})
+        _write_at(store_fd, FAILED, f"{staging_id}.json", failure)
+        _discard_staging(store_fd, staging_id, tree=False)
+        _cleanup(store_fd, staging_id, _nothing)
+        return f"failed:{RECOVERY_FAILED}"
+    receipt = _read_at(store_fd, PUBLISHED, f"{staging_id}.json")
+    if receipt is not None:         # P6 was interrupted
+        agrees = _intent_of(receipt, staging_id) == intent
+        _cleanup(store_fd, staging_id, _nothing)
+        return "published" if agrees else f"failed:{RECOVERY_FAILED}"
+    failed = _read_at(store_fd, FAILED, f"{staging_id}.json")
+    if failed is not None:          # an abandonment was interrupted: finish it
+        constant = _failure_of(failed, staging_id)
+        _abandon(store_fd, intent, constant, hook)
+        return f"failed:{constant}"
+    try:
+        rec_raw = _read_at(store_fd, PUBLISHING, f"{staging_id}.record.json", MAX_STORE_FILE)
+        data = _read_at(store_fd, STAGED, f"{staging_id}.json", MAX_STORE_FILE)
+        if data is None:
+            data = _meta(store_fd, intent.adapter, intent.install, "manifest")
+        if rec_raw is None or data is None:
+            raise Refused(RECOVERY_FAILED)
+        r2 = _record_of(rec_raw)
+        m = parse(data)
+        if digest(m) != intent.digest or r2[""][:2] != intent.root:
+            raise Refused(RECOVERY_FAILED)
+        staging_fd = _open(STAGING, DIR_FLAGS, store_fd)
+        try:
+            try:
+                st = statx_at(staging_fd, staging_id)
+            except FileNotFoundError:
+                st = None
+        finally:
+            os.close(staging_fd)
+        if st is not None and st.kind == "dir" and (st.dev, st.ino) == intent.root:
+            fd = _open(PUBLISHING, DIR_FLAGS, store_fd)
+            try:
+                _unlink_durable(fd, f"{staging_id}.record.json")
+                _unlink_durable(fd, f"{staging_id}.json")
+            finally:
+                os.close(fd)
+            return "restarted"
+        adapter_fd = _opt_dir(store_fd, intent.adapter)
+        if adapter_fd is None:
+            raise Refused(RECOVERY_FAILED)
+        try:
+            try:
+                at = statx_at(adapter_fd, intent.install)
+            except FileNotFoundError:
+                raise Refused(RECOVERY_FAILED) from None
+        finally:
+            os.close(adapter_fd)
+        if at.kind != "dir" or (at.dev, at.ino) != intent.root:
+            raise Refused(RECOVERY_FAILED)
+        hook("RECOVER.FOUND")
+        rec = _reverify(store_fd, intent, m, r2, hook, read)
+        _committed_agree(store_fd, intent, data, rec)
+    except Refused as exc:
+        _abandon(store_fd, intent, exc.constant, hook)
+        return f"failed:{exc.constant}"
+    _complete(store_fd, intent, data, rec, _nothing)
+    return "published"
+
+
+def _recover(store_fd: int, hook: Hook, read: Reader) -> list[tuple[str, str]]:
+    """Every intent recovered (E21). A temp file a crash left mid-write is removed first: the phase it
+    belonged to never happened."""
+    fd = _opt_dir(store_fd, PUBLISHING)
+    if fd is None:
+        return []
+    try:
+        names = _names(fd)
+        stale = [n for n in names if n.endswith(".tmp")]
+        for n in stale:
+            os.unlink(n, dir_fd=fd)
+        if stale:
+            os.fsync(fd)
+        names = [n for n in names if not n.endswith(".tmp")]
+    finally:
+        os.close(fd)
+    ids = sorted({n.split(".", 1)[0] for n in names if STAGING_ID.fullmatch(n.split(".", 1)[0])})
+    return [(sid, _recover_one(store_fd, sid, hook, read)) for sid in ids]
+
+
+def _state(store_fd: int, adapter: str, install: str) -> State:
+    """E21's published: one receipt names it, no intent does, both meta files exist and the meta manifest's
+    digest is the receipt's, the root's `(dev, ino)` is the receipt's, and `check_fast` passes. Anything
+    unreadable is not published."""
+    if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
+        raise Refused(NO_SUCH_INSTALL)
+    try:
+        receipts = _naming(_receipts(store_fd), adapter, install)
+        if _naming(_intents(store_fd), adapter, install):
+            return "publishing"
+    except Refused:
+        return "broken"
+    if not receipts and not _held(store_fd, adapter, install):
+        raise Refused(NO_SUCH_INSTALL)
+    if len(receipts) != 1:
+        return "broken"
+    try:
+        data = _meta(store_fd, adapter, install, "manifest")
+        rec_raw = _meta(store_fd, adapter, install, "record")
+        if data is None or rec_raw is None:
+            return "broken"
+        m = parse(data)
+        rec = _record_of(rec_raw)
+        if digest(m) != receipts[0].digest:
+            return "broken"
+        adapter_fd = _open(adapter, DIR_FLAGS, store_fd)
+        try:
+            root_fd = _open(install, DIR_FLAGS, adapter_fd)
+        finally:
+            os.close(adapter_fd)
+        try:
+            root = statx_at(root_fd, "")
+            if (root.dev, root.ino) != receipts[0].root:
+                return "broken"
+            check_fast(root_fd, m, rec)
+        finally:
+            os.close(root_fd)
+    except (Refused, OSError):
+        return "broken"
+    return "published"
+
+
+def _outcome(store_fd: int, staging_id: str) -> str | None:
+    if not STAGING_ID.fullmatch(staging_id):
+        return None
+    receipt = _read_at(store_fd, PUBLISHED, f"{staging_id}.json")
+    if receipt is not None:
+        done = _intent_of(receipt, staging_id)
+        if _state(store_fd, done.adapter, done.install) == "published":
+            return f"published:{done.install}"
+        return f"failed:{INSTALL_BROKEN}"
+    failed = _read_at(store_fd, FAILED, f"{staging_id}.json")
+    if failed is not None:
+        return f"failed:{_failure_of(failed, staging_id)}"
+    fd = _opt_dir(store_fd, STAGED)
+    if fd is None:
+        return None
+    try:
+        return "staged" if _exists(fd, f"{staging_id}.json") else None
+    finally:
+        os.close(fd)
+
+
+def _verify(store_fd: int, adapter: str, install: str, hook: Hook, read: Reader) -> None:
+    """E18: V1, the rehash and the structure against the meta manifest, V2 (`CHANGED_DURING_VERIFY` unless it
+    is V1), then V2 written as the record, and the receipt's root updated to V2's."""
+    if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
+        raise Refused(NO_SUCH_INSTALL)
+    data = _meta(store_fd, adapter, install, "manifest")
+    if data is None:
+        raise Refused(NO_SUCH_INSTALL)
+    m = parse(data)
+    receipts = _naming(_receipts(store_fd), adapter, install)
+    if len(receipts) != 1:
+        raise Refused(INSTALL_BROKEN)
+    if receipts[0].digest != digest(m):
+        raise Refused(DIGEST_MISMATCH)
+    adapter_fd = _open(adapter, DIR_FLAGS, store_fd)
+    try:
+        try:
+            root_fd = _open(install, DIR_FLAGS, adapter_fd)
+        except FileNotFoundError:
+            raise Mismatch(ENTRY_MISSING) from None
+        try:
+            v1 = record(root_fd)
+            rehash(root_fd, m, read=read)
+            _structure(root_fd, m)
+            hook("VERIFY.REHASHED")
+            v2 = record(root_fd)
+            if v2 != v1:
+                raise Refused(CHANGED_DURING_VERIFY)
+        finally:
+            os.close(root_fd)
+        meta_fd = _open(META, DIR_FLAGS, adapter_fd)
+        try:
+            _write_durable(meta_fd, f"{install}.record.json", _record_bytes(v2))
+        finally:
+            os.close(meta_fd)
+    finally:
+        os.close(adapter_fd)
+    root = (v2[""][0], v2[""][1])
+    if receipts[0].root != root:
+        moved = dataclasses.replace(receipts[0], root=root)
+        _write_at(store_fd, PUBLISHED, f"{moved.id}.json", _intent_bytes(moved))
+
+
+def _remove_install(store_fd: int, adapter: str, install: str, hook: Hook) -> None:
+    """The meta record, the meta manifest, the tree bottom-up, then the receipt (E21); a rerun finishes a
+    partial removal. The tree is opened first and must be one a receipt or an intent names
+    (`INSTALL_BROKEN` and nothing changed otherwise); it is removed through that fd."""
+    if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
+        raise Refused(NO_SUCH_INSTALL)
+    receipts = _naming(_receipts(store_fd), adapter, install)
+    if not receipts and not _held(store_fd, adapter, install):
+        raise Refused(NO_SUCH_INSTALL)
+    roots = {i.root for i in receipts + _naming(_intents(store_fd), adapter, install)}
+    adapter_fd = _opt_dir(store_fd, adapter)
+    if adapter_fd is not None:
+        try:
+            tree = _open_named(adapter_fd, install, roots)
+            try:
+                meta_fd = _opt_dir(adapter_fd, META)
+                if meta_fd is not None:
+                    try:
+                        _unlink_durable(meta_fd, f"{install}.record.json")
+                        hook("REMOVE.record")
+                        _unlink_durable(meta_fd, f"{install}.manifest.json")
+                        hook("REMOVE.manifest")
+                    finally:
+                        os.close(meta_fd)
+                if tree is not None:
+                    if not _remove_opened(adapter_fd, install, tree, hook):
+                        raise Refused(INSTALL_BROKEN)
+                    os.fsync(adapter_fd)
+            finally:
+                if tree is not None:
+                    os.close(tree)
+            hook("REMOVE.tree")
+        finally:
+            os.close(adapter_fd)
+    fd = _opt_dir(store_fd, PUBLISHED)
+    if fd is not None:
+        try:
+            for r in receipts:
+                _unlink_durable(fd, f"{r.id}.json")
+            hook("REMOVE.receipt")
+        finally:
+            os.close(fd)
+
+
+def _age_ok(dirfd: int, name: str, now: float, hours: float) -> bool:
+    """True if `name` under `dirfd` changed last more than `hours` before `now`."""
+    try:
+        st = statx_at(dirfd, name)
+    except FileNotFoundError:
+        return False
+    return now - st.ctime_ns / 1e9 > hours * 3600
+
+
+def _sweep(store_fd: int, now: float, hours: float) -> int:
+    """Removes stagings no intent names (E21): a partial one (no staged manifest, its builder's lock free or
+    gone) at any age, and a complete one, staged manifest first, once older than `hours`. A staging whose
+    lock is held is still being built and is skipped. The count is of stagings removed."""
+    staging_fd = _opt_dir(store_fd, STAGING)
+    if staging_fd is None:
+        return 0
+    publishing = set(_ids(store_fd, PUBLISHING))
+    staged_fd = _make_dir(store_fd, STAGED, STORE_DIR_MODE)
+    removed = 0
+    try:
+        groups: dict[str, set[str]] = {}
+        for n in _names(staging_fd):
+            sid, dot, rest = n.partition(".")
+            if STAGING_ID.fullmatch(sid) and rest in (("",) if not dot else ("src", "lock")):
+                groups.setdefault(sid, set()).add(n)
+        for sid in sorted(groups):
+            if sid in publishing:
+                continue
+            complete = _exists(staged_fd, f"{sid}.json")
+            if f"{sid}.lock" in groups[sid]:
+                lock_fd = _open(f"{sid}.lock", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, staging_fd)
+                try:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue            # still being built
+                    if not complete:
+                        for name in sorted(groups[sid]):
+                            _remove(staging_fd, name)
+                        os.fsync(staging_fd)
+                        removed += 1
+                        continue
+                    os.unlink(f"{sid}.lock", dir_fd=staging_fd)     # its builder died after the commit
+                finally:
+                    os.close(lock_fd)
+            if not complete:
+                for name in sorted(groups[sid]):
+                    _remove(staging_fd, name)
+                os.fsync(staging_fd)
+                removed += 1
+            elif _age_ok(staging_fd, sid, now, hours):
+                _unlink_durable(staged_fd, f"{sid}.json")
+                for name in (sid, f"{sid}.src"):
+                    _remove(staging_fd, name)
+                os.fsync(staging_fd)
+                removed += 1
+    finally:
+        os.close(staged_fd)
+        os.close(staging_fd)
+    return removed
+
+
+def _installs(store_fd: int) -> list[dict[str, object]]:
+    names: set[tuple[str, str]] = set()
+    for n in _names(store_fd):
+        if not PLAIN.fullmatch(n):
+            continue
+        fd = _opt_dir(store_fd, n)
+        if fd is None:
+            continue
+        try:
+            meta_fd = _opt_dir(fd, META)
+            if meta_fd is not None:
+                try:
+                    for f in _names(meta_fd):
+                        install = f.removesuffix(".manifest.json")
+                        if f.endswith(".manifest.json") and INSTALL.fullmatch(install):
+                            names.add((n, install))
+                finally:
+                    os.close(meta_fd)
+        finally:
+            os.close(fd)
+    names |= {(i.adapter, i.install) for i in _receipts(store_fd) + _intents(store_fd)}
+    out: list[dict[str, object]] = []
+    for adapter, install in sorted(names):
+        info: dict[str, object] = {"name": install, "adapter": adapter, "version": "", "digest": "",
+                                   "entries": 0, "size": 0, "state": _state(store_fd, adapter, install)}
+        data = _meta(store_fd, adapter, install, "manifest")
+        try:
+            m = parse(data) if data is not None else None
+        except Refused:
+            m = None
+        if m is not None:
+            info |= {"version": m.version, "digest": digest(m), "entries": len(m.entries),
+                     "size": sum(e.size for e in m.entries if e.kind == "file")}
+        out.append(info)
+    return out
+
+
+def publish(store: Path, staging_id: str, approved_digest: str, *, deadline: float = LOCK_SECONDS,
+            hook: Hook = _nothing, read: Reader = os.read, statx: StatAt = statx_at) -> str:
+    """Publish the staging `staging_id` as `<store>/<adapter>/<version>-<12 hex>` (E20, E21), if its staged
+    manifest's digest is `approved_digest`, and return the install's name. Idempotent: a staging already
+    published returns its install. Under the store lock, after recovery."""
+    if not STAGING_ID.fullmatch(staging_id):
+        raise Refused(NO_SUCH_STAGING)
+    with store_lock(store, deadline=deadline) as store_fd:
+        _recover(store_fd, _nothing, os.read)
+        return _publish(store_fd, staging_id, approved_digest, hook, read, statx)
+
+
+def recover(store: Path, *, deadline: float = LOCK_SECONDS, hook: Hook = _nothing,
+            read: Reader = os.read) -> list[tuple[str, str]]:
+    """E21's recovery of every intent, as (staging ID, `published`, `restarted` or `failed:<constant>`)."""
+    with store_lock(store, deadline=deadline) as store_fd:
+        return _recover(store_fd, hook, read)
+
+
+def outcome(store: Path, staging_id: str, *, deadline: float = LOCK_SECONDS) -> str | None:
+    """`published:<install>`, `staged`, `failed:<constant>` or None, from the store's own evidence."""
+    with store_lock(store, shared=True, deadline=deadline) as store_fd:
+        return _outcome(store_fd, staging_id)
+
+
+def state(store: Path, adapter: str, install: str, *, deadline: float = LOCK_SECONDS) -> State:
+    with store_lock(store, shared=True, deadline=deadline) as store_fd:
+        return _state(store_fd, adapter, install)
+
+
+def verify(store: Path, adapter: str, install: str, *, deadline: float = LOCK_SECONDS, hook: Hook = _nothing,
+           read: Reader = os.read) -> None:
+    with store_lock(store, deadline=deadline) as store_fd:
+        _recover(store_fd, _nothing, os.read)
+        _verify(store_fd, adapter, install, hook, read)
+
+
+def remove(store: Path, adapter: str, install: str, *, deadline: float = LOCK_SECONDS,
+           hook: Hook = _nothing) -> None:
+    with store_lock(store, deadline=deadline) as store_fd:
+        _recover(store_fd, _nothing, os.read)
+        _remove_install(store_fd, adapter, install, hook)
+
+
+def sweep(store: Path, now: float, hours: float, *, deadline: float = LOCK_SECONDS) -> int:
+    with store_lock(store, deadline=deadline) as store_fd:
+        return _sweep(store_fd, now, hours)
+
+
+def list_installs(store: Path, *, deadline: float = LOCK_SECONDS) -> list[dict[str, object]]:
+    """Every install the store's meta files, receipts and intents name, with its state."""
+    with store_lock(store, shared=True, deadline=deadline) as store_fd:
+        return _installs(store_fd)
+
+
+def read_staged(store: Path, staging_id: str) -> Manifest:
+    """The staged manifest of `staging_id`, read without the store lock (the service user can't take a lock
+    root made): a staging's manifest is written once and never changed."""
+    if not STAGING_ID.fullmatch(staging_id):
+        raise Refused(NO_SUCH_STAGING)
+    store_fd = _open_store(store)
+    try:
+        data = _read_at(store_fd, STAGED, f"{staging_id}.json", MAX_STORE_FILE)
+    finally:
+        os.close(store_fd)
+    if data is None:
+        raise Refused(NO_SUCH_STAGING)
+    return parse(data)
+
+
+# --- the store helper (plan 4c E1, E3): one request a connection, as JSON, its artifacts as fds ---
+
+PEER_REFUSED = "the peer is not the service user"
+HELPER_FAILED = "the store helper failed or did not answer"
+REQUEST_TOO_LARGE = "the request is larger than the helper accepts"
+TOO_MANY_FDS = "the request carries more fds than the helper accepts"
+BAD_REQUEST = "the request is not one the helper accepts"
+WRONG_STORE = "the request names another store than the helper's"
+BAD_CONFIG = "the helper's config is not in its form"
+MAX_REQUEST = 1 << 20           # one request's bytes, its newline included; at the limit is accepted
+MAX_FDS = 16                    # one request's fds; at the limit is accepted
+CONFIG_EXIT = 2
+HANG_UP_SECONDS = 1.0
+CONFIG = Path("/etc/heterodyne/store-helper.json")
+STAGING_HOURS = 24.0
+CONFIG_FIELDS = frozenset({"service_uid", "store"})
+CONFIG_OPTIONAL = frozenset({"staging_hours"})
+
+
+@dataclasses.dataclass(frozen=True)
+class HelperConfig:
+    service_uid: int
+    store: Path
+    staging_hours: float = STAGING_HOURS
+    lock_seconds: float = LOCK_SECONDS
+
+
+def load_config(path: Path) -> HelperConfig:
+    """The helper's config: `service_uid`, an absolute `store` and optionally `staging_hours`; anything else,
+    or a config that can't be read, refuses (`BAD_CONFIG`)."""
+    try:
+        fd = os.open(path, FILE_FLAGS)
+    except OSError:
+        raise Refused(BAD_CONFIG) from None
+    try:
+        data = _read_bounded(fd, MAX_METADATA)
+    finally:
+        os.close(fd)
+    try:
+        doc: object = json.loads(data) if data is not None else None
+    except (ValueError, RecursionError):
+        doc = None
+    if not isinstance(doc, dict):
+        raise Refused(BAD_CONFIG)
+    d = cast(dict[str, object], doc)
+    if not CONFIG_FIELDS <= frozenset(d) <= CONFIG_FIELDS | CONFIG_OPTIONAL:
+        raise Refused(BAD_CONFIG)
+    uid, store, hours = d["service_uid"], d["store"], d.get("staging_hours", STAGING_HOURS)
+    if (type(uid) is not int or uid < 0 or not isinstance(store, str) or not Path(store).is_absolute()
+            or type(hours) not in (int, float) or not 0 < cast(float, hours) < 1e6):
+        raise Refused(BAD_CONFIG)
+    return HelperConfig(uid, Path(store), float(cast(float, hours)))
+
+
+def encode_request(op: str, store: Path, args: dict[str, object]) -> bytes:
+    return json.dumps({"op": op, "store": str(store), "args": args}, sort_keys=True).encode() + b"\n"
+
+
+def stage_args(adapter: str, layout: Layout, parts: Sequence[Part], login_names: frozenset[str], *,
+               verity: bool, target: str) -> dict[str, object]:
+    return {"adapter": adapter, "layout": dataclasses.asdict(layout),
+            "parts": [dataclasses.asdict(p) for p in parts], "login_names": sorted(login_names),
+            "verity": verity, "target": target}
+
+
+def _bad() -> Refused:
+    return Refused(BAD_REQUEST)
+
+
+def _value(t: object, v: object) -> object:
+    """`v` as the field type `t`: a str, bool, int, an optional str, a Literal or a dataclass."""
+    if t is str or t is bool or t is int:
+        if type(v) is not t:
+            raise _bad()
+        return v
+    if t == str | None:
+        if v is not None and type(v) is not str:
+            raise _bad()
+        return v
+    if get_origin(t) is Literal:
+        if type(v) is not str or v not in get_args(t):
+            raise _bad()
+        return v
+    if isinstance(t, type) and dataclasses.is_dataclass(t):
+        return _decode(t, v)
+    raise _bad()
+
+
+def _decode[T](cls: type[T], v: object) -> T:
+    fields = dataclasses.fields(cast(Any, cls))
+    if not isinstance(v, dict) or frozenset(cast(dict[str, object], v)) != frozenset(f.name for f in fields):
+        raise _bad()
+    d = cast(dict[str, object], v)
+    return cls(**{f.name: _value(f.type, d[f.name]) for f in fields})
+
+
+def _args(args: dict[str, object], fields: dict[str, type]) -> list[object]:
+    if frozenset(args) != frozenset(fields):
+        raise _bad()
+    return [_value(t, args[k]) for k, t in fields.items()]
+
+
+@dataclasses.dataclass(frozen=True)
+class Request:
+    op: str
+    store: str
+    args: dict[str, object]
+
+
+def decode_request(data: bytes) -> Request:
+    """One request line (BAD_REQUEST unless it is `{"op", "store", "args"}` with a known op)."""
+    try:
+        doc: object = json.loads(data)
+    except (ValueError, RecursionError):
+        raise _bad() from None
+    if not isinstance(doc, dict):
+        raise _bad()
+    d = cast(dict[str, object], doc)
+    op, store, args = d.get("op"), d.get("store"), d.get("args")
+    if (frozenset(d) != REQUEST_FIELDS or not isinstance(op, str) or op not in OPS
+            or not isinstance(store, str) or not isinstance(args, dict)):
+        raise _bad()
+    return Request(op, store, cast(dict[str, object], args))
+
+
+REQUEST_FIELDS = frozenset({"op", "store", "args"})
+STAGE_FIELDS = frozenset({"adapter", "layout", "parts", "login_names", "verity", "target"})
+INSTALL_ARGS: dict[str, type] = {"adapter": str, "install": str}
+OP_ARGS: dict[str, dict[str, type]] = {
+    "publish": {"id": str, "digest": str}, "outcome": {"id": str}, "state": INSTALL_ARGS,
+    "verify": INSTALL_ARGS, "remove": INSTALL_ARGS, "recover": {}, "list": {}}
+OPS = frozenset({"stage", *OP_ARGS})
+
+
+def handle(store: Path, request: Request, fds: Sequence[int], *, now: float, hours: float,
+           deadline: float) -> object:
+    """One request against `store`, its result as JSON values. Every request first recovers and sweeps
+    under the store lock, so crash leftovers never wait for a restart; `stage` then runs with its own
+    locks."""
+    op, args = request.op, request.args
+    if op != "stage" and fds:
+        raise _bad()
+    # The whole request is decoded before the lock: a malformed one changes nothing.
+    run_stage = _stage_request(store, args, fds, deadline) if op == "stage" else None
+    values = [] if run_stage is not None else [cast(str, v) for v in _args(args, OP_ARGS[op])]
+    if op == "publish" and not STAGING_ID.fullmatch(values[0]):
+        raise Refused(NO_SUCH_STAGING)
+    with store_lock(store, deadline=deadline) as store_fd:
+        recovered = _recover(store_fd, _nothing, os.read)
+        _sweep(store_fd, now, hours)
+        match op, values:
+            case "publish", [sid, dig]:
+                return _publish(store_fd, sid, dig, _nothing, os.read, statx_at)
+            case "outcome", [sid]:
+                return _outcome(store_fd, sid)
+            case "state", [adapter_, install]:
+                return _state(store_fd, adapter_, install)
+            case "verify", [adapter_, install]:
+                return _verify(store_fd, adapter_, install, _nothing, os.read)
+            case "remove", [adapter_, install]:
+                return _remove_install(store_fd, adapter_, install, _nothing)
+            case "recover", []:
+                return recovered
+            case "list", []:
+                return _installs(store_fd)
+            case _:
+                pass
+    if run_stage is None:               # every other op returned above
+        raise _bad()
+    return dataclasses.asdict(run_stage())
+
+
+def _stage_request(store: Path, args: dict[str, object], fds: Sequence[int],
+                   deadline: float) -> Callable[[], Staged]:
+    """A `stage` request's arguments, decoded before anything runs; the stage itself, to run after the
+    recovery and the sweep."""
+    if frozenset(args) != STAGE_FIELDS:
+        raise _bad()
+    parts, names = args["parts"], args["login_names"]
+    if not isinstance(parts, list) or not isinstance(names, list):
+        raise _bad()
+    adapter, target = cast(str, _value(str, args["adapter"])), cast(str, _value(str, args["target"]))
+    verity = cast(bool, _value(bool, args["verity"]))
+    decoded = [_decode(Part, p) for p in cast(list[object], parts)]
+    login = frozenset(cast(str, _value(str, n)) for n in cast(list[object], names))
+    layout = _decode(Layout, args["layout"])
+    return lambda: stage(store, adapter, layout, decoded, fds, login, verity=verity, target=target,
+                         deadline=deadline)
+
+
+def _peer_uid(conn: socket.socket) -> int:
+    creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    return struct.unpack("3i", creds)[1]
+
+
+def _receive(conn: socket.socket, fds: list[int]) -> bytes:
+    """One request line and its fds, which are appended to `fds` as they arrive so the caller closes them."""
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk, got, flags, _ = socket.recv_fds(conn, 1 << 16, MAX_FDS, socket.MSG_CMSG_CLOEXEC)
+        fds.extend(got)
+        if flags & socket.MSG_CTRUNC or len(fds) > MAX_FDS:
+            raise Refused(TOO_MANY_FDS)
+        if not chunk:
+            raise _bad()
+        data += chunk
+        if len(data) > MAX_REQUEST:
+            raise Refused(REQUEST_TOO_LARGE)
+    if data.count(b"\n") != 1:
+        raise _bad()
+    return data
+
+
+def serve(conn: socket.socket, config: HelperConfig, clock: Callable[[], float], *,
+          peer_uid: Callable[[socket.socket], int] = _peer_uid) -> bool:
+    """Answer one request on `conn`: the peer must be the service user (nothing is read otherwise), the
+    request must name this helper's store, and the reply is one JSON line, `{"ok": true, "result": ...}` or
+    `{"ok": false, "refused": <constant>}`. Every fd received is closed; `conn` is the caller's. True if the
+    peer check passed, so the request was read."""
+    fds: list[int] = []
+    trusted = False
+    try:
+        try:
+            if peer_uid(conn) != config.service_uid:
+                raise Refused(PEER_REFUSED)
+            trusted = True
+            request = decode_request(_receive(conn, fds))
+            if request.store != str(config.store):
+                raise Refused(WRONG_STORE)
+            result = handle(config.store, request, fds, now=clock(), hours=config.staging_hours,
+                            deadline=config.lock_seconds)
+            reply: dict[str, object] = {"ok": True, "result": result}
+        except Refused as exc:
+            reply = {"ok": False, "refused": exc.constant}
+        except Exception as exc:        # anything else is the helper's failure; its type names no path
+            reply = {"ok": False, "refused": HELPER_FAILED, "type": type(exc).__name__}
+        conn.sendall(json.dumps(reply, sort_keys=True).encode() + b"\n")
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return trusted
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """The helper as systemd runs it for one connection (`Accept=yes`): the socket is stdin."""
+    parser = argparse.ArgumentParser(prog="store_core")
+    parser.add_argument("--config", type=Path, default=CONFIG)
+    ns = parser.parse_args(argv)
+    with socket.socket(fileno=0) as conn:
+        try:
+            config = load_config(cast(Path, ns.config))
+        except Refused as exc:
+            os.write(2, exc.constant.encode() + b"\n")
+            _hang_up(conn, read=False)
+            return CONFIG_EXIT
+        _hang_up(conn, read=serve(conn, config, time.time))
+    return 0
+
+
+def _hang_up(conn: socket.socket, *, read: bool) -> None:
+    """End the reply, then discard, unparsed, whatever request bytes are still queued: closing a Unix socket
+    with unread data resets it, and the peer would lose the reply. A request never read may still be on its
+    way, so that one is waited for, at most `HANG_UP_SECONDS`. At most `MAX_REQUEST` bytes are dropped; any
+    fds among them are released by the kernel."""
+    conn.shutdown(socket.SHUT_WR)
+    if not read:
+        poller = select.poll()
+        poller.register(conn, select.POLLIN | select.POLLRDHUP)
+        poller.poll(HANG_UP_SECONDS * 1000)
+    dropped = 0
+    while dropped <= MAX_REQUEST:
+        try:
+            chunk = conn.recv(1 << 16, socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            return
+        if not chunk:
+            return
+        dropped += len(chunk)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
