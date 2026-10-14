@@ -391,6 +391,18 @@ The CLI results of those attempts (DNS names, execs, `packages/`) matched the ru
 - With a login file present, the DNS names attempted were `ab.chatgpt.com`, `chatgpt.com` and `raw.githubusercontent.com`. There was no `api.github.com`.
 - Resume wasn't reached, because that needs a real thread.
 
+**The first Part 2 run (2026-10-14, the lead's, under ask yvkg at `e86854e`; results in `$XDG_RUNTIME_DIR/s9-10-part2.EDZixy`) failed on the harness, not the CLI.**
+- **What failed.** Both variants failed `new_session_answered` and `resume_shows_the_first_prompt`, and nothing else.
+- **What passed.** Every launch-shape check passed. `e25` had no exec under the home and no `api.github.com`. The DNS names were `ab.chatgpt.com`, `chatgpt.com` and `raw.githubusercontent.com`. `rc` was 0, no process was left, and both homes were deleted. `plain` repeated its arg0 ENOENT attempts.
+- **Why.** The screen shows "Hook failed / hook exited with code 2 / Blocked by hook / python3: can't open file '/run/hz/shim.py'". The generated hooks run `python3 -I /run/hz/shim.py hook` (`HOOK_COMMAND`), but `inner2.sh` put only `Codex.run_files()` into `/run/hz`. Production also writes the shim there (`runtime.py`, `SHIM_SOURCE`).
+- **The fix.** `run-files` now also writes the shipped `session/shim.py`, byte for byte. It writes no token, no `shim.json` and no `HZ_SESSION_SOCKET`. With no socket, the shim takes production's control-plane-down path: `SessionStart`, `UserPromptSubmit` and `Stop` are spooled to `$HOME/.hz/spool.jsonl` and exit 0, and any tool call is denied. The pong prompt needs no tool.
+- **New Part 2 checks.**
+  - `inner2.sh` writes the spooled event names (names only, since the events carry the prompt) to `hooks`.
+  - `hooks_ran` needs `UserPromptSubmit` there.
+  - `no_hook_failure` fails a "Hook failed", "Blocked by hook" or "hook exited with code" on either screen.
+  - Both are gated on complete evidence, and `hooks` must exist. Part 1's checks are unchanged.
+- **Not tested by Part 2.** The hook round trip to wsd (the token, `shim.json`, the session socket and wsd's decisions). That is T14 / Task 13.
+
 ## Cleanup
 
 Everything is under `$T` and the `mktemp -d -p "$XDG_RUNTIME_DIR"` homes. No process from the spike is left running. The S9-8 run ended with zero `s9-*` sandboxes or containers, both `tmpfs` mounts unmounted in Podman's namespace, and no `conmon` left.
