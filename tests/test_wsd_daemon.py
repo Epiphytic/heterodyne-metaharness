@@ -31,6 +31,7 @@ from heterodyne.wsd.runtime import ResolveFailed, ResolveRefused, Session, Unlan
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
+from heterodyne.wsd.usage import NoUsageReader
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 
@@ -2505,3 +2506,42 @@ def test_a_resolve_waits_for_the_operation_lock(tmp_path: Path, monkeypatch: pyt
         release.set()
         threads.join()
     assert threads.errors == {} and runtime.finished == [(WS, SID, 1)]
+
+
+def test_assemble_hands_the_reader_to_every_workstream(tmp_path: Path) -> None:
+    s = settings(tmp_path)
+    world = World(tmp_path / "btq-state")
+
+    class Reader(NoUsageReader):
+        pass
+
+    reader = Reader()
+    parts = assemble(s, Journal(s.journal), factory(world), FakeRuntime(), usage_reader=reader)
+    assert all(sch.d.usage_reader is reader for sch in parts.schedulers.values())
+    plain = assemble(s, Journal(s.journal), factory(world), FakeRuntime())
+    assert all(isinstance(sch.d.usage_reader, NoUsageReader) for sch in plain.schedulers.values())
+
+
+def test_run_recovers_crashed_reads_once_it_holds_the_lock(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings(tmp_path)
+    recovered: list[Path] = []
+
+    def recording(root: Path) -> None:
+        with pytest.raises(AlreadyRunning):
+            instance_lock(s.instance_lock)                  # recover runs under the instance lock
+        recovered.append(root)
+
+    async def served(_d: Wsd) -> None:
+        return None
+
+    monkeypatch.setattr(cli.hostread, "recover", recording)
+    monkeypatch.setattr(cli, "_serve", served)
+    assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 0
+    assert recovered == [s.state_dir / "hostread"]
+    held = instance_lock(s.instance_lock)
+    try:
+        assert cli.run(s, factory(World(tmp_path / "btq-state")), FakeRuntime()) == 1
+    finally:
+        os.close(held)
+    assert recovered == [s.state_dir / "hostread"]          # a second instance recovers nothing

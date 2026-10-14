@@ -12,7 +12,9 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   (closes its output and waits), `exit` (exits 3 without answering), `orphan` (starts a descendant that
   holds its output open, writes the descendant's PID to `HZ_FAKE_CHILD_PID_FILE`, and hangs) or `escaped`
   (the same, the descendant in a session of its own). With `HZ_FAKE_PID_FILE` set, it first writes its
-  PID there, so a test can prove it is gone.
+  PID there, so a test can prove it is gone. `HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json`
+  with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it
+  answers `account/rateLimits/read`.
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
 - the TUI: prints its prompt marker (Claude merges its settings layers as the real one does, see
   `claude_hooks`; Codex runs only the hooks config.toml trusts at their current hash;
@@ -94,6 +96,10 @@ def faulty(result: Any, fault: str) -> Any:
 
 def rate_limits(msg: dict[str, Any]) -> str | None:
     """The answer line to account/rateLimits/read, or None to never answer."""
+    if rotated := os.environ.get("HZ_FAKE_ROTATE"):
+        auth = Path(os.environ["CODEX_HOME"]) / "auth.json"
+        (auth.parent / "auth.json.tmp").write_text(rotated)
+        (auth.parent / "auth.json.tmp").replace(auth)
     fault = os.environ.get("HZ_FAKE_RATE_FAULT")
     if fault == "hang":
         return None

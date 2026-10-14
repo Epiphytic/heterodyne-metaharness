@@ -7,13 +7,15 @@ from wsd_env import accounts_at
 
 from heterodyne import platform
 from heterodyne.config import ConfigError
-from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_runtime
+from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_runtime, build_usage_reader
+from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import SandboxRuntime
 from heterodyne.wsd import cli
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings
+from heterodyne.wsd.usage import NoUsageReader, UsageReader
 
 
 def settings(tmp_path: Path, env: dict[str, str]) -> WsdSettings:
@@ -96,9 +98,12 @@ def test_wsd_run_uses_the_built_runtime(tmp_path: Path, monkeypatch: pytest.Monk
     env = config_env(tmp_path, "")
     s = settings(tmp_path, env)
     seen: list[AgentRuntime] = []
+    readers: list[UsageReader | None] = []
 
-    def run(_s: WsdSettings, _f: object, runtime: AgentRuntime) -> int:
+    def run(_s: WsdSettings, _f: object, runtime: AgentRuntime, *,
+            usage_reader: UsageReader | None = None) -> int:
         seen.append(runtime)
+        readers.append(usage_reader)
         return 0
 
     def refused(_s: WsdSettings, _env: Mapping[str, str]) -> AgentRuntime:
@@ -108,6 +113,18 @@ def test_wsd_run_uses_the_built_runtime(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(cli, "_factory", lambda _s: None)
     monkeypatch.setattr(cli, "run", run)
     monkeypatch.setattr(cli, "build_runtime", lambda _s, _env: NoRuntime())
+    monkeypatch.setattr(cli, "build_usage_reader", lambda _s, _env: NoUsageReader())
     assert cli.wsd_main(["run"]) == 0 and isinstance(seen[0], NoRuntime)
+    assert isinstance(readers[0], NoUsageReader)
     monkeypatch.setattr(cli, "build_runtime", refused)
     assert cli.wsd_main(["run"]) == cli.EX_CONFIG
+
+
+def test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary(tmp_path: Path) -> None:
+    env = config_env(tmp_path, "")
+    assert isinstance(build_usage_reader(settings(tmp_path, env), env), NoUsageReader)
+    env = config_env(tmp_path, '[platform]\nsandbox = "openshell"\n')
+    reader = build_usage_reader(settings(tmp_path, env), env)
+    assert isinstance(reader, HostUsageReader)
+    assert reader.credlocks == settings(tmp_path, env).credlock_dir
+    assert reader.scratch_root == settings(tmp_path, env).state_dir / "hostread"
