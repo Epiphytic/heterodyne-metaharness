@@ -1,7 +1,7 @@
 """ws-hook and ws-request (ADR 0001 §3.1, §10): the agent's side of the per-session socket.
 
 Standard library only, with no heterodyne imports: inside the sandbox this file is run as
-`python3 -I /run/hz/shim.py hook|request|status` from the read-only run directory. The socket is
+`python3 -I /run/hz/shim.py hook <Event>|request|status` from the read-only run directory. The socket is
 $HZ_SESSION_SOCKET; the token and `shim.json` sit beside it, never in argv (plan 4 D5).
 
 If wsd doesn't answer within `wait_seconds`, a PreToolUse is allowed only for a locally classifiable
@@ -18,6 +18,15 @@ its short top-level scalars, the short path fields of its `tool_input`, and a `{
 "bytes": N}` marker in place of everything else. The server keeps turn state from the event name and
 session ID alone, so lifecycle events survive; the local `worktree_edit` check still reads the full
 event. A tool call too large even projected is denied; another such event is dropped.
+
+The hook's input is bounded too (btq-rcose): at most MAX_HOOK_INPUT bytes, ending within HOOK_INPUT_WAIT
+seconds, after which a hook the CLI cancels at its timeout would let the tool run. Input past the bound is
+drained to its end, or to the deadline, so the CLI's write completes. The event comes from the installed
+command's argument, which is as trusted as the hook itself, so bad input is answered by event without
+parsing anything: a PreToolUse is denied (too large, or unreadable: late, empty, no stdin, not JSON, or a
+payload whose tool-call status disagrees with the argument) and a lifecycle event gets empty output. No
+argument, an unknown one or extra words fail closed as PreToolUse on bad input; a readable payload is
+then taken by its own `hook_event_name`, as before. Nothing bad is sent to wsd or spooled.
 """
 
 import hashlib
@@ -48,6 +57,10 @@ MAX_LINE = 64 * 1024            # one request line, at most (ADR 0001 §7); the 
 MAX_FIELD = 4096                # a scalar kept in a projection: a path, a name, an ID
 PATH_FIELDS = ("file_path", "path", "notebook_path")
 DEFAULT_WAIT = 5.0
+MAX_HOOK_INPUT = 16 << 20       # ~45x the largest payload seen, 4x a 1M-token context: cuts only a runaway
+HOOK_INPUT_WAIT = 5.0           # the CLI writes from memory at spawn: only a stalled writer is this late
+DRAIN_CHUNK = 64 * 1024         # past the bound, input is read into a fixed scratch buffer and dropped
+KNOWN_EVENTS = frozenset({"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse"})
 REQUEST_WRAPPER = '#!/bin/sh\nexec python3 -I /run/hz/shim.py request "$@"\n'
 
 Clock = Callable[[], float]
@@ -218,18 +231,24 @@ def _spool(env: Mapping[str, str], payload: dict[str, Any]) -> None:
     except (OSError, ValueError):
         pass
 
-def run_hook(raw: bytes, env: Mapping[str, str], *, clock: Clock = time.monotonic,
+def run_hook(raw: bytes, env: Mapping[str, str], *, event: str | None = None, clock: Clock = time.monotonic,
              sleep: Sleep = time.sleep) -> tuple[int, str]:
-    """Exit 0 always; a denied tool call is the JSON decision on stdout. Input that can't be read as a
-    hook event (not JSON, nested too deeply) is denied, as is a tool call the shim fails on."""
+    """Exit 0 always; a denied tool call is the JSON decision on stdout. `event` is the command's argument
+    (None: none, or not one we know). Input over MAX_HOOK_INPUT is answered unparsed, and input that can't
+    be read as a hook event (empty, not JSON, nested too deeply, or a tool call where `event` says
+    otherwise, or the reverse) takes the unreadable path: denied for a tool call, silent for a lifecycle
+    event. So is a tool call the shim fails on."""
+    tool_event = event in (None, "PreToolUse")      # no argument: fail closed
+    if len(raw) > MAX_HOOK_INPUT:
+        return 0, _deny(TOO_LARGE_REASON) if tool_event else ""
     try:
         payload: Any = json.loads(raw) if json_depth(raw) <= MAX_DEPTH else None
     except (ValueError, RecursionError):
         payload = None
-    if not isinstance(payload, dict):
-        return 0, _deny(DENY_REASON)
-    fields = cast(dict[str, Any], payload)
-    tool_call = fields.get("hook_event_name") == "PreToolUse"
+    fields = cast(dict[str, Any], payload) if isinstance(payload, dict) else None
+    tool_call = fields is not None and fields.get("hook_event_name") == "PreToolUse"
+    if fields is None or (event is not None and (event == "PreToolUse") != tool_call):
+        return 0, _deny(DENY_REASON) if tool_event or tool_call else ""
     try:
         return _decide(fields, tool_call, env, clock, sleep)
     except Exception:  # noqa: BLE001 - fail closed on anything unforeseen
@@ -403,8 +422,13 @@ def json_depth(line: bytes) -> int:
     return deepest
 
 
-def hook_main() -> int:
-    rc, out = run_hook(sys.stdin.buffer.read(), os.environ)
+def hook_main(args: Sequence[str]) -> int:
+    event = args[0] if len(args) == 1 and args[0] in KNOWN_EVENTS else None
+    try:
+        raw = read_bounded(0, MAX_HOOK_INPUT, HOOK_INPUT_WAIT, drain=True)
+    except OSError:                     # no stdin: closed (sys.stdin is None under `exec 0<&-`) or invalid
+        raw = b""
+    rc, out = run_hook(raw, os.environ, event=event)
     if out:
         print(out)
     return rc
@@ -416,22 +440,31 @@ def request_main(argv: Sequence[str] | None = None) -> int:
     return rc
 
 
-def read_bounded(fd: int, limit: int, seconds: float, clock: Clock = time.monotonic) -> bytes:
+def read_bounded(fd: int, limit: int, seconds: float, clock: Clock = time.monotonic, *,
+                 drain: bool = False) -> bytes:
     """`fd`'s input up to its end, cut at `limit` + 1 bytes (too long to be read as one line), or b"" if
-    it hasn't ended within `seconds`: neither an endless nor a stalled stream can hold the caller."""
+    it hasn't ended within `seconds`: neither an endless nor a stalled stream can hold the caller. With
+    `drain`, input past the cut is read and dropped until its end or the deadline, so its writer isn't
+    left on a closed pipe; the cut is returned either way. The deadline is checked before every read."""
     end = clock() + seconds
     poller = select.poll()
     poller.register(fd, select.POLLIN)
-    data = b""
-    while len(data) <= limit:
+    data = bytearray()
+    while True:
         left = end - clock()
         if left <= 0 or not poller.poll(max(1, int(left * 1000))):
-            return b""
+            return bytes(data) if len(data) > limit else b""
+        if len(data) > limit:
+            if not os.read(fd, DRAIN_CHUNK):
+                break
+            continue
         chunk = os.read(fd, limit + 1 - len(data))
         if not chunk:
             break
-        data += chunk
-    return data
+        data.extend(chunk)
+        if len(data) > limit and not drain:
+            break
+    return bytes(data)
 
 
 def status_main() -> int:
@@ -440,12 +473,12 @@ def status_main() -> int:
 
 def main(argv: Sequence[str]) -> int:
     if argv[:1] == ["hook"]:
-        return hook_main()
+        return hook_main(argv[1:])
     if argv[:1] == ["request"]:
         return request_main(argv[1:])
     if argv[:1] == ["status"]:
         return status_main()
-    print("usage: shim.py hook|request|status [text...]", file=sys.stderr)
+    print("usage: shim.py hook <Event>|request|status [text...]", file=sys.stderr)
     return 2
 
 
