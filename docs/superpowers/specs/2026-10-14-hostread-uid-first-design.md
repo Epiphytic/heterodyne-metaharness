@@ -1,6 +1,12 @@
-# hostread: another user's zombie leader is cleared by its uid (btq-19fh0)
+# hostread: the uid rule for a zombie leader with threads (btq-19fh0): recommend won't-fix
 
-An amendment to the flakes2 design (`docs/superpowers/specs/2026-10-14-hostread-fifo-flakes-design.md`, approved at 6d4fab6, implemented in PR #88). It changes one branch of `_judge` in `src/heterodyne/sandbox/hostread.py`. Line numbers are at origin/main 7c68abb (the #88 merge).
+An amendment to the flakes2 design (`docs/superpowers/specs/2026-10-14-hostread-fifo-flakes-design.md`, approved at 6d4fab6, implemented in PR #88). It concerns one branch of `_judge` in `src/heterodyne/sandbox/hostread.py`.
+
+Review: `docs/reviews/19fh0-design-r1.md` (REVISE).
+
+**Recommendation (r2): don't change production. Keep settling, and close btq-19fh0 as won't-fix.** The only change is three test pins of today's behaviour (below). The r1 proposal is withdrawn, and the reasons are set out here.
+
+Line numbers are at origin/main 7c68abb (the #88 merge).
 
 ## The rule order today
 
@@ -38,72 +44,61 @@ Take another user's process whose main thread has exited (`pthread_exit`) while 
 
 This fails closed, but it lasts as long as that process lives. While another user's process is in this state, every start-up recovery and every trusted read on the host waits 10 s and keeps its home. Before flakes2 the same process was cleared as a zombie. A live (non-zombie) leader of another user is cleared today by rule 5 at `:261`.
 
-## The change
+## What r1 proposed, and why it is withdrawn
 
-In the branch at `:257`, replace `_SETTLE` when no worker gives an environment with rule 5's uid clause. The uid comes from the facts the branch already holds, the same `status` read:
+r1 proposed this: in the branch at `:257`, when no worker gives an environment, clear another user's group by the leader's uid (`_SETTLE if _ours(facts) else _CLEAR`).
 
-```python
-        group = _through_workers(pid)
-        if group is not None:
-            return _matched(fd, group, marks)
-        return _SETTLE if _ours(facts) else _CLEAR          # another user's group: rule 5's uid clause
-```
+Review r1 showed that this is unsound, and I agree. The leader's uid says nothing about who the *other* threads are, and holding a home depends on the environment, not the uid.
+- **Credentials are per task, and need no privilege to diverge.** A thread can switch to any of its own real, effective or saved uids with a raw per-thread `setresuid` (`kernel/sys.c`). So:
+  - A group with real and effective uid B and saved uid A (one of ours) can leave a worker that has gone back to A, while the leader reads as B's.
+  - `_ours` reads only the real and effective uids, so it would call the group another user's.
+  - In a user namespace with a subordinate-uid mapping, `CAP_SETUID` needs no host privilege, so threads can hold different host uids.
+- **An unreadable thread is not an absent holder.** That worker can be non-dumpable, so its `task/<tid>/environ` is refused, while the shared environment still holds `CODEX_HOME`.
+  - Today that group settles, and the homes are kept.
+  - The r1 rule would clear it and remove the home under a live holder.
+  - r1 argued that the scan couldn't kill such a holder anyway. That argument is wrong:
+    - `kill` permission can match the target's saved uid.
+    - In any case, a holder that can't be killed calls for keeping the homes, not for treating it as absent.
+- **Exec makes it worse.** Suppose a worker of ours execs after the `status` read. It takes the leader's PID and drops out of the worker listing. The r1 rule would then clear the group on the old leader's uid, and no later scan may follow.
 
-- The workers are still read **first**. The uid clears only when no thread gives an environment. A worker readable by this user (ours and dumpable) decides as it does today, whatever the leader's uid. So the change only turns some of today's settles into clears. It never turns a match into a clear.
-- Only the uid clause applies, not the whole of rule 5:
-  - Rule 5's `PF_EXITING` clause would always settle here, because a zombie leader always has the flag.
-  - The start-time clause is left out: see Out of scope.
-- `_ours` is unchanged:
-  - A missing `Uid:` line counts as ours, so the process settles as today.
-  - A line that can't be parsed raises `ValueError`, which fails the scan (unknown-like, homes kept), as it does on the live path today.
+## Whether a sound proof is worth building
 
-## Why this stays fail-closed
+A clear here would need a proof that **no** thread of the group can hold a home. The candidate is:
+1. read every task's `/proc/<pid>/task/<tid>/status`, with all four uids (real, effective, saved, fs) foreign;
+2. prove the enumeration complete;
+3. re-read the leader to show the same zombie.
 
-- **One read, one task.** State, Threads and Uid all come from one `status` read. `proc_single_show` pins one task for the whole show. `task_state` prints both `State:` and the `Uid:` line from that task, the uids from `get_task_cred(p)` (`fs/proc/array.c`, v6.17). The branch is reached only when that read showed `Z`/`X` with `Threads:` of 2 or more. So the uid is the zombie leader's.
-  - A zombie runs no code, and credentials change only through `commit_creds` on the current task. So that uid stays fixed while the task is a zombie.
-- **Exec between the reads.** A worker that execs takes the leader's PID, and the old leader is released (flakes2, "PID and pidfd continuity do not prove task continuity").
-  - A `status` read pinned to the old leader before the switch shows `Z`, its uid and `Threads:` of 2 or more. That is this branch, judged on the old group's uid.
-  - After the switch, the old leader reads `Threads: 0` (settle), and the new leader shows a live state (rules 4–5, not this branch).
-  - So this branch never judges the new image on the old image's facts. The new leader is judged by its own `status` read, on the live path, at the next scan or this one.
-  - A worker that execs after the `status` read vanishes from the listing and is skipped. The group is then cleared on its leader's uid, which is the uid the exec'ing worker held too, unless the group is privileged (next point).
-- **The uid changing between reads.** Credentials are per task.
-  - A worker can hold a different uid from the leader only through `setresuid`-style calls, and changing to another user's uid needs `CAP_SETUID`.
-  - So an "another user's" leader with one of *our* threads is a privileged process. Today's live rule at `:261` already judges such a process by its leader's uid.
-  - The worker-first order narrows even that. A thread of ours that is dumpable is read, and matched or cleared on its environment, before the uid is consulted.
-  - What is left is a privileged process with a non-dumpable thread of ours, whose leader is another user's zombie. The scan can't kill that process anyway:
-    - `pidfd_send_signal` checks permission against the pidfd's task, the leader (`check_kill_permission`, `kernel/signal.c`).
-    - A SIGKILL to another user's leader raises `PermissionError`, which `_end_holders` doesn't suppress, so the scan fails and the homes are kept.
-    - Clearing it doesn't lose anything the scan could have done.
-- **PID reuse.** As today, the pidfd is opened before any read, and `status` is read by PID.
-  - If the PID was reused meanwhile, the original process is gone and holds nothing.
-  - The reused PID's process is judged as any process met by the scan is. A match is still confirmed by signal 0 through the original pidfd, which fails for a process that is gone.
-  - A clear here never sends a signal, so a reused PID can't misdirect a kill.
+It doesn't hold:
+- **Completeness can't be proven from `/proc`.**
+  - The listing can end early (`next_tid` stops when its task loses its PID, as flakes2 found).
+  - `Threads:` comes from a different read than the listing. A clone and an exit between the two leave the count unchanged, with different members.
+- **Each thread's uids are only true at its own read.** Unprivileged saved-uid restoration lets a thread judged foreign become ours a moment later. Its environment, the shared one, may still hold the mark.
+- **A leader re-read doesn't show task continuity.** It is the flakes2 lesson: an exec moves a worker into the leader's PID, so a later read can describe a different task.
+- **And it doesn't fix the premise.** Even with all four uids foreign at once, a foreign uid doesn't show the environment lacks `CODEX_HOME`. The environment is what holding means.
 
-## Tests
+So the cost would be a per-thread read loop and a completeness check that can't be made sound, all to turn a fail-closed wait into a clear.
 
-All existing hostread tests stay as they are. Two of them pin that our own zombie leader still settles:
-- `test_no_readable_worker_settles`;
-- `test_a_truncated_task_listing_settles`.
+**The cost of keeping today's behaviour is small and bounded.**
+- While another user's process is in this state, each start-up recovery and each trusted read waits `RECOVER_SECONDS` (10 s) and keeps its home. They log `DIAG_RECOVERY_KEPT` or `DIAG_SCRATCH_KEPT` (the read is discarded).
+- Nothing that holds a home is ever missed. The next start or read, once that process has exited, cleans up.
+- The state is rare. It needs another user's program to `pthread_exit` its main thread and keep running. No process on this host was in it at the 2026-10-14 check.
 
-`test_a_zombie_leader_with_live_threads_is_found_through_them` and `test_a_worker_that_cant_be_read_is_skipped_not_its_process` pin the worker-first order. They run with this user's uid and are unchanged.
+## Tests (a test-only change, if won't-fix is approved)
 
-The test helper `status_text` gains a `uid=(real, effective)` argument. It defaults to this user's uid, so the existing calls are unchanged.
+All existing hostread tests stay. `status_text` in `tests/test_sandbox_hostread.py` gains a `uids` argument: the four `Uid:` fields, defaulting to this user's.
 
-New seam tests use the flakes2 `Scripted` and `Seam` helpers and the fake clock:
-1. **Another user's zombie leader, no readable worker** (parametrized: workers refused, gone, empty, or an empty listing), with `Z`, `Threads: 3` and `Uid` of another uid → cleared at once:
-   - zero sleeps;
-   - no signal;
-   - home removed, `DIAG_RECOVERED`.
-   - Today it is kept at the deadline with `DIAG_RECOVERY_KEPT`, so the test fails before the change.
-2. **Another user's zombie leader with a readable worker that holds the mark** → matched, and the SIGKILL is sent (recorded) before the home is removed. Pins worker-first. It passes today and must keep passing.
-3. **Mixed uids count as ours** (parametrized: real ours with effective other, and real other with effective ours) → settles, kept at the deadline.
-4. **No `Uid:` line** in a `Z`, `Threads: 2` read with no readable worker → settles, kept at the deadline.
-5. **The read path:** `read()` with another user's zombie leader scripted for every scan, and `RECOVER_SECONDS` patched to 0.3 → returns `WANTED` and logs nothing. Today it settles to the deadline, logs `DIAG_SCRATCH_KEPT` and returns None.
+Three seam tests pin today's settling against a future reintroduction of the r1 rule. They use the flakes2 `Scripted` and `Seam` helpers and the fake clock. Each asserts the home is kept at the deadline (`DIAG_RECOVERY_KEPT`), no signal is sent, and no pidfd is leaked.
+1. **An unreadable mixed-uid holder:**
+   - `Z`, `Threads: 2`, with the leader's `Uid:` another user's on all four fields.
+   - The one worker's environ is refused (EACCES), standing in for a non-dumpable worker of ours that holds the mark.
+2. **Saved-uid restoration:** the same, with the leader's `Uid:` showing another user's real and effective uids and *our* uid as saved.
+3. **A worker exec between `status` and the listing:** `Z`, `Threads: 2`, another user's `Uid:`, and a listing whose only worker raises `FileNotFoundError` (it exec'd and took the leader's PID).
 
-No live test is added, since an unprivileged test can't start another user's process. The live zombie-leader regressions stay.
+All three pass today. They would fail under the r1 rule, so they are pins, not failing-first tests.
 
-## Out of scope
+## Out of scope (noted, not proposed)
 
-- The start-time clause in this branch. Our own long-lived process with a zombie leader, started before the home, still settles until the deadline.
-  - Applying that clause would need a separate argument: exec keeps the start time, and here a worker's later exec would be judged by the group's start.
-  - It is left as a possible follow-up.
+- **Rule 5 on the live path (`:261`) relies on the same premise:** "another user's process is not a holder", from the leader's real and effective uids.
+  - The saved-uid point above applies there too. For example, a descendant of ours that execs a setuid binary owned by user B can later drop to B entirely, without privilege. Its environment, which still holds `CODEX_HOME`, is then refused, and rule 5 clears it.
+  - That behaviour predates flakes2 (T8) and is unchanged by this doc. Whether to tighten it is a separate question for the lead.
+- **The start-time clause in the zombie branch,** as in r1.
