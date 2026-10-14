@@ -445,14 +445,16 @@ def read_bounded(fd: int, limit: int, seconds: float, clock: Clock = time.monoto
     """`fd`'s input up to its end, cut at `limit` + 1 bytes (too long to be read as one line), or b"" if
     it hasn't ended within `seconds`: neither an endless nor a stalled stream can hold the caller. With
     `drain`, input past the cut is read and dropped until its end or the deadline, so its writer isn't
-    left on a closed pipe; the cut is returned either way. The deadline is checked before every read."""
+    left on a closed pipe; the cut is returned either way. The deadline is checked before every poll and
+    again before every read, so input the poll reports only after the deadline is late however whole."""
     end = clock() + seconds
     poller = select.poll()
     poller.register(fd, select.POLLIN)
     data = bytearray()
     while True:
         left = end - clock()
-        if left <= 0 or not poller.poll(max(1, int(left * 1000))):
+        # a poll that returns past the deadline (or a process resumed past it) is late: never read on
+        if left <= 0 or not poller.poll(max(1, int(left * 1000))) or clock() >= end:
             return bytes(data) if len(data) > limit else b""
         if len(data) > limit:
             if not os.read(fd, DRAIN_CHUNK):
