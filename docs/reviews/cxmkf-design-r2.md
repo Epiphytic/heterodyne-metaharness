@@ -1,0 +1,20 @@
+Reviewer: gpt-6.1-sol (Codex, workspace-write sandbox), cross-model; author claude-opus-5-5.
+Reviewed commit: 509c2d7d74ac5ddad8417bfdc3a0adaf3a3fdc4d (range 32ba9d94e4515eae3fc0855f2864e1535d3f87ca..509c2d7d74ac5ddad8417bfdc3a0adaf3a3fdc4d). Verdict: REVISE.
+
+Note: the 4 blockers are answered in r3 (doc §9).
+
+- **[BLOCKING] §1.4 K17/K17c; `bin/btq:401,584`: Optional purpose requires more than adding it to `ASK_FIELDS`.** `ask_digest()` requires every listed field to be nonempty, and `approval_valid()` requires exactly that field set. Adding `purpose` as proposed makes existing purpose-less beads unpostable and invalidates their approval gates, despite unchanged digests. Specify separate required/allowed field handling, preserve absent-purpose approvals, and test both admission and gate validity across the upgrade. The readout-only label, honest fallback and admind-first sequencing otherwise resolve r1’s mislabelling blocker.
+
+- **[BLOCKING] §1.1 K5–K7: Pruning can defeat the undelivered bound.** Notices may remain pending indefinitely while unverified, but K7 unconditionally prunes their counting rows after seven days. If K5 counts pending notices through that table, ten notices disappear from admission accounting while their forty chunks remain queued; subsequent batches accumulate without bound. Count directly from pending notice outbox keys, or retain notice rows until delivery terminates. Add an offline test spanning pruning while delivery is gated.
+
+- **[BLOCKING] §1.5 K21/K21h: GitHub verification does not fix the API hostname.** The specified relative `gh api` endpoints honor inherited `GH_HOST`—confirmed by local `gh api --help`. With `GH_HOST` pointing to an enterprise instance, successful checks can produce a `github.com` URL whose commit/path was never checked there. Require `--hostname github.com` and test hostile `GH_HOST`. Argument arrays and revision/path validation otherwise address r1’s subprocess concern.
+
+- **[BLOCKING] §1.5 K22l; §1.6 K23; §7: Approval links still violate the clickability requirement.** K23 explicitly cuts oversized approval link lines, contradicting K22l’s no-split rule. At `chunk_chars=200`, a valid GitHub blob link using a 39-character owner, 100-character repository and `docs/design.md` produces a 226-character `link:` line against 184 usable characters. The card is accepted with a broken URL. Define a consistent refusal/grooming policy or another rendering that preserves the complete clickable URL, and include it in the ADR amendment.
+
+- **[NON-BLOCKING] §1.1 K6; `src/heterodyne/admind/store.py:395`; `daemon.py:2790`: Lane priority provides no notice liveness guarantee.** Continuous lane-1 traffic can starve notices forever; a notice already awaiting `send_final()` can also delay a newly queued approval until that send finishes. Lane 2 additionally contains `!details`, which can wait behind notice retries. State these limits explicitly and decide whether indefinite notice starvation is acceptable. The proposed admission transaction and per-notice limits otherwise resolve r1’s immediate flood concern.
+
+- **[NON-BLOCKING] §1.5 K21; §2.1 link tests: Distinguish commit and path 404s.** An existing commit with an absent path should receive a path-specific refusal, rather than “push it first.” Also specify HTTP-status extraction without forwarding raw gh stderr/debug output into audit records.
+
+The remaining r1 resolutions are sound: K22 persists a terminal target resolution for every parent state before sending; reaction attribution and approval separation remain intact; six maximum-length choices fit through line-boundary splitting and the compact footer at 200 characters. Q1–Q9, the staged `REQUIRE_QUESTION_FORM` rollout and §7’s amendment coverage are reasonable, subject to the findings above.
+
+Verdict: REVISE
