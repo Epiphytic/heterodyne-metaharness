@@ -3,6 +3,7 @@ the process's open file-descriptor count. Checksums are computed here at run tim
 
 import base64
 import contextlib
+import gc
 import gzip
 import hashlib
 import io
@@ -112,6 +113,9 @@ def sample_manifest(paths: list[str] | None = None) -> sc.Manifest:
 
 
 def fd_count() -> int:
+    """This process's open fds, after a collection: garbage another test left (its sockets, pipes or files)
+    is closed now, not by a collection inside the count."""
+    gc.collect()
     return len(list(Path("/proc/self/fd").iterdir()))
 
 
