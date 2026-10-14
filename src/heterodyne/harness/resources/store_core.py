@@ -1348,7 +1348,10 @@ def _make_dir(parent_fd: int, name: str, mode: int) -> int:
 
 def _remove(dirfd: int, name: str) -> None:
     """`name` under `dirfd` and everything below it, by fd, never following a link; each directory is made
-    writable by its owner first. Gone already is fine."""
+    writable by its owner first. Gone already is fine. A known residual race, accepted for the PoC: each
+    `rmdir` is by name, so an empty directory swapped in after the scan is removed instead. No content can
+    be lost (`rmdir` removes only an empty directory), and the swap needs write access to a directory the
+    store owns, made 0700 here, which could `rmdir` it anyway; Linux has no `rmdir` by fd."""
     try:
         st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1772,7 +1775,10 @@ def _open_named(dirfd: int, name: str, roots: Collection[tuple[int, int]]) -> in
 def _remove_opened(dirfd: int, name: str, fd: int, hook: Hook) -> bool:
     """The tree open at `fd`, `name` under `dirfd`, emptied through `fd` alone, then `name` removed if it is
     still that directory: `rmdir` takes a path, so the path is checked just before it, and `rmdir` only
-    ever removes an empty directory. False if `name` is no longer the tree."""
+    ever removes an empty directory. False if `name` is no longer the tree. A known residual race, accepted
+    for the PoC (Codex r3): the check and the `rmdir` are two steps, so an empty directory swapped in
+    between them is removed. No content can be lost, the swap needs write access to the install's parent,
+    which the store owner holds and could `rmdir` with directly, and Linux has no `rmdir` by fd."""
     hook("TREE.OPENED")
     os.fchmod(fd, 0o700)
     with os.scandir(fd) as it:
