@@ -2,9 +2,16 @@
 
 The source is the FINDING-PROD in the btq-19fh0 design review r2 (`/tmp/review-19fh0-r2.md`, rated High). The saved-uid analysis is in r1 (`/tmp/review-19fh0-r1.md`). That finding was noted as out of scope in `docs/superpowers/specs/2026-10-14-hostread-uid-first-design.md` (19fh0, pending Liam's ask 4gt8).
 
+Review: `docs/reviews/9yiku-design-r1.md` (REVISE).
+
 Line numbers are at origin/main e65ade7.
 
-**Recommendation: (a) alone.** The host read's app-server is started under `PR_SET_NO_NEW_PRIVS`, through a small exec trampoline. Rule 5 is unchanged, and its premise is written down. (b) is rejected because of its measured cost, and so (c) is rejected too. The design is test-first, offline, and changes one launcher.
+**Recommendation (r2): (a), plus a subordinate-uid check in `_ours`.**
+- The host read's app-server is started under `PR_SET_NO_NEW_PRIVS`, through an exec trampoline.
+- The trampoline first checks the launch conditions below and fails closed if they don't hold.
+- `_ours` also counts this user's subordinate uids (`/etc/subuid`) as this user's. r1 found that a descendant can reach them even under no_new_privs; I reproduced that on this host (below).
+- Rule 5's order is unchanged.
+- (b) is rejected because of its cost, and so (c) is rejected too.
 
 ## The gap
 
@@ -20,65 +27,117 @@ The first clause relies on a premise: *another user's process can't be a holder.
 
 Preconditions: a setuid executable on a suid mount, and no inherited `no_new_privs`. The trusted reader runs outside every sandbox (ADR 0001 D9, plan 4b E4). The shared client's `Popen` (`src/heterodyne/sandbox/resources/codex_usage.py:87`) sets no privilege barrier.
 
+## Launch conditions (r2)
+
+The guarantee below holds only if the app-server starts with all of these:
+1. **Uid A, ordinary.** The reader's real, effective and saved uids are this user's (wsd's), and none is 0.
+2. **No capabilities.** `CapPrm`, `CapEff` and `CapAmb` are all zero in `/proc/self/status`.
+   - no_new_privs stops exec from *granting* privilege. It doesn't remove what is already held: an app-server that inherited ambient `CAP_SETUID` could `setresuid(B,B,B)` despite it.
+   - With no capability at all, no mapping of the current user namespace can be used to take another uid: changing uid inside a namespace needs `CAP_SETUID` there.
+   - `CapInh` is ignored. Under no_new_privs, inheritable capabilities can only be raised through file capabilities, and those are suppressed.
+3. **no_new_privs set, and confirmed** with `PR_GET_NO_NEW_PRIVS` after the set.
+
+Rather than leave these as assumptions, the trampoline checks them and exits 126 before the exec if any fails. wsd today runs as an ordinary user service with all three capability sets zero (checked on this host: `CapPrm`, `CapEff` and `CapAmb` are 0, uid 1001). So the check costs nothing in operation, and it turns the premise into a check.
+
 ## The candidates
 
-### (a) no_new_privs for the host read's app-server (recommended)
+### (a) no_new_privs for the host read's app-server, and launch conditions checked
 
-`no_new_privs` is inherited across fork, clone and exec, and it can't be unset. After it is set, `execve` grants nothing: setuid and setgid bits and file capabilities are ignored. The only uid changes left without privilege are among a task's own real, effective and saved uids, and here all three are A.
-- An unprivileged user namespace can map only the caller's own uid. `newuidmap` is setuid or file-capability, so it is blocked too.
-- In the reader's namespace, every task in the app-server's tree keeps real and effective uid A for its whole life.
-- So for every process descended from the app-server, `_ours` is true, and rule 5's uid clause can only clear a process outside that tree.
-
-That makes the premise hold for the holders hostread's contract names: the app-server and the descendants that escape its group. Rule 5's code doesn't change.
+Under the launch conditions:
+- **Exec can't add privilege.** no_new_privs is inherited across fork, clone and exec, and can't be unset. After it is set, `execve` grants nothing: setuid and setgid bits and file capabilities are ignored ([kernel documentation](https://docs.kernel.org/userspace-api/no_new_privs.html)).
+- **Only A's own uids remain.** The only uid changes left without privilege are among a task's own real, effective and saved uids, and all three are A.
+- **So the reported scenario is closed.** Step 2's setuid exec runs as A and gains nothing.
 
 This repo already uses the same argument for the sandbox (`src/heterodyne/sandbox/channel.py:18,216`: a task under no_new_privs can't gain privilege; "under no no_new_privs, it can still gain them", `tests/test_sandbox_channel.py:636`).
 
-**How it is set.** Python has no `os.prctl`, and `preexec_fn` is unsafe in a threaded process such as wsd. So the host read launches through a trampoline instead:
+**What no_new_privs does and doesn't stop (r2):**
+- **Direct `sudo`, `su` and `pkexec` are stopped.** They are setuid, so under no_new_privs they run without elevation and fail, even with `NOPASSWD`.
+- **Already-privileged services reached over IPC are not stopped.** Examples are a root daemon's socket, a system service manager, or a container engine's root socket. They can start processes as anyone, but they can't change the descendant's own credentials, because there is no such syscall. Whatever they start is not a descendant: see "Residuals".
+- **SCM_RIGHTS passes descriptors, not uid-changing capabilities by itself.** A descendant can be sent, or can open, a user-namespace file. That case is the next section's.
+- **ptrace stays subject to its own permission checks.** A descendant can't attach to a more privileged process.
+
+**The subordinate-uid path (r1 BLOCKING 1), reproduced.** no_new_privs doesn't stop `setns` into a user namespace that this user owns. Inside it, the joiner has every capability, so it can take any uid the namespace maps, including this user's subordinate uids. The namespace can come from:
+- this user's own rootless containers (podman `--userns=keep-id` maps the rest of the namespace to `/etc/subuid`'s range);
+- a helper outside the tree that runs `newuidmap` for a namespace the descendant made. `newuidmap` itself is setuid, so the descendant can't run it under no_new_privs.
+
+On this host, 2026-10-14 (no root, no podman):
+- openclaw has `/etc/subuid` and `/etc/subgid` entries `openclaw:165536:65536`.
+- `/usr/bin/newuidmap` and `/usr/bin/newgidmap` are setuid root (mode 4755).
+- `/etc/nsswitch.conf` has no `subid:` line, so `/etc/subuid` is the only source.
+- The reproduction:
+  1. `unshare --user --map-auto --map-root-user sleep`, outside no_new_privs, made a namespace mapping `0→1001` and `1→165536 (65536)`.
+  2. A Python process started under `setpriv --no-new-privs` opened `/proc/<that pid>/ns/user`, then called `os.setns(fd, CLONE_NEWUSER)` and `setresuid(1000,1000,1000)`.
+  3. From the host it showed `Uid: 166535` on all four fields, with `NoNewPrivs: 1`.
+  4. Its environ read was refused: it joined after its last exec, so its memory map's namespace is the initial one.
+  5. Rule 5 would clear it.
+
+**The check that closes it.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
+- **Where the ranges come from.** `/etc/subuid` lines whose first field is this user's login name or numeric uid, as `newuidmap` reads them. They are read once per scan.
+- **Missing file.** No ranges. With no subordinate uids, `newuidmap` maps nothing for this user and no namespace of this user's maps any.
+- **Unreadable or malformed file, or an nsswitch `subid:` source** (which this design doesn't parse). Every uid counts as ours. That fails closed with (b)'s cost below, on such hosts only.
+
+**What the check costs.** A refused process in the subordinate range, started after the home, becomes `_Unknown`: the home is kept, and the read is discarded or recovery kept.
+- Ordinary rootless-container processes don't reach that point. Each one's environ is readable, because this user owns its namespace and so has `CAP_SYS_PTRACE` there for the read's access check. That holds for both the task's namespace and its memory map's, since they exec'd inside it.
+- Only a process that joined after its last exec, or one in a namespace nested under a subordinate owner, is refused.
+- On this host now, 0 processes run in the range.
+- The 19fh0 pins and the new rule-5 pin use foreign uids outside the range. Tests patch the ranges.
+
+**How it is set.** Python has no `os.prctl`, and `preexec_fn` is unsafe in a threaded process such as wsd. So the host read launches through `codex_usage.py` itself, in a new mode:
 
 ```python
-NO_NEW_PRIVS = (                                # PR_SET_NO_NEW_PRIVS 38, PR_GET_NO_NEW_PRIVS 39
-    "import ctypes, os, sys\n"
-    "libc = ctypes.CDLL(None, use_errno=True)\n"
-    "if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:\n"
-    "    os._exit(126)\n"
-    "os.execv(sys.argv[1], sys.argv[1:])\n")
+def exec_no_new_privs(argv):
+    """`python3 -I codex_usage.py --exec-no-new-privs <codex> app-server`: check the launch conditions,
+    set and confirm no_new_privs, then exec argv. Exits 126 if any fails; never returns."""
+    try:
+        if not unprivileged(Path("/proc/self/status").read_text()):
+            os._exit(126)
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:   # PR_SET/GET_NO_NEW_PRIVS
+            os._exit(126)
+        os.execv(argv[0], argv)
+    finally:
+        os._exit(126)
+
+def unprivileged(status):
+    """The launch conditions, from one read of status: uids all this user's and not 0, and CapPrm,
+    CapEff and CapAmb zero."""
 ```
 
-- `read(codex, env, limit)` in `codex_usage.py` gains a keyword, `no_new_privs: bool = False`.
-- When it is true, the argv is `[sys.executable, "-I", "-c", NO_NEW_PRIVS, codex, "app-server"]`, with the same `env`, pipes and `start_new_session=True`.
-- hostread's call (`hostread.py:400`) passes `no_new_privs=True`. The in-sandbox read keeps the default, because the sandbox's workload already runs under no_new_privs (channel.py) and the change isn't needed there.
-- The exec keeps the PID, the session, the group and the start time. The app-server is still the group leader that `_kill` names, and its start is still after the home.
-- The trampoline has `CODEX_HOME` from birth, so a crash between its start and the exec leaves an ordinary holder that the scan finds.
-- If the prctl fails, or the exec fails (exit 1 from the uncaught OSError), the client sees `ClosedOutput` before an answer and then `ExitStatus`. The read fails closed (`DIAG_READ_FAILED: ExitStatus`), and its home is removed as for any failed read.
-- `setpriv --no-new-privs` (util-linux) would do the same. It is rejected because it adds a host dependency and an argv parser for something four lines of stdlib can do.
-- The cost is one interpreter start per read, about 20–40 ms, against a 30 s limit.
+- `read(codex, env, limit)` gains a keyword, `no_new_privs: bool = False`.
+- When it is true, the argv is `[*barrier_argv(), codex, "app-server"]`, where `barrier_argv()` returns `[sys.executable, "-I", __file__, "--exec-no-new-privs"]`. The same `env`, pipes and `start_new_session=True` apply. `__file__` is set by hostread's `spec_from_file_location` load.
+- The script's existing usage, `codex_usage.py <codex> [limit]`, is unchanged. The new mode is chosen only by its flag.
+- hostread's call (`hostread.py:400`) passes `no_new_privs=True`. The in-sandbox read keeps the default; the sandbox's workload already runs under no_new_privs (channel.py).
+- **What the exec keeps.** The PID, session, group and start time are unchanged, so the app-server is still the group leader `_kill` names, and it still starts after the home. r1 confirmed `PID == PGID == SID` and `NoNewPrivs: 1` after the exec.
+- **No window before the barrier.** The trampoline starts nothing before the exec, so no descendant can be spawned before no_new_privs is set. It has `CODEX_HOME` from birth, so a crash before the exec leaves an ordinary holder the scan finds.
+- **If a check or the exec fails,** the process exits 126 with no answer. The client sees `ClosedOutput`.
+  - If `_end`'s SIGKILL lands before the exit, the status is `-9`, which is accepted, and `ClosedOutput` stands.
+  - If the exit lands first, the status is 126 and `ExitStatus` replaces it.
+  - Either way the read fails closed (`DIAG_READ_FAILED`), returns no reading, and its home is removed as for any failed read.
+- **Alternative.** `setpriv --no-new-privs` (util-linux) is rejected: it is a host dependency, and it doesn't check capabilities.
+- **Cost.** One interpreter start per read, about 20–40 ms against a 30 s limit.
 
 ### (b) rule 5 settles instead of clearing on the uid clause
 
-This would remove the premise rather than enforce it: another user's refused process started after `since` settles. That is sound but expensive.
-- A settling process keeps the scan incomplete, so cleanup waits `RECOVER_SECONDS` (10 s) and keeps the home.
-- On the read path that means `DIAG_SCRATCH_KEPT`, and the read is discarded. On `recover` it means `DIAG_RECOVERY_KEPT`, and every home is kept.
-- I measured this host on 2026-10-14. Of 673 live processes of other users whose environ is refused (uptime 27 days):
-
-  | started within | processes |
-  |---|---|
-  | 10 s | 3 |
-  | 60 s | 8 |
-  | 10 min | 46 |
-  | 1 h | 103 |
-  | 1 day | 123 |
-
-- **Read path.** `since` is the read's own home, made a second or two before cleanup. Any foreign process started in that window and still alive at cleanup discards the read. With about 3 such processes started in any 10 s, that is a large share of reads.
-- **Recovery.** `since` is the crashed read's stamp, which can be hours or days before the restart. Every foreign process started since then and still alive (123 for a one-day gap here) settles. Recovery then waits 10 s at every start and never succeeds while any of them lives.
-- No uid-based refinement saves (b). The attack leaves all four uids foreign, and r1 showed that per-task uid reads can't be made complete.
+This would remove the premise rather than enforce it: another user's refused process started after `since` settles. That is sound, but expensive.
+- A settling process keeps the scan incomplete. Cleanup waits `RECOVER_SECONDS` (10 s) and keeps the home: `DIAG_SCRATCH_KEPT` on the read path, where the read is discarded, and `DIAG_RECOVERY_KEPT` on `recover`, where every home is kept.
+- **Recovery is obstructed.** `since` is the crashed read's stamp, which can be hours or days before the restart. Every foreign refused process started since then and still alive settles, so recovery waits 10 s at every start and never succeeds while any of them lives.
+  - A snapshot of this host on 2026-10-14 (uptime 27 days) found 673 live foreign processes with refused environs. Of them, 46 had started within the last 10 min, 103 within the last hour and 123 within the last day.
+  - So a one-day crash gap would leave over a hundred blockers.
+- **Reads would sometimes fail.** At the same instant, 3 of those processes had started within the last 10 s. A read cleaning up then, with a home that old, would have settled. This is one snapshot of surviving processes, not an arrival rate. It shows the read path would sometimes discard reads, without saying how often.
+- **The hybrids don't save it:**
+  - Filtering by start time is (b) itself.
+  - Filtering by session misses a `setsid()` descendant, which is the reported scenario.
+  - Filtering by cgroup needs enforced membership. `systemd-run --scope` alone doesn't stop a descendant from asking a delegated service to start a process elsewhere.
+  - Filtering by uid fails because the attack leaves all four uids foreign, and r1 (19fh0) showed per-task uid reads can't be made complete.
+- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's.
 
 ### (c) both
 
-(c) has (b)'s cost. With (a) in place, (b) only adds protection against the residual cases below, which (b) doesn't fully close either. Rejected.
+(c) has (b)'s cost. With (a) and the subordinate check in place, (b) would only add protection against the residuals below, and it doesn't fully close them either. Rejected.
 
 ## Does no_new_privs break the pinned app-server?
 
-I checked offline against the installed codex-cli 0.160.0 (`~/.codex/packages/standalone/releases/0.160.0-x86_64-unknown-linux-musl`). The scratch `CODEX_HOME` held no login, and `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` were all set to `http://127.0.0.1:9`, so nothing left the host. I drove the host read's protocol (`initialize`, `initialized`, `account/rateLimits/read`, EOF) under `strace -f`, once plain and once through the trampoline above.
+I checked offline against the installed codex-cli 0.160.0 (`~/.codex/packages/standalone/releases/0.160.0-x86_64-unknown-linux-musl`). The scratch `CODEX_HOME` held no login. `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` were all set to `http://127.0.0.1:9`, so nothing left the host. I drove the host read's protocol (`initialize`, `initialized`, `account/rateLimits/read`, EOF) under `strace -f`, once plain and once through an equivalent no_new_privs trampoline.
 
 | | plain | no_new_privs |
 |---|---|---|
@@ -91,57 +150,77 @@ I checked offline against the installed codex-cli 0.160.0 (`~/.codex/packages/st
 The app-server's descendants were the same in both runs, with the same exit statuses:
 - `/usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / /bin/true`: a bubblewrap probe, exit 0;
 - `lsb_release` and `getconf`: exit 0;
-- `git -c safe.bareRepository=explicit ls-remote https://github.com/openai/plugin… HEAD` and `git-remote-https`: exit 128, failing at the discard proxy.
+- `git -c safe.bareRepository=explicit ls-remote https://github.com/openai/plugin… HEAD` and `git-remote-https`: exit 128, at the discard proxy.
 
-None of them needs privilege. `uid`, `setuid` and `setresuid` never appear.
+None of them needs privilege. `setuid` and `setresuid` never appear. The bwrap probe creates a user namespace, but it maps only uid A, so it is not a subordinate-range process.
 
 The one thing no_new_privs can change is the bwrap probe, on a host where bwrap is **setuid**. The binary's own text says its pipeline runs "bubblewrap first (which may rely on setuid)".
 - Here `/usr/bin/bwrap` and the bundled `codex-resources/bwrap` are both mode 0755, not setuid. Unprivileged user namespaces are allowed (`kernel.unprivileged_userns_clone=1`, `apparmor_restrict_unprivileged_userns=0`).
 - Elsewhere, a setuid bwrap runs unprivileged under no_new_privs, and the probe may fail.
-- That only tells the app-server its command sandbox is unavailable. The host read starts no turn and runs no command, so the answer it needs doesn't depend on the probe.
+- That only tells the app-server its command sandbox is unavailable. The host read starts no turn and runs no command.
 - I couldn't test a failing probe offline without a host change. If it ever made the app-server refuse to answer, the read would fail closed with `DIAG_READ_FAILED`, which is visible.
 
-## What (a) leaves open (stated, not fixed)
+## Residuals (stated and accepted for the PoC)
 
-1. **A delegated spawn.** A descendant could ask a service manager or server that isn't under no_new_privs to start a process of ours with `CODEX_HOME` set: `systemd-run --user --setenv`, a running tmux server, D-Bus activation, `at`. That process could then make the setuid transition.
-   - It is not a descendant, so the holder contract doesn't cover it today.
-   - The pinned app-server's descendants (above) do nothing of the kind.
-   - Closing it would take cgroup-scoped reads, which a separate bead could take up, and even that doesn't cover a service manager outside the cgroup.
-2. **Homes from before the change.** `recover` at the first start after deployment may meet a holder from a read launched without no_new_privs. This happens once, and needs a crash plus the setuid transition before the upgrade. Accepted.
+1. **A delegated spawn.** A descendant could ask a service manager or server that isn't under no_new_privs to start a process with `CODEX_HOME` set:
+   - this user's own (`systemd-run --user --setenv`, a running tmux server, D-Bus activation, `at`), which could then make a setuid transition;
+   - an already-privileged service, which could start it as any user.
+
+   It is not a descendant, so the holder contract doesn't cover it today, and the pinned app-server's descendants (above) do nothing of the kind. Closing it would need enforced cgroup membership for the read and every service it can reach, which is not proposed.
+2. **A privileged helper that maps a namespace outside the subordinate ranges.** Root, or a service with `CAP_SETUID` in the initial namespace, can write any `uid_map` for a namespace the descendant made, and so give it any host uid. `newuidmap` can't do this; it maps only the caller's ranges. This is the privileged-service case of residual 1, applied to the descendant's own credentials. Accepted the same way.
+3. **Homes from before the change.** `recover` at the first start after deployment may meet a holder from a read launched without no_new_privs. This happens once, and needs a crash plus a uid transition before the upgrade. Accepted.
 
 ## Interaction with other work
 
-- **btq-19fh0 (ask 4gt8).** Its three pins are in the zombie-leader branch (`:252–258`), which this design doesn't touch. They stay valid in either merge order.
-  - (a) makes their mixed-uid and saved-uid holders impossible for app-server descendants, but the pins test the scan's behaviour for any process, so they stay as defence in depth.
+- **btq-19fh0 (ask 4gt8).** Its three pins are in the zombie-leader branch (`:252–258`), which this design doesn't touch.
+  - Its pins use another user's uid on all four fields. That uid must be outside the subordinate ranges, which the tests patch to a fixed set, so they stay valid in either merge order.
+  - (a) makes their mixed-uid and saved-uid holders impossible for app-server descendants under the launch conditions, but the pins test the scan for any process, so they stay as defence in depth.
   - Both designs extend `status_text` in `tests/test_sandbox_hostread.py` with a `uids` argument. This design uses the same signature (four fields, defaulting to this user's), so whichever lands second merges trivially.
-- **The flakes2 holder scan.** The rule order, settling, `PF_EXITING`, the zombie branch and the read path's settling are all unchanged. no_new_privs doesn't change dumpability, so `/proc/<pid>/environ` of an app-server descendant stays readable to the reader. A descendant of ours that makes itself non-dumpable is still `_Unknown` (kept), as today.
-- **u63ak.** The fakes run under the trampoline unchanged. The outlive fake's exec into the sleeper and the sleepers' census and lifeline need no privilege.
+- **The flakes2 holder scan.** The rule order, settling, `PF_EXITING`, the zombie branch and the read path's settling are unchanged. Only `_ours`, which only rule 5 calls, widens.
+  - no_new_privs doesn't change dumpability, so an app-server descendant's environ stays readable to the reader.
+  - A descendant of ours that makes itself non-dumpable is still `_Unknown` (kept), as today.
+- **u63ak.** The fakes run under the trampoline unchanged. The outlive fake's exec into the sleeper, and the sleepers' census and lifeline, need no privilege.
 
 ## Tests (offline, deterministic; failing tests first)
 
-The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the existing fake app-server (`tests/fakes/fake_agent_cli.py`):
-1. **The host read's app-server runs under no_new_privs.**
+The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the existing fake app-server (`tests/fakes/fake_agent_cli.py`).
+1. **The host read's app-server, and an escaped descendant, run under no_new_privs.**
    - The fake gains `HZ_FAKE_STATUS_FILE`: at start, it writes its `/proc/self/status` `NoNewPrivs` value there.
-   - A `Rig` read returns `WANTED`, and the file says `1`.
-   - With the `escaped` fault, the fake also appends its sleeper's `NoNewPrivs` value, read from `/proc/<child>/status` right after the spawn, and that says `1` too. The sleeper is a descendant in a session of its own, so this shows the barrier reaches escaped descendants. sleeper.py doesn't change.
-   - Both fail today.
-2. **The in-sandbox read doesn't change.** In `tests/test_sandbox_runtime.py` or wherever `codex_usage.read` is tested directly: with the default, the app-server's `NoNewPrivs` is `0` and argv[0] is the codex binary.
-3. **The trampoline fails closed.** hostread's `NO_NEW_PRIVS` source is monkeypatched to `os._exit(126)` before the exec.
-   - `read()` is None, and the log is `[f"{DIAG_READ_FAILED}: ExitStatus"]`.
-   - The app-server's PID file was never written (the fake never ran), and the scratch home is removed.
-4. **The trampoline is the group leader the client kills.** With the existing `escaped` and `orphan` faults, the current assertions stay unchanged under the trampoline: the descendant is ended, the scratch is empty and `server_gone()` holds. They need no edit; they run as regression.
-5. **A pin of rule 5's uid clause.** Using flakes2's `Scripted`/`Seam`, a seam child with status `S`, `PF_EXITING` clear, environ refused and the four `Uid:` fields foreign is cleared at once: `rmtree`, no kill, `DIAG_RECOVERED`.
-   - The same child with our uid in the real or effective field raises `_Unknown` (kept).
-   - This pins that (a) leaves rule 5 itself unchanged. It passes today.
+   - With the `escaped` fault, it also appends its sleeper's value, read from `/proc/<child>/status` right after the spawn.
+   - A `Rig` read returns `WANTED`, and the file says `1`. With `escaped`, both values say `1`.
+   - Both fail today. sleeper.py doesn't change.
+2. **The default path is direct and inherits.** In the test file that drives `codex_usage.read`:
+   - with the default, argv[0] is the codex binary;
+   - the app-server's `NoNewPrivs` equals the test runner's own, whatever that is. (The runner may already have 1, so this doesn't assert 0.)
+3. **A failing trampoline fails closed.**
+   - Setup: hostread's `_usage_module` is wrapped so the loaded module's `barrier_argv` returns `[sys.executable, "-I", "-c", "import os; os._exit(126)"]`.
+   - `read()` returns None.
+   - The log is exactly one line, `DIAG_READ_FAILED` with `ExitStatus` or `ClosedOutput`. Both are accepted, because `_end`'s SIGKILL may land before the exit.
+   - The fake's PID file was never written, since it never ran, and the scratch home is removed.
+4. **`unprivileged`** (unit, on status texts):
+   - true for this user's uids with zero capabilities;
+   - false for uid 0 on any field, for a uid that isn't ours, for any non-zero bit in `CapPrm`, `CapEff` or `CapAmb` (with `CAP_SETUID` as the named case), and for a status missing any of those lines;
+   - `CapInh` non-zero alone stays true.
+5. **The trampoline is the group leader the client kills.** The existing `escaped` and `orphan` tests' assertions stay unchanged under the trampoline: the descendant is ended, the scratch is empty and `server_gone()` holds. They run as regression.
+6. **The subordinate ranges.** `hostread._subordinate_uids` is patched to `{(200000, 65536)}`. With flakes2's `Scripted`/`Seam`, take a seam child with status `S`, `PF_EXITING` clear, and environ refused:
+   - with uid 200500 on all four fields, it is `_Unknown` (kept, no kill);
+   - with uid 300000, it is cleared at once (`rmtree`, no kill, `DIAG_RECOVERED`), which pins that rule 5's uid clause still clears another user's process;
+   - with our uid in the real or effective field, it is `_Unknown`, as today.
+   - The 200500 case fails today.
+7. **Parsing `/etc/subuid`** (unit, on file texts, with the user's name and uid given):
+   - lines by name and by numeric uid are taken, and other users' lines are ignored;
+   - a missing file gives no ranges;
+   - an unreadable or malformed file, or an nsswitch `subid:` line, gives "all".
 
-No test makes a real uid transition. That would need a setuid binary or root, which the test rules forbid. The kernel guarantee is cited, not re-proven; test 1 proves the barrier is in place on the processes that matter.
+No test makes a real uid transition, which would need a setuid binary or root. The setns reproduction above used `unshare --map-auto` and is not a test: it depends on `/etc/subuid` and setuid `newuidmap`. The kernel guarantees are cited; tests 1, 4 and 6 show the barrier, the check and the widened rule are in place.
 
 ## Changes, if approved
 
-- `src/heterodyne/sandbox/resources/codex_usage.py`: `NO_NEW_PRIVS`, and `read(..., no_new_privs=False)`.
+- `src/heterodyne/sandbox/resources/codex_usage.py`: `exec_no_new_privs`, `unprivileged`, `barrier_argv`, the `--exec-no-new-privs` mode, and `read(..., no_new_privs=False)`.
 - `src/heterodyne/sandbox/hostread.py`:
   - the call at `:400` passes `no_new_privs=True`;
-  - `_ruled_out`'s docstring states the premise: every holder descends from an app-server under no_new_privs, so another user's process can't be one, apart from the residuals above;
-  - the module docstring says so too.
+  - `_subordinate_uids()` (`/etc/subuid`, as above), read once per scan;
+  - `_ours` counts those ranges;
+  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor subordinate to it can't be one, apart from the residuals above.
 - `tests/fakes/fake_agent_cli.py`: the `HZ_FAKE_STATUS_FILE` report.
-- The tests above. No ADR change: D9 and E4 already put the reader outside the sandbox. A line in plan 4b E4's notes records the barrier.
+- The tests above. No ADR change: D9 and E4 already put the reader outside the sandbox. A line in plan 4b E4's notes records the barrier and the launch conditions.
