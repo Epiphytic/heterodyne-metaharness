@@ -212,7 +212,7 @@ The same was repeated for the TUI (`script -qfec codex`, with `daemon_auto_start
 
 **Amends** (S9-7 stop rule: Task 6 stops for Codex until these land):
 - **Task 6**: Codex's generated config sets `[features] daemon_auto_start = false` (S9-5), and `prepare_install_home` creates no `$CODEX_HOME/packages`.
-- **Task 8**: the Codex sandbox presents `$CODEX_HOME/tmp` as an empty read-only directory (a read-only bind of an empty directory), so no aliases are made, and `$CODEX_HOME/packages` as an empty read-only directory, so no daemon copy can be written. The CLI's internal `apply_patch` tool is unaffected; only the shell alias for it goes away.
+- **Task 8**: the Codex sandbox presents `$CODEX_HOME/tmp` as an empty read-only directory (a read-only bind of an empty directory), so no aliases are made, and `$CODEX_HOME/packages` as an empty read-only directory, so no daemon copy can be written. With that bind, startup succeeds (the run above). Editing compatibility (whether `apply_patch` still works without its shell alias) wasn't exercised, since no run invoked it, and is pending Task 13 validation.
 - **Task 13**: `test_an_updater_write_into_the_synthetic_home_is_never_run` covers the `packages/` copy and the `tmp/arg0` directory, and shows that `shell_snapshots/` holds only what the CLI wrote in that session (it's a script the system bash sources).
 
 ## S9-8: the bind's options on OpenShell 0.1.2 and Podman (refuted)
@@ -260,7 +260,7 @@ Inside (`/proc/self/mountinfo` lines for the tree, paths shortened to `$T`):
 **Verdict: refuted.** OpenShell 0.1.2's Podman driver accepts no field for a non-recursive bind, and refuses every candidate field by name. The bind it makes is `ro,rbind,rprivate`: private (later host mounts stay out), but recursive, and a submount present at create time is carried in without `ro`. Stop rule (S9-8): **Task 8 stops** at `driver_config` / E24. A backend change, or another way to get a non-recursive bind, goes through its own design review first. Facts for that review:
 - what does hold today: `rprivate` propagation; `ro` on the top mount; Landlock's read-only rule covering the carried submount;
 - what doesn't: non-recursion, and `ro` on submounts;
-- the store's own checks see a submount: T2's `check_fast` compares every entry's `mnt_id` with the root's (`CROSSES_MOUNT`), and inside the sandbox the submount has its own mount ID (9098 vs 9097) and its own `st_dev` (S9-9). A probe that refuses any mountinfo line below the bind's target would also catch it.
+- which checks see a submount depends on the namespace. A mount made in Podman's namespace (as here) is invisible to a host walk: `host.json`, from the host's own namespace, shows `sub` as the underlying directory, and only `host-podmanns.json` shows the carried tmpfs. So T2's `check_fast` (`mnt_id` vs the root's, `CROSSES_MOUNT`), run on the host, can't detect it. Inside the sandbox the submount has its own mount ID (9098 vs 9097) and its own `st_dev` (S9-9), so **Task 8's inside probe is still required**: it must refuse any mountinfo line below the bind's target. Task 13's controls must keep that split, with one submount visible to the host walk and one made only in Podman's namespace.
 
 ## S9-9: the file identity seen inside the sandbox (confirmed)
 
