@@ -112,8 +112,8 @@ def _write_new(folder: Path, name: str, data: bytes) -> None:
 
 
 class _Unknown(Exception):
-    """A process of this user whose environment can't be read, and which can't be ruled out by its start
-    time: it may hold a home, so the scan is incomplete."""
+    """A live process of this user whose environment can't be read, and which can't be ruled out by its
+    start time: it may hold a home, so the scan is incomplete."""
 
 
 def _boot_id() -> str:
@@ -147,14 +147,9 @@ def _environ(pid: str) -> bytes:
         return f.read()
 
 
-def _ours(pid: str) -> bool:
-    """Whether the process runs with this user's real or effective uid. /proc/<pid>/status stays readable
-    when the environment doesn't (another user's process, or one of ours made non-dumpable)."""
-    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-        if line.startswith("Uid:"):
-            real, effective = (int(u) for u in line.split()[1:3])
-            return bool({real, effective} & {os.getuid(), os.geteuid()})
-    return True                 # no Uid line: not ruled out
+def _status(pid: str) -> str:
+    """/proc/<pid>/status, from one open: the kernel renders all of it from one task, at once."""
+    return Path(f"/proc/{pid}/status").read_text()
 
 
 def _stat(pid: str) -> list[str]:
@@ -162,27 +157,120 @@ def _stat(pid: str) -> list[str]:
     return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
 
 
-def _ruled_out(pid: str, since: float | None) -> bool:
-    """A process whose environment can't be read is not a holder only if it is another user's, a zombie
-    (it holds no memory or files, and its environment reads as empty or not at all), or started before
-    the earliest home was made (`since`, less the slack). Anything else may be one. The start time is
-    field 22, on the boot clock in clock ticks."""
-    if not _ours(pid):
-        return True
-    fields = _stat(pid)
-    if fields[0] in ("Z", "X"):
-        return True
-    return since is not None and int(fields[19]) / os.sysconf("SC_CLK_TCK") < since - SLACK_SECONDS
+def _task_ids(pid: str) -> list[str]:
+    return [task.name for task in Path(f"/proc/{pid}/task").iterdir()]
 
 
-def _holders(marks: set[bytes], since: float | None) -> list[int]:
-    """pidfds of the live processes whose environment holds one of `marks`. The pidfd is opened before
-    the process is read, and signal 0 through it afterwards proves the PID wasn't reused meanwhile.
-    A zombie's environment is empty, so a killed process stops being found once it ends. A process that
-    is gone is skipped, as is one whose environment can't be read and which `_ruled_out` rules out. One
-    it can't rule out, or any other failure (a pidfd that can't be opened, `/proc` that can't be listed),
-    means the scan is incomplete, so it raises, with every pidfd it opened closed."""
+def _task_environ(pid: str, tid: str) -> bytes:
+    with Path(f"/proc/{pid}/task/{tid}/environ").open("rb") as f:
+        return f.read()
+
+
+PF_EXITING = 0x4                # /proc/<pid>/stat field 9: set as a task starts to exit, never cleared
+_MATCH, _CLEAR, _SETTLE = "match", "clear", "settle"
+
+
+def _facts(status: str) -> dict[str, str]:
+    return {key: value.strip() for key, _, value in (line.partition(":") for line in status.splitlines())}
+
+
+def _ours(facts: Mapping[str, str]) -> bool:
+    """Whether the process runs with this user's real or effective uid. Status stays readable when the
+    environment doesn't (another user's process, or one of ours made non-dumpable)."""
+    if "Uid" not in facts:
+        return True             # no Uid line: not ruled out
+    real, effective = (int(u) for u in facts["Uid"].split()[:2])
+    return bool({real, effective} & {os.getuid(), os.geteuid()})
+
+
+def _ruled_out(pid: str, facts: Mapping[str, str], since: float | None) -> bool:
+    """A live process whose environment can't be read is not a holder only if it is another user's, or
+    started before the earliest home was made (`since`, less the slack). Anything else may be one. The
+    start time is field 22, on the boot clock in clock ticks; an exec keeps it (`de_thread` gives the
+    new leader the old one's), so it is the same process's whichever image `stat` reads."""
+    if not _ours(facts):
+        return True
+    return since is not None and int(_stat(pid)[19]) / os.sysconf("SC_CLK_TCK") < since - SLACK_SECONDS
+
+
+def _through_workers(pid: str) -> bytes | None:
+    """A zombie leader's group environment, read through one of its other threads (they share one
+    memory map): the first non-empty read, or None. A thread that is gone, refused or empty is skipped
+    for the next; a listing can also end early (`next_tid` stops when its task loses its PID)."""
+    try:
+        tids = _task_ids(pid)
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+    for tid in tids:
+        if tid == pid:
+            continue
+        try:
+            environ = _task_environ(pid, tid)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if environ:
+            return environ
+    return None
+
+
+def _matched(fd: int, environ: bytes, marks: set[bytes]) -> str:
+    """Signal 0 through the pidfd, opened before the read, proves the PID wasn't reused meanwhile."""
+    signal.pidfd_send_signal(fd, 0)
+    return _CLEAR if marks.isdisjoint(environ.split(b"\0")) else _MATCH
+
+
+def _judge(pid: str, fd: int, marks: set[bytes], since: float | None) -> str:
+    """One process's outcome: _MATCH (a holder), _CLEAR (not one), or _SETTLE (not known yet: the scan
+    is incomplete and runs again). Raises _Unknown for a live process that may be a holder, or
+    FileNotFoundError or ProcessLookupError once the process is gone.
+
+    A non-empty environ is the group's environment then. Empty, EACCES (from the start of an exit) and
+    ESRCH (no memory map) prove nothing alone, so one read of status decides:
+    - `Z`/`X` with `Threads: 1` in that one read: the group is dead. The read is of one task throughout,
+      and counts the group's unreleased threads under that task's lock (0 once it is released), so its
+      only unreleased thread was a zombie: none is left to clone or exec.
+    - `Z`/`X` with more threads: a zombie leader with live threads, read through them.
+    - `Threads: 0`, a read missing either fact, or an empty environ otherwise: settle. An empty read may
+      be an exiting leader's, read just before a worker exec'd and took its PID.
+    - EACCES or ESRCH otherwise: settle if `PF_EXITING` is set (one task's flag, which never shows the
+      group is dead), else the start and uid rules, else unknown.
+    PID and pidfd continuity never show two reads saw the same task: an exec moves a worker into the
+    leader's PID. So nothing is cleared on facts from two reads, but the uid and start time, which an
+    exec keeps."""
+    try:
+        environ, why = _environ(pid), "empty"
+    except PermissionError:
+        environ, why = b"", "refused"
+    except ProcessLookupError:          # ESRCH: no memory map; /proc/<pid> may well still be there
+        environ, why = b"", "no map"
+    if environ:
+        return _matched(fd, environ, marks)
+    facts = _facts(_status(pid))
+    state, threads = facts.get("State", "")[:1], facts.get("Threads", "")
+    if not state or not threads.isdigit():
+        return _SETTLE
+    if state in ("Z", "X"):
+        if threads == "1":
+            return _CLEAR
+        if threads == "0":
+            return _SETTLE
+        group = _through_workers(pid)
+        return _SETTLE if group is None else _matched(fd, group, marks)
+    if why == "empty" or int(_stat(pid)[6]) & PF_EXITING:
+        return _SETTLE
+    if why == "refused" and _ruled_out(pid, facts, since):
+        return _CLEAR
+    raise _Unknown("a process that may hold a home can't be read")
+
+
+def _holders(marks: set[bytes], since: float | None) -> tuple[list[int], list[int]]:
+    """pidfds of the live processes whose environment holds one of `marks`, and the PIDs of those the
+    scan couldn't judge yet (see `_judge`), whose pidfds it closed: while any is settling the scan is
+    incomplete. The pidfd is opened before the process is read. A process that is gone is skipped. An
+    unknown, or any other failure (a pidfd that can't be opened, `/proc` that can't be listed), means
+    the scan is incomplete, so it raises, with every pidfd it opened closed."""
     found: list[int] = []
+    settling: list[int] = []
     try:
         for entry in os.scandir("/proc"):
             if not entry.name.isdigit():
@@ -192,36 +280,35 @@ def _holders(marks: set[bytes], since: float | None) -> list[int]:
             except ProcessLookupError:
                 continue
             try:
-                try:
-                    environ = set(_environ(entry.name).split(b"\0"))
-                except PermissionError:
-                    if not _ruled_out(entry.name, since):
-                        raise _Unknown("a process that may hold a home can't be read") from None
-                    os.close(fd)         # not a holder, whichever process it is (signal 0 may be refused)
-                    continue
-                signal.pidfd_send_signal(fd, 0)
+                outcome = _judge(entry.name, fd, marks, since)
             except (FileNotFoundError, ProcessLookupError):
                 os.close(fd)             # gone
                 continue
             except BaseException:
                 os.close(fd)
                 raise
-            if marks.isdisjoint(environ):
-                os.close(fd)
-            else:
+            if outcome == _MATCH:
                 found.append(fd)
+                continue
+            os.close(fd)                 # not a holder, or not known yet: either way nothing is sent
+            if outcome == _SETTLE:
+                settling.append(int(entry.name))
     except BaseException:
         for fd in found:
             os.close(fd)
         raise
-    return found
+    return found, settling
 
 
 def _end_holders(marks: set[bytes], since: float | None, seconds: float) -> None:
-    """SIGKILL, through their pidfds, the processes `marks` find, until a complete scan finds none.
-    Raises TimeoutError if one is still found after `seconds`, or what a failed scan or signal raised."""
+    """SIGKILL, through their pidfds, the processes `marks` find, until a complete scan finds none: no
+    holder and none settling. Raises TimeoutError if one is still found or settling after `seconds`, or
+    at once what a failed scan (an unknown) or signal raised."""
     deadline = time.monotonic() + seconds
-    while fds := _holders(marks, since):
+    while True:
+        fds, settling = _holders(marks, since)
+        if not fds and not settling:
+            return
         try:
             for fd in fds:
                 with contextlib.suppress(ProcessLookupError):
@@ -230,7 +317,7 @@ def _end_holders(marks: set[bytes], since: float | None, seconds: float) -> None
             for fd in fds:
                 os.close(fd)
         if time.monotonic() > deadline:
-            raise TimeoutError("an app-server outlived the recovery deadline")
+            raise TimeoutError("an app-server outlived the recovery deadline, or a process stayed unjudged")
         time.sleep(0.05)
 
 

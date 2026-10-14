@@ -200,7 +200,7 @@ sys.path[:0] = [sys.argv[1]]
 from test_sandbox_hostread import Rig
 from heterodyne.sandbox import hostread
 from pathlib import Path
-rig = Rig(Path(sys.argv[2]), HZ_FAKE_RATE_FAULT="hang")
+rig = Rig(Path(sys.argv[2]), HZ_FAKE_RATE_FAULT="outlive")
 rig.reader.limit_seconds = 600
 if sys.argv[3] == "copied":
     hostread._usage_module = lambda: os.kill(os.getpid(), signal.SIGKILL)
@@ -218,11 +218,13 @@ def wait_for(done: Callable[[], bool], seconds: float = 10.0) -> bool:
 
 
 def alive(pid: int) -> bool:
+    """Neither gone, a zombie nor exiting. Enough for this file's single-threaded fixtures; it never
+    shows a group is dead (a zombie leader's threads may run)."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        fields = hostread._stat(str(pid))
+    except (FileNotFoundError, ProcessLookupError):
         return False
-    return Path(f"/proc/{pid}/environ").read_bytes() != b""     # a zombie, not yet reaped, has none
+    return fields[0] not in ("Z", "X") and not int(fields[6]) & hostread.PF_EXITING
 
 
 @pytest.mark.parametrize("crash", ["copied", "started"])
@@ -236,22 +238,26 @@ def test_a_crashed_read_is_recovered_at_the_next_start(tmp_path: Path, logged: C
                    env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
     scratch = tmp_path / "crash" / "hostread"
     pid_file = tmp_path / "crash" / "read.pid"
-    if crash == "started":
-        assert wait_for(pid_file.exists)
-        assert wait_for(lambda: pid_file.read_text().strip() != "")
-        reader.kill()
-    assert reader.wait(30) == -signal.SIGKILL
-    homes = list(scratch.iterdir())
-    assert len(homes) == 1 and (homes[0] / "auth.json").exists()            # the crash left the copy
-    orphan = int(pid_file.read_text()) if crash == "started" else None
-    if orphan is not None:
-        assert alive(orphan)                                    # its timer died with the reader
-    recover(scratch)
-    assert list(scratch.iterdir()) == []
-    if orphan is not None:
-        assert wait_for(lambda: not alive(orphan))
-    assert logged() == [DIAG_RECOVERED]
-    assert rig.read() == WANTED                                 # another rig's reads are untouched
+    try:
+        if crash == "started":
+            assert wait_for(pid_file.exists)
+            assert wait_for(lambda: pid_file.read_text().strip() != "")
+            reader.kill()
+        assert reader.wait(30) == -signal.SIGKILL
+        homes = list(scratch.iterdir())
+        assert len(homes) == 1 and (homes[0] / "auth.json").exists()        # the crash left the copy
+        orphan = int(pid_file.read_text()) if crash == "started" else None
+        if orphan is not None:
+            assert alive(orphan)                                # its timer died with the reader; it didn't
+        recover(scratch)
+        assert list(scratch.iterdir()) == []
+        if orphan is not None:
+            assert wait_for(lambda: not alive(orphan))
+        assert logged() == [DIAG_RECOVERED]
+        assert rig.read() == WANTED                             # another rig's reads are untouched
+    finally:            # `outlive` survives its reader on purpose: a failed assertion must not leak it
+        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path,
@@ -367,16 +373,7 @@ def test_an_app_server_that_cannot_be_reaped_is_no_reading(tmp_path: Path, monke
     def stuck(self: "subprocess.Popen[str]", timeout: float | None = None) -> int:
         raise subprocess.TimeoutExpired(self.args, timeout or 0)
 
-    real_end = hostread._end_holders
-
-    def once_a_zombie(marks: set[bytes], since: float | None, seconds: float) -> None:
-        """The read's own scan, once the killed server has finished exiting. While it exits its
-        environment can't be read and its state isn't yet Z, so a scan then rightly keeps the home."""
-        assert all(wait_for(lambda p=p: hostread._stat(str(p.pid))[0] == "Z") for p in started)
-        real_end(marks, since, seconds)
-
     monkeypatch.setattr(POPEN, "wait", stuck)
-    monkeypatch.setattr(hostread, "_end_holders", once_a_zombie)
     try:
         assert rig.read() is None
     finally:
