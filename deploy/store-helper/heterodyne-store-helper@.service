@@ -1,0 +1,22 @@
+# One store helper process per connection on heterodyne-store-helper.socket (plan 4c E1, Task 12): the
+# connection is stdin, and the helper runs as the store owner, the only user that can write the store.
+[Unit]
+Description=heterodyne managed-install store helper (one connection)
+
+[Service]
+User=heterodyne-store
+Group=heterodyne-store
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/heterodyne/store_core.py --config /etc/heterodyne/store-helper.json
+StandardInput=socket
+StandardOutput=journal
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/heterodyne/harnesses
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+UMask=0022
+TimeoutSec=600
