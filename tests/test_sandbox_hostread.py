@@ -545,11 +545,14 @@ def fake_time(monkeypatch: pytest.MonkeyPatch) -> FakeTime:
     return clock
 
 
-def status_text(state: str | None, threads: int | None) -> str:
-    """A /proc/<pid>/status of this user's process, as one read gives it."""
+def status_text(state: str | None, threads: int | None, uids: tuple[int, int, int, int] | None = None) -> str:
+    """A /proc/<pid>/status as one read gives it, of this user's process unless `uids` (real, effective,
+    saved, fs) says otherwise."""
     uid = os.getuid()
+    real, effective, saved, fs = uids or (uid, uid, uid, uid)
     lines = ["Name:\tfake", *([f"State:\t{state} (fake)"] if state else []),
-             f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}", *([f"Threads:\t{threads}"] if threads is not None else [])]
+             f"Uid:\t{real}\t{effective}\t{saved}\t{fs}",
+             *([f"Threads:\t{threads}"] if threads is not None else [])]
     return "\n".join(lines) + "\n"
 
 
@@ -717,6 +720,30 @@ def test_no_readable_worker_settles(monkeypatch: pytest.MonkeyPatch, seam: Seam,
     Scripted(monkeypatch, seam.child.pid, [
         {"environ": EACCES, "status": status_text("Z", 4), "stat": ("Z", PF_EXITING),
          "tasks": {"9001": GONE, "9002": EACCES, "9003": b""}}])
+    before = open_fds()
+    recover(seam.scratch)
+    kept_at_the_deadline(seam, logged, fake_time, before)
+
+
+# Another user's uid, outside this host's subordinate ranges (165536-231071) as well as ours.
+FOREIGN = 65534
+
+
+@pytest.mark.parametrize(("uids", "worker"), [
+    ((FOREIGN,) * 4, EACCES),                               # a non-dumpable worker of ours, holding the mark
+    ((FOREIGN, FOREIGN, os.getuid(), FOREIGN), EACCES),     # saved uid ours: a thread can go back to it
+    ((FOREIGN,) * 4, GONE),                                 # the only worker exec'd and took the leader's PID
+], ids=["unreadable-mixed-uid", "saved-uid", "exec-between-reads"])
+def test_another_users_zombie_leader_with_unread_threads_settles(
+        monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime, logged: Callable[[], list[str]],
+        uids: tuple[int, int, int, int], worker: BaseException) -> None:
+    """btq-19fh0, won't-fix: a leader's uid says nothing of its other threads' credentials or of the
+    environment they share, so a zombie group read through none of them settles whoever the leader is.
+    These pin that against clearing it by the leader's uid (the withdrawn r1 rule)."""
+    assert FOREIGN != os.getuid()
+    Scripted(monkeypatch, seam.child.pid, [
+        {"environ": EACCES, "status": status_text("Z", 2, uids), "stat": ("Z", PF_EXITING),
+         "tasks": {"9001": worker}}])
     before = open_fds()
     recover(seam.scratch)
     kept_at_the_deadline(seam, logged, fake_time, before)
