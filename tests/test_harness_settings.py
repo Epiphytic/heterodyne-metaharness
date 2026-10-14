@@ -132,7 +132,7 @@ def test_recipes_need_exact_versions_and_full_commits(tmp_path: Path) -> None:
             assert COMMIT40[:12] not in message and "@example" not in message
 
 
-def test_install_agnostic_allows_only_the_store_default(tmp_path: Path) -> None:
+def test_install_agnostic_passes_the_store_default_and_flags_a_home_store(tmp_path: Path) -> None:
     """The shipped default is a system path, not an install path, so the checker passes it as is. A home
     path in the same key (what a host's own store would be) is still refused."""
     env = {**os.environ, "HETERODYNE_CONFIG_DIR": str(tmp_path / "no-config")}
