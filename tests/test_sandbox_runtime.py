@@ -2217,6 +2217,21 @@ def test_an_intent_from_before_wpyv5_has_no_end(rig: RuntimeRig, point: str) -> 
     assert runtime.sessions("alpha") == [] and not os.path.lexists(path)
 
 
+def test_an_unknown_cause_in_an_intent_is_a_death(rig: RuntimeRig) -> None:
+    """Required by the wpyv5 approval: an intent's end cause the runtime doesn't know is carried as a
+    death, as `ended()` maps an unknown record cause."""
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    crash_at(rig, "imported")
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    path = intent_path(rig, key)
+    raw = msgspec.json.decode(path.read_bytes())
+    path.write_bytes(msgspec.json.encode({**raw, "end_cause": "healthy", "reached_running": True}))
+    done = restarted(rig).resolve_unlanded("alpha", sid, 1, "discard", made)
+    assert done.end is not None and (done.end.cause, done.end.reached_running) == (EndCause.DIED, True)
+
+
 def test_a_manual_land_then_resolve_land_carries_the_end(rig: RuntimeRig) -> None:
     """docs/wsd.md §5, manual steps 2 and 3, then `wsctl resolve --land` with wsd running: the branch is
     already at the tip, so nothing is imported, and the end is carried."""

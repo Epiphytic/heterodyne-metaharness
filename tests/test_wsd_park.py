@@ -1283,6 +1283,32 @@ def test_a_resolved_end_is_only_for_its_own_generation(tmp_path: Path) -> None:
     assert classes(other)[0] == "reset" and other.journal.crash_count(WS, "btq-1") == 0
 
 
+def test_an_unknown_carried_cause_is_a_death(tmp_path: Path) -> None:
+    """Required by the wpyv5 approval: a carried cause the guard doesn't know is a death, as `ended()`
+    maps one, even with reached_running set."""
+    rig = picked(tmp_path)
+    key = rig.key("btq-1")
+    dies(rig)
+    del rig.runtime.ends[key]
+    rig.journal.emit_resolved(WS, "btq-1", "action=discard tip=none", "unknown", key, 1,
+                              ResolvedEnd(cause="healthy", reached_running=True, ran_seconds=60))
+    rig.pickup()
+    assert classes(rig) == ["died", None] and rig.journal.crash_count(WS, "btq-1") == 1
+    assert rig.state("btq-1") == "running"
+
+
+def test_a_matching_runtime_death_overrides_a_healthy_carried_end(tmp_path: Path) -> None:
+    """Required by the wpyv5 approval: the runtime's ended record of the same generation is the evidence;
+    a conflicting healthy `crash_end:` row for it is never read."""
+    rig = picked(tmp_path)
+    key = rig.key("btq-1")
+    dies(rig)
+    assert rig.runtime.ended(key) == Ended(1, EndCause.DIED, True, 60)
+    rig.journal.emit_resolved(WS, "btq-1", "action=discard tip=none", "conflict", key, 1, LIFETIME_END)
+    rig.pickup()
+    assert classes(rig) == ["died", None] and rig.journal.crash_count(WS, "btq-1") == 1
+
+
 @pytest.mark.parametrize("released", [False, True])
 def test_a_hand_removed_directory_still_counts_one_death(tmp_path: Path, released: bool) -> None:
     """Manual step 4 with wsd not running: nothing carries the end, so the next guard counts a death, even
