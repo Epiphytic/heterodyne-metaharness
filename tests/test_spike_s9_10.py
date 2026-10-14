@@ -71,6 +71,7 @@ def evidence(run: Path, part: int, meta: dict[str, object] | None = None) -> Pat
             "tui.screen": "› Reply with only the word pong.\n", "composer": "yes\n", "answered": "yes\n",
             "thread": "t-1\n", "resumed": "yes\n", "tui-resume.screen": "› Reply with only the word pong.\n",
             "tui-resume.strace": trace([tui[0], "resume", "t-1"], end="killed by SIGHUP"),
+            "hooks": "SessionStart\nUserPromptSubmit\nStop\n",
         })
     for name, text in files.items():
         (run / name).write_text(text)
@@ -464,3 +465,78 @@ def test_a_tui_s_core_dumped_hangup_fails(tmp_path: Path) -> None:
                                           end="killed by SIGHUP (core dumped)"))
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["tui.strace_ran_to_its_end"]
+
+
+# --- Part 2's hooks: the shipped shim with no session socket (after the EDZixy run) ---
+
+HOOK_FAILURES = ["• Hook failed\n  └ hook exited with code 2\n",
+                 "• Blocked by hook\n  └ python3: can't open file\n", "hook exited with code 1\n"]
+
+
+@pytest.mark.parametrize("screen", ["tui.screen", "tui-resume.screen"])
+@pytest.mark.parametrize("failure", HOOK_FAILURES)
+def test_a_hook_failure_on_screen_fails_by_name(tmp_path: Path, screen: str, failure: str) -> None:
+    run = evidence(tmp_path / "r", 2)
+    with (run / screen).open("a") as f:
+        f.write(failure)
+    assert analyze(run, "--part", "2").returncode == 1
+    found = checks(run)
+    assert found["evidence_complete"] and not found["no_hook_failure"]
+
+
+def test_a_missing_hooks_file_is_incomplete_evidence(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 2)
+    (run / "hooks").unlink()
+    assert analyze(run, "--part", "2").returncode == 1
+    found = checks(run)
+    assert not found["evidence_complete"] and not found["hooks_ran"] and not found["no_hook_failure"]
+
+
+@pytest.mark.parametrize("text", ["", "SessionStart\nStop\n", "UserPromptSubmitted\n"])
+def test_hooks_without_the_prompt_event_fail(tmp_path: Path, text: str) -> None:
+    run = evidence(tmp_path / "r", 2)
+    (run / "hooks").write_text(text)
+    assert analyze(run, "--part", "2").returncode == 1
+    assert not checks(run)["hooks_ran"]
+
+
+def test_part_1_is_unchanged_by_the_hook_checks(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    assert analyze(run, "--part", "1").returncode == 0
+    assert "hooks_ran" not in checks(run) and "no_hook_failure" not in checks(run)
+
+
+def steps(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, str(SPIKE / "part2_steps.py"), *args],  # noqa: S603
+                          capture_output=True, text=True, timeout=60, check=False)
+
+
+def test_run_files_writes_the_shipped_shim(tmp_path: Path) -> None:
+    from heterodyne.session import shim
+    out = tmp_path / "run"
+    out.mkdir()
+    assert steps("run-files", str(out)).returncode == 0
+    assert (out / "shim.py").read_bytes() == Path(shim.__file__).read_bytes()
+    assert not (out / "token").exists() and not (out / "shim.json").exists()   # no socket: the no-wsd path
+
+
+def test_the_hooks_step_prints_only_event_names(tmp_path: Path) -> None:
+    session = tmp_path / "s"
+    spool = session / "home" / ".hz" / "spool.jsonl"
+    spool.parent.mkdir(parents=True)
+    events = [{"hook_event_name": "SessionStart"}, {"hook_event_name": "UserPromptSubmit", "prompt": "pong?"},
+              {"hook_event_name": 7}, {"no": "name"}]
+    spool.write_text("".join(json.dumps({"spooled": True, "payload": e}) + "\n" for e in events) + "{bad\n")
+    done = steps("hooks", str(session))
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == "SessionStart\nUserPromptSubmit\n"
+
+
+def test_the_hooks_step_with_no_spool_prints_nothing(tmp_path: Path) -> None:
+    done = steps("hooks", str(tmp_path / "s"))
+    assert done.returncode == 0 and done.stdout == ""
+
+
+def test_part2_copies_the_hooks_and_inner2_writes_them() -> None:
+    assert " hooks " in (SPIKE / "part2.sh").read_text().replace("\\\n", " ")
+    assert 'part2_steps.py" hooks "$SESSION" > "$R/hooks"' in (SPIKE / "inner2.sh").read_text()
