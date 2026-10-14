@@ -72,7 +72,7 @@ It doesn't hold:
 - **Completeness can't be proven from `/proc`.**
   - The listing can end early (`next_tid` stops when its task loses its PID, as flakes2 found).
   - `Threads:` comes from a different read than the listing. A clone and an exit between the two leave the count unchanged, with different members.
-- **Each thread's uids are only true at its own read.** Unprivileged saved-uid restoration lets a thread judged foreign become ours a moment later. Its environment, the shared one, may still hold the mark.
+- (Saved-uid restoration is not a ground here. If a thread's real, effective and saved uids are all foreign, an unprivileged thread can't get ours back. The candidate fails on completeness, continuity and the environment premise alone.)
 - **A leader re-read doesn't show task continuity.** It is the flakes2 lesson: an exec moves a worker into the leader's PID, so a later read can describe a different task.
 - **And it doesn't fix the premise.** Even with all four uids foreign at once, a foreign uid doesn't show the environment lacks `CODEX_HOME`. The environment is what holding means.
 
@@ -80,7 +80,8 @@ So the cost would be a per-thread read loop and a completeness check that can't 
 
 **The cost of keeping today's behaviour is small and bounded.**
 - While another user's process is in this state, each start-up recovery and each trusted read waits `RECOVER_SECONDS` (10 s) and keeps its home. They log `DIAG_RECOVERY_KEPT` or `DIAG_SCRATCH_KEPT` (the read is discarded).
-- Nothing that holds a home is ever missed. The next start or read, once that process has exited, cleans up.
+- In this branch, no holder is missed: the zombie group settles, and the homes are kept. (This is not a claim about the scan as a whole. See the live-path rule-5 gap under Out of scope.)
+- Cleanup is left to a later start or read, once that process has exited, and still depends on that later scan completing.
 - The state is rare. It needs another user's program to `pthread_exit` its main thread and keep running. No process on this host was in it at the 2026-10-14 check.
 
 ## Tests (a test-only change, if won't-fix is approved)
