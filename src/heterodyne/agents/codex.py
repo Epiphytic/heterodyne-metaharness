@@ -124,11 +124,23 @@ class Codex:
                                                      None), "")
     content_kinds = KINDS
     # E9: written, or dropped, after the defaults. `features.apps` is the connectors; `profile` and
-    # `profiles` are never written, so no config profile can turn a key back on.
+    # `profiles` are never written, so no config profile can turn a key back on. The rest of 0.160's
+    # ConfigToml that changes what its commands see and how they start, where its traffic and logins
+    # go, or which plugins and state it keeps outside the home is dropped too.
     owned_keys = frozenset({
         "approval_policy", "sandbox_mode", "check_for_update_on_startup", "projects", "notify", "hooks",
         "features.apps", "features.daemon_auto_start", "features.plugins", "features.in_app_updates",
-        "profile", "profiles", *(f"mcp_servers.{n}" for n in RESERVED_MCP)})
+        "profile", "profiles", *(f"mcp_servers.{n}" for n in RESERVED_MCP),
+        "shell_environment_policy", "allow_login_shell", "zsh_path", "sandbox_workspace_write",
+        "default_permissions", "permissions", "js_repl_node_path", "js_repl_node_module_dirs",
+        "browser_use", "computer_use", "agents", "orchestrator",
+        "model_provider", "model_providers", "openai_base_url", "chatgpt_base_url", "oss_provider",
+        "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url",
+        "experimental_thread_store_endpoint", "experimental_thread_store", "otel",
+        "forced_login_method", "forced_chatgpt_workspace_id", "cli_auth_credentials_store",
+        "mcp_oauth_credentials_store", "mcp_oauth_callback_port", "mcp_oauth_callback_url",
+        "mcp_enterprise_managed_auth",
+        "plugins", "marketplaces", "allow_symlinked_codex_home", "sqlite_home", "log_dir"})
     # E25: the PATH aliases (tmp/arg0/) and the daemon copy (packages/), which the CLI runs.
     empty_read_only = (PurePosixPath(".codex/tmp"), PurePosixPath(".codex/packages"))
     profile_flags = FLAGS["codex"]
