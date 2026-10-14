@@ -1,5 +1,5 @@
-"""`admind` command line: init, run, operators, rearm, ask, notice, unit, hook (ADR 0001 §8; relay spec R1,
-R2; cxmkf K1)."""
+"""`admind` command line: init, run, operators, rearm, ask, notice, unit, initialised, hook (ADR 0001 §8;
+relay spec R1, R2; cxmkf K1; design btq-v7sgt D4)."""
 
 import argparse
 import asyncio
@@ -17,7 +17,7 @@ import msgspec
 
 from heterodyne import config as hconfig
 from heterodyne import units
-from heterodyne.admind import approvals, asks, ctl, links, refs, unit
+from heterodyne.admind import approvals, asks, ctl, initialised, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
@@ -470,6 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
                                            "the answers"))
     _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
     units.add_arguments(sub.add_parser("unit", help="print a systemd user unit for this install"))
+    sub.add_parser("initialised", help="exit 0 if admind init has run, 1 if not, 2 if it can't tell")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")
     return parser
@@ -542,4 +543,14 @@ def _dispatch(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "unit":
         return units.command(unit.render, args, os.environ)
+    if args.command == "initialised":     # read-only: never `_load()`, which creates the store
+        try:
+            s = _settings_only()
+        except hconfig.ConfigError as exc:
+            print(f"config error: {show(str(exc), False)}", file=sys.stderr)
+            return EX_CONFIG
+        result = initialised.state(s.state_dir / "admind.db")
+        print({initialised.INITIALISED: "initialised",
+               initialised.NOT_INITIALISED: "not initialised"}.get(result, "cannot tell"))
+        return result
     return _with_settings(args)
