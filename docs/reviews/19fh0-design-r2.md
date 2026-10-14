@@ -1,0 +1,19 @@
+Reviewer: gpt-6.1-sol. Author: claude-opus-5-5. Mode: cross-model. Range: 7c68abb32204678a00860de9e42839aca902a604..38c5364ce95e3a7c538eb9c5c92617adcf38080c. Verdict: APPROVE.
+
+Note: cycle 2 of 3 of the btq-19fh0 (hostread uid rule for a zombie leader with threads) design review. Verbatim.
+
+- **[NON-BLOCKING] R1’s blocker is resolved.** Withdrawing the UID fallback preserves retention for unreadable workers and worker-exec races. Rejecting the proposed per-task proof is sound: task enumeration and separate status reads do not establish a complete, stable snapshot, and foreign credentials do not establish absence of `CODEX_HOME`.
+
+- **[NON-BLOCKING] The three proposed pins are suitable.** The revision contains their specification, not implemented tests. I instantiated equivalent cases in `/tmp` using the existing `Scripted`, `Seam`, fake clock and deadline assertions: **3 passed** against current production; **all 3 failed** with the withdrawn fallback applied in memory. They run offline, check retention, absence of kills/removal, and descriptor closure. They simulate the observations left by credential changes and exec; they do not reproduce those kernel transitions. No production or repository files were changed.
+
+- **[NON-BLOCKING] Two substantive statements need qualification.**
+  - Design line 75’s saved-UID restoration argument does **not** defeat the candidate that checks **all four** UIDs: if real, effective and saved UIDs are all foreign, ordinary unprivileged restoration cannot recover our UID. The enumeration/continuity problems and environment premise still justify rejecting that candidate. [setresuid rules](https://man7.org/linux/man-pages/man2/setresuid.2.html).
+  - Line 83’s “Nothing that holds a home is ever missed” is valid for the retained zombie fallback, not globally. The live-path finding below contradicts the broader reading. A subsequent cleanup also remains conditional on a complete successful scan.
+
+- **[FINDING-PROD] High — rule 5 can clear a surviving host-read holder after a UID transition.** Concrete scenario: an app-server descendant inherits the scratch `CODEX_HOME`, escapes its process group with `setsid()`, and execs an existing setuid executable owned by B. That executable preserves the mark, calls `setresuid(B,B,B)`, and remains alive. Exec initially leaves real UID A unchanged, so **exec alone is insufficient**; the subsequent transition makes real/effective UIDs foreign. Environment access is refused, `PF_EXITING` is clear, and `_ruled_out` returns true. With no other blockers, cleanup deletes the home while this holder survives, losing the recovery marker. A foreign holder may retain previously read credentials even though the home’s permissions prevent reopening it. [Exec credential rules](https://man7.org/linux/man-pages/man2/execve.2.html), [UID transition rules](https://man7.org/linux/man-pages/man2/setresuid.2.html).
+
+  This fits hostread’s holder contract: environment-marked app-servers and escaped descendants, rather than only processes currently able to open the home. `AT_SECURE` scrubbing does not automatically remove arbitrary variables such as `CODEX_HOME`; the executable itself may sanitize them. [Loader scrubbing](https://man7.org/linux/man-pages/man8/ld.so.8.html).
+
+  OpenShell’s sandbox controls do not exclude this scenario: ADR D9 and plan 4b E4 place the trusted reader **outside every sandbox**, and the shared client’s `Popen` sets no privilege barrier. The scenario requires an effective setuid executable on a suid-enabled mount and no inherited `no_new_privs` or applicable execution restriction. Those deployment protections can prevent it, but hostread does not enforce them. This is an existing conditional production gap, not evidence that the pinned Codex currently executes such a helper, and it does not require changing this test-only design.
+
+Verdict: APPROVE
