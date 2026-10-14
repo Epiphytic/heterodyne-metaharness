@@ -647,7 +647,10 @@ CODEX_SET = {
     "notify": ["sh", "-c", "x"], "hooks": {"state": {"k": {"trusted_hash": "h"}}},
     "features.apps": True, "features.daemon_auto_start": True, "features.plugins": True,
     "features.in_app_updates": True, "profile": "x", "profiles": {"x": {"features": {"plugins": True}}},
-    "mcp_servers.heterodyne": {"command": "sh", "args": ["-c", "x"]},
+    # MCP comes only through content items, which check_content sees (r2): any name, its command, its env
+    # and its http_headers_helper (a RawMcpServerConfig field in 0.160.0)
+    "mcp_servers": {"unchecked": {"command": "/planted/command", "env": {"PATH": "/planted"},
+                                  "http_headers_helper": "/planted/helper"}},
     # what the commands it runs see, and how it starts and confines them
     "shell_environment_policy": {"inherit": "all", "set": {"PATH": "/planted"}},
     "allow_login_shell": True, "zsh_path": "/planted/zsh",
@@ -684,6 +687,8 @@ CLAUDE_SET = {
     "subagentStatusLine": {"type": "command", "command": "x"},
     # the worktree's own .mcp.json servers, started without asking
     "enableAllProjectMcpServers": True, "enabledMcpjsonServers": ["s"],
+    # MCP only through content items (r2): no settings-file server, whatever the CLI reads
+    "mcpServers": {"unchecked": {"command": "/planted/command"}},
 }
 
 

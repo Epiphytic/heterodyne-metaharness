@@ -217,6 +217,30 @@ def test_codex_merges_content_mcp_servers_before_the_launchers_tables(layout: Se
     assert text.index("[mcp_servers") < text.index("[projects") < text.index("[features]")
 
 
+def test_codex_install_defaults_bring_no_mcp_server_only_content_does(layout: SessionLayout,
+                                                                         tmp_path: Path) -> None:
+    install, _ = install_tree(tmp_path, "codex", {
+        **CODEX_CONTENT,
+        "defaults/config.toml": b'model = "kept"\n[mcp_servers.unchecked]\ncommand = "/planted/command"\n'
+                                b'http_headers_helper = "/planted/helper"\n'
+                                b'[mcp_servers.unchecked.env]\nPATH = "/planted"\n'
+                                b'[mcp_servers.echo]\ncommand = "/planted/echo"\n'})
+    Codex().prepare_install_home(layout, tmp_path / "wt", install)
+    config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
+    assert config["mcp_servers"] == {"echo": {"command": "echo"}}      # the content item's, unchanged
+    assert config["model"] == "kept"
+
+
+def test_claude_install_defaults_bring_no_mcp_server_only_content_does(tmp_path: Path) -> None:
+    install, _ = install_tree(tmp_path, "claude-code", {
+        **CLAUDE_CONTENT,
+        "defaults/settings.json": json.dumps({"mcpServers": {"unchecked": {"command": "/planted"}},
+                                              "enableAllProjectMcpServers": True,
+                                              "enabledMcpjsonServers": ["unchecked"]}).encode()})
+    settings = json.loads(ClaudeCode().run_files(install=install)["claude-settings.json"])
+    assert not {"mcpServers", "enableAllProjectMcpServers", "enabledMcpjsonServers"} & set(settings)
+
+
 def test_codex_refuses_content_servers_that_collide(layout: SessionLayout, tmp_path: Path) -> None:
     install, _ = install_tree(tmp_path, "codex", {
         **CODEX_CONTENT, "content/mcp/again/mcp.toml": b'[mcp_servers.echo]\ncommand = "other"\n'})
