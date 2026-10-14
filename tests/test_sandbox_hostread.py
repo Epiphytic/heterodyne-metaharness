@@ -1040,7 +1040,8 @@ def test_unknown_subordinate_uids_keep_every_refused_process(
     this user's."""
     monkeypatch.setattr(hostread, "_subordinate_uids", lambda: None, raising=False)
     Scripted(monkeypatch, seam.child.pid, [
-        {"environ": EACCES, "status": status_text("S", 1, uids=(FOREIGN,) * 4), "stat": ("S", 0)}])
+        {"environ": EACCES, "status": status_text("S", 1, uids=(FOREIGN, FOREIGN, FOREIGN, FOREIGN)),
+         "stat": ("S", 0)}])
     recover(seam.scratch)
     assert seam.events == [] and seam.home.exists()
     assert logged() == [DIAG_RECOVERY_KEPT]
