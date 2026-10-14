@@ -2,7 +2,7 @@
 
 The source is the FINDING-PROD in the btq-19fh0 design review r2 (`/tmp/review-19fh0-r2.md`, rated High). The saved-uid analysis is in r1 (`/tmp/review-19fh0-r1.md`). That finding was noted as out of scope in `docs/superpowers/specs/2026-10-14-hostread-uid-first-design.md` (19fh0, pending Liam's ask 4gt8).
 
-Reviews: `docs/reviews/9yiku-design-r1.md` (REVISE) and `docs/reviews/9yiku-design-r2.md` (REVISE).
+Reviews: `docs/reviews/9yiku-design-r1.md` (REVISE), `docs/reviews/9yiku-design-r2.md` (REVISE) and `docs/reviews/9yiku-design-r3.md` (APPROVE; this doc's last commit only rewords the premise as a stable effective allocation and records the narrower kernel-map rule as a follow-up).
 
 Line numbers are at origin/main e65ade7.
 
@@ -10,7 +10,7 @@ Line numbers are at origin/main e65ade7.
 - The host read's app-server is started under `PR_SET_NO_NEW_PRIVS`, through an exec trampoline.
 - The trampoline first checks the launch conditions below and fails closed if they don't hold.
 - `_ours` also counts this user's subordinate uids (`/etc/subuid`) as this user's. r1 found that a descendant can reach them even under no_new_privs; I reproduced that on this host (below).
-- r2 showed that the file's current entries don't bound the kernel's existing mappings. Checking the kernel's mapping instead (`/proc/<pid>/uid_map`) would be sound. On this host it costs about one read in 25, and it leaves credential copies behind, so it is rejected ("Why not the kernel's mapping"). The gap is root's edits to the allocation file, which r3 states as residual 4, and the invariant is qualified to match.
+- r2 showed that the file's current entries don't bound the kernel's existing mappings. Checking the kernel's mapping instead (`/proc/<pid>/uid_map`) would be sound. On this host it costs about one read in 25, and it leaves credential copies behind, so it is rejected ("Why not the kernel's mapping"). The gap is an administrative change to this user's effective allocation (defined below), which r3 states as residual 4, and the invariant is qualified to match.
 - Rule 5's order is unchanged.
 - (b) is rejected because of its cost, and so (c) is rejected too.
 
@@ -72,7 +72,7 @@ On this host, 2026-10-14 (no root, no podman):
   4. Its environ read was refused: it joined after its last exec, so its memory map's namespace is the initial one.
   5. Rule 5 would clear it.
 
-**The check that closes it, while the allocation is unchanged.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
+**The check that closes it, while the effective allocation is stable.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
 - **Where the ranges come from.** `/etc/subuid` lines whose first field is this user's login name or numeric uid, as `newuidmap` reads them. They are read once per scan.
   - The login name is `pwd.getpwuid(os.getuid())`'s. If that lookup fails, every uid counts as ours.
   - Every matching line is taken, so a user with several ranges gets all of them.
@@ -80,11 +80,12 @@ On this host, 2026-10-14 (no root, no podman):
   - A line whose start or count isn't a decimal integer, whose count is 0 or less, or which doesn't have exactly three fields, makes the file malformed. That applies to other users' lines too, since `newuidmap` would also be reading a damaged file.
 - **Missing file.** No ranges. With no subordinate uids, `newuidmap` maps nothing for this user, so no namespace this user maps through it holds any.
 - **Unreadable or malformed file, an unreadable `/etc/nsswitch.conf`, or an nsswitch `subid:` source** (which this design doesn't parse). Every uid counts as ours. That fails closed with (b)'s cost below, on such hosts only.
-- **What it doesn't bound (r2 BLOCKING).** The kernel keeps a namespace's mapping after `/etc/subuid` changes. So the check reads an allocation, not a mapping, and it is wrong when the two differ:
-  - a range removed from this user's lines, or the file deleted, while a namespace mapped from it still lives;
-  - a range added between the scan's read of the file and a helper's `newuidmap` call.
+- **The effective allocation.** This means the ranges the scan selects for this user. That is the `/etc/subuid` entries as resolved through this user's identity: its login name (from `getpwuid`) and its numeric uid. It changes when the file changes, and also when that identity changes. For example, if A is renamed and an old name-keyed entry stays in the file, the scan no longer selects that entry's ranges, though a namespace mapped from them may still live.
+- **What it doesn't bound (r2 BLOCKING).** The kernel keeps a namespace's mapping after the effective allocation changes. So the check reads an allocation, not a mapping, and it is wrong when the two differ:
+  - a range that leaves this user's effective allocation (an entry removed or reassigned, the file deleted, or the user renamed past a name-keyed entry) while a namespace mapped from it still lives;
+  - a range that joins it between the scan's read and a helper's `newuidmap` call.
   
-  Both need root to edit `/etc/subuid`. Residual 4 states them, and the premise in "Changes" is qualified to match.
+  Each is an administrative change to the account or to `/etc/subuid`. Residual 4 states them, and the premise in "Changes" is qualified to match.
 
 **Why not the kernel's mapping (r2 option 1).** I worked this through and measured it, then rejected it on cost.
 - **The rule.** A foreign-uid process would be ruled out only if `/proc/<pid>/uid_map` reads exactly `0 0 4294967295`, which is the initial namespace's identity map. Anything else, even one other line, means a non-initial namespace, and the process would be `_Unknown`. That subsumes the subuid check: the escape above needs a non-initial namespace, whatever the allocation file says.
@@ -101,7 +102,13 @@ On this host, 2026-10-14 (no root, no podman):
   - **The read path.** Over 180 s, sampled every 0.5 s, a non-identity foreign process younger than 2 s existed in 8 of 346 samples; younger than 5 s in 14; younger than 10 s in 23. Chrome starts and ends them all the time. A read's cleanup window is its duration plus the 1 s slack, so about 4% of reads would raise `_Unknown`, be discarded and keep their home (`DIAG_SCRATCH_KEPT`).
   - **Recovery.** Each kept home holds a copy of the login, and recovery would remove it only at a start with no non-identity foreign process younger than the oldest home. At one instant, 5 had started within the last hour, mostly container processes. A container restarted after a home was kept would block recovery for as long as it runs.
   - (b) costs more (123 blockers in a day), but this cost is still not small, and it compounds: a discarded read is how the homes that block recovery are made.
-- **The trade.** With the allocation check (r2 option 2), the gap is root's edits to a file that root owns, made while this user's namespaces from the old allocation live. That is the same trust class as residual 2, where root maps any uid. With the kernel's mapping (option 1), the gap is closed, but about one read in 25 would be lost, along with an on-disk credential copy that might never be recovered on a shared host. For the PoC I pick option 2. A narrower kernel-map rule is possible (for example, keeping only the non-identity processes whose uid isn't in another user's current range), but it brings back an allocation-file dependence of its own, so it isn't proposed.
+- **The trade.** With the allocation check (r2 option 2), the gap is an administrative change to this user's effective allocation, made while this user's namespaces from the old allocation live. That is the same trust class as residual 2, where root maps any uid. With the kernel's mapping (option 1), the gap is closed, but about one read in 25 would be lost, along with an on-disk credential copy that might never be recovered on a shared host. For the PoC I pick option 2.
+- **Follow-up: a narrower kernel-map rule (r3 review).** Keep a refused foreign process only if its non-identity `uid_map`'s outside ranges include A or overlap this user's current effective allocation. Otherwise rule it out, as the uid check does now. That rules out maps such as chrome's for another user (`1000 1000 1`).
+  - It is sound under the same stable-allocation premise.
+  - It doesn't close residual 4. An old namespace can map only a range that has since been removed, and leave out A. Nesting can also drop A from a child's map. Either way the map then overlaps nothing current.
+  - So it would replace the cost of keeping every non-identity map, not establish the stronger invariant.
+  - The census above measured the broader rule, not this one.
+  - It is tracked as a separate follow-up bead and is not part of this design.
 
 **What the check costs.** A refused process in the subordinate range, started after the home, becomes `_Unknown`: the home is kept, and the read is discarded or recovery kept.
 - Ordinary rootless-container processes don't reach that point. Each one's environ is readable, because this user owns its namespace and so has `CAP_SYS_PTRACE` there for the read's access check. That holds for both the task's namespace and its memory map's, since they exec'd inside it.
@@ -158,7 +165,7 @@ This would remove the premise rather than enforce it: another user's refused pro
   - Filtering by session misses a `setsid()` descendant, which is the reported scenario.
   - Filtering by cgroup needs enforced membership. `systemd-run --scope` alone doesn't stop a descendant from asking a delegated service to start a process elsewhere.
   - Filtering by uid fails because the attack leaves all four uids foreign, and r1 (19fh0) showed per-task uid reads can't be made complete.
-- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's, as long as root doesn't change them (residual 4).
+- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's, as long as the effective allocation stays stable (residual 4).
 
 ### (c) both
 
@@ -198,12 +205,13 @@ The one thing no_new_privs can change is the bwrap probe, on a host where bwrap 
    It is not a descendant, so the holder contract doesn't cover it today, and the pinned app-server's descendants (above) do nothing of the kind. Closing it would need enforced cgroup membership for the read and every service it can reach, which is not proposed.
 2. **A privileged helper that maps a namespace outside the subordinate ranges.** Root, or a service with `CAP_SETUID` in the initial namespace, can write any `uid_map` for a namespace the descendant made, and so give it any host uid. `newuidmap` can't do this; it maps only the caller's ranges. This is the privileged-service case of residual 1, applied to the descendant's own credentials. Accepted the same way.
 3. **Homes from before the change.** `recover` at the first start after deployment may meet a holder from a read launched without no_new_privs. This happens once, and needs a crash plus a uid transition before the upgrade. Accepted.
-4. **Root changes this user's subordinate allocation (r3).** These cases need root to edit `/etc/subuid`:
-   - root removes a range from this user's lines, or deletes the file, while a namespace mapped from that range lives;
-   - root reassigns the range to another user while such a namespace lives;
-   - root adds a range during a scan, after the file was read, and a helper maps it at once.
+4. **This user's effective allocation changes (r3).** Each case needs an administrative change, to `/etc/subuid` or to the account it is resolved through:
+   - a range is removed from this user's entries, or the file is deleted, while a namespace mapped from that range lives;
+   - the range is reassigned to another user while such a namespace lives;
+   - this user is renamed while an entry keyed by the old name stays, and such a namespace lives;
+   - a range is added during a scan, after the scan read it, and a helper maps it at once.
 
-   In each, a descendant can hold a uid that the scan doesn't count as this user's. These are root's edits to a file root owns, the same trust class as residual 2. The kernel-mapping check that would close them costs about one read in 25 on this host (above). Accepted for the PoC.
+   In each, a descendant can hold a uid that the scan doesn't count as this user's. These are administrative changes, the same privileged-authority class as residual 2. Routine administration can cause them without malice; this design accepts that and qualifies its guarantee. The kernel-mapping check that would close them costs about one read in 25 on this host (above). Accepted for the PoC.
 
 ## Interaction with other work
 
@@ -271,6 +279,6 @@ No test makes a real uid transition, which would need a setuid binary or root. T
   - the call at `:400` passes `no_new_privs=True`;
   - `_subordinate_uids()` (`/etc/subuid`, as above), read once per scan;
   - `_ours` counts those ranges;
-  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor in this user's current `/etc/subuid` ranges can't be one. That holds while root leaves this user's allocation unchanged during the lifetime of its namespaces, and apart from the residuals above.
+  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor in this user's current `/etc/subuid` ranges can't be one. That holds while this user's effective allocation stays stable for the lifetime of its namespaces: the `/etc/subuid` entries as resolved through this user's login name and uid. It also holds apart from the residuals above.
 - `tests/fakes/fake_agent_cli.py`: the `HZ_FAKE_STATUS_FILE` report.
 - The tests above. No ADR change: D9 and E4 already put the reader outside the sandbox. A line in plan 4b E4's notes records the barrier and the launch conditions.
