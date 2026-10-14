@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from harness_env import GIT_ENV, git
 
+from heterodyne.config import paths as config_paths
 from heterodyne.harness import paths as harness_paths
 from heterodyne.harness import settings
 from heterodyne.harness.resources import store_core as sc
@@ -504,35 +505,107 @@ def test_step_4_installs_the_units_from_the_stage_only() -> None:
     assert text.splitlines()[-1] == f"sudo rm -r {STAGE}"
 
 
-def test_step_6_removes_only_the_harnesses_fallback_and_keeps_a_backup(tmp_path: Path) -> None:
+CONFIG_LINE = "cfg=$HOME/.config/heterodyne/config.toml"
+
+
+def test_step_6_pins_the_config_heterodyne_reads_with_no_overrides(tmp_path: Path) -> None:
     lines = block("step-6").splitlines()
-    assert lines[-1].endswith("heterodyne config check")
-    config = tmp_path / "config.toml"
-    original = ("[sandbox]\nfallback = true\n\n[harnesses]\nowner = \"x\"\nfallback = true\n"
-                "\n[harnesses.claude]\nfallback = true\n")
-    config.write_text(original)
-    out = subprocess.run(["bash", "-euo", "pipefail", "-c", "\n".join(lines[:-1])], capture_output=True,
+    assert lines[0] == CONFIG_LINE
+    assert config_paths.config_dir({"HOME": str(tmp_path)}) / "config.toml" == \
+        tmp_path / ".config" / "heterodyne" / "config.toml"
+    assert lines[-1].startswith("env -u HETERODYNE_CONFIG_DIR -u XDG_CONFIG_HOME uv run ")
+    assert lines[-1].endswith(" heterodyne config check")
+
+
+def step6_check(home: Path) -> subprocess.CompletedProcess[str]:
+    """Step 6 up to `config check`, as the service user with HOME at `home`."""
+    lines = block("step-6").splitlines()
+    return subprocess.run(["bash", "-euo", "pipefail", "-c", "\n".join(lines[:-1])], capture_output=True,
+                          text=True, timeout=60, check=False, env={**os.environ, "HOME": str(home)})
+
+
+@pytest.mark.parametrize(("text", "stops"), [
+    ("[sandbox]\nfallback = true\n", False),
+    ("[harnesses] # host\nowner = \"x\"\n  [harnesses.claude]\n  fallback = true\n", False),
+    ("[harnesses]\n# fallback = true\n", False),
+    ("[harnesses]\nfallback = true # on\n", True),
+    ("  [harnesses] # host\nfallback = false\n", True),
+    ("harnesses.fallback = true\n", True),
+    ("[harnesses\n", True),
+])
+def test_step_6_checks_harnesses_fallback_and_never_edits(tmp_path: Path, text: str, stops: bool) -> None:
+    config = tmp_path / ".config" / "heterodyne" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(text)
+    out = step6_check(tmp_path)
+    assert (out.returncode != 0) == stops, out.stderr
+    assert config.read_text() == text
+    assert sorted(p.name for p in config.parent.iterdir()) == ["config.toml"]
+
+
+def test_step_6_stops_without_a_config(tmp_path: Path) -> None:
+    assert step6_check(tmp_path).returncode != 0
+
+
+STUB = r"""#!/bin/bash
+name=$(basename "$0")
+echo "$name $*" >>"$STUB_LOG"
+IFS=';' read -r -a fail <<<"${STUB_FAIL_ON:-}"
+for f in "${fail[@]}"; do [[ -n $f && "$name $*" == "$f"* ]] && exit 1; done
+exit 0
+"""
+ROLLBACK_TOOLS = ("systemctl", "pgrep", "rm", "rmdir", "userdel")
+
+
+def rollback(tmp_path: Path, fail_on: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """The rollback script with every host command a stand-in that logs its call and fails as told."""
+    first, *body, last = block("rollback").splitlines(keepends=True)
+    assert (first, last) == ("sudo bash -euo pipefail -s <<'ROLLBACK'\n", "ROLLBACK\n")
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(exist_ok=True)
+    for tool in ROLLBACK_TOOLS:
+        (stubs / tool).write_text(STUB)
+        (stubs / tool).chmod(0o755)
+    log = tmp_path / "calls.log"
+    log.write_text("")
+    out = subprocess.run(["bash", "-euo", "pipefail", "-s"], input="".join(body), capture_output=True,
                          text=True, timeout=60, check=False,
-                         env={**os.environ, "HETERODYNE_CONFIG_DIR": str(tmp_path)})
-    assert (out.returncode, out.stderr) == (0, "")
-    assert config.read_text() == original.replace('owner = "x"\nfallback = true\n', 'owner = "x"\n')
-    assert (tmp_path / "config.toml.bak-t12b").read_text() == original
+                         env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "STUB_LOG": str(log),
+                              "STUB_FAIL_ON": fail_on})
+    return out, log.read_text().splitlines()
 
 
-def test_the_rollback_stops_every_helper_before_it_removes_the_store_or_the_owner() -> None:
-    text = block("rollback")
-    order = ["systemctl disable --now heterodyne-store-helper.socket",
-             "systemctl stop 'heterodyne-store-helper@*.service'",
-             "systemctl list-units --plain --no-legend --state=active,activating,deactivating "
-             "'heterodyne-store-helper@*'",
-             "pgrep -u heterodyne-store",
-             "rm -r /var/lib/heterodyne",
-             "userdel heterodyne-store"]
-    at = [text.find(step) for step in order]
-    assert -1 not in at and at == sorted(at), at
-    first, *body, last = text.split("\n\n")[0].splitlines(keepends=True)
-    last += "\n"                       # the blank line after the heredoc took its newline
-    assert (first, last) == ("sudo bash -euo pipefail -s <<'STOP'\n", "STOP\n")
-    out = subprocess.run(["bash", "-n"], input="".join(body), capture_output=True, text=True, timeout=60,
-                         check=False)
+NO_PROCESS = "pgrep "      # pgrep exits 1: nothing runs as the store owner
+
+
+def test_the_rollback_stops_every_helper_then_removes_and_ends_with_the_owner(tmp_path: Path) -> None:
+    out, calls = rollback(tmp_path, NO_PROCESS)
     assert (out.returncode, out.stderr) == (0, "")
+    assert calls[:4] == ["systemctl disable --now heterodyne-store-helper.socket",
+                         "systemctl stop heterodyne-store-helper@*.service",
+                         "systemctl list-units --plain --no-legend --state=active,activating,deactivating "
+                         "heterodyne-store-helper@*",
+                         "pgrep -u heterodyne-store"]
+    assert calls[-2:] == ["rmdir /var/lib/heterodyne/harnesses /var/lib/heterodyne",
+                          "userdel heterodyne-store"]
+    assert not [c for c in calls if c.startswith("rm -r") or c.startswith("rm -f")]
+
+
+@pytest.mark.parametrize(("fail_on", "refused"), [
+    ("", "refused: a process still runs as heterodyne-store"),
+    (f"{NO_PROCESS};systemctl stop", ""),
+    (f"{NO_PROCESS};systemctl disable", ""),
+])
+def test_the_rollback_removes_nothing_while_a_helper_may_run(tmp_path: Path, fail_on: str,
+                                                             refused: str) -> None:
+    out, calls = rollback(tmp_path, fail_on)
+    assert out.returncode != 0
+    assert refused in out.stderr
+    assert not [c for c in calls if c.split()[0] in ("rm", "rmdir", "userdel")]
+
+
+def test_the_rollback_keeps_a_store_that_is_not_empty_and_its_owner(tmp_path: Path) -> None:
+    out, calls = rollback(tmp_path, f"{NO_PROCESS};rmdir /var/lib/heterodyne/harnesses")
+    assert out.returncode != 0
+    assert calls[-1] == "rmdir /var/lib/heterodyne/harnesses /var/lib/heterodyne"
+    assert "userdel heterodyne-store" not in calls
