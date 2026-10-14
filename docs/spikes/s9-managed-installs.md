@@ -279,6 +279,6 @@ All seven fields are identical inside for every entry on the bound file system, 
 
 Everything is under `$T` and the `mktemp -d -p "$XDG_RUNTIME_DIR"` homes. No process from the spike is left running. The S9-8 run ended with zero `s9-*` sandboxes or containers, both `tmpfs` mounts unmounted in Podman's namespace, and no `conmon` left.
 
-The Codex TUI runs also left rendezvous sockets in `/tmp`, outside the throwaway homes. They were left alone, because the host's own Codex uses `/tmp/codex-daemon-<uid>/` too. Each name is a 64-hex digest (the socket's lock file is `<name>.lock`); they're listed here by their first 12 characters, with the time made (2026-10-13, UTC):
+The Codex TUI runs also left rendezvous sockets in `/tmp`, outside the throwaway homes. They were left alone, because the host's own Codex uses `/tmp/codex-daemon-<uid>/` too. Each name is a 64-hex digest (the socket's lock file is `<name>.lock`); they're listed here by their first 12 characters, with the time made (2026-10-13, Pacific time):
 - `/tmp/codex-daemon-<uid>/`: sockets and locks `5af58a0262a0…` and `9e10ca84e872…` (21:16); `190eaab267cb…`, `2a7eb2f4286e…`, `948756bdc611…` and `f6a3c4ca6a17…` (21:18); `6c6b992d391e…` and `efa47b76cb2d…` (21:19).
 - `/tmp/codex-daemon-0/` (made by the `unshare -r` runs, where the uid is 0; the directory is new): lock `50db70744d46….lock` (21:10), socket and lock `ea39582e5d92…` (21:21).
