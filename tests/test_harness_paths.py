@@ -10,6 +10,7 @@ import pytest
 from heterodyne.harness import paths
 
 ME = os.getuid()
+SERVICE = ME + 1      # outside the fallback the test's own files belong to the store owner, not the service
 Lookup = Callable[[Path], tuple[int, int]]
 
 
@@ -32,7 +33,7 @@ def mkdir(p: Path, mode: int = 0o700) -> Path:
 
 def problems(tmp_path: Path, store: Path, lookup: Lookup | None = None, **overrides: Any) -> list[str]:
     args: dict[str, Any] = {"login_dirs": [tmp_path / "home" / ".codex"], "worktrees": [tmp_path / "repo"],
-                            "state_dir": tmp_path / "state", "service_uid": ME, "owner_uid": ME,
+                            "state_dir": tmp_path / "state", "service_uid": SERVICE, "owner_uid": ME,
                             "fallback": False}
     args.update(overrides)
     return paths.store_problems(store, lookup=lookup or above_tmp_is_root(tmp_path), **args)
@@ -60,6 +61,24 @@ def in_state(t: Path) -> list[str]:
     return problems(t, mkdir(t / "state" / "harnesses"))
 
 
+def contains_worktree(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store"), worktrees=[t / "store" / "repo"])
+
+
+def contains_state(t: Path) -> list[str]:
+    return problems(t, mkdir(t / "store"), state_dir=t / "store" / "state")
+
+
+def _svc_owns(t: Path) -> Lookup:
+    """`tmp_path` is root's, `svc` the service user's (this test's uid) and everything else the owner's."""
+    def lookup(p: Path) -> tuple[int, int]:
+        if p == t or t not in p.parents:
+            return 0, 0o40755
+        st = os.lstat(p)
+        return (ME if p == t / "svc" else ME + 1), st.st_mode
+    return lookup
+
+
 def group_writable(t: Path) -> list[str]:
     mkdir(t / "shared", 0o770)
     return problems(t, mkdir(t / "shared" / "store"))
@@ -72,7 +91,25 @@ def other_writable(t: Path) -> list[str]:
 
 def owned_by_service_user(t: Path) -> list[str]:
     # Not the fallback: a component the service user owns is one it can rename, so the store is unsafe.
-    return problems(t, mkdir(t / "store", 0o755), owner_uid=ME + 1)
+    return problems(t, mkdir(t / "store", 0o755), service_uid=ME, owner_uid=ME + 1)
+
+
+def owner_is_service_user(t: Path) -> list[str]:
+    # Not the fallback, so the store owner must be another user, even before the store exists.
+    return problems(t, t / "missing" / "store", service_uid=ME, owner_uid=ME)
+
+
+def link_through_service_dir(t: Path) -> list[str]:
+    # The service user owns the directory holding a link to a protected store, so it can repoint the link.
+    protected = mkdir(t / "protected" / "store", 0o755)
+    mkdir(t / "svc", 0o755)
+    (t / "svc" / "store").symlink_to(protected)
+    return problems(t, t / "svc" / "store", lookup=_svc_owns(t), service_uid=ME, owner_uid=ME + 1)
+
+
+def link_loop(t: Path) -> list[str]:
+    (t / "loop").symlink_to(t / "loop")
+    return problems(t, t / "loop" / "store")
 
 
 def unreadable_component(t: Path) -> list[str]:
@@ -84,7 +121,7 @@ def unreadable_component(t: Path) -> list[str]:
 
 
 def fallback_not_0700(t: Path) -> list[str]:
-    return problems(t, mkdir(t / "store", 0o750), fallback=True, owner_uid=None)
+    return problems(t, mkdir(t / "store", 0o750), fallback=True, service_uid=ME, owner_uid=None)
 
 
 def fallback_not_service_users(t: Path) -> list[str]:
@@ -93,7 +130,7 @@ def fallback_not_service_users(t: Path) -> list[str]:
     def lookup(p: Path) -> tuple[int, int]:
         uid, mode = real(p)
         return (ME + 1, mode) if p == t / "store" else (uid, mode)
-    return problems(t, mkdir(t / "store"), lookup=lookup, fallback=True, owner_uid=ME + 1)
+    return problems(t, mkdir(t / "store"), lookup=lookup, fallback=True, service_uid=ME, owner_uid=ME + 1)
 
 
 def helper_differs(t: Path) -> list[str]:
@@ -111,9 +148,12 @@ CASES: list[tuple[str, Callable[[Path], list[str]]]] = [
     ("STORE_IN_LOGIN_DIR", in_login), ("STORE_IN_LOGIN_DIR", via_symlink),
     ("LOGIN_DIR_IN_STORE", login_inside),
     ("STORE_IN_WORKTREE", in_worktree),
-    ("STORE_IN_STATE_DIR", in_state),
+    ("WORKTREE_IN_STORE", contains_worktree),
+    ("STORE_IN_STATE_DIR", in_state), ("STATE_DIR_IN_STORE", contains_state),
     ("STORE_PATH_WRITABLE", group_writable), ("STORE_PATH_WRITABLE", other_writable),
     ("STORE_PATH_WRITABLE", owned_by_service_user), ("STORE_PATH_WRITABLE", unreadable_component),
+    ("STORE_PATH_WRITABLE", owner_is_service_user), ("STORE_PATH_WRITABLE", link_through_service_dir),
+    ("STORE_PATH_WRITABLE", link_loop),
     ("STORE_PATH_WRITABLE", fallback_not_0700), ("STORE_PATH_WRITABLE", fallback_not_service_users),
     ("HELPER_DRIFT", helper_differs), ("HELPER_DRIFT", helper_missing),
 ]
@@ -133,7 +173,11 @@ def test_a_clean_store_has_no_problems(tmp_path: Path) -> None:
     """The negative controls: each case's tree, minus the one thing that causes it."""
     assert problems(tmp_path, mkdir(tmp_path / "store", 0o755)) == []
     assert problems(tmp_path, tmp_path / "missing" / "store") == []      # created later, by the store
-    assert problems(tmp_path, mkdir(tmp_path / "fb"), fallback=True, owner_uid=None) == []
+    assert problems(tmp_path, mkdir(tmp_path / "fb"), fallback=True, service_uid=ME, owner_uid=None) == []
+    # A link in a directory only root can change, to a store only the owner can, is fine.
+    (tmp_path / "link").symlink_to(mkdir(tmp_path / "protected" / "store", 0o755))
+    assert problems(tmp_path, tmp_path / "link", lookup=_svc_owns(tmp_path), service_uid=ME,
+                    owner_uid=ME + 1) == []
     assert problems(tmp_path, mkdir(tmp_path / "sib"), login_dirs=[tmp_path / "sibling"],
                     worktrees=[tmp_path / "s"], state_dir=tmp_path / "st") == []
     (tmp_path / "packaged.py").write_text("print(1)\n")

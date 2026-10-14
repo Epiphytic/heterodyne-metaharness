@@ -5,6 +5,7 @@ atomically, so a reader sees the old file or the new one, never a mix. Errors na
 import os
 import re
 import secrets
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,18 @@ class Selection:
 
 def load(config_dir: Path) -> Mapping[str, Selection]:
     """The selections in `config_dir/harnesses.toml`; none when the file doesn't exist."""
-    raw = layers.read_toml(config_dir / FILE)
+    path = config_dir / FILE
+    if not os.path.lexists(path):
+        return {}
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        # An entry that exists but can't be read (a dangling link, no permission) is not "no selection".
+        raise ConfigError(f"{FILE} exists but can't be read") from None
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{FILE}: {show(str(exc), False)}") from None
     found: dict[str, Selection] = {}
     for adapter, value in raw.items():
         where = f"{FILE}: [{show(adapter, False)}]"

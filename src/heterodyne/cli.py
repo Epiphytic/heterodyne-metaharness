@@ -13,6 +13,7 @@ from typing import Any
 from heterodyne import config as hconfig
 from heterodyne import platform
 from heterodyne.config import accounts, layers, paths
+from heterodyne.config.secret_scan import show
 from heterodyne.harness import paths as store_paths
 from heterodyne.harness import selection
 from heterodyne.harness import settings as harness_settings
@@ -43,7 +44,8 @@ def cmd_config_check(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 1
     for key, value in _flatten(cfg.values):
-        shown = "<hidden>" if _is_login_dir(key) else repr(value)   # D10: no message shows a login path
+        # D10: no message shows a login path; `show` redacts secrets and identifiers (a 64-hex commit).
+        shown = "<hidden>" if _is_login_dir(key) else show(value)
         print(f"{key} = {shown}    ({cfg.sources.get(key, '?')})")
     print(f"policy: approvers={list(cfg.policy.approvers)}  (policy.toml)")
     if len({p.get("model") for p in cfg.get("profiles", {}).values()}) < 2:

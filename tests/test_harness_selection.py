@@ -88,3 +88,13 @@ def test_previous_keeps_at_most_ten(tmp_path: Path) -> None:
     (tmp_path / selection.FILE).write_text(f"[codex]\nprevious = [{rows}]\n")
     with pytest.raises(ConfigError, match="previous"):
         selection.load(tmp_path)
+
+
+def test_an_unreadable_selection_is_not_an_absent_one(tmp_path: Path) -> None:
+    (tmp_path / selection.FILE).symlink_to(tmp_path / "gone.toml")       # a dangling link
+    with pytest.raises(ConfigError, match="exists but can't be read"):
+        selection.load(tmp_path)
+    (tmp_path / selection.FILE).unlink()
+    (tmp_path / selection.FILE).mkdir()                                   # not a file
+    with pytest.raises(ConfigError, match="exists but can't be read"):
+        selection.load(tmp_path)

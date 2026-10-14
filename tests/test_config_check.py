@@ -68,3 +68,19 @@ def test_config_check_refuses_a_bad_harnesses_table(tmp_path: Path, monkeypatch:
     (Path(env["HETERODYNE_CONFIG_DIR"]) / selection.FILE).write_text("[codex]\nuse = 1\n")
     rc, _, err = check(env, monkeypatch, capsys)
     assert rc == 1 and err.startswith("config error: harnesses.toml")
+
+
+def test_config_check_redacts_a_full_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                            capsys: pytest.CaptureFixture[str]) -> None:
+    commit = HEX * 4
+    env = config_env(tmp_path, f"""
+[harnesses.codex]
+version = "0.160.0"
+target = "x86_64-unknown-linux-musl"
+content = [{{ kind = "skills", name = "s", git = "https://example.org/s.git", commit = "{commit}" }}]
+""")
+    rc, out, err = check(env, monkeypatch, capsys)
+    assert rc == 0, err
+    assert commit not in out + err
+    assert "harnesses.codex.content = [{'kind': 'skills', 'name': 's', 'git': 'https://example.org/s.git', " \
+           "'commit': <redacted hex key>}]    (host:config.toml)" in out.splitlines()
