@@ -1,14 +1,15 @@
 import asyncio
-import contextlib
 import fcntl
 import os
-import signal
+import shlex
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
+from escapes import Escapes, shell_prelude, sleeper_line
 
 from heterodyne.admind import backstop, reap, summarize
 from heterodyne.admind.redact import redact
@@ -157,9 +158,14 @@ def test_the_reply_is_never_in_argv(tmp_path: Path) -> None:
     assert all("SECRET-REPLY-TEXT" not in a for a in argv)
 
 
-def test_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
+def group_sleeper_body(use: Path, pidfile: Path) -> str:
+    """A sleeper (tests/escapes.py) in the script's group, its PID in `pidfile`; the script waits for it."""
+    return f'{shell_prelude(use)}{sleeper_line(use)} &\necho $! > "{pidfile}"\nexec 9<&-\nwait'
+
+
+def test_timeout_kills_the_whole_process_group(tmp_path: Path, escapes: Escapes) -> None:
     pidfile = tmp_path / "child.pid"
-    argv = script(tmp_path, f'sleep 30 &\necho $! > "{pidfile}"\nwait')
+    argv = script(tmp_path, group_sleeper_body(escapes.path, pidfile))
     with pytest.raises(summarize.SummaryFailed) as info:
         asyncio.run(summarize.summarize(argv, tmp_path / "w", "r", timeout=1))
     assert info.value.reason == "timeout"
@@ -351,10 +357,16 @@ def test_oversize_output_is_cleaned_up_without_hanging(tmp_path: Path, big_pipe:
     assert gone(read_pids(pidfile)[0])
 
 
-def test_oversize_output_with_a_grandchild_holding_stdout(tmp_path: Path, big_pipe: None) -> None:
+def grandchild_body(use: Path, pids: Path) -> str:
+    """A sleeper in a subshell in the script's group holds stdout; `pids` gets the script's PID and its."""
+    return (f'{shell_prelude(use)}{FILL}\n({sleeper_line(use)}) &\necho $$ $! > "{pids}"\nexec 9<&-\n'
+            'python3 -c "$FILL"')
+
+
+def test_oversize_output_with_a_grandchild_holding_stdout(tmp_path: Path, escapes: Escapes,
+                                                          big_pipe: None) -> None:
     pids = tmp_path / "pids"
-    body = f'{FILL}\n(sleep 60) &\necho $$ $! > "{pids}"\npython3 -c "$FILL"'
-    argv = script(tmp_path, body)
+    argv = script(tmp_path, grandchild_body(escapes.path, pids))
 
     async def run() -> None:
         await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 10)
@@ -382,13 +394,15 @@ def test_cancellation_still_kills_the_group(tmp_path: Path) -> None:
     assert gone(read_pids(pidfile)[0])
 
 
-# The descendant makes its own session with os.setsid: macOS has no setsid command.
-ESCAPED = """python3 -c 'import os, sys
-os.setsid()
-fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-os.write(fd, str(os.getpid()).encode()); os.close(fd)
-os.execvp("sleep", ["sleep", "20"])' "{pidfile}" &
-while [ ! -s "{pidfile}" ]; do sleep 0.05; done"""     # ready once the descendant has its own session
+# The descendant makes its own session with os.setsid (macOS has no setsid command), then becomes a sleeper
+# (tests/escapes.py), which publishes its own PID.
+SETSID = "import os, sys\nos.setsid()\nos.execv(sys.argv[1], sys.argv[1:])"
+
+
+def escaped_body(use: Path, pidfile: Path) -> str:
+    setsid = f"{shlex.quote(sys.executable)} -I -c {shlex.quote(SETSID)}"
+    return (f'{shell_prelude(use)}{setsid} {sleeper_line(use, "--pid-file", str(pidfile))} &\nexec 9<&-\n'
+            f'while [ ! -s "{pidfile}" ]; do sleep 0.05; done')  # ready once it has its own session
 
 
 class Spy:
@@ -411,25 +425,21 @@ class Spy:
         monkeypatch.setattr(summarize, "_wait", wait)
 
 
-def run_escaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, steps) -> Spy:  # type: ignore[no-untyped-def]
+def run_escaped(tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch, body: str,
+                steps) -> Spy:  # type: ignore[no-untyped-def]
     """Run `summarize` on a child that leaves a descendant in its own session holding stdout; cleanup closes
-    the pipe rather than wait for it to close. `steps(task, spy)` drives the test; the descendant is always
-    killed afterwards."""
+    the pipe rather than wait for it to close. `steps(task, spy)` drives the test; the descendant is a
+    sleeper of `escapes`, so it ends at the test's end."""
     pidfile = tmp_path / "escaped.pid"
     monkeypatch.setattr(summarize, "REAP_SECONDS", 0.5)
     spy = Spy(monkeypatch, pidfile)
-    argv = script(tmp_path, ESCAPED.format(pidfile=pidfile) + "\n" + body)
+    argv = script(tmp_path, escaped_body(escapes.path, pidfile) + "\n" + body)
 
     async def main() -> None:
         task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
         await asyncio.wait_for(steps(task, spy), 8)
 
-    try:
-        asyncio.run(main())
-    finally:
-        if pidfile.exists():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(read_pids(pidfile)[0], signal.SIGKILL)
+    asyncio.run(main())
     return spy
 
 
@@ -440,7 +450,7 @@ def transport_closed(spy: Spy) -> bool:
 
 
 def test_a_descendant_outside_the_group_cannot_hang_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, big_pipe: None
+    tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch, big_pipe: None
 ) -> None:
 
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
@@ -449,12 +459,12 @@ def test_a_descendant_outside_the_group_cannot_hang_cleanup(
         assert info.value.reason == "too-long"
         assert alive(read_pids(tmp_path / "escaped.pid")[0])  # still holding the pipe, which was closed
 
-    spy = run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
+    spy = run_escaped(tmp_path, escapes, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
     assert spy.escaped and spy.waited and transport_closed(spy)  # the wait never needed the pipe
 
 
 def test_cancelling_during_cleanup_still_closes_the_pipe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, big_pipe: None
+    tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch, big_pipe: None
 ) -> None:
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
         await spy.entered.wait()  # oversize output sent it into cleanup, which waits on the descendant
@@ -462,11 +472,12 @@ def test_cancelling_during_cleanup_still_closes_the_pipe(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    spy = run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
+    spy = run_escaped(tmp_path, escapes, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
     assert spy.escaped and transport_closed(spy)
 
 
-def test_cancelling_twice_still_closes_the_pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancelling_twice_still_closes_the_pipe(tmp_path: Path, escapes: Escapes,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
         while not (tmp_path / "escaped.pid").exists() or not (tmp_path / "escaped.pid").read_text().strip():
             await asyncio.sleep(0.02)
@@ -476,7 +487,7 @@ def test_cancelling_twice_still_closes_the_pipe(tmp_path: Path, monkeypatch: pyt
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    spy = run_escaped(tmp_path, monkeypatch, "sleep 30", steps)
+    spy = run_escaped(tmp_path, escapes, monkeypatch, "sleep 30", steps)
     assert spy.escaped and transport_closed(spy)
 
 
@@ -495,13 +506,14 @@ def test_a_cleanup_failure_is_noted_by_type_and_does_not_replace_the_result(
 
 
 def test_a_pipe_held_outside_the_group_is_not_noted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], big_pipe: None
+    tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    big_pipe: None
 ) -> None:
     async def steps(task: asyncio.Task[str], spy: Spy) -> None:
         with pytest.raises(summarize.SummaryFailed):
             await task
 
-    run_escaped(tmp_path, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
+    run_escaped(tmp_path, escapes, monkeypatch, f'{FILL}\npython3 -c "$FILL"', steps)
     assert capsys.readouterr().err == ""
 
 

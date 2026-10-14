@@ -1,6 +1,5 @@
 """Plan 4b Task 8: the trusted host-side read (D9 (d), E4), against the fake app-server."""
 
-import contextlib
 import errno
 import json
 import logging
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from escapes import Escapes
 from sandbox_env import fake_jwt, install_fake_cli
 from wsd_env import Clock, accounts_at
 
@@ -478,46 +478,39 @@ def test_a_home_without_this_boots_stamp(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_a_descendant_that_left_the_group_is_ended_before_the_home_goes(
-        tmp_path: Path, logged: Callable[[], list[str]]) -> None:
+        tmp_path: Path, escapes: Escapes, logged: Callable[[], list[str]]) -> None:
     """The client kills the app-server's process group; a descendant in a session of its own outlives
     it, holding the copy's CODEX_HOME. The read ends it before it removes the home and lets go."""
     child = tmp_path / "child.pid"
-    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
-    try:
-        assert rig.read() is None
-        assert logged() == [f"{DIAG_READ_FAILED}: TimeoutError"]
-        assert not alive(int(child.read_text()))                # ended before the read returned
-        assert rig.scratch_empty() and rig.server_gone()
-        assert rig.login.read_text() == rig.original
-    finally:
-        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
-            os.kill(int(child.read_text()), signal.SIGKILL)
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child), **escapes.env)
+    assert rig.read() is None
+    assert logged() == [f"{DIAG_READ_FAILED}: TimeoutError"]
+    assert not alive(int(child.read_text()))                # ended before the read returned
+    assert rig.scratch_empty() and rig.server_gone()
+    assert rig.login.read_text() == rig.original
 
 
 def test_a_descendant_that_cant_be_ended_keeps_the_home_for_recovery(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logged: Callable[[], list[str]]) -> None:
+        tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch,
+        logged: Callable[[], list[str]]) -> None:
     child = tmp_path / "child.pid"
-    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child), **escapes.env)
     real_signal = signal.pidfd_send_signal
 
     def no_kill(fd: int, sig: int) -> None:
         if sig != signal.SIGKILL:
             real_signal(fd, sig)
 
-    try:
-        monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
-        monkeypatch.setattr(hostread, "RECOVER_SECONDS", 0.3)
-        assert rig.read() is None
-        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError"]
-        pid = int(child.read_text())
-        assert alive(pid)
-        [home] = list(rig.scratch.iterdir())                    # kept: the next start's only record of it
-        assert (home / "auth.json").exists()
-        monkeypatch.undo()
-        recover(rig.scratch)
-        assert wait_for(lambda: not alive(pid))
-        assert rig.scratch_empty()
-        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError", DIAG_RECOVERED]
-    finally:
-        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
-            os.kill(int(child.read_text()), signal.SIGKILL)
+    monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
+    monkeypatch.setattr(hostread, "RECOVER_SECONDS", 0.3)
+    assert rig.read() is None
+    assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError"]
+    pid = int(child.read_text())
+    assert alive(pid)
+    [home] = list(rig.scratch.iterdir())                    # kept: the next start's only record of it
+    assert (home / "auth.json").exists()
+    monkeypatch.undo()
+    recover(rig.scratch)
+    assert wait_for(lambda: not alive(pid))
+    assert rig.scratch_empty()
+    assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError", DIAG_RECOVERED]

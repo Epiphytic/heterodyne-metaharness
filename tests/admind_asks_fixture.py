@@ -16,12 +16,14 @@ TWO = {"operators": (operator("a", OPERATOR_HEX), operator("b", SECOND_HEX))}
 BOTH = json.dumps(sorted([OPERATOR_HEX, SECOND_HEX]))
 
 
-def approve_bead_wrapper(tmp_path: Path) -> Path:
-    """A `#!/bin/sh` approve-bead that runs the fake against tmp_path's btq.json and btq.log."""
+def approve_bead_wrapper(tmp_path: Path, escape_dir: Path | None = None) -> Path:
+    """A `#!/bin/sh` approve-bead that runs the fake against tmp_path's btq.json and btq.log, with its
+    long-lived grandchildren in the escapes use `escape_dir` (tests/escapes.py)."""
     wrapper = tmp_path / "approve-bead"
     db, log = shlex.quote(str(tmp_path / "btq.json")), shlex.quote(str(tmp_path / "btq.log"))
-    wrapper.write_text(f"#!/bin/sh\nFAKE_BTQ_DB={db} FAKE_BTQ_LOG={log} exec {shlex.quote(sys.executable)} "
-                       f"{shlex.quote(str(FAKE_APPROVE_BEAD))} \"$@\"\n")
+    escape = f"HZ_ESCAPE_DIR={shlex.quote(str(escape_dir))} " if escape_dir is not None else ""
+    wrapper.write_text(f"#!/bin/sh\nFAKE_BTQ_DB={db} FAKE_BTQ_LOG={log} {escape}exec "
+                       f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_APPROVE_BEAD))} \"$@\"\n")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     return wrapper
 
