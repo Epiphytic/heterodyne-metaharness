@@ -28,7 +28,9 @@ controls:
   `<db dir>/<name>.go` before going on as normal;
 - `gate_ok` (default true) and `gate_reasons`: what btq's `approval_valid` says of a closed approval;
 - `after_decide`: fields merged into the bead once any decision run ends (to fail a read-back).
-Each run appends its PID to `<db dir>/pids`. It touches nothing outside the files named above.
+Each run appends its PID to `<db dir>/pids`. It touches nothing outside the files named above. The `held` and
+`descendant` grandchildren are sleepers (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`:
+they end themselves at the test's end.
 """
 
 import hashlib
@@ -40,6 +42,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import sleeper
 
 DB = Path(os.environ["FAKE_BTQ_DB"])
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -134,30 +138,35 @@ def spew(stdout_bytes: int) -> None:
 
 
 def hold_stdout() -> None:
-    """A grandchild in its own session (os.setsid, as no `setsid` binary is assumed) keeps stdout open. It
-    has left the process group before this returns: it says so on a pipe of its own."""
+    """A grandchild in its own session (a sleeper, tests/fakes/sleeper.py) keeps stdout open. It has left
+    the process group before this returns: it says so on a pipe of its own. Its PID is then written
+    (atomically)."""
     ready_r, ready_w = os.pipe()
-    code = f"import os, time\nos.setsid()\nos.write({ready_w}, b'1')\ntime.sleep(30)\n"
-    child = subprocess.Popen([sys.executable, "-c", code], stdout=sys.stdout, stderr=subprocess.DEVNULL,
-                             stdin=subprocess.DEVNULL, pass_fds=(ready_w,))
+    child = sleeper.spawn(os.environ.get(sleeper.ENV), new_session=True, ready_fd=ready_w, stdout=sys.stdout,
+                          stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
     os.close(ready_w)
     os.read(ready_r, 1)
-    (DB.parent / "held.pid").write_text(str(child.pid))
+    publish(DB.parent / "held.pid", child.pid)
 
 
 def descendant() -> None:
-    """A grandchild that stays in the process group, with its output off the pipes, and sleeps. Its PID is
+    """A grandchild (a sleeper) that stays in the process group, with its output off the pipes. Its PID is
     written (atomically) once it exists."""
-    pid = os.fork()
+    pid = sleeper.fork_held(os.environ.get(sleeper.ENV))
     if pid == 0:
-        null = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(null, 1)
-        os.dup2(null, 2)
-        time.sleep(60)
-        os._exit(0)
-    tmp = DB.parent / "descendant.pid.tmp"
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(null, 1)
+            os.dup2(null, 2)
+        finally:
+            sleeper.exec_sleeper()
+    publish(DB.parent / "descendant.pid", pid)
+
+
+def publish(path: Path, pid: int) -> None:
+    tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(str(pid))
-    tmp.replace(DB.parent / "descendant.pid")
+    tmp.replace(path)
 
 
 def write_decision(bead_id: str, f: dict[str, str | bool], by: str, close: bool) -> dict[str, Any]:

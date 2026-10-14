@@ -13,7 +13,8 @@ from heterodyne import platform
 
 # tmux_guard: test tmux servers are cleaned up even if pytest is killed.
 # tier_marks: the `slow` and `safety` markers.
-pytest_plugins = ("tmux_guard", "tier_marks")
+# escapes: long-lived test descendants end themselves, and each test proves it.
+pytest_plugins = ("tmux_guard", "tier_marks", "escapes")
 
 DISK_TMP_ENV = "HZ_TEST_DISK_TMP"     # set to 1 to keep pytest's default on-disk base temp
 

@@ -17,6 +17,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import sleeper
+from escapes import FAKES, Escapes
 from sandbox_env import fake_jwt, install_fake_cli
 from wsd_env import Clock, accounts_at
 
@@ -200,7 +202,7 @@ sys.path[:0] = [sys.argv[1]]
 from test_sandbox_hostread import Rig
 from heterodyne.sandbox import hostread
 from pathlib import Path
-rig = Rig(Path(sys.argv[2]), HZ_FAKE_RATE_FAULT="outlive")
+rig = Rig(Path(sys.argv[2]), HZ_FAKE_RATE_FAULT="outlive", HZ_ESCAPE_DIR=sys.argv[4])
 rig.reader.limit_seconds = 600
 if sys.argv[3] == "copied":
     hostread._usage_module = lambda: os.kill(os.getpid(), signal.SIGKILL)
@@ -228,36 +230,32 @@ def alive(pid: int) -> bool:
 
 
 @pytest.mark.parametrize("crash", ["copied", "started"])
-def test_a_crashed_read_is_recovered_at_the_next_start(tmp_path: Path, logged: Callable[[], list[str]],
-                                                       crash: str) -> None:
+def test_a_crashed_read_is_recovered_at_the_next_start(tmp_path: Path, escapes: Escapes,
+                                                       logged: Callable[[], list[str]], crash: str) -> None:
     """The reader is killed after the copy is written, or once its app-server runs. Its home, holding
     the copy, outlives it; so does the orphaned app-server. `recover` finds and removes both."""
     rig = Rig(tmp_path / "rig")
     reader = POPEN([sys.executable, "-c", CRASHING_READER, str(Path(__file__).parent),
-                    str(tmp_path / "crash"), crash],
+                    str(tmp_path / "crash"), crash, str(escapes.path)],
                    env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
     scratch = tmp_path / "crash" / "hostread"
     pid_file = tmp_path / "crash" / "read.pid"
-    try:
-        if crash == "started":
-            assert wait_for(pid_file.exists)
-            assert wait_for(lambda: pid_file.read_text().strip() != "")
-            reader.kill()
-        assert reader.wait(30) == -signal.SIGKILL
-        homes = list(scratch.iterdir())
-        assert len(homes) == 1 and (homes[0] / "auth.json").exists()        # the crash left the copy
-        orphan = int(pid_file.read_text()) if crash == "started" else None
-        if orphan is not None:
-            assert alive(orphan)                                # its timer died with the reader; it didn't
-        recover(scratch)
-        assert list(scratch.iterdir()) == []
-        if orphan is not None:
-            assert wait_for(lambda: not alive(orphan))
-        assert logged() == [DIAG_RECOVERED]
-        assert rig.read() == WANTED                             # another rig's reads are untouched
-    finally:            # `outlive` survives its reader on purpose: a failed assertion must not leak it
-        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
-            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    if crash == "started":          # `outlive` survives its reader on purpose, until the test ends
+        assert wait_for(pid_file.exists)
+        assert wait_for(lambda: pid_file.read_text().strip() != "")
+        reader.kill()
+    assert reader.wait(30) == -signal.SIGKILL
+    homes = list(scratch.iterdir())
+    assert len(homes) == 1 and (homes[0] / "auth.json").exists()        # the crash left the copy
+    orphan = int(pid_file.read_text()) if crash == "started" else None
+    if orphan is not None:
+        assert alive(orphan)                                # its timer died with the reader; it didn't
+    recover(scratch)
+    assert list(scratch.iterdir()) == []
+    if orphan is not None:
+        assert wait_for(lambda: not alive(orphan))
+    assert logged() == [DIAG_RECOVERED]
+    assert rig.read() == WANTED                             # another rig's reads are untouched
 
 
 def test_recover_leaves_other_processes_and_reports_a_kept_home(tmp_path: Path,
@@ -477,50 +475,42 @@ def test_a_home_without_this_boots_stamp(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_a_descendant_that_left_the_group_is_ended_before_the_home_goes(
-        tmp_path: Path, logged: Callable[[], list[str]]) -> None:
+        tmp_path: Path, escapes: Escapes, logged: Callable[[], list[str]]) -> None:
     """The client kills the app-server's process group; a descendant in a session of its own outlives
     it, holding the copy's CODEX_HOME. The read ends it before it removes the home and lets go."""
     child = tmp_path / "child.pid"
-    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
-    try:
-        assert rig.read() is None
-        assert logged() == [f"{DIAG_READ_FAILED}: TimeoutError"]
-        assert not alive(int(child.read_text()))                # ended before the read returned
-        assert rig.scratch_empty() and rig.server_gone()
-        assert rig.login.read_text() == rig.original
-    finally:
-        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
-            os.kill(int(child.read_text()), signal.SIGKILL)
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child), **escapes.env)
+    assert rig.read() is None
+    assert logged() == [f"{DIAG_READ_FAILED}: TimeoutError"]
+    assert not alive(int(child.read_text()))                # ended before the read returned
+    assert rig.scratch_empty() and rig.server_gone()
+    assert rig.login.read_text() == rig.original
 
 
 def test_a_descendant_that_cant_be_ended_keeps_the_home_for_recovery(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logged: Callable[[], list[str]]) -> None:
+        tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch,
+        logged: Callable[[], list[str]]) -> None:
     child = tmp_path / "child.pid"
-    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child))
+    rig = Rig(tmp_path, HZ_FAKE_RATE_FAULT="escaped", HZ_FAKE_CHILD_PID_FILE=str(child), **escapes.env)
     real_signal = signal.pidfd_send_signal
 
     def no_kill(fd: int, sig: int) -> None:
         if sig != signal.SIGKILL:
             real_signal(fd, sig)
 
-    try:
-        monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
-        monkeypatch.setattr(hostread, "RECOVER_SECONDS", 0.3)
-        assert rig.read() is None
-        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError"]
-        pid = int(child.read_text())
-        assert alive(pid)
-        [home] = list(rig.scratch.iterdir())                    # kept: the next start's only record of it
-        assert (home / "auth.json").exists()
-        monkeypatch.undo()
-        recover(rig.scratch)
-        assert wait_for(lambda: not alive(pid))
-        assert rig.scratch_empty()
-        assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError", DIAG_RECOVERED]
-    finally:
-        with contextlib.suppress(ProcessLookupError, FileNotFoundError, ValueError):
-            os.kill(int(child.read_text()), signal.SIGKILL)
-
+    monkeypatch.setattr(hostread.signal, "pidfd_send_signal", no_kill)
+    monkeypatch.setattr(hostread, "RECOVER_SECONDS", 0.3)
+    assert rig.read() is None
+    assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError"]
+    pid = int(child.read_text())
+    assert alive(pid)
+    [home] = list(rig.scratch.iterdir())                    # kept: the next start's only record of it
+    assert (home / "auth.json").exists()
+    monkeypatch.undo()
+    recover(rig.scratch)
+    assert wait_for(lambda: not alive(pid))
+    assert rig.scratch_empty()
+    assert logged() == [DIAG_SCRATCH_KEPT, f"{DIAG_READ_FAILED}: TimeoutError", DIAG_RECOVERED]
 
 # --- the scan's outcomes for a process it can't read through its leader (flakes2) ---
 
@@ -632,13 +622,13 @@ class Seam:
 
 
 @pytest.fixture
-def seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Seam]:
-    """A stamped home, then a child of the test started after it, and a record of what the scan does:
-    each SIGKILL it sends, by PID, and each removal."""
+def seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, escapes: Escapes) -> Iterator[Seam]:
+    """A stamped home, then a child of the test started after it (a sleeper of the test's use), and a
+    record of what the scan does: each SIGKILL it sends, by PID, and each removal."""
     scratch = tmp_path / "hostread"
     home = stamped(scratch)
     home.mkdir(parents=True)
-    child = POPEN([sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ})
+    child = sleeper.spawn(str(escapes.path), env={**os.environ})
     events: list[str] = []
     real_signal, real_rmtree = signal.pidfd_send_signal, shutil.rmtree
 
@@ -656,7 +646,7 @@ def seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Seam]:
     try:
         yield Seam(scratch, home, child, events)
     finally:
-        child.kill()
+        escapes.end()
         child.wait(10)
 
 
@@ -799,15 +789,15 @@ def test_an_exec_after_an_empty_read_settles_b2(monkeypatch: pytest.MonkeyPatch,
     killed_then_removed(seam, logged)
 
 
-def test_a_genuinely_empty_environment_keeps_the_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                      fake_time: FakeTime,
+def test_a_genuinely_empty_environment_keeps_the_home(tmp_path: Path, escapes: Escapes,
+                                                      monkeypatch: pytest.MonkeyPatch, fake_time: FakeTime,
                                                       logged: Callable[[], list[str]]) -> None:
     """Fail-closed and accepted (r2): a live process of this user with no environment at all, started
     after the home, can't be told from an exec that raced an empty read."""
     scratch = tmp_path / "hostread"
     home = stamped(scratch)
     home.mkdir(parents=True)
-    bare = POPEN([shutil.which("sleep") or "/bin/sleep", "60"], env={})
+    bare = sleeper.spawn(str(escapes.path), env={})
     try:
         assert Path(f"/proc/{bare.pid}/environ").read_bytes() == b""
         Scripted(monkeypatch, bare.pid, [{}])                     # the real reads, the scan alone with it
@@ -817,35 +807,52 @@ def test_a_genuinely_empty_environment_keeps_the_home(tmp_path: Path, monkeypatc
         assert home.exists() and open_fds() == before and bare.poll() is None
         assert logged() == [DIAG_RECOVERY_KEPT]
     finally:
-        bare.kill()
+        escapes.end()
         bare.wait(10)
 
 
-def test_the_read_path_settles_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_the_read_path_settles_too(tmp_path: Path, escapes: Escapes, monkeypatch: pytest.MonkeyPatch,
                                    logged: Callable[[], list[str]]) -> None:
     """An unrelated process exiting during the read's own scan no longer discards the read."""
     rig = Rig(tmp_path)
-    bystander = POPEN([sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ})
+    bystander = sleeper.spawn(str(escapes.path), env={**os.environ})
     try:
         Scripted(monkeypatch, bystander.pid, [EXITING, DEAD], alone=False)
         assert rig.read() == WANTED
         assert logged() == []
         assert rig.scratch_empty() and bystander.poll() is None
     finally:
-        bystander.kill()
+        escapes.end()
         bystander.wait(10)
 
 
 ZOMBIE_LEADER = r"""
-import ctypes, os, sys, threading, time
+import ctypes, os, sys, threading
+sys.path[:0] = [sys.argv[1]]
+import sleeper
+use, census = sys.argv[2], int(sys.argv[3])     # the test's use, and its census, held from the spawn
 def worker():
-    if len(sys.argv) > 1:                       # wait for a byte, then exec a sleeper (same environment)
-        os.read(int(sys.argv[1]), 1)
-        os.execv(sys.argv[2], [sys.argv[2], "60"])
-    time.sleep(60)
+    if len(sys.argv) > 4:                       # wait for a byte, then exec a sleeper (same environment)
+        os.read(int(sys.argv[4]), 1)
+        argv = sleeper.sleeper_argv(use, census)
+        os.execv(argv[0], argv)
+    sleeper.wait_for_release(use)               # ends itself at the test's end, if nothing killed it
+    os._exit(0)
 threading.Thread(target=worker).start()
 ctypes.CDLL(None).pthread_exit(None)
 """
+
+
+def zombie_leader(escapes: Escapes, home: Path, *fds: int) -> "tuple[subprocess.Popen[bytes], int]":
+    """ZOMBIE_LEADER, holding the use's census from birth (as the fd it returns), so the test's end proves
+    it gone."""
+    census = sleeper.held_census(str(escapes.path))
+    try:
+        child = POPEN([sys.executable, "-c", ZOMBIE_LEADER, str(FAKES), str(escapes.path), str(census),
+                       *map(str, fds)], pass_fds=(census, *fds), env={**os.environ, "CODEX_HOME": str(home)})
+        return child, census
+    finally:
+        os.close(census)
 
 
 def a_zombie_leader(pid: int) -> bool:
@@ -854,12 +861,12 @@ def a_zombie_leader(pid: int) -> bool:
     return facts["State"].split()[0] == "Z" and int(facts["Threads"]) >= 2
 
 
-def test_a_live_zombie_leader_is_killed_before_its_home_goes(tmp_path: Path,
+def test_a_live_zombie_leader_is_killed_before_its_home_goes(tmp_path: Path, escapes: Escapes,
                                                             logged: Callable[[], list[str]]) -> None:
     scratch = tmp_path / "hostread"
     home = stamped(scratch)
     home.mkdir(parents=True)
-    child = POPEN([sys.executable, "-c", ZOMBIE_LEADER], env={**os.environ, "CODEX_HOME": str(home)})
+    child, _ = zombie_leader(escapes, home)
     try:
         assert wait_for(lambda: a_zombie_leader(child.pid))       # else recover could kill it too early
         recover(scratch)
@@ -867,12 +874,13 @@ def test_a_live_zombie_leader_is_killed_before_its_home_goes(tmp_path: Path,
         assert not os.path.lexists(home)
         assert logged() == [DIAG_RECOVERED]
     finally:
-        child.kill()
+        escapes.end()
         child.wait(10)
 
 
 @pytest.mark.parametrize("hooked", ["_status", "_environ"], ids=["between", "before"])
-def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, escapes: Escapes,
+                                                        monkeypatch: pytest.MonkeyPatch,
                                                         logged: Callable[[], list[str]], hooked: str) -> None:
     """A zombie leader's worker execs as the scan reaches the process. Hooked on `status`, the leader
     environ was the zombie's and status is the new image's: nothing is proven, so the home is kept, and
@@ -881,10 +889,8 @@ def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, monkeypa
     scratch = tmp_path / "hostread"
     home = stamped(scratch)
     home.mkdir(parents=True)
-    sleeper = os.path.realpath(shutil.which("sleep") or "/bin/sleep")
     r, w = os.pipe()
-    child = POPEN([sys.executable, "-c", ZOMBIE_LEADER, str(r), sleeper], pass_fds=(r,),
-                  env={**os.environ, "CODEX_HOME": str(home)})
+    child, census = zombie_leader(escapes, home, r)
     os.close(r)
     try:
         assert wait_for(lambda: a_zombie_leader(child.pid))
@@ -892,15 +898,19 @@ def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, monkeypa
         fired: list[bool] = []
 
         def exe() -> str:
+            """The running image: its command line (a zombie leader's reads empty), as the new image
+            is the same interpreter as the old."""
             with contextlib.suppress(OSError):
-                return str(Path(f"/proc/{child.pid}/exe").readlink())
+                return Path(f"/proc/{child.pid}/cmdline").read_text()
             return ""
+
+        sleeper_image = "\0".join(sleeper.sleeper_argv(str(escapes.path), census)) + "\0"
 
         def exec_first(pid: str, *rest: Any) -> Any:
             if pid == str(child.pid) and not fired:
                 fired.append(True)
                 os.write(w, b"x")
-                assert wait_for(lambda: exe() == sleeper)
+                assert wait_for(lambda: exe() == sleeper_image)
             assert real is not None
             return real(pid, *rest)
 
@@ -918,5 +928,5 @@ def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, monkeypa
         assert not os.path.lexists(home)
     finally:
         os.close(w)
-        child.kill()
+        escapes.end()
         child.wait(10)

@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import IO, Any
 
 import pytest
+from escapes import FAKES, Escapes
 from sandbox_env import wait_for
 
 from heterodyne.agents.codex import Codex
@@ -639,16 +640,18 @@ def test_a_capture_past_its_deadline_is_killed_reaped_and_fails(tmp_path: Path) 
         os.waitpid(int(pid.read_text()), os.WNOHANG)
 
 
-def test_a_capture_held_open_after_the_program_exits_ends_at_the_deadline(tmp_path: Path) -> None:
+def grandchild_code(use: Path | None, pid_file: Path) -> str:
+    """A program that starts a sleeper (tests/escapes.py) of `use`, which keeps its output open, writes the
+    sleeper's PID to `pid_file`, and exits 0."""
+    return (f"import sys; sys.path.insert(0, {str(FAKES)!r}); import sleeper; "
+            f"p = sleeper.spawn({None if use is None else str(use)!r}); "
+            f"open({str(pid_file)!r}, 'w').write(str(p.pid))")
+
+
+def test_a_capture_held_open_after_the_program_exits_ends_at_the_deadline(tmp_path: Path,
+                                                                          escapes: Escapes) -> None:
     """The program exits 0, but something it started keeps the socket open: the read is bounded by the
     same deadline, and the result fails, whatever the program's own exit status."""
     captured = probe_function("captured")
-    grandchild = tmp_path / "grandchild"
-    try:
-        rc, _ = captured(py("import subprocess, sys; p = subprocess.Popen([sys.executable, '-I', '-c', "
-                            "'import time; time.sleep(60)']); "
-                            f"open({str(grandchild)!r}, 'w').write(str(p.pid))"), seconds=1)
-        assert rc == "timeout"
-    finally:
-        if grandchild.exists() and grandchild.read_text():
-            os.kill(int(grandchild.read_text()), 9)
+    rc, _ = captured(py(grandchild_code(escapes.path, tmp_path / "grandchild")), seconds=1)
+    assert rc == "timeout"
