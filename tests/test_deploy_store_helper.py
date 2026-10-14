@@ -523,13 +523,15 @@ def test_the_rollback_stops_every_helper_before_it_removes_the_store_or_the_owne
     text = block("rollback")
     order = ["systemctl disable --now heterodyne-store-helper.socket",
              "systemctl stop 'heterodyne-store-helper@*.service'",
-             "systemctl list-units --all --plain --no-legend 'heterodyne-store-helper@*'",
+             "systemctl list-units --plain --no-legend --state=active,activating,deactivating "
+             "'heterodyne-store-helper@*'",
              "pgrep -u heterodyne-store",
              "rm -r /var/lib/heterodyne",
              "userdel heterodyne-store"]
     at = [text.find(step) for step in order]
     assert -1 not in at and at == sorted(at), at
     first, *body, last = text.split("\n\n")[0].splitlines(keepends=True)
+    last += "\n"                       # the blank line after the heredoc took its newline
     assert (first, last) == ("sudo bash -euo pipefail -s <<'STOP'\n", "STOP\n")
     out = subprocess.run(["bash", "-n"], input="".join(body), capture_output=True, text=True, timeout=60,
                          check=False)

@@ -9,50 +9,84 @@ helper (`store_core.py`), which systemd starts as `heterodyne-store` for each co
 | --- | --- |
 | `heterodyne-store-helper.socket` | `/run/heterodyne-store/helper.sock`, 0660, owned by `heterodyne-store`; `Accept=yes`, so each connection gets its own helper |
 | `heterodyne-store-helper@.service` | the helper for one connection, which arrives on stdin, run as `heterodyne-store` under a strict sandbox |
-| `setup-store.sh` | creates the user, the store, the helper copy, the helper's config and the socket's group drop-in (step 3) |
+| `setup-store.sh` | creates the user, the store, the helper copy, the helper's config and the socket's group drop-in (step 3), from a staged tree |
+| `manifest.sh` | prints the sums the execution approval pins for step 3 (unprivileged) |
 
 `tests/test_deploy_store_helper.py` checks all of this offline:
 - the units pass `systemd-analyze verify` with no output;
 - their keys match the plan and the paths the harness reads (`[harnesses]` in `defaults.toml`, `settings.STORE`, `store_core.CONFIG`);
 - the units' command line serves a request;
-- the script passes `bash -n`;
-- its dry run lists every change and makes none, and each refusal is checked.
+- both scripts pass `bash -n`;
+- the script's dry run lists every change and makes none, and each refusal is checked;
+- the step-3, step-4, step-6 and rollback blocks below run (or parse) as written, including step 3 against a planted replacement ref.
 
 ## Departures from the plan's unit text
 
 - **`ExecStart` passes `--config /etc/heterodyne/store-helper.json`, not `serve`.** `store_core.main` takes only `--config`; a `serve` argument would fail argument parsing on every connection. The path is the helper's own default, given explicitly so that the unit states it.
 - **`SocketGroup=` is in a drop-in, not in the unit.** The group is the service user's, so it differs per host. `setup-store.sh` writes `/etc/systemd/system/heterodyne-store-helper.socket.d/10-group.conf` (`[Socket]` `SocketGroup=<group>`), and the unit files stay as committed, byte for byte.
 
+## Where root's trust comes from
+
+The checkout belongs to the service user, who can change any file in it, or what git reports for a commit (a `refs/replace/` ref), after any check. So root never runs, reads or installs anything from the checkout. Step 3:
+1. archives the pinned commit as the service user, with replacement refs ignored (`GIT_NO_REPLACE_OBJECTS=1`, no git config, no hooks), into `/run/heterodyne-store-setup`, a directory only root can enter;
+2. checks the archive against the sha256 that the execution approval names, **before** extracting it;
+3. extracts it, and checks each file against the approval's sums;
+4. runs the staged `setup-store.sh`, which installs the staged helper.
+
+Step 4 installs the units from the same stage. The sums come from `manifest.sh`, which the lead runs on the merged commit, unprivileged, and pastes into the approval. It builds the archive the same way, so the sums hold only for the commit's own bytes. Anything else makes `sha256sum` fail, and since step 3 is one `bash -e` script, nothing after that runs.
+
 ## Preview (no root, changes nothing)
 
-Run this from a checkout at the pinned commit, as the service user:
+Run this as the service user, from a checkout that has the pinned commit:
 
 ```bash
-bash deploy/store-helper/setup-store.sh --dry-run --commit <pinned commit> --service-user "$(id -un)"
+stage=$(mktemp -d)
+git archive <pinned commit> -- deploy/store-helper src/heterodyne/harness/resources/store_core.py | tar -x -C "$stage"
+bash "$stage/deploy/store-helper/setup-store.sh" --dry-run --staged "$stage" --service-user "$(id -un)"
+rm -rf "$stage"
 ```
 
 The dry run runs every check. It prints `ok: <what>` for what is already in place and `would: <command>` for each change, ending with `done`. A failed check prints `refused: <check>` on stderr and exits 1. Usage errors exit 2. A dry run by any other user refuses, because only the service user can answer the "writable by the service user" check.
 
 ## The root commands (T12b, steps 3–6)
 
-These are the commands the execution approval names. `<checkout>` is a clean checkout owned by the service user, at `<pinned commit>`. `<service user>` is the user `wsd` runs as. Nothing here runs before that approval.
+These are the commands the execution approval names. Nothing here runs before that approval. The approval fills in:
+- `<checkout>`: a checkout that has `<pinned commit>`;
+- `<service user>`: the user `wsd` runs as;
+- the two sums placeholders, with `manifest.sh`'s output for `<pinned commit>` (its first line, then the rest);
+- `<run checkout>` (step 6): the checkout heterodyne runs from.
 
 ### Step 3: the user, the store and the helper copy
 
-```bash
-cd <checkout>
-sudo bash deploy/store-helper/setup-store.sh --commit <pinned commit> --service-user <service user>
+```bash step-3
+sudo bash -euo pipefail -s <<'STEP3'
+umask 077
+stage=/run/heterodyne-store-setup
+mkdir -m 0700 "$stage" "$stage/tree"
+cd /
+runuser -u <service user> -- env -i PATH=/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null git -C <checkout> -c core.hooksPath=/dev/null archive --format=tar \
+    <pinned commit> -- deploy/store-helper src/heterodyne/harness/resources/store_core.py >"$stage/archive.tar"
+cd "$stage"
+sha256sum --check --strict --quiet <<'SUMS'
+<the archive line from manifest.sh>
+SUMS
+tar -x --no-same-owner --no-same-permissions -C tree -f archive.tar
+sha256sum --check --strict --quiet <<'SUMS'
+<the tree lines from manifest.sh>
+SUMS
+bash tree/deploy/store-helper/setup-store.sh --staged "$stage/tree" --service-user <service user>
+STEP3
 ```
 
-The script runs every check before it makes any change. It refuses if:
-- the checkout's HEAD is not the commit, or its `deploy/store-helper` differs from it;
-- the service user is root or doesn't exist;
-- an existing `heterodyne-store` has uid 0, the service user's uid, or a login shell;
-- any component of the paths below, from `/` down, is a symlink, isn't a directory, or is writable by the service user;
-- `/var/lib/heterodyne` or `/var/lib/heterodyne/harnesses` (or one of the other directories) exists with another owner;
-- a file it writes exists and isn't a regular file.
-
-Root never runs git from the checkout. The helper copy is read with `git cat-file` as the service user, and then installed by root. Every change is printed before it runs (`change: ...`), and anything already correct is reported `ok:`, so running the script again is safe.
+- `mkdir` fails if the stage already exists (from an earlier attempt). Remove it with `sudo rm -r /run/heterodyne-store-setup`, and start again. The stage is on tmpfs, so a reboot also removes it.
+- `setup-store.sh` checks the stage (root's, 0700), then the staged helper (a regular file that parses), and then the host, before it makes any change. It refuses if:
+  - the service user is root or doesn't exist;
+  - an existing `heterodyne-store` has uid 0, the service user's uid, or a login shell;
+  - any component of the paths below, from `/` down, is a symlink, isn't a directory, is owned by the service user, or is writable by them;
+  - `/var/lib/heterodyne` or `/var/lib/heterodyne/harnesses` (or one of the other directories) exists with another owner;
+  - a file it writes exists and isn't a regular file.
+- Every change is printed before it runs (`change: ...`), and anything already correct is reported `ok:`, so running the step again is safe.
 
 | Change | Undo |
 | --- | --- |
@@ -62,24 +96,25 @@ Root never runs git from the checkout. The helper copy is read with `git cat-fil
 | `install -d -o root -g root -m 0755 /usr/local/libexec/heterodyne` | `rmdir /usr/local/libexec/heterodyne` |
 | `install -d -o root -g root -m 0755 /etc/heterodyne` | `rmdir /etc/heterodyne` |
 | `install -d -o root -g root -m 0755 /etc/systemd/system/heterodyne-store-helper.socket.d` | `rmdir` it |
-| `install -o root -g root -m 0644 <staged> /usr/local/libexec/heterodyne/store_core.py` (the helper at the commit) | `rm` it |
-| `install -o root -g root -m 0644 <staged> /etc/heterodyne/store-helper.json` (`{"service_uid": <uid>, "store": "/var/lib/heterodyne/harnesses"}`) | `rm` it |
-| `install -o root -g root -m 0644 <staged> /etc/systemd/system/heterodyne-store-helper.socket.d/10-group.conf` (`SocketGroup=<group>`) | `rm` it |
+| `install -o root -g root -m 0644 <stage>/tree/src/heterodyne/harness/resources/store_core.py /usr/local/libexec/heterodyne/store_core.py` | `rm` it |
+| `install -o root -g root -m 0644 <generated> /etc/heterodyne/store-helper.json` (`{"service_uid": <uid>, "store": "/var/lib/heterodyne/harnesses"}`) | `rm` it |
+| `install -o root -g root -m 0644 <generated> /etc/systemd/system/heterodyne-store-helper.socket.d/10-group.conf` (`SocketGroup=<group>`) | `rm` it |
+| the stage `/run/heterodyne-store-setup` (removed at the end of step 4) | `rm -r` it |
 
 A directory that already exists with the right owner but a different mode gets `chmod 0755` instead of `install -d`. Its undo is `chmod` back to the mode the dry run showed.
 
 ### Step 4: the units
 
-```bash
-cd <checkout>
-sudo install -m 0644 deploy/store-helper/heterodyne-store-helper.socket deploy/store-helper/heterodyne-store-helper@.service \
-     /etc/systemd/system/
+```bash step-4
+sudo install -o root -g root -m 0644 /run/heterodyne-store-setup/tree/deploy/store-helper/heterodyne-store-helper.socket \
+     /run/heterodyne-store-setup/tree/deploy/store-helper/heterodyne-store-helper@.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now heterodyne-store-helper.socket
+sudo rm -r /run/heterodyne-store-setup
 ```
 
-- These commands add the two unit files, plus the `sockets.target.wants/` symlink that `enable` creates, and start listening on `/run/heterodyne-store/helper.sock`.
-- To undo: `systemctl disable --now heterodyne-store-helper.socket`, `rm` both unit files, then `systemctl daemon-reload`.
+- These commands add the two unit files (the staged, checked copies), plus the `sockets.target.wants/` symlink that `enable` creates, start listening on `/run/heterodyne-store/helper.sock`, and remove the stage.
+- To undo: the first part of Rollback.
 
 ### Step 5: verity on `/var/lib`'s filesystem
 
@@ -105,17 +140,45 @@ sudo tune2fs -l <device> | command grep -i '^filesystem features'   # confirm: l
 
 ### Step 6: the host config
 
-This step needs the operator's go for the config change.
-1. Remove `[harnesses] fallback = true` from the host config if it was set.
-2. Run `heterodyne config check`. It must report no store problem and no `HELPER_DRIFT`.
-3. Restart `wsd`.
+This step needs the operator's go for the config change. Run it as the service user, not root:
 
-To undo, put `fallback = true` back and restart `wsd`.
+```bash step-6
+cfg=${HETERODYNE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/heterodyne}/config.toml
+cp -p -- "$cfg" "$cfg.bak-t12b"
+sed -i '/^\[harnesses\][[:space:]]*$/,/^\[/{/^[[:space:]]*fallback[[:space:]]*=[[:space:]]*true[[:space:]]*$/d}' "$cfg"
+uv run --offline --project <run checkout> heterodyne config check
+```
+
+- `cfg` is the host config, resolved the way `heterodyne` resolves it. The `sed` deletes only a `fallback = true` line in the `[harnesses]` table. It touches no other table, including `[harnesses.<adapter>]`, and it leaves the backup `config.toml.bak-t12b`.
+- `config check` must report no store problem and no `HELPER_DRIFT`.
+- To undo: `mv "$cfg.bak-t12b" "$cfg"`.
+- `wsd`: on this host (checked 2026-10-14), `wsd` runs under no unit and isn't running, so there is nothing to restart and the restart is not applicable. If `wsd` runs under a unit by execution time, the approval names it, and the restart is `systemctl --user restart <that unit>`.
 
 ## Rollback
 
-1. Run `systemctl disable --now heterodyne-store-helper.socket`. Then `rm /etc/systemd/system/heterodyne-store-helper.socket /etc/systemd/system/heterodyne-store-helper@.service`, followed by `rm -r /etc/systemd/system/heterodyne-store-helper.socket.d` and `systemctl daemon-reload`.
-2. Run `rm /usr/local/libexec/heterodyne/store_core.py /etc/heterodyne/store-helper.json`, then `rmdir /usr/local/libexec/heterodyne /etc/heterodyne`.
-3. Remove `/var/lib/heterodyne` only if it is empty, or after `wsctl harness list` shows that nothing in the store is in use.
-4. Run `userdel heterodyne-store`. This comes after step 3, so that no file is left owned by a uid with no user.
-5. Leave the ext4 `verity` feature set. `tune2fs` doesn't clear it, and it is harmless without the store.
+```bash rollback
+sudo bash -euo pipefail -s <<'STOP'
+systemctl disable --now heterodyne-store-helper.socket
+systemctl stop 'heterodyne-store-helper@*.service'
+left=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'heterodyne-store-helper@*')
+[[ -z $left ]] || { echo "refused: a helper instance is still running" >&2; exit 1; }
+if pgrep -u heterodyne-store >/dev/null; then
+    echo "refused: a process still runs as heterodyne-store" >&2
+    exit 1
+fi
+STOP
+
+sudo rm /etc/systemd/system/heterodyne-store-helper.socket /etc/systemd/system/heterodyne-store-helper@.service
+sudo rm -r /etc/systemd/system/heterodyne-store-helper.socket.d
+sudo systemctl daemon-reload
+sudo rm /usr/local/libexec/heterodyne/store_core.py /etc/heterodyne/store-helper.json
+sudo rmdir /usr/local/libexec/heterodyne /etc/heterodyne
+sudo rm -r /var/lib/heterodyne
+sudo userdel heterodyne-store
+```
+
+1. The first part disables the socket, which stops new connections, and then stops every `heterodyne-store-helper@` instance, since `Accept=yes` instances outlive their socket. It stops with `refused:` if any instance is still running, or if any process still runs as `heterodyne-store`. Nothing after it runs until it passes: the store, its owner and an install in progress all stay.
+2. Then the units, the drop-in, the helper copy and the config are removed.
+3. Run `sudo rm -r /var/lib/heterodyne` only if it is empty, or after `wsctl harness list` shows that nothing in the store is in use.
+4. Run `userdel` last, so that no file is left owned by a uid with no user.
+5. The ext4 `verity` feature stays set. `tune2fs` doesn't clear it, and it is harmless without the store.
