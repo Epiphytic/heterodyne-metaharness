@@ -4,6 +4,7 @@ Base: origin/main 0ac8c92.
 
 Files involved:
 - `src/heterodyne/sandbox/hostread.py` (`_holders`, `_ruled_out`, `_end_holders`)
+- Review: `docs/reviews/flakes2-design-r1.md` (REVISE)
 - `tests/test_sandbox_hostread.py`
 - `tests/fakes/fake_agent_cli.py` (the fake app-server)
 - `tests/test_session_git.py` (`test_snapshot_refuses_links_special_files_and_hard_links`)
@@ -12,7 +13,7 @@ Files involved:
 - **Hostread's main flake is a production bug.** The holder scan reads *any* exiting process of this user as one it can't rule out. It then gives up on the whole scan. On a busy host this discards reads and leaves the copied login on disk until the next start. The fix changes production.
 - **A second, smaller hostread flake is in the test.** Its "orphaned" fake app-server exits as soon as its reader dies.
 - **The `[fifo]` flake is in the test.** A plant collides with the commit's random fan-out directory.
-- **A related production gap was found on the way:** a process whose main thread has exited is ruled out as a zombie while its other threads still run. The design proposes a fix; whether it goes in this bead is the lead's call.
+- **A related production gap was found on the way, and is in scope:** a process whose main thread has exited is cleared as a zombie while its other threads still run. The fix requires proof that the whole thread group is dead.
 - No assertion is removed or weakened.
 
 ## The flakes
@@ -102,71 +103,138 @@ No run showed the `[signal]` fd count (`:325`) failing. Every `[signal]` failure
 - 12 runs of `session_commits` gave fan-out directories `9b`, `fc` and one random directory (`0b`, `9f`, `a2`, `bd`, `59`, `12`, `d9`, `7b`, `36`, `d4`, `6a`, `fc`).
 - The CI failure is the `cd` case. It is not load-related.
 
-## Finding (production, pre-existing): a process whose main thread exited is ruled out as a zombie
+## Finding (production, pre-existing): a zombie leader with live threads is cleared as a zombie
 
-- `_ruled_out` treats `Z` as "holds nothing" (`:173`).
-- When a process's main thread exits (`pthread_exit`) while other threads run, `/proc/<pid>/stat` shows `Z` and `PF_EXITING`, and `/proc/<pid>/environ` is EACCES. But the process is alive.
-- Probe: a Python child whose main thread called `pthread_exit` with one other thread sleeping showed `Z`, flags & 4, environ EACCES, with 2 tasks. `/proc/<pid>/task/<tid>/environ` of the live thread reads normally.
-- Such a holder is ruled out and never killed, and its home is removed under it. That breaks the "removed only once a complete scan finds none" rule.
-- It is unlikely for the codex app-server, but a descendant can do it.
+In scope (lead, 2026-10-14). It is a fail-closed gap in the same function.
+
+- `_ruled_out` treats `Z`/`X` as "holds nothing" (`:173`).
+- A process whose main thread has exited (`pthread_exit`) while other threads run is still alive. Its `/proc/<pid>/stat` shows `Z` with `PF_EXITING`.
+- Its leader-level `/proc/<pid>/environ` doesn't give its environment:
+  - on 6.17 it is EACCES, seen by probe;
+  - the kernel also allows an empty read (`environ_read` with no `env_end`, v6.12);
+  - or `ESRCH` when the leader's memory map is gone (`__mem_open`, v6.17).
+- Today each of those outcomes clears the process without checking its thread group:
+  - EACCES goes to `_ruled_out`, where `Z` clears it;
+  - an empty environ doesn't match, so the pidfd is closed;
+  - `ProcessLookupError` is taken as "gone" (`:203`).
+- So a live holder is never killed, and its home is removed under it. That breaks "removed only once a complete scan finds none".
+
+**Evidence (probes, Python 3.12, 6.17).**
+- A child whose main thread called `pthread_exit` with one other thread sleeping showed:
+  - `stat` `Z` with flags & 4, leader environ EACCES and 2 entries in `task/`;
+  - `/proc/<pid>/status` `Threads: 2`;
+  - a working `pidfd_open` and signal 0;
+  - a readable `/proc/<pid>/task/<tid>/environ` for the worker.
+- A pidfd SIGKILL ended the whole group: `wait()` returned -9.
+- A true zombie showed `Z`, flags & 4 and `Threads: 1`.
 
 ## The fix
 
-1. **Production: an exiting process makes the scan settle, not fail** (`hostread.py`).
-   - On `PermissionError` for a process `_ruled_out` doesn't clear, read its `stat` flags.
-     - If `PF_EXITING` is set, the scan is *settling*. Close that pidfd, send it nothing, and go on to the next process.
-     - Otherwise raise `_Unknown`, as now. A live non-dumpable process is still an unknown.
-   - `_holders` returns `(holders, settling)`.
-   - `_end_holders` loops while either is non-empty: it SIGKILLs only `holders`, sleeps 50 ms and scans again. At the deadline it raises `TimeoutError`, as now.
-   - A home is still removed only after a scan that found no holder *and* no settling process.
-   - So an exiting process can delay removal by its exit time, a few ms, but it can never cause it.
-   - Nothing new is ruled out. An exiting process is waited for, not cleared.
-   - The docstrings of `_holders` and `_ruled_out` drop "a zombie's environment is empty" and say what the kernel does.
-2. **Production: a zombie leader with live threads is not ruled out** (the finding; scope is the lead's call).
-   - In `_ruled_out`, `Z`/`X` clears a process only if `/proc/<pid>/task` lists no task but the leader.
-   - Otherwise the scan reads the environment through a live thread (`/proc/<pid>/task/<tid>/environ`) and treats that process like any other, as a holder if it matches. If no thread's environment can be read, it is not ruled out, so fix 1's `PF_EXITING` rule makes the scan settle until the deadline. That is fail-closed.
-3. **Test: a fake app-server that outlives its reader.**
-   - Add a fault value, `HZ_FAKE_RATE_FAULT=outlive`, to `fake_agent_cli.py`. It never answers, like `hang`. After stdin's EOF it keeps sleeping until killed.
-   - `CRASHING_READER` uses it.
-   - `hang` keeps exiting at EOF for `test_sandbox_runtime.py:2311`.
-   - Document it in the fake's header with the other faults.
-4. **Test: `alive()` reads state, not the environment.** A process is alive if its `/proc/<pid>/stat` exists, its state isn't `Z`/`X` and `PF_EXITING` is clear. It no longer raises for a process that is dying, and it no longer depends on what a dying process's environ reads.
-5. **Test: plant into a fan-out directory that isn't there.**
+### Production (`hostread.py`): what a scan learns about each process
+
+The scan reads, in this order and each after the last:
+1. the leader's environ;
+2. `stat` (state, flags);
+3. when needed, `status` (`Uid:`, `Threads:`).
+
+That order matters. The kernel sets `PF_EXITING` before it tears down the memory map, and never clears it. Each process then ends in one of four outcomes.
+
+| Outcome | Effect on the scan |
+|---|---|
+| **match** | pidfd kept and SIGKILLed |
+| **clear** | pidfd closed; not a holder |
+| **settle** | pidfd closed, nothing sent; the scan is not complete and runs again |
+| **unknown** | `_Unknown`: the scan fails at once, and its homes are kept |
+
+The leader's environ read leads to one of these outcomes:
+
+- **Non-empty environment.** As today: match if it holds a mark, clear if not. The pidfd signal-0 identity check is unchanged.
+- **Empty, EACCES or ESRCH.** None of these alone proves anything. Read `stat`, then go through these rules in order:
+  1. **Group dead:** state `Z`/`X` *and* `Threads: 1` in `status`, read after `stat` → clear.
+     - `Threads:` is the kernel's count of the group's unreleased threads (`signal->nr_threads`). It does not depend on listing `task/`. A worker leaves the count only once it has finished exiting, so a worker still exiting keeps it above 1.
+     - A zombie leader is released only after the group is empty, so `Z` with `Threads: 1` means no thread is left.
+     - This is the only way a `Z` process is cleared. `PF_EXITING` belongs to one task and never by itself shows the group is dead.
+  2. **Zombie leader with live threads:** state `Z`/`X` and `Threads:` above 1. Read the environment through the workers:
+     - list `/proc/<pid>/task`;
+     - for each tid other than the leader, read `/proc/<pid>/task/<tid>/environ`. The threads share one memory map, so one successful non-empty read is the group's environment.
+     - The first such read decides match or clear, after the same pidfd signal-0 check.
+     - A worker that is gone (`FileNotFoundError`, `ProcessLookupError`), refused (EACCES) or empty is skipped, and the next one is tried. These errors are handled per task and never reach the per-process handler, so they never skip the whole process.
+     - If no worker gives a readable environment → **settle**. That includes a listing that shows no worker even though `Threads:` is above 1 (truncated enumeration: `next_tid` stops when its current task loses its PID).
+  3. **Exiting:** `PF_EXITING` set → **settle**. A single-threaded process mid-exit lands here and is cleared by rule 1 once it is `Z`.
+  4. **Otherwise**, the leader is running and not exiting:
+     - *Empty:* a genuine empty environment, because the memory map was present when the environ was read. Otherwise `PF_EXITING` would have been set by the `stat` read. → **clear**, as today.
+     - *EACCES:* `_ruled_out`'s other two rules as today: another user's, or started before the earliest home → clear. Otherwise → **unknown**, as today. A live non-dumpable process of this user is still an unknown.
+     - *ESRCH:* there is no memory map, but the process is neither exiting nor a zombie. This should not happen for a user process. → **unknown**.
+- **`/proc/<pid>` itself is gone** (`stat` or `status` raises `FileNotFoundError` or `ProcessLookupError`) → clear, as today. The PID directory outlives every thread of the group, so its absence means the group is gone.
+
+`_holders` returns `(holders, settling)`. `_end_holders`:
+- loops while either is non-empty;
+- SIGKILLs only `holders`, through their pidfds. A pidfd SIGKILL ends the whole group.
+- **closes every pidfd it collected in a `finally`, before it checks the deadline**;
+- sleeps 50 ms and scans again.
+
+The deadline rules:
+- At the deadline it raises `TimeoutError`, whether the last scan found holders or was settling. **A timeout while settling keeps every home**, exactly as a timeout with holders does.
+- An **unknown** raises at once. It never waits for the deadline.
+- A home is removed only after one scan that found no holder, no settling process and no unknown.
+
+Waiting and rescanning stay conservative across exec and PID reuse. A rescan sees whatever process holds the PID then, with a fresh pidfd. `_ruled_out` and `_holders` get docstrings that say all of this, and the false "a zombie's environment is empty" is removed.
+
+### Tests and fakes
+
+1. **`HZ_FAKE_RATE_FAULT=outlive`** in `fake_agent_cli.py`: an app-server that outlives its reader.
+   - It never answers, like `hang`. It survives EOF at both points where the fake can meet it: in the unanswered-request path, after `sys.stdin.read()`, and when the `for line in sys.stdin` loop ends before any request arrives. In both it sleeps until it is killed.
+   - It is documented in the fake's header with the other faults.
+   - `hang` keeps exiting at EOF, which `test_sandbox_runtime.py:2311` relies on.
+2. **`CRASHING_READER` uses `outlive`.** `test_a_crashed_read_is_recovered_at_the_next_start` gets a `finally` that SIGKILLs the orphan by its PID, read from the PID file, with `ProcessLookupError` and a missing or empty file suppressed. The fake now outlives its reader on purpose, so a failing assertion must not leak it.
+3. **`alive()` reads state, not the environment.** A process is alive if its `stat` exists, its state isn't `Z`/`X` and `PF_EXITING` is clear. That is enough for this file's fixtures, which are all single-threaded. It is not used to show that a group has died; the zombie-leader tests wait on the whole group (below).
+4. **Plant into a fan-out directory that isn't there.**
    - A helper `absent_fanout(private) -> str` returns the first of `00`…`ff` with no entry under `private/objects`.
    - The `fifo` and `object-dir-link` plants use it in place of `cd` and `ab`.
-   - The plant is still a real fan-out directory holding a 38-character name, so the snapshot's checks see the same shape.
-6. **Test: drop the zombie wait in `test_an_app_server_that_cannot_be_reaped_is_no_reading`.**
-   - `once_a_zombie` (`:370`) was added in T8 r3 to step around root cause 1: the read's own scan meeting its just-killed server.
-   - With fix 1 the real `_end_holders` settles through that window itself. The wrapper goes, so the test covers the production path.
+   - The plant is still a real fan-out directory holding a 38-character name, so the rejection and secrecy assertions are unchanged.
+5. **Drop `once_a_zombie`** in `test_an_app_server_that_cannot_be_reaped_is_no_reading` (`:370`). It was added in T8 r3 to step around root cause 1. With settling, the real `_end_holders` covers that window, so the test exercises the production path.
 
 ## Tests
 
-All new tests use the module's existing seams (`_environ`, `_stat`, `_holders`). They are deterministic and need no load.
+Most of the new tests drive the scan through module seams. These are the existing `_environ` and `_stat`, plus new one-line readers for `status`'s `Threads:`, a task listing and a task's environ. They use a fake clock: `hostread.time.monotonic` and `hostread.time.sleep` are replaced together, and the sleep advances the clock and counts calls. So they are deterministic, need no load, and assert timing by the number of calls, not by wall time.
 
-- **Settling, then removed.** An unreadable process of this user, started after the home, whose `stat` reports `PF_EXITING` for two scans and then `Z`:
-  - `recover` removes the home and logs `DIAG_RECOVERED`;
-  - it sends that process no signal (a recording `pidfd_send_signal`).
+- **The three leader outcomes for a zombie leader** (parametrized: EACCES, empty, ESRCH; `Z`, `Threads: 2`, a worker whose environ holds the mark):
+  - `recover` SIGKILLs it, as recorded by `pidfd_send_signal`, and then removes the home.
+  - Today all three clear it, and the home is removed without a kill.
+- **A true zombie** for each of the three (`Z`, `Threads: 1`): cleared at once, no sleep, home removed, as today.
+- **Truncated enumeration:** `Z`, `Threads: 2` and a listing with only the leader:
+  - settles, sending no signal;
+  - when the seam reports `Threads: 1` on the third scan, the home is removed after exactly two sleeps;
+  - if the seam keeps reporting `Threads: 2`, the deadline passes, `DIAG_RECOVERY_KEPT` is logged, the home is kept and `open_fds()` is unchanged.
+- **A worker that vanishes while another holder survives:** tasks are leader, w1 and w2. w1's environ raises `FileNotFoundError` and w2's holds the mark. The process is matched and SIGKILLed, not skipped. A second case has w1 raise EACCES, with the same result.
+- **No readable worker:** every worker is gone, refused or empty while `Threads: 2` → settle, and kept at the deadline.
+- **Settling, then removed** (fix 1): an unrelated unreadable process of this user that started after the home, `R` with `PF_EXITING` for two scans, then `Z` with `Threads: 1`:
+  - `DIAG_RECOVERED` and the home removed, with no signal sent to it.
   - Today this logs `DIAG_RECOVERY_KEPT`.
-- **Settling past the deadline.** The same process stays exiting: `recover(seconds=0.3)` keeps the home and logs `DIAG_RECOVERY_KEPT`, with no pidfd leaked (the existing `open_fds` check).
-- **A live non-dumpable process is still an unknown.** `PF_EXITING` clear: kept at once, as today. The existing `unreadable` tests cover this; one assertion is added that it raised without waiting for the deadline.
-- **The read path settles too.** `read()` with an unrelated exiting process present for one scan returns `WANTED` and logs nothing. Today it logs `DIAG_SCRATCH_KEPT` and returns None.
-- **Zombie leader** (if fix 2 is in scope):
-  - a live child whose main thread has exited, with `CODEX_HOME` set to the home: `recover` kills it and then removes the home;
-  - with its thread's environ also refused: kept.
-- **`crashed[started]`** asserts `alive(orphan)` before `recover`. With `outlive` that now holds on every run.
-- **`[fifo]` / `[object-dir-link]`:** a parametrized check that `absent_fanout` is absent. Plus one run with the commit's fan-out directory forced to `cd`, by planting `cd/` first. Today that is the CI failure.
-- **Acceptance under load.** The implementation PR records the hostread file passing 10 of 10 runs under the churn and contention harness. The harness is a documented command, not per-PR CI:
-  - `systemd-run --user --scope`;
-  - 8 busy loops and 4 exit loops on CPUs 0–3;
-  - the test pinned to the same CPUs.
-  - Today it fails 7 of 10.
+- **Settling past the deadline:** the same process stays exiting → kept, `DIAG_RECOVERY_KEPT`, no pidfd leaked.
+- **Unknown fails at once:** a live non-dumpable process of this user, EACCES with `PF_EXITING` clear → `DIAG_RECOVERY_KEPT` after **zero** sleeps and one scan. Today this is the same, and the test pins it against the new settle path.
+- **The read path settles too:** `read()` with an unrelated exiting process present for one scan returns `WANTED` and logs nothing. Today it logs `DIAG_SCRATCH_KEPT` and returns None.
+- **Live zombie-leader regression** (no seams):
+  - A child of the test whose main thread calls `pthread_exit` while a worker sleeps, with `CODEX_HOME` set to a stamped home. `recover` kills it and removes the home.
+  - Group death is shown by the child's `Popen.wait(10) == -SIGKILL`. Waiting on a direct child returns only once every thread of its group has exited, which `alive()` can't show.
+  - A `finally` SIGKILLs and reaps it by its handle.
+- **`crashed[started]`** asserts `alive(orphan)` before `recover`. With `outlive` that holds on every run. The `copied` case is unchanged.
+- **`[fifo]` / `[object-dir-link]`:** a check that `absent_fanout` is absent, plus one run with `cd/` and `ab/` planted first. Today that collision is the CI failure.
+- **Acceptance under load, bounded.** The implementation PR records the hostread file passing 10 of 10 runs under the churn and contention harness. Today it fails 7 of 10.
+  - The harness is a documented command, not per-PR CI: `systemd-run --user --scope` with a runtime cap, 8 busy loops and 4 exit loops on CPUs 0–3, and the tests pinned to the same CPUs.
+  - It runs in bursts of a few minutes, announced to the other workers, and the scope is stopped as each burst ends.
 
 ## Risks
 
-- **A host that is always exiting something.** The scan settles only while it meets an exiting process, and each one is gone within ms. A host spawning processes non-stop could keep the scan settling until the deadline (`RECOVER_SECONDS`, 10 s). The result is `TimeoutError` and a kept home: today's outcome, reached more slowly. Never a wrong removal.
-- **`PF_EXITING` is a kernel flag value** (0x4 in `include/linux/sched.h`, long-standing). `/proc/<pid>/stat` field 9 is ABI. If either ever changed, the flag would read clear and the scan would fall back to today's behaviour (`_Unknown`), which is fail-closed.
-- **PID reuse.** The settling check reads `stat` by PID after the pidfd is open, as the zombie check already does. A reused PID could only make a settling process look like a new one, and every outcome there is conservative.
-- **Fix 2 widens the scan** by one `task/` listing per unreadable zombie. That is rare and cheap.
+- **A host that is always exiting something.** The scan settles only while it meets an exiting process or a zombie leader it can't read through, and an exit takes ms. A host spawning processes non-stop could keep the scan settling until the deadline (`RECOVER_SECONDS`, 10 s). The result is `TimeoutError` and kept homes: today's outcome, reached more slowly. Never a wrong removal.
+- **Kernel interfaces.** The design relies on three of them:
+  - `PF_EXITING` (0x4 in `include/linux/sched.h`, long-standing);
+  - `stat` field 9;
+  - `status`'s `Threads:`.
+
+  If the flag ever read clear, the process would fall to rule 4 and become unknown or be cleared by today's rules. If `Threads:` were missing, the group-dead rule couldn't fire, and a zombie would settle until the deadline. Both fail closed.
+- **PID reuse.** `stat` and `status` are read by PID after the pidfd is open, as the zombie check already does. A worker match is confirmed by pidfd signal 0, as a leader match is. A reused PID can only make the scan wait or match through a fresh pidfd. It can never make it clear a process it had no proof for.
+- **Cost.** It adds one `status` read per unreadable or empty process, and a `task/` listing only for a zombie leader with live threads. Both are rare.
 
 ## Out of scope
 
