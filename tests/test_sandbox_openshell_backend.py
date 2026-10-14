@@ -223,6 +223,7 @@ def test_the_shipped_version_set_is_empty() -> None:
     (0, b"Server Status\n  Version: 0.2.0\n", False),
     (0, b"[]", False),
     (0, status(None), False),
+    (0, json.dumps({"status": "connected", "version": ["0.2.0"]}).encode(), False),   # unhashable
     (0, status(state="connected_http"), False),
     (0, status(state="disconnected"), False),
 ])
