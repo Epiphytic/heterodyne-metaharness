@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -28,7 +29,7 @@ from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_asks import NONE, audited, joined, posted, row, via_main
 from test_admind_daemon import Harness, needs_tmux, run_with
 
-from heterodyne.admind import approvals, asks, chunk, cli, commands, reap, summarize
+from heterodyne.admind import approvals, asks, cli, commands, reap, summarize
 from heterodyne.admind.approvals import ApproveBead, Attempt, BtqError, Busy, Readout
 from heterodyne.admind.audit import ref_id
 from heterodyne.admind.daemon import (
@@ -628,7 +629,7 @@ def test_postable_accepts() -> None:
 # --- the card (R8, R21, R25) ---------------------------------------------------------------------
 HEAD = "🛂 Approval ask k7m2 · bead btq-ab12c · posted by controller (a local process; unverified)"
 ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
-TOP = [HEAD, ACTIONS, f"digest {D12}", "No other asks outstanding or in flight."]
+TOP = ["APPROVAL: purpose not set", HEAD, ACTIONS, f"digest {D12}", "No other asks outstanding or in flight."]
 END = ["", f"Approving records your approval of {BEAD} in btq, as you, via Marmot. Any other reply is a note "
        "for the poster."]
 
@@ -639,17 +640,27 @@ def test_approval_card_is_the_readout_verbatim() -> None:
     assert isinstance(card, asks.ApprovalCard)
     whole = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == [whole] and card.details_chunks == [whole]
-    assert D not in whole and whole.splitlines()[:4] == TOP and "!approve" not in whole
+    assert D not in whole and whole.splitlines()[:5] == TOP and "!approve" not in whole
     assert asks.approval_title(readout(), BEAD) == "Approve the plan 4 sandbox runtime"
     assert asks.approval_title(readout(readout={"title": ["title:"], "ask": [], "description": []}),
                                BEAD) == BEAD
+
+
+def unmarked(parts: list[str]) -> str:
+    """The chunks' text without their part markers (cxmkf K23) or the newlines a boundary drops."""
+    return "".join(re.sub(r"\A↳ part \d+/\d+\n", "", p) for p in parts).replace("\n", "")
 
 
 def test_approval_card_chunks_are_what_is_queued() -> None:
     card = asks.approval_card(card_row(), readout(), 200)
     assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
     text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
-    assert card.card_chunks == chunk.split(text, 200)
+    n = len(card.card_chunks)
+    assert all(len(p) <= 200 for p in card.card_chunks)
+    assert unmarked(card.card_chunks) == text.replace("\n", "")
+    assert all(p.startswith(f"↳ part {i + 1}/{n}\n") for i, p in enumerate(card.card_chunks) if i)
+    for line in (t for t in LINKED if "link: " in t):          # a link line is never cut (K23)
+        assert any(line in p.split("\n") for p in card.card_chunks)
 
 
 def test_approval_card_is_never_shortened() -> None:
@@ -660,7 +671,8 @@ def test_approval_card_is_never_shortened() -> None:
     card = asks.approval_card(card_row(), r, 4000)
     assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
     text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *long, *END])
-    assert card.card_chunks == chunk.split(text, 4000) and card.details_chunks == card.card_chunks
+    assert unmarked(card.card_chunks) == text.replace("\n", "") and card.details_chunks == card.card_chunks
+    assert all(len(p) <= 4000 for p in card.card_chunks)
     assert "  │ line 59 of the plan" in "".join(card.card_chunks) and "shortened" not in text
     assert len(text.splitlines()) > asks.CARD_LINES and len(text) > asks.CARD_CHARS
 
@@ -692,14 +704,21 @@ def test_approval_card_refuses_what_redaction_would_change(line: str) -> None:
 
 
 def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
-    """The R21 fixture found by search (again for the R30 layout): the whole text survives redaction; a
-    chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES` matches."""
+    """The R21 fixture, found by search (again for the cxmkf labels, markers and packing): the whole text
+    survives redaction; a chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES`
+    matches."""
     key = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
-    r = readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
-                         "description": ["description:", "  │ " + "w" * 84 + " " + key]}, links=[])
-    whole = asks.approval_card(card_row(), r, 4000)
-    assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
-    assert asks.approval_card(card_row(), r, 200) == asks.REDACTED
+
+    def with_pad(pad: int) -> Readout:
+        return readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
+                                "description": ["description:", "  │ " + "w" * pad + " " + key]}, links=[])
+    for pad in range(0, 400):
+        whole = asks.approval_card(card_row(), with_pad(pad), 4000)
+        assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
+        if asks.approval_card(card_row(), with_pad(pad), 200) == asks.REDACTED:
+            break
+    else:
+        raise AssertionError("no padding makes a chunk that redaction would change")
 
 
 def test_approval_card_refuses_a_value_split_across_chunks() -> None:
@@ -709,15 +728,13 @@ def test_approval_card_refuses_a_value_split_across_chunks() -> None:
         return readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
                                 "description": ["description:", line]}, links=[])
     stand_in_token = "Z" * len(TOKEN)
-    for pad in range(100, 200):
-        stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 4000)
+    for pad in range(0, 400):
+        stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 200)
         assert isinstance(stand_in, asks.ApprovalCard)
-        text = stand_in.card_chunks[0].replace(stand_in_token, TOKEN)
-        if all(redact(part) == part for part in chunk.split(text, 200)):
-            break
+        if all(stand_in_token not in part for part in stand_in.card_chunks):
+            break           # a boundary cuts the token: no chunk holds it whole
     else:
         raise AssertionError("no padding splits the token")
-    assert redact(text) != text
     assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) == asks.REDACTED
 
 
@@ -2090,4 +2107,4 @@ def test_in_flight_counts_other_asks() -> None:
     assert asks.count_others(rows) == (2, 3)
     card = asks.approval_card(card_row(), readout(), 4000, others=(2, 1))
     assert isinstance(card, asks.ApprovalCard)
-    assert card.card_chunks[0].splitlines()[3] == "2 other asks outstanding, 1 in flight."
+    assert card.card_chunks[0].splitlines()[4] == "2 other asks outstanding, 1 in flight."

@@ -117,11 +117,12 @@ def test_a_failed_notice_does_not_roll_back_the_hold_and_is_retried_next_episode
     real = Store.enqueue
     failed: list[str] = []
 
-    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
+    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1,
+                thread_key: str | None = None) -> bool:
         if text == HOOK_LOST_NOTICE and not failed:
             failed.append(key)
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to, lane)
+        return real(self, key, text, reply_to, lane, thread_key)
     monkeypatch.setattr(Store, "enqueue", enqueue)
 
     async def scenario() -> None:
@@ -188,10 +189,11 @@ def test_a_failed_abandon_notice_cannot_roll_back_the_busy_period_of_a_new_promp
     arm(u)
     real = Store.enqueue
 
-    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1) -> bool:
+    def enqueue(self: Store, key: str, text: str, reply_to: str | None, lane: int = 1,
+                thread_key: str | None = None) -> bool:
         if key.startswith("abandoned:"):
             raise OSError("outbox write failed")
-        return real(self, key, text, reply_to, lane)
+        return real(self, key, text, reply_to, lane, thread_key)
 
     async def scenario() -> None:
         await u.say("job A")
