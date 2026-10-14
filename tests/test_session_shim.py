@@ -874,3 +874,30 @@ def test_late_tool_input_is_denied_however_complete(run: Path, live: SessionServ
         os.close(r)
     assert denied(shim.run_hook(raw, env_for(run), event="PreToolUse")[1]) == shim.DENY_REASON
     assert live.served == 0
+
+
+@pytest.mark.parametrize("late_read", ["data", "end"])
+def test_no_read_runs_after_a_late_poll(monkeypatch: pytest.MonkeyPatch, late_read: str) -> None:
+    """r1, both reads: the poll before the read that would return the data, or before the end-of-input
+    read that would return what was gathered, returns past the deadline. That read never runs."""
+    t = FakeTime()
+    poller = LatePoller(t, 5.1 if late_read == "data" else 0.1)
+    monkeypatch.setattr(shim.select, "poll", lambda: poller)
+    reads: list[int] = []
+    real_read = os.read
+
+    def read(fd: int, n: int) -> bytes:
+        reads.append(n)
+        poller.at = 5.1
+        return real_read(fd, n)
+
+    monkeypatch.setattr(shim.os, "read", read)
+    r, w = os.pipe()
+    try:
+        os.write(w, json.dumps(bash()).encode())
+        os.close(w)
+        raw = shim.read_bounded(r, shim.MAX_HOOK_INPUT, shim.HOOK_INPUT_WAIT, clock=t.clock, drain=True)
+    finally:
+        os.close(r)
+    assert raw == b"" and len(reads) == (0 if late_read == "data" else 1)
+    assert denied(shim.run_hook(raw, {}, event="PreToolUse")[1]) == shim.DENY_REASON
