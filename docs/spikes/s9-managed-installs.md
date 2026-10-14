@@ -356,6 +356,7 @@ What this shows:
   - `plain`: every check passes except `no_exec_under_home`, with the same 6 ENOENT attempts under `.codex/tmp/arg0/` (exit 1).
   - DNS: `raw.githubusercontent.com` only. No process was left, both homes were deleted, and no `.unended` marker was written.
 - **Root ends seen.** In both variants the app-server's root shows `+++ exited with 0 +++` after the harness's SIGTERM. So the server's rule was tightened to `exited with` only. The TUI's root shows `+++ killed by SIGHUP +++`, which a TUI is allowed. In each trace that record is the root's last event, and the file ends on a whole line.
+- **Limit, accepted for the PoC.** The proof covers the root's whole lifetime only. A child still running when the root ends is traced until the namespace teardown kills strace, so its last lines can be lost. Nothing requires those lines to be there.
 
 **Harness notes.** Two first attempts were discarded because of harness bugs, not CLI behaviour:
 - `server_ready` got a `str` instead of a `Path`, so readiness was never seen.
