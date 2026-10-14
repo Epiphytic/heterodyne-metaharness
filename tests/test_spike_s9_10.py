@@ -446,3 +446,21 @@ def test_the_server_must_exit_and_a_tui_may_die_of_its_hangup(tmp_path: Path) ->
     (run / "server.strace").write_text(trace([CLI, "app-server"], end="killed by SIGTERM"))
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["server.strace_ran_to_its_end"]
+
+
+@pytest.mark.parametrize("cut", [60, 120])
+def test_a_truncated_first_line_fails(tmp_path: Path, cut: int) -> None:
+    """The root's exec cut mid-line (path whole, argv not) doesn't show the command, and nothing after it."""
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(execve([CLI, "app-server"])[:cut])
+    assert analyze(run, "--part", "1").returncode == 1
+    found = checks(run)
+    assert not found["server.strace_shows_its_exec"] and not found["evidence_complete"]
+
+
+def test_a_tui_s_core_dumped_hangup_fails(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "tui.strace").write_text(trace(cast_list(argv_json(run)["tui_new"]), connect(SOCK),
+                                          end="killed by SIGHUP (core dumped)"))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["tui.strace_ran_to_its_end"]
