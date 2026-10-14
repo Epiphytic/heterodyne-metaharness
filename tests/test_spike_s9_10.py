@@ -60,7 +60,7 @@ def evidence(run: Path, part: int, meta: dict[str, object] | None = None) -> Pat
     files = {
         "argv.json": json.dumps(meta), "rc": "0\n", "server_ready": "yes\n", "inside": "uid=0\n",
         "inside.packages": "",
-        "server.strace": trace(server, sendto("raw.githubusercontent.com"), end="killed by SIGTERM"),
+        "server.strace": trace(server, sendto("raw.githubusercontent.com"), end="exited with 0"),
         "tui.strace": trace(tui, connect(SOCK), end="killed by SIGHUP"),
         "tui.screen": "Welcome to Codex\nSign in with ChatGPT\n",
     }
@@ -298,10 +298,12 @@ def test_an_api_github_lookup_fails_cut_off_or_not(tmp_path: Path, part: int) ->
 
 @pytest.mark.parametrize(("name", "end"), [
     ("server.strace", "killed by SIGKILL"), ("server.strace", "killed by SIGSEGV (core dumped)"),
-    ("server.strace", "killed by SIGHUP"), ("tui.strace", "killed by SIGTERM"),
+    ("server.strace", "killed by SIGHUP"), ("server.strace", "killed by SIGTERM"),
+    ("tui.strace", "killed by SIGTERM"),
     ("tui.strace", "killed by SIGABRT"),
 ])
-def test_a_root_killed_by_anything_but_the_harness_stop_fails(tmp_path: Path, name: str, end: str) -> None:
+def test_a_root_killed_by_anything_but_its_command_s_allowed_end_fails(tmp_path: Path, name: str,
+                                                                       end: str) -> None:
     run = evidence(tmp_path / "r", 1)
     argv = cast_list(argv_json(run)["server" if name == "server.strace" else "tui_new"])
     (run / name).write_text(trace(argv, connect(SOCK), end=end))
@@ -408,7 +410,7 @@ def test_a_root_event_after_its_end_fails(tmp_path: Path) -> None:
 def test_a_truncated_last_line_fails(tmp_path: Path) -> None:
     run = evidence(tmp_path / "r", 1)
     child = sendto("raw.githubusercontent.com").replace("7", "8", 1)
-    (run / "server.strace").write_text(trace([CLI, "app-server"], end="killed by SIGTERM") + child[:40])
+    (run / "server.strace").write_text(trace([CLI, "app-server"]) + child[:40])
     assert analyze(run, "--part", "1").returncode == 1
     assert not checks(run)["server.strace_ran_to_its_end"]
 
@@ -434,3 +436,13 @@ def test_the_wrappers_bound_the_wait_and_mark_a_timeout(script: str) -> None:
 @pytest.mark.parametrize("script", ["part1.sh", "part2.sh"])
 def test_the_outer_wrappers_keep_the_markers(script: str) -> None:
     assert "strace.unended" in (SPIKE / script).read_text()
+
+
+def test_the_server_must_exit_and_a_tui_may_die_of_its_hangup(tmp_path: Path) -> None:
+    """r3 re-run: the app-server exits 0 on SIGTERM, so only `exited with` passes for it; the TUI dies of the
+    SIGHUP, which passes for a TUI only."""
+    run = evidence(tmp_path / "r", 1)
+    assert analyze(run, "--part", "1").returncode == 0
+    (run / "server.strace").write_text(trace([CLI, "app-server"], end="killed by SIGTERM"))
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_ran_to_its_end"]
