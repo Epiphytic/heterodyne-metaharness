@@ -1,4 +1,4 @@
-Reviewer: Codex (cross-model review run by team-lead). Reviewed commit: 9b1642cae1c94f93ad132776555ae889198eecc7 (PR #89). Verdict: APPROVE.
+Reviewer: gpt-6.1-sol (Codex CLI, `codex exec -m gpt-6.1-sol`). Author: claude-opus-5-5. Mode: cross-model. Reviewed commit: 9b1642cae1c94f93ad132776555ae889198eecc7 (PR #89). Verdict: APPROVE.
 
 Note: code-review cycle 1 of 3, range 5a9ec58..9b1642c.
 
