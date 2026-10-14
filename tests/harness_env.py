@@ -22,7 +22,7 @@ def make_tree(root: Path, spec: Mapping[str, Spec]) -> Path:
         if isinstance(what, bytes):
             path.write_bytes(what)
             path.chmod(0o755 if what.startswith(EXECUTABLE) else 0o644)
-        elif what[0] == "link":
+        elif len(what) == 2:
             path.symlink_to(what[1])
         else:
             path.mkdir(exist_ok=True)

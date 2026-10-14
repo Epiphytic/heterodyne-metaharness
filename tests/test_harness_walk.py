@@ -22,6 +22,7 @@ from harness_env import (
     seal,
     unseal,
 )
+
 from heterodyne.harness.resources import store_core as sc
 
 STORE_CORE = Path(sc.__file__)
@@ -238,7 +239,11 @@ def test_an_added_removed_renamed_or_rewritten_entry_fails_the_fast_check(tmp_pa
     tree, m, _ = fresh("rerecorded")                    # the manifest still binds what a record can't
     (tree / "cli" / "README").chmod(0o644)
     assert fast_refusal(tree, m, record_of(tree)) == sc.ENTRY_CHANGED
-    for name in ("added", "removed", "renamed", "rewritten", "root", "rerecorded"):
+
+    tree, m, _ = fresh("root-mode")                     # a writable root, even freshly recorded
+    tree.chmod(0o755)
+    assert fast_refusal(tree, m, record_of(tree)) == sc.ENTRY_CHANGED
+    for name in ("added", "removed", "renamed", "rewritten", "root", "rerecorded", "root-mode"):
         unseal(tmp_path / name)
 
 
