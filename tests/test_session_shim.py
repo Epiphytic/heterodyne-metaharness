@@ -788,3 +788,89 @@ def test_a_bare_hook_denies_oversized_or_late_input(run: Path, live: SessionServ
     rc, out = late.result(timeout=shim.HOOK_INPUT_WAIT + 30)
     assert rc == 0 and denied(out.decode()) == shim.DENY_REASON
     assert live.served == 0 and not spool_exists(run)
+
+
+class LatePoller:
+    """A poll that reports input ready only once the clock has passed `at`, as a process descheduled
+    across the deadline would see it."""
+
+    @staticmethod
+    def late_after_first_read(monkeypatch: pytest.MonkeyPatch, poller: "LatePoller", at: float) -> None:
+        """The first read is in time; every poll after it returns at `at` (the r1 case: reads at 0.1 s
+        and 5.1 s against a 5 s limit, the second one the end of input)."""
+        real_read = os.read
+
+        def read(fd: int, n: int) -> bytes:
+            poller.at = at
+            return real_read(fd, n)
+
+        monkeypatch.setattr(shim.os, "read", read)
+
+    def __init__(self, t: FakeTime, at: float) -> None:
+        self.t, self.at = t, at
+
+    def register(self, fd: int, events: int) -> None:
+        pass
+
+    def poll(self, timeout: int) -> list[tuple[int, int]]:
+        self.t.now = max(self.t.now, self.at)
+        return [(0, 1)]
+
+
+@pytest.mark.parametrize("drain", [False, True])
+def test_read_bounded_input_ready_only_after_the_deadline_is_late(monkeypatch: pytest.MonkeyPatch,
+                                                                  drain: bool) -> None:
+    """r1: a poll that returns past the deadline must not lead to a read; the input is late, however
+    complete it then turns out to be."""
+    t = FakeTime()
+    poller = LatePoller(t, 0.1)
+    monkeypatch.setattr(shim.select, "poll", lambda: poller)
+    LatePoller.late_after_first_read(monkeypatch, poller, 5.1)
+    r, w = os.pipe()
+    try:
+        os.write(w, json.dumps(bash()).encode())
+        os.close(w)                                   # whole and ended: only its timing is wrong
+        assert shim.read_bounded(r, 1000, 5.0, clock=t.clock, drain=drain) == b""
+    finally:
+        os.close(r)
+
+
+def test_read_bounded_drain_past_the_deadline_returns_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Input already over the bound stays over it: a poll past the deadline returns the cut, unread."""
+    t = FakeTime()
+    poller = LatePoller(t, 0.0)
+    monkeypatch.setattr(shim.select, "poll", lambda: poller)
+    reads: list[int] = []
+    real_read = os.read
+
+    def read(fd: int, n: int) -> bytes:
+        reads.append(n)
+        poller.at = 9.0                               # the bound is crossed in time; the next poll is late
+        return real_read(fd, n)
+
+    monkeypatch.setattr(shim.os, "read", read)
+    r, w = os.pipe()
+    try:
+        os.write(w, b"y" * 20)
+        assert shim.read_bounded(r, 10, 1.0, clock=t.clock, drain=True) == b"y" * 11
+    finally:
+        os.close(r)
+        os.close(w)
+    assert reads == [11]                              # nothing was read after the late poll
+
+
+def test_late_tool_input_is_denied_however_complete(run: Path, live: SessionServer,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    t = FakeTime()
+    poller = LatePoller(t, 0.1)
+    monkeypatch.setattr(shim.select, "poll", lambda: poller)
+    LatePoller.late_after_first_read(monkeypatch, poller, shim.HOOK_INPUT_WAIT + 0.1)
+    r, w = os.pipe()
+    try:
+        os.write(w, json.dumps(bash()).encode())
+        os.close(w)
+        raw = shim.read_bounded(r, shim.MAX_HOOK_INPUT, shim.HOOK_INPUT_WAIT, clock=t.clock, drain=True)
+    finally:
+        os.close(r)
+    assert denied(shim.run_hook(raw, env_for(run), event="PreToolUse")[1]) == shim.DENY_REASON
+    assert live.served == 0
