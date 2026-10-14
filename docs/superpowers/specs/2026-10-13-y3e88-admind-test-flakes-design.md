@@ -17,7 +17,7 @@ Files involved:
 | # | Test | Seen | Failure |
 |---|---|---|---|
 | 1 | `test_admind_asks_bump.py::test_a_pending_reminder_blocks_until_it_fails_and_a_restart_keeps_that` | PR #67 job 115524643780, #71 job 115554104861, #72 job 115568467092 | `assert [] == ['asknote:<id>:autobump:1:0']` at line 1341, logged with an `asyncio` `ConnectionResetError` in `client_connected_cb` |
-| 2 | `test_admind_r13_replies.py::test_a_batch_that_cannot_be_delivered_is_reopened_and_resent` | PR #77 run 38485104771 attempt 1, job 115596739124 | `assert 'pending' == 'sent'` at line 470 |
+| 2 | `test_admind_r13_replies.py::test_a_batch_that_cannot_be_delivered_is_reopened_and_resent` | PR #77 run 38485104771 attempt 1, job 115596739124; again on PR #78 | `assert 'pending' == 'sent'` at line 470 |
 
 Each failed alone in a full run on the self-hosted runner (1 failed, about 4,000 passed, 11.5–12 min). Each passed on rerun.
 
@@ -94,7 +94,9 @@ This one has not failed CI yet. When it does, it shows as a hung job, not a fail
 2. **Negative checks keep the raw list.** A test that asserts something was *not* sent must not get weaker. The two `stays(lambda: sent_mid(...) is None)` calls (`test_admind_approvals.py:1262`, `test_admind_asks_bump.py:1284`) switch to a new `listed_mid(h, key)`, which is today's `fake.sent` read. So does any other negative `sent_mid` use the implementation finds.
    - `h.texts()` stays the raw fake list. Its 11 `not in h.texts()` uses keep their full strength.
 3. **`Harness.delivered_texts()`.** It returns the texts from `fake.sent` whose idempotency key's outbox row is `sent` with the fake's message ID, in send order.
-   - `test_admind_r13_replies.batches()` is built on it, so `batch_arrives` returns only once the daemon has recorded the batch. Flake 2's line 470 assertion then stays exactly as written. The `waited(...)` form from the repro is the fallback if the reviewers prefer to leave `batches()` alone.
+   - `test_admind_r13_replies.batches()` **stays raw** (it reads `fake.sent`). Its exact-count and absence checks keep their full strength: `len(batches(h)) == 1` at lines 298, 314 and 328, and `batches(h) == []` at line 364. A filtered `batches()` would let a wrongly published batch whose ack is late or lost slip past them.
+   - A new `delivered_batches(h)` is built on `delivered_texts()`. `batch_arrives` (also used by `test_admind_au11.py:417`) waits on and returns from `delivered_batches()`, so it returns only once the daemon has recorded the batch. Flake 2's line 470 assertion then stays exactly as written.
+   - `batch_arrives` is the only positive use of `batches()`. Every other use is a count or absence check and stays on the raw helper.
    - Positive waits that go on to depend on the daemon's record use it. These are the four `!details` tests above, plus any that the sweep in step 7 finds.
    - Positive waits on texts with no daemon-state step after them may stay on `h.texts()`. The rule goes into `Harness`'s docstring: **wait on `delivered_texts()` or `recorded()` before acting on the daemon's state; check absence on `texts()` or `listed_mid()`.**
 4. **Gate readiness.** Add `async def posting(h)` to `test_admind_daemon.py`: `await h.until(h.daemon.may_post, 20)`, failing with the gate's fields (`latched`, `group_ok`, `observing`, `changing`, operator seen) on a timeout.
@@ -105,15 +107,16 @@ This one has not failed CI yet. When it does, it shows as a hung job, not a fail
    - `FakeWnAgent.reply_delay: float = 0.0`: seconds slept inside `_send_final` after the send is listed and before the `final_sent` reply.
    - `FakeWnAgent.ack_check_delay: float = 0.0`: holds the first `group_info` after each subscription by that long.
    - `Harness` reads both from `HZ_FAKE_WN_REPLY_DELAY` and `HZ_FAKE_WN_CHECK_DELAY`, default 0.
-   - Two fast regression tests (the knob tests) run the two flake scenarios with the knobs set (0.3 s and 0.5 s). The fixed tests must pass with the knobs set. These knob tests are the deterministic proof the fix holds. The unchanged tests, with the fix reverted, must fail them; the implementation PR shows that once, as in the repro.
+   - Three fast regression tests (the knob tests) run the two flake scenarios with the knobs set (0.3 s and 0.5 s), and the root cause 3 scenario with the check delay (below). The fixed tests must pass with the knobs set. These knob tests are the deterministic proof the fix holds. The unchanged tests, with the fix reverted, must fail them; the implementation PR shows that once, as in the repro.
 7. **Acceptance sweep.**
    - The whole admind suite passes with `HZ_FAKE_WN_REPLY_DELAY=0.3`, and separately with `HZ_FAKE_WN_CHECK_DELAY=0.5`. The implementation records both results in its PR.
    - These sweeps are not added to per-PR CI. They add about 17 minutes each. They are a documented command in `tests/README` or the test docstring, for whoever touches the admind harness. A nightly job is a possible follow-up, not part of this design.
 8. **`no_sleep` yields.** Its body becomes `await asyncio.sleep(0)`, matching `no_wait` in `test_admind_t9r2.py`. It still skips every delay, so the tests keep their speed and their assertions, but each poll loop now gives the event loop a turn.
+   - **Permanent regression, supervised from outside.** A hang blocks the event loop, so no in-process timeout can catch it. The third knob test runs `test_a_summary_that_cannot_be_delivered_goes_to_the_backstop` in a child `python -m pytest` with `HZ_FAKE_WN_CHECK_DELAY=0.5` and `-o faulthandler_timeout=30`. It starts the child with `start_new_session=True` and waits up to 90 s. On expiry it kills the child's process group with `os.killpg`, so the daemon and fake go too. A timeout or a non-zero exit fails the test, with the child's output (and faulthandler dump) in the message. Reverting only the `no_sleep` fix makes it time out, and the implementation PR shows that once.
 
 ## Tests
 
-- The two knob tests from step 6. Each fails on today's tests and passes on the fixed ones.
+- The three knob tests from steps 6 and 8. Each fails (or, for the third, times out) on today's tests and passes on the fixed ones.
 - A unit test of `Harness.recorded` and `delivered_texts`, run against a live harness:
   - A send held in the fake by `reply_delay` is listed by `texts()`/`listed_mid()`, but not by `recorded()`/`delivered_texts()`, until `mark_sent` runs.
   - A row the daemon marks `failed` is never `recorded()`.
