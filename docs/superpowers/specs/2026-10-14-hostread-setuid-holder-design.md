@@ -2,14 +2,15 @@
 
 The source is the FINDING-PROD in the btq-19fh0 design review r2 (`/tmp/review-19fh0-r2.md`, rated High). The saved-uid analysis is in r1 (`/tmp/review-19fh0-r1.md`). That finding was noted as out of scope in `docs/superpowers/specs/2026-10-14-hostread-uid-first-design.md` (19fh0, pending Liam's ask 4gt8).
 
-Review: `docs/reviews/9yiku-design-r1.md` (REVISE).
+Reviews: `docs/reviews/9yiku-design-r1.md` (REVISE) and `docs/reviews/9yiku-design-r2.md` (REVISE).
 
 Line numbers are at origin/main e65ade7.
 
-**Recommendation (r2): (a), plus a subordinate-uid check in `_ours`.**
+**Recommendation (r3): (a), plus a subordinate-uid check in `_ours`. The check reads the allocation file, and its limits are stated as a PoC residual.**
 - The host read's app-server is started under `PR_SET_NO_NEW_PRIVS`, through an exec trampoline.
 - The trampoline first checks the launch conditions below and fails closed if they don't hold.
 - `_ours` also counts this user's subordinate uids (`/etc/subuid`) as this user's. r1 found that a descendant can reach them even under no_new_privs; I reproduced that on this host (below).
+- r2 showed that the file's current entries don't bound the kernel's existing mappings. Checking the kernel's mapping instead (`/proc/<pid>/uid_map`) would be sound. On this host it costs about one read in 25, and it leaves credential copies behind, so it is rejected ("Why not the kernel's mapping"). The gap is root's edits to the allocation file, which r3 states as residual 4, and the invariant is qualified to match.
 - Rule 5's order is unchanged.
 - (b) is rejected because of its cost, and so (c) is rejected too.
 
@@ -71,10 +72,36 @@ On this host, 2026-10-14 (no root, no podman):
   4. Its environ read was refused: it joined after its last exec, so its memory map's namespace is the initial one.
   5. Rule 5 would clear it.
 
-**The check that closes it.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
+**The check that closes it, while the allocation is unchanged.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
 - **Where the ranges come from.** `/etc/subuid` lines whose first field is this user's login name or numeric uid, as `newuidmap` reads them. They are read once per scan.
-- **Missing file.** No ranges. With no subordinate uids, `newuidmap` maps nothing for this user and no namespace of this user's maps any.
-- **Unreadable or malformed file, or an nsswitch `subid:` source** (which this design doesn't parse). Every uid counts as ours. That fails closed with (b)'s cost below, on such hosts only.
+  - The login name is `pwd.getpwuid(os.getuid())`'s. If that lookup fails, every uid counts as ours.
+  - Every matching line is taken, so a user with several ranges gets all of them.
+  - A line `name:start:count` covers `start` through `start + count - 1`, both ends included.
+  - A line whose start or count isn't a decimal integer, whose count is 0 or less, or which doesn't have exactly three fields, makes the file malformed. That applies to other users' lines too, since `newuidmap` would also be reading a damaged file.
+- **Missing file.** No ranges. With no subordinate uids, `newuidmap` maps nothing for this user, so no namespace this user maps through it holds any.
+- **Unreadable or malformed file, an unreadable `/etc/nsswitch.conf`, or an nsswitch `subid:` source** (which this design doesn't parse). Every uid counts as ours. That fails closed with (b)'s cost below, on such hosts only.
+- **What it doesn't bound (r2 BLOCKING).** The kernel keeps a namespace's mapping after `/etc/subuid` changes. So the check reads an allocation, not a mapping, and it is wrong when the two differ:
+  - a range removed from this user's lines, or the file deleted, while a namespace mapped from it still lives;
+  - a range added between the scan's read of the file and a helper's `newuidmap` call.
+  
+  Both need root to edit `/etc/subuid`. Residual 4 states them, and the premise in "Changes" is qualified to match.
+
+**Why not the kernel's mapping (r2 option 1).** I worked this through and measured it, then rejected it on cost.
+- **The rule.** A foreign-uid process would be ruled out only if `/proc/<pid>/uid_map` reads exactly `0 0 4294967295`, which is the initial namespace's identity map. Anything else, even one other line, means a non-initial namespace, and the process would be `_Unknown`. That subsumes the subuid check: the escape above needs a non-initial namespace, whatever the allocation file says.
+- **It would be sound.** The reads would go status (foreign uid), then `uid_map`, then signal 0 through the pidfd that was opened before the reads.
+  - **Exits.** `ENOENT` or `ESRCH` at any of the three reads means gone, as now.
+  - **An unreadable map** (`EACCES`, for example under `hidepid`) would fail closed, as `_Unknown`.
+  - **The two reads are of one namespace.** A thread group shares one user namespace: `setns` and `unshare` of `CLONE_NEWUSER` need a single-threaded caller, and `clone` refuses `CLONE_NEWUSER` with `CLONE_THREAD`. An exec keeps the namespace. So, unlike most of status, the namespace is a group fact, like the uid and the start time. That holds even when an exec moves a worker into the leader's PID between the reads.
+  - **It is monotone.** A task can join or create only namespaces below its own, never return to an ancestor. So an identity map at the later read shows the group was in the initial namespace at the status read, and there, under the launch conditions, it couldn't have taken the foreign uid.
+  - **A process that joins after we read it.** If it joined before the status read, the later `uid_map` read shows a non-identity map, so it is kept. If it joins after the status read, the status showed a uid it had while still in the initial namespace, which is either ours (kept) or one it couldn't have reached (so it is no holder). Switching to a uid mapped by the joined namespace comes after the join. Rule 5's existing order handles that, and no re-read is needed.
+  - **A reader outside the initial namespace** sees no identity maps at all, so every foreign process would be kept. That fails closed.
+- **What it would cost, measured on this host on 2026-10-14.**
+  - 670 to 678 live foreign processes had refused environs. All their `uid_map`s were readable, and 48 to 50 were non-identity. They come from chrome's sandbox under uid 1000, from containers whose uids are mapped by root (1065536 to 1066536, outside every `/etc/subuid` range here), and from system services with a namespace of their own (uids 0, 116 and 126).
+  - The start-time clause would still clear those that started before the home. So the cost is the young ones.
+  - **The read path.** Over 180 s, sampled every 0.5 s, a non-identity foreign process younger than 2 s existed in 8 of 346 samples; younger than 5 s in 14; younger than 10 s in 23. Chrome starts and ends them all the time. A read's cleanup window is its duration plus the 1 s slack, so about 4% of reads would raise `_Unknown`, be discarded and keep their home (`DIAG_SCRATCH_KEPT`).
+  - **Recovery.** Each kept home holds a copy of the login, and recovery would remove it only at a start with no non-identity foreign process younger than the oldest home. At one instant, 5 had started within the last hour, mostly container processes. A container restarted after a home was kept would block recovery for as long as it runs.
+  - (b) costs more (123 blockers in a day), but this cost is still not small, and it compounds: a discarded read is how the homes that block recovery are made.
+- **The trade.** With the allocation check (r2 option 2), the gap is root's edits to a file that root owns, made while this user's namespaces from the old allocation live. That is the same trust class as residual 2, where root maps any uid. With the kernel's mapping (option 1), the gap is closed, but about one read in 25 would be lost, along with an on-disk credential copy that might never be recovered on a shared host. For the PoC I pick option 2. A narrower kernel-map rule is possible (for example, keeping only the non-identity processes whose uid isn't in another user's current range), but it brings back an allocation-file dependence of its own, so it isn't proposed.
 
 **What the check costs.** A refused process in the subordinate range, started after the home, becomes `_Unknown`: the home is kept, and the read is discarded or recovery kept.
 - Ordinary rootless-container processes don't reach that point. Each one's environ is readable, because this user owns its namespace and so has `CAP_SYS_PTRACE` there for the read's access check. That holds for both the task's namespace and its memory map's, since they exec'd inside it.
@@ -85,18 +112,20 @@ On this host, 2026-10-14 (no root, no podman):
 **How it is set.** Python has no `os.prctl`, and `preexec_fn` is unsafe in a threaded process such as wsd. So the host read launches through `codex_usage.py` itself, in a new mode:
 
 ```python
-def exec_no_new_privs(argv):
+def exec_no_new_privs(argv, *, status=lambda: Path("/proc/self/status").read_text(), prctl=None,
+                      execv=os.execv, exit=os._exit):
     """`python3 -I codex_usage.py --exec-no-new-privs <codex> app-server`: check the launch conditions,
-    set and confirm no_new_privs, then exec argv. Exits 126 if any fails; never returns."""
+    set and confirm no_new_privs, then exec argv. Exits 126 if any fails; never returns. The keywords
+    are seams for the tests only."""
     try:
-        if not unprivileged(Path("/proc/self/status").read_text()):
-            os._exit(126)
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.prctl(39, 0, 0, 0, 0) != 1:   # PR_SET/GET_NO_NEW_PRIVS
-            os._exit(126)
-        os.execv(argv[0], argv)
+        if not unprivileged(status()):
+            exit(126)
+        prctl = prctl or ctypes.CDLL(None, use_errno=True).prctl
+        if prctl(38, 1, 0, 0, 0) != 0 or prctl(39, 0, 0, 0, 0) != 1:   # PR_SET/GET_NO_NEW_PRIVS
+            exit(126)
+        execv(argv[0], argv)
     finally:
-        os._exit(126)
+        exit(126)
 
 def unprivileged(status):
     """The launch conditions, from one read of status: uids all this user's and not 0, and CapPrm,
@@ -129,7 +158,7 @@ This would remove the premise rather than enforce it: another user's refused pro
   - Filtering by session misses a `setsid()` descendant, which is the reported scenario.
   - Filtering by cgroup needs enforced membership. `systemd-run --scope` alone doesn't stop a descendant from asking a delegated service to start a process elsewhere.
   - Filtering by uid fails because the attack leaves all four uids foreign, and r1 (19fh0) showed per-task uid reads can't be made complete.
-- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's.
+- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's, as long as root doesn't change them (residual 4).
 
 ### (c) both
 
@@ -169,6 +198,12 @@ The one thing no_new_privs can change is the bwrap probe, on a host where bwrap 
    It is not a descendant, so the holder contract doesn't cover it today, and the pinned app-server's descendants (above) do nothing of the kind. Closing it would need enforced cgroup membership for the read and every service it can reach, which is not proposed.
 2. **A privileged helper that maps a namespace outside the subordinate ranges.** Root, or a service with `CAP_SETUID` in the initial namespace, can write any `uid_map` for a namespace the descendant made, and so give it any host uid. `newuidmap` can't do this; it maps only the caller's ranges. This is the privileged-service case of residual 1, applied to the descendant's own credentials. Accepted the same way.
 3. **Homes from before the change.** `recover` at the first start after deployment may meet a holder from a read launched without no_new_privs. This happens once, and needs a crash plus a uid transition before the upgrade. Accepted.
+4. **Root changes this user's subordinate allocation (r3).** These cases need root to edit `/etc/subuid`:
+   - root removes a range from this user's lines, or deletes the file, while a namespace mapped from that range lives;
+   - root reassigns the range to another user while such a namespace lives;
+   - root adds a range during a scan, after the file was read, and a helper maps it at once.
+
+   In each, a descendant can hold a uid that the scan doesn't count as this user's. These are root's edits to a file root owns, the same trust class as residual 2. The kernel-mapping check that would close them costs about one read in 25 on this host (above). Accepted for the PoC.
 
 ## Interaction with other work
 
@@ -188,6 +223,7 @@ The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the 
    - The fake gains `HZ_FAKE_STATUS_FILE`: at start, it writes its `/proc/self/status` `NoNewPrivs` value there.
    - With the `escaped` fault, it also appends its sleeper's value, read from `/proc/<child>/status` right after the spawn.
    - A `Rig` read returns `WANTED`, and the file says `1`. With `escaped`, both values say `1`.
+   - **Launch path (r3).** The runner may already have `NoNewPrivs: 1` (r2's review process did), so the values alone could pass without the barrier. The test also wraps `subprocess.Popen` in the loaded module, and asserts that the read's argv is exactly `[sys.executable, "-I", <codex_usage.py>, "--exec-no-new-privs", <codex>, "app-server"]`. The env, `start_new_session=True` and the pipes are unchanged. This assertion fails without the trampoline, whatever the runner's own `NoNewPrivs` is.
    - Both fail today. sleeper.py doesn't change.
 2. **The default path is direct and inherits.** In the test file that drives `codex_usage.read`:
    - with the default, argv[0] is the codex binary;
@@ -197,6 +233,15 @@ The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the 
    - `read()` returns None.
    - The log is exactly one line, `DIAG_READ_FAILED` with `ExitStatus` or `ClosedOutput`. Both are accepted, because `_end`'s SIGKILL may land before the exit.
    - The fake's PID file was never written, since it never ran, and the scratch home is removed.
+   - This pins what hostread does when the trampoline fails. The trampoline's own branches are test 3b's.
+3b. **The trampoline's branches (r3; unit, in process, bounded).** `exec_no_new_privs` is called directly with its seams.
+   - `exit` is a fake that records its code and raises, so the call never leaves the test. `execv` is a fake that records its argv, and `prctl` is a fake that records its calls and returns scripted values. Nothing really execs, and no real prctl runs.
+   - **The checker rejects:** `status` returns a text with `CapEff` non-zero, and another with a uid of 0. The exit code is 126. Neither `prctl` nor `execv` is called.
+   - **PR_SET fails:** `prctl(38, …)` returns -1. The code is 126, `PR_GET` isn't asked, and `execv` isn't called.
+   - **PR_GET returns 0:** the set returns 0 but the get returns 0. The code is 126, and `execv` isn't called.
+   - **`execv` raises `OSError`:** the code is 126.
+   - **All pass:** the calls are `prctl(38, 1, 0, 0, 0)`, then `prctl(39, 0, 0, 0, 0)`, then `execv(argv[0], argv)`, in that order. The fake's return then reaches `finally`'s 126, which the real `execv` never returns to.
+   - These fail today, because the function doesn't exist.
 4. **`unprivileged`** (unit, on status texts):
    - true for this user's uids with zero capabilities;
    - false for uid 0 on any field, for a uid that isn't ours, for any non-zero bit in `CapPrm`, `CapEff` or `CapAmb` (with `CAP_SETUID` as the named case), and for a status missing any of those lines;
@@ -207,20 +252,25 @@ The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the 
    - with uid 300000, it is cleared at once (`rmtree`, no kill, `DIAG_RECOVERED`), which pins that rule 5's uid clause still clears another user's process;
    - with our uid in the real or effective field, it is `_Unknown`, as today.
    - The 200500 case fails today.
-7. **Parsing `/etc/subuid`** (unit, on file texts, with the user's name and uid given):
+7. **Parsing `/etc/subuid`** (unit, on file texts, with the user's name and uid given; the readers are seams that return a text or raise):
    - lines by name and by numeric uid are taken, and other users' lines are ignored;
+   - **several ranges:** two lines for the user, one by name and one by uid, give both ranges;
+   - **endpoints:** with `name:200000:65536`, uids 200000 and 265535 are in the range, and 199999 and 265536 are not;
+   - **invalid counts:** a count of 0, a negative count, or a non-numeric start or count gives "all", and so does a line with two or four fields;
    - a missing file gives no ranges;
-   - an unreadable or malformed file, or an nsswitch `subid:` line, gives "all".
+   - an unreadable file gives "all";
+   - an nsswitch `subid:` line, or an unreadable `/etc/nsswitch.conf`, gives "all";
+   - **a failed name lookup:** `getpwuid` raising `KeyError` gives "all".
 
-No test makes a real uid transition, which would need a setuid binary or root. The setns reproduction above used `unshare --map-auto` and is not a test: it depends on `/etc/subuid` and setuid `newuidmap`. The kernel guarantees are cited; tests 1, 4 and 6 show the barrier, the check and the widened rule are in place.
+No test makes a real uid transition, which would need a setuid binary or root. The setns reproduction above used `unshare --map-auto` and is not a test: it depends on `/etc/subuid` and setuid `newuidmap`. The kernel guarantees are cited; tests 1, 3b, 4, 6 and 7 show the barrier, its branches, the check and the widened rule are in place.
 
 ## Changes, if approved
 
-- `src/heterodyne/sandbox/resources/codex_usage.py`: `exec_no_new_privs`, `unprivileged`, `barrier_argv`, the `--exec-no-new-privs` mode, and `read(..., no_new_privs=False)`.
+- `src/heterodyne/sandbox/resources/codex_usage.py`: `exec_no_new_privs` (with its test seams), `unprivileged`, `barrier_argv`, the `--exec-no-new-privs` mode, and `read(..., no_new_privs=False)`.
 - `src/heterodyne/sandbox/hostread.py`:
   - the call at `:400` passes `no_new_privs=True`;
   - `_subordinate_uids()` (`/etc/subuid`, as above), read once per scan;
   - `_ours` counts those ranges;
-  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor subordinate to it can't be one, apart from the residuals above.
+  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor in this user's current `/etc/subuid` ranges can't be one. That holds while root leaves this user's allocation unchanged during the lifetime of its namespaces, and apart from the residuals above.
 - `tests/fakes/fake_agent_cli.py`: the `HZ_FAKE_STATUS_FILE` report.
 - The tests above. No ADR change: D9 and E4 already put the reader outside the sandbox. A line in plan 4b E4's notes records the barrier and the launch conditions.
