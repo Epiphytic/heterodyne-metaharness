@@ -4,7 +4,7 @@ Base: origin/main 0ac8c92.
 
 Files involved:
 - `src/heterodyne/sandbox/hostread.py` (`_holders`, `_ruled_out`, `_end_holders`)
-- Review: `docs/reviews/flakes2-design-r1.md` (REVISE)
+- Reviews: `docs/reviews/flakes2-design-r1.md`, `docs/reviews/flakes2-design-r2.md` (both REVISE)
 - `tests/test_sandbox_hostread.py`
 - `tests/fakes/fake_agent_cli.py` (the fake app-server)
 - `tests/test_session_git.py` (`test_snapshot_refuses_links_special_files_and_hard_links`)
@@ -132,12 +132,7 @@ In scope (lead, 2026-10-14). It is a fail-closed gap in the same function.
 
 ### Production (`hostread.py`): what a scan learns about each process
 
-The scan reads, in this order and each after the last:
-1. the leader's environ;
-2. `stat` (state, flags);
-3. when needed, `status` (`Uid:`, `Threads:`).
-
-That order matters. The kernel sets `PF_EXITING` before it tears down the memory map, and never clears it. Each process then ends in one of four outcomes.
+Each process ends in one of four outcomes.
 
 | Outcome | Effect on the scan |
 |---|---|
@@ -146,30 +141,58 @@ That order matters. The kernel sets `PF_EXITING` before it tears down the memory
 | **settle** | pidfd closed, nothing sent; the scan is not complete and runs again |
 | **unknown** | `_Unknown`: the scan fails at once, and its homes are kept |
 
-The leader's environ read leads to one of these outcomes:
+**PID and pidfd continuity do not prove task continuity.**
+- A worker that execs takes over the leader's PID in `de_thread` (`fs/exec.c`), and the old leader is released.
+- Signal 0 through the pidfd still succeeds afterwards.
+- So two separate reads of `/proc/<pid>/…` can describe two different tasks. The rules below never clear a process on facts taken from more than one read. Anything they can't prove from one read settles or is unknown.
 
-- **Non-empty environment.** As today: match if it holds a mark, clear if not. The pidfd signal-0 identity check is unchanged.
-- **Empty, EACCES or ESRCH.** None of these alone proves anything. Read `stat`, then go through these rules in order:
-  1. **Group dead:** state `Z`/`X` *and* `Threads: 1` in `status`, read after `stat` → clear.
-     - `Threads:` is the kernel's count of the group's unreleased threads (`signal->nr_threads`). It does not depend on listing `task/`. A worker leaves the count only once it has finished exiting, so a worker still exiting keeps it above 1.
-     - A zombie leader is released only after the group is empty, so `Z` with `Threads: 1` means no thread is left.
-     - This is the only way a `Z` process is cleared. `PF_EXITING` belongs to one task and never by itself shows the group is dead.
-  2. **Zombie leader with live threads:** state `Z`/`X` and `Threads:` above 1. Read the environment through the workers:
+**The group-dead proof: one read of `/proc/<pid>/status`.** The group is dead if, and only if, a *single* read shows `State:` `Z` or `X` *and* `Threads: 1`. Why one read is enough:
+- `proc_single_show` (`fs/proc/base.c`) takes the task for the PID once and runs `proc_pid_status` (`fs/proc/array.c`) on that one task for the whole read. A read too large for the buffer reruns the whole show, so the text returned is always one show's.
+  - `State:` is that task's state, printed first (`task_state`).
+  - `Threads:` comes later, from `task_sig`. It reads `signal->nr_threads` while holding that same task's `sighand` lock, and prints 0 if the lock can't be taken because the task has already been released (`__exit_signal`, `kernel/exit.c`, clears `sighand`).
+- So `Z`/`X` with `Threads: 1` means:
+  - the pinned task was a zombie when `State` was printed. A zombie never runs again.
+  - at the later locked read, it was still unreleased, and it was the group's only unreleased member, since `nr_threads` counts every member until its `__exit_signal`.
+  - No other thread exists to clone or exec, and a zombie can't, so the group is dead from then on.
+- The exec race can't produce this pair. Before the switch in `de_thread`, the exec'ing worker and the zombie leader are both counted (`Threads:` ≥ 2). After it, the old leader has been released, so a read pinned to it prints `Threads: 0`, and a read pinned to the new leader prints its live state.
+- Checked by probe: a zombie leader's worker execs while the scan samples single `status` reads continuously. Over 30 execs and about 880,000 reads, the pairs were:
+  - `Z 2` (400);
+  - `R 1`, `S 1` and `D 1`, the new leader;
+  - `R 2` (1);
+  - `Z 0` and `X 0` (1 each): the released old leader.
+  - Never `Z 1` or `X 1`.
+- The stat, status, stat "sandwich" is **not** enough, and is not used. Here is how it fails:
+  1. The first `stat` shows the old leader `Z`.
+  2. A worker execs.
+  3. `status` shows `Threads: 1` for the new, live leader.
+  4. That leader clones a thread and calls `pthread_exit`.
+  5. The second `stat` shows `Z` while the clone runs.
+
+**The rules.** The leader's environ is read first, as today.
+
+- **Non-empty environment.** As today: match if it holds a mark, clear if not, after the pidfd signal-0 check. Only a live memory map can give a non-empty read, so this is the group's environment at that moment. A zombie leader has none. (See "What the rules do and don't claim" under Risks.)
+- **Empty, EACCES or ESRCH.** None of these alone proves anything. Read `status` once (`State:`, `Threads:`, `Uid:`), then apply these rules in order. A `status` read missing `State:` or `Threads:`, or one that can't be parsed, → **settle**.
+  1. **`Z`/`X` with `Threads: 1`** → **clear**: the group is dead, by the proof above.
+  2. **`Z`/`X` with `Threads:` above 1** (a zombie leader with live threads). Read the environment through the workers:
      - list `/proc/<pid>/task`;
-     - for each tid other than the leader, read `/proc/<pid>/task/<tid>/environ`. The threads share one memory map, so one successful non-empty read is the group's environment.
-     - The first such read decides match or clear, after the same pidfd signal-0 check.
-     - A worker that is gone (`FileNotFoundError`, `ProcessLookupError`), refused (EACCES) or empty is skipped, and the next one is tried. These errors are handled per task and never reach the per-process handler, so they never skip the whole process.
-     - If no worker gives a readable environment → **settle**. That includes a listing that shows no worker even though `Threads:` is above 1 (truncated enumeration: `next_tid` stops when its current task loses its PID).
-  3. **Exiting:** `PF_EXITING` set → **settle**. A single-threaded process mid-exit lands here and is cleared by rule 1 once it is `Z`.
-  4. **Otherwise**, the leader is running and not exiting:
-     - *Empty:* a genuine empty environment, because the memory map was present when the environ was read. Otherwise `PF_EXITING` would have been set by the `stat` read. → **clear**, as today.
-     - *EACCES:* `_ruled_out`'s other two rules as today: another user's, or started before the earliest home → clear. Otherwise → **unknown**, as today. A live non-dumpable process of this user is still an unknown.
-     - *ESRCH:* there is no memory map, but the process is neither exiting nor a zombie. This should not happen for a user process. → **unknown**.
-- **`/proc/<pid>` itself is gone** (`stat` or `status` raises `FileNotFoundError` or `ProcessLookupError`) → clear, as today. The PID directory outlives every thread of the group, so its absence means the group is gone.
+     - for each tid other than the PID, read `/proc/<pid>/task/<tid>/environ`. Threads share one memory map, so a non-empty read is the group's environment.
+     - The first such read decides **match** or **clear**, after the pidfd signal-0 check.
+     - A worker that is gone (`FileNotFoundError`, `ProcessLookupError`), refused or empty is skipped, and the next one is tried. These errors are handled per task and never reach the per-process handler, so they never skip the whole process.
+     - If no worker gives a non-empty environment → **settle**. That includes a truncated listing (`next_tid` stops when its current task loses its PID), and a worker that has exec'd, whose old tid is then gone.
+  3. **`Z`/`X` with `Threads: 0`** → **settle**. The read was pinned to a task already released, possibly the old leader of an exec. The next scan reads whatever task holds the PID then.
+  4. **Empty, in any other state** → **settle**. An empty read doesn't show a genuinely empty environment: it may be an exiting leader's, read just before a worker exec'd. The next scan reads again.
+     - A live process of this user with a genuinely empty environment, started after the home, therefore settles on every scan. The deadline then keeps the homes (`TimeoutError`). That is fail-closed, and rare: a process run under `env -i` that is still alive at the scan.
+     - No cheaper sound proof was found. Any later read can describe a task that replaced the one read empty.
+  5. **EACCES or ESRCH, in any other state.** Read `stat` for `PF_EXITING` and the start time:
+     - **`PF_EXITING` set** → **settle**. A single-threaded process mid-exit lands here, and is cleared by rule 1 once it is a zombie. The flag here only chooses settle over unknown, and never clears anything: `PF_EXITING` belongs to one task and never shows the group is dead.
+     - **EACCES**: today's two remaining rules. Another user's process (`status` `Uid:`), or one started before the earliest home (`stat` field 22) → **clear**. Otherwise → **unknown**, as today. A live non-dumpable process of this user is still an unknown.
+       - These two facts also come from reads other than the environ read. They hold across an exec: `de_thread` copies the leader's start time to the new leader, and a uid change makes the clear "another user's", as today.
+     - **ESRCH** → **unknown**.
+- **`/proc/<pid>` itself is gone** (`status`, or `stat` when it's needed, raises `FileNotFoundError` or `ProcessLookupError`) → **clear**, as today. The PID directory outlives every thread of the group.
 
 `_holders` returns `(holders, settling)`. `_end_holders`:
 - loops while either is non-empty;
-- SIGKILLs only `holders`, through their pidfds. A pidfd SIGKILL ends the whole group.
+- SIGKILLs only `holders`, through their pidfds. A pidfd SIGKILL ends the group that holds the PID at that moment.
 - **closes every pidfd it collected in a `finally`, before it checks the deadline**;
 - sleeps 50 ms and scans again.
 
@@ -178,7 +201,7 @@ The deadline rules:
 - An **unknown** raises at once. It never waits for the deadline.
 - A home is removed only after one scan that found no holder, no settling process and no unknown.
 
-Waiting and rescanning stay conservative across exec and PID reuse. A rescan sees whatever process holds the PID then, with a fresh pidfd. `_ruled_out` and `_holders` get docstrings that say all of this, and the false "a zombie's environment is empty" is removed.
+`_ruled_out` and `_holders` get docstrings that say all of this, and the false "a zombie's environment is empty" is removed.
 
 ### Tests and fakes
 
@@ -196,7 +219,7 @@ Waiting and rescanning stay conservative across exec and PID reuse. A rescan see
 
 ## Tests
 
-Most of the new tests drive the scan through module seams. These are the existing `_environ` and `_stat`, plus new one-line readers for `status`'s `Threads:`, a task listing and a task's environ. They use a fake clock: `hostread.time.monotonic` and `hostread.time.sleep` are replaced together, and the sleep advances the clock and counts calls. So they are deterministic, need no load, and assert timing by the number of calls, not by wall time.
+Most of the new tests drive the scan through module seams. These are the existing `_environ` and `_stat`, plus new one-line readers for `status` (returning State, Threads and Uid from one read), a task listing and a task's environ. They use a fake clock: `hostread.time.monotonic` and `hostread.time.sleep` are replaced together, and the sleep advances the clock and counts calls. So they are deterministic, need no load, and assert timing by the number of calls, not by wall time.
 
 - **The three leader outcomes for a zombie leader** (parametrized: EACCES, empty, ESRCH; `Z`, `Threads: 2`, a worker whose environ holds the mark):
   - `recover` SIGKILLs it, as recorded by `pidfd_send_signal`, and then removes the home.
@@ -214,8 +237,22 @@ Most of the new tests drive the scan through module seams. These are the existin
 - **Settling past the deadline:** the same process stays exiting → kept, `DIAG_RECOVERY_KEPT`, no pidfd leaked.
 - **Unknown fails at once:** a live non-dumpable process of this user, EACCES with `PF_EXITING` clear → `DIAG_RECOVERY_KEPT` after **zero** sleeps and one scan. Today this is the same, and the test pins it against the new settle path.
 - **The read path settles too:** `read()` with an unrelated exiting process present for one scan returns `WANTED` and logs nothing. Today it logs `DIAG_SCRATCH_KEPT` and returns None.
+- **The group-dead proof needs both facts from one read** (seams):
+  - `Z` with `Threads: 0` → settles, no signal, kept at the deadline.
+  - A `status` text missing `Threads:` or `State:` → settles. It is never cleared.
+  - EACCES, then `status` `S` with `Threads: 1` while the `stat` seam still reports `Z` with `PF_EXITING` (the replaced leader's stale facts) → not cleared. It settles, and the home is kept at the deadline.
+- **Exec between the reads, B1** (seams, forced): the leader environ raises EACCES, `status` reports `Z` with `Threads: 2`, and the task listing's only worker raises `FileNotFoundError` because it has exec'd → settle. The next scan's leader environ holds the mark → matched and SIGKILLed, then removed. The home is never removed before the kill.
+- **Exec between the reads, B2** (seams, forced): `_environ` returns `b""`, then `status` reports the new leader, `S` with `Threads: 1` → settle, no removal. The next scan's environ holds the mark → matched and killed.
+- **A genuinely empty environment:** a live process of this user started after the home whose environ is always `b""` → settles on every scan, `DIAG_RECOVERY_KEPT` at the deadline, home kept, no pidfd leaked.
+- **Live exec between the reads** (no fake `/proc`; one seam hook):
+  - A child of the test with `CODEX_HOME` set to a stamped home. Its main thread calls `pthread_exit` while a worker waits on a pipe; on a byte, the worker execs a sleeper that inherits the environment.
+  - The test wraps the `status` reader. Before its first call for the child's PID, the wrapper writes the byte, then waits (bounded, 10 s) until `/proc/<pid>/exe` names the sleeper. Then it calls the real reader.
+  - So the leader environ was read from the zombie leader (EACCES), and `status` describes the new image (`S`, `Threads: 1`, `PF_EXITING` clear). Under rule 5 that is an unknown. The first `recover` therefore logs `DIAG_RECOVERY_KEPT` and keeps the home, with no signal sent.
+  - A second `recover`, with the wrapper removed, reads the new image's environ, which holds the mark. It SIGKILLs the child and removes the home. The test asserts `Popen.wait(10) == -SIGKILL`.
+  - The same harness with the hook placed before the environ read is the control: one scan matches.
 - **Live zombie-leader regression** (no seams):
   - A child of the test whose main thread calls `pthread_exit` while a worker sleeps, with `CODEX_HOME` set to a stamped home. `recover` kills it and removes the home.
+  - **Readiness:** before calling `recover`, the test waits (bounded, 10 s) for one `/proc/<pid>/status` read showing `Z` with `Threads:` of 2 or more, and fails if it never does. Otherwise `recover` could kill the child before its leader exits, and pass without exercising the regression.
   - Group death is shown by the child's `Popen.wait(10) == -SIGKILL`. Waiting on a direct child returns only once every thread of its group has exited, which `alive()` can't show.
   - A `finally` SIGKILLs and reaps it by its handle.
 - **`crashed[started]`** asserts `alive(orphan)` before `recover`. With `outlive` that holds on every run. The `copied` case is unchanged.
@@ -232,8 +269,15 @@ Most of the new tests drive the scan through module seams. These are the existin
   - `stat` field 9;
   - `status`'s `Threads:`.
 
-  If the flag ever read clear, the process would fall to rule 4 and become unknown or be cleared by today's rules. If `Threads:` were missing, the group-dead rule couldn't fire, and a zombie would settle until the deadline. Both fail closed.
-- **PID reuse.** `stat` and `status` are read by PID after the pidfd is open, as the zombie check already does. A worker match is confirmed by pidfd signal 0, as a leader match is. A reused PID can only make the scan wait or match through a fresh pidfd. It can never make it clear a process it had no proof for.
+  If the flag ever read clear, an EACCES process would fall to today's rules under rule 5: cleared as another user's or as older than the home, otherwise unknown. If `Threads:` were missing, the group-dead rule couldn't fire, and a zombie would settle until the deadline. Both fail closed.
+- **What the rules do and don't claim across exec and PID reuse.**
+  - A process is judged by the environment of the image whose environ was read. A process that execs after a non-empty read is judged by the image read, as today; the scan doesn't claim to see an exec it raced.
+  - Only two things are cleared without a non-empty environment:
+    - the group-dead proof, which comes from one read of one task;
+    - today's other-user and early-start rules, whose facts survive `de_thread`.
+  - PID and pidfd continuity are used only to aim the SIGKILL and to confirm a match. They are never used to show that two reads saw the same task.
+  - Every other case settles or is unknown, and keeps the home.
+- **A genuinely empty environment.** A live process of this user, started after the home, whose environ is empty settles until the deadline and keeps the homes. This is accepted (lead, r2): it is fail-closed, and needs a process started with no environment that is still alive at the scan.
 - **Cost.** It adds one `status` read per unreadable or empty process, and a `task/` listing only for a zombie leader with live threads. Both are rare.
 
 ## Out of scope
