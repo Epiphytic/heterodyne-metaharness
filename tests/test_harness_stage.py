@@ -316,6 +316,7 @@ def test_bounds_apply_at_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     data = tar_of(over)
     assert refusal(tmp_path / "b", CODEX_LAYOUT, [(part_of("cli", data), data)]) == sc.TOO_MANY_ENTRIES
 
+    monkeypatch.undo()                  # the depth cases need more than 50 entries
     deep = "/".join(["d"] * (sc.MAX_DEPTH - 2)) + "/f"      # with `cli/`, exactly MAX_DEPTH components
     data = tar_of(with_cli({deep: b"x"}))
     stage(tmp_path / "c", CODEX_LAYOUT, [(part_of("cli", data), data)])

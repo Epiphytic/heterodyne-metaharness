@@ -55,9 +55,9 @@ class Server:
     def __init__(self, files: dict[str, bytes]) -> None:
         self.files = files
         self.asked: list[tuple[str, float]] = []
-        self.special: dict[str, Callable[[], object]] = {}
+        self.special: dict[str, Callable[[], fetch.Response]] = {}
 
-    def __call__(self, url: str, timeout: float) -> object:
+    def __call__(self, url: str, timeout: float) -> fetch.Response:
         self.asked.append((url, timeout))
         if url in self.special:
             return self.special[url]()
@@ -86,7 +86,7 @@ def npm_files(tarball: bytes, *, integrity: str | None = None) -> dict[str, byte
 
 def fetcher(tmp_path: Path, server: Server, clock: Clock | None = None, **kw: object) -> fetch.Fetcher:
     return fetch.Fetcher(server, tmp_path / "cache", clock or Clock(), 60.0, npm_registry=REGISTRY,
-                         **kw)  # type: ignore[arg-type]
+                         **kw)  # type: ignore[arg-type] (login_dirs only)
 
 
 def refused(call: Callable[[], object]) -> str:

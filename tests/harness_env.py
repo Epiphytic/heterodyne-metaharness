@@ -224,6 +224,7 @@ def store_dir(tmp_path: Path) -> Path:
 def artifact_fds(tmp_path: Path, blobs: Sequence[bytes]) -> Iterator[list[int]]:
     """Each of `blobs` as a file in `tmp_path`, opened read-only, as `wsd` hands artifacts over."""
     fds: list[int] = []
+    tmp_path.mkdir(parents=True, exist_ok=True)
     try:
         for i, data in enumerate(blobs):
             path = tmp_path / f"artifact-{i}"
