@@ -7,9 +7,10 @@ from collections.abc import Callable
 
 import pytest
 from harness_env import sample_manifest
-from heterodyne.harness.resources import store_core as sc
 from hypothesis import given
 from hypothesis import strategies as st
+
+from heterodyne.harness.resources import store_core as sc
 
 
 def test_the_digest_is_the_sha256_of_the_canonical_encoding() -> None:
