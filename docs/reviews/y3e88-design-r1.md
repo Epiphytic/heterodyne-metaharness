@@ -1,0 +1,17 @@
+Reviewer: gpt-6.1-sol. Author: claude-opus-5-5. Mode: cross-model. Range: 093ede58d4463dd3c267d18ae3a22a8201c5838f..388f92ef6e195fa4faca6565c91ad748f175dbfe. Verdict: REVISE.
+
+Note: cycle 1 of 3 of the btq-y3e88 design review.
+
+[BLOCKING] **Changing `batches()` weakens negative and exact-count assertions.** Design “The fix,” step 3; `tests/test_admind_r13_replies.py:298,314,328,364`. These uses also depend on the raw helper. If an erroneous batch is published but its acknowledgement is delayed or lost, the proposed filtered `batches()` hides it: `assert batches(h) == []` can pass, and `len(batches(h)) == 1` can overlook a second published batch. The design explicitly preserves negative `sent_mid()` and `texts()` checks but misses these indirect checks. Keep `batches()` raw and introduce `delivered_batches()` for `batch_arrives()`, or explicitly migrate every absence and upper-bound assertion to a raw helper. A green delay sweep cannot prove these assertions retained their strength.
+
+[NON-BLOCKING] **The three root causes match the code.** `tests/fakes/fake_wn_agent.py:191–196` lists sends before returning their IDs; `src/heterodyne/admind/daemon.py:2811–2827` records them afterward. `tests/test_admind_daemon.py:117` waits for subscriber registration, while `confirm_observing()` still needs its group check; `autobump()` correctly returns when the gate is closed. Finally, `tests/test_admind_r13_replies.py:429` supplies a coroutine that never suspends, allowing `alerts_loop()` to starve the event loop when `relay_alerts()` returns immediately. The proposed readiness waits and `asyncio.sleep(0)` address these mechanisms.
+
+[NON-BLOCKING] **The waits do not silently mask delivery failure.** `tests/test_admind_daemon.py:94–99` propagates timeout; `tests/test_admind_r13_replies.py:111–116` converts it into an explicit test failure. If `mark_sent()` never runs or records the wrong ID, the proposed helpers remain false and the test fails. Waiting for `sent` makes the subsequent status assertion redundant, but still tests eventual successful recording. It does not test a delivery-latency bound beyond the timeout.
+
+[NON-BLOCKING] **“No production change” is appropriate, with the documented limitation.** `src/heterodyne/admind/store.py:647–665` explicitly excludes pending and failed rows from message recognition. Recording after `final_sent` is necessary with the current ID flow. An operator reaction arriving before acknowledgement can therefore be ignored; that is a real behavioral limitation, already acknowledged under Risks, rather than evidence that these test fixes require changing production ordering.
+
+[NON-BLOCKING] **The knobs are production-safe as designed; retain permanent starvation coverage.** Design steps 6–8 and Tests. Reading the variables only in `Harness`, with zero defaults, leaves production unaffected. Nonzero CI values intentionally change timing. The two flake regressions, helper tests, and separate delay sweeps provide reasonable acceptance coverage. However, reverting only the `no_sleep()` fix could restore the hang without failing either permanent flake regression reliably. Add a bounded, externally supervised regression for the closed-gate sleep seam, or include that scenario in the permanent check-delay regression.
+
+Review based on source inspection; I did not run reproductions or modify files.
+
+Verdict: REVISE
