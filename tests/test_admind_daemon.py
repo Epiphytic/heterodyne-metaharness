@@ -38,6 +38,8 @@ from heterodyne.tmux import Tmux, TmuxError
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "fake_claude.py"
 STRANGER = "e5" * 32
+REPLY_DELAY_ENV = "HZ_FAKE_WN_REPLY_DELAY"     # the fake's reply_delay, for the race sweeps (btq-y3e88)
+CHECK_DELAY_ENV = "HZ_FAKE_WN_CHECK_DELAY"     # the fake's ack_check_delay
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +70,8 @@ class Harness:
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.fake = FakeWnAgent(tmp_path / "wn.sock")
+        self.fake.reply_delay = float(os.environ.get(REPLY_DELAY_ENV, "0"))
+        self.fake.ack_check_delay = float(os.environ.get(CHECK_DELAY_ENV, "0"))
         self.tmux = new_test_tmux()
         self.agent = AdminAgent(self.tmux, self.store, self.settings, self.settings.state_dir / "hook.sock")
         runner = CommandRunner(self.agent, Services(), ("fake.service",), lambda: True)
