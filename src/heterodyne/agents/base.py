@@ -25,18 +25,28 @@ from heterodyne.wsd.usage import Observation
 if TYPE_CHECKING:
     from heterodyne.agents.exec_dirs import Cleared  # exec_dirs raises AdapterError, so not at runtime
 
-# One fixed hook command for every launch (plan 4 D5): Codex's trusted hash stays valid, and the
-# session token is read from the file beside the socket, never from a command line.
-HOOK_COMMAND = "python3 -I /run/hz/shim.py hook"
+
+# One fixed hook command per event, the same on every launch (plan 4 D5): Codex's trusted hash stays
+# valid, and the session token is read from the file beside the socket, never from a command line. The
+# event is the command's argument, so the shim knows it without parsing untrusted input (btq-rcose).
+def hook_command(event: str) -> str:
+    return f"python3 -I /run/hz/shim.py hook {event}"
+
+
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PreToolUse")
 # Claude's status line, when (c) is on (plan 4b E7): fixed like the hooks, and reading nothing from argv.
 STATUS_COMMAND = "python3 -I /run/hz/shim.py status"
 # Claude Code 2.1.286 and codex-cli 0.160 block a tool only on exit 2: an interpreter that can't start,
 # crashes or is killed would otherwise let the tool run under bypass mode. PreToolUse only; also fixed,
-# so Codex's trusted hash stays valid. A hook the CLI times out is cancelled and its tool runs, so the
-# timeout (seconds) sits well above the shim's own deadline (hook_wait_seconds, at most 60).
-PRE_TOOL_COMMAND = (f"sh -c '{HOOK_COMMAND} || "
-                    '{ echo "heterodyne: the PreToolUse hook could not run" >&2; exit 2; }\'')
+# so Codex's trusted hash stays valid. A hook the CLI times out is cancelled and its tool runs (rcose
+# design, experiment E7), so the timeout (seconds) sits well above the shim's own deadlines: its input's
+# (shim.HOOK_INPUT_WAIT) plus its reply's (hook_wait_seconds, at most settings.MAX_HOOK_WAIT).
+def pre_tool_command() -> str:
+    return (f"sh -c '{hook_command('PreToolUse')} || "
+            '{ echo "heterodyne: the PreToolUse hook could not run" >&2; exit 2; }\'')
+
+
+PRE_TOOL_COMMAND = pre_tool_command()
 PRE_TOOL_TIMEOUT = 120
 
 
@@ -121,7 +131,7 @@ def install_root(binary: Path) -> Path:
 def hook_group(event: str, matcher: str | None = None) -> dict[str, Any]:
     hook: dict[str, Any] = (
         {"type": "command", "command": PRE_TOOL_COMMAND, "timeout": PRE_TOOL_TIMEOUT} if event == "PreToolUse"
-        else {"type": "command", "command": HOOK_COMMAND})
+        else {"type": "command", "command": hook_command(event)})
     return {"hooks": [hook]} if matcher is None else {"matcher": matcher, "hooks": [hook]}
 
 

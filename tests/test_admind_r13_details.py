@@ -468,7 +468,7 @@ def test_details_full_adds_this_turns_tool_calls_and_no_thinking(tmp_path: Path)
 def test_details_full_on_a_turn_without_a_span(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await terminal_stop(h, LONG)  # no UserPromptSubmit: no span
-        await wait_until(lambda: SUMMARY in h.texts(), 20)
+        await wait_until(lambda: SUMMARY in h.delivered_texts(), 20)  # `!details` finds the latest sent one
         mid = await ask(h, "!details full")
         await wait_until(lambda: delivered(h, mid), 20)
         assert details_texts(h, mid)[0].endswith(f"\n\n{NO_TOOLS}")
@@ -910,7 +910,13 @@ def test_an_alert_is_delivered_while_a_large_details_is_still_being_staged(
         on_stage(h, lambda calls, parts: calls == 3 and h.daemon.post("alert:x", "urgent alert", None))
         mid_holder.append(await ask(h, "!details", reply_to=sid))
         mid = mid_holder[0]
-        await wait_until(lambda: delivered(h, mid), 30)
+        # One 30 s budget for publishing and delivery, plus the fake's reply delay for each of the 300-odd
+        # parts when a sweep sets one: exactly 30 s with the knob unset.
+        loop = asyncio.get_running_loop()
+        end = loop.time() + 30
+        await wait_until(lambda: bool(details_texts(h, mid)), 30)    # published, all parts at once
+        end += len(details_texts(h, mid)) * h.fake.reply_delay
+        await wait_until(lambda: delivered(h, mid), max(0.0, end - loop.time()))
         assert snapshot == {"status": "executing", "visible": 0}  # sent mid-preparation, nothing partial
         assert len(details_texts(h, mid)) > 100 and staged(h) == 0
 

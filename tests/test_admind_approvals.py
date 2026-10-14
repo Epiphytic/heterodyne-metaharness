@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -21,14 +22,23 @@ from typing import Any
 
 import msgspec
 import pytest
-from admind_asks_fixture import approve_bead_wrapper, bead_db, btq_log, decisions, sent_mid, two_operators
+from admind_asks_fixture import (
+    approve_bead_wrapper,
+    bead_db,
+    btq_log,
+    decisions,
+    listed_mid,
+    sent_mid,
+    two_operators,
+)
 from admind_waits import lock_waiters, stays, wait_until
+from escapes import FAKES, Escapes
 from fakes.fake_wn_agent import ACCOUNT
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, operator
 from test_admind_asks import NONE, audited, joined, posted, row, via_main
 from test_admind_daemon import Harness, needs_tmux, run_with
 
-from heterodyne.admind import approvals, asks, chunk, cli, commands, reap, summarize
+from heterodyne.admind import approvals, asks, cli, commands, reap, summarize
 from heterodyne.admind.approvals import ApproveBead, Attempt, BtqError, Busy, Readout
 from heterodyne.admind.audit import ref_id
 from heterodyne.admind.daemon import (
@@ -134,9 +144,9 @@ def kill_quietly(path: Path) -> None:
             pass
 
 
-def fake(tmp_path: Path, **kw: Any) -> ApproveBead:
+def fake(tmp_path: Path, escape_dir: Path | None = None, **kw: Any) -> ApproveBead:
     bead_db(tmp_path, **{BEAD: bead(**kw)})
-    return ApproveBead(approve_bead_wrapper(tmp_path))
+    return ApproveBead(approve_bead_wrapper(tmp_path, escape_dir))
 
 
 # --- Readout -------------------------------------------------------------------------------------
@@ -287,14 +297,14 @@ def stall_connect(monkeypatch: pytest.MonkeyPatch, loop: asyncio.AbstractEventLo
     return stalled
 
 
-def test_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path,
+def test_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path, escapes: Escapes,
                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     """r2-B3: a cancellation while the pipes are being connected, a stall never released: the read still
     ends within REAP_SECONDS, and the child and a descendant it already started in its group are gone."""
     monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
 
     async def scenario() -> None:
-        ab = fake(tmp_path, read="descendant")
+        ab = fake(tmp_path, escapes.path, read="descendant")
         stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
         task = asyncio.create_task(ab.read(BEAD))
         await wait_until(lambda: stalled.is_set() and (tmp_path / "descendant.pid").exists(), 20)
@@ -305,30 +315,24 @@ def test_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path,
         assert time.monotonic() - started < 1 + 1
         child, grandchild = pids(tmp_path)[0], int((tmp_path / "descendant.pid").read_text())
         await wait_until(lambda: gone(child) and gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(tmp_path / "descendant.pid")
+    asyncio.run(scenario())
 
 
-def test_a_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path,
+def test_a_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path, escapes: Escapes,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """The run's own timeout covers connecting the pipes too."""
     monkeypatch.setattr(approvals, "READ_SECONDS", 1)
     monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
 
     async def scenario() -> None:
-        ab = fake(tmp_path, read="descendant")
+        ab = fake(tmp_path, escapes.path, read="descendant")
         stall_connect(monkeypatch, asyncio.get_running_loop())
         with pytest.raises(BtqError, match="timed out"):
             await asyncio.wait_for(ab.read(BEAD), 1 + 1 + 1)
         await wait_until(lambda: (tmp_path / "descendant.pid").exists(), 20)
         child, grandchild = pids(tmp_path)[0], int((tmp_path / "descendant.pid").read_text())
         await wait_until(lambda: gone(child) and gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(tmp_path / "descendant.pid")
+    asyncio.run(scenario())
 
 
 def fail_connect(monkeypatch: pytest.MonkeyPatch, pid_file: Path, decision: bool = False) -> None:
@@ -346,33 +350,34 @@ def fail_connect(monkeypatch: pytest.MonkeyPatch, pid_file: Path, decision: bool
     monkeypatch.setattr(reap.Child, "connect", failing)
 
 
-def test_failure_after_launch_reaps_the_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failure_after_launch_reaps_the_group(tmp_path: Path, escapes: Escapes,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
     """r2-B2: connecting the pipes fails with the child and a descendant in its group running: both are
     killed, and the failure is approve-bead's fixed word."""
     pid_file = tmp_path / "descendant.pid"
     fail_connect(monkeypatch, pid_file)
 
     async def scenario() -> None:
-        ab = fake(tmp_path, read="descendant")
+        ab = fake(tmp_path, escapes.path, read="descendant")
         with pytest.raises(BtqError, match="unavailable"):
             await asyncio.wait_for(ab.read(BEAD), approvals.REAP_SECONDS + 20)
         child, grandchild = pids(tmp_path)[0], int(pid_file.read_text())
         await wait_until(lambda: gone(child) and gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(pid_file)
+    asyncio.run(scenario())
 
 
-DESCENDANT = """\
+DESCENDANT = f"""\
 import os, sys, time
-pid = os.fork()
+sys.path.insert(0, {str(FAKES)!r})
+import sleeper
+pid = sleeper.fork_held(sys.argv[2])
 if pid == 0:
-    null = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(null, fd)
-    time.sleep(60)
-    os._exit(0)
+    try:
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+    finally:
+        sleeper.exec_sleeper()
 with open(sys.argv[1] + ".tmp", "w") as f:
     f.write(str(pid))
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
@@ -380,7 +385,7 @@ time.sleep(600)
 """
 
 
-def test_summarizer_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path,
+def test_summarizer_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: Path, escapes: Escapes,
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     """The summarizer starts its child through the same `reap.spawn`: a stall never released, cancelled."""
     monkeypatch.setattr(summarize, "REAP_SECONDS", 1)
@@ -388,7 +393,7 @@ def test_summarizer_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: P
 
     async def scenario() -> None:
         stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
-        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file), str(escapes.path)]
         task = asyncio.create_task(summarize.summarize(argv, tmp_path / "w", "r", timeout=30))
         await wait_until(lambda: stalled.is_set() and pid_file.exists(), 20)
         started = time.monotonic()
@@ -398,31 +403,25 @@ def test_summarizer_cancel_during_a_stalled_creation_reaps_the_group(tmp_path: P
         assert time.monotonic() - started < 1 + 1
         grandchild = int(pid_file.read_text())
         await wait_until(lambda: gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(pid_file)
+    asyncio.run(scenario())
 
 
-def test_summarizer_failure_after_launch_reaps_the_group(tmp_path: Path,
+def test_summarizer_failure_after_launch_reaps_the_group(tmp_path: Path, escapes: Escapes,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     pid_file = tmp_path / "descendant.pid"
     fail_connect(monkeypatch, pid_file)
 
     async def scenario() -> None:
-        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file), str(escapes.path)]
         with pytest.raises(summarize.SummaryFailed) as info:
             await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=30), 30)
         assert info.value.reason == "not-run"
         grandchild = int(pid_file.read_text())
         await wait_until(lambda: gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(pid_file)
+    asyncio.run(scenario())
 
 
-def test_summarizer_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path,
+def test_summarizer_stalled_creation_times_out_and_reaps_the_group(tmp_path: Path, escapes: Escapes,
                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     """The summarizer's own timeout covers connecting the pipes too: a stall never released ends as
     "timeout", and its group is gone."""
@@ -431,17 +430,14 @@ def test_summarizer_stalled_creation_times_out_and_reaps_the_group(tmp_path: Pat
 
     async def scenario() -> None:
         stalled = stall_connect(monkeypatch, asyncio.get_running_loop())
-        argv = [sys.executable, "-c", DESCENDANT, str(pid_file)]
+        argv = [sys.executable, "-c", DESCENDANT, str(pid_file), str(escapes.path)]
         with pytest.raises(summarize.SummaryFailed) as info:
             await asyncio.wait_for(summarize.summarize(argv, tmp_path / "w", "r", timeout=1), 20 + 1 + 1)
         assert info.value.reason == "timeout" and stalled.is_set()
         await wait_until(pid_file.exists, 20)
         grandchild = int(pid_file.read_text())
         await wait_until(lambda: gone(grandchild), 5)
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(pid_file)
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("released", [True, False])
@@ -507,7 +503,8 @@ def test_cleanup_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert "summarizer cleanup failed (TimeoutError)" in capsys.readouterr().err
 
 
-def test_reap_bounded_when_pipe_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reap_bounded_when_pipe_held(tmp_path: Path, escapes: Escapes,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(approvals, "READ_SECONDS", 1)
     monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
     closed: list[str] = []
@@ -522,7 +519,7 @@ def test_reap_bounded_when_pipe_held(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(reap, "close_pipes", recording)
 
     async def scenario() -> None:
-        ab = fake(tmp_path, read="held")
+        ab = fake(tmp_path, escapes.path, read="held")
         started = time.monotonic()
         with pytest.raises(BtqError, match="timed out"):
             await ab.read(BEAD)
@@ -530,13 +527,11 @@ def test_reap_bounded_when_pipe_held(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert closed == ["approve-bead"] and gone(pids(tmp_path)[0])
         held = int((tmp_path / "held.pid").read_text())
         assert not gone(held)            # it left the group, so the kill missed it: only the pipe was let go
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(tmp_path / "held.pid")
+    asyncio.run(scenario())
 
 
-def test_second_cancel_during_cleanup_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_second_cancel_during_cleanup_is_bounded(tmp_path: Path, escapes: Escapes,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(approvals, "REAP_SECONDS", 1)
     killed = asyncio.Event()
     kill = reap.kill
@@ -547,7 +542,7 @@ def test_second_cancel_during_cleanup_is_bounded(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(reap, "kill", recording)
 
     async def scenario() -> None:
-        ab = fake(tmp_path, read="held")
+        ab = fake(tmp_path, escapes.path, read="held")
         task = asyncio.create_task(ab.read(BEAD))
         await wait_until(lambda: (tmp_path / "held.pid").exists())
         task.cancel()
@@ -557,10 +552,7 @@ def test_second_cancel_during_cleanup_is_bounded(tmp_path: Path, monkeypatch: py
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 1 + 1)
         assert time.monotonic() - started < 1 + 1 and gone(pids(tmp_path)[0])
-    try:
-        asyncio.run(scenario())
-    finally:
-        kill_quietly(tmp_path / "held.pid")
+    asyncio.run(scenario())
 
 
 def test_descendant_killed_after_parent_exit(tmp_path: Path) -> None:
@@ -628,7 +620,7 @@ def test_postable_accepts() -> None:
 # --- the card (R8, R21, R25) ---------------------------------------------------------------------
 HEAD = "🛂 Approval ask k7m2 · bead btq-ab12c · posted by controller (a local process; unverified)"
 ACTIONS = "👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>"
-TOP = [HEAD, ACTIONS, f"digest {D12}", "No other asks outstanding or in flight."]
+TOP = ["APPROVAL: purpose not set", HEAD, ACTIONS, f"digest {D12}", "No other asks outstanding or in flight."]
 END = ["", f"Approving records your approval of {BEAD} in btq, as you, via Marmot. Any other reply is a note "
        "for the poster."]
 
@@ -639,17 +631,29 @@ def test_approval_card_is_the_readout_verbatim() -> None:
     assert isinstance(card, asks.ApprovalCard)
     whole = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
     assert card.card_chunks == [whole] and card.details_chunks == [whole]
-    assert D not in whole and whole.splitlines()[:4] == TOP and "!approve" not in whole
+    assert D not in whole and whole.splitlines()[:5] == TOP and "!approve" not in whole
     assert asks.approval_title(readout(), BEAD) == "Approve the plan 4 sandbox runtime"
     assert asks.approval_title(readout(readout={"title": ["title:"], "ask": [], "description": []}),
                                BEAD) == BEAD
+
+
+def unmarked(parts: list[str]) -> str:
+    """The chunks' text without their part markers (cxmkf K23; part 1's count, Amendment 1 §2) or the
+    newlines a boundary drops."""
+    return "".join(re.sub(r"\A↳ part \d+/\d+\n|\n↳ part 1/\d+\Z", "", p) for p in parts).replace("\n", "")
 
 
 def test_approval_card_chunks_are_what_is_queued() -> None:
     card = asks.approval_card(card_row(), readout(), 200)
     assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
     text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *DESCRIPTION, *END])
-    assert card.card_chunks == chunk.split(text, 200)
+    n = len(card.card_chunks)
+    assert all(len(p) <= 200 for p in card.card_chunks)
+    assert unmarked(card.card_chunks) == text.replace("\n", "")
+    assert all(p.startswith(f"↳ part {i + 1}/{n}\n") for i, p in enumerate(card.card_chunks) if i)
+    assert card.card_chunks[0].endswith(f"\n↳ part 1/{n}") and card.card_chunks[0].startswith(TOP[0])
+    for line in (t for t in LINKED if "link: " in t):          # a link line is never cut (K23)
+        assert any(line in p.split("\n") for p in card.card_chunks)
 
 
 def test_approval_card_is_never_shortened() -> None:
@@ -660,7 +664,8 @@ def test_approval_card_is_never_shortened() -> None:
     card = asks.approval_card(card_row(), r, 4000)
     assert isinstance(card, asks.ApprovalCard) and len(card.card_chunks) > 1
     text = "\n".join([*TOP, *TITLE, "ask:", *LINKED, *long, *END])
-    assert card.card_chunks == chunk.split(text, 4000) and card.details_chunks == card.card_chunks
+    assert unmarked(card.card_chunks) == text.replace("\n", "") and card.details_chunks == card.card_chunks
+    assert all(len(p) <= 4000 for p in card.card_chunks)
     assert "  │ line 59 of the plan" in "".join(card.card_chunks) and "shortened" not in text
     assert len(text.splitlines()) > asks.CARD_LINES and len(text) > asks.CARD_CHARS
 
@@ -692,14 +697,21 @@ def test_approval_card_refuses_what_redaction_would_change(line: str) -> None:
 
 
 def test_approval_card_refuses_a_chunk_redaction_would_change() -> None:
-    """The R21 fixture found by search (again for the R30 layout): the whole text survives redaction; a
-    chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES` matches."""
+    """The R21 fixture, found by search (again for the cxmkf labels, markers and packing): the whole text
+    survives redaction; a chunk boundary cuts the key so that one chunk holds a run `SECRET_VALUES`
+    matches."""
     key = "AKIA" + "ABCDEFGHIJKLMNOPQRST"
-    r = readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
-                         "description": ["description:", "  │ " + "w" * 84 + " " + key]}, links=[])
-    whole = asks.approval_card(card_row(), r, 4000)
-    assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
-    assert asks.approval_card(card_row(), r, 200) == asks.REDACTED
+
+    def with_pad(pad: int) -> Readout:
+        return readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
+                                "description": ["description:", "  │ " + "w" * pad + " " + key]}, links=[])
+    for pad in range(0, 400):
+        whole = asks.approval_card(card_row(), with_pad(pad), 4000)
+        assert isinstance(whole, asks.ApprovalCard) and key in whole.card_chunks[0]
+        if asks.approval_card(card_row(), with_pad(pad), 200) == asks.REDACTED:
+            break
+    else:
+        raise AssertionError("no padding makes a chunk that redaction would change")
 
 
 def test_approval_card_refuses_a_value_split_across_chunks() -> None:
@@ -709,15 +721,13 @@ def test_approval_card_refuses_a_value_split_across_chunks() -> None:
         return readout(readout={"title": ["title:", "  │ T"], "ask": ["  effect:", "    - │ e"],
                                 "description": ["description:", line]}, links=[])
     stand_in_token = "Z" * len(TOKEN)
-    for pad in range(100, 200):
-        stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 4000)
+    for pad in range(0, 400):
+        stand_in = asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + stand_in_token), 200)
         assert isinstance(stand_in, asks.ApprovalCard)
-        text = stand_in.card_chunks[0].replace(stand_in_token, TOKEN)
-        if all(redact(part) == part for part in chunk.split(text, 200)):
-            break
+        if all(stand_in_token not in part for part in stand_in.card_chunks):
+            break           # a boundary cuts the token: no chunk holds it whole
     else:
         raise AssertionError("no padding splits the token")
-    assert redact(text) != text
     assert asks.approval_card(card_row(), with_line("  │ " + "w" * pad + " " + TOKEN), 200) == asks.REDACTED
 
 
@@ -785,12 +795,14 @@ APPROVAL = asks.AskPost("approval", bead=BEAD)
 
 def go(tmp_path: Path, scenario: Callable[[Harness], Awaitable[None]],
        beads: dict[str, dict[str, Any]] | None = None, *,
-       before_store: Callable[[Harness], Any] | None = None, fresh: bool = True, **settings: Any) -> Harness:
+       before_store: Callable[[Harness], Any] | None = None, fresh: bool = True,
+       escape_dir: Path | None = None, **settings: Any) -> Harness:
     """A run with the fake approve-bead and operators op and llctest, both confirmed in a three-member
-    group (r1-12). `fresh=False` keeps the bead file of an earlier run (a restart)."""
+    group (r1-12). `fresh=False` keeps the bead file of an earlier run (a restart). `escape_dir`: the
+    escapes use for the fake's long-lived grandchildren (tests/escapes.py)."""
     if fresh:
         bead_db(tmp_path, **(beads or {BEAD: bead()}))
-    overrides = {"approve_bead": approve_bead_wrapper(tmp_path), **OPS, **settings}
+    overrides = {"approve_bead": approve_bead_wrapper(tmp_path, escape_dir), **OPS, **settings}
     h = run_with(tmp_path, scenario, before=two_operators, settings_overrides=overrides,
                  before_store=before_store)
     h.store.close()
@@ -1259,7 +1271,7 @@ def test_latch_during_decision_completes(tmp_path: Path) -> None:
         assert ask_status(h, ask_id) == "approved"
         assert audited(h, kind="ask", action="decided", ask_id=ask_id, latched_during=True)
         assert queued(h, mid).startswith(f"Approved {BEAD}")
-        await stays(lambda: sent_mid(h, f"ask:{mid}:0") is None)
+        await stays(lambda: listed_mid(h, f"ask:{mid}:0") is None)
     go(tmp_path, scenario)
 
 
@@ -2035,7 +2047,7 @@ def test_launch_follows_the_last_check_with_no_await(tmp_path: Path, monkeypatch
 
 
 @needs_tmux
-def test_failure_after_the_decision_launch_reads_back(tmp_path: Path,
+def test_failure_after_the_decision_launch_reads_back(tmp_path: Path, escapes: Escapes,
                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     """r2-B2: the decision's child exists (it wrote the decision and started a descendant in its group), then
     connecting its pipes fails: the group is reaped, and the outcome comes from the read-back, not "nothing
@@ -2053,10 +2065,7 @@ def test_failure_after_the_decision_launch_reads_back(tmp_path: Path,
         assert reads(h) == 3 and len(decisions(h)) == 1
         child, grandchild = pids(tmp_path)[2], int(pid_file.read_text())
         await wait_until(lambda: gone(child) and gone(grandchild), 5)
-    try:
-        go(tmp_path, scenario)
-    finally:
-        kill_quietly(pid_file)
+    go(tmp_path, scenario, escape_dir=escapes.path)
 
 
 @needs_tmux
@@ -2090,4 +2099,4 @@ def test_in_flight_counts_other_asks() -> None:
     assert asks.count_others(rows) == (2, 3)
     card = asks.approval_card(card_row(), readout(), 4000, others=(2, 1))
     assert isinstance(card, asks.ApprovalCard)
-    assert card.card_chunks[0].splitlines()[3] == "2 other asks outstanding, 1 in flight."
+    assert card.card_chunks[0].splitlines()[4] == "2 other asks outstanding, 1 in flight."

@@ -93,7 +93,7 @@ This is a setup step only (ADR 0001 §8.1, host exception 1). In operation, oper
   - The rendered text is capped at the smaller of 64 MiB of UTF-8 bytes and 20,000 parts of `chunk_chars` characters each (at the default 4000 that is 64 MiB; at `chunk_chars` 200 it is about 4 MB). Where the output stops at the cap it ends with a notice: `(details truncated at 64 MiB)` or, for the smaller limit, `(details truncated at N MiB)` or `(details truncated at N bytes)`. A tool call or result is never shown in part: the first one that would pass the cap, and everything after it, is replaced by the notice. A stored reply is shown whole, so the output can pass the cap by one reply, and the cap counts the text before redaction, which can expand it.
   - One command has one transcript read budget, 30 seconds in total (`DETAILS_READ_SECONDS`), however many turns a batch holds. A turn the budget ran out before shows `(not read: time limit)`. A turn whose transcript is busy or slow shows `(the transcript is busy or slow; try `!details full` again)`. A turn with no known span, or with a corrupt record, shows that its tool calls are not available, and a record over 64 MiB makes the turn unreadable. There is no automatic retry.
   - `!details` output is sent in lane 2 (below). It is staged in the `details_stage` table in slices, with a yield between them, and published in one statement, so a long one does not stall the daemon. The table is emptied at startup, and a command that fails or is cancelled discards what it staged.
-- **Two lanes.** The outbox sends lane 1 (command replies, alerts, notices, verbatim replies, summaries and batches) before lane 2 (`!details`), each in order. A lane-1 message never waits behind a lane-2 message that is backing off after a failure.
+- **Two lanes.** The outbox sends lane 1 (command replies, alerts, notices, verbatim replies, summaries and batches) before lane 2 (`!details` and posted FYI notices, section 10), each in order. A lane-1 message never waits behind a lane-2 message that is backing off after a failure.
 - **Memory.** The accepted reply is bounded as above, but the transient peak is not: a reply is redacted before its size is checked, control escaping can grow text about fourfold, and each pass makes a copy. No multiple is claimed and this is not an RSS guarantee (see the comment at `MAX_REPLY` in `hook.py`). Transcript reads run one at a time, so peaks do not stack. `!details` loads a batch's replies one at a time as it renders them, up to the cap, and none past the cap is loaded.
 - **Empty replies.** A reply that is empty or only whitespace is delivered as `(the admin agent's turn ended without a text reply)`, never as an empty message.
 - **Commands.** Text starting with `!` is always a command and never reaches the agent. A mistyped `!restrat` is an error reply, not a prompt, and a leading `!` would otherwise switch Claude Code's input box to bash mode.
@@ -338,14 +338,19 @@ What it does **not** change, stated plainly so the change is not overstated:
 Run on the host as the service user. `admind ask` is a client of `ask.sock` (section 7) and opens no database.
 
 ```sh
-admind ask post --kind question --title "<one line>" --body-file <file|-> [--from <label>] [--json]
+admind ask post --kind question --title "<one line>" --body-file <file|-> \
+    (--choice <text> --choice <text> ... --recommended <letter> | --yes-no [--recommended yes|no]) \
+    [--link <label>=<url>]... [--ref <path>[@<rev>]]... [--from <label>] [--json]
 admind ask post --kind merge --title "<one line>" --body-file <file|-> \
-    --pr https://github.com/<owner>/<repo>/pull/<n> --head <40-hex-sha> [--from <label>] [--json]
+    --pr https://github.com/<owner>/<repo>/pull/<n> --head <40-hex-sha> \
+    [--link <label>=<url>]... [--ref <path>[@<rev>]]... [--from <label>] [--json]
 admind ask post --kind approval --bead <bead> [--from <label>] [--json]
 admind ask get <id> [--json]
 admind ask wait <id> [--timeout <seconds>] [--json]
 admind ask list [--json]
 admind ask cancel <id>
+admind notice post --title "<one line>" [--body-file <file|->] \
+    [--link <label>=<url>]... [--ref <path>[@<rev>]]... [--from <label>] [--json]
 ```
 
 | Exit | Meaning |
@@ -358,7 +363,7 @@ admind ask cancel <id>
 | 78 | A configuration error, for example a bad `approve_bead`. |
 
 - **`post`** checks the rules below, then stores the ask and queues its card. The client checks the same rules before it connects, so most refusals need no round trip; the daemon checks them again. `--body-file -` reads stdin. `--from` (default `local`) is shown on the card and is not verified: any process of the service user can post. The audit also records the poster's PID where the platform reports it. A post's client waits long enough for the reads of the posts queued ahead of it (see Limits). If it still gets no answer it exits 69, but a post the daemon received goes on without its client and may be stored with its card sent: check `admind ask list` before posting it again.
-- **`get`** prints `ask <id> · <kind> · <status>` (with ` · not yet delivered` until every chunk of the card is sent), then each answer or note as `--- <answer|note> from <operator> at <time>` followed by its text, then `outcome: …` once there is one.
+- **`get`** prints `ask <id> · <kind> · <status>` (with ` · not yet delivered` until every chunk of the card is sent), then each answer or note as `--- <answer|note> from <operator> at <time>` followed by its text, then `outcome: …` once there is one. An answer on a question with choices names the choice it was read as: `--- answer (choice A) from <operator> at <time>`, then the verbatim text or emoji; `--json` carries it as `choice` (`A`–`F`, `yes`, `no` or `none`, null for a free answer).
 - **`wait`** polls `get` every 2 seconds until the ask has an answer or note, or reaches a final status (`approved`, `denied`, `stale`, `superseded`, `cancelled`, `blocked`). The default `--timeout` is 540 seconds, under a 10-minute tool-call limit. A daemon that is down or restarting is retried until the timeout. For an approval ask the first note also ends the wait, so exit 0 from `wait` is not approval evidence. Only the read-back is: `get` (status `approved` or `denied`, and its `outcome`), or `approve-bead <bead>` on the host.
 - **`list`** prints one line per ask, `<id> <kind> · <status> · <n> answers · <title>`: every active ask and the 20 most recent others.
 - **`cancel`** works on an `open` or `answered` ask only. It posts "Ask `<id>` was cancelled by its poster. Nothing more is needed." in the card's thread.
@@ -368,8 +373,10 @@ admind ask cancel <id>
 **What a post must carry** (R4, R16). Every ask carries its context:
 
 - question and merge: `--title`, one line of 1 to 200 characters, and a body of at most 16,000 characters with at least 80 that are not spaces;
+- a question: either 2 to 6 `--choice`, lettered A to F in the order given, with `--recommended <letter>`, or `--yes-no` with `--recommended yes` (the default) or `no` (see "Questions with choices"). A question with neither is still accepted for now, with `warning: questions without --choice or --yes-no will be refused in the next release` on stderr; the next release refuses it;
+- question and merge: at most 8 links in all from `--link` and `--ref` (see "Links");
 - merge also needs `--pr`, matching `https://github.com/<owner>/<repo>/pull/<n>`, and `--head`, 40 lowercase hex digits; `--pr` and `--head` are refused on other kinds;
-- approval: `--bead` only. Its context is the bead, read with `approve-bead <bead> --json`;
+- approval: `--bead` only, without choices or links. Its context is the bead, read with `approve-bead <bead> --json`;
 - `--from` must match `[a-z0-9][a-z0-9._-]{0,31}`, and `--bead` must match `[a-z0-9]{1,16}-[a-z0-9.]{1,32}`.
 
 **Posting an approval** reads the bead first, up to 60 seconds. The post is refused, with the reason going back to the poster and not to the operators, when:
@@ -380,15 +387,20 @@ admind ask cancel <id>
 - the bead is busy, or another ask for it is `deciding` or `uncertain`;
 - the read failed: "admind could not read `<bead>` (`<word>`); try again.", where the word is `unavailable`, `timed out` or `bad output`;
 - any part of the card would be changed by redaction: "this bead holds text admind would redact; decide it at the terminal". Nothing is posted (R21);
-- the readout is longer than 24,000 characters (`MAX_APPROVAL_CARD`, R8): "this bead is too long to decide from the phone; decide it at the terminal".
+- the readout is longer than 24,000 characters (`MAX_APPROVAL_CARD`, R8): "this bead is too long to decide from the phone; decide it at the terminal";
+- one of its `link:` lines is wider than a chunk can hold: "this bead has a link longer than this group's message size allows (`<n>` characters, `<usable>` usable at chunk_chars `<c>`); shorten the link in the bead or raise chunk_chars". A link is never cut across messages;
+- its readout's `purpose` is set to anything but `design` or `execution` (see "Cards").
 
 Posts run one at a time, and a third post while two are in flight is refused as busy. The latch and the limits are checked again after the read. A new approval ask for a bead that already has an `open` or `answered` ask supersedes the old one (R9). The old card gets "Ask `<old>` is superseded by ask `<new>`, a newer card for `<bead>`. This card decides nothing any more." in its thread.
 
 ### Cards
 
-Cards are posted top-level, in lane 1. Each is redacted whole, then split into `chunk_chars` chunks. An ask ID is 4 characters from `23456789abcdefghjkmnpqrstuvwxyz` and is matched in any case.
+Cards are posted in lane 1. Each is redacted whole, then split into chunks (see "Parts and threads"). An ask ID is 4 characters from `23456789abcdefghjkmnpqrstuvwxyz` and is matched in any case.
+
+**Every card's first line is its label**, so its kind is readable before anything else: `QUESTION: Multiple Options`, `QUESTION: yes/no`, `QUESTION` (a question with no choices), `ACTION: merge`, `APPROVAL: design`, `APPROVAL: execution`, `APPROVAL: purpose not set`, or `FYI: no reply needed` for a notice. The head line follows, as before.
 
 ```
+QUESTION
 ❓ Ask k7m2 · question · posted by controller (a local process; unverified)
 <title>
 
@@ -398,9 +410,10 @@ Cards are posted top-level, in lane 1. Each is redacted whole, then split into `
 Answer by replying or reacting to this message, or send !answer k7m2 <text>
 ```
 
-A merge card is headed `🔀 Ask m3qp · merge request · posted by …`. It shows `PR: <url>` and `Head: <sha>` under the title, and ends with "Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it is merged, or reply with what to change."
+A merge card is labelled `ACTION: merge` and headed `🔀 Ask m3qp · merge request · posted by …`. It shows `PR: <url>` and `Head: <sha>` under the title, and ends with "Merging is yours to do in GitHub; admind never merges. React 👍 or reply when it is merged, or reply with what to change."
 
 ```
+APPROVAL: design
 🛂 Approval ask p4xw · bead <bead> · posted by controller (a local process; unverified)
 👍 approve · 👎 deny — react to any part of this card, or reply approve / deny <reason>
 digest 1a2b3c4d5e6f
@@ -409,12 +422,79 @@ digest 1a2b3c4d5e6f
 Approving records your approval of <bead> in btq, as you, via Marmot. Any other reply is a note for the poster.
 ```
 
+- **The approval label** comes only from the readout's `purpose` field, which is part of the bead's ask and of its digest: `design` or `execution`, or `purpose not set` when the bead has none (every bead until approve-bead reports the field). admind never infers it, and nothing on the host sets or overrides it. Any other value is a readout gap: the post is refused and the bead goes back for grooming. An approval ask stored before labels keeps its stored chunks, so its repeats have no label.
 - **The digest line** (`digest12`) is the first 12 hex digits of the bead's context digest, as `approve-bead` computes it. admind stores the full digest. A decision passes the full digest to `approve-bead` (`--expect-digest`), never the 12 typed characters. Linked beads' `pinned digest` lines are cut to 12 digits the same way.
 - **Refs.** Under each numbered ref is `link: <permalink>` pinned to the ref's commit, where the repo has a GitHub remote. Otherwise the card says `(no forge link; read it on the host with approve-bead --doc N)`. A link does not prove the commit is pushed: if it gives a 404, do not approve from the phone.
 - **An approval card is never shortened** (R8). Its whole readout, digest line and closing lines are the card, split into `chunk_chars` chunks, and any chunk is the card for a reaction or a reply. The readout is capped at 24,000 characters (`MAX_APPROVAL_CARD`); a longer one is refused at post time (above).
 - **The budget** (R15) applies to question and merge cards only: at most 40 lines and 3,500 characters of context, counted after redaction, cut at 3,500 characters, then at 40 lines, so the last shown line can end mid-line. The first line and the closing lines are fixed framing and are never cut. When something is left out, the card says so, and `!details` has the rest.
 - **`!details` on a card.** Sent as a reply to any chunk of a card, or of its `!details`, `!details` (or `!details full`) returns the whole ask in lane 2, threaded to the command. For an approval, these are the chunks checked when the ask was posted, the same as the card. admind records which operator asked and how many chunks went out. It is no longer a step before approving, except for an ask stored before the delta (below).
-- **What counts as a card.** Only messages admind itself queued as a card, as an ask's `!details` or as an `!asks repeat` of the card, and that were sent, count. A look-alike printed by the admin agent does not. A reminder (`!asks bump`, or an automatic one) is not a card.
+- **What counts as a card.** Only messages admind itself queued as a card, as an ask's `!details` or as an `!asks repeat` of the card, and that were sent, count. A look-alike printed by the admin agent does not. A reminder (`!asks bump`, or an automatic one) is not a card, and neither is a notice.
+
+### Questions with choices
+
+A question posted with `--choice` or `--yes-no` ends with its choices, rendered by admind from the post, never from the body:
+
+```
+QUESTION: Multiple Options
+❓ Ask k7m2 · question · posted by team-lead (a local process; unverified)
+Which runtime for the T15 rerun?
+
+<body>
+
+A = rerun on bel-ci (recommended)
+B = rerun on laptop-ci
+C = skip the rerun
+Answer: 👍 = A (recommended) · 👎 = none · or reply with a letter or your own answer (!answer k7m2 <text>)
+Choices: A = rerun on bel-ci (recommended) · B = rerun on laptop-ci · C = skip the rerun
+```
+
+A yes/no question ends `Answer: 👍 = yes (recommended) · 👎 = no · or reply with your own answer (!answer p3qz <text>)` and `Choices: yes (recommended) · no`; with `--recommended no`, `Answer: 👍 = no (recommended) · 👎 = yes · …` and `Choices: yes · no (recommended)`. The `Choices:` footer is always the very last line of the card. When it is wider than a chunk, it is shortened to the letters (`Choices: A (recommended) · B · C`). A choice is one line of 1 to 80 characters, without controls, `·` or `=`, and must not be changed by redaction ("choice B would be redacted; reword it"). Choices are never cut: when a card is over the budget, the body is.
+
+**How an answer is read on a question with choices** (on a question without them, as before: the reply or emoji is the answer):
+
+| You send | Recorded as |
+|---|---|
+| 👍 (any skin tone), ✅, ❤️ or ♥️ | the recommended choice |
+| 👎 (any skin tone) or ❌ | the option not recommended on a yes/no card (`no`, or `yes` when `no` is recommended), `none` ("none of these") on a multiple-choice card |
+| a reply that is one choice letter (`a`, `B.`, `(c)`) | that letter |
+| on a yes/no card: `yes` or `y`; `no` or `n` | `yes`; `no` (whichever is recommended) |
+| on a multiple-choice card: `yes`, `y`, `ok`, `okay`, `lgtm`, `approve`, `approved` | the recommended choice |
+| on a multiple-choice card: `no` or `n` | `none` |
+| anything else, any other emoji | a free answer, with no choice |
+
+The answer's text is always stored verbatim. The reply on the card says how it was read: "Recorded for k7m2: A = rerun on bel-ci (from 👍)." **Only approval cards decide approvals**: on a question (even one posted with `--bead`), a merge card or a notice, no reply, command or emoji ever starts an approval.
+
+### Links
+
+`--link <label>=<url>` adds a link to a question, a merge or a notice. The label is one line of 1 to 40 characters. The URL is at most 400 characters and must be a GitHub URL in a pinned form (`https://github.com/<owner>/<repo>/` then): `pull/<n>` (optionally `/files` or `/commits/<40-hex>`), `blob/<40-hex>/<path>`, `tree/<40-hex>/<path>`, `commit/<40-hex>`, `compare/<40-hex>...<40-hex>`, `actions/runs/<n>` or `issues/<n>`. The path is percent-encoded; no query, fragment, user or port. Anything else, a branch or a short SHA included, is refused ("--link must be a GitHub URL pinned to a 40-hex commit, or a PR, run or issue"). admind checks the form only and never opens the URL.
+
+`--ref <path>[@<rev>]` makes the link for you, from the repository you run it in: `<rev>` (default `HEAD`) is resolved locally to its commit, and the client then asks GitHub (with `gh api`, for github.com only) whether the commit and the path exist at the repository `origin` names. Refused: "`<sha>` is not on GitHub at `<owner>/<repo>`; push it first", "`<path>` does not exist at `<sha>` on GitHub", "origin is not a GitHub repository", and, when `gh` is missing, not logged in, offline or slow, "can't check the link on GitHub; pass --link with a pinned URL instead". The label is the path. git runs with a fixed configuration and environment and never touches the network; local refs such as `refs/remotes/...` are never trusted.
+
+The card shows the links in a `Links:` block after the body, one per line as `<label>: <url>`, with the URL last. A link line is never split across messages; one wider than a chunk is refused. If `chunk_chars` is lowered after a post so that one of its links no longer fits, `!asks repeat` skips that ask (`<id>: a link is longer than this group's message size now allows; raise chunk_chars to repeat it`) and `!details` on it is refused with the lengths, both with nothing sent; the `!details` refusal is audited as `details-refused` with reason `link too long`. The client prints a hint on stderr for a path in the title or body that is a file tracked in your repository, such as `hint: docs/x.md is a bare path; --ref docs/x.md renders it as a link`; it never refuses the post.
+
+### Notices
+
+`admind notice post` posts an FYI: news for the operators that asks nothing of them. Use it for status, not `--kind question`.
+
+```
+FYI: no reply needed
+ℹ️ Notice · posted by team-lead (a local process; unverified)
+PR #69 merged
+
+Plan 4b Task 11 Part A is in main.
+Links:
+PR #69: https://github.com/<owner>/<repo>/pull/69
+```
+
+- It prints `posted <id>`, a 6-character ID for the audit, or `refused: <why>` on stderr (exit 1). `--json` prints the reply.
+- **A notice is not an ask.** It has no status, no answer footer and no `!details`, and it is not in `ask list`, `!asks`, bumps or repeats. It never counts toward the active-ask or hourly ask limits.
+- A reaction on a notice is ignored. A reply to it is ordinary chat, sent to the admin agent like a reply to any other message.
+- Notices go in lane 2, behind every card, reply and command, so they never delay a card. A busy group can delay notices.
+- Bounds: the title as for asks; the body is optional, at most 3,500 characters and 40 lines; at most 8 links; the whole notice, after redaction, at most 6,000 characters and 4 messages at the group's `chunk_chars`. At most 12 notices in any hour and 10 waiting to be delivered. Over a bound the notice is refused and nothing is queued. While latched, a notice is refused; before the group is verified it is stored and waits.
+
+### Parts and threads
+
+A card or notice too long for one message is split into parts. Chunk 0 is posted top-level and ends with `↳ part 1/<n>` (its label stays the first line); each later part starts with `↳ part <i>/<n>` and is posted as a reply to chunk 0, once chunk 0 is sent. If chunk 0 failed, or was sent without a message ID, the later parts go top-level instead (audited as `thread_fallback`); the outbox never waits for it. If a later part of a card, a repeat or a notice fails after all its retries, admind posts `part <k>/<n> failed to deliver, ask the poster to repeat` under chunk 0 (top-level if chunk 0 has no message ID), once, and audits `part_failed`. That message is not a card: nothing on it answers or decides anything. A failed chunk 0 is not reported this way (the card stays undelivered; `!asks repeat` sends it again), and neither are `!details` parts. Every part is at most `chunk_chars`, marker included. Lines are kept whole where they can be: the label, the head, link lines, choices, the answer line and the footer are never cut, and the choices block stays in the last part when it fits. A reaction or reply on any part counts as on the card, and a card counts as delivered only when all its parts are sent, as before.
 
 ### Answering and deciding
 
@@ -519,6 +599,10 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 | title | 1 line, 1 to 200 characters |
 | body (question, merge) | at least 80 non-space characters, at most 16,000 characters |
 | question or merge card | 40 lines and 3,500 characters of context |
+| choices | 2 to 6, each 1 to 80 characters |
+| links | 8 per post (`--link` and `--ref` together); label 40 characters, URL 400 |
+| notice | title as above; body 3,500 characters and 40 lines; 6,000 characters and 4 messages in all |
+| notices | 12 in any 60 minutes; 10 waiting to be delivered |
 | approval card readout (`MAX_APPROVAL_CARD`) | 24,000 characters |
 | one answer or note | 16,000 characters |
 | automatic reminders | checked every 5 minutes; one per ask per `ask_bump_hours` of quiet (default 12, at most 720) |
@@ -534,14 +618,18 @@ Exit 5 ("written, but the content changed during the write") and "written, but t
 
 Every record about asks has kind `ask`. Asks are recorded by IDs and lengths, never by text. Operator text is recorded whole in the `inbound` record, as for every message (section 7). A message ID appears only as `id:` plus 12 hex digits of its SHA-256; a reaction's key appears as `r:id:<12 hex>`, the hash being of its event ID.
 
-- A request on `ask.sock`: `op` (`post`, `get`, `list`, `cancel`), with `ask_kind`, `poster`, `bead` and the title and body lengths for a post.
-- `posted`: `ask_id`, `ask_kind`, `poster`, `pid`, `parts`, `truncated`; for an approval also `bead`, `digest12`, `details_parts`, `superseded` (the asks it replaced) and `refreshed_from` (the stale ask a fresh card replaced, or null). A fresh card's `pid` is null.
-- `refused`: a post or a decision refused before it started. `reason` is one of `limits`, `busy`, `not postable`, `redaction`, `too long`, `not a card reply`, `no match` (arguments not the card's), `reason too long`, `not open`, `not delivered`, `needs details`, `not configured`, `stale`, `decided`, `not approval`, `not an approver`, or a check's word (`unavailable`, `timed out`, `bad output`, `error`). A refusal after the attempt was persisted also has the ask's new `status`. A `stale` one also has `fresh` (the fresh ask, or null), `refresh_refused` (why there is none, or null) and `updated_parts` (chunks of a pinned bead's updated content).
+- A request on `ask.sock`: `op` (`post`, `get`, `list`, `cancel`, `notice`), with `ask_kind`, `poster`, `bead`, the title and body lengths, `form` and the number of `choices` and `links` for a post.
+- `posted`: `ask_id`, `ask_kind`, `poster`, `pid`, `parts`, `truncated`; for a question or merge also `title_chars`, `body_chars`, `form`, `choices` and `links` (counts, never text); for an approval also `bead`, `digest12`, `details_parts`, `superseded` (the asks it replaced) and `refreshed_from` (the stale ask a fresh card replaced, or null). A fresh card's `pid` is null.
+- `refused`: a post or a decision refused before it started. `reason` is one of `limits`, `busy`, `not postable`, `redaction`, `too long`, `not a card reply`, `no match` (arguments not the card's), `reason too long`, `not open`, `not delivered`, `needs details`, `not configured`, `stale`, `decided`, `not approval`, `not an approver`, `link too long`, or a check's word (`unavailable`, `timed out`, `bad output`, `error`). A refusal after the attempt was persisted also has the ask's new `status`. A `stale` one also has `fresh` (the fresh ask, or null), `refresh_refused` (why there is none, or null) and `updated_parts` (chunks of a pinned bead's updated content).
 - A reaction's `inbound` record has `what` `reaction`, `ref` (`id:<12 hex>`), `emoji` and `target`. Dropped reactions are `drop` records with `what` `reaction`.
 - `deciding`: an attempt is about to run (`message_id`, `ask_id`, `bead`, `decision`, `operator`).
 - `decided`: `outcome` (`recorded`, `untouched`, `blocked`, `uncertain`), `status`, `exit_status`, `gate_valid`, `latched_during`. An `untouched` read-back with a new digest is `reason` `stale`, with `fresh`, `refresh_refused` and `updated_parts` as above.
 - `!asks bump` and `!asks repeat` are `command` records with `command` `asks`, `sub` (`bump` or `repeat`), `bumped` (the ask IDs) and `skipped` (`ask_id` and `why`: `answered`, `deciding`, `uncertain` or `card not delivered`). An automatic check that bumped or skipped something is an `autobump` record with `bumped` and `skipped` (`why` may also be `pending delivery`); a check that found nothing due writes nothing.
 - `bump-hint`: a reply or a decision emoji on a reminder was answered with the hint (`message_id`, `ask_id`).
+- `answered` has `choice` (the choice an answer was read as, or null).
+- A notice is one record of kind `notice`: `action` `posted` or `refused`, `poster`, `peer_pid`, `title_chars`, `body_chars`, `links`, and `notice_id` and `parts` when posted, or `why` when refused. `why` is a fixed code: `latched`, `title`, `body-too-long`, `notice-too-long`, `too-many-parts`, `too-many-links`, `link-label`, `link-format`, `link-too-long`, `link-line-too-long`, `link-redacted`, `rate-hour`, `undelivered`, or `internal` with the exception's class name as `error`. No notice text is ever audited.
+- `part_failed` (kind of its own): a later part failed for good and its report was queued; `key` (the failed part) and `parent` (chunk 0's key).
+- `thread_fallback` (kind of its own): a later part went top-level; `key`, `parent` (chunk 0's key) and `why` (`no-message-id`, `parent-failed`, `parent-missing` or `parent-pending`).
 - Also `reaction-ignored` (an emoji that decides nothing, on an approval card), `answered`, `noted`, `answer-refused`, `details`, `cancelled`, `conflict` (a compare-and-set found the ask changed), `read-back-failed`, `reconciled` (`was`, `restarted`), `reconcile-unverified` (the notice above was sent because `approve_bead` is not set), `reconcile-skipped` and `reconcile-failed`. A decision dropped because authorisation was lost is a `drop` record with `what` `decision`.
 
 **Matching a bead to the audit.** A bead decided from Marmot holds `via: marmot` and `via_ref: marmot:id:<12 hex>`. The `id:<12 hex>` part is exactly how the audit names the operator's message, or a reaction's `ref` (R27). Search `audit.jsonl` for it to find that message's or reaction's `inbound`, `deciding` and `decided` records:

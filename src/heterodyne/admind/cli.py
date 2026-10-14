@@ -1,4 +1,5 @@
-"""`admind` command line: init, run, operators, rearm, ask, unit, hook (ADR 0001 §8; relay spec R1, R2)."""
+"""`admind` command line: init, run, operators, rearm, ask, notice, unit, hook (ADR 0001 §8; relay spec R1,
+R2; cxmkf K1)."""
 
 import argparse
 import asyncio
@@ -15,11 +16,13 @@ from typing import NoReturn, cast
 import msgspec
 
 from heterodyne import config as hconfig
-from heterodyne.admind import approvals, asks, ctl, unit
+from heterodyne.admind import approvals, asks, ctl, links, refs, unit
 from heterodyne.admind.agent import TMUX_SOCKET, AdminAgent, tmux_launcher
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.commands import CommandRunner
 from heterodyne.admind.daemon import Admind, supervised
+from heterodyne.admind.links import LinkSpec
+from heterodyne.admind.notices import NoticePost
 from heterodyne.admind.redact import set_login_dirs
 from heterodyne.admind.settings import AdmindSettings, resolve
 from heterodyne.admind.store import Store
@@ -36,6 +39,7 @@ WAIT_POLL = 2.0         # seconds between `admind ask wait` polls (R2); replaced
 WAIT_TIMEOUT = 540.0
 ASK_READ_SECONDS = 30.0     # one ask.sock reply
 NOT_RUNNING = "admind is not running (or did not answer)."
+APPROVAL_ONLY_BEAD = "an approval ask takes only --bead: its context is the bead"
 POST_UNANSWERED = ("admind did not answer in time. The ask may still have been posted: check "
                    "`admind ask list` before posting it again.")
 IDENTITY_LABEL = "heterodyne-admind"
@@ -152,21 +156,91 @@ def _print_view(view: asks.AskView) -> None:
     head = f"ask {sm.ask_id} · {sm.kind} · {sm.status}" + ("" if sm.delivered else " · not yet delivered")
     print(head)
     for a in view.answers:
-        print(f"--- {a.kind} from {_terminal(a.operator)} at {a.at}")
+        choice = "" if a.choice is None else f" (choice {_terminal(a.choice)})"     # K19
+        print(f"--- {a.kind}{choice} from {_terminal(a.operator)} at {a.at}")
         print(_terminal(a.text))
     if sm.outcome is not None:
         print(f"outcome: {_terminal(sm.outcome)}")
 
 
-def _ask_post(args: argparse.Namespace) -> asks.AskPost | None:
-    body = ""
-    if args.body_file is not None:
-        try:
-            body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text()
-        except (OSError, ValueError) as exc:     # ValueError: not UTF-8
-            print(f"admind: cannot read the body ({type(exc).__name__})", file=sys.stderr)
+def _body(args: argparse.Namespace) -> str | None:
+    if args.body_file is None:
+        return ""
+    try:
+        return sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text()
+    except (OSError, ValueError) as exc:     # ValueError: not UTF-8
+        print(f"admind: cannot read the body ({type(exc).__name__})", file=sys.stderr)
+        return None
+
+
+def _links(args: argparse.Namespace, *texts: str) -> list[LinkSpec] | None:
+    """`--link LABEL=URL` as given, then each `--ref` resolved and verified here (K20, K21); the daemon
+    checks every link's form again. Prints the bare-path hints (K22p). None if one is refused."""
+    given: list[str] = args.link or []
+    wanted: list[str] = args.ref or []
+    if len(given) + len(wanted) > links.MAX_LINKS:
+        print(f"admind: {links.TOO_MANY}", file=sys.stderr)
+        return None
+    out: list[LinkSpec] = []
+    for spec in given:
+        label, eq, url = spec.partition("=")
+        if not eq:
+            print("admind: --link takes LABEL=URL", file=sys.stderr)
             return None
-    return asks.AskPost(args.kind, args.title, body, args.pr, args.head, args.bead, args.poster)
+        out.append(LinkSpec(label, url))
+    resolver = refs.Resolver()
+    for spec in wanted:
+        try:
+            out.append(resolver.resolve(spec))
+        except refs.RefError as exc:
+            print(f"admind: {show(str(exc), False)}", file=sys.stderr)
+            return None
+    for hint in resolver.hints(*texts):
+        print(show(hint, False), file=sys.stderr)
+    return out
+
+
+def _ask_post(args: argparse.Namespace) -> asks.AskPost | None:
+    body = _body(args)
+    if body is None:
+        return None
+    if args.kind == "approval" and (args.link or args.ref):     # nothing to resolve: its context is the bead
+        print(f"admind: {APPROVAL_ONLY_BEAD}", file=sys.stderr)
+        return None
+    specs = _links(args, args.title, body) if args.kind != "approval" else []
+    if specs is None:
+        return None
+    form = "yes-no" if args.yes_no else "choices" if args.choice else None
+    return asks.AskPost(args.kind, args.title, body, args.pr, args.head, args.bead, args.poster, form=form,
+                        choices=args.choice or [], recommended=args.recommended, links=specs)
+
+
+def notice_command(s: AdmindSettings, args: argparse.Namespace) -> int:
+    """`admind notice post` (K1): prints `posted <id>`, or `refused: <why>` on stderr. Exit 0 when posted,
+    1 when refused or failed, 69 when no daemon answers."""
+    body = _body(args)
+    if body is None:
+        return 1
+    specs = _links(args, args.title, body)
+    if specs is None:
+        return 1
+    req = NoticePost(args.title, body, specs, args.poster)
+    refusal = asks.check(req)
+    if refusal is not None:
+        print(f"refused: {show(refusal, False)}", file=sys.stderr)
+        return 1
+    try:
+        reply = _ask_request(s, req, post_seconds())
+    except ctl.CtlUnavailable:
+        print(NOT_RUNNING + " The notice may still have been posted.", file=sys.stderr)
+        return EX_UNAVAILABLE
+    if args.json:
+        print(msgspec.json.encode(reply).decode())
+    elif reply.result == "posted":
+        print(_terminal(reply.message))
+    else:
+        print(f"refused: {_terminal(reply.message)}", file=sys.stderr)
+    return 0 if reply.result == "posted" else 1
 
 
 def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
@@ -207,7 +281,10 @@ def ask_command(s: AdmindSettings, args: argparse.Namespace) -> int:
     elif args.ask_command == "get" and reply.ask is not None:
         _print_view(reply.ask)
     else:
-        print(_terminal(reply.message))
+        first, *rest = reply.message.split("\n")
+        print(_terminal(first))
+        for line in rest:           # the K14 warning: for the poster, not for a script reading the ID
+            print(f"admind: {_terminal(line)}", file=sys.stderr)
     return 0 if reply.result in ("posted", "ok") else 1
 
 
@@ -243,13 +320,13 @@ def _settings_only() -> AdmindSettings:
 
 
 def _with_settings(args: argparse.Namespace) -> int:
-    if args.command == "ask":       # a client only: it opens no database (the daemon owns it)
+    if args.command in ("ask", "notice"):       # a client only: it opens no database (the daemon owns it)
         try:
             s = _settings_only()
         except hconfig.ConfigError as exc:
             print(f"config error: {show(str(exc), False)}", file=sys.stderr)
             return EX_CONFIG
-        return ask_command(s, args)
+        return ask_command(s, args) if args.command == "ask" else notice_command(s, args)
     try:
         s, store, audit = _load()
     except hconfig.ConfigError as exc:
@@ -390,6 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
                                  "(check the members in your client first)")
     _ask_parser(sub.add_parser("ask", help="post a question or merge request to the operators and read "
                                            "the answers"))
+    _notice_parser(sub.add_parser("notice", help="post an FYI to the operators; no reply is requested"))
     sub.add_parser("unit", help="print a systemd user unit for this install")
     hook = sub.add_parser("hook", help="(internal) forward an agent hook event to admind")
     hook.add_argument("--socket")
@@ -405,6 +483,12 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
     post.add_argument("--pr", help="merge: https://github.com/<owner>/<repo>/pull/<n>")
     post.add_argument("--head", help="merge: the pull request's 40-hex head commit")
     post.add_argument("--bead")
+    post.add_argument("--choice", action="append", metavar="TEXT",
+                      help="question: an option, 2-6 times; lettered A-F in order (needs --recommended)")
+    post.add_argument("--yes-no", action="store_true", help="question: a yes/no question")
+    post.add_argument("--recommended", metavar="X",
+                      help="question: the recommended option's letter, or yes/no (default yes)")
+    _link_arguments(post)
     post.add_argument("--from", dest="poster", default="local", help="a label for the card (unverified)")
     post.add_argument("--json", action="store_true")
     for name, what in (("get", "an ask's status and answers"), ("cancel", "cancel an open or answered ask"),
@@ -418,6 +502,24 @@ def _ask_parser(ask: argparse.ArgumentParser) -> None:
             one.add_argument("--timeout", type=float, default=WAIT_TIMEOUT)
     sub.add_parser("list", help="active asks and the 20 most recent others").add_argument(
         "--json", action="store_true")
+
+
+def _link_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--link", action="append", metavar="LABEL=URL",
+                        help="a GitHub URL pinned to a 40-hex commit, or a PR, run or issue (at most 8)")
+    parser.add_argument("--ref", action="append", metavar="PATH[@REV]",
+                        help="a path in this repository at REV (default HEAD), made a pinned link once "
+                             "GitHub has the commit")
+
+
+def _notice_parser(notice: argparse.ArgumentParser) -> None:
+    sub = notice.add_subparsers(dest="notice_command", required=True, parser_class=_QuietParser)
+    post = sub.add_parser("post", help="post a notice; prints `posted <id>`")
+    post.add_argument("--title", required=True)
+    post.add_argument("--body-file", help="the text, from a file or - for stdin (optional)")
+    _link_arguments(post)
+    post.add_argument("--from", dest="poster", default="local", help="a label for the notice (unverified)")
+    post.add_argument("--json", action="store_true")
 
 
 def main(argv: list[str] | None = None) -> int:

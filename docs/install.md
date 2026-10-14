@@ -63,6 +63,36 @@ The configuration rules are in [configuration.md](configuration.md).
 
 `admind` is implemented. It is a separate service with its own Marmot identity, set up after `heterodyne setup` and a validated configuration: add `[admind]` to `config.toml` and `operators` to `policy.toml`, run `admind init`, render the systemd user unit with `admind unit`, and enable it. It needs `claude` and `wn-agent` on the `PATH` of the shell that renders the unit, and tmux. The full steps, the first-launch dialogs, the latch and the troubleshooting guide are in [admind.md](admind.md).
 
+## Controller session permissions
+
+An operator who runs a Claude controller session (the team lead that dispatches workers and drives the shared queue) in auto mode needs Bash allow rules for the shared queue CLI, btq. Without them, every queue command stops for a permission prompt.
+
+**Where the rules go.** Put them in the workspace-scoped `<workspace>/.claude/settings.local.json`, where `<workspace>` is the controller's working directory. Never put them in the global `~/.claude/settings.json`: there they would apply to every Claude session on the host, workers included. The local settings file isn't committed anywhere, so it can hold the operator's real home directory.
+
+**The rules that work today.** In these rules, `<HOME>` is the operator's home directory, written out in full.
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(<HOME>/repos/beads-task-queue/bin/btq:*)",
+      "Bash(~/repos/beads-task-queue/bin/btq:*)"
+    ]
+  }
+}
+```
+
+- **Why btq.** The controller uses btq to show, claim and close beads (closing attaches evidence files), and for `btq ... bd OP`: `show`, `cycles`, `park`, `unpark`, `create`, `update`, `dep add`, `dep remove` and `comment`.
+  - All bead restructuring goes through `btq bd`, which builds the queue's TLS and credential environment and enforces the pickup rules.
+  - The rule names the exact btq executable, not an interpreter or a shell, so it allows nothing else.
+- **Why two rules.** Claude matches the command as it is written. A command spelled with the full path and one spelled with `~` are different strings, so each spelling needs its own rule.
+- **Leave out `Bash(bd:*)`.** A bare `bd` rule doesn't help, so we recommend not adding it:
+  - native `bd` can't reach the shared queue without btq's environment;
+  - native `bd` must not be used to claim, close or restructure beads in any case.
+- **These rules grant no approvals.** They only let the controller run btq without a prompt. Design and code approvals still come only from operators, through `admind` and Marmot ([admind.md](admind.md)). Nothing a controller runs under these rules can approve its own work.
+
+**Applying them.** The operator workspace has a helper, `~/.hermes/scripts/controller-permissions.py`, with a `controller-permissions.rules.json` beside it. It adds the rules listed in the JSON file to a settings file idempotently: by default it shows what would change, and with `--apply` it backs up the file and then writes it. The helper isn't part of this repository. The operator reviews it and runs it; the controller doesn't.
+
 ## Repository checks
 
 The repository is install-agnostic (ADR 0001 §15): no committed file may contain an install-specific value. These checks enforce it, and they run the same way locally, in pre-commit and in CI.
