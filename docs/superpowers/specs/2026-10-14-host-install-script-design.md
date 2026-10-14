@@ -1,10 +1,10 @@
-# One host install script (`deploy/install.sh`), r2
+# One host install script (`deploy/install.sh`), r3
 
 Requested by Liam on 2026-10-14: "anything that's required to install this has to be encapsulated in an install
 script anyways, otherwise this platform is not installable by others. So make an install script for it, and get
 me to run it using sudo."
 
-r2 answers Codex design review r1 (5 blocking findings, 1 non-blocking) and p4b-t1's notes. The changes:
+r3 answers Codex design review r2 (literal `PATHS`, never sourced; reconciliation driven by live state). r2 answered Codex design review r1 (5 blocking findings, 1 non-blocking) and p4b-t1's notes. The changes:
 - a verified bootstrap;
 - one path set shared with `manifest.sh`;
 - one resolved commit;
@@ -77,9 +77,10 @@ honest mistake of running the unpinned form on this host.
 2. **Stage (step 3's trust model, kept).**
    - As the service user, with the same git hardening, it archives the resolved commit's paths into a mkdtemp
      directory, `/run/heterodyne-install.XXXX`, owned by root with mode 0700.
-   - The path set is the one shared with `manifest.sh`, so the sums agree by construction: `deploy/` and
-     `src/heterodyne/harness/resources/store_core.py`. `manifest.sh` reads the same path list (one `PATHS`
-     array, sourced from `deploy/paths.sh`), and also prints `<sha256>  deploy/install.sh` from the commit's
+   - The path set is `deploy/` and `src/heterodyne/harness/resources/store_core.py`, written as a literal
+     `PATHS` array in both `install.sh` and `manifest.sh`. Neither sources any file to get it, because root
+     must never read an unverified file from the checkout before the archive compare. A test asserts that the
+     two arrays are equal. `manifest.sh` also prints `<sha256>  deploy/install.sh`, taken from the commit's
      blob.
    - It prints the archive's sha256. With `--expect-sha256`, it refuses unless the archive matches, before
      extracting anything.
@@ -87,17 +88,22 @@ honest mistake of running the unpinned form on this host.
      `bash <stage>/tree/deploy/install.sh --staged <stage> …`, passing the resolved commit. From then on
      everything runs from the stage, and nothing is read from the checkout except step 6's `uv run`.
 3. **Store (step 3).** It runs the staged `setup-store.sh --staged … --service-user …`, unchanged. That script
-   is idempotent. Before it runs, the installer records the drop-in's bytes, so it knows whether
-   `SocketGroup` changed.
-4. **Units (step 4) and reconciliation.**
-   - It installs each staged unit file only if it differs (`cmp`; owned by root, mode 0644), and runs
-     `daemon-reload` only if a unit or the drop-in changed.
+   is idempotent.
+4. **Units (step 4) and reconciliation, driven by live state rather than by what this run changed.** A run
+   that wrote files and then failed before the reload or restart is repaired by the next run.
+   - It installs each staged unit file only if it differs (`cmp`; owned by root, mode 0644).
+   - It always runs `systemctl daemon-reload`, which is cheap and idempotent. Then it confirms that
+     `systemctl show -p NeedDaemonReload` reports `no` for the socket and the helper template.
    - Then `systemctl enable heterodyne-store-helper.socket`.
-   - If the socket was already active and a unit or the drop-in changed, it runs
-     `systemctl restart heterodyne-store-helper.socket`, so the new `SocketGroup`, mode and path take effect.
-     If the socket was inactive, it runs `systemctl start` instead.
-   - It then confirms: `is-active`, and that `/run/heterodyne-store/helper.sock` exists with the drop-in's
-     group and mode 0660. Any mismatch fails the install.
+   - **Live check.** The socket is in place when all of these hold:
+     - `is-active` is `active`;
+     - `/run/heterodyne-store/helper.sock` is a socket owned by `heterodyne-store`, with the drop-in's group
+       and mode 0660;
+     - `systemctl show -p SocketGroup,SocketMode,Listen` matches the staged unit and drop-in.
+
+     If it was inactive, the script runs `systemctl start`. If it was active but drifted, it runs
+     `systemctl restart heterodyne-store-helper.socket`. Then it runs the live check again. Any mismatch at
+     that point fails the install.
    - Accept=yes instances that are already serving a connection finish under their old unit. Each one serves
      a single connection, so nothing long-lived is left with the old settings.
 5. **Verity (step 5), on by default.**
@@ -161,7 +167,7 @@ injected PATH of shims, so the whole orchestration runs as a non-root user again
 in for `systemctl`, `tune2fs`, `findmnt`, `runuser`, `install`, `useradd` and `id -u`, which reports 0. Each
 shim logs its argv, and any one can be made to fail. The tests cover:
 
-- `bash -n` on `install.sh`, `uninstall.sh` and `paths.sh`;
+- `bash -n` on `install.sh` and `uninstall.sh`, and the `PATHS` arrays in `install.sh` and `manifest.sh` are equal;
 - **`manifest.sh` against the installer:** for the same commit, its archive sum and `install.sh` sum equal what
   the installer computes;
 - **bootstrap:** the pinned command, with a tampered `install.sh` in the checkout, fails `sha256sum` and runs
@@ -180,9 +186,11 @@ shim logs its argv, and any one can be made to fail. The tests cover:
   all leave the installed bytes equal to the resolved commit's;
 - **the re-exec:** argv is the staged path, and the stage is removed on success and on an injected failure;
 - **socket reconciliation:**
-  - an unchanged re-run logs no `daemon-reload` or `restart`;
-  - a changed drop-in with an active socket logs `daemon-reload` and then `restart`;
+  - a live state that matches logs no `restart`;
+  - a drifted live state (wrong group, wrong mode, or `NeedDaemonReload=yes`) logs `restart`;
   - an inactive socket logs `start`;
+  - an injected `daemon-reload` or `restart` failure is followed by a clean re-run, which repairs the state;
+  - a live state that still mismatches after the restart fails;
 - **verity:** each unsupported reason gives exit 3 and `skipped`; `tune2fs` failing, or a confirmation without
   `verity`, gives exit 1 and `failed`; already on gives `ok` and no `tune2fs -O`; `--no-verity` gives exit 0;
 - **step 6:** `HELPER_DRIFT` in the shimmed output fails the install;
