@@ -58,7 +58,7 @@ from heterodyne.wsd.beads import (
     WorktreeConflict,
 )
 from heterodyne.wsd.headroom import Deadline, quota_detail
-from heterodyne.wsd.journal import DeferralRow, EntryConflict, Op, OpKind, OpStatus, now
+from heterodyne.wsd.journal import DeferralRow, EntryConflict, Op, OpKind, OpStatus, ResolvedEnd, now
 from heterodyne.wsd.launches import (
     ABANDONED,
     LAUNCHED,
@@ -138,6 +138,18 @@ GUARD_SETTLES = frozenset({Reason.LAUNCH_UNCERTAIN})
 
 # g08sd: what an end is accounted as. Anything else (DIED, REFUSED, a cause wsd doesn't know) is a death.
 CLASSES = {EndCause.STOPPED: "stopped", EndCause.LIFETIME: "lifetime", EndCause.LEGACY_LIFETIME: "legacy"}
+
+
+def _resolved(entry: LaunchEntry, r: ResolvedEnd | None) -> Ended | None:
+    """wpyv5: the end a resolve carried for the entry's generation, as the runtime would report it: an
+    unknown cause is a death, as `ended()` maps one."""
+    if r is None:
+        return None
+    try:
+        cause = EndCause(r.cause)
+    except ValueError:
+        cause = EndCause.DIED
+    return Ended(entry.generation, cause, r.reached_running, r.ran_seconds)
 
 
 def _died(generation: int, end: Ended | None) -> str:
@@ -1295,10 +1307,13 @@ class Parker:
                     klass = "reset"          # plan 3 D8: a lost journal escalates; the release resets
                 elif e.generation != latest[e.session_key]:
                     klass = "legacy"
-                elif end is None or end.generation != e.generation or not end.reached_running:
-                    klass = "died"
                 else:
-                    klass = CLASSES.get(end.cause, "died")
+                    if end is None or end.generation != e.generation:
+                        end = _resolved(e, j.resolved_end(e)) or end    # wpyv5: carried by its resolve
+                    if end is None or end.generation != e.generation or not end.reached_running:
+                        klass = "died"
+                    else:
+                        klass = CLASSES.get(end.cause, "died")
                 n = j.crash_account(ws, bead, e, klass)
                 if klass == "died":
                     details.append(_died(e.generation, end))
