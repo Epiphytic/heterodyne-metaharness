@@ -901,3 +901,40 @@ def test_no_read_runs_after_a_late_poll(monkeypatch: pytest.MonkeyPatch, late_re
         os.close(r)
     assert raw == b"" and len(reads) == (0 if late_read == "data" else 1)
     assert denied(shim.run_hook(raw, {}, event="PreToolUse")[1]) == shim.DENY_REASON
+
+
+def console_script(name: str) -> str:
+    """The installed console script `name`, checked to resolve to this package's entry point."""
+    from importlib.metadata import entry_points
+    (ep,) = entry_points(group="console_scripts", name=name)
+    assert ep.value == f"heterodyne.session.shim:{name.removeprefix('ws-')}_main"
+    script = Path(sys.executable).parent / name
+    assert script.is_file()
+    return str(script)
+
+
+@pytest.mark.parametrize("stdin", ["empty", "closed"])
+def test_the_ws_hook_entry_point_denies_with_no_arguments(run: Path, stdin: str) -> None:
+    """r2: `ws-hook` calls hook_main() with no arguments; a TypeError there would print no deny."""
+    script = console_script("ws-hook")
+    if stdin == "empty":
+        proc = subprocess.run([script], env=env_for(run), stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=60, check=False)
+    else:
+        proc = subprocess.run(["/bin/sh", "-c", f"exec 0<&-; exec {script}"], env=env_for(run),
+                              capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 0 and proc.stderr == b""
+    assert denied(proc.stdout.decode()) == shim.DENY_REASON
+
+
+def test_the_ws_hook_entry_point_takes_its_event_from_argv(run: Path, live: SessionServer) -> None:
+    proc = subprocess.run([console_script("ws-hook"), "Stop"], env=env_for(run), input=b"not json",
+                          capture_output=True, timeout=60, check=False)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, b"", b"")
+    assert live.served == 0
+
+
+def test_the_ws_request_entry_point_still_runs(run: Path, live: SessionServer) -> None:
+    proc = subprocess.run([console_script("ws-request"), "ping"], env=env_for(run), capture_output=True,
+                          timeout=60, check=False)
+    assert proc.stderr == b"" and isinstance(json.loads(proc.stdout), dict)   # wsd's answer, passed on
