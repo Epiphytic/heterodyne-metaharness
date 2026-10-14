@@ -306,6 +306,8 @@ Proposed "ADR 0001 r16 Amendment 1" (Q2), as replacement text:
 
 ## 7. Questions
 
+All five were decided, as recommended, in ask bpq9, Liam, 2026-10-14. Each decision is recorded under its question.
+
 **Q1. How does Task 8 handle S9-8's recursive bind?**
 - **A. The probe refuses any mount below the install (`MI_SUBMOUNT`). Recommended.**
 - B. A, plus a check from Podman's namespace before create.
@@ -314,23 +316,33 @@ Proposed "ADR 0001 r16 Amendment 1" (Q2), as replacement text:
 
 Recommended: A now, with C filed as a follow-up bead that blocks nothing.
 
+**Decided: A** (ask bpq9, Liam, 2026-10-14). The probe's `MI_SUBMOUNT` refuses any mount below the install. C becomes a follow-up bead, filed by the team lead, that blocks nothing.
+
 **Q2. Where does the ADR change go?**
 - **A standalone "ADR 0001 r16 Amendment 1" on the design repo's `adr-r16` line, with §6's four edits. Recommended.** It's small, and Task 8 doesn't wait on r17.
 - Fold it into r17.
 - No ADR change, only the plan. Not recommended: the plan would contradict §7 and A.3.
 
+**Decided: a standalone "ADR 0001 r16 Amendment 1"** (ask bpq9, Liam, 2026-10-14). The draft is `docs/superpowers/specs/2026-10-14-adr-r16-amendment1-design.md`.
+
 **Q3. Codex's `$CODEX_HOME/tmp`:**
 - **An empty read-only bind (E25), the only presentation this amendment approves. Recommended.** If Task 13's `apply_patch` check fails, Task 13 stops, and a new amendment, with its own review and approval, chooses what replaces it. One candidate for that amendment is a fresh `tmpfs` per launch through OpenShell's `tmpfs` mount type. It is not approved here.
 - A writable `tmpfs` for `tmp` from the start. Not recommended: the stop rule asks for read-only or empty, the session could put files under command names onto its own `PATH`, and it would need that separate amendment anyway.
+
+**Decided: an empty read-only bind (E25)** (ask bpq9, Liam, 2026-10-14). A `tmpfs` for `tmp` would still need its own amendment.
 
 **Q4. Profile `args` that could override an owned key:**
 - **An allowlist per adapter, checked in `config/layers.py`'s `check_profiles` and again at launch (§4.2). Any token the checker can't place is refused, so every override spelling and parent-table override is refused without parsing keys. Both allowlists start empty. Recommended.**
 - A denylist parser: refuse `-c`, `--config`, `--enable`, `--disable`, `-p` and `--profile` only when their key path is an owned key, a parent of one (including `features={...}` and root inline tables) or a child of one. This needs TOML dotted-key parsing, a list of attached and equals spellings, and a fail-closed rule for anything unparsed. It is more code and more ways to be wrong, for flags nobody uses yet.
 - Allow them, since the operator writes profiles. Not recommended: the launcher's values must win (§7).
 
+**Decided: the allowlist per adapter** (ask bpq9, Liam, 2026-10-14). Both allowlists start empty.
+
 **Q5. Claude Code's second variable:**
 - **Set `DISABLE_UPDATES=1` beside `DISABLE_AUTOUPDATER=1`. Recommended.** It also blocks a manual `claude update` inside the session.
 - Set only `DISABLE_AUTOUPDATER=1`, the switch S9-6 names.
+
+**Decided: set `DISABLE_UPDATES=1` beside `DISABLE_AUTOUPDATER=1`** (ask bpq9, Liam, 2026-10-14).
 
 S9-10 is no longer a question. The review made it a requirement before Task 6 merges (§4.5).
 
