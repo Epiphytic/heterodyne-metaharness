@@ -108,6 +108,18 @@ as_service_user() {
     runuser -u "$service_user" -- env -i HOME="$service_home" USER="$service_user" LOGNAME="$service_user" "$@"
 }
 
+# The tools for the new user-level calls: the system's, except under --prefix, where the shims stand in.
+user_tools=/usr/bin:/bin
+if [[ -n $prefix ]]; then user_tools=$PATH; fi
+
+# `systemctl --user` on the service user's own manager and bus. Never -M or machinectl, and never a call
+# that changes the manager itself: no daemon-reexec, and no set-, unset- or import-environment (design
+# btq-v7sgt D1).
+user_systemctl() {
+    as_service_user PATH="$user_tools" XDG_RUNTIME_DIR="/run/user/$service_uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$service_uid/bus" systemctl --user "$@" </dev/null
+}
+
 # git as the service user on the checkout: the system's git (not one on their PATH), and no replacement
 # refs, git config or hooks, so what it reports is the commit's own.
 service_git() {
@@ -166,7 +178,7 @@ verity_probe() {
 if [[ -z $staged ]]; then
     # === the first stage: every check, the commit, the stage ===
 
-    for tool in git runuser systemctl findmnt cmp sha256sum tar; do
+    for tool in git runuser systemctl loginctl findmnt cmp sha256sum tar; do
         command -v "$tool" >/dev/null || refuse "a tool is missing: $tool"
     done
     if ((verity)); then
@@ -208,6 +220,18 @@ if [[ -z $staged ]]; then
         [[ $msg == "the host config"* ]] || msg="the host config can't be checked"
         refuse "$msg"
     fi
+
+    # The service user's user manager, reached on its own bus (design btq-v7sgt D1). Lingering is the
+    # operator's: the installer never changes it, and a failed read is not `yes` (loginctl fails for a user
+    # with no session and no lingering).
+    linger=$(loginctl show-user "$service_user" -p Linger --value 2>/dev/null </dev/null) || linger=""
+    [[ $linger == yes ]] || refuse "lingering is off for $service_user (or could not be read): run" \
+        "\`sudo loginctl enable-linger $service_user\`, then run the installer again"
+    [[ $(stat -c '%F %u' -- "$(host "/run/user/$service_uid/bus")" 2>/dev/null) == "socket $service_uid" ]] \
+        || refuse "the service user's systemd bus is not running"
+    manager=$(user_systemctl is-system-running 2>/dev/null) || true
+    [[ $manager == running || $manager == degraded ]] \
+        || refuse "the service user's systemd manager is not running"
 
     service_path=$(login_path)
     as_service_user PATH="$service_path" sh -c 'command -v uv' >/dev/null 2>&1 </dev/null \

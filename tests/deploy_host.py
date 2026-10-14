@@ -7,6 +7,7 @@ import pwd
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import tomllib
 from collections.abc import Iterator
@@ -88,7 +89,8 @@ exec bash -c "$4"
 """,
     # daemon-reload clears NeedDaemonReload (unless `reload-no-effect`); start and restart make the socket
     # active and, with `sockstat.after`, the socket file what it then is
-    "systemctl": r"""case $1 in
+    "systemctl": r"""if [[ $1 == --user ]]; then shift; exec "$S/user-systemctl" "$@"; fi
+case $1 in
     daemon-reload) [[ -f $S/reload-no-effect ]] || echo no >"$S/need-reload" ;;
     enable) ;;
     is-active) read -r state <"$S/active"; echo "$state"; [[ $state == active ]] ;;
@@ -108,6 +110,14 @@ esac
 if [[ $# == 4 && $1 == -c && $2 == '%F %U %G %a' && $3 == -- ]]; then
     [[ $4 == "$root@LISTEN@" && -f $S/sockstat ]] || exit 1
     exec cat "$S/sockstat"
+fi
+# `%F %u` (the user bus): the real type, and the real owner unless `uids` names another
+if [[ $# == 4 && $1 == -c && $2 == '%F %u' && $3 == -- ]]; then
+    out=$(/usr/bin/stat -c '%F|%u' -- "$4") || exit
+    uid=${out#*|}
+    while IFS='=' read -r p u; do [[ $root/$p == "${4%/}" ]] && uid=$u; done <"$S/uids"
+    echo "${out%|*} $uid"
+    exit 0
 fi
 [[ $# == 4 && $1 == -c && $2 == '%u %a' && $3 == -- ]] || { echo "fake stat: unexpected use" >&2; exit 99; }
 out=$(/usr/bin/stat -c '%u %a' -- "$4") || exit
@@ -154,6 +164,19 @@ chmod "$mode" -- "$dir"
 exit "$rc"
 """,
     "useradd": "",
+    # Linger is `linger`; a user with no session and no lingering (no `linger`) fails, as loginctl does
+    "loginctl": r"""[[ $# == 5 && $1 == show-user && $3 == -p && $4 == Linger && $5 == --value ]] || exit 99
+[[ -f $S/linger ]] || exit 1
+cat "$S/linger"
+""",
+    # the service user's manager, reached as `systemctl --user` with the bus environment it logs
+    "user-systemctl": r"""printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "${XDG_RUNTIME_DIR-}" \
+    "${DBUS_SESSION_BUS_ADDRESS-}" >"$S/user-bus.env"
+case $1 in
+    is-system-running) read -r s <"$S/user-system"; echo "$s"; [[ $s == running ]] ;;
+    *) exit 99 ;;
+esac
+""",
     "uv": r"""case "$*" in
     *" heterodyne --help") ;;
     *" heterodyne config check") cat "$S/config-check"; exit "$(cat "$S/config-check-rc")" ;;
@@ -166,7 +189,8 @@ esac
 def state() -> dict[str, str]:
     """A host where the store helper's socket is in place and verity is on."""
     return {
-        "fail": "", "uids": "", "active": "active\n", "need-reload": "no\n",
+        "fail": "", "uids": "", "active": "active\n", "need-reload": "no\n", "linger": "yes\n",
+        "user-system": "running\n",
         "props": f"Listen={LISTEN} (Stream)\nSocketGroup={MY_GROUP}\nSocketMode=0660\n",
         "sockstat": f"socket {defaults()['owner']} {MY_GROUP} 660\n",
         "mount": "ext4 /dev/fake0\n",
@@ -218,6 +242,25 @@ class Host:
         home = self.root / pwd.getpwnam(ME).pw_dir.removeprefix("/")
         return home / ".config" / "heterodyne" / "config.toml"
 
+    @property
+    def user(self) -> str:
+        return ME
+
+    @property
+    def uid(self) -> int:
+        return os.getuid()
+
+    def bus_rel(self) -> str:
+        return f"run/user/{self.uid}/bus"
+
+    def bus(self) -> Path:
+        return self.root / self.bus_rel()
+
+    def user_bus_env(self) -> dict[str, str]:
+        """The bus environment of the last `systemctl --user` call."""
+        text = (self.shims / "user-bus.env").read_text()
+        return dict(line.split("=", 1) for line in text.splitlines())
+
     def put(self, name: str, text: str) -> None:
         (self.shims / name).write_text(text)
 
@@ -241,6 +284,20 @@ def unseal_all(root: Path) -> None:
         p.chmod(0o755 if p.is_dir() else 0o644)
 
 
+def bind_bus(d: Path) -> socket.socket:
+    """A real Unix socket at `d`/bus, the user manager's bus as the preflight sees it. It binds a relative
+    name from inside `d`, since tmp_path can exceed the 108-byte limit on a socket path."""
+    d.mkdir(parents=True)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    cwd = Path.cwd()
+    os.chdir(d)
+    try:
+        sock.bind("bus")
+    finally:
+        os.chdir(cwd)
+    return sock
+
+
 @pytest.fixture(name="host")
 def host_fixture(tmp_path: Path) -> Iterator[Host]:
     """The fake host; import `host_fixture` to use it as `host`."""
@@ -259,10 +316,14 @@ def host_fixture(tmp_path: Path) -> Iterator[Host]:
     for name, text in state().items():
         (shims / name).write_text(text)
     (shims / "calls.log").write_text("")
+    bus = bind_bus(root / f"run/user/{os.getuid()}")
     for d in SEALED:
         (root / d).chmod(0o555)
-    yield Host(root, shims, commit, manifest(repo, commit))
-    unseal_all(root)
+    try:
+        yield Host(root, shims, commit, manifest(repo, commit))
+    finally:
+        bus.close()
+        unseal_all(root)
 
 
 def host_path(host: Host) -> str:
