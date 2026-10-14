@@ -158,7 +158,7 @@ def test_codex_home_is_rewritten_and_stale_sockets_go(layout: SessionLayout, tmp
     (layout.home / ".codex" / "config.toml").write_text("model = 'x'\n")
     Codex().prepare_home(layout, tmp_path / "wt")
     config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
-    assert config == {"approval_policy": "never", "sandbox_mode": "workspace-write",
+    assert config == {"approval_policy": "never", "sandbox_mode": "danger-full-access",
                       "check_for_update_on_startup": False,
                       "projects": {str(tmp_path / "wt"): {"trust_level": "untrusted"}},
                       "features": {"apps": False, "daemon_auto_start": False, "plugins": False,
