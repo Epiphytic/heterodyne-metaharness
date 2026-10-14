@@ -22,7 +22,7 @@ from escapes import FAKES, Escapes
 from sandbox_env import fake_jwt, install_fake_cli
 from wsd_env import Clock, accounts_at
 
-from heterodyne.agents.codex import HOST_SOURCE
+from heterodyne.agents.codex import HOST_SOURCE, USAGE_SOURCE
 from heterodyne.config import ConfigError
 from heterodyne.sandbox import hostread
 from heterodyne.sandbox.hostread import (
@@ -545,11 +545,14 @@ def fake_time(monkeypatch: pytest.MonkeyPatch) -> FakeTime:
     return clock
 
 
-def status_text(state: str | None, threads: int | None) -> str:
-    """A /proc/<pid>/status of this user's process, as one read gives it."""
-    uid = os.getuid()
+def status_text(state: str | None, threads: int | None, *,
+                uids: tuple[int, int, int, int] | None = None) -> str:
+    """A /proc/<pid>/status, as one read gives it: this user's process unless `uids` (real, effective,
+    saved, filesystem) says otherwise."""
+    real, effective, saved, fs = uids or (os.getuid(),) * 4
     lines = ["Name:\tfake", *([f"State:\t{state} (fake)"] if state else []),
-             f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}", *([f"Threads:\t{threads}"] if threads is not None else [])]
+             f"Uid:\t{real}\t{effective}\t{saved}\t{fs}",
+             *([f"Threads:\t{threads}"] if threads is not None else [])]
     return "\n".join(lines) + "\n"
 
 
@@ -930,3 +933,170 @@ def test_a_live_exec_between_the_reads_is_never_cleared(tmp_path: Path, escapes:
         os.close(w)
         escapes.end()
         child.wait(10)
+
+
+# --- the read's app-server runs under no_new_privs, and rule 5's uid clause (btq-9yiku) ---
+
+@pytest.fixture
+def launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, Any]]]:
+    """The argv and keywords of every process the read starts."""
+    made: list[tuple[list[str], dict[str, Any]]] = []
+
+    def recording(args: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        made.append((list(args), kwargs))
+        return POPEN(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", recording)
+    return made
+
+
+@pytest.mark.parametrize("fault", [None, "escaped"])
+def test_the_reads_app_server_and_an_escaped_descendant_run_under_no_new_privs(
+        tmp_path: Path, escapes: Escapes, launches: list[tuple[list[str], dict[str, Any]]],
+        fault: str | None) -> None:
+    """The app-server is started through the trampoline, so it and every descendant run under
+    no_new_privs: a setuid exec can't move one to another user's uid. The argv proves the launch path
+    even where the runner already has no_new_privs, as it may."""
+    report = tmp_path / "no-new-privs"
+    env = {"HZ_FAKE_STATUS_FILE": str(report)}
+    if fault:
+        env |= {"HZ_FAKE_RATE_FAULT": fault, "HZ_FAKE_CHILD_PID_FILE": str(tmp_path / "child.pid"),
+                **escapes.env}
+    rig = Rig(tmp_path, **env)
+    assert rig.read() == (None if fault else WANTED)
+    assert report.read_text().split() == (["1", "1"] if fault else ["1"])
+    [(args, kwargs)] = launches
+    assert args[:4] == [sys.executable, "-I", str(USAGE_SOURCE), "--exec-no-new-privs"]
+    assert Path(args[4]).samefile(rig.codex) and args[5:] == ["app-server"]
+    assert kwargs["start_new_session"] is True and kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["stdin"] == kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["env"]["CODEX_HOME"].startswith(str(rig.scratch))
+    assert rig.scratch_empty() and rig.server_gone()
+
+
+def test_a_trampoline_that_fails_fails_the_read_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      logged: Callable[[], list[str]]) -> None:
+    """A trampoline that exits 126 (a launch condition unmet, or no_new_privs not confirmed) starts no
+    app-server: the read fails, and its home goes as for any failed read."""
+    real = hostread._usage_module
+
+    def failing() -> Any:
+        module = real()
+        module.barrier_argv = lambda: [sys.executable, "-I", "-c", "import os; os._exit(126)"]
+        return module
+
+    monkeypatch.setattr(hostread, "_usage_module", failing)
+    rig = Rig(tmp_path)
+    assert rig.read() is None
+    assert logged() in ([f"{DIAG_READ_FAILED}: ExitStatus"], [f"{DIAG_READ_FAILED}: ClosedOutput"])
+    assert not rig.pid_file.exists()                    # the fake never ran
+    assert rig.scratch_empty()
+
+
+FOREIGN = 300_000                       # another user's uid, outside the patched subordinate range
+RANGE = (200_000, 65_536)               # this user's subordinate uids, as the tests patch them
+
+
+@pytest.mark.parametrize(("uids", "kept"), [
+    ((200_500,) * 4, True),
+    ((200_000,) * 4, True),
+    ((265_535,) * 4, True),
+    ((199_999,) * 4, False),
+    ((265_536,) * 4, False),
+    ((FOREIGN,) * 4, False),
+    ((os.getuid(), FOREIGN, FOREIGN, FOREIGN), True),
+    ((FOREIGN, os.getuid(), FOREIGN, FOREIGN), True),
+], ids=["subordinate", "first", "last", "below", "above", "foreign", "ours-real", "ours-effective"])
+def test_a_refused_process_is_another_users_only_outside_this_users_subordinate_uids(
+        monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime, logged: Callable[[], list[str]],
+        uids: tuple[int, int, int, int], kept: bool) -> None:
+    """A descendant can reach this user's subordinate uids without privilege, through a namespace this
+    user owns, so a process with one may be a holder: unknown, and the home kept. Another user's
+    process, started after the home, is still cleared at once, without a kill."""
+    reads: list[None] = []
+
+    def subordinate() -> tuple[tuple[int, int], ...]:
+        reads.append(None)
+        return (RANGE,)
+
+    monkeypatch.setattr(hostread, "_subordinate_uids", subordinate, raising=False)
+    scan = Scripted(monkeypatch, seam.child.pid, [
+        {"environ": EACCES, "status": status_text("S", 1, uids=uids), "stat": ("S", 0)}])
+    recover(seam.scratch)
+    assert (fake_time.sleeps, scan.scans, len(reads)) == (0, 1, 1)         # one read of the file per scan
+    assert seam.child.poll() is None
+    if kept:
+        assert seam.events == [] and seam.home.exists()
+        assert logged() == [DIAG_RECOVERY_KEPT]
+    else:
+        assert seam.events == ["rmtree"]
+        assert logged() == [DIAG_RECOVERED]
+
+
+def test_unknown_subordinate_uids_keep_every_refused_process(
+        monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime,
+        logged: Callable[[], list[str]]) -> None:
+    """With the ranges unknown (an unreadable or malformed file, a `subid:` source), every uid may be
+    this user's."""
+    monkeypatch.setattr(hostread, "_subordinate_uids", lambda: None, raising=False)
+    Scripted(monkeypatch, seam.child.pid, [
+        {"environ": EACCES, "status": status_text("S", 1, uids=(FOREIGN,) * 4), "stat": ("S", 0)}])
+    recover(seam.scratch)
+    assert seam.events == [] and seam.home.exists()
+    assert logged() == [DIAG_RECOVERY_KEPT]
+
+
+ME, MY_UID = "me", 4321
+
+
+def subordinate_uids(subuid: str | BaseException, nsswitch: str | BaseException = "passwd: files\n",
+                     login: str | BaseException = ME) -> Any:
+    """`_subordinate_uids` over the given texts: each reader returns its text or raises it."""
+    texts = {"/etc/subuid": subuid, "/etc/nsswitch.conf": nsswitch}
+
+    def read(path: str) -> str:
+        value = texts[path]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def name() -> str:
+        if isinstance(login, BaseException):
+            raise login
+        return login
+
+    return hostread._subordinate_uids(read=read, login=name, uid=MY_UID)
+
+
+def test_the_subordinate_uids_are_this_users_lines_by_name_and_by_uid() -> None:
+    text = f"other:100000:65536\n{ME}:200000:65536\n\nthird:400000:10\n{MY_UID}:300000:10\n"
+    assert subordinate_uids(text) == ((200_000, 65_536), (300_000, 10))
+    assert subordinate_uids("other:100000:65536\n") == ()
+
+
+def test_a_missing_subuid_file_gives_no_subordinate_uids() -> None:
+    assert subordinate_uids(GONE) == ()
+
+
+@pytest.mark.parametrize("line", [
+    f"{ME}:200000:0", f"{ME}:200000:-5", f"{ME}:x:10", f"{ME}:200000:1e3", f"{ME}:200000",
+    f"{ME}:1:2:3", "other:100000:0", f"{ME}: 200000:10", f"{ME}:\u0662:10"],
+    ids=["zero", "negative", "start", "count", "two-fields", "four-fields", "others-line", "space", "digit"])
+def test_a_malformed_subuid_file_makes_every_uid_this_users(line: str) -> None:
+    assert subordinate_uids(f"{ME}:200000:65536\n{line}\n") is None
+
+
+@pytest.mark.parametrize(("subuid", "nsswitch", "login"), [
+    (EACCES, "passwd: files\n", ME),
+    (f"{ME}:200000:65536\n", "passwd: files\nsubid: sss\n", ME),
+    (f"{ME}:200000:65536\n", "  subid:files\n", ME),
+    (f"{ME}:200000:65536\n", EACCES, ME),
+    (f"{ME}:200000:65536\n", "passwd: files\n", KeyError(MY_UID)),
+], ids=["subuid-unreadable", "subid-source", "subid-indented", "nsswitch-unreadable", "no-name"])
+def test_an_unknown_source_makes_every_uid_this_users(subuid: Any, nsswitch: Any, login: Any) -> None:
+    assert subordinate_uids(subuid, nsswitch, login) is None
+
+
+def test_a_missing_nsswitch_or_a_commented_subid_line_is_no_subid_source() -> None:
+    assert subordinate_uids(f"{ME}:200000:65536\n", GONE) == ((200_000, 65_536),)
+    assert subordinate_uids(f"{ME}:200000:65536\n", "# subid: sss\n") == ((200_000, 65_536),)
