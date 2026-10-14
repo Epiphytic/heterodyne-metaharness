@@ -1,13 +1,20 @@
 import json
+import logging
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from test_sandbox_openshell_policy import spec
+from test_sandbox_openshell_policy import install_spec, spec
 
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable, Watch
-from heterodyne.sandbox.openshell import OpenShellBackend, policy, tool_env
+from heterodyne.sandbox.openshell import (
+    NONRECURSIVE_VERSIONS,
+    OpenShellBackend,
+    driver_config,
+    policy,
+    tool_env,
+)
 from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal
 
 
@@ -36,9 +43,11 @@ class Script:
         self.now += seconds
 
 
-def backend(script: Script, scope: int = 1) -> OpenShellBackend:
+def backend(script: Script, scope: int = 1,
+            versions: frozenset[str] = NONRECURSIVE_VERSIONS) -> OpenShellBackend:
     return OpenShellBackend("openshell", "podman", "img:1", {"PATH": "/usr/bin"}, runner=script,
-                            clock=script.clock, sleep=script.sleep, ptrace_scope=lambda: scope)
+                            clock=script.clock, sleep=script.sleep, ptrace_scope=lambda: scope,
+                            nonrecursive_versions=versions)
 
 
 def test_create_writes_the_policy_privately_and_waits_until_exec_works(tmp_path: Path) -> None:
@@ -187,3 +196,105 @@ def test_create_refuses_a_host_ptrace_scope_other_than_1(tmp_path: Path, scope: 
         backend(script, scope).create(spec(), tmp_path / "scratch")
     assert str(failed.value) == ptrace_scope_refusal(scope)
     assert script.calls == [] and not (tmp_path / "scratch").exists()
+
+
+LISTED = frozenset({"0.2.0"})
+STATUS = ("openshell", "status", "-o", "json")
+
+
+def status(version: str | None = "0.2.0", state: str = "connected") -> bytes:
+    out = {"gateway": "openshell", "status": state,
+           "authentication": {"state": "authenticated"}}
+    return json.dumps(out if version is None else {**out, "version": version}).encode()
+
+
+def test_the_shipped_version_set_is_empty() -> None:
+    """Nothing is enabled before the design's §3.4 review; that review edits this test (btq-wazo1)."""
+    assert frozenset() == NONRECURSIVE_VERSIONS
+
+
+@pytest.mark.parametrize(("rc", "out", "supported"), [
+    (0, status(), True),
+    (0, status("0.1.2"), False),                 # today's pin: never listed
+    (0, status("0.2.1"), False),                 # newer: not reviewed, so not supported
+    (0, status("0.1.9"), False),
+    (0, status("0.2.0-rc1"), False),             # exact, not a prefix
+    (1, status(), False),
+    (0, b"Server Status\n  Version: 0.2.0\n", False),
+    (0, b"[]", False),
+    (0, status(None), False),
+    (0, status(state="connected_http"), False),
+    (0, status(state="disconnected"), False),
+])
+def test_support_needs_an_exact_listed_gateway_version(rc: int, out: bytes, supported: bool) -> None:
+    script = Script((STATUS, rc, out),)
+    assert backend(script, versions=LISTED).nonrecursive_supported() is supported
+    assert [c[0] for c in script.calls] == [list(STATUS)]
+
+
+def test_a_status_query_that_cannot_answer_is_unsupported() -> None:
+    def timeout(argv: Sequence[str], data: bytes | None, t: float) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(list(argv), t)
+
+    def missing(argv: Sequence[str], data: bytes | None, t: float) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("no such file")
+
+    for runner in (timeout, missing):
+        b = OpenShellBackend("openshell", "podman", "img:1", {}, runner=runner, nonrecursive_versions=LISTED)
+        assert b.nonrecursive_supported() is False
+
+
+def test_an_empty_version_set_asks_nothing() -> None:
+    script = Script()
+    assert backend(script).nonrecursive_supported() is False
+    assert script.calls == []
+
+
+def created_config(script: Script) -> dict[str, object]:
+    [create] = [c[0] for c in script.calls if c[0][:3] == ["openshell", "sandbox", "create"]]
+    return json.loads(create[create.index("--driver-config-json") + 1])
+
+
+def test_a_supported_gateway_creates_with_the_non_recursive_install_bind(tmp_path: Path) -> None:
+    script = Script((STATUS, 0, status()), (("openshell", "sandbox", "create"), 0, b""),
+                    (("openshell", "sandbox", "exec"), 0, b""))
+    backend(script, versions=LISTED).create(install_spec(), tmp_path / "scratch")
+    assert [c[0][:2] for c in script.calls][:2] == [["openshell", "status"], ["openshell", "sandbox"]]
+    assert created_config(script) == driver_config(install_spec(), nonrecursive=True)
+
+
+def test_an_unsupported_gateway_creates_option_a_s_object(tmp_path: Path) -> None:
+    script = Script((STATUS, 0, status("0.1.2")), (("openshell", "sandbox", "create"), 0, b""),
+                    (("openshell", "sandbox", "exec"), 0, b""))
+    backend(script, versions=LISTED).create(install_spec(), tmp_path / "scratch")
+    assert created_config(script) == driver_config(install_spec())
+
+
+def test_a_gateway_that_refuses_recursive_fails_the_launch(tmp_path: Path) -> None:
+    """Detection said yes, then create refused the field by name (a downgrade in between): no retry."""
+    refusal = (b"Error: invalid driver config: unknown field `recursive`, expected one of `source`, "
+               b"`target`, `read_only`, `selinux_label`")
+    calls: list[list[str]] = []
+
+    def runner(argv: Sequence[str], data: bytes | None, t: float) -> subprocess.CompletedProcess[bytes]:
+        calls.append(list(argv))
+        if list(argv[:2]) == ["openshell", "status"]:
+            return subprocess.CompletedProcess(list(argv), 0, status(), b"")
+        return subprocess.CompletedProcess(list(argv), 1, b"", refusal)
+
+    b = OpenShellBackend("openshell", "podman", "img:1", {}, runner=runner, ptrace_scope=lambda: 1,
+                         nonrecursive_versions=LISTED)
+    with pytest.raises(BackendError, match="`recursive`"):
+        b.create(install_spec(), tmp_path / "scratch")
+    assert [c[:3] for c in calls] == [["openshell", "status", "-o"], ["openshell", "sandbox", "create"]]
+
+
+@pytest.mark.parametrize(("version", "mode"), [("0.2.0", "nonrecursive"), ("0.1.2", "recursive")])
+def test_the_create_log_names_the_bind_mode(tmp_path: Path, caplog: pytest.LogCaptureFixture,
+                                            version: str, mode: str) -> None:
+    script = Script((STATUS, 0, status(version)), (("openshell", "sandbox", "create"), 0, b""),
+                    (("openshell", "sandbox", "exec"), 0, b""))
+    with caplog.at_level(logging.INFO, logger="heterodyne.sandbox.openshell"):
+        backend(script, versions=LISTED).create(install_spec(), tmp_path / "scratch")
+    [line] = [r.getMessage() for r in caplog.records if "bind=" in r.getMessage()]
+    assert line == f"openshell sandbox create hz0123456789abg1 bind={mode}"
