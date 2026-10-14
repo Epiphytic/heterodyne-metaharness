@@ -8,14 +8,17 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   sha256(command). HZ_FAKE_HOOKS_FAULT breaks the answer (see `faulty`). It also answers
   `account/rateLimits/read` with `HZ_FAKE_RATE_LIMITS` (a snapshot), after an `account/rateLimits/updated`
   notification; with no `auth.json` in `$CODEX_HOME` it answers -32600, as codex 0.160 does with no login.
-  `HZ_FAKE_RATE_FAULT` is `hang` (never answers), `error`, `garbage` (a line that isn't JSON), `close`
-  (closes its output and waits), `exit` (exits 3 without answering), `orphan` (starts a descendant that
-  holds its output open, writes the descendant's PID to `HZ_FAKE_CHILD_PID_FILE` atomically, and hangs) or
-  `escaped` (the same, the descendant in a session of its own). The descendant is a sleeper
-  (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`: it ends itself at the test's end.
-  With `HZ_FAKE_PID_FILE` set, it first writes its PID there, so a test can prove it is gone.
-  `HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json` with `<text>` (a temporary file, then a rename,
-  as a CLI saving a refreshed login would) before it answers `account/rateLimits/read`.
+  `HZ_FAKE_RATE_FAULT` is `hang` (never answers, and exits at EOF), `outlive` (never answers, and outlives its
+  reader: at EOF, before a request or after one, it waits until killed or the test ends), `error`, `garbage`
+  (a line that isn't JSON), `close` (closes its output and waits), `exit` (exits 3 without answering),
+  `orphan` (starts a descendant that holds its output open, writes the descendant's PID to
+  `HZ_FAKE_CHILD_PID_FILE` atomically, and hangs) or `escaped` (the same, the descendant in a session of its
+  own). The descendant is a sleeper (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`: it
+  ends itself at the test's end. So does `outlive`: it takes that use's census before anything else, and at
+  EOF execs the sleeper on it (the same PID and environment). With `HZ_FAKE_PID_FILE` set, it first writes
+  its PID there, so a test can prove it is gone. `HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json`
+  with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it answers
+  `account/rateLimits/read`.
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
 - the TUI: prints its prompt marker (Claude merges its settings layers as the real one does, see
   `claude_hooks`; Codex runs only the hooks config.toml trusts at their current hash;
@@ -107,7 +110,7 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
         (auth.parent / "auth.json.tmp").write_text(rotated)
         (auth.parent / "auth.json.tmp").replace(auth)
     fault = os.environ.get("HZ_FAKE_RATE_FAULT")
-    if fault == "hang":
+    if fault in ("hang", "outlive"):
         return None
     if fault == "garbage":
         return "not json"
@@ -130,7 +133,22 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
     return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"rateLimits": snapshot}})
 
 
+_census: int | None = None      # with `outlive`: the escapes use's census, held from the start
+
+
+def outlive_eof() -> None:
+    """With `outlive`, the reader's end of stdin closing (its death) doesn't end the app-server: it becomes
+    a sleeper on the census it holds, so it ends at the test's end, or when killed."""
+    if _census is not None:
+        os.set_inheritable(_census, True)
+        argv = sleeper.sleeper_argv(os.environ[sleeper.ENV], _census)
+        os.execv(argv[0], argv)  # noqa: S606 - the sleeper, by absolute path
+
+
 def stdio_server() -> None:
+    global _census
+    if os.environ.get("HZ_FAKE_RATE_FAULT") == "outlive":     # before the PID file: a test sees it held
+        _census = sleeper.held_census(os.environ.get(sleeper.ENV))
     if pid_file := os.environ.get("HZ_FAKE_PID_FILE"):
         Path(pid_file).write_text(str(os.getpid()))
     for line in sys.stdin:
@@ -155,12 +173,14 @@ def stdio_server() -> None:
             answer = rate_limits(msg)
             if answer is None:
                 sys.stdin.read()        # hang (or, its output closed, wait) until killed
+                outlive_eof()
                 return
             print(answer, flush=True)
             continue
         else:
             continue                    # a notification
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+    outlive_eof()
 
 
 def listen_server(url: str) -> None:

@@ -21,7 +21,15 @@ from typing import Any
 
 import msgspec
 import pytest
-from admind_asks_fixture import approve_bead_wrapper, bead_db, btq_log, decisions, sent_mid, two_operators
+from admind_asks_fixture import (
+    approve_bead_wrapper,
+    bead_db,
+    btq_log,
+    decisions,
+    listed_mid,
+    sent_mid,
+    two_operators,
+)
 from admind_waits import lock_waiters, stays, wait_until
 from escapes import FAKES, Escapes
 from fakes.fake_wn_agent import ACCOUNT
@@ -1244,7 +1252,7 @@ def test_latch_during_decision_completes(tmp_path: Path) -> None:
         assert ask_status(h, ask_id) == "approved"
         assert audited(h, kind="ask", action="decided", ask_id=ask_id, latched_during=True)
         assert queued(h, mid).startswith(f"Approved {BEAD}")
-        await stays(lambda: sent_mid(h, f"ask:{mid}:0") is None)
+        await stays(lambda: listed_mid(h, f"ask:{mid}:0") is None)
     go(tmp_path, scenario)
 
 

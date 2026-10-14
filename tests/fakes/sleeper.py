@@ -169,7 +169,8 @@ def _report(use_dir: str, ready_fd: int | None, pid_file: str | None) -> None:
             pass
 
 
-def _wait_for_release(use_dir: str) -> None:
+def wait_for_release(use_dir: str) -> None:
+    """Return once the use's lifeline is released (or after CAP). The caller holds the census."""
     try:
         fd = os.open(Path(use_dir, LIFELINE), os.O_RDONLY | os.O_CLOEXEC)
     except OSError:
@@ -216,7 +217,7 @@ def main(argv: list[str]) -> int:
     pid_file = opts.get("--pid-file")
     _report(use_dir, int(str(ready)) if ready is not None else None,
             str(pid_file) if pid_file is not None else None)
-    _wait_for_release(use_dir)
+    wait_for_release(use_dir)
     return 0
 
 

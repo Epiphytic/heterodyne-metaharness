@@ -54,7 +54,13 @@ def configure(
 
 
 def batches(h: Harness) -> list[str]:
+    """Every batch the fake has listed, recorded by the daemon or not: for counts and absence."""
     return [t for t in h.texts() if t.startswith(backstop.TITLE)]
+
+
+def delivered_batches(h: Harness) -> list[str]:
+    """The batches the daemon has recorded as sent (`Harness.delivered_texts`)."""
+    return [t for t in h.delivered_texts() if t.startswith(backstop.TITLE)]
 
 
 def diagnostics(h: Harness) -> str:
@@ -118,13 +124,12 @@ async def waited(h: Harness, pred: Callable[[], bool], what: str, timeout: float
 
 async def batch_arrives(h: Harness, n: int = 1) -> str:
     # a loaded machine is slow, not wrong
-    await waited(h, lambda: len(batches(h)) >= n, f"batch {n}", 40)
-    return batches(h)[n - 1]
+    await waited(h, lambda: len(delivered_batches(h)) >= n, f"batch {n}", 40)
+    return delivered_batches(h)[n - 1]
 
 
 async def batch_message_id(h: Harness) -> str:
-    """The message ID of the (first) batch, once the daemon has recorded it as sent. The fake lists a send
-    before it replies, so `batch_arrives` can return while the outbox row has no message ID yet."""
+    """The message ID of the (first) batch, once the daemon has recorded it as sent."""
     def recorded() -> str | None:
         row = h.store.db.execute("SELECT message_id FROM outbox WHERE key LIKE 'batch:%' AND status = 'sent' "
                                  "AND message_id IS NOT NULL ORDER BY seq LIMIT 1").fetchone()
@@ -429,7 +434,7 @@ def test_a_reply_that_cannot_be_recorded_goes_to_the_backstop(
 
 
 async def no_sleep(_seconds: float) -> None:
-    return None
+    await asyncio.sleep(0)      # skips the delay but yields, or a poll loop behind it spins
 
 
 @needs_tmux

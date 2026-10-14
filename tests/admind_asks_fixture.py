@@ -46,7 +46,14 @@ def decisions(h: Harness) -> list[list[str]]:
 
 
 def sent_mid(h: Harness, key: str) -> str | None:
-    """The message ID the fake returned for the outbox row `key`, once it has been sent."""
+    """The message ID the fake returned for the outbox row `key`, once the daemon has recorded it as sent
+    (`Harness.recorded`). Check that something was not sent with `listed_mid`."""
+    return h.recorded(key)
+
+
+def listed_mid(h: Harness, key: str) -> str | None:
+    """The message ID the fake returned for a send with idempotency key `key`, as soon as the fake lists
+    it, whether or not the daemon has recorded it. For absence checks."""
     return next((r["_message_id"] for r in h.fake.sent if r.get("idempotency_key") == key), None)
 
 
