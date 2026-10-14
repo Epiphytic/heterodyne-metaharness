@@ -393,3 +393,44 @@ def test_the_wrappers_keep_strace_s_exit_records(script: str) -> None:
     text = (SPIKE / script).read_text()
     assert 'TRACE="-f -q -s 300' in text and "-qq" not in text
     assert "stop_root" in text
+
+
+# --- r3 lead refinements: the root's end is its final event, a whole last line, and the wrapper's marker ---
+
+def test_a_root_event_after_its_end_fails(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"], end=None) + ended() + "\n"
+                                       + sendto("raw.githubusercontent.com") + "\n")
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_ran_to_its_end"]
+
+
+def test_a_truncated_last_line_fails(tmp_path: Path) -> None:
+    run = evidence(tmp_path / "r", 1)
+    child = sendto("raw.githubusercontent.com").replace("7", "8", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"], end="killed by SIGTERM") + child[:40])
+    assert analyze(run, "--part", "1").returncode == 1
+    assert not checks(run)["server.strace_ran_to_its_end"]
+
+
+@pytest.mark.parametrize("part", [1, 2])
+@pytest.mark.parametrize("name", ["server.strace", "tui.strace", "tui-resume.strace"])
+def test_the_wrapper_s_unended_marker_fails(tmp_path: Path, part: int, name: str) -> None:
+    """stop_root writes <trace>.unended when the record didn't come within its bound."""
+    run = evidence(tmp_path / "r", part)
+    if not (run / name).is_file():
+        pytest.skip("part 1 has no resume")
+    (run / f"{name}.unended").write_text("no end record within 10 s\n")
+    assert analyze(run, "--part", str(part)).returncode == 1
+    assert not checks(run)[f"{name}_ran_to_its_end"]
+
+
+@pytest.mark.parametrize("script", ["inner.sh", "inner2.sh"])
+def test_the_wrappers_bound_the_wait_and_mark_a_timeout(script: str) -> None:
+    text = (SPIKE / script).read_text()
+    assert '-lt 20 ]' in text and '.unended"' in text                # 20 half-second polls: 10 s
+
+
+@pytest.mark.parametrize("script", ["part1.sh", "part2.sh"])
+def test_the_outer_wrappers_keep_the_markers(script: str) -> None:
+    assert "strace.unended" in (SPIKE / script).read_text()
