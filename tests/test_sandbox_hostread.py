@@ -725,6 +725,30 @@ def test_no_readable_worker_settles(monkeypatch: pytest.MonkeyPatch, seam: Seam,
     kept_at_the_deadline(seam, logged, fake_time, before)
 
 
+# Another user's uid, outside this host's subordinate ranges (165536-231071) as well as ours.
+FOREIGN = 65534
+
+
+@pytest.mark.parametrize(("uids", "worker"), [
+    ((FOREIGN,) * 4, EACCES),                               # a non-dumpable worker of ours, holding the mark
+    ((FOREIGN, FOREIGN, os.getuid(), FOREIGN), EACCES),     # saved uid ours: a thread can go back to it
+    ((FOREIGN,) * 4, GONE),                                 # the only worker exec'd and took the leader's PID
+], ids=["unreadable-mixed-uid", "saved-uid", "exec-between-reads"])
+def test_another_users_zombie_leader_with_unread_threads_settles(
+        monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime, logged: Callable[[], list[str]],
+        uids: tuple[int, int, int, int], worker: BaseException) -> None:
+    """btq-19fh0, won't-fix: a leader's uid says nothing of its other threads' credentials or of the
+    environment they share, so a zombie group read through none of them settles whoever the leader is.
+    These pin that against clearing it by the leader's uid (the withdrawn r1 rule)."""
+    assert FOREIGN != os.getuid()
+    Scripted(monkeypatch, seam.child.pid, [
+        {"environ": EACCES, "status": status_text("Z", 2, uids=uids), "stat": ("Z", PF_EXITING),
+         "tasks": {"9001": worker}}])
+    before = open_fds()
+    recover(seam.scratch)
+    kept_at_the_deadline(seam, logged, fake_time, before)
+
+
 def test_an_exiting_process_settles_then_its_home_goes(monkeypatch: pytest.MonkeyPatch, seam: Seam,
                                                       fake_time: FakeTime,
                                                       logged: Callable[[], list[str]]) -> None:
@@ -993,7 +1017,7 @@ def test_a_trampoline_that_fails_fails_the_read_closed(tmp_path: Path, monkeypat
     assert rig.scratch_empty()
 
 
-FOREIGN = 300_000                       # another user's uid, outside the patched subordinate range
+STRANGER = 300_000                      # another user's uid, outside the patched subordinate range
 RANGE = (200_000, 65_536)               # this user's subordinate uids, as the tests patch them
 
 
@@ -1003,9 +1027,9 @@ RANGE = (200_000, 65_536)               # this user's subordinate uids, as the t
     ((265_535,) * 4, True),
     ((199_999,) * 4, False),
     ((265_536,) * 4, False),
-    ((FOREIGN,) * 4, False),
-    ((os.getuid(), FOREIGN, FOREIGN, FOREIGN), True),
-    ((FOREIGN, os.getuid(), FOREIGN, FOREIGN), True),
+    ((STRANGER,) * 4, False),
+    ((os.getuid(), STRANGER, STRANGER, STRANGER), True),
+    ((STRANGER, os.getuid(), STRANGER, STRANGER), True),
 ], ids=["subordinate", "first", "last", "below", "above", "foreign", "ours-real", "ours-effective"])
 def test_a_refused_process_is_another_users_only_outside_this_users_subordinate_uids(
         monkeypatch: pytest.MonkeyPatch, seam: Seam, fake_time: FakeTime, logged: Callable[[], list[str]],
@@ -1040,7 +1064,7 @@ def test_unknown_subordinate_uids_keep_every_refused_process(
     this user's."""
     monkeypatch.setattr(hostread, "_subordinate_uids", lambda: None, raising=False)
     Scripted(monkeypatch, seam.child.pid, [
-        {"environ": EACCES, "status": status_text("S", 1, uids=(FOREIGN, FOREIGN, FOREIGN, FOREIGN)),
+        {"environ": EACCES, "status": status_text("S", 1, uids=(STRANGER, STRANGER, STRANGER, STRANGER)),
          "stat": ("S", 0)}])
     recover(seam.scratch)
     assert seam.events == [] and seam.home.exists()
