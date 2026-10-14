@@ -1,0 +1,14 @@
+Reviewer: gpt-6.1-sol (Codex, workspace-write sandbox), cross-model; author claude-opus-5-5.
+Reviewed commit: fe98f19132cc535020d3a0d9dab136c562b1689c (design r1, on main 093ede5). Verdict: REVISE.
+
+Note: the one blocker (Claude EPIPE behaviour) is answered in r2 with source evidence and an offline experiment.
+
+- **[BLOCKING] Design §“Reading: `read_bounded` drains past the bound” and Tests 1–2, 6:** Draining avoids EPIPE only when the writer finishes before 5 seconds. A writer still sending at the deadline encounters a closed pipe after the shim exits; the design explicitly leaves Claude’s handling of that failure unspecified. If the CLI treats it as a nonblocking hook error and discards stdout, an unchecked PreToolUse runs. The seven tests verify the shim’s response, not that the CLI consumes it under this condition. Establish the pinned CLI’s behavior through source evidence or an offline protocol experiment before claiming every failure path closes. Codex 0.160 explicitly tolerates BrokenPipe and collects stdout, so that side is supported by its [command runner](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/hooks/src/engine/command_runner.rs#L259).
+
+- **[NON-BLOCKING] Design §“What the shim answers”:** “For other events the CLI ignores a decision for a different event” is inaccurate for Codex 0.160. Its Stop output rejects `hookSpecificOutput`; SessionStart and UserPromptSubmit reject the permission fields. An oversized Stop therefore produces invalid hook output rather than an accepted, ignored decision. This does not itself request continuation or block a prompt, but the design should describe the error behavior and verify the corresponding Claude behavior. See Codex’s [event output types](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/hooks/src/schema.rs#L395).
+
+- **[NON-BLOCKING] Design §“Reading” and Test 6:** Prefer a capped `bytearray` accumulator over an unrestricted chunk list. With tiny pipe reads, millions of list entries and join bookkeeping substantially amplify memory despite the byte bound. `bytearray.extend()` avoids repeated whole-buffer copying while keeping allocation proportional to retained bytes. Check the absolute deadline on every drain iteration, including continuously readable input.
+
+- **[NON-BLOCKING] Design §“Deadline” and Tests:** The timeout arithmetic agrees with `settings.py:81` and `base.py:78–82`: 5 + 60 seconds leaves substantial room inside 120. Keeping `drain=False` preserves `status_main`’s contract. The proposed tests otherwise cover the core shim behavior; add exactly-at-limit EOF and a real oversized stream left open past the deadline. A simpler protocol alternative is to pass the registered event through trusted hook-command arguments: input failures can then use exit 2 for PreToolUse and silence for lifecycle events, without parsing an untrusted prefix.
+
+Verdict: REVISE
