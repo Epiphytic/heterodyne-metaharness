@@ -38,6 +38,8 @@ from heterodyne.tmux import Tmux, TmuxError
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 FAKE_CLAUDE = Path(__file__).parent / "fakes" / "fake_claude.py"
 STRANGER = "e5" * 32
+REPLY_DELAY_ENV = "HZ_FAKE_WN_REPLY_DELAY"     # the fake's reply_delay, for the race sweeps (btq-y3e88)
+CHECK_DELAY_ENV = "HZ_FAKE_WN_CHECK_DELAY"     # the fake's ack_check_delay
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +56,15 @@ class Services:
 
 
 class Harness:
+    """A daemon wired to a fake wn-agent and a fake Claude, in one test's tmp_path.
+
+    The fake lists a send in `fake.sent` before it replies `final_sent`, and the daemon records the row
+    as `sent` only once it reads that reply (btq-y3e88). So wait on `delivered_texts()` or `recorded()`
+    before acting on the daemon's state; check absence on `texts()` or `listed_mid()`, which see a send
+    as soon as it is made. A fake sleep must await something: one that returns without yielding turns
+    every poll loop behind it into a spin that starves the event loop.
+    """
+
     def __init__(self, tmp_path: Path, settings_overrides: dict[str, Any] | None = None,
                  before_store: Callable[["Harness"], Any] | None = None) -> None:
         wrapper = tmp_path / "claude"
@@ -68,6 +79,8 @@ class Harness:
         self.store.set("group_id_hex", "b2" * 32)
         self.audit = Audit(self.settings.state_dir / "audit.jsonl")
         self.fake = FakeWnAgent(tmp_path / "wn.sock")
+        self.fake.reply_delay = float(os.environ.get(REPLY_DELAY_ENV, "0"))
+        self.fake.ack_check_delay = float(os.environ.get(CHECK_DELAY_ENV, "0"))
         self.tmux = new_test_tmux()
         self.agent = AdminAgent(self.tmux, self.store, self.settings, self.settings.state_dir / "hook.sock")
         runner = CommandRunner(self.agent, Services(), ("fake.service",), lambda: True)
@@ -88,13 +101,41 @@ class Harness:
         return HookEvent(name, session, transcript, launch=self.agent.launch_nonce, **kw)
 
     def texts(self) -> list[str]:
+        """Every text the fake has listed, recorded by the daemon or not."""
         return [r["text"] for r in self.fake.sent]
+
+    def recorded(self, key: str) -> str | None:
+        """The message ID the fake returned for the send with idempotency key `key`, once the daemon's
+        outbox row for `key` is `sent` with that same ID; else None."""
+        listed = next((r["_message_id"] for r in self.fake.sent if r.get("idempotency_key") == key), None)
+        row = self.store.db.execute("SELECT status, message_id FROM outbox WHERE key = ?", (key,)).fetchone()
+        if listed is None or row is None or tuple(row) != ("sent", listed):
+            return None
+        return listed
+
+    def delivered_texts(self) -> list[str]:
+        """The texts the fake has listed whose outbox rows the daemon has recorded as sent, in send order."""
+        return [r["text"] for r in self.fake.sent
+                if r.get("idempotency_key") is not None and self.recorded(r["idempotency_key"]) is not None]
 
     async def until(self, pred: Callable[[], bool], timeout: float = 15) -> None:
         async def poll() -> None:
             while not pred():
                 await asyncio.sleep(0.05)
         await asyncio.wait_for(poll(), timeout)
+
+
+async def posting(h: Harness) -> None:
+    """Wait until the daemon's outbound gate is open. `run_with` starts a scenario once the fake sees a
+    subscription, a group-info round trip before the gate can open, and some gated work (an automatic
+    bump) is a silent no-op until then."""
+    try:
+        await h.until(h.daemon.may_post, 20)
+    except TimeoutError:
+        d = h.daemon
+        pytest.fail(f"the outbound gate never opened: latched={d.latched()} group_ok={d.group_ok} "
+                    f"observing={d.observing} changing={d.changing} "
+                    f"operator_seen={h.store.get('operator_seen_at') is not None}", pytrace=False)
 
 
 def drop_tmux(h: Harness) -> None:

@@ -380,8 +380,9 @@ def test_login_dirs_never_leave_through_replies_tail_details_summaries_or_audit(
         await waited(h, lambda: h.store.get("turn_start") is not None, "the turn to start")
         append(path, [tool("Bash", command=f"ls {all_forms(forms)}"), result(f"in {forms[1]}")])
         await h.daemon.hooks.put(h.event("Stop", sid, str(path), f"{LONG} {all_forms(forms)}"))
-        await waited(h, lambda: any(t.endswith(summarize.FOOTER) for t in h.texts()), "the summary")
-        summary = next(t for t in h.texts() if t.endswith(summarize.FOOTER))
+        await waited(h, lambda: any(t.endswith(summarize.FOOTER) for t in h.delivered_texts()),
+                     "the summary")                     # recorded, so `!details` finds it
+        summary = next(t for t in h.delivered_texts() if t.endswith(summarize.FOOTER))
         assert summary.startswith(f"summary of {LOGIN_DIR}")                # its own output, redacted
         ordinary = await details_of(h)
         assert LONG in ordinary and LOGIN_DIR in ordinary
