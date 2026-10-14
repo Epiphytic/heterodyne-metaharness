@@ -15,6 +15,7 @@ import pytest
 from sandbox_env import fake_jwt, install_fake_cli, short_dir
 
 from heterodyne.agents import codex as codex_mod
+from heterodyne.agents import config_files
 from heterodyne.agents.base import (
     DEFAULTS_MALFORMED,
     HOOK_COMMAND,
@@ -157,7 +158,7 @@ def test_codex_home_is_rewritten_and_stale_sockets_go(layout: SessionLayout, tmp
     (layout.home / ".codex" / "config.toml").write_text("model = 'x'\n")
     Codex().prepare_home(layout, tmp_path / "wt")
     config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
-    assert config == {"approval_policy": "never", "sandbox_mode": "danger-full-access",
+    assert config == {"approval_policy": "never", "sandbox_mode": "workspace-write",
                       "check_for_update_on_startup": False,
                       "projects": {str(tmp_path / "wt"): {"trust_level": "untrusted"}},
                       "features": {"apps": False, "daemon_auto_start": False, "plugins": False,
@@ -638,6 +639,50 @@ def test_defaults_that_set_every_owned_key_lose_to_the_launcher_claude(tmp_path:
         assert at(merged, key) == at(plain, key), key
     assert merged["env"] == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1", "KEPT": "1"}
     assert merged["permissions"] == {"allow": ["Read"]}
+
+
+# One install per owned key, setting only that key the way an install would turn it back on.
+CODEX_SET = {
+    "approval_policy": "on-request", "sandbox_mode": "workspace-write",
+    "check_for_update_on_startup": True, "projects": {"/elsewhere": {"trust_level": "trusted"}},
+    "notify": ["sh", "-c", "x"], "hooks": {"state": {"k": {"trusted_hash": "h"}}},
+    "features.apps": True, "features.daemon_auto_start": True, "features.plugins": True,
+    "features.in_app_updates": True, "profile": "x", "profiles": {"x": {"features": {"plugins": True}}},
+    "mcp_servers.heterodyne": {"command": "sh", "args": ["-c", "x"]},
+}
+CLAUDE_SET = {
+    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]},
+    "statusLine": {"type": "command", "command": "x"}, "skipDangerousModePermissionPrompt": False,
+    "disableAllHooks": True, "permissions.defaultMode": "default", "enabledPlugins": {"p@m": True},
+    "extraKnownMarketplaces": {"m": {"source": {"source": "github", "repo": "x/y"}}},
+    "sandbox": {"enabled": False}, "env.DISABLE_AUTOUPDATER": "0", "env.DISABLE_UPDATES": "0",
+    "env.ENABLE_CLAUDEAI_MCP_SERVERS": "1",
+}
+
+
+def test_each_owned_key_has_an_install_case() -> None:
+    assert set(CODEX_SET) == Codex().owned_keys
+    assert set(CLAUDE_SET) == ClaudeCode().owned_keys
+
+
+@pytest.mark.parametrize("key", sorted(CODEX_SET))
+def test_an_install_that_sets_one_owned_key_is_overridden_codex(layout: SessionLayout, tmp_path: Path,
+                                                                 key: str) -> None:
+    plain = codex_generated(layout, tmp_path, None)
+    merged = codex_generated(layout, tmp_path,
+                             config_files.toml_text(owned_tree(frozenset({key}), CODEX_SET[key])))
+    assert at(merged, key) == at(plain, key)
+    assert at(merged, key) != CODEX_SET[key]
+
+
+@pytest.mark.parametrize("key", sorted(CLAUDE_SET))
+def test_an_install_that_sets_one_owned_key_is_overridden_claude(tmp_path: Path, key: str) -> None:
+    plain = json.loads(ClaudeCode().run_files(usage=True)[SETTINGS_FILE])
+    install = install_with_defaults(tmp_path, "settings.json",
+                                    json.dumps(owned_tree(frozenset({key}), CLAUDE_SET[key])))
+    merged = json.loads(ClaudeCode().run_files(usage=True, install=install)[SETTINGS_FILE])
+    assert at(merged, key) == at(plain, key)
+    assert at(merged, key) != CLAUDE_SET[key]
 
 
 @pytest.mark.parametrize(("adapter", "name", "text"), [
