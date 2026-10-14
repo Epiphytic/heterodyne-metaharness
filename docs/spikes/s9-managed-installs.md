@@ -403,7 +403,7 @@ The CLI results of those attempts (DNS names, execs, `packages/`) matched the ru
   - Both are gated on complete evidence, and `hooks` must exist. Part 1's checks are unchanged.
 - **Not tested by Part 2.** The hook round trip to wsd (the token, `shim.json`, the session socket and wsd's decisions). That is T14 / Task 13.
 
-**Part 2 re-run (2026-10-14, the lead's, approved by Liam as ask 8mhc on btq-cjwn3, at `047f518`; results in `$XDG_RUNTIME_DIR/s9-10-part2r.mbaqNX`): the gate passes.**
+**Part 2 re-run (2026-10-14, the lead's, approved by Liam as ask 8mhc on btq-cjwn3, at `047f518`; results in `$XDG_RUNTIME_DIR/s9-10-part2r.mbaqNX`): the gate passed, but the pass is void (see the next run).**
 - **`e25` PASSES every Part 2 check.** That covers the launch shape, `new_session_answered`, `thread_found`, `resume_shows_the_first_prompt`, `no_hook_failure` and `hooks_ran`. The run:
   - The hook trust listed 4 hooks, seeded them, then listed 0.
   - The spooled hook events were `SessionStart`, `UserPromptSubmit` and `Stop`.
@@ -414,6 +414,25 @@ The CLI results of those attempts (DNS names, execs, `packages/`) matched the ru
 - **Clean-up.** `rc` was 0, no process was left, and both run homes were deleted.
 - **Gate result.** `part2.sh`'s last line reads `S9-10 Part 2: FAIL` because it requires both variants to pass. Under Decision 1 (option A), `plain` is the control and `e25` is the gate, so **S9-10 Part 2 passes**. With Part 1's `e25` pass, S9-10 is confirmed for the shape Task 6 ships.
 - **An oddity, as a follow-up and not fixed here.** `plain`'s DNS list has a third, binary entry. `qname` reads any `sendto` buffer as a DNS packet, so a non-DNS payload whose bytes happen to parse as labels slips through. It is most likely the TLS handshake on a TCP socket. It doesn't affect `e25` or any verdict, because `no_api_github_lookup` matches the name's bytes in every buffer anyway. The analyzer should filter it. It could accept a buffer as a query only with a DNS header (QDCOUNT 1, no answers), hostname-character labels and a terminating zero label, or only on a socket connected to port 53.
+
+**Part 2 at the merged head (2026-10-14, the lead's, approved by Liam as ask wskr on btq-j2015, at `9ab753e`; results in `$XDG_RUNTIME_DIR/s9-10-part2s.cwgabc`): the gate passes.**
+- **Why the `047f518` pass is void.** Merging main (btq-rcose) changed two things. The hook command is now `hook_command(event)`, which is `python3 -I /run/hz/shim.py hook <event>`. The shipped shim now takes the event from that argument. Both are in the Codex adapter's hooks and in the shim Part 2 runs, so ask 8mhc's terms needed a new run at the merged head. The harness itself didn't change. It copies the shipped shim byte for byte and takes the hooks from the adapter, and it hard-codes neither the command nor a trust count.
+- **`e25` PASSES all 19 Part 2 checks.** The run:
+  - The hook trust listed 4 hooks, then 0 after seeding.
+  - The spooled hook events were `SessionStart`, `UserPromptSubmit` and `Stop`.
+  - The real DNS queries were `chatgpt.com` and `raw.githubusercontent.com` only, with no `api.github.com`.
+  - Nothing was exec'd under the home, and `.codex/packages` stayed empty.
+- **`plain` (the control) failed only `no_exec_under_home`.** It made the same 12 attempts at the arg0 `lsb_release` and `getconf`. Every other check passed, the hook checks included.
+- **Root ends, both variants.** The server shows `exited with 0`. The TUI and the resume TUI each show `killed by SIGHUP`.
+- **Clean-up.** `rc` was 0, no process was left, and both run homes were deleted.
+- **Gate result.** The script's last line again reads `S9-10 Part 2: FAIL`, because it requires both variants to pass. Under Decision 1 (option A), **S9-10 Part 2 passes at `9ab753e`**.
+- **The DNS oddity, again.** This time `e25`'s list has three binary entries and `plain`'s has none. I checked the bytes only, without printing them.
+  - All three come from `sendto` calls in the server's trace, on three different sockets, with no destination address.
+  - Each buffer starts with a TLS record header (content type 0x14 to 0x17, then 0x03). Two are 300-byte handshake-sized writes and one is 24 bytes.
+  - Read as DNS, their QDCOUNT is not 1.
+  - The two real names, by contrast, have QDCOUNT 1 and a port-53 destination on the line.
+
+  So it is the same artifact, and no verdict changes. The follow-up filter above (QDCOUNT 1, or a port-53 destination) would drop all three.
 
 ## Cleanup
 
