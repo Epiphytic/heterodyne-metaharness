@@ -353,6 +353,26 @@ The CLI results of those attempts (DNS names, execs, `packages/`) matched the ru
 - `~/.codex` and `~/.claude` weren't read or written.
 - The download directory and the results directory (traces, screens, `result.json`) are kept under `$XDG_RUNTIME_DIR` for Part 2 and the review.
 
+**Part 2: the script, for the lead's run.** `S9_10_LOGIN=<live-test codex auth.json> sh docs/spikes/s9-10/part2.sh <dl>/cli <results>`. Supporting files: `inner2.sh`, `part2_steps.py`, and `generate.py`'s `--install` and `--resume` flags. Part 1's path through `generate.py` is unchanged.
+- **Namespaces:** `unshare -rmpf`, with no `-n`. The binds are Part 1's.
+- **Login:** bound read-only at `<home>/.codex/auth.json`, inside the namespace only. The script never reads it.
+- **Model:** `HZ_LIVE_SANDBOX_CODEX_MODEL` (default `gpt-6-luna`) through `tui_argv`'s `--model`.
+- **Effort:** `model_reasoning_effort = "low"` comes from an install's `defaults/config.toml` through `prepare_install_home`. Q4 refuses profile args, and no argv may carry `-c`, so that's the only route.
+- **Steps for each variant (plain, then E25):**
+  1. The hook trust from `runtime._trust`: the adapter's `run_files`, `trust_argv` and `apply_trust`.
+  2. The server.
+  3. A new session, which gets the prompt "Reply with only the word pong.". The answer is read from the rollout.
+  4. The thread ID, taken from the rollout and checked with `has_state`.
+  5. `tui_argv(resume=True)`. It passes when the resumed screen shows the first prompt.
+- **Cap:** 240 s per variant.
+
+`S9_10_DRY=1` adds `-n` for a harness check. It was run once that way, with a stand-in `{}` login in a temp directory.
+- Trust listed 4 hooks, seeded them, then listed 0.
+- `server_ready` held, and the TUI connected to `APP_SOCKET`.
+- The TUI then exited, as it should on that stand-in: `account/read failed: plan type is required for chatgpt authentication`.
+- With a login file present, the DNS names attempted were `ab.chatgpt.com`, `chatgpt.com` and `raw.githubusercontent.com`. There was no `api.github.com`.
+- Resume wasn't reached, because that needs a real thread.
+
 ## Cleanup
 
 Everything is under `$T` and the `mktemp -d -p "$XDG_RUNTIME_DIR"` homes. No process from the spike is left running. The S9-8 run ended with zero `s9-*` sandboxes or containers, both `tmpfs` mounts unmounted in Podman's namespace, and no `conmon` left.
