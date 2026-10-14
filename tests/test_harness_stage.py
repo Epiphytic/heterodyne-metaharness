@@ -15,6 +15,7 @@ import pytest
 from harness_env import (
     CLAUDE_LAYOUT,
     CLAUDE_PACKAGE,
+    CLAUDE_TARGET,
     CLAUDE_TREE,
     CODEX_LAYOUT,
     CODEX_PACKAGE,
@@ -52,10 +53,11 @@ def writable_store(tmp_path: Path) -> Iterator[None]:
     unseal(tmp_path / "store")
 
 
-def refusal(tmp_path: Path, layout: sc.Layout, parts: list[tuple[sc.Part, bytes]]) -> str:
+def refusal(tmp_path: Path, layout: sc.Layout, parts: list[tuple[sc.Part, bytes]], *,
+            target: str | None = None) -> str:
     fds = fd_count()
     with pytest.raises(sc.Refused) as e:
-        stage(tmp_path, layout, parts)
+        stage(tmp_path, layout, parts, target=target)
     assert str(e.value) == e.value.constant
     assert fd_count() == fds
     assert_nothing_staged(tmp_path)
@@ -96,8 +98,8 @@ def test_a_claude_like_package_stages_with_its_version_from_package_json_and_a_f
         tmp_path: Path) -> None:
     staged = stage(tmp_path, CLAUDE_LAYOUT, [claude_part()], adapter="claude-code")
     m = staged_manifest(tmp_path, staged)
-    assert (m.adapter, m.version, m.target, m.entry_point) == ("claude-code", CLAUDE_PACKAGE["version"], "",
-                                                              "cli/claude")
+    assert (m.adapter, m.version, m.target, m.entry_point) == ("claude-code", CLAUDE_PACKAGE["version"],
+                                                              CLAUDE_TARGET, "cli/claude")
     assert {e.path for e in m.entries} == {"cli", "cli/claude", "cli/package.json"}
 
 
@@ -443,3 +445,55 @@ def test_every_file_and_directory_is_fsynced_before_the_staged_manifest(
     assert order["./"] < order[f".staged/{sid}.json"]
     first_parent = synced.index("./")
     assert first_parent < order[f"{root}/"]
+
+
+def test_the_recipe_target_is_recorded_and_a_target_the_metadata_names_must_be_it(tmp_path: Path) -> None:
+    assert refusal(tmp_path / "a", CODEX_LAYOUT, [codex_part()],
+                   target="aarch64-unknown-linux-musl") == sc.TARGET_MISMATCH
+    for bad in ("", "../x", "a/b"):
+        assert refusal(tmp_path / "b", CODEX_LAYOUT, [codex_part()], target=bad) == sc.BAD_PART
+    staged = stage(tmp_path / "c", CLAUDE_LAYOUT, [claude_part()], adapter="claude-code",
+                   target="linux-arm64")
+    assert staged_manifest(tmp_path / "c", staged).target == "linux-arm64"
+
+
+def test_parse_accepts_an_empty_target_and_refuses_one_that_is_not_a_plain_name(tmp_path: Path) -> None:
+    m = staged_manifest(tmp_path, stage(tmp_path, CODEX_LAYOUT, [codex_part()]))
+    assert sc.parse(sc.canonical(dataclasses.replace(m, target=""))).target == ""
+    for bad in ("../x", "a/b", ".hidden", "a b"):
+        with pytest.raises(sc.Mismatch) as e:
+            sc.parse(sc.canonical(dataclasses.replace(m, target=bad)))
+        assert e.value.constant == sc.MANIFEST_MALFORMED
+
+
+ZEROS = 1 << 20                         # a gzip of this many zeros is about a kilobyte: a small bomb
+
+
+@pytest.mark.parametrize("bound", ["MAX_FILE_BYTES", "MAX_INSTALL_BYTES", "MAX_ARTIFACT_BYTES"])
+def test_the_byte_bounds_refuse_a_checksum_valid_bomb_and_accept_the_limit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str) -> None:
+    files: dict[str, Spec] = {"a": bytes(ZEROS // 2), "b": bytes(ZEROS // 2)}
+    data = tar_of(with_cli(files))
+    base = sum(len(v) for k, v in with_cli({}).items() if isinstance(v, bytes))
+    at_limit = {"MAX_FILE_BYTES": ZEROS // 2, "MAX_INSTALL_BYTES": base + ZEROS,
+                "MAX_ARTIFACT_BYTES": len(data)}[bound]
+    monkeypatch.setattr(sc, bound, at_limit)
+    stage(tmp_path / "a", CODEX_LAYOUT, [(part_of("cli", data), data)])
+    monkeypatch.setattr(sc, bound, at_limit - 1)
+    assert refusal(tmp_path / "b", CODEX_LAYOUT, [(part_of("cli", data), data)]) == sc.TOO_MANY_BYTES
+
+
+def test_an_artifact_that_grows_while_it_is_copied_is_refused(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    part, data = codex_part()
+    monkeypatch.setattr(sc, "MAX_ARTIFACT_BYTES", len(data) + 10)
+    real = os.sendfile
+    artifact = tmp_path / "artifact-0"
+
+    def growing(out: int, fd: int, offset: int | None, count: int) -> int:
+        with artifact.open("ab") as f:              # the writer appends faster than the copy reads
+            f.write(bytes(4096))
+        return real(out, fd, offset, count)
+
+    monkeypatch.setattr(os, "sendfile", growing)
+    assert refusal(tmp_path, CODEX_LAYOUT, [(part, data)]) == sc.TOO_MANY_BYTES

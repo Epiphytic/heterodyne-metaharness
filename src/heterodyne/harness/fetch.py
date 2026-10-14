@@ -3,7 +3,9 @@ with its line from the release's `SHA256SUMS`, an npm tarball with its version d
 and a git commit as `git archive` and `git cat-file commit` from a bare cache. Each artifact is a 0600 temp
 file in the cache, checked before it is returned, and removed if anything refuses.
 
-Every fetch has one deadline from the injected clock, and every size is bounded. Refusals carry their
+Every fetch has one deadline from the injected clock, and every size is bounded. The production opener,
+`HttpsOpener`, speaks HTTPS only, refuses a redirect off HTTPS, and holds each request to a total deadline
+however slowly the server sends. Refusals carry their
 constant as `.constant`, and their message is the constant alone: nothing here names a URL, a path or a
 checksum in an error.
 """
@@ -11,15 +13,19 @@ checksum in an error.
 import contextlib
 import dataclasses
 import hashlib
+import http.client
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit
 
 from heterodyne.harness.resources import store_core as sc
 
@@ -32,9 +38,12 @@ BAD_URL = "a source's URL, name or version is not one the store fetches"
 BAD_DOCUMENT = "a release's SHA256SUMS or an npm version document is malformed or names another package"
 FETCH_FAILED = "a fetch failed"
 GIT_FAILED = "git could not fetch or export the commit"
+INSECURE_REDIRECT = "a fetch was redirected off HTTPS"
 
 MAX_ARTIFACT = 1 << 30
 MAX_DOCUMENT = 4 << 20
+MAX_REDIRECTS = 5
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
 NPM_REGISTRY = "https://registry.npmjs.org"
 PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")            # an asset name or a version
 NPM_NAME = re.compile(r"(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
@@ -52,7 +61,110 @@ class Response(Protocol):
     def close(self) -> None: ...
 
 
-Opener = Callable[..., Response]        # `opener(url, timeout=seconds)`, as `urllib.request.urlopen`
+Opener = Callable[..., Response]
+"""`opener(url, timeout=seconds)`: the response must be done (read to its end, or failed) within `timeout`
+seconds of the call, every redirect it followed must have stayed on HTTPS, and its `url`, if it has one,
+is the last hop's. `HttpsOpener` is the production one."""
+
+
+class HttpsOpener:
+    """GET over HTTPS only (`INSECURE_REDIRECT` for a redirect to anything else), following at most
+    `MAX_REDIRECTS` redirects, with a total deadline: a watchdog shuts the socket down `timeout` seconds after
+    the call, so a server that trickles bytes can't hold a read past it (`DEADLINE`). `connection` is
+    `http.client.HTTPSConnection`; tests pass a plain one to a loopback server."""
+
+    def __init__(self, *, connection: Callable[..., http.client.HTTPConnection] = http.client.HTTPSConnection,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.connection = connection
+        self.monotonic = monotonic
+
+    def __call__(self, url: str, timeout: float) -> "HttpsResponse":
+        end = self.monotonic() + timeout
+        for _ in range(MAX_REDIRECTS + 1):
+            parts = urlsplit(url)
+            if parts.scheme != "https" or not parts.hostname:
+                raise FetchRefused(INSECURE_REDIRECT)
+            left = end - self.monotonic()
+            if left <= 0:
+                raise FetchRefused(DEADLINE)
+            target = parts.path or "/"
+            if parts.query:
+                target += "?" + parts.query
+            conn = self.connection(parts.hostname, parts.port, timeout=left)
+            resp = HttpsResponse(conn, url, left)
+            try:
+                conn.connect()
+                resp.bind(conn.sock)
+                conn.request("GET", target,
+                             headers={"Accept-Encoding": "identity", "User-Agent": "heterodyne"})
+                resp.attach(conn.getresponse())
+            except (OSError, http.client.HTTPException):
+                resp.close()
+                raise FetchRefused(DEADLINE if resp.expired else FETCH_FAILED) from None
+            if resp.status not in REDIRECTS:
+                return resp
+            location = resp.header("Location")
+            resp.close()
+            if not location:
+                raise FetchRefused(FETCH_FAILED)
+            url = urljoin(url, location)
+        raise FetchRefused(FETCH_FAILED)
+
+
+class HttpsResponse:
+    """One request's response, with the watchdog that ends it at its deadline."""
+
+    def __init__(self, conn: http.client.HTTPConnection, url: str, timeout: float) -> None:
+        self.conn = conn
+        self.url = url
+        self.status = 0
+        self.expired = False
+        self._resp: http.client.HTTPResponse | None = None
+        self._sock: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._watchdog = threading.Timer(timeout, self._expire)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            self._shutdown()
+
+    def bind(self, sock: socket.socket) -> None:
+        """Keep the connected socket: `getresponse` hands a closing connection's socket to the response
+        and drops `conn.sock`, so the watchdog can't look it up there."""
+        with self._lock:
+            self._sock = sock
+            if self.expired:
+                self._shutdown()
+
+    def _shutdown(self) -> None:
+        if self._sock is not None:
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_RDWR)
+
+    def attach(self, resp: http.client.HTTPResponse) -> None:
+        self._resp = resp
+        self.status = resp.status
+
+    def header(self, name: str) -> str | None:
+        return self._resp.getheader(name) if self._resp is not None else None
+
+    def read(self, n: int = -1, /) -> bytes:
+        if self._resp is None:
+            return b""
+        try:
+            chunk = self._resp.read(n)
+        except (OSError, http.client.HTTPException):
+            raise FetchRefused(DEADLINE if self.expired else FETCH_FAILED) from None
+        if self.expired:                        # a shut-down socket can look like the body's end
+            raise FetchRefused(DEADLINE)
+        return chunk
+
+    def close(self) -> None:
+        self._watchdog.cancel()
+        self.conn.close()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,6 +172,7 @@ class Artifact:
     path: Path
     checksum: str               # `sha256:<hex>` or an SRI `sha512-<base64>`
     origin: str                 # where the checksum came from
+    signature_available: bool = False       # an npm document's `dist.signatures` (never verified in v1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,7 +224,10 @@ class Fetcher:
                 or not _https(tarball) or not isinstance(integrity, str)
                 or not integrity.startswith(sc.SRI_PREFIX)):
             raise FetchRefused(BAD_DOCUMENT)
-        return self._artifact(tarball, integrity, origin, end)
+        signatures = dist.get("signatures")
+        signed = isinstance(signatures, list) and len(cast(list[object], signatures)) > 0
+        artifact = self._artifact(tarball, integrity, origin, end)
+        return dataclasses.replace(artifact, signature_available=signed)
 
     def git(self, repo: str, commit: str) -> GitArtifact:
         """`commit` of `repo` (an https URL, or an absolute local path outside every login directory) through
@@ -169,6 +285,9 @@ class Fetcher:
         except OSError:
             raise FetchRefused(DEADLINE if self.clock() >= end else FETCH_FAILED) from None
         try:
+            final = getattr(resp, "url", None)
+            if isinstance(final, str) and not final.startswith("https://"):
+                raise FetchRefused(INSECURE_REDIRECT)
             if getattr(resp, "status", 200) != 200:
                 raise FetchRefused(FETCH_FAILED)
             total = 0

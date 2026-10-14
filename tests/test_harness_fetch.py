@@ -1,13 +1,18 @@
 """Plan 4c Task 3: fetching artifacts and their checksums (plan 4c E5, E6). The opener is a fixture that
-serves artifacts built in a temp dir; nothing here touches the network. Checksums are computed at run time
-and compared as values."""
+serves artifacts built in a temp dir, or `HttpsOpener` against a loopback server on 127.0.0.1 with a plain
+connection; nothing here touches the network. Checksums are computed at run time and compared as values."""
 
+import contextlib
 import hashlib
+import http.client
+import http.server
 import io
 import json
 import os
 import stat
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -74,13 +79,15 @@ def release_files(artifact: bytes, *, listed: bool = True) -> dict[str, bytes]:
     return {f"{BASE}/{ASSET}": artifact, f"{BASE}/{SUMS}": ("\n".join(lines) + "\n").encode()}
 
 
-def npm_files(tarball: bytes, *, integrity: str | None = None) -> dict[str, bytes]:
-    tarball_url = f"{REGISTRY}/{NPM_NAME}/-/claude-code-linux-x64-2.1.286.tgz"
-    doc = {"name": NPM_NAME, "version": "2.1.286",
-           "dist": {"tarball": tarball_url, "integrity": integrity or sri_of(tarball),
-                    "shasum": hashlib.sha1(tarball).hexdigest(),  # noqa: S324 (npm's own field)
-                    "signatures": [{"keyid": "k", "sig": "s"}]}}
-    return {f"{REGISTRY}/@anthropic-ai%2Fclaude-code-linux-x64/2.1.286": json.dumps(doc).encode(),
+def npm_files(tarball: bytes, *, integrity: str | None = None, signed: bool = True,
+              registry: str = REGISTRY) -> dict[str, bytes]:
+    tarball_url = f"{registry}/{NPM_NAME}/-/claude-code-linux-x64-2.1.286.tgz"
+    dist: dict[str, object] = {"tarball": tarball_url, "integrity": integrity or sri_of(tarball),
+                               "shasum": hashlib.sha1(tarball).hexdigest()}  # noqa: S324 (npm's own field)
+    if signed:
+        dist["signatures"] = [{"keyid": "k", "sig": "s"}]
+    doc = {"name": NPM_NAME, "version": "2.1.286", "dist": dist}
+    return {f"{registry}/@anthropic-ai%2Fclaude-code-linux-x64/2.1.286": json.dumps(doc).encode(),
             tarball_url: tarball}
 
 
@@ -222,3 +229,149 @@ def test_the_git_cache_runs_no_hook_from_the_source(tmp_path: Path) -> None:
         path.chmod(0o755)
     fetcher(tmp_path, Server({})).git(str(repo), commit)
     assert not os.path.lexists(marker)
+
+
+def test_npm_signature_availability_is_kept_and_a_release_has_none(tmp_path: Path) -> None:
+    tarball = tar_of({"package/package.json": b"{}"})
+    assert fetcher(tmp_path / "s", Server(npm_files(tarball))).npm(NPM_NAME, "2.1.286").signature_available
+    unsigned = fetcher(tmp_path / "u", Server(npm_files(tarball, signed=False))).npm(NPM_NAME, "2.1.286")
+    assert unsigned.signature_available is False
+    artifact = tar_of({"bin/codex": b"x"})
+    assert fetcher(tmp_path / "r", Server(release_files(artifact))).release(BASE, ASSET, SUMS) \
+        .signature_available is False
+
+
+class Moved(Response):
+    url = "http://github.example.invalid/elsewhere"
+
+
+def test_a_response_whose_last_hop_is_not_https_is_refused(tmp_path: Path) -> None:
+    artifact = tar_of({"bin/codex": b"x"})
+    server = Server(release_files(artifact))
+    server.special[f"{BASE}/{SUMS}"] = lambda: Moved(release_files(artifact)[f"{BASE}/{SUMS}"])
+    f = fetcher(tmp_path, server)
+    assert refused(lambda: f.release(BASE, ASSET, SUMS)) == fetch.INSECURE_REDIRECT
+    assert cache_files(tmp_path) == []
+
+
+# --- HttpsOpener against a loopback server ---
+
+Route = Callable[[http.server.BaseHTTPRequestHandler], None]
+
+
+@contextlib.contextmanager
+def loopback(routes: dict[str, Route]) -> Iterator[tuple[str, threading.Event]]:
+    """A plain-HTTP server on 127.0.0.1 serving `routes` by path; the base URL is `https://` because the
+    tests' `HttpsOpener` reaches it with a plain connection. The event ends any trickle."""
+    stop = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 (http.server's name)
+            route = routes.get(self.path)
+            if route is None:
+                self.send_error(404)
+                return
+            with contextlib.suppress(OSError):
+                route(self)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (http.server's name)
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_address[1]}", stop
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+def body(data: bytes) -> Route:
+    def route(h: http.server.BaseHTTPRequestHandler) -> None:
+        h.send_response(200)
+        h.send_header("Content-Length", str(len(data)))
+        h.end_headers()
+        h.wfile.write(data)
+    return route
+
+
+def redirect(location: str) -> Route:
+    def route(h: http.server.BaseHTTPRequestHandler) -> None:
+        h.send_response(302)
+        h.send_header("Location", location)
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+    return route
+
+
+def opener() -> fetch.HttpsOpener:
+    return fetch.HttpsOpener(connection=http.client.HTTPConnection)
+
+
+def real_fetcher(tmp_path: Path, registry: str, deadline: float = 30.0) -> fetch.Fetcher:
+    return fetch.Fetcher(opener(), tmp_path / "cache", time.monotonic, deadline, npm_registry=registry)
+
+
+def test_https_opener_follows_a_redirect_that_stays_on_https(tmp_path: Path) -> None:
+    artifact = tar_of({"bin/codex": b"x"})
+    files = release_files(artifact)
+    routes: dict[str, Route] = {}
+    with loopback(routes) as (base, _):
+        routes["/rel/" + SUMS] = redirect(f"{base}/moved/{SUMS}")
+        routes["/moved/" + SUMS] = body(files[f"{BASE}/{SUMS}"])
+        routes["/rel/" + ASSET] = body(artifact)
+        a = real_fetcher(tmp_path, base).release(f"{base}/rel", ASSET, SUMS)
+    assert a.path.read_bytes() == artifact
+
+
+@pytest.mark.parametrize("which", ["sums", "npm-document"])
+def test_a_metadata_redirect_off_https_is_refused(tmp_path: Path, which: str) -> None:
+    artifact = tar_of({"bin/codex": b"x"})
+    routes: dict[str, Route] = {}
+    with loopback(routes) as (base, _):
+        plain = base.replace("https://", "http://", 1)
+        if which == "sums":
+            routes["/rel/" + SUMS] = redirect(f"{plain}/evil/{SUMS}")
+            routes["/evil/" + SUMS] = body(release_files(artifact)[f"{BASE}/{SUMS}"])
+            routes["/rel/" + ASSET] = body(artifact)
+            def call() -> object:
+                return real_fetcher(tmp_path, base).release(f"{base}/rel", ASSET, SUMS)
+        else:
+            files = npm_files(artifact, registry=base)
+            doc = next(k for k in files if k.endswith("/2.1.286"))
+            path = doc.removeprefix(base)
+            routes[path] = redirect(f"{plain}/evil")
+            routes["/evil"] = body(files[doc])
+            def call() -> object:
+                return real_fetcher(tmp_path, base).npm(NPM_NAME, "2.1.286")
+        assert refused(call) == fetch.INSECURE_REDIRECT
+    assert cache_files(tmp_path) == []
+
+
+def test_a_trickle_is_ended_by_the_real_deadline(tmp_path: Path) -> None:
+    artifact = tar_of({"bin/codex": b"x"})
+
+    def trickle_route(stop: threading.Event) -> Route:
+        def route(h: http.server.BaseHTTPRequestHandler) -> None:
+            h.send_response(200)
+            h.send_header("Content-Length", str(1 << 20))
+            h.end_headers()
+            while not stop.is_set():                    # a byte far inside every socket timeout
+                h.wfile.write(b"x")
+                h.wfile.flush()
+                stop.wait(0.05)
+        return route
+
+    routes: dict[str, Route] = {}
+    with loopback(routes) as (base, stop):
+        routes["/rel/" + SUMS] = body(release_files(artifact)[f"{BASE}/{SUMS}"])
+        routes["/rel/" + ASSET] = trickle_route(stop)
+        f = real_fetcher(tmp_path, base, deadline=1.0)
+        start = time.monotonic()
+        assert refused(lambda: f.release(f"{base}/rel", ASSET, SUMS)) == fetch.DEADLINE
+        assert time.monotonic() - start < 5
+    assert cache_files(tmp_path) == []

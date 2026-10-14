@@ -139,6 +139,7 @@ CLAUDE_PACKAGE = {"name": "@anthropic-ai/claude-code-linux-x64", "version": "2.1
 CLAUDE_TREE: dict[str, Spec] = {"package.json": json.dumps(CLAUDE_PACKAGE).encode(),
                                 "claude": EXECUTABLE + b"echo claude\n"}
 CLAUDE_LAYOUT = sc.Layout("package.json", "version", None, None, "claude")
+CLAUDE_TARGET = "linux-x64"             # the recipe's (plan 4c Q6): package.json names no target
 
 LOGIN_NAMES = frozenset({"auth.json", ".credentials.json"})
 
@@ -238,14 +239,17 @@ def artifact_fds(tmp_path: Path, blobs: Sequence[bytes]) -> Iterator[list[int]]:
 
 def stage(tmp_path: Path, layout: sc.Layout, parts: Sequence[tuple[sc.Part, bytes | Sequence[bytes]]], *,
           adapter: str = "codex", login_names: frozenset[str] = LOGIN_NAMES,
-          verity: bool = False) -> sc.Staged:
-    """`store_core.stage` into `tmp_path / "store"` with each part's artifact (or a git part's two)."""
+          verity: bool = False, target: str | None = None) -> sc.Staged:
+    """`store_core.stage` into `tmp_path / "store"` with each part's artifact (or a git part's two), and the
+    recipe's target: Codex's from its metadata unless `target` is given, else Claude's."""
+    if target is None:
+        target = str(CODEX_PACKAGE["target"]) if layout.target_field else CLAUDE_TARGET
     blobs: list[bytes] = []
     for _, data in parts:
         blobs.extend([data] if isinstance(data, bytes) else data)
     with artifact_fds(tmp_path, blobs) as fds:
         return sc.stage(store_dir(tmp_path), adapter, layout, [p for p, _ in parts], fds, login_names,
-                        verity=verity)
+                        verity=verity, target=target)
 
 
 def staged_root(tmp_path: Path, staged: sc.Staged) -> Path:

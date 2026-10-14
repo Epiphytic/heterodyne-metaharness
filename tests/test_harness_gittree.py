@@ -2,8 +2,10 @@
 from `git archive`'s entries and hashes the commit object itself; these tests compare it with a real `git`
 on repositories built in a temp dir. Commit and tree IDs are compared as values and never printed."""
 
+import io
 import os
 import subprocess
+import tarfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,6 +28,26 @@ from heterodyne.harness.resources import store_core as sc
 
 def blobs(repo: Path, commit: str) -> tuple[bytes, bytes]:
     return git(repo, "archive", "--format=tar", commit), git(repo, "cat-file", "commit", commit)
+
+
+def remode(archive: bytes, name: str, mode: int) -> bytes:
+    """`archive` written again member by member, with `name`'s mode set to `mode`."""
+    out = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(archive)) as src, \
+            tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as dst:
+        for info in src:
+            if info.name == name:
+                info.mode = mode
+            dst.addfile(info, src.extractfile(info) if info.isreg() else None)
+    return out.getvalue()
+
+
+def repo_of(tmp_path: Path, object_format: str) -> tuple[Path, str]:
+    probe = subprocess.run(["git", "init", "-q", f"--object-format={object_format}", str(tmp_path / "probe")],
+                           env=GIT_ENV, capture_output=True, timeout=60)
+    if probe.returncode != 0:
+        pytest.skip(f"this host's git can't create a {object_format} repository")
+    return make_repo(tmp_path / "repo", object_format=object_format)
 
 
 @pytest.fixture
@@ -135,3 +157,28 @@ def test_a_git_part_stages_and_records_its_commit(tmp_path: Path) -> None:
     finally:
         for d in ("store", "b/store", "c/store"):
             unseal(tmp_path / d)
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_a_mode_git_could_not_have_written_is_refused_and_never_staged_executable(
+        tmp_path: Path, fds: list[int], object_format: str) -> None:
+    repo, commit = repo_of(tmp_path, object_format)
+    archive, commit_object = blobs(repo, commit)
+    same = remode(archive, "README.md", 0o664)                  # the control: rewriting alone changes nothing
+    sc.check_git(fd_of(tmp_path, "same", same, fds), fd_of(tmp_path, "c0", commit_object, fds), commit)
+    for i, mode in enumerate((0o654, 0o645, 0o744, 0o4644, 0o600)):    # group or other execute, setuid, ...
+        changed = remode(archive, "README.md", mode)
+        with pytest.raises(sc.Refused) as e:
+            sc.check_git(fd_of(tmp_path, f"a{i}", changed, fds), fd_of(tmp_path, f"c{i}", commit_object, fds),
+                         commit)
+        assert e.value.constant == sc.GIT_MISMATCH
+    cli = tar_of(CODEX_TREE)
+    changed = remode(archive, "README.md", 0o654)
+    content = part_of("content/skills/a", changed, fmt="tar", kind="git", checksum=f"git:{commit}",
+                      git_commit=commit)
+    try:
+        with pytest.raises(sc.Refused) as e:
+            stage(tmp_path, CODEX_LAYOUT, [(part_of("cli", cli), cli), (content, [changed, commit_object])])
+        assert e.value.constant == sc.GIT_MISMATCH
+    finally:
+        unseal(tmp_path / "store")
