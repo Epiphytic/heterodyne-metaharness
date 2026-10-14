@@ -91,7 +91,7 @@ def test_coder_spec(tmp_path: Path) -> None:
     by_target = {b.target: b for b in spec.binds}
     assert not by_target[i.worktree].read_only and not by_target[i.layout.home].read_only
     assert by_target[RUN_INSIDE].source == i.layout.run(1) and by_target[RUN_INSIDE].read_only
-    assert by_target[i.agent.cli_root].read_only
+    assert by_target[i.agent.cli_root].read_only and spec.install == i.agent.cli_root
     [login] = spec.logins
     assert login.target == i.layout.home / ".codex" / "auth.json" and login.read_only
     assert login.source == (tmp_path / "home" / ".codex" / "auth.json").resolve()

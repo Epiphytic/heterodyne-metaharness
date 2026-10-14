@@ -6,20 +6,28 @@ What OpenShell enforces, as S5 measured it: Landlock filesystem rules (hard requ
 broker that answers every INET socket operation itself, a podman `--network none` netns, and a
 TLS-terminating egress proxy keyed by exact host and executable (or executable ancestor). The policy is
 fixed at create time.
+
+The install bind can be non-recursive (btq-wazo1): a gateway whose exact version is in
+NONRECURSIVE_VERSIONS takes `"recursive": false` on it, so a mount below the install isn't carried in.
+The set ships empty; a version joins it only with the review in that design's §3.4. The probe's
+submount check runs in both modes.
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from heterodyne.sandbox.backend import BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.openshell_selftest import ptrace_scope_refusal, read_ptrace_scope
-from heterodyne.sandbox.spec import NAME, SandboxSpec
+from heterodyne.sandbox.spec import NAME, Bind, SandboxSpec
+
+log = logging.getLogger(__name__)
 
 
 def policy(spec: SandboxSpec) -> dict[str, Any]:
@@ -36,15 +44,20 @@ def policy(spec: SandboxSpec) -> dict[str, Any]:
     }
 
 
-def driver_config(spec: SandboxSpec) -> dict[str, Any]:
-    return {"podman": {"mounts": [
-        {"type": "bind", "source": str(b.source), "target": str(b.target), "read_only": b.read_only}
-        for b in (*spec.binds, *spec.logins)]}}
+def driver_config(spec: SandboxSpec, nonrecursive: bool = False) -> dict[str, Any]:
+    """With `nonrecursive`, only the install bind gets `"recursive": false`; without it, option A's
+    four keys on every bind, which any OpenShell takes."""
+    def mount(b: Bind) -> dict[str, Any]:
+        m = {"type": "bind", "source": str(b.source), "target": str(b.target), "read_only": b.read_only}
+        return {**m, "recursive": False} if nonrecursive and b.target == spec.install else m
+    return {"podman": {"mounts": [*map(mount, spec.binds), *map(mount, spec.logins)]}}
 
 
-def create_argv(binary: str, spec: SandboxSpec, image: str, policy_file: Path) -> list[str]:
+def create_argv(binary: str, spec: SandboxSpec, image: str, policy_file: Path,
+                nonrecursive: bool = False) -> list[str]:
     argv = [binary, "sandbox", "create", "--name", spec.name, "--detach", "--from", image,
-            "--policy", str(policy_file), "--driver-config-json", json.dumps(driver_config(spec)),
+            "--policy", str(policy_file),
+            "--driver-config-json", json.dumps(driver_config(spec, nonrecursive)),
             "--no-credential-warnings"]
     for name, value in spec.env.items():
         argv += ["--env", f"{name}={value}"]
@@ -58,6 +71,10 @@ CREATE_SECONDS = 300
 READY_SECONDS = 60
 DELETE_SECONDS = 60
 QUERY_SECONDS = 30
+# The exact gateway versions whose Podman driver takes `"recursive": false` on a bind (btq-wazo1 §3.1).
+# Exact, not "at least": a version nobody has reviewed is unsupported. Empty until §3.4's review.
+NONRECURSIVE_VERSIONS: frozenset[str] = frozenset()
+REFUSED_RECURSIVE = b"unknown field `recursive`"
 
 
 def tool_env(base: Mapping[str, str], overrides: Mapping[str, str]) -> dict[str, str]:
@@ -75,7 +92,8 @@ class OpenShellBackend:
     def __init__(self, openshell: str, podman: str, image: str, env: Mapping[str, str], *,
                  runner: Runner | None = None, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 ptrace_scope: Callable[[], int] = read_ptrace_scope) -> None:
+                 ptrace_scope: Callable[[], int] = read_ptrace_scope,
+                 nonrecursive_versions: frozenset[str] = NONRECURSIVE_VERSIONS) -> None:
         self.openshell = openshell
         self.podman = podman
         self.image = image
@@ -84,6 +102,7 @@ class OpenShellBackend:
         self.clock = clock
         self.sleep = sleep
         self.ptrace_scope = ptrace_scope
+        self.nonrecursive_versions = nonrecursive_versions
 
     def _call(self, argv: Sequence[str], timeout: float = QUERY_SECONDS,
               data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -109,6 +128,23 @@ class OpenShellBackend:
             raise BackendUnavailable("openshell sandbox list failed")
         return {t for t in proc.stdout.decode("utf-8", "replace").split() if NAME.fullmatch(t)}
 
+    def nonrecursive_supported(self) -> bool:
+        """Whether the gateway reports a version listed in `nonrecursive_versions`. Any failure to say so
+        is no: the launch then binds as option A, and the probe refuses a submount either way."""
+        if not self.nonrecursive_versions:
+            return False                 # nothing listed, so nothing to ask
+        try:
+            proc = self._call([self.openshell, "status", "-o", "json"])
+            report: object = json.loads(proc.stdout) if proc.returncode == 0 else None
+        except (BackendError, BackendUnavailable, ValueError):
+            return False
+        if not isinstance(report, dict):
+            return False
+        fields = cast(dict[str, object], report)
+        version = fields.get("version")
+        return (fields.get("status") == "connected" and isinstance(version, str)
+                and version in self.nonrecursive_versions)
+
     def create(self, spec: SandboxSpec, scratch: Path) -> None:
         why = ptrace_scope_refusal(self.ptrace_scope())     # gap 15: OpenShell can't start at 2 or 3
         if why:
@@ -119,8 +155,15 @@ class OpenShellBackend:
         fd = os.open(policy_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(policy(spec), fh, indent=1)
-        proc = self._call(create_argv(self.openshell, spec, self.image, policy_file), CREATE_SECONDS)
+        nonrecursive = spec.install is not None and self.nonrecursive_supported()
+        log.info("openshell sandbox create %s bind=%s", spec.name,
+                 "nonrecursive" if nonrecursive else "recursive")
+        proc = self._call(create_argv(self.openshell, spec, self.image, policy_file, nonrecursive),
+                          CREATE_SECONDS)
         if proc.returncode != 0:
+            if nonrecursive and REFUSED_RECURSIVE in proc.stdout + proc.stderr:
+                # The gateway isn't what it reported: fail, never retry without the field (§3.2).
+                raise BackendError("openshell sandbox create refused the bind field `recursive`")
             raise BackendError("openshell sandbox create failed")
         end = self.clock() + READY_SECONDS
         while self.exec(spec.name, spec.workdir, ["true"], timeout=QUERY_SECONDS).returncode != 0:
