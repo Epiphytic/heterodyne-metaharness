@@ -422,7 +422,9 @@ def json_depth(line: bytes) -> int:
     return deepest
 
 
-def hook_main(args: Sequence[str]) -> int:
+def hook_main(args: Sequence[str] | None = None) -> int:
+    """`ws-hook` (pyproject) calls this with no arguments: its event, if any, is then on its command line."""
+    args = list(sys.argv[1:] if args is None else args)
     event = args[0] if len(args) == 1 and args[0] in KNOWN_EVENTS else None
     try:
         raw = read_bounded(0, MAX_HOOK_INPUT, HOOK_INPUT_WAIT, drain=True)
