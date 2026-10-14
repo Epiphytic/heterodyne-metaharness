@@ -22,6 +22,8 @@ from fakes.fake_runtime import FakeRuntime
 from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at
 
 from heterodyne.config import ConfigError
+from heterodyne.harness import selection
+from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.wsd import cli, ctl, daemon, ids, journal, park, scheduler
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
@@ -2545,3 +2547,39 @@ def test_run_recovers_crashed_reads_once_it_holds_the_lock(tmp_path: Path,
     finally:
         os.close(held)
     assert recovered == [s.state_dir / "hostread"]          # a second instance recovers nothing
+
+
+def test_the_daemon_wires_selections_to_harnesses_toml_and_rereads_it(tmp_path: Path) -> None:
+    """Plan 4c T7: each entry reads `harnesses.toml` afresh, so a `use` applies to the next entry without
+    a restart; with no config directory (tests, and settings made by hand) nothing is selected."""
+    hexes = "0123456789abcdef"
+    one = InstallPin(f"0.160.0-{hexes[:12]}", "sha256:" + hexes * 4)
+    two = InstallPin(f"0.161.0-{hexes[4:]}", "sha256:" + hexes[::-1] * 4)
+    config = tmp_path / "config"
+    config.mkdir()
+    s = replace(settings(tmp_path), config_dir=config)
+    j = Journal(s.journal)
+    parts = assemble(s, j, factory(World(tmp_path / "btq-state")), FakeRuntime())
+    chosen = parts.schedulers[WS].d.selections
+    assert chosen("codex") is None                            # no harnesses.toml yet
+    selection.write(config, {"codex": Selection("codex", one)})
+    assert chosen("codex") == one and chosen("claude-code") is None
+    selection.write(config, {"codex": Selection("codex", two, (one,))})
+    assert chosen("codex") == two
+    selection.write(config, {"codex": Selection("codex", None, (two,))})
+    assert chosen("codex") is None                            # only previous installs: nothing current
+    bare = assemble(settings(tmp_path), j, factory(World(tmp_path / "btq-state")), FakeRuntime())
+    assert bare.schedulers[WS].d.selections("codex") is None
+
+
+def test_resolve_takes_the_config_directory_for_selections(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    d = config_dir(tmp_path)
+    monkeypatch.setenv("HETERODYNE_CONFIG_DIR", str(d))
+    monkeypatch.setenv("HOME", str(d))
+    s = resolve(os.environ)
+    assert s.config_dir == d
+    pin = InstallPin(f"0.160.0-{'a1' * 6}", "sha256:" + "b2" * 32)
+    selection.write(d, {"codex": Selection("codex", pin)})
+    chosen = assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime())
+    assert chosen.schedulers["alpha"].d.selections("codex") == pin

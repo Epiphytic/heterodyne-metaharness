@@ -15,6 +15,8 @@ from wsd_env import WS, Rig, make_rig
 
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
+from heterodyne.config.errors import ConfigError
+from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import AccountChanged, Candidate, Chosen, ConfiguredAccounts, ProfileAccounts
 from heterodyne.wsd.beads import (
@@ -41,7 +43,7 @@ from heterodyne.wsd.launches import (
 )
 from heterodyne.wsd.park import DEFER_STEPS, UNRECEIPTED
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
+from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED, LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import BeadState, Reason
 
@@ -628,3 +630,110 @@ def test_a_rebuilt_dispatched_entry_with_no_outcome_holds(tmp_path: Path) -> Non
     assert rig.runtime.calls == calls and row_reason(rig) is Reason.UNEXPECTED_STATE
     row = rig.journal.state(WS, "btq-1")
     assert row is not None and "generation 2 was dispatched with no launch receipt" in row.detail
+
+
+# --- plan 4c T7: each entry pins its install (D2) ---
+
+HEX = "0123456789abcdef"            # digests built at runtime: no 64-hex literal (gitleaks)
+PIN_A = InstallPin(f"0.160.0-{HEX[:12]}", "sha256:" + HEX * 4)
+PIN_B = InstallPin(f"0.161.0-{HEX[4:16]}", "sha256:" + HEX[::-1] * 4)
+
+
+def select(rig: Rig, pins: dict[str, InstallPin]) -> None:
+    """The host's selection, read on each call as production's is: changing `pins` applies at once."""
+    rig.selections = pins.get
+    rig.restart(rig.cp)
+
+
+def pins_of(rig: Rig) -> list[tuple[str, str]]:
+    return [(e.install, e.install_digest) for e in rig.journal.launches_of(WS, "btq-1")]
+
+
+def test_a_pinned_entry_carries_its_install_in_the_bead_copy_and_an_unpinned_one_omits_it() -> None:
+    pinned = json.loads(encode_entry(entry(install=PIN_A.install, install_digest=PIN_A.digest)))
+    assert (pinned["install"], pinned["install_digest"]) == (PIN_A.install, PIN_A.digest)
+    assert "install" not in json.loads(encode_entry(entry()))      # a bead copy from before T7, unchanged
+    assert decode_launches(f"[{encode_entry(entry()).decode()}]").entries[0].install == ""
+
+
+def test_the_guard_journals_the_selected_pin_with_the_entry(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    select(rig, {"claude-code": PIN_A})
+    crash(rig, "pickup.entry")                  # just after the entry's transaction: it has both values
+    assert pins_of(rig) == [(PIN_A.install, PIN_A.digest)]
+    select(rig, {"claude-code": PIN_A})
+    rig.pickup()
+    [spec] = rig.runtime.launches
+    assert (spec.install, spec.install_digest) == (PIN_A.install, PIN_A.digest)
+    [copy] = rig.beads.show(WS, "btq-1").launches().entries
+    assert (copy.install, copy.install_digest) == (PIN_A.install, PIN_A.digest)
+
+
+def test_a_replay_after_a_crash_uses_the_journaled_pin_not_the_current_selection(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    select(rig, {"claude-code": PIN_A})
+    crash(rig, "pickup.entry!")
+    select(rig, {"claude-code": PIN_B})          # a `use` between the entry and the replay
+    rig.pickup()
+    [spec] = rig.runtime.launches
+    assert (spec.generation, spec.install, spec.install_digest) == (1, PIN_A.install, PIN_A.digest)
+    assert pins_of(rig) == [(PIN_A.install, PIN_A.digest)]
+
+
+def test_a_selection_change_applies_to_the_next_entry_only(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    pins = {"claude-code": PIN_A}
+    select(rig, pins)
+    assert rig.pickup() is Outcome.STARTED
+    [first] = raw_entries(rig)
+    pins["claude-code"] = PIN_B                  # no restart: the next entry reads it
+    rig.parker.park("btq-1", ("btq-2",))
+    rig.world.close("btq-2")
+    rig.pickup()
+    assert pins_of(rig) == [(PIN_A.install, PIN_A.digest), (PIN_B.install, PIN_B.digest)]
+    assert raw_entries(rig)[0] == first          # generation 1 is never re-pinned
+
+
+def test_a_resume_takes_the_selection_at_its_own_launch(tmp_path: Path) -> None:
+    rig = resumable(tmp_path)                    # generation 1 launched with no selection
+    select(rig, {"claude-code": PIN_B})
+    rig.pickup()
+    one, two = rig.runtime.launches
+    assert (one.install, two.install, two.install_digest) == ("", PIN_B.install, PIN_B.digest)
+    assert two.resume and pins_of(rig) == [("", ""), (PIN_B.install, PIN_B.digest)]
+
+
+def test_no_selection_journals_an_empty_pin_and_dispatches_unchanged(tmp_path: Path) -> None:
+    """E23: nothing refuses an empty pin until Task 8 (which escalates it as `NOT_SELECTED`)."""
+    rig = started(tmp_path)
+    select(rig, {"codex": PIN_A})                # another adapter's selection is not this one's
+    assert rig.pickup() is Outcome.STARTED
+    [spec] = rig.runtime.launches
+    assert (spec.install, spec.install_digest) == ("", "") and pins_of(rig) == [("", "")]
+    assert all(b'"install' not in raw for raw in raw_entries(rig))
+    assert INSTALL_UNPINNED and NOT_SELECTED and INSTALL_UNPINNED != NOT_SELECTED
+
+
+def test_an_unreadable_selection_is_config_invalid_and_launches_nothing(tmp_path: Path) -> None:
+    def unreadable(_adapter: str) -> InstallPin | None:
+        raise ConfigError("harnesses.toml exists but can't be read")
+    rig = started(tmp_path)
+    rig.selections = unreadable
+    rig.restart()
+    rig.pickup()
+    assert row_reason(rig) is Reason.CONFIG_INVALID and rig.runtime.calls == 0
+    assert rig.journal.launches_of(WS, "btq-1") == []
+
+
+def test_the_bead_copy_carries_the_pin_and_rebuilds_with_it(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    select(rig, {"claude-code": PIN_A})
+    assert rig.pickup() is Outcome.STARTED
+    before = rig.beads.show(WS, "btq-1").launches().entries
+    assert [(e.install, e.install_digest) for e in before] == [(PIN_A.install, PIN_A.digest)]
+    lose_journal(rig)
+    assert recover(rig.sched).ok
+    rig.parker.release("btq-1")
+    rig.pickup()
+    p = rig.key("btq-1")
+    assert rig.journal.launches(p)[0] == before[0] and rig.journal.rebuilt_at(p, 1) is not None

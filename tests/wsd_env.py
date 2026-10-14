@@ -16,6 +16,7 @@ from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 
 from heterodyne.config.accounts import Account
+from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.accounts import ConfiguredAccounts, Failover, ProfileAccounts
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint
@@ -27,7 +28,7 @@ from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSp
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
+from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, no_selection, place, record
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
@@ -79,6 +80,7 @@ class Rig:
     reconciler: ActionReconciler | None = None
     clock: Clock = field(default_factory=Clock)
     usage_reader: UsageReader = field(default_factory=NoUsageReader)
+    selections: Callable[[str], InstallPin | None] = no_selection     # plan 4c T7: adapter to its pin
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -98,7 +100,7 @@ class Rig:
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
                          self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
-                         usage_reader=self.usage_reader)
+                         usage_reader=self.usage_reader, selections=self.selections)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 

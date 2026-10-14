@@ -18,7 +18,16 @@ from heterodyne.wsd import cli, ids, upgrade
 from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.beads import NEEDS_HUMAN, PARKED, RECORD_KEY, BeadsAdapter
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
-from heterodyne.wsd.journal import V1_SCHEMA, V2_TABLES, Adoption, Journal, JournalCorrupt, check_v1
+from heterodyne.wsd.journal import (
+    V1_SCHEMA,
+    V2_META,
+    V2_TABLES,
+    Adoption,
+    Journal,
+    JournalCorrupt,
+    JournalNeedsUpgrade,
+    check_v1,
+)
 from heterodyne.wsd.launches import LAUNCHES_KEY, LaunchEntry, encode_entry
 from heterodyne.wsd.park import NotReleasable
 from heterodyne.wsd.recovery import recover
@@ -154,9 +163,9 @@ def test_the_upgrade_keeps_every_v1_row(tmp_path: Path, v1: Path) -> None:
     for table in V1_TABLES:
         kept = before[table] - {("schema_version", "1")}
         assert kept <= after[table], table
-    assert ("schema_version", "2") in after["meta"]
+    assert ("schema_version", "3") in after["meta"]          # plan 4c T7: straight to version 3
     assert [r[4] for r in after["events"] - before["events"]] == ["journal_upgraded"]
-    Journal(v1).close()                                      # the v2 check passes
+    Journal(v1).close()                                      # the current version's check passes
     assert (v1.parent / "wsd.db.v1.bak").exists()
 
 
@@ -506,3 +515,91 @@ def test_a_parked_adoption_hold_is_released_back_to_parked(tmp_path: Path, point
     rig.world.close("btq-2")
     rig.pickup()
     assert rig.runtime.launches[-1].generation == 2 and rig.state("btq-1") == "running"
+
+
+# --- plan 4c T7: version 2 to 3, the launch entries' install pin ---
+
+def v2_journal(path: Path) -> None:
+    """AU-3's version 2 schema exactly, with a row in plan 3's tables, a launch entry and its receipt."""
+    v1_journal(path)
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        for stmt in V2_TABLES:
+            db.execute(stmt)
+        db.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", V2_META)
+        db.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+        at = "2026-10-02T00:00:00+00:00"
+        db.execute("INSERT INTO launches (session_key, generation, ws, bead, role, profile, account, "
+                   "credential_key, model_passed, dispatched_at, outcome, journaled_at) "
+                   "VALUES ('k', 1, ?, 'btq-9', 'coder', 'p-one', 'default', 'ck', '', ?, 'launched', ?)",
+                   (WS, at, at))
+        db.execute("INSERT INTO receipts (session_key, generation, kind, at) VALUES ('k', 1, 'started', ?)",
+                   (at,))
+    finally:
+        db.close()
+
+
+def all_rows(path: Path) -> dict[str, set[tuple[object, ...]]]:
+    db = sqlite3.connect(path)
+    try:
+        tables = [str(r[0]) for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table' "
+                                                "AND name NOT LIKE 'sqlite_%'")]
+        return {t: set(db.execute(f"SELECT * FROM {t}").fetchall()) for t in tables}  # noqa: S608
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("point", ["upgrade.v3.install", "upgrade.v3.install_digest", "upgrade.v3.inserted"])
+def test_the_upgrade_from_2_to_3_keeps_every_row_and_rolls_back_on_failure(tmp_path: Path,
+                                                                          point: str) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v2_journal(path)
+    before = all_rows(path)
+    with pytest.raises(JournalNeedsUpgrade) as needs:
+        Journal(path)
+    assert needs.value.version == "2"
+    with pytest.raises(SimulatedCrash):
+        upgrade.run_2_to_3(path, CrashAt(point))
+    assert all_rows(path) == before                          # rolled back whole: still version 2
+    with pytest.raises(JournalNeedsUpgrade):
+        Journal(path)
+    upgrade.run_2_to_3(path)
+    after = all_rows(path)
+    for table, kept in before.items():
+        if table == "launches":
+            assert {r[:-2] for r in after[table]} == kept and {r[-2:] for r in after[table]} == {("", "")}
+        elif table == "meta":
+            assert kept - {("schema_version", "2")} <= after[table]
+            assert ("schema_version", "3") in after[table]
+        elif table == "events":
+            assert [r[4] for r in after[table] - kept] == ["journal_upgraded"]
+        else:
+            assert after[table] == kept, table
+    j = Journal(path)                                        # the version 3 check passes
+    try:
+        [entry] = j.launches("k")
+        assert (entry.install, entry.install_digest, entry.outcome) == ("", "", "launched")
+    finally:
+        j.close()
+    assert (path.parent / "wsd.db.v2.bak").exists()
+
+
+def test_startup_upgrades_version_2_without_the_hosts_accounts(tmp_path: Path) -> None:
+    """2 to 3 only adds columns: it reads no bead and no account, unlike 1 to 2."""
+    s = WsdSettings(tmp_path / "state", 1.0, 1.0, 1, tmp_path / "btq", {}, ())
+    v2_journal(s.journal)
+    j = cli._open(s, factory(World(tmp_path / "btq-state")))      # type: ignore[attr-defined]
+    try:
+        assert [e.install for e in j.launches("k")] == [""]
+    finally:
+        j.close()
+
+
+def test_the_upgrade_from_1_lands_on_version_3(tmp_path: Path, v1: Path) -> None:
+    upgrade.run(*no_beads(tmp_path), v1)
+    j = Journal(v1)
+    try:
+        assert j.db.execute("PRAGMA table_info(launches)").fetchall()[-2:] == [
+            (16, "install", "TEXT", 1, "''", 0), (17, "install_digest", "TEXT", 1, "''", 0)]
+    finally:
+        j.close()
