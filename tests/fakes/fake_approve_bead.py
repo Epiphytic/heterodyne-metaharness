@@ -2,10 +2,12 @@
 
 Beads live in the JSON file $FAKE_BTQ_DB, keyed by bead ID; each argv is appended to $FAKE_BTQ_LOG as a
 JSON list. As the real tool: `--json` takes no decision or paging flag (exit 2) and prints one line of the
-readout fields; a busy bead prints `{"format": 1, "busy": true}` for `--json` and exits 4; a decision exits
-0 (decided; for an approval, btq's gate accepts it), 1 (a refusal, a bd failure, or written but the gate
-rejects it), 2 (usage, or gaps), 3 (not the expected content), 4 (busy) or 5 (written, but the content
-changed during the write). Every non-zero exit prints exactly one stderr line.
+readout fields; `--gate-preview` needs `--json` (exit 2), and adds the key `gate_preview` (btq-ryfxf):
+`{"valid", "reasons"}` for an open bead that holds no decision, and null otherwise; a busy bead prints
+`{"format": 1, "busy": true}` for `--json` and exits 4; a decision exits 0 (decided; for an approval, btq's
+gate accepts it), 1 (a refusal, a bd failure, or written but the gate rejects it), 2 (usage, or gaps), 3 (not
+the expected content), 4 (busy) or 5 (written, but the content changed during the write). Every non-zero exit
+prints exactly one stderr line.
 
 A bead's record holds its readout fields, the decision metadata, and test controls. As the real tool, a
 bead holds a decision once any key `decision` or `via_ref`, or starting `approved_` or `denied_`, is present,
@@ -27,6 +29,12 @@ controls:
 - `wait`: a name. A `"wait"` mode creates `<db dir>/<name>.waiting`, then waits (bounded) for
   `<db dir>/<name>.go` before going on as normal;
 - `gate_ok` (default true) and `gate_reasons`: what btq's `approval_valid` says of a closed approval;
+- `preview_ok` (default true) and `preview_reasons` (lines as btq prints them, `btq: approval <id> rejected:
+  <reason>`): the gate preview of an open, undecided bead. A false verdict with no lines gets the real tool's
+  "no reason given" line;
+- `preview`: a broken gate preview. `"unsupported"` (the flag is unknown, as to an approve-bead that
+  predates it: exit 2), `"omit"` (no `gate_preview` key), `"null"` (null even when open and undecided),
+  `"always"` (a preview even when closed or decided);
 - `after_decide`: fields merged into the bead once any decision run ends (to fail a read-back).
 Each run appends its PID to `<db dir>/pids`. It touches nothing outside the files named above. The `held` and
 `descendant` grandchildren are sleepers (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`:
@@ -50,7 +58,7 @@ DIGEST = re.compile(r"[0-9a-f]{64}")
 VIA_REF = re.compile(r"[A-Za-z0-9:._-]{1,80}")
 WAIT_SECONDS = 60.0
 VALUE_FLAGS = {"--as", "--note", "--expect-digest", "--via", "--via-ref", "--tree", "--doc"}
-BOOL_FLAGS = {"--json", "--yes", "--deny", "--detail", "--dry-run"}
+BOOL_FLAGS = {"--json", "--gate-preview", "--yes", "--deny", "--detail", "--dry-run"}
 READ_ONLY_REFUSED = ("--tree", "--detail", "--doc", "--deny", "--note", "--yes", "--dry-run",
                      "--expect-digest", "--via", "--via-ref")
 FIELDS: dict[str, Any] = {
@@ -113,6 +121,19 @@ def readout(bead_id: str, bead: dict[str, Any]) -> dict[str, Any]:
     out = {**FIELDS, "id": bead_id, **{k: v for k, v in bead.items() if k in FIELDS}}
     out["decided"] = decided(bead)
     return out
+
+
+def gate_preview(bead_id: str, bead: dict[str, Any]) -> dict[str, Any] | None:
+    """The real tool's preview: null unless the bead is open and holds no decision (or `preview` breaks
+    it)."""
+    mode = bead.get("preview")
+    if mode == "null" or (mode != "always" and (bead.get("status", "open") != "open" or decided(bead))):
+        return None
+    valid = bool(bead.get("preview_ok", True))
+    reasons = list(bead.get("preview_reasons", []))
+    if not valid and not reasons:
+        reasons = [f"btq: approval {bead_id} rejected: no reason given"]
+    return {"valid": valid, "reasons": reasons}
 
 
 def wait(bead: dict[str, Any]) -> None:
@@ -182,7 +203,7 @@ def write_decision(bead_id: str, f: dict[str, str | bool], by: str, close: bool)
     return update(bead_id, **fields)
 
 
-def json_read(bead_id: str, bead: dict[str, Any]) -> int:
+def json_read(bead_id: str, bead: dict[str, Any], preview: bool) -> int:
     mode = bead.get("read")
     if mode == "wait":
         wait(bead)
@@ -205,7 +226,10 @@ def json_read(bead_id: str, bead: dict[str, Any]) -> int:
     if mode == "descendant":
         descendant()
         time.sleep(600)
-    print(json.dumps(readout(bead_id, bead), ensure_ascii=True))
+    out = readout(bead_id, bead)
+    if preview and bead.get("preview") != "omit":
+        out["gate_preview"] = gate_preview(bead_id, bead)
+    print(json.dumps(out, ensure_ascii=True))
     return 0
 
 
@@ -292,6 +316,8 @@ def main() -> int:
             return fail(2, "approve-bead: error: --via-ref needs --via=marmot")
         if not (isinstance(via_ref, str) and VIA_REF.fullmatch(via_ref)):
             return fail(2, "approve-bead: error: --via-ref must match [A-Za-z0-9:._-]{1,80}")
+    if f.get("--gate-preview") and not f.get("--json"):
+        return fail(2, "approve-bead: error: --gate-preview needs --json")
     if f.get("--json"):
         used = [flag for flag in READ_ONLY_REFUSED if f.get(flag)]
         if used:
@@ -299,8 +325,10 @@ def main() -> int:
     bead = load().get(bead_id)
     if bead is None:
         return fail(1, f"bd show {bead_id} returned no bead")
+    if f.get("--gate-preview") and bead.get("preview") == "unsupported":
+        return fail(2, "approve-bead: error: unrecognized arguments: --gate-preview")
     if f.get("--json"):
-        return json_read(bead_id, bead)
+        return json_read(bead_id, bead, bool(f.get("--gate-preview")))
     try:
         return decide(bead_id, bead, f)
     finally:

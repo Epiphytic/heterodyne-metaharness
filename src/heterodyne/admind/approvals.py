@@ -1,7 +1,8 @@
 """approve-bead as admind's only way to read and decide a btq approval (relay spec R5, R6, R12, R23).
 
-admind never writes bead metadata and imports no btq code: it runs `approve-bead <bead> --json` to read a
-bead (read only, under btq's per-bead lock) and `approve-bead <bead> --as=NAME --yes --expect-digest=FULL
+admind never writes bead metadata and imports no btq code: it runs `approve-bead <bead> --json
+--gate-preview` to read a bead (read only, under btq's per-bead lock; btq-ryfxf's preview is btq's own gate
+run on a simulated approval) and `approve-bead <bead> --as=NAME --yes --expect-digest=FULL
 --via=marmot --via-ref=REF` to decide it. Each run is a child in its own process group, with its output
 capped and its time bounded; on every exit path the group is killed and the child reaped (`reap`) before
 anything is settled. The outcome of a decision is never parsed from its output: it is read back with
@@ -40,6 +41,12 @@ class Link(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 PURPOSES = (None, "design", "execution")
 
 
+class GatePreview(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """btq-ryfxf: btq's `approval_valid` on the bead as approved now, and the lines it printed."""
+    valid: bool
+    reasons: list[str]
+
+
 class Readout(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """Task 1's `--json`, field for field."""
     format: Literal[1]
@@ -64,6 +71,8 @@ class Readout(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     decided: bool
     gate_valid: bool | None
     gate_reasons: list[str]
+    # btq-ryfxf: no default, so an approve-bead without `--gate-preview` fails to decode (fail closed)
+    gate_preview: GatePreview | None
     links: list[Link]
     readout: dict[str, list[str]]
     # cxmkf K17: the bead's `ask.purpose`, digest-bound; absent from an approve-bead that predates it.
@@ -159,9 +168,10 @@ class ApproveBead:
         return child.returncode if child.returncode is not None else -1, out, err
 
     async def read(self, bead: str, on_launch: Callable[[], None] | None = None) -> Readout | Busy:
-        """`approve-bead <bead> --json`: the readout, or Busy. Anything else is a BtqError."""
-        code, out, _ = await self._run([str(self.binary), bead, "--json"], READ_SECONDS, MAX_READ_OUTPUT,
-                                       on_launch)
+        """`approve-bead <bead> --json --gate-preview`: the readout, or Busy. Anything else is a BtqError,
+        a preview that is null for an open, undecided bead, or present for any other, included."""
+        code, out, _ = await self._run([str(self.binary), bead, "--json", "--gate-preview"], READ_SECONDS,
+                                       MAX_READ_OUTPUT, on_launch)
         try:
             if code == 4:
                 return msgspec.json.decode(out, type=Busy)
@@ -171,6 +181,8 @@ class ApproveBead:
         except msgspec.DecodeError:
             raise BtqError("bad output") from None
         if r.busy or r.id != bead or frozenset(r.readout) != READOUT_KEYS:
+            raise BtqError("bad output")
+        if (r.gate_preview is None) == (r.status == "open" and not r.decided):
             raise BtqError("bad output")
         return r
 
@@ -234,9 +246,28 @@ def settle(r: Readout, a: Attempt) -> Settled:
     return "blocked"
 
 
-def postable(r: Readout) -> str | None:
-    """Why the bead can't be posted as an approval ask (spec §8 "Post", step 2), or None. The gaps go
-    back to the poster, not to the operator (R4)."""
+def postable(r: Readout) -> tuple[str, str] | None:
+    """Why the bead can't be posted as an approval ask (spec §8 "Post", step 2), as (the refusal, its
+    audit reason), or None. The gaps and btq's gate reasons go back to the poster, not to the operator
+    (R4); the caller redacts the refusal."""
+    why = _unpostable(r)
+    if why is not None:
+        return why, "not postable"
+    if r.gate_preview is None:
+        return "approve-bead gave no gate preview for this bead; try again", "gate"
+    if not r.gate_preview.valid:
+        return ("btq's gate would reject this approval once approved; fix the bead and post it again: "
+                + gate_reasons(r)), "gate"
+    return None
+
+
+def gate_reasons(r: Readout) -> str:
+    """The preview's reasons, each without btq's `btq: approval <bead> rejected: ` prefix, unredacted."""
+    prefix = f"btq: approval {r.id} rejected: "
+    return "; ".join(line.removeprefix(prefix) for line in (r.gate_preview.reasons if r.gate_preview else []))
+
+
+def _unpostable(r: Readout) -> str | None:
     gaps = "; ".join(r.gaps)
     if r.digest is None or not DIGEST.fullmatch(r.digest):
         return "the bead's ask is malformed: approve-bead computed no digest" + (f" ({gaps})" if gaps else "")
