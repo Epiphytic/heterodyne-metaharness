@@ -549,12 +549,6 @@ def test_the_installer_checks_the_config_heterodyne_reads(tmp_path: Path) -> Non
     assert config_paths.config_dir({"HOME": str(tmp_path)}) / "config.toml" == tmp_path / c["HOST_CONFIG"]
 
 
-def test_a_run_checkout_that_does_not_run_refuses(host: Host) -> None:
-    host.put("fail", "uv run\n")
-    assert install_refusal(host, installer(host)) == (
-        "the run checkout does not run heterodyne (run uv sync there first)")
-
-
 def test_the_prefix_is_for_the_tests_only(host: Host) -> None:
     out = installer(host, env={"HZ_INSTALL_TEST": ""})
     assert install_refusal(host, out) == "--prefix is for the tests only"
@@ -834,6 +828,8 @@ def test_a_failed_config_check_stops_before_verity_is_turned_on(host: Host, setu
 
 @pytest.mark.parametrize(("setup", "why"), FAILED_CHECKS)
 def test_a_failed_config_check_is_advice_in_a_dry_run(host: Host, setup: dict[str, str], why: str) -> None:
+    assert installer(host).returncode == 0      # the release the check runs from
+    host.clear_calls()
     for name, text in setup.items():
         host.put(name, text)
     out = installer(host, "--dry-run")
@@ -848,8 +844,9 @@ def test_a_dry_run_makes_no_change(host: Host) -> None:
     out = installer(host, "--dry-run")
     assert out.returncode == 0, out.stdout + out.stderr
     assert host.mutations() == []
-    assert summary(out) == {"store": "would change", "units": "would change", "config": "ok",
-                            "verity": "would change"}
+    assert summary(out) == {"store": "would change", "units": "would change", "release": "would change",
+                            "config": "advisory (the release is not built yet)", "verity": "would change",
+                            "services": "not run"}
     assert "would: systemctl start heterodyne-store-helper.socket" in out.stdout.splitlines()
     assert "would: tune2fs -O verity /dev/fake0" in out.stdout.splitlines()
     assert host.stages() == []

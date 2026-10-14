@@ -28,7 +28,10 @@ readonly STAGE_PARENT=/run
 readonly HOST_CONFIG=.config/heterodyne/config.toml
 readonly VERITY_FEATURE=/sys/fs/ext4/features/verity
 readonly PYTHON=/usr/bin/python3
-readonly STEPS=(store units config verity)
+readonly STEPS=(store units release config verity services)
+# `uv sync` for a release: from uv.lock exactly, without the dev group, on the system python3 (design
+# btq-v7sgt D2). uv_sync adds --offline after --locked unless --fetch.
+readonly UV_SYNC=(uv sync --locked --no-dev --python /usr/bin/python3)
 
 # Exit 1 with the message when the service user's config sets `[harnesses] fallback`, or can't be read as
 # TOML. A missing file is empty, as heterodyne reads it.
@@ -53,17 +56,18 @@ refuse() {
 }
 
 usage() {
-    echo "usage: install.sh [--dry-run] [--no-verity] [--service-user USER] [--checkout DIR]" \
+    echo "usage: install.sh [--dry-run] [--no-verity] [--fetch] [--service-user USER] [--checkout DIR]" \
         "[--commit ID --expect-sha256 SUM]" >&2
     exit 2
 }
 
-dry_run=0 verity=1 service_user=${SUDO_USER:-} checkout="" commit="" expect="" staged="" archive_sum="" prefix=""
-probe=""
+dry_run=0 verity=1 fetch=0 service_user=${SUDO_USER:-} checkout="" commit="" expect="" staged="" archive_sum=""
+prefix="" probe=""
 while (($#)); do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --no-verity) verity=0; shift ;;
+        --fetch) fetch=1; shift ;;
         --service-user) (($# >= 2)) || usage; service_user=$2; shift 2 ;;
         --checkout) (($# >= 2)) || usage; checkout=$2; shift 2 ;;
         --commit) (($# >= 2)) || usage; commit=$2; shift 2 ;;
@@ -133,6 +137,21 @@ login_path() {
     path=$(runuser -l "$service_user" -c 'printf "%s\n" "$PATH"' 2>/dev/null </dev/null) \
         || refuse "the service user's login shell does not run"
     printf '%s' "${path##*$'\n'}"
+}
+
+# `uv sync` for the release tree `$1`, as the service user, offline unless --fetch, with the uv cache `$2`
+# if given (the preflight's disposable copy). UV_LINK_MODE=copy: a release shares no files with the cache.
+uv_sync() {
+    local args=("${UV_SYNC[@]:0:3}")
+    ((fetch)) || args+=(--offline)
+    args+=("${UV_SYNC[@]:3}" --project "$1")
+    as_service_user PATH="$service_path" UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
+        ${2:+UV_CACHE_DIR="$2"} "${args[@]}" </dev/null
+}
+
+# The commit `$1`'s whole tree, archived by the hardened git and extracted as the service user into `$2`.
+extract_tree() {
+    service_git archive --format=tar "$1" | as_service_user PATH="$user_tools" tar -x -C "$2"
 }
 
 # The value of the superblock field `$2` in `tune2fs -l`'s output `$1`.
@@ -236,8 +255,6 @@ if [[ -z $staged ]]; then
     service_path=$(login_path)
     as_service_user PATH="$service_path" sh -c 'command -v uv' >/dev/null 2>&1 </dev/null \
         || refuse "uv is not on the service user's login PATH"
-    as_service_user PATH="$service_path" uv run --offline --project "$repo" heterodyne --help >/dev/null 2>&1 \
-        </dev/null || refuse "the run checkout does not run heterodyne (run uv sync there first)"
 
     if ((verity)); then
         probe=$(verity_probe) || exit 1
@@ -253,6 +270,33 @@ if [[ -z $staged ]]; then
         echo "note: the work tree's state can't be read (advice only: the commit's bytes are installed)"
     elif [[ -n $status ]]; then
         echo "note: the work tree differs from the commit (advice only: the commit's bytes are installed)"
+    fi
+
+    # The offline build, proven before any change (design btq-v7sgt D2): the release's exact `uv sync`, on
+    # the full tree, in a scratch directory, against a hardlink copy of the service user's uv cache, which
+    # uv's rename-into-place writes can't reach through. Never the real cache: a copy that fails refuses.
+    # Skipped for a built release, and under --fetch, where the network may supply what the cache lacks.
+    releases=$(host "$service_home")/.local/share/heterodyne/releases
+    if [[ ! -f $releases/$resolved/.complete ]] && ((!fetch)); then
+        cache=$(as_service_user PATH="$service_path" uv cache dir 2>/dev/null </dev/null) && [[ -n $cache ]] \
+            || refuse "the uv cache can't be found"
+        scratch_parent=$(host "$service_home")/.cache/heterodyne
+        as_service_user PATH="$user_tools" mkdir -p -m 0700 -- "$scratch_parent" \
+            || refuse "the offline build check has no scratch directory"
+        scratch=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/preflight.XXXXXX" \
+            </dev/null) || refuse "the offline build check has no scratch directory"
+        trap 'as_service_user PATH="$user_tools" rm -rf -- "$scratch"' EXIT
+        as_service_user PATH="$user_tools" cp -al -- "$cache" "$scratch/cache" >/dev/null 2>&1 </dev/null \
+            || refuse "the uv cache could not be copied for the offline build check"
+        as_service_user PATH="$user_tools" mkdir -- "$scratch/tree" || refuse "the commit can't be archived"
+        extract_tree "$resolved" "$scratch/tree" || refuse "the commit can't be archived"
+        if ! out=$(uv_sync "$scratch/tree" "$scratch/cache" 2>&1); then
+            printf '%s\n' "$out" | tail -n 20 | sed -E 's/[0-9a-f]{64}/<hex>/g'
+            refuse "the uv cache lacks a package this release needs: run with --fetch"
+        fi
+        as_service_user PATH="$user_tools" rm -rf -- "$scratch" \
+            || refuse "the scratch directory can't be removed"
+        trap - EXIT
     fi
 
     stage=$(mktemp -d "$(host "$STAGE_PARENT")/heterodyne-install.XXXXXX")
@@ -272,6 +316,7 @@ if [[ -z $staged ]]; then
     args=(--staged "$stage" --checkout "$checkout" --commit "$resolved" --archive-sha256 "$archive_sum"
           --service-user "$service_user")
     if ((dry_run)); then args+=(--dry-run); fi
+    if ((fetch)); then args+=(--fetch); fi
     if ((verity)); then args+=(--verity-probe "$probe"); else args+=(--no-verity); fi
     if [[ -n $prefix ]]; then args+=(--prefix "$prefix"); fi
     rc=0
@@ -322,6 +367,7 @@ summary() {
         echo "  $s: ${result[$s]:-not run}"
     done
     echo "commit: $commit"
+    echo "release: $commit"
     echo "archive sha256: $archive_sum"
     if ((rc == 0)) && [[ ${result[verity]:-} == "skipped ("* && ${result[verity]} != "skipped (--no-verity)" ]]
     then
@@ -434,27 +480,62 @@ else
 fi
 if ((unit_changes)); then finish_step "$changed"; else finish_step ok; fi
 
+# --- the release: the commit's whole tree and its venv, as the service user (design btq-v7sgt D2) ---
+
+begin release
+releases=$(host "$service_home")/.local/share/heterodyne/releases
+release=$releases/$commit
+vbin=$release/.venv/bin
+service_path=$(login_path)
+if [[ -f $release/.complete ]]; then
+    echo "ok: the release is built"
+    finish_step ok
+elif ((dry_run)); then
+    echo "would: build the release"
+    finish_step "would change"
+else
+    # A directory without .complete is a failed run's: it goes, and the release is built again in place
+    # (the venv's scripts and its editable .pth hold absolute paths, so it can't be built elsewhere).
+    echo "change: build the release"
+    as_service_user PATH="$user_tools" rm -rf -- "$release" || fail "a partial release can't be removed"
+    as_service_user PATH="$user_tools" mkdir -p -m 0700 -- "$release" || fail "the release can't be made"
+    extract_tree "$commit" "$release" || fail "the commit can't be archived"
+    uv_sync "$release" || fail "uv sync failed"
+    uv_version=$(as_service_user PATH="$service_path" uv --version </dev/null) || fail "uv can't be run"
+    lock_sum=$(sha256sum <"$release/uv.lock") || fail "uv.lock can't be read"
+    printf '%s\n%s\n%s\n' "$commit" "$uv_version" "${lock_sum%% *}" \
+        | as_service_user PATH="$user_tools" tee -- "$release/.complete" >/dev/null \
+        || fail ".complete can't be written"
+    finish_step changed
+fi
+
 # --- step 6: the host config, as heterodyne reads it for the service user, before step 5's change, which
 # can't be undone ---
 
 begin config
-service_path=$(login_path)
+# What the units get, and what every checked command runs with: host paths, never under the prefix.
+config_dir=$service_home/.config/heterodyne
+state_dir=$service_home/.local/state/heterodyne
+location_env=(PATH="$vbin:$service_path" HETERODYNE_CONFIG_DIR="$config_dir" HETERODYNE_STATE_DIR="$state_dir")
 why=""
-if out=$(as_service_user PATH="$service_path" uv run --offline --project "$repo" heterodyne config check 2>&1 \
-    </dev/null); then
-    while IFS= read -r line; do
-        if [[ $line == "harnesses problem: "* ]]; then why="config check reports a store problem"; fi
-    done <<<"$out"
+if [[ ! -f $release/.complete ]]; then
+    finish_step "advisory (the release is not built yet)"      # a dry run only: the release step built it
 else
-    why="config check failed"
-fi
-printf '%s\n' "$out"
-if [[ -z $why ]]; then
-    finish_step ok
-elif ((dry_run)); then
-    finish_step "advisory ($why; the changes above may fix it)"    # a dry run made none of them
-else
-    fail "$why"
+    if out=$(as_service_user "${location_env[@]}" "$vbin/heterodyne" config check 2>&1 </dev/null); then
+        while IFS= read -r line; do
+            if [[ $line == "harnesses problem: "* ]]; then why="config check reports a store problem"; fi
+        done <<<"$out"
+    else
+        why="config check failed"
+    fi
+    printf '%s\n' "$out"
+    if [[ -z $why ]]; then
+        finish_step ok
+    elif ((dry_run)); then
+        finish_step "advisory ($why; the changes above may fix it)"    # a dry run made none of them
+    else
+        fail "$why"
+    fi
 fi
 
 # --- step 5: verity on the store's filesystem, last: it can't be undone ---

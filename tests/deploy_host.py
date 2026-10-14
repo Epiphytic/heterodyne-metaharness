@@ -9,6 +9,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -177,11 +178,55 @@ case $1 in
     *) exit 99 ;;
 esac
 """,
-    "uv": r"""case "$*" in
-    *" heterodyne --help") ;;
-    *" heterodyne config check") cat "$S/config-check"; exit "$(cat "$S/config-check-rc")" ;;
+    # `cache dir` is `uvcache`; `sync` logs its UV_CACHE_DIR to uv-env.log and the rest of its uv settings to
+    # uv-sync.env, fails as an offline cache miss with `uv-miss` (printing a sum, for the mask), and
+    # otherwise writes the fake venv into the project's .venv/bin
+    "uv": r"""case $1 in
+    --version) echo "uv 0.11.16" ;;
+    cache) [[ $2 == dir ]] || exit 99; echo "$S/uvcache" ;;
+    sync)
+        printf 'UV_CACHE_DIR=%s\n' "${UV_CACHE_DIR-}" >>"$S/uv-env.log"
+        env | LC_ALL=C sort | command grep -E '^UV_' | command grep -v '^UV_CACHE_DIR=' >"$S/uv-sync.env" \
+            || true
+        if [[ -f $S/uv-miss && " $* " == *" --offline "* ]]; then
+            digest=$(printf 'w%.0s' {1..8} | sha256sum | cut -c1-64)
+            echo "error: w not found in the cache, sha256 $digest" >&2
+            exit 2
+        fi
+        project=${*: -1}
+        [[ ${*: -2:1} == --project && -d $project ]] || exit 99
+        mkdir -p "$project/.venv/bin"
+        cp -a "$S/venv/." "$project/.venv/bin/" ;;
     *) exit 99 ;;
 esac
+""",
+    # cp as the system's, logged, so that `fail` can stand in for a hardlink copy across filesystems
+    "cp": r"""exec /usr/bin/cp "$@"
+""",
+}
+
+
+# The release's fake venv (the uv shim copies it into .venv/bin): each script is a shim, so it is logged and
+# can be failed. `admind` and `wsd` are the real CLIs, except `admind initialised`, which exits with
+# `admind-initialised-rc`; each script writes its environment to env-<name>.log.
+VENV = {
+    "python3": r"""exec @PYTHON@ "$@"
+""",
+    "admind": r"""env >"$S/env-admind.log"
+if [[ $1 == initialised ]]; then exit "$(cat "$S/admind-initialised-rc")"; fi
+exec @PYTHON@ -m heterodyne.admind "$@"
+""",
+    "wsd": r"""env >"$S/env-wsd.log"
+exec @PYTHON@ -m heterodyne.wsd "$@"
+""",
+    "heterodyne": r"""env >"$S/env-heterodyne.log"
+[[ $* == "config check" ]] || exit 99
+cat "$S/config-check"
+exit "$(cat "$S/config-check-rc")"
+""",
+    "wsctl": r"""env >"$S/env-wsctl.log"
+[[ $1 == status ]] || exit 99
+exit "$(cat "$S/wsctl-rc")"
 """,
 }
 
@@ -196,7 +241,7 @@ def state() -> dict[str, str]:
         "mount": "ext4 /dev/fake0\n",
         "e2fsprogs": "tune2fs 1.47.0 (5-Feb-2023)\n",
         "superblock": FEATURES_OFF.replace("ext_attr", "ext_attr verity"),
-        "config-check-rc": "0\n",
+        "config-check-rc": "0\n", "admind-initialised-rc": "0\n", "wsctl-rc": "0\n",
         "config-check": "harnesses.store = /var/lib/heterodyne/harnesses    (defaults)\n",
     }
 
@@ -207,6 +252,8 @@ def make_checkout(root: Path) -> str:
     helper.parent.mkdir(parents=True)
     shutil.copy(harness_paths.packaged_helper(), helper)
     shutil.copytree(REPO / "deploy", root / "deploy")
+    (root / "pyproject.toml").write_text('[project]\nname = "fixture"\nversion = "0"\n')
+    (root / "uv.lock").write_text("version = 1\n")
     subprocess.run(["git", "init", "-q", str(root)], env=GIT_ENV, check=True, capture_output=True, timeout=60)
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "fixture")
@@ -261,6 +308,40 @@ class Host:
         text = (self.shims / "user-bus.env").read_text()
         return dict(line.split("=", 1) for line in text.splitlines())
 
+    def home(self) -> Path:
+        """The service user's home under the fake root."""
+        return self.root / self.real_home().removeprefix("/")
+
+    def real_home(self) -> str:
+        return pwd.getpwnam(ME).pw_dir
+
+    def clear_calls(self) -> None:
+        (self.shims / "calls.log").write_text("")
+
+    def uvcache_snapshot(self) -> dict[str, tuple[int, int, int]]:
+        cache = self.shims / "uvcache"
+        return {str(p.relative_to(cache)): (p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns)
+                for p in cache.rglob("*") if p.is_file()}
+
+    def env_of(self, name: str) -> dict[str, str]:
+        """The environment the fake venv's `name` last ran with."""
+        text = (self.shims / f"env-{name}.log").read_text()
+        return {k: v for k, _, v in (line.partition("=") for line in text.splitlines())}
+
+    def uv_env_of_last_sync(self) -> dict[str, str]:
+        text = (self.shims / "uv-sync.env").read_text()
+        return dict(line.split("=", 1) for line in text.splitlines())
+
+    def replace_ref(self, path: str, data: bytes) -> None:
+        """A refs/replace ref that swaps the commit for one where `path` holds `data`."""
+        blob = git_input(self.repo, data, "hash-object", "-w", "--stdin").strip()
+        index = {"GIT_INDEX_FILE": str(self.shims / "replace.index")}
+        git_env(self.repo, index, "read-tree", self.commit)
+        git_env(self.repo, index, "update-index", "--cacheinfo", f"100644,{blob},{path}")
+        tree = git_env(self.repo, index, "write-tree").strip()
+        other = git_env(self.repo, {}, "commit-tree", tree, "-m", "replaced").strip()
+        git_env(self.repo, {}, "replace", self.commit, other)
+
     def put(self, name: str, text: str) -> None:
         (self.shims / name).write_text(text)
 
@@ -275,6 +356,23 @@ class Host:
 
     def installed(self, unit: Path) -> bytes:
         return (self.root / "etc/systemd/system" / unit.name).read_bytes()
+
+
+def git_env(repo: Path, extra: dict[str, str], *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], env=GIT_ENV | extra, capture_output=True,
+                          check=True, timeout=60, text=True).stdout
+
+
+def git_input(repo: Path, data: bytes, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], env=GIT_ENV, input=data, capture_output=True,
+                          check=True, timeout=60).stdout.decode()
+
+
+def git_show(host: Host, path: str) -> bytes:
+    """`path` as the commit holds it, whatever refs/replace says."""
+    return subprocess.run(["git", "-C", str(host.repo), "show", f"{host.commit}:{path}"],
+                          env=GIT_ENV | {"GIT_NO_REPLACE_OBJECTS": "1"}, capture_output=True, check=True,
+                          timeout=60).stdout
 
 
 def unseal_all(root: Path) -> None:
@@ -315,6 +413,17 @@ def host_fixture(tmp_path: Path) -> Iterator[Host]:
         (shims / name).chmod(0o755)
     for name, text in state().items():
         (shims / name).write_text(text)
+    (shims / "venv").mkdir()
+    for name, body in VENV.items():
+        text = body if name == "python3" else SHIM_HEAD + body
+        text = text.replace("@SHIMS@", shlex.quote(str(shims)))
+        text = text.replace("@PYTHON@", shlex.quote(sys.executable))
+        (shims / "venv" / name).write_text("#!/bin/bash\n" + text if name == "python3" else text)
+        (shims / "venv" / name).chmod(0o755)
+    for i in range(3):
+        cached = shims / "uvcache" / f"archive-v0/e{i}/f"
+        cached.parent.mkdir(parents=True)
+        cached.write_text(f"cached {i}\n")
     (shims / "calls.log").write_text("")
     bus = bind_bus(root / f"run/user/{os.getuid()}")
     for d in SEALED:
@@ -347,7 +456,12 @@ def installer(host: Host, *args: str, pinned: bool = True, user: str | None = ME
 def summary(out: subprocess.CompletedProcess[str]) -> dict[str, str]:
     lines = out.stdout.splitlines()
     at = lines.index("summary:")
-    return dict(line.strip().split(": ", 1) for line in lines[at + 1:at + 5])
+    steps = []
+    for line in lines[at + 1:]:
+        if not line.startswith("  "):
+            break
+        steps.append(line)
+    return dict(line.strip().split(": ", 1) for line in steps)
 
 
 def install_refusal(host: Host, out: subprocess.CompletedProcess[str]) -> str:
@@ -360,7 +474,8 @@ def install_refusal(host: Host, out: subprocess.CompletedProcess[str]) -> str:
     return line.removeprefix(REFUSED)
 
 
-ALL_IN_PLACE = {"store": "changed", "units": "changed", "config": "ok", "verity": "ok"}
+ALL_IN_PLACE = {"store": "changed", "units": "changed", "release": "changed", "config": "ok", "verity": "ok",
+                "services": "not run"}
 
 
 def readme_block(name: str) -> str:
