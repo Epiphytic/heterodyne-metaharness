@@ -1,0 +1,16 @@
+# The store helper's socket (plan 4c E1, Task 12). One helper process per connection (Accept=yes); the
+# helper checks the peer's uid (SO_PEERCRED) against its config before it reads anything. SocketGroup, the
+# service user's group, is set by the drop-in setup-store.sh writes (heterodyne-store-helper.socket.d/).
+[Unit]
+Description=heterodyne managed-install store helper socket
+
+[Socket]
+ListenStream=/run/heterodyne-store/helper.sock
+SocketUser=heterodyne-store
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target
