@@ -289,7 +289,7 @@ sh docs/spikes/s9-10/part1.sh <dl>/cli <results>
 # for V in plain e25, each with a fresh T=$(mktemp -d -p "$XDG_RUNTIME_DIR" s9-10.XXXXXX):
 .venv/bin/python docs/spikes/s9-10/generate.py $T <dl>/cli [--e25]     # Codex.prepare_home (+ exec_dirs.prepare)
 timeout -k 5 40 unshare -rmnpf --mount-proc --kill-child sh docs/spikes/s9-10/inner.sh $T <dl>/cli $V <python>
-.venv/bin/python docs/spikes/s9-10/analyze.py $T $V
+.venv/bin/python docs/spikes/s9-10/analyze.py $T $V --part 1
 ```
 
 - **`generate.py`** calls the candidate adapter.
@@ -304,7 +304,7 @@ timeout -k 5 40 unshare -rmnpf --mount-proc --kill-child sh docs/spikes/s9-10/in
   4. For `e25`, one fresh empty directory is bound read-only at `.codex/tmp` and at `.codex/packages`.
   5. The server starts under `strace -f -qq -s 300 -xx -e trace=execve,connect,sendto,sendmmsg`. Readiness is the adapter's own `Codex.server_ready(layout)`, polled every 0.5 s for up to 10 s.
   6. The TUI runs in a private tmux server: `tmux -L s9-10 -f /dev/null new-session -d -x 160 -y 48`, with its socket on the run's private `/tmp`. Its screen is captured after 14 s, and the tmux server is killed.
-- **`analyze.py`** decodes the `-xx` buffers.
+- **`analyze.py`** decodes the `-xx` buffers. Since r2 it fails closed: it needs `--part 1|2`, every file a check reads must be there (and hold something, except `inside.packages`), each trace must show the exec of the argv it traced, and the run must have ended by itself (`rc` 0, not the cap's 124). With any of that missing, no later check passes. It exits 1 on any FAIL. Part 1's screen check is the login screen, which is what the TUI shows without a login; Part 2 checks the composer. `part1.sh` and `part2.sh` keep its status (no pipe, since `sh` has no `pipefail`), also fail on a leftover process or an undeleted home, and exit non-zero unless both variants pass.
 
 **The argv**, unchanged from the adapter (both variants; `<dl>` is the download directory):
 
@@ -339,6 +339,10 @@ What this shows:
 - **E25 is what makes the exec condition hold.** Without it, the CLI makes its PATH aliases under `.codex/tmp/arg0/` and resolves commands through them first (S9-7). This run only shows failed lookups (ENOENT), but a file planted there under a common command name would run. With E25's read-only empty directory, no aliases are made and there's no exec attempt under the home.
 
 **Verdict: Part 1 confirmed for the shape Task 6 ships (with E25's binds).** All three pass conditions hold in `e25`: `.codex/packages` stays empty, there's no exec of a path under the home, and there's no `api.github.com` lookup. The `plain` run is the baseline without E25. It meets two of the three, and its exec attempts under `.codex/tmp/arg0/` are the reason E25 exists. Reading `plain` as a control rather than a variant that must also pass is pending Liam's decision. Still open for Part 2 / Task 13: whether `apply_patch` works without its shell alias (S9-7), because no Part 1 run invokes a tool.
+
+**r2 re-check (2026-10-14).** Review r2 found the first analyzer could pass on missing evidence: a missing trace read as no execs and no lookups, Part 2's checks vanished without `answered`, and neither the analyzer nor the wrapper's `tee` pipeline passed a failure on. So the record above was checked again:
+- **The first run's evidence was complete.** Nothing was missing. Both variants had non-empty `server.strace` (70 and 66 lines) and `tui.strace` (48 and 45 lines), each showing the exec of its own argv, `rc` 0, `server_ready` `yes`, the screen and the `inside` listings. Re-analyzed with the fixed analyzer, the kept files give the same results: `e25` PASS, and `plain` FAIL on `no_exec_under_home` alone.
+- **Part 1 was run again** at `f5a590b` with the fixed scripts, in the same scope: the same checksum-verified CLI (`sha256sum -c` OK again, no download), `unshare -rmnpf`, no login, `env -i`, 40 s caps. The results match the table above. `e25`: every check passes (exit 0). `plain`: every check passes except `no_exec_under_home`, with the same 6 ENOENT attempts under `.codex/tmp/arg0/` (exit 1). `packages/` was never created in `plain` and stayed empty in `e25`. The DNS names were `raw.githubusercontent.com` only, with no `api.github.com`. `part1.sh` now exits 1 because `plain` fails. Whether that run is a control is the decision pending with Liam. No process was left, both homes were deleted, and the traces are kept under `$XDG_RUNTIME_DIR`.
 
 **Harness notes.** Two first attempts were discarded because of harness bugs, not CLI behaviour:
 - `server_ready` got a `str` instead of a `Path`, so readiness was never seen.
