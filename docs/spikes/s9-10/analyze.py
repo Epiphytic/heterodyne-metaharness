@@ -4,8 +4,9 @@
 
 Part 1: the run ended by itself (rc 0), the server was ready, the TUI connected to it and drew its screen
 (the login screen: Part 1 has no login), `.codex/packages` stayed empty, nothing under the home was
-executed, and no DNS lookup named api.github.com. Part 2 adds the composer, the new session's answer and
-the resume showing the first prompt. Every file a check reads must be there, and every metadata field with
+executed, and no DNS lookup named api.github.com. Part 2 adds the composer, the new session's answer, the
+resume showing the first prompt, no hook failure on either screen, and the shim's spool showing the hooks
+ran (UserPromptSubmit). Every file a check reads must be there, and every metadata field with
 its type; without them, nothing passes. Each trace must open with the exec of its command's exact argv and
 hold strace's record of that process ending as its last event (`+++ exited with N +++`; a TUI may instead
 be killed by the harness's SIGHUP), so a cut trace fails; with any of that wrong, no later check passes.
@@ -34,13 +35,16 @@ STOP: dict[str, bytes | None] = {"server.strace": None, "tui.strace": b"SIGHUP",
 TRACES = {1: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new")},
           2: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new"),
               "tui-resume.strace": ("argv-resume.json", "tui_resume")}}
-# Files that must hold something. inside.packages need only exist: empty is e25's result.
+# Files that must hold something. inside.packages and hooks need only exist: hooks_ran judges hooks.
 NONEMPTY = {1: ("argv.json", "rc", "server_ready", "inside", "tui.screen"),
             2: ("argv.json", "argv-resume.json", "rc", "server_ready", "inside", "trust.txt", "tui.screen",
                 "composer", "answered", "thread", "resumed", "tui-resume.screen")}
-PRESENT = ("inside.packages",)
+PRESENT = {1: ("inside.packages",), 2: ("inside.packages", "hooks")}
+# What Codex 0.160 draws for a hook that failed or blocked (S9-10 Part 2's EDZixy run).
+HOOK_FAILURE = (b"Hook failed", b"Blocked by hook", b"hook exited with code")
 PART_CHECKS = {1: ("tui_screen_shows_login",), 2: ("tui_screen_shows_composer", "new_session_answered",
-                                                  "thread_found", "resume_shows_the_first_prompt")}
+                                                  "thread_found", "resume_shows_the_first_prompt",
+                                                  "no_hook_failure", "hooks_ran")}
 # The metadata each check reads: an absolute path, a unix:// socket, or an argv of strings run by full path.
 FIELDS = {1: {"argv.json": {"home": "path", "app_socket": "socket", "server": "argv", "tui_new": "argv"}},
           2: {"argv.json": {"home": "path", "app_socket": "socket", "server": "argv", "tui_new": "argv"},
@@ -116,7 +120,7 @@ def root(raw: bytes, argv: list[str], stop: bytes | None) -> tuple[bool, bool]:
 
 def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
     missing = [f for f in (*NONEMPTY[part], *TRACES[part]) if not nonempty(run / f)]
-    missing += [f for f in PRESENT if not (run / f).is_file()]
+    missing += [f for f in PRESENT[part] if not (run / f).is_file()]
     meta, malformed = metadata(run, part)
     rc = (run / "rc").read_text().strip() if nonempty(run / "rc") else "<none>"
     facts: dict[str, Any] = {"rc": rc, "missing": missing, "malformed": malformed}
@@ -167,6 +171,10 @@ def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
         checks["new_session_answered"] = complete and said(run, "answered")
         checks["thread_found"] = complete and nonempty(run / "thread")
         checks["resume_shows_the_first_prompt"] = complete and said(run, "resumed")
+        screens = screen + (run / "tui-resume.screen").read_bytes() if complete else b""
+        hooks = (run / "hooks").read_text(errors="replace").split() if complete else []
+        checks["no_hook_failure"] = complete and not any(f in screens for f in HOOK_FAILURE)
+        checks["hooks_ran"] = complete and "UserPromptSubmit" in hooks
     facts.update({"dns": names, "sockets": sockets,
                   "under_home": [e.decode("utf-8", "replace") for e in under_home], "left": left[:16]})
     return checks, facts

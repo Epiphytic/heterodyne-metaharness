@@ -37,7 +37,7 @@ for V in plain e25; do
     "$PY" "$HERE/analyze.py" "$T" "$V" --part 2 > "$OUT/$V.result.txt" || failed=1
     cat "$OUT/$V.result.txt"
     for f in argv.json argv-resume.json inside inside.tmp inside.packages trust.txt server_ready server.log \
-             composer answered thread resumed tui.screen tui-resume.screen rc result.json \
+             composer answered thread resumed hooks tui.screen tui-resume.screen rc result.json \
              server.strace tui.strace tui-resume.strace server.strace.unended tui.strace.unended \
              tui-resume.strace.unended; do
         [ -e "$T/$f" ] && cp "$T/$f" "$OUT/$V.$f"

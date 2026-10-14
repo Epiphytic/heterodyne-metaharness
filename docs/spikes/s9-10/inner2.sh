@@ -39,7 +39,8 @@ fi
 touch "$HOME_DIR/.codex/auth.json"
 mount --bind "$LOGIN" "$HOME_DIR/.codex/auth.json"
 mount -o remount,bind,ro "$HOME_DIR/.codex/auth.json"
-# RUN_INSIDE holds the adapter's run files (the trust script), as the sandbox does.
+# RUN_INSIDE holds the adapter's run files (the trust script) and the shipped shim the hooks run, as the
+# sandbox does, but no session socket: the shim spools lifecycle events and denies tool calls.
 mkdir /run/hz
 "$PY" "$HERE/part2_steps.py" run-files /run/hz
 echo "uid=$(id -u)" > "$R/inside"
@@ -127,6 +128,8 @@ fi
 stop_root "$R/server.strace" TERM
 kill "$SP" 2>/dev/null || true
 wait "$SP" 2>/dev/null || true
+# Which hook events reached the shim (names only: the events themselves carry the prompt).
+"$PY" "$HERE/part2_steps.py" hooks "$SESSION" > "$R/hooks" 2>/dev/null || true
 for p in tmp packages; do
     find "$HOME_DIR/.codex/$p" -mindepth 1 > "$R/inside.$p" 2>&1 || true
 done
