@@ -7,9 +7,9 @@ Part 1: the run ended by itself (rc 0), the server was ready, the TUI connected 
 executed, and no DNS lookup named api.github.com. Part 2 adds the composer, the new session's answer and
 the resume showing the first prompt. Every file a check reads must be there, and every metadata field with
 its type; without them, nothing passes. Each trace must open with the exec of its command's exact argv and
-hold strace's record of that process ending (`+++ exited with N +++`, or killed by the harness's own stop
-signal), so a cut trace fails; with any of that wrong, no later check passes. Prints one line per check and
-exits 0 only when every check passes."""
+hold strace's record of that process ending as its last event (`+++ exited with N +++`; a TUI may instead
+be killed by the harness's SIGHUP), so a cut trace fails; with any of that wrong, no later check passes.
+Prints one line per check and exits 0 only when every check passes."""
 
 import argparse
 import json
@@ -27,8 +27,10 @@ ENDED = re.compile(rb"(\d+) +\+\+\+ (?:exited with \d+|killed by (SIG[A-Z0-9]+)(
 GITHUB_API = b"\x03api\x06github\x03com"
 LOGIN_SCREEN = b"Sign in with ChatGPT"
 COMPOSER = "›".encode()                                      # Codex.prompt_marker
-# Each trace, with the file and key of the argv it traced, and the signal the harness stops that command with.
-STOP = {"server.strace": b"SIGTERM", "tui.strace": b"SIGHUP", "tui-resume.strace": b"SIGHUP"}
+# The one signal each command may die of, beside `exited with N`: a TUI, of the harness's SIGHUP. The
+# app-server exits 0 on the harness's SIGTERM (r3's Part 1 re-run), so it must exit.
+STOP: dict[str, bytes | None] = {"server.strace": None, "tui.strace": b"SIGHUP",
+                                 "tui-resume.strace": b"SIGHUP"}
 TRACES = {1: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new")},
           2: {"server.strace": ("argv.json", "server"), "tui.strace": ("argv.json", "tui_new"),
               "tui-resume.strace": ("argv-resume.json", "tui_resume")}}
@@ -95,7 +97,7 @@ def metadata(run: Path, part: int) -> tuple[dict[str, dict[str, Any]], list[str]
     return meta, bad
 
 
-def root(raw: bytes, argv: list[str], stop: bytes) -> tuple[bool, bool]:
+def root(raw: bytes, argv: list[str], stop: bytes | None) -> tuple[bool, bool]:
     """Whether the trace opens with the exec of exactly `argv`, and whether its last event for that process
     is the process's end, on a whole last line."""
     lines = raw.splitlines()
@@ -108,7 +110,8 @@ def root(raw: bytes, argv: list[str], stop: bytes) -> tuple[bool, bool]:
     ends = sum(1 for ln in own if ENDED.fullmatch(ln))
     # `exited with N` (we stop it, so any N); killed only by this command's own stop signal, without a core.
     return True, (raw.endswith(b"\n") and last is not None and ends == 1
-                  and (last.group(2) is None or (last.group(2) == stop and last.group(3) is None)))
+                  and (last.group(2) is None or (stop is not None and last.group(2) == stop
+                                                 and last.group(3) is None)))
 
 
 def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
