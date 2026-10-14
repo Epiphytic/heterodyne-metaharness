@@ -169,6 +169,13 @@ def test_a_yes_no_card_has_no_choice_lines_and_the_footer_last(r: AskRow, footer
     assert not any(t.startswith(("yes = ", "no = ")) for t in lines)
 
 
+@pytest.mark.parametrize(("r", "says"), [(YN, "👍 = yes (recommended) · 👎 = no · "),
+                                         (YN_NO, "👍 = no (recommended) · 👎 = yes · ")])
+def test_the_yes_no_answer_line_names_what_each_reaction_records(r: AskRow, says: str) -> None:
+    line = asks.question_card(r)[0].split("\n")[-2]
+    assert line.startswith("Answer: " + says), line
+
+
 def test_a_long_body_is_truncated_and_the_choices_are_not() -> None:
     long = form_row(choices(six_long(), "B"), body="\n".join(f"line {i} of the context" for i in range(300)))
     text, truncated = asks.question_card(long)
@@ -215,9 +222,10 @@ def test_an_approve_emoji_maps_to_the_recommended_option(emoji: str) -> None:
 
 
 @pytest.mark.parametrize("emoji", DENY_SET)
-def test_a_deny_emoji_maps_to_none_or_no(emoji: str) -> None:
+def test_a_deny_emoji_maps_to_none_or_the_option_not_recommended(emoji: str) -> None:
+    """Amendment 1 §1: on a yes/no card 👎 rejects the recommendation; with `no` recommended it is `yes`."""
     assert asks.map_reaction(MC, emoji) == asks.NONE_OF_THESE
-    assert asks.map_reaction(YN, emoji) == "no" and asks.map_reaction(YN_NO, emoji) == "no"
+    assert asks.map_reaction(YN, emoji) == "no" and asks.map_reaction(YN_NO, emoji) == "yes"
     assert asks.map_reaction(BARE, emoji) is None
 
 
