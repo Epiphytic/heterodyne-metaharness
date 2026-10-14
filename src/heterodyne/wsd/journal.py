@@ -40,7 +40,8 @@ from heterodyne.wsd.headroom import Mark, UsageCache, Window, epoch
 from heterodyne.wsd.launches import LAUNCHED, SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
+V2_VERSION = "2"
 V1_VERSION = "1"
 # Plan 3's schema, frozen: a version 1 journal must match it exactly to be upgraded (`upgrade.py`).
 V1_SCHEMA = """
@@ -127,7 +128,14 @@ V2_TABLES = (
     credential_key TEXT PRIMARY KEY, until TEXT, observed_at TEXT NOT NULL, receipt_seq INTEGER NOT NULL)""",
 )
 V2_META = (("usage_receipt_seq", "0"),)     # orders AU-5's usage receipts; unused until then
-SCHEMA = V1_SCHEMA + "".join(f"{stmt};\n" for stmt in V2_TABLES)
+V2_SCHEMA = V1_SCHEMA + "".join(f"{stmt};\n" for stmt in V2_TABLES)
+# Version 3 (plan 4c T7): each launch entry's install pin. SQLite records an added column in the table's
+# own CREATE text, so a new journal runs these too, and its schema is exactly an upgraded one's.
+V3_COLUMNS = (
+    "ALTER TABLE launches ADD COLUMN install TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE launches ADD COLUMN install_digest TEXT NOT NULL DEFAULT ''",
+)
+SCHEMA = V2_SCHEMA + "".join(f"{stmt};\n" for stmt in V3_COLUMNS)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
 
 
@@ -140,8 +148,12 @@ class JournalCorrupt(Exception):
 
 
 class JournalNeedsUpgrade(Exception):
-    """The journal is plan 3's exactly (schema and version 1). Nothing was written; `upgrade.run` upgrades
-    it in one transaction."""
+    """The journal is an earlier version exactly: plan 3's (schema and version 1), for `upgrade.run`, or
+    AU-3's (version 2), for `upgrade.run_2_to_3`. Nothing was written; each upgrades in one transaction."""
+
+    def __init__(self, version: str) -> None:
+        super().__init__(f"the journal is version {version}")
+        self.version = version
 
 
 class JournalBusy(Exception):
@@ -286,7 +298,7 @@ class Adoption:
 _DATA = msgspec.json.Decoder(dict[str, str])
 _LAUNCH_COLS = ("session_key", "generation", "ws", "bead", "role", "profile", "account", "credential_key",
                 "model_passed", "dispatched_at", "native_id", "model_reported", "outcome", "adopted",
-                "journaled_at")
+                "journaled_at", "install", "install_digest")
 LAUNCH_SQL = ", ".join(_LAUNCH_COLS)
 LAUNCH_N = len(_LAUNCH_COLS)
 _RECEIPT = "session_key, generation, kind, refusal, tmux_session, tmux_pane, pane_pid, native_id, error"
@@ -471,6 +483,7 @@ def _expected(schema: str) -> set[tuple[str, str, str, str]]:
 
 
 EXPECTED_SCHEMA = _expected(SCHEMA)
+EXPECTED_V2 = _expected(V2_SCHEMA)
 EXPECTED_V1 = _expected(V1_SCHEMA)
 
 
@@ -484,8 +497,13 @@ def check_v1(db: sqlite3.Connection) -> bool:
     return _schema(db) == EXPECTED_V1 and _version(db) == V1_VERSION
 
 
+def check_v2(db: sqlite3.Connection) -> bool:
+    """Whether the file is AU-3's journal exactly: the version 2 schema and version 2."""
+    return _schema(db) == EXPECTED_V2 and _version(db) == V2_VERSION
+
+
 def _check(db: sqlite3.Connection) -> None:
-    """Version 2 opens; version 1, exactly, needs the upgrade; anything else is refused."""
+    """Version 3 opens; version 1 or 2, exactly, needs its upgrade; anything else is refused."""
     rows = db.execute("PRAGMA integrity_check").fetchall()
     if [tuple(r) for r in rows] != [("ok",)]:
         raise JournalCorrupt("integrity_check failed")
@@ -494,10 +512,11 @@ def _check(db: sqlite3.Connection) -> None:
         if _version(db) != SCHEMA_VERSION:
             raise JournalCorrupt("unknown schema version")
         return
-    if schema == EXPECTED_V1:
-        if _version(db) != V1_VERSION:
-            raise JournalCorrupt("unknown schema version")
-        raise JournalNeedsUpgrade("the journal is version 1")
+    for expected, version in ((EXPECTED_V2, V2_VERSION), (EXPECTED_V1, V1_VERSION)):
+        if schema == expected:
+            if _version(db) != version:
+                raise JournalCorrupt("unknown schema version")
+            raise JournalNeedsUpgrade(version)
     raise JournalCorrupt("schema differs")
 
 

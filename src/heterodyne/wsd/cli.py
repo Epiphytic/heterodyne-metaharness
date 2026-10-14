@@ -17,7 +17,8 @@ indefinitely. The kernel releases the lock with the process. To the journal that
 recovery replays like any other.
 
 A version 1 journal (plan 3's) is upgraded in place before anything else uses it (`upgrade.run`, AU-3 §3).
-If the beads can't be read for it, the file is left untouched and `wsd run` exits 1: retrying is safe.
+If the beads can't be read for it, the file is left untouched and `wsd run` exits 1: retrying is safe. A
+version 2 journal (AU-3's) gets plan 4c's install pin columns the same way (`upgrade.run_2_to_3`).
 """
 
 import argparse
@@ -34,7 +35,7 @@ from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
-from heterodyne.wsd.journal import Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
+from heterodyne.wsd.journal import V2_VERSION, Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
 from heterodyne.wsd.runtime import AgentRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
 from heterodyne.wsd.usage import UsageReader
@@ -103,7 +104,10 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
 def _open(s: WsdSettings, factory: btq.QueueFactory) -> Journal:
     try:
         return Journal(s.journal)
-    except JournalNeedsUpgrade:
+    except JournalNeedsUpgrade as needs:
+        if needs.version == V2_VERSION:
+            upgrade.run_2_to_3(s.journal)          # adds columns only: no bead or account is read
+            return Journal(s.journal)
         if s.accounts is None:
             raise ConfigError("the journal upgrade needs the host's accounts") from None
         upgrade.run(BeadsAdapter(factory), s.accounts, s.journal)

@@ -737,3 +737,13 @@ def test_the_bead_copy_carries_the_pin_and_rebuilds_with_it(tmp_path: Path) -> N
     rig.pickup()
     p = rig.key("btq-1")
     assert rig.journal.launches(p)[0] == before[0] and rig.journal.rebuilt_at(p, 1) is not None
+
+
+@pytest.mark.parametrize("pin", [
+    {"install": "../../elsewhere"}, {"install": PIN_A.install}, {"install_digest": PIN_A.digest},
+    {"install": PIN_A.install, "install_digest": "sha256:short"},
+])
+def test_a_bead_copy_with_a_malformed_or_half_pin_is_unreadable(pin: dict[str, str]) -> None:
+    raw = json.loads(encode_entry(entry()))
+    with pytest.raises(LaunchesUnreadable):
+        decode_launches(json.dumps([{**raw, **pin}]))

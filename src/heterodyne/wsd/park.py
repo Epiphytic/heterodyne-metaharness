@@ -1337,7 +1337,7 @@ class Parker:
                     raise EntryConflict(f"generation {generation} of the operation is not journaled")
                 self._bead_write(entry, f"{kind}.entry!")        # a replay: keep, write or conflict
             else:
-                pinned = self._pin(op, rec, accounts)            # step 2
+                pinned = self._pin(op, rec, accounts, adapter)   # step 2
                 if isinstance(pinned, Launch):
                     return pinned
                 op, entry = pinned
@@ -1374,7 +1374,8 @@ class Parker:
                           worktree, resume=op.kind is OpKind.RESUME and not handoff,
                           ref=op.data.get("ref") or None, generation=entry.generation, native_id=native,
                           account=entry.account, credential_key=entry.credential_key, handoff=handoff,
-                          model=entry.model_passed, repo=Path(rec.repo))
+                          model=entry.model_passed, repo=Path(rec.repo), install=entry.install,
+                          install_digest=entry.install_digest)
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)
@@ -1400,10 +1401,12 @@ class Parker:
         launched = [e for e in self.d.journal.launches(session_key) if e.outcome == LAUNCHED]
         return launched[-1].credential_key if launched else None
 
-    def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts) -> tuple[Op, LaunchEntry] | Launch:
+    def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts,
+             adapter: str) -> tuple[Op, LaunchEntry] | Launch:
         """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
         copy. A Deadline or AccountChanged defers the bead inside this op (AU-4 §3.2 entry 3): no session
-        was dispatched for it, so the tail's stop only confirms that."""
+        was dispatched for it, so the tail's stop only confirms that. The entry pins the adapter's selected
+        install as it reads now (plan 4c T7, D2), or none; a replay dispatches the journaled pin."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
         stale = stale_keys(op)
@@ -1425,8 +1428,14 @@ class Parker:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"generations exhausted at {last}")
             return Launch.ENDED
         n = last + 1
+        try:
+            pin = self.d.selections(adapter) if adapter else None
+        except ConfigError as exc:          # an unreadable selection is not "none selected"
+            self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
+            return Launch.ENDED
         entry = LaunchEntry(rec.session_key, n, self.ws.name, op.bead, rec.role, rec.profile, chosen.account,
-                            chosen.key, self.ws.models.get(rec.profile, ""), False, now())
+                            chosen.key, self.ws.models.get(rec.profile, ""), False, now(),
+                            install=pin.install if pin else "", install_digest=pin.digest if pin else "")
         with j.transaction():
             j.launch_insert(entry)
             op = j.op_step(op.op_id, "entry", {"generation": str(n)})

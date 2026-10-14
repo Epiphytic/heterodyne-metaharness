@@ -2568,7 +2568,7 @@ def test_the_daemon_wires_selections_to_harnesses_toml_and_rereads_it(tmp_path: 
     assert chosen("codex") == two
     selection.write(config, {"codex": Selection("codex", None, (two,))})
     assert chosen("codex") is None                            # only previous installs: nothing current
-    bare = assemble(settings(tmp_path), j, factory(World(tmp_path / "btq-state")), FakeRuntime())
+    bare = assemble(replace(s, config_dir=None), j, factory(World(tmp_path / "btq-state")), FakeRuntime())
     assert bare.schedulers[WS].d.selections("codex") is None
 
 
