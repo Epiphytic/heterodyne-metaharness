@@ -536,3 +536,234 @@ def test_read_bounded_cuts_a_flood_and_drops_a_stall() -> None:
     finally:
         os.close(r)
         os.close(w)
+
+
+# --- btq-rcose: the hook's input is bounded in size and time, and its event is an argument ---
+
+LIFECYCLE = ("SessionStart", "UserPromptSubmit", "Stop", "StopFailure")
+
+
+def spool_exists(run: Path) -> bool:
+    return (run.parent / "home" / ".hz" / "spool.jsonl").exists()
+
+
+def standalone(*args: str) -> list[str]:
+    return [sys.executable, "-I", shim.__file__, "hook", *args]
+
+
+class Fed:
+    """A standalone hook fed `data` by a writer thread, which records whether the shim broke its pipe;
+    stdin is closed after the data unless `close` is False."""
+
+    def __init__(self, argv: list[str], env: dict[str, str], data: bytes, *, close: bool = True) -> None:
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, env=env)
+        self.error: BaseException | None = None
+        self.done = threading.Event()
+        self.writer = threading.Thread(target=self._write, args=(data, close), daemon=True)
+        self.writer.start()
+
+    def _write(self, data: bytes, close: bool) -> None:
+        assert self.proc.stdin is not None
+        try:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+            if close:
+                self.proc.stdin.close()
+        except BaseException as e:  # noqa: BLE001 - recorded for the test to assert on
+            self.error = e
+        finally:
+            self.done.set()
+
+    def result(self, timeout: float) -> tuple[int, bytes]:
+        try:
+            out, _ = self.proc.communicate(timeout=timeout)   # a TimeoutExpired here fails the test
+            self.writer.join(timeout)
+            return self.proc.returncode, out
+        finally:
+            self.proc.kill()
+            self.proc.wait()
+            for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError):
+                        pipe.close()
+
+
+def huge_write(path: str = "/elsewhere/a.py") -> bytes:
+    content = "x" * (shim.MAX_HOOK_INPUT + 1)
+    return json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                       "tool_input": {"file_path": path, "content": content}}).encode()
+
+
+def test_read_bounded_drains_past_the_bound() -> None:
+    limit = 64 * 1024
+    r, w = os.pipe()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            for _ in range(100):
+                os.write(w, b"y")
+            left = limit * 8 - 100
+            while left:
+                left -= os.write(w, b"y" * min(left, 64 * 1024))
+        except BaseException as e:  # noqa: BLE001 - asserted below
+            errors.append(e)
+        finally:
+            os.close(w)
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    try:
+        assert shim.read_bounded(r, limit, 30.0, drain=True) == b"y" * (limit + 1)
+        thread.join(30)
+        assert not thread.is_alive() and errors == []     # the writer finished: nothing broke its pipe
+    finally:
+        os.close(r)
+
+
+@pytest.mark.parametrize("drain", [False, True])
+def test_read_bounded_at_exactly_the_limit(drain: bool) -> None:
+    for size in (10, 11):
+        r, w = os.pipe()
+        try:
+            os.write(w, b"y" * size)
+            os.close(w)
+            assert shim.read_bounded(r, 10, 5.0, drain=drain) == b"y" * size
+        finally:
+            os.close(r)
+
+
+def test_read_bounded_drain_stops_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = 0
+    real_read = os.read
+
+    def counted(fd: int, n: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        return real_read(fd, n)
+
+    monkeypatch.setattr(shim.os, "read", counted)
+    t = Ticking(0.01)
+    zero = os.open("/dev/zero", os.O_RDONLY)         # always readable, never ends
+    try:
+        assert shim.read_bounded(zero, 10, 1.0, clock=t.clock, drain=True) == b"\0" * 11
+    finally:
+        os.close(zero)
+    assert reads >= 2                                 # it went on draining past the bound...
+    assert t.now >= 1.0 and t.now / t.tick >= reads + 1   # ...and read the clock before every read
+    r, w = os.pipe()
+    try:
+        os.write(w, b"y" * 5)                         # under the bound, and no end of input
+        assert shim.read_bounded(r, 10, 0.2, drain=True) == b""
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_an_oversized_tool_call_is_denied_and_drained(run: Path, live: SessionServer) -> None:
+    fed = Fed(standalone("PreToolUse"), env_for(run), huge_write())
+    rc, out = fed.result(timeout=60)
+    assert fed.error is None                          # the CLI's write completes: the shim drained it
+    assert rc == 0 and denied(out.decode()) == shim.TOO_LARGE_REASON
+    assert live.served == 0 and not spool_exists(run)
+
+
+def test_an_oversized_stream_left_open_is_denied_at_the_deadline(run: Path, live: SessionServer) -> None:
+    fed = Fed(standalone("PreToolUse"), env_for(run), huge_write(), close=False)
+    rc, out = fed.result(timeout=shim.HOOK_INPUT_WAIT + 30)
+    assert rc == 0 and denied(out.decode()) == shim.TOO_LARGE_REASON
+    assert live.served == 0 and not spool_exists(run)
+
+
+def test_hook_input_that_never_ends_never_holds_the_shim(run: Path, live: SessionServer) -> None:
+    fed = Fed(standalone("PreToolUse"), env_for(run), json.dumps(bash()).encode(), close=False)
+    rc, out = fed.result(timeout=shim.HOOK_INPUT_WAIT + 30)
+    assert rc == 0 and denied(out.decode()) == shim.DENY_REASON
+    assert live.served == 0 and not spool_exists(run)
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "Stop"])
+def test_a_hook_with_no_stdin(run: Path, live: SessionServer, event: str) -> None:
+    argv = " ".join(standalone(event))
+    proc = subprocess.run(["/bin/sh", "-c", f"exec 0<&-; exec {argv}"], env=env_for(run),
+                          capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 0
+    if event == "PreToolUse":
+        assert denied(proc.stdout.decode()) == shim.DENY_REASON
+    else:
+        assert proc.stdout == b""
+    assert live.served == 0
+
+
+def test_a_large_hook_input_under_the_bound_is_still_read_whole(run: Path, tmp_path: Path) -> None:
+    cfg = json.loads((run / "shim.json").read_text())
+    (run / "shim.json").write_text(json.dumps({**cfg, "wait_seconds": 0.5}))
+    mib = "x" * (1 << 20)
+    edit = {"hook_event_name": "PreToolUse", "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "wt" / "a.py"), "content": mib}}
+    proc = subprocess.run(standalone("PreToolUse"), env=env_for(run), input=json.dumps(edit).encode(),
+                          capture_output=True, timeout=60, check=False)
+    assert (proc.returncode, proc.stdout) == (0, b"")        # wsd down: allowed on the full event
+    s = SessionServer(run / "s.sock", TOKEN, run.parent / "events.jsonl")
+    s.start()
+    try:
+        stop = {"hook_event_name": "Stop", "session_id": "s1", "last_assistant_message": mib}
+        proc = subprocess.run(standalone("Stop"), env=env_for(run), input=json.dumps(stop).encode(),
+                              capture_output=True, timeout=60, check=False)
+        assert (proc.returncode, proc.stdout) == (0, b"")
+        assert s.turns().stops == 1
+    finally:
+        s.close()
+    [payload] = sent(run)
+    assert cast(dict[str, object], payload["last_assistant_message"])["truncated"] is True
+
+
+def test_a_lifecycle_hook_with_bad_input_is_silent(run: Path, live: SessionServer) -> None:
+    t = FakeTime()
+    for event in LIFECYCLE:
+        oversize = json.dumps({"hook_event_name": event, "pad": "x" * (shim.MAX_HOOK_INPUT + 1)}).encode()
+        for raw in (oversize, b"not json"):
+            assert shim.run_hook(raw, env_for(run), event=event, clock=t.clock, sleep=t.sleep) == (0, "")
+    late = [Fed(standalone(e), env_for(run), json.dumps({"hook_event_name": e}).encode(), close=False)
+            for e in LIFECYCLE]
+    assert [f.result(timeout=shim.HOOK_INPUT_WAIT + 30) for f in late] == [(0, b"")] * len(LIFECYCLE)
+    assert live.served == 0 and not spool_exists(run)
+
+
+@pytest.mark.parametrize("args", [(), ("Bogus",), ("Stop", "extra")], ids=["none", "unknown", "extra"])
+def test_the_event_argument_fails_closed(run: Path, live: SessionServer, args: tuple[str, ...]) -> None:
+    proc = subprocess.run(standalone(*args), env=env_for(run), input=b"not json", capture_output=True,
+                          timeout=60, check=False)
+    assert proc.returncode == 0 and denied(proc.stdout.decode()) == shim.DENY_REASON
+    assert live.served == 0
+
+
+def test_an_event_argument_that_disagrees_with_the_payload_is_denied(run: Path, live: SessionServer) -> None:
+    t = FakeTime()
+
+    def under(event: str, payload: dict[str, object]) -> tuple[int, str]:
+        return shim.run_hook(json.dumps(payload).encode(), env_for(run), event=event, clock=t.clock,
+                             sleep=t.sleep)
+
+    assert denied(under("Stop", bash())[1]) == shim.DENY_REASON
+    assert denied(under("PreToolUse", {"hook_event_name": "Stop"})[1]) == shim.DENY_REASON
+    assert live.served == 0 and sent(run) == []
+    assert under("PreToolUse", bash()) == (0, "")             # matching payloads: as before
+    assert under("Stop", {"hook_event_name": "Stop"}) == (0, "")
+    assert live.turns().stops == 1
+
+
+def test_run_hook_denies_input_over_the_bound_unparsed(run: Path, live: SessionServer,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_parse(_: bytes) -> object:
+        raise AssertionError("parsed")
+
+    monkeypatch.setattr(shim.json, "loads", no_parse)
+    raw = huge_write()
+    t = FakeTime()
+    assert denied(shim.run_hook(raw, env_for(run), event="PreToolUse", clock=t.clock,
+                                sleep=t.sleep)[1]) == shim.TOO_LARGE_REASON
+    assert denied(shim.run_hook(raw, env_for(run), clock=t.clock, sleep=t.sleep)[1]) == shim.TOO_LARGE_REASON
+    assert shim.run_hook(raw, env_for(run), event="Stop", clock=t.clock, sleep=t.sleep) == (0, "")
+    assert live.served == 0 and not spool_exists(run)
