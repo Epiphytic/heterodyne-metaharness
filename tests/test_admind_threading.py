@@ -138,6 +138,12 @@ def without_message_id(h: Harness, key: str) -> None:
     h.daemon.client.send_final = send_final       # type: ignore[method-assign]
 
 
+def sent_unidentified(h: Harness, key: str) -> bool:
+    """The outbox row `key` is recorded as sent, with no message ID."""
+    row = h.store.db.execute("SELECT status, message_id FROM outbox WHERE key = ?", (key,)).fetchone()
+    return row is not None and tuple(row) == ("sent", None)
+
+
 @needs_tmux
 def test_chunk_zero_sent_without_a_message_id(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
@@ -145,7 +151,8 @@ def test_chunk_zero_sent_without_a_message_id(tmp_path: Path) -> None:
         without_message_id(h, "t:0")
         h.daemon.post_parts("t", PARTS)
         h.daemon.post("after", "unrelated", None)
-        await drained(h, "t:0", "t:1", "t:2", "after")
+        await drained(h, "t:1", "t:2", "after")
+        assert sent_unidentified(h, "t:0")      # sent_mid needs the recorded ID, and there is none
         assert [reply_to(h, k) for k in ("t:1", "t:2")] == [None, None]
         assert fallback(h, "t:1", "no-message-id") and fallback(h, "t:2", "no-message-id")
     run_with(tmp_path, scenario)
