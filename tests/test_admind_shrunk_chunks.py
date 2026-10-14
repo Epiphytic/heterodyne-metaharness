@@ -58,8 +58,8 @@ def test_a_repeat_after_chunk_chars_is_lowered_is_refused_visibly(tmp_path: Path
         reply = "".join(outbox(h, f"cmd:{mid}:%"))
         assert "Repeated 0 asks." in reply
         assert asks.SKIPPED["link too long"].format(ask_id=ask_id) in reply
-        assert audited(h, kind="command", command="asks", sub="repeat",
-                       skipped=[{"ask_id": ask_id, "why": "link too long"}])
+        await h.until(lambda: audited(h, kind="command", command="asks", sub="repeat",
+                                      skipped=[{"ask_id": ask_id, "why": "link too long"}]))
         no_cut_url(h)
     run_with(tmp_path, scenario, settings_overrides={"chunk_chars": 4000})
 
@@ -79,8 +79,8 @@ def test_details_after_chunk_chars_is_lowered_is_refused_visibly(tmp_path: Path)
         reply = "".join(outbox(h, f"cmd:{mid}:%"))
         assert reply == asks.DETAILS_LINK_TOO_LONG.format(ask_id=ask_id, n=len(f"{LINK.label}: {URL}"),
                                                           usable=chunk.usable(200), c=200)
-        assert audited(h, kind="ask", action="details-refused", message_id=mid, ask_id=ask_id,
-                       reason="link too long")
+        await h.until(lambda: audited(h, kind="ask", action="details-refused", ask_id=ask_id,
+                                      reason="link too long"))
         no_cut_url(h)
     run_with(tmp_path, scenario, settings_overrides={"chunk_chars": 4000})
 

@@ -980,7 +980,11 @@ class Admind:
                     skipped.append((row.ask_id, row.status))
                     continue
                 if sub == "repeat":
-                    self.repeat_card(mid, row, at)
+                    try:
+                        self.repeat_card(mid, row, at)
+                    except chunk.TooWide:      # nothing queued: a link is never cut (K23, r1 B3)
+                        skipped.append((row.ask_id, "link too long"))
+                        continue
                 else:
                     target = self.store.bump_target(row.ask_id)
                     if target is None:
@@ -1038,7 +1042,8 @@ class Admind:
 
     def repeat_card(self, mid: str, row: AskRow, at: datetime) -> None:
         """The ask's whole card again, top-level (B11): an approval's stored checked chunks as they are
-        (R21), a question's or merge's whole text split; recorded with its own part count (B12)."""
+        (R21), a question's or merge's whole text split; recorded with its own part count (B12). Raises
+        chunk.TooWide, with nothing queued, if a link no longer fits a chunk."""
         if row.kind == "approval":
             parts = asks.stored_details(row)
         else:
@@ -1090,7 +1095,17 @@ class Admind:
         if row.kind == "approval":     # the chunks checked when it was posted, as they are (R21, r2-1)
             parts = asks.stored_details(row)
         else:
-            parts = asks.full_chunks(row, self.s.chunk_chars)
+            try:
+                parts = asks.full_chunks(row, self.s.chunk_chars)
+            except chunk.TooWide as exc:   # a link is never cut (K23, r1 B3): refused, nothing queued
+                text = asks.DETAILS_LINK_TOO_LONG.format(ask_id=ask_id, n=exc.length, usable=exc.usable,
+                                                         c=self.s.chunk_chars)
+                with self.store.transaction():
+                    self.touch(ask_id)
+                    self.finish(mid, "done", text, "cmd")
+                self.audit.write("ask", action="details-refused", message_id=mid, ask_id=ask_id,
+                                 reason="link too long")
+                return
         with self.store.transaction():
             for i, part in enumerate(parts):
                 self.post(f"askd:{ask_id}:{mid}:{i}", part, mid, lane=2)

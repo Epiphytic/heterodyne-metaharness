@@ -43,6 +43,9 @@ TOO_LONG = "this bead is too long to decide from the phone; decide it at the ter
 LINK_TOO_LONG = ("this bead has a link longer than this group's message size allows ({n} characters, "
                  "{usable} usable at chunk_chars {c}); shorten the link in the bead or raise chunk_chars")
 ASK_LINK_TOO_LONG = "a link line is longer than this group's message size allows; shorten it"
+DETAILS_LINK_TOO_LONG = ("Ask {ask_id} has a link longer than this group's message size now allows "
+                         "({n} characters, {usable} usable at chunk_chars {c}), so it can't be sent in full; "
+                         "raise chunk_chars. Nothing was sent.")
 MAX_TITLE, MIN_BODY_CHARS, MAX_BODY = 200, 80, 16_000
 ACTIVE = ASK_ACTIVE      # counted by MAX_OPEN; blocked is terminal (r2-4)
 TERMINAL = ("approved", "denied", "stale", "superseded", "cancelled", "blocked")
@@ -422,12 +425,10 @@ def full_text(row: AskRow) -> str:
 
 
 def full_chunks(row: AskRow, chunk_chars: int) -> list[str]:
-    """`!details` and `!asks repeat` for a question or merge: the whole ask, packed as its card was. If the
-    chunk size has shrunk since it was posted so that a link no longer fits, it is split as plain text."""
-    try:
-        return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
-    except chunk.TooWide:
-        return chunk.split(full_text(row), chunk_chars)
+    """`!details` and `!asks repeat` for a question or merge: the whole ask, packed as its card was. Raises
+    chunk.TooWide if the chunk size has shrunk since it was posted so that a link no longer fits: a link is
+    never cut (K23), so the caller refuses visibly."""
+    return _packed(row, redact(context(row)).rstrip("\n"), chunk_chars)
 
 
 # --- answers on question cards (K17q, K18q, K19) -------------------------------------------------
@@ -649,7 +650,9 @@ def reminder(row: AskRow, at: datetime, every: int | None = None) -> str:
 NO_OUTSTANDING = "No outstanding asks."
 SKIPPED = {"answered": "{ask_id} is answered; awaiting its asker", "deciding": "{ask_id} is deciding",
            "uncertain": "{ask_id} is uncertain",
-           "card not delivered": "{ask_id}: card not delivered; try !asks repeat"}
+           "card not delivered": "{ask_id}: card not delivered; try !asks repeat",
+           "link too long": "{ask_id}: a link is longer than this group's message size now allows; "
+                            "raise chunk_chars to repeat it"}
 
 
 def remind_summary(verb: str, done: list[str], skipped: list[tuple[str, str]]) -> str:
