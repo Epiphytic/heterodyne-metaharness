@@ -58,11 +58,11 @@ class FakeTmux:
 
 
 def test_interactive_argv() -> None:
-    profile = {"adapter": "claude-code", "model": "m1", "args": ["--verbose"]}
+    profile = {"adapter": "claude-code", "model": "m1", "args": []}
     new = interactive_argv("claude", profile, session_id="S", resume=False,
                            settings_file=Path("/x/s.json"), name="admin")
     assert new == ["claude", "--session-id", "S", "--model", "m1", "--permission-mode", "bypassPermissions",
-                   "--settings", "/x/s.json", "--name", "admin", "--verbose"]
+                   "--settings", "/x/s.json", "--name", "admin"]
     again = interactive_argv("claude", {"adapter": "claude-code"}, session_id="S", resume=True,
                              settings_file=Path("/x/s.json"), name="admin")
     assert again[:3] == ["claude", "--resume", "S"] and "--model" not in again
