@@ -2,6 +2,7 @@
 Shared by test_deploy_store_helper.py and test_deploy_platform.py."""
 
 import grp
+import json
 import os
 import pwd
 import re
@@ -15,6 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import pytest
 from harness_env import GIT_ENV, git
@@ -40,6 +42,12 @@ def script_constants() -> dict[str, str]:
 
 
 MANIFEST = DEPLOY / "manifest.sh"
+ADMIND, WSD = "heterodyne-admind.service", "heterodyne-wsd.service"
+# A unit made by hand before the installer (the dev checkout's), for --adopt
+HAND_MADE = ("[Unit]\nDescription=admind, by hand\n[Service]\n"
+             "ExecStart=/srv/dev/.venv/bin/python3 -m heterodyne.admind run\n"
+             "[Install]\nWantedBy=default.target\n")
+MANAGER = str(Path(__file__).resolve().with_name("fake_user_manager.py"))
 
 
 HOST_DIRS = ("var/lib", "usr/local/libexec", "etc/systemd/system")
@@ -61,14 +69,17 @@ SEALED = ("", "var", "var/lib", "usr", "usr/local", "usr/local/libexec", "etc", 
 MUTATING = ("install ", "useradd ", "systemctl daemon-reload", "systemctl enable", "systemctl start",
             "systemctl restart", "tune2fs -O")
 
-# Every shim logs its argv to calls.log and fails (exit 1) when a line of `fail` is a prefix of
-# "<name> <args>". Their state is files beside them, so a cleared environment (`env -i`) doesn't lose it.
+# Every shim logs its argv to calls.log, one line, with an argument that spans lines (a `python3 -c`
+# script) as <script>, and fails (exit 1) when a line of `fail` is a prefix of that line. Their state is files
+# beside them, so a cleared environment (`env -i`) doesn't lose it.
 SHIM_HEAD = r"""#!/bin/bash
 S=@SHIMS@
 name=${0##*/}
-printf '%s\n' "$name $*" >>"$S/calls.log"
+logged=()
+for a in "$@"; do [[ $a == *$'\n'* ]] && a='<script>'; logged+=("$a"); done
+printf '%s\n' "$name ${logged[*]}" >>"$S/calls.log"
 while IFS= read -r f; do
-    [[ -n $f && "$name $*" == "$f"* ]] && { echo "$name: injected failure" >&2; exit 1; }
+    [[ -n $f && "$name ${logged[*]}" == "$f"* ]] && { echo "$name: injected failure" >&2; exit 1; }
 done <"$S/fail"
 """
 SHIMS = {
@@ -77,9 +88,20 @@ SHIMS = {
 exec /usr/bin/id "$@"
 """,
     # `-u USER -- CMD...` runs CMD as this user, then `hook CMD...` if there is one; `-l USER -c CMD` runs
-    # CMD in this environment
+    # CMD in this environment. A run of deploy/platform_state.py (`python3 -I -c SCRIPT SUB ARGS...`) logs
+    # "SUB ARGS" to platform.log, and fails (exit 1) when a line of `fail-platform` is a prefix of it.
     "runuser": r"""if [[ $1 == -u && $3 == -- ]]; then
     shift 3
+    args=("$@")
+    for ((i = 0; i + 1 < ${#args[@]}; i++)); do
+        if [[ ${args[i]} == -c && ${args[i+1]} == *'prog="platform_state.py"'* ]]; then
+            sub="${args[*]:i+2}"
+            printf '%s\n' "$sub" >>"$S/platform.log"
+            while IFS= read -r f; do
+                [[ -n $f && $sub == "$f"* ]] && { echo "failed: injected" >&2; exit 1; }
+            done <"$S/fail-platform"
+        fi
+    done
     rc=0
     "$@" || rc=$?
     if [[ -x $S/hook ]]; then "$S/hook" "$@" >/dev/null 2>&1 </dev/null; fi
@@ -170,14 +192,13 @@ exit "$rc"
 [[ -f $S/linger ]] || exit 1
 cat "$S/linger"
 """,
-    # the service user's manager, reached as `systemctl --user` with the bus environment it logs
+    # the service user's manager (tests/fake_user_manager.py), reached as `systemctl --user` with the bus
+    # environment it logs
     "user-systemctl": r"""printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "${XDG_RUNTIME_DIR-}" \
     "${DBUS_SESSION_BUS_ADDRESS-}" >"$S/user-bus.env"
-case $1 in
-    is-system-running) read -r s <"$S/user-system"; echo "$s"; [[ $s == running ]] ;;
-    *) exit 99 ;;
-esac
+exec @PYTHON@ @MANAGER@ @ROOT@ "$S" "$@"
 """,
+    "journalctl": "",
     # `cache dir` is `uvcache`; `sync` logs its UV_CACHE_DIR to uv-env.log and the rest of its uv settings to
     # uv-sync.env, fails as an offline cache miss with `uv-miss` (printing a sum, for the mask), and
     # otherwise writes the fake venv into the project's .venv/bin
@@ -224,9 +245,11 @@ exec @PYTHON@ -m heterodyne.wsd "$@"
 cat "$S/config-check"
 exit "$(cat "$S/config-check-rc")"
 """,
+    # status: wsctl-rc's exit if there is one; else up when the fake manager runs wsd, or `wsd-outside`
     "wsctl": r"""env >"$S/env-wsctl.log"
 [[ $1 == status ]] || exit 99
-exit "$(cat "$S/wsctl-rc")"
+if [[ -f $S/wsctl-rc ]]; then exit "$(cat "$S/wsctl-rc")"; fi
+[[ $(cat "$S/u/heterodyne-wsd.service/active" 2>/dev/null) == active || -f $S/wsd-outside ]]
 """,
 }
 
@@ -235,13 +258,13 @@ def state() -> dict[str, str]:
     """A host where the store helper's socket is in place and verity is on."""
     return {
         "fail": "", "uids": "", "active": "active\n", "need-reload": "no\n", "linger": "yes\n",
-        "user-system": "running\n",
         "props": f"Listen={LISTEN} (Stream)\nSocketGroup={MY_GROUP}\nSocketMode=0660\n",
         "sockstat": f"socket {defaults()['owner']} {MY_GROUP} 660\n",
         "mount": "ext4 /dev/fake0\n",
         "e2fsprogs": "tune2fs 1.47.0 (5-Feb-2023)\n",
         "superblock": FEATURES_OFF.replace("ext_attr", "ext_attr verity"),
-        "config-check-rc": "0\n", "admind-initialised-rc": "0\n", "wsctl-rc": "0\n",
+        "config-check-rc": "0\n", "admind-initialised-rc": "0\n", "fail-platform": "",
+        "user-system": "running\n", "manager-env": "PATH=/usr/bin:/bin\n",
         "config-check": "harnesses.store = /var/lib/heterodyne/harnesses    (defaults)\n",
     }
 
@@ -357,6 +380,126 @@ class Host:
     def installed(self, unit: Path) -> bytes:
         return (self.root / "etc/systemd/system" / unit.name).read_bytes()
 
+    # --- the platform's user state (design btq-v7sgt D4, D6) ---
+
+    def unit_file(self, unit: str) -> Path:
+        return self.home() / ".config/systemd/user" / unit
+
+    def install_dir(self) -> Path:
+        return self.home() / ".local/share/heterodyne/install"
+
+    def record(self) -> dict[str, Any]:
+        return json.loads((self.install_dir() / "record.json").read_text())
+
+    def backups(self) -> list[Path]:
+        d = self.install_dir() / "backup"
+        return sorted(d.iterdir()) if d.is_dir() else []
+
+    def platform_calls(self) -> list[str]:
+        """Each platform_state.py run's "SUB ARGS", in order."""
+        f = self.shims / "platform.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def manager(self, *args: str) -> None:
+        """The fake user manager, called as the service user would call it (logged, like any call)."""
+        subprocess.run([str(self.shims / "user-systemctl"), *args], env={"HOME": self.real_home()},
+                       check=True, capture_output=True, timeout=60)
+
+    def unit_state(self, unit: str) -> Path:
+        d = self.shims / "u" / unit
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def pid(self, unit: str) -> str:
+        f = self.unit_state(unit) / "pid"
+        return f.read_text().strip() if f.exists() else "0"
+
+    def proc(self, unit: str) -> Path:
+        return self.root / "proc" / self.pid(unit)
+
+    def set_unit(self, unit: str, *, active: str) -> None:
+        """The unit stopped, as `inactive` or `failed`."""
+        if self.pid(unit) != "0":
+            shutil.rmtree(self.proc(unit))
+        d = self.unit_state(unit)
+        (d / "active").write_text(f"{active}\n")
+        (d / "sub").write_text("failed\n" if active == "failed" else "dead\n")
+        (d / "pid").write_text("0\n")
+
+    def process_env(self, unit: str) -> dict[str, str]:
+        raw = (self.proc(unit) / "environ").read_bytes()
+        return {k: v for k, _, v in (item.decode().partition("=") for item in raw.split(b"\0") if item)}
+
+    def drift_process(self, unit: str, drift: str) -> None:
+        """The running process, other than its unit: its argv, its unit revision, or a state dir the
+        manager's environment gave it."""
+        if drift == "argv":
+            (self.proc(unit) / "cmdline").write_bytes(b"/usr/bin/python3\0-m\0heterodyne.admind\0run\0")
+            return
+        env = self.process_env(unit)
+        if drift == "rev":
+            env["HETERODYNE_UNIT_REV"] = "0" * 12
+        else:
+            env["HETERODYNE_STATE_DIR"] = "/elsewhere/state"
+        environ = b"".join(f"{k}={v}".encode() + b"\0" for k, v in env.items())
+        (self.proc(unit) / "environ").write_bytes(environ)
+
+    def drop_in(self, unit: str, name: str, text: str) -> None:
+        d = self.unit_file(unit).with_name(f"{unit}.d")
+        d.mkdir(exist_ok=True)
+        (d / name).write_text(text)
+
+    def flap(self, unit: str) -> None:
+        """The unit restarts on its own just after it starts."""
+        (self.unit_state(unit) / "flap").write_text("")
+
+    def hide_proc(self, unit: str) -> None:
+        (self.proc(unit) / "environ").unlink()
+
+    def hand_made_admind(self, kind: str = "file") -> bytes:
+        """admind's unit made by hand: a file the manager runs (enabled and active), a symlink to one, or a
+        directory in its place."""
+        f = self.unit_file(ADMIND)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "symlink":
+            (self.home() / "admind.service").write_text(HAND_MADE)
+            f.symlink_to(self.home() / "admind.service")
+        elif kind == "directory":
+            f.mkdir()
+        else:
+            f.write_text(HAND_MADE)
+            for args in (("daemon-reload",), ("enable", ADMIND), ("start", ADMIND)):
+                self.manager(*args)
+            self.clear_calls()
+        return HAND_MADE.encode()
+
+    def selftest_unit(self) -> None:
+        f = self.unit_file("heterodyne-admind-selftest.service")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("[Service]\nExecStart=/bin/true\n")
+
+    def new_commit(self) -> None:
+        """A second commit in the checkout, which the pinned form then names."""
+        (self.repo / "NEWS").write_text("a second commit\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "second")
+        self.commit = git(self.repo, "rev-parse", "HEAD").decode().strip()
+        self.sums = manifest(self.repo, self.commit)
+
+    def home_snapshot(self) -> dict[str, tuple[int, int, bytes]]:
+        """Every path under the fake home but the scratch parent (and .cache, which holds it), which must be
+        empty."""
+        cache = self.home() / ".cache/heterodyne"
+        assert not cache.exists() or list(cache.iterdir()) == []
+        out = {}
+        for p in sorted(self.home().rglob("*")):
+            if p in (cache, cache.parent):
+                continue
+            st = p.lstat()
+            data = p.read_bytes() if p.is_file() and not p.is_symlink() else b""
+            out[str(p.relative_to(self.home()))] = (st.st_mode, st.st_mtime_ns, data)
+        return out
+
 
 def git_env(repo: Path, extra: dict[str, str], *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], env=GIT_ENV | extra, capture_output=True,
@@ -400,7 +543,7 @@ def bind_bus(d: Path) -> socket.socket:
 def host_fixture(tmp_path: Path) -> Iterator[Host]:
     """The fake host; import `host_fixture` to use it as `host`."""
     root = tmp_path / "root"
-    for d in (*HOST_DIRS, "run", "sys/fs/ext4/features", pwd.getpwnam(ME).pw_dir.removeprefix("/")):
+    for d in (*HOST_DIRS, "run", "proc", "sys/fs/ext4/features", pwd.getpwnam(ME).pw_dir.removeprefix("/")):
         (root / d).mkdir(parents=True, exist_ok=True)
     (root / "sys/fs/ext4/features/verity").write_text("")
     repo = root / CHECKOUT.removeprefix("/")
@@ -409,6 +552,8 @@ def host_fixture(tmp_path: Path) -> Iterator[Host]:
     shims.mkdir()
     for name, body in SHIMS.items():
         text = (SHIM_HEAD + body).replace("@SHIMS@", shlex.quote(str(shims)))
+        text = text.replace("@PYTHON@", shlex.quote(sys.executable))
+        text = text.replace("@MANAGER@", shlex.quote(MANAGER))
         (shims / name).write_text(text.replace("@ROOT@", shlex.quote(str(root))).replace("@LISTEN@", LISTEN))
         (shims / name).chmod(0o755)
     for name, text in state().items():
@@ -475,7 +620,7 @@ def install_refusal(host: Host, out: subprocess.CompletedProcess[str]) -> str:
 
 
 ALL_IN_PLACE = {"store": "changed", "units": "changed", "release": "changed", "config": "ok", "verity": "ok",
-                "services": "not run"}
+                "services": "changed"}
 
 
 def readme_block(name: str) -> str:

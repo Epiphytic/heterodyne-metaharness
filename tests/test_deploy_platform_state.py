@@ -229,6 +229,15 @@ def test_release_and_drop(p: Paths) -> None:
     assert p.entry() is None
 
 
+def test_record_show_names_the_release_and_each_unit_without_a_digest(p: Paths) -> None:
+    out = run("record-show", "--record", str(p.record))
+    assert (out.returncode, out.stdout) == (0, "release -\n")
+    adopt_through_created(p)
+    assert run("record-release", "--record", str(p.record), "--release", C).returncode == 0
+    out = run("record-show", "--record", str(p.record))
+    assert out.stdout == f"release {C}\nunit {U} written created\n"
+
+
 def test_the_marker_is_the_renderers() -> None:
     from heterodyne import units
     assert P.MARKER_PREFIX == units.MARKER_PREFIX.encode() and MARKED.startswith(units.MARKER_PREFIX)

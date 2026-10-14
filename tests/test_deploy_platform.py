@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 from deploy_host import (
+    ADMIND,
+    FEATURES_OFF,
     REPO,
+    WSD,
     Host,
     git_show,
     hook,
@@ -280,3 +283,295 @@ def test_a_build_against_a_hardlink_copy_of_the_cache_leaves_the_original_unchan
     assert (proj / ".venv").is_dir()
     assert files_of(tmp_path / "orig") == snap
     assert len(files_of(tmp_path / "copy")) > len(snap)
+
+
+# --- the services (D4, D6) ---
+
+def user_calls(host: Host, *verbs: str) -> list[str]:
+    return [c for c in host.calls() if c.startswith("user-systemctl ") and c.split()[1] in verbs]
+
+
+def started(host: Host) -> list[list[str]]:
+    return [c.split()[1:] for c in user_calls(host, "start", "restart")]
+
+
+MARKER = "# Rendered by heterodyne's deploy/install.sh for release "
+
+
+def test_a_fresh_install_writes_reloads_enables_and_starts_admind_then_wsd(host: Host) -> None:
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["services"] == "changed"
+    assert started(host) == [["start", ADMIND], ["start", WSD]]
+    calls = host.calls()
+    assert calls.index("user-systemctl daemon-reload") < calls.index(f"user-systemctl start {ADMIND}")
+    assert [c.split()[2] for c in user_calls(host, "enable")] == [ADMIND, WSD]
+    for u in (ADMIND, WSD):
+        assert host.unit_file(u).read_text().startswith(f"{MARKER}{host.commit};")
+        assert host.record()["units"][u] == {"origin": "created", "state": "written"}
+    assert host.record()["release"] == host.commit
+    never_touched_the_manager(host)
+
+
+def test_verity_runs_before_any_service_starts(host: Host) -> None:
+    host.put("superblock", FEATURES_OFF)
+    assert installer(host).returncode == 0
+    calls = host.calls()
+    assert calls.index("tune2fs -O verity /dev/fake0") < calls.index(f"user-systemctl start {ADMIND}")
+
+
+def test_a_rerun_in_place_starts_nothing(host: Host) -> None:
+    installer(host)
+    host.clear_calls()
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["services"] == "ok"
+    assert user_calls(host, "start", "restart", "daemon-reload", "enable", "reset-failed") == []
+
+
+@pytest.mark.parametrize(("state", "verbs"), [("inactive", ["start"]), ("failed", ["reset-failed", "start"])])
+def test_an_inactive_or_failed_service_is_started(host: Host, state: str, verbs: list[str]) -> None:
+    installer(host)
+    host.set_unit(WSD, active=state)
+    host.clear_calls()
+    assert installer(host).returncode == 0
+    assert [c.split()[1] for c in user_calls(host, "start", "restart", "reset-failed")] == verbs
+
+
+@pytest.mark.parametrize("drift", ["argv", "rev", "manager-state-dir"])
+def test_a_running_process_that_differs_is_restarted(host: Host, drift: str) -> None:
+    installer(host)
+    host.drift_process(ADMIND, drift)
+    host.clear_calls()
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert started(host) == [["restart", ADMIND]]
+
+
+@pytest.mark.parametrize(("dropin", "prop"), [
+    ("[Service]\nExecStart=\nExecStart=/usr/bin/python3 -m heterodyne.other run\n", "ExecStart"),
+    ("[Service]\nEnvironment=PATH=/opt/bin\n", "Environment"),
+])
+def test_a_drop_in_that_changes_the_identity_fails_and_restarts_nothing(host: Host, dropin: str,
+                                                                        prop: str) -> None:
+    installer(host)
+    host.drop_in(ADMIND, "10-x.conf", dropin)
+    host.clear_calls()
+    out = installer(host)
+    assert out.returncode == 1 and summary(out)["services"].startswith("failed")
+    assert prop in out.stderr and "drop-in 10-x.conf" in out.stderr
+    assert started(host) == []
+
+
+def test_a_drop_in_that_changes_nothing_compared_is_a_note(host: Host) -> None:
+    installer(host)
+    host.drop_in(ADMIND, "10-nice.conf", "[Service]\nNice=5\n")
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert f"note: {ADMIND} has drop-ins, which change nothing the installer compares: 10-nice.conf" \
+        in out.stdout.splitlines()
+
+
+def test_need_daemon_reload_left_after_the_reload_fails(host: Host) -> None:
+    host.put("user-reload-no-effect", "")
+    out = installer(host)
+    assert out.returncode == 1
+    assert "systemd still has an old copy of a platform unit after daemon-reload" in out.stderr
+    assert "NeedDaemonReload" not in out.stderr
+    assert started(host) == []
+
+
+def test_a_wsd_that_is_not_ready_fails_with_the_journal(host: Host) -> None:
+    host.put("wsctl-rc", "1\n")
+    out = installer(host)
+    assert out.returncode == 1 and f"{WSD} is not ready" in out.stderr
+    assert f"journalctl --user -u {WSD} -n 20 --no-pager" in host.calls()
+
+
+def test_an_admind_that_restarts_during_readiness_fails_the_recheck(host: Host) -> None:
+    host.flap(ADMIND)
+    out = installer(host)
+    assert out.returncode == 1 and f"{ADMIND} restarted while it was checked" in out.stderr
+    assert f"journalctl --user -u {ADMIND} -n 20 --no-pager" in host.calls()
+
+
+def test_an_unreadable_proc_is_not_a_match_and_the_restart_is_rechecked(host: Host) -> None:
+    installer(host)
+    host.hide_proc(ADMIND)
+    host.clear_calls()
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert started(host) == [["restart", ADMIND]]
+    assert f"ok: {ADMIND} is up and runs the render" in out.stdout.splitlines()
+
+
+def test_a_wsd_running_outside_its_unit_refuses_before_any_change(host: Host) -> None:
+    installer(host)
+    host.set_unit(WSD, active="inactive")
+    host.put("wsd-outside", "")      # an older wsd answers on its socket
+    host.clear_calls()
+    assert install_refusal(host, installer(host)) == "a wsd is running outside its unit: stop it first"
+    assert started(host) == []
+
+
+def test_without_a_built_release_a_wsd_outside_its_unit_is_a_note(host: Host) -> None:
+    out = installer(host, "--dry-run")
+    assert "note: no built release has wsctl, so a wsd outside its unit can't be looked for" in out.stdout
+
+
+def test_a_contaminated_manager_environment_changes_nothing_the_installer_checked(host: Host) -> None:
+    dirty = {"BTQ_REPO": "/elsewhere/repo", "HETERODYNE_CONFIG_DIR": "/elsewhere/c",
+             "HETERODYNE_STATE_DIR": "/elsewhere/s", "XDG_CONFIG_HOME": "/elsewhere/xc",
+             "XDG_STATE_HOME": "/elsewhere/xs", "XDG_DATA_HOME": "/elsewhere/xd", "PATH": "/elsewhere/bin"}
+    host.put("manager-env", "".join(f"{k}={v}\n" for k, v in dirty.items()))
+    before = (host.shims / "manager-env").read_bytes()
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    for u in (ADMIND, WSD):
+        env = host.process_env(u)
+        assert env["HETERODYNE_CONFIG_DIR"] == f"{host.real_home()}/.config/heterodyne"
+        assert env["HETERODYNE_STATE_DIR"] == f"{host.real_home()}/.local/state/heterodyne"
+        assert env["PATH"].startswith(f"{release_dir(host)}/.venv/bin:")
+        assert not {"BTQ_REPO", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"} & set(env)
+    for name in ("heterodyne", "admind", "wsctl"):
+        assert host.env_of(name)["HETERODYNE_STATE_DIR"] == f"{host.real_home()}/.local/state/heterodyne"
+    assert (host.shims / "manager-env").read_bytes() == before
+    never_touched_the_manager(host)
+
+
+# --- adoption, and a failure then a rerun ---
+
+def test_a_hand_made_unit_without_adopt_refuses_before_any_change(host: Host) -> None:
+    host.hand_made_admind()
+    assert install_refusal(host, installer(host)) == (
+        f"{ADMIND} was not written by the installer: run with --adopt to replace it (the old file is kept)")
+    assert user_calls(host, "daemon-reload", "enable", "start", "restart") == []
+
+
+def test_adopt_backs_up_records_replaces_and_restarts_once(host: Host) -> None:
+    old = host.hand_made_admind()
+    out = installer(host, "--adopt")
+    assert out.returncode == 0, out.stdout + out.stderr
+    order = [c.split() for c in host.platform_calls()
+             if c.split()[0] in ("backup", "record-set", "write") and ADMIND in c]
+    assert [c[0] + (f" {c[4]}" if c[0] == "record-set" else "") for c in order] == [
+        "backup", "record-set writing", "write", "record-set written"]
+    [b] = host.backups()
+    assert b.read_bytes() == old
+    assert host.record()["units"][ADMIND]["origin"] == "adopted"
+    assert started(host) == [["restart", ADMIND], ["start", WSD]]
+
+
+@pytest.mark.parametrize(("fail_at", "rerun_args", "backups"), [
+    (f"record-set --unit {ADMIND} --state writing", ("--adopt",), 2),
+    (f"write --unit {ADMIND}", (), 1),
+    (f"record-set --unit {ADMIND} --state written", (), 1),
+], ids=["after-backup", "after-writing", "after-write"])
+def test_a_failure_at_each_boundary_is_completed_by_a_rerun(
+        host: Host, fail_at: str, rerun_args: tuple[str, ...], backups: int) -> None:
+    host.hand_made_admind()
+    host.put("fail-platform", fail_at + "\n")
+    assert installer(host, "--adopt").returncode == 1
+    host.put("fail-platform", "")
+    out = installer(host, *rerun_args)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert len(host.backups()) == backups
+    assert host.record()["units"][ADMIND]["state"] == "written"
+    assert host.record()["units"][ADMIND]["origin"] == "adopted"
+
+
+def test_a_hand_made_file_changed_while_writing_refuses(host: Host) -> None:
+    host.hand_made_admind()
+    host.put("fail-platform", f"write --unit {ADMIND}\n")
+    installer(host, "--adopt")
+    host.put("fail-platform", "")
+    host.unit_file(ADMIND).write_text("[Unit]\nDescription=changed by hand\n")
+    host.clear_calls()
+    assert install_refusal(host, installer(host)) == f"{ADMIND} changed since its backup"
+
+
+def test_an_upgrade_keeps_the_adoption(host: Host) -> None:
+    host.hand_made_admind()
+    assert installer(host, "--adopt").returncode == 0
+    before = host.record()["units"][ADMIND]
+    host.new_commit()
+    host.clear_calls()
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.record()["units"][ADMIND] == before and host.record()["release"] == host.commit
+    assert host.unit_file(ADMIND).read_text().startswith(f"{MARKER}{host.commit};")
+    assert started(host) == [["restart", ADMIND], ["restart", WSD]]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_a_symlink_or_a_directory_refuses_even_with_adopt(host: Host, kind: str) -> None:
+    host.hand_made_admind(kind=kind)
+    why = install_refusal(host, installer(host, "--adopt"))
+    assert why == f"{ADMIND}: the unit file is a symlink or not a regular file"
+
+
+def test_the_selftest_unit_is_never_touched(host: Host) -> None:
+    host.selftest_unit()
+    assert installer(host, "--adopt").returncode == 0
+    assert not any("heterodyne-admind-selftest" in c for c in host.calls() + host.platform_calls())
+
+
+# --- what is skipped ---
+
+def test_admind_not_initialised_writes_its_unit_but_does_not_enable_or_start_it(host: Host) -> None:
+    host.put("admind-initialised-rc", "1\n")
+    out = installer(host)
+    assert out.returncode == 3, out.stdout + out.stderr
+    assert summary(out)["services"] == "skipped (admind init has not run)"
+    assert host.unit_file(ADMIND).exists()
+    assert not any(ADMIND in c for c in user_calls(host, "enable", "start", "restart"))
+    assert started(host) == [["start", WSD]]
+
+
+@pytest.mark.parametrize("rc", ["2\n", "78\n"])
+def test_admind_initialised_that_cannot_tell_fails(host: Host, rc: str) -> None:
+    host.put("admind-initialised-rc", rc)
+    out = installer(host)
+    assert out.returncode == 1
+    assert summary(out)["services"] == f"failed (admind initialised can't tell (exit {rc.strip()}))"
+    assert started(host) == []
+
+
+def test_no_wsd_writes_no_wsd_unit(host: Host) -> None:
+    out = installer(host, "--no-wsd")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["services"] == "skipped (--no-wsd)"
+    assert not host.unit_file(WSD).exists() and started(host) == [["start", ADMIND]]
+
+
+def test_no_wsd_stops_and_disables_a_managed_wsd_and_keeps_its_file(host: Host) -> None:
+    installer(host)
+    host.clear_calls()
+    out = installer(host, "--no-wsd")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c.split()[1:] for c in user_calls(host, "stop", "disable")] == [["stop", WSD], ["disable", WSD]]
+    assert host.unit_file(WSD).exists()
+
+
+def test_a_dry_run_changes_no_user_state(host: Host) -> None:
+    host.hand_made_admind()
+    snap = host.home_snapshot()
+    out = installer(host, "--dry-run", "--adopt")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.home_snapshot() == snap
+    changing = ("daemon-reload", "enable", "start", "restart", "reset-failed", "stop", "disable")
+    assert user_calls(host, *changing) == []
+    assert host.mutations() == [] and host.backups() == []
+    assert f"would: back up {ADMIND}" in out.stdout.splitlines()
+
+
+def test_a_dry_run_after_an_install_reports_a_drift_and_changes_nothing(host: Host) -> None:
+    installer(host)
+    host.drift_process(ADMIND, "argv")
+    snap = host.home_snapshot()
+    host.clear_calls()
+    out = installer(host, "--dry-run")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["services"] == "would change"
+    assert f"would: restart {ADMIND}" in out.stdout.splitlines()
+    assert host.home_snapshot() == snap and started(host) == []

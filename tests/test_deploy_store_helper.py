@@ -754,7 +754,7 @@ def test_verity_that_breaks_fails_the_install(host: Host, setup: dict[str, str],
         host.put(name, text)
     out = installer(host)
     assert out.returncode == 1, out.stdout + out.stderr
-    assert summary(out) == {**ALL_IN_PLACE, "verity": f"failed ({why})"}
+    assert summary(out) == {**ALL_IN_PLACE, "verity": f"failed ({why})", "services": "not run"}
 
 
 @pytest.mark.parametrize(("setup", "why"), [
@@ -822,7 +822,8 @@ def test_a_failed_config_check_stops_before_verity_is_turned_on(host: Host, setu
         host.put(name, text)
     out = installer(host)
     assert out.returncode == 1, out.stdout + out.stderr
-    assert summary(out) == {**ALL_IN_PLACE, "config": f"failed ({why})", "verity": "not run"}
+    assert summary(out) == {**ALL_IN_PLACE, "config": f"failed ({why})", "verity": "not run",
+                            "services": "not run"}
     assert not [c for c in host.calls() if c.startswith("tune2fs -O")]
 
 
@@ -846,7 +847,7 @@ def test_a_dry_run_makes_no_change(host: Host) -> None:
     assert host.mutations() == []
     assert summary(out) == {"store": "would change", "units": "would change", "release": "would change",
                             "config": "advisory (the release is not built yet)", "verity": "would change",
-                            "services": "not run"}
+                            "services": "would change"}
     assert "would: systemctl start heterodyne-store-helper.socket" in out.stdout.splitlines()
     assert "would: tune2fs -O verity /dev/fake0" in out.stdout.splitlines()
     assert host.stages() == []

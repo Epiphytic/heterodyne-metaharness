@@ -356,6 +356,8 @@ def main(argv: list[str]) -> int:
     rr = sub.add_parser("record-release")
     rr.add_argument("--record", required=True)
     rr.add_argument("--release", required=True)
+    sh = sub.add_parser("record-show")
+    sh.add_argument("--record", required=True)
     d = sub.add_parser("record-drop")
     d.add_argument("--unit", required=True)
     d.add_argument("--record", required=True)
@@ -393,6 +395,12 @@ def main(argv: list[str]) -> int:
             rec = load_record(Path(args.record))
             rec["release"] = args.release
             save_record(Path(args.record), rec)
+        elif args.cmd == "record-show":
+            # what install.sh needs to know, and never a backup's name or sum
+            rec = load_record(Path(args.record))
+            print(f"release {rec['release'] or '-'}")
+            for unit, e in sorted(rec["units"].items()):
+                print(f"unit {unit} {e['state']} {e['origin']}")
         elif args.cmd == "record-drop":
             rec = load_record(Path(args.record))
             rec["units"].pop(args.unit, None)

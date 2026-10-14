@@ -4,8 +4,8 @@
 # (step 6). deploy/store-helper/README.md says which form to run; on a checkout the service user can change,
 # only the pinned form, which runs a root-only copy of this file whose sum the approval names:
 #
-#   sudo bash deploy/install.sh [--dry-run] [--no-verity] [--service-user USER] [--checkout DIR]
-#                               [--commit ID --expect-sha256 SUM]
+#   sudo bash deploy/install.sh [--dry-run] [--no-verity] [--fetch] [--adopt] [--no-wsd]
+#                               [--service-user USER] [--checkout DIR] [--commit ID --expect-sha256 SUM]
 #
 # This first stage runs every check before the first change, resolves the commit once, archives it as the
 # service user into a root-only stage, checks the archive against --expect-sha256 before extracting it, and
@@ -56,18 +56,20 @@ refuse() {
 }
 
 usage() {
-    echo "usage: install.sh [--dry-run] [--no-verity] [--fetch] [--service-user USER] [--checkout DIR]" \
-        "[--commit ID --expect-sha256 SUM]" >&2
+    echo "usage: install.sh [--dry-run] [--no-verity] [--fetch] [--adopt] [--no-wsd] [--service-user USER]" \
+        "[--checkout DIR] [--commit ID --expect-sha256 SUM]" >&2
     exit 2
 }
 
 dry_run=0 verity=1 fetch=0 service_user=${SUDO_USER:-} checkout="" commit="" expect="" staged="" archive_sum=""
-prefix="" probe=""
+prefix="" probe="" adopt=0 no_wsd=0
 while (($#)); do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --no-verity) verity=0; shift ;;
         --fetch) fetch=1; shift ;;
+        --adopt) adopt=1; shift ;;
+        --no-wsd) no_wsd=1; shift ;;
         --service-user) (($# >= 2)) || usage; service_user=$2; shift 2 ;;
         --checkout) (($# >= 2)) || usage; checkout=$2; shift 2 ;;
         --commit) (($# >= 2)) || usage; commit=$2; shift 2 ;;
@@ -129,6 +131,72 @@ user_systemctl() {
 service_git() {
     as_service_user PATH=/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
         git -C "$repo" -c core.hooksPath=/dev/null -c safe.directory="$repo" "$@" 2>/dev/null </dev/null
+}
+
+# --- the platform's user state (design btq-v7sgt D2 to D6) ---
+
+releases=$(host "$service_home")/.local/share/heterodyne/releases
+install_dir=$(host "$service_home")/.local/share/heterodyne/install
+record=$install_dir/record.json
+backups=$install_dir/backup
+user_units=$(host "$service_home")/.config/systemd/user
+# What the units get, and what every checked command runs with: host paths, never under the prefix.
+config_dir=$service_home/.config/heterodyne
+state_dir=$service_home/.local/state/heterodyne
+readonly MANAGED=(heterodyne-admind.service heterodyne-wsd.service)
+wanted=(heterodyne-admind.service)
+((no_wsd)) || wanted+=(heterodyne-wsd.service)
+plan_flags=()
+((!adopt)) || plan_flags+=(--adopt)
+
+# The commit's deploy/platform_state.py (PLATFORM_PY, set from the stage) as the service user: its bytes
+# are the approved archive's, passed as `-c`, since the stage is root's alone.
+platform() { as_service_user PATH="$user_tools" "$PYTHON" -I -c "$PLATFORM_PY" "$@"; }
+
+# The release the install record names, or nothing.
+recorded_release() {
+    local line
+    line=$(platform record-show --record "$record" </dev/null | sed -n 's/^release //p') \
+        || refuse "the install record can't be read"
+    [[ $line != - ]] && printf '%s' "$line"
+    return 0
+}
+
+# A wsd that answers while its unit is not active runs outside it, and the install would start a second one
+# (design btq-v7sgt D4). It is asked with the commit's built release's wsctl, or else the recorded one's.
+wsd_outside_check() {
+    local rel bin state
+    ((!no_wsd)) || return 0
+    rel=$releases/$1
+    if [[ ! -f $rel/.complete ]]; then
+        rel=$(recorded_release)
+        [[ -n $rel ]] && rel=$releases/$rel
+    fi
+    if [[ -z $rel || ! -f $rel/.complete || ! -x $rel/.venv/bin/wsctl ]]; then
+        echo "note: no built release has wsctl, so a wsd outside its unit can't be looked for"
+        return 0
+    fi
+    state=$(user_systemctl is-active heterodyne-wsd.service 2>/dev/null) || true
+    [[ $state != active ]] || return 0
+    bin=$rel/.venv/bin
+    if as_service_user PATH="$bin:$service_path" HETERODYNE_CONFIG_DIR="$config_dir" \
+        HETERODYNE_STATE_DIR="$state_dir" "$bin/wsctl" status >/dev/null 2>&1 </dev/null; then
+        refuse "a wsd is running outside its unit: stop it first"
+    fi
+}
+
+# platform_state.py plan for each wanted unit as its files are now: a refusal is the install's. The render
+# is empty, since it only decides between actions that go ahead.
+plan_check() {
+    local u msg
+    for u in "${wanted[@]}"; do
+        if ! msg=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render /dev/null \
+            --backup-dir "$backups" "${plan_flags[@]}" 2>&1 >/dev/null </dev/null); then
+            msg=${msg%%$'\n'*}
+            [[ $msg == "refused: "* ]] && refuse "${msg#refused: }"
+            refuse "$u can't be planned"
+        fi
+    done
 }
 
 # The service user's login PATH, where `uv` is (its last line: a profile may print).
@@ -276,7 +344,6 @@ if [[ -z $staged ]]; then
     # the full tree, in a scratch directory, against a hardlink copy of the service user's uv cache, which
     # uv's rename-into-place writes can't reach through. Never the real cache: a copy that fails refuses.
     # Skipped for a built release, and under --fetch, where the network may supply what the cache lacks.
-    releases=$(host "$service_home")/.local/share/heterodyne/releases
     if [[ ! -f $releases/$resolved/.complete ]] && ((!fetch)); then
         cache=$(as_service_user PATH="$service_path" uv cache dir 2>/dev/null </dev/null) && [[ -n $cache ]] \
             || refuse "the uv cache can't be found"
@@ -312,11 +379,16 @@ if [[ -z $staged ]]; then
         || refuse "the archive can't be extracted"
     installer=$stage/tree/deploy/install.sh
     [[ -f $installer && ! -L $installer ]] || refuse "the commit has no installer"
+    PLATFORM_PY=$(<"$stage/tree/deploy/platform_state.py") || refuse "the commit has no platform_state.py"
+    plan_check
+    wsd_outside_check "$resolved"
 
     args=(--staged "$stage" --checkout "$checkout" --commit "$resolved" --archive-sha256 "$archive_sum"
           --service-user "$service_user")
     if ((dry_run)); then args+=(--dry-run); fi
     if ((fetch)); then args+=(--fetch); fi
+    if ((adopt)); then args+=(--adopt); fi
+    if ((no_wsd)); then args+=(--no-wsd); fi
     if ((verity)); then args+=(--verity-probe "$probe"); else args+=(--no-verity); fi
     if [[ -n $prefix ]]; then args+=(--prefix "$prefix"); fi
     rc=0
@@ -335,6 +407,7 @@ read -r uid mode < <(owner_mode "$staged") || refuse "the stage can't be read"
 repo=$(host "$checkout")
 tree=$staged/tree
 units=$tree/deploy/store-helper
+PLATFORM_PY=$(<"$tree/deploy/platform_state.py") || refuse "the commit has no platform_state.py"
 
 declare -A result=()
 step=""
@@ -373,6 +446,8 @@ summary() {
     then
         rc=3
     fi
+    if ((rc == 0)) && [[ ${result[services]:-} == "skipped (admind init has not run)" ]]; then rc=3; fi
+    if [[ -n ${renders:-} ]]; then as_service_user PATH="$user_tools" rm -rf -- "$renders" || true; fi
     exit "$rc"
 }
 trap summary EXIT
@@ -401,6 +476,11 @@ if ((verity)); then
     now=$(verity_probe) || exit 1
     [[ $now == "$probe" ]] || refuse "the store's filesystem changed since the preflight"
 fi
+
+# The user state as the preflight read it, read again before the first change.
+service_path=$(login_path)
+plan_check
+wsd_outside_check "$commit"
 
 # --- step 3: the store owner, the store and the helper copy ---
 
@@ -483,10 +563,8 @@ if ((unit_changes)); then finish_step "$changed"; else finish_step ok; fi
 # --- the release: the commit's whole tree and its venv, as the service user (design btq-v7sgt D2) ---
 
 begin release
-releases=$(host "$service_home")/.local/share/heterodyne/releases
 release=$releases/$commit
 vbin=$release/.venv/bin
-service_path=$(login_path)
 if [[ -f $release/.complete ]]; then
     echo "ok: the release is built"
     finish_step ok
@@ -513,9 +591,6 @@ fi
 # can't be undone ---
 
 begin config
-# What the units get, and what every checked command runs with: host paths, never under the prefix.
-config_dir=$service_home/.config/heterodyne
-state_dir=$service_home/.local/state/heterodyne
 location_env=(PATH="$vbin:$service_path" HETERODYNE_CONFIG_DIR="$config_dir" HETERODYNE_STATE_DIR="$state_dir")
 why=""
 if [[ ! -f $release/.complete ]]; then
@@ -571,3 +646,210 @@ else
     finish_step "skipped (--no-verity)"
 fi
 
+
+# --- the services: admind, then wsd, reconciled from the user manager's live state (design btq-v7sgt D4) ---
+
+ready_wsd=60 settle_admind=15
+if [[ -n $prefix ]]; then ready_wsd=${HZ_INSTALL_READY_SECONDS:-0} settle_admind=${HZ_INSTALL_READY_SECONDS:-0}; fi
+svc_changes=0 written=0 renders=""
+declare -A st=()
+
+# A user-level change: printed, and run unless --dry-run. The description stands in for the command, which
+# may hold all of platform_state.py.
+user_change() {
+    local what=$1
+    shift
+    svc_changes=1
+    if ((dry_run)); then echo "would: $what"; return 0; fi
+    echo "change: $what"
+    "$@" </dev/null || fail "$what failed"
+}
+
+daemon_of() { local u=${1#heterodyne-}; printf '%s' "${u%.service}"; }    # admind | wsd
+
+render_unit() {    # $1 unit, $2 output file
+    as_service_user "${location_env[@]}" "$vbin/$(daemon_of "$1")" unit --python "$vbin/python3" \
+        --config-dir "$config_dir" --state-dir "$state_dir" --release "$commit" >"$2" </dev/null
+}
+
+# One unit's file, in the D6 order: the backup, the record's `writing`, the write, the record's `written`.
+write_unit() {    # $1 unit, $2 render
+    local u=$1 r=$2 action name
+    if ! action=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render "$r" \
+        --backup-dir "$backups" "${plan_flags[@]}" 2>&1 </dev/null); then
+        fail "${action#refused: }"
+    fi
+    case $action in
+        ok) echo "ok: $u is the render"; return 0 ;;
+        mark-written)
+            user_change "record $u as written" platform record-set --unit "$u" --state written --record "$record" ;;
+        create|adopt|rewrite|resume)
+            if [[ $action == adopt ]]; then
+                if ((dry_run)); then
+                    echo "would: back up $u"
+                    name=dry-run
+                else
+                    name=$(platform backup --unit "$u" --file "$user_units/$u" --backup-dir "$backups" \
+                        </dev/null) || fail "$u can't be backed up"
+                    echo "change: back up $u"
+                fi
+                user_change "record $u as being written" platform record-set --unit "$u" --state writing \
+                    --record "$record" --origin adopted --backup "$name" --backup-dir "$backups"
+            else
+                user_change "record $u as being written" platform record-set --unit "$u" --state writing \
+                    --record "$record" --origin created
+            fi
+            ((dry_run)) || as_service_user PATH="$user_tools" mkdir -p -- "$user_units" \
+                || fail "the user unit directory can't be made"
+            user_change "write $u" platform write --unit "$u" --file "$user_units/$u" --render "$r"
+            user_change "record $u as written" platform record-set --unit "$u" --state written --record "$record"
+            written=1 ;;
+        *) fail "$u: unexpected plan" ;;
+    esac
+}
+
+# ActiveState, SubState, MainPID and NRestarts of `$1` into `st`.
+unit_state() {
+    local out line
+    out=$(user_systemctl show "$1" -p ActiveState -p SubState -p MainPID -p NRestarts) || return 1
+    st=()
+    while IFS= read -r line; do st[${line%%=*}]=${line#*=}; done <<<"$out"
+    [[ -n ${st[ActiveState]:-} && ${st[MainPID]:-} =~ ^[0-9]+$ && ${st[NRestarts]:-} =~ ^[0-9]+$ ]]
+}
+
+# What differs between the process `$2` and the render of `$1`: keys, never values.
+process_drift() {
+    platform process-diff --render "$renders/$1" --proc "$(host /proc)" --pid "$2" </dev/null
+}
+
+# A unit's failure, with its journal.
+svc_fail() {
+    as_service_user PATH="$user_tools" XDG_RUNTIME_DIR="/run/user/$service_uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$service_uid/bus" journalctl --user -u "$1" -n 20 \
+        --no-pager </dev/null || true
+    fail "$2"
+}
+
+ready() {
+    local i=0
+    if [[ $1 == heterodyne-admind.service ]]; then sleep "$settle_admind"; return 0; fi
+    while true; do
+        as_service_user "${location_env[@]}" "$vbin/wsctl" status >/dev/null 2>&1 </dev/null && return 0
+        ((++i < ready_wsd)) || return 1
+        sleep 1
+    done
+}
+
+# D4 steps 3 to 6: enabled, then running the render (started, or restarted when the process differs), ready,
+# and then still the same process.
+reconcile_service() {
+    local u=$1 enabled diff pid restarts
+    enabled=$(user_systemctl is-enabled "$u" 2>/dev/null) || true
+    [[ $enabled == enabled ]] || user_change "enable $u" user_systemctl enable "$u"
+    unit_state "$u" || fail "systemd's unit state can't be read"
+    case ${st[ActiveState]}/${st[SubState]} in
+        active/running)
+            diff=$(process_drift "$u" "${st[MainPID]}") || fail "$u's process can't be compared"
+            if [[ -z $diff ]]; then
+                echo "ok: $u runs the render"
+                return 0
+            fi
+            echo "drift: $u runs other than the render: ${diff//$'\n'/, }"
+            user_change "restart $u" user_systemctl restart "$u" ;;
+        failed/*)
+            user_change "reset $u" user_systemctl reset-failed "$u"
+            user_change "start $u" user_systemctl start "$u" ;;
+        *) user_change "start $u" user_systemctl start "$u" ;;
+    esac
+    ((!dry_run)) || return 0
+    unit_state "$u" || svc_fail "$u" "systemd's unit state can't be read"
+    [[ ${st[ActiveState]} == active && ${st[MainPID]} != 0 ]] || svc_fail "$u" "$u did not start"
+    pid=${st[MainPID]} restarts=${st[NRestarts]}
+    ready "$u" || svc_fail "$u" "$u is not ready"
+    unit_state "$u" || svc_fail "$u" "systemd's unit state can't be read"
+    [[ ${st[ActiveState]} == active && ${st[MainPID]} == "$pid" && ${st[NRestarts]} == "$restarts" ]] \
+        || svc_fail "$u" "$u restarted while it was checked"
+    diff=$(process_drift "$u" "$pid") || svc_fail "$u" "$u's process can't be compared"
+    [[ -z $diff ]] || svc_fail "$u" "$u does not run the render"
+    echo "ok: $u is up and runs the render"
+}
+
+begin services
+if [[ ! -f $release/.complete ]]; then
+    # a dry run only (the release step built it): the plan, on the files as they are
+    for u in "${wanted[@]}"; do write_unit "$u" /dev/null; done
+    echo "would: reload the user manager, then start what the release changes"
+    finish_step "would change"
+else
+    init_rc=0
+    as_service_user "${location_env[@]}" "$vbin/admind" initialised >/dev/null 2>&1 </dev/null || init_rc=$?
+    case $init_rc in 0|1) ;; *) fail "admind initialised can't tell (exit $init_rc)" ;; esac
+    scratch_parent=$(host "$service_home")/.cache/heterodyne
+    as_service_user PATH="$user_tools" mkdir -p -m 0700 -- "$scratch_parent" || fail "no render directory"
+    renders=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/render.XXXXXX" </dev/null) \
+        || fail "no render directory"
+    for u in "${wanted[@]}"; do
+        render_unit "$u" "$renders/$u" || fail "$u can't be rendered"
+        write_unit "$u" "$renders/$u"
+    done
+    # --no-wsd: a wsd the install manages is stopped and disabled; its file stays, for uninstall
+    if ((no_wsd)); then
+        records=$(platform record-show --record "$record" </dev/null) || fail "the install record can't be read"
+        if [[ $'\n'$records == *$'\n'"unit heterodyne-wsd.service "* ]]; then
+            state=$(user_systemctl is-active heterodyne-wsd.service 2>/dev/null) || true
+            [[ $state != active ]] || user_change "stop heterodyne-wsd.service" \
+                user_systemctl stop heterodyne-wsd.service
+            enabled=$(user_systemctl is-enabled heterodyne-wsd.service 2>/dev/null) || true
+            [[ $enabled != enabled ]] || user_change "disable heterodyne-wsd.service" \
+                user_systemctl disable heterodyne-wsd.service
+        fi
+    fi
+    reload=$written
+    for u in "${wanted[@]}"; do
+        need=$(user_systemctl show -p NeedDaemonReload --value "$u") || fail "systemd's unit state can't be read"
+        [[ $need == no ]] || reload=1
+    done
+    if ((reload)); then user_change "reload the user manager" user_systemctl daemon-reload; fi
+    if ((!dry_run)); then
+        for u in "${wanted[@]}"; do
+            need=$(user_systemctl show -p NeedDaemonReload --value "$u") || fail "systemd's unit state can't be read"
+            [[ $need == no ]] || fail "systemd still has an old copy of a platform unit after daemon-reload"
+            shown=$(user_systemctl show "$u" -p FragmentPath -p DropInPaths -p ExecStart -p Environment \
+                -p UnsetEnvironment) || fail "systemd's unit state can't be read"
+            diff=$(platform loaded-diff --render "$renders/$u" --fragment "${user_units#"$prefix"}/$u" \
+                <<<"$shown") || fail "$u's loaded unit can't be compared"
+            [[ -z $diff ]] || fail "$u as systemd loads it differs from the render: ${diff//$'\n'/, }"
+            dropins=$(sed -n 's/^DropInPaths=//p' <<<"$shown")
+            if [[ -n $dropins ]]; then
+                names=()
+                for d in $dropins; do names+=("${d##*/}"); done
+                echo "note: $u has drop-ins, which change nothing the installer compares: ${names[*]}"
+            fi
+        done
+        recorded=$(recorded_release)
+        if [[ $recorded != "$commit" ]]; then
+            platform record-release --record "$record" --release "$commit" </dev/null \
+                || fail "the install record can't be written"
+        fi
+    fi
+    skipped=""
+    for u in "${wanted[@]}"; do
+        if [[ $u == heterodyne-admind.service ]] && ((init_rc == 1)); then
+            echo "skipped: $u (admind init has not run: run \`admind init\`, then the installer again)"
+            skipped="skipped (admind init has not run)"
+            continue
+        fi
+        reconcile_service "$u"
+    done
+    as_service_user PATH="$user_tools" rm -rf -- "$renders" || fail "the render directory can't be removed"
+    renders=""
+    if [[ -n $skipped ]]; then
+        finish_step "$skipped"
+    elif ((no_wsd)); then
+        finish_step "skipped (--no-wsd)"
+    elif ((svc_changes)); then
+        finish_step "$changed"
+    else
+        finish_step ok
+    fi
+fi
