@@ -84,3 +84,15 @@ content = [{{ kind = "skills", name = "s", git = "https://example.org/s.git", co
     assert commit not in out + err
     assert "harnesses.codex.content = [{'kind': 'skills', 'name': 's', 'git': 'https://example.org/s.git', " \
            "'commit': <redacted hex key>}]    (host:config.toml)" in out.splitlines()
+
+
+def test_config_check_redacts_the_derived_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture[str]) -> None:
+    # r2: the fallback's store comes from XDG_DATA_HOME, so it is a user-supplied path like any other.
+    ident = HEX * 4
+    env = config_env(tmp_path, "[harnesses]\nfallback = true\n")
+    env["XDG_DATA_HOME"] = str(tmp_path / ident / "data")
+    rc, out, err = check(env, monkeypatch, capsys)
+    assert rc == 0, err
+    assert ident not in out + err
+    assert "harnesses.store = <redacted hex key>    (defaults, fallback)" in out.splitlines()

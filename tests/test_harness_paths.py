@@ -183,3 +183,41 @@ def test_a_clean_store_has_no_problems(tmp_path: Path) -> None:
     (tmp_path / "packaged.py").write_text("print(1)\n")
     (tmp_path / "installed.py").write_text("print(1)\n")
     assert paths.helper_problems(tmp_path / "installed.py", tmp_path / "packaged.py") == []
+
+
+@pytest.mark.parametrize("kind, expected", [
+    ("login_dirs", [paths.STORE_IN_LOGIN_DIR, paths.LOGIN_DIR_IN_STORE]),
+    ("worktrees", [paths.STORE_IN_WORKTREE, paths.WORKTREE_IN_STORE]),
+    ("state_dir", [paths.STORE_IN_STATE_DIR, paths.STATE_DIR_IN_STORE]),
+])
+def test_a_path_that_cant_be_resolved_is_both_containment_problems(tmp_path: Path, kind: str,
+                                                                   expected: list[str]) -> None:
+    # r2: `locked/link` points into the store, but `locked` can't be searched, so where it leads can't be
+    # established; a lexical comparison would call them apart.
+    store = mkdir(tmp_path / "store", 0o755)
+    locked = mkdir(tmp_path / "locked")
+    (locked / "link").symlink_to(store / "inner")
+    where = locked / "link"
+    locked.chmod(0o000)
+    try:
+        found = problems(tmp_path, store, **{kind: where if kind == "state_dir" else [where]})
+    finally:
+        locked.chmod(0o700)
+    assert found == expected
+
+
+def test_a_dangling_link_is_followed_into_a_store_not_yet_made(tmp_path: Path) -> None:
+    (tmp_path / "login").symlink_to(tmp_path / "missing" / "store" / "logins")
+    assert problems(tmp_path, tmp_path / "missing" / "store",
+                    login_dirs=[tmp_path / "login"]) == [paths.LOGIN_DIR_IN_STORE]
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")              # a loop can't be resolved either
+    assert problems(tmp_path, mkdir(tmp_path / "store"), worktrees=[tmp_path / "loop" / "repo"]) == [
+        paths.STORE_IN_WORKTREE, paths.WORKTREE_IN_STORE]
+
+
+def test_a_store_path_climbing_out_of_a_missing_directory_is_refused(tmp_path: Path) -> None:
+    # The walk stops at the first missing component; a `..` after it would land back among real
+    # directories (and links) the walk never checked.
+    mkdir(tmp_path / "home" / ".codex")
+    (tmp_path / "link").symlink_to(tmp_path / "home" / ".codex")
+    assert paths.STORE_PATH_WRITABLE in problems(tmp_path, tmp_path / "missing" / ".." / "link" / "store")

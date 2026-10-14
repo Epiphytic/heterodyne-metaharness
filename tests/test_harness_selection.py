@@ -98,3 +98,17 @@ def test_an_unreadable_selection_is_not_an_absent_one(tmp_path: Path) -> None:
     (tmp_path / selection.FILE).mkdir()                                   # not a file
     with pytest.raises(ConfigError, match="exists but can't be read"):
         selection.load(tmp_path)
+
+
+def test_a_selection_behind_an_unsearchable_directory_is_not_an_absent_one(tmp_path: Path) -> None:
+    # r2: `os.path.lexists` reads EACCES as "absent"; only a missing entry is.
+    config = tmp_path / "config"
+    config.mkdir()
+    selection.write(config, {"codex": Selection("codex", pin(1))})
+    config.chmod(0o000)
+    try:
+        with pytest.raises(ConfigError, match="exists but can't be read"):
+            selection.load(config)
+    finally:
+        config.chmod(0o700)
+    assert selection.load(tmp_path / "missing") == {}       # a missing config directory is no selection
