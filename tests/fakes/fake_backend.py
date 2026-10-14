@@ -85,6 +85,10 @@ class FakeBackend:
         env |= self.env_extra
         return env
 
+    def host_env(self, name: str) -> dict[str, str]:
+        """The environment this fake runs the sandbox's commands with, its paths on the host."""
+        return self._env(self._box(name))
+
     def _box(self, name: str) -> _Box:
         box = self.boxes.get(name)
         if box is None or not self.up:

@@ -9,6 +9,7 @@ import contextlib
 import dataclasses
 import errno
 import json
+import logging
 import os
 import re
 import secrets
@@ -25,13 +26,14 @@ from typing import Any
 
 import msgspec
 
-from heterodyne.agents.base import Adapter, AdapterError, Cli, write_private
+from heterodyne.agents.base import Adapter, AdapterError, Cli, UsageReport, write_private
 from heterodyne.agents.registry import ADAPTERS
 from heterodyne.config import ConfigError
 from heterodyne.config.accounts import credential_key
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.fsutil import private_dir
 from heterodyne.sandbox import sessiongit
-from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, Watch
+from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
@@ -65,6 +67,7 @@ from heterodyne.wsd.runtime import (
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
+    LimitSeen,
     Liveness,
     Resolution,
     ResolveFailed,
@@ -74,6 +77,7 @@ from heterodyne.wsd.runtime import (
     Signal,
     Started,
     UnlandedView,
+    UsageSeen,
 )
 
 DEFAULT_ACCOUNT = "default"
@@ -84,6 +88,10 @@ TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
+MAX_QUEUED = 256        # reports a workstream keeps between drains: a flooding session keeps only its newest
+USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py's own limit is 30)
+DIAG_USAGE_READ = "an in-sandbox usage read gave no reading"
+READ_REASON = re.compile(rb"codex_usage: ([A-Za-z]+)\n")       # the script's one stderr line (Task 5)
 # btq-xb56t: the operator's resolve of an unlanded session (docs/wsd.md §5).
 SHORT_ID = re.compile(r"hz[0-9a-f]{12}")
 ZERO = "0" * 40
@@ -97,6 +105,8 @@ STEP_FAILED = "a resolve step failed; run the same wsctl resolve again"
 RESOLVE_POINTS = ("imported", "imported.recorded", "moved", "moved.recorded", "removed", "removed.recorded")
 MARKER_BYTES = 4096
 BRANCH_TAKEN = "another session of this bead still holds its branch; a branch holds one session at a time"
+
+log = logging.getLogger(__name__)
 
 
 def _same_repo(recorded: str, repo: Path | None) -> bool:
@@ -261,6 +271,9 @@ class SandboxRuntime:
         self.cp: Checkpoint = nothing                       # a test's crash points in a resolve
         self._inspect_lock = threading.Lock()
         self._inspect_cleared = False
+        self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
+        self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
+        self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
 
     # --- names ---
 
@@ -424,7 +437,18 @@ class SandboxRuntime:
             raise RuntimeUnavailable(failed[0])
 
     def signals(self, ws: str) -> list[Signal]:
-        return []                    # nothing produces a signal yet; Task 7 replaces this
+        """E8: what the workstream's sessions reported since the last call, oldest first. Each running
+        session's usage read is run first when it is due (E5). Never raises: a report that can't be had
+        is no report."""
+        try:
+            running = [r for r in self._records() if r.ws == ws and r.phase is Phase.RUNNING]
+        except RuntimeUnavailable:
+            running = []
+        for rec in running:
+            if rec.key in self.servers:
+                self._poll(rec)
+        with self.queue_lock:
+            return self.queued.pop(ws, [])
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record. Whether it ran is this generation's
@@ -573,13 +597,15 @@ class SandboxRuntime:
         token = secrets.token_hex(16)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
                        "local_classes": sorted(ws.local_classes), "worktree": str(spec.worktree)}
+        caps = self._caps(spec.profile)
         files = {shim.TOKEN_FILE: token, SHIM_SOURCE.name: SHIM_SOURCE.read_text(),
                  shim.CONFIG_FILE: json.dumps(shim_config), REQUEST_INSIDE.name: shim.REQUEST_WRAPPER,
-                 **adapter.run_files(), **self.selftest.files()}
+                 **adapter.run_files(usage=caps.in_session_usage, limits=caps.limit_signal),
+                 **self.selftest.files()}
         for fname, text in files.items():
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
-        server = SessionServer(layout.socket(gen), token, layout.events(gen))
+        server = self._server(rec, adapter, token, caps)
         self.servers[spec.session_key] = server     # before start: an end closes even a half-started one
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
@@ -664,6 +690,63 @@ class SandboxRuntime:
         if r.returncode != 0 or not self._until(lambda: adapter.server_ready(layout), SERVER_SECONDS):
             raise _StepFailed("the agent's server did not start")
 
+    def _caps(self, profile: str) -> Capabilities:
+        """E15: the profile's capabilities now; none if the profile is gone. No login is read: only
+        `_pinned` reads one, under its lock."""
+        return self.c.accounts.capabilities_of(profile)
+
+    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities) -> SessionServer:
+        """The generation's socket: it counts the adapter's turn ends and hands each hook payload to the
+        adapter's parser, attributed to this generation (E8, E14)."""
+        layout, key, gen = self.layout(rec.key), rec.key, rec.generation
+
+        def heard(payload: dict[str, Any]) -> None:
+            self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
+
+        return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
+                             on_event=heard)
+
+    def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
+        if report is None:
+            return
+        found: list[Signal] = []
+        if caps.in_session_usage and report.windows:
+            found.append(UsageSeen(key, gen, report.windows))
+        if caps.limit_signal and report.limited:
+            found.append(LimitSeen(key, gen, report.reset_hint))
+        if found:
+            with self.queue_lock:
+                queue = self.queued.setdefault(ws, [])
+                queue.extend(found)
+                del queue[:-MAX_QUEUED]
+
+    def _poll(self, rec: SessionRecord) -> None:
+        """E5: run the session's in-sandbox usage read if (c) or (e) is on and it is due; `_report`
+        emits each signal only under its own capability. A read that fails reports nothing and is not
+        retried before the next interval."""
+        adapter = self.c.adapters.get(rec.adapter)
+        caps = self._caps(rec.profile)
+        if adapter is None or not (caps.in_session_usage or caps.limit_signal):
+            return
+        now, ident = self.c.clock(), (rec.key, rec.generation)
+        last = self.polled.get(ident)
+        if last is not None and now - last < self.c.settings.usage_poll_seconds:
+            return
+        self.polled[ident] = now
+        try:
+            argv = adapter.usage_argv(self._cli(adapter))
+            if argv is None:
+                return
+            r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)
+        except (LaunchFailed, BackendError, BackendUnavailable) as exc:
+            log.warning("%s: %s", DIAG_USAGE_READ, type(exc).__name__)
+            return
+        report = adapter.usage_from_read(r.stdout) if r.returncode == 0 else None
+        if report is None:
+            log.warning("%s: %s", DIAG_USAGE_READ, _read_reason(r))
+            return
+        self._report(rec.ws, rec.key, rec.generation, caps, report)
+
     def _native(self, server: SessionServer, native: str | None) -> str:
         """D8, D24: the native ID this generation's SessionStart reported, checked against the one it was
         started with. A resume must report it too: nothing else says which session the CLI resumed."""
@@ -739,8 +822,9 @@ class SandboxRuntime:
         layout = self.layout(rec.key)
         try:
             token = (layout.run(rec.generation) / shim.TOKEN_FILE).read_text().strip()
-            server = SessionServer(layout.socket(rec.generation), token, layout.events(rec.generation))
-        except OSError:
+            adapter = self.c.adapters[rec.adapter]
+            server = self._server(rec, adapter, token, self._caps(rec.profile))
+        except (OSError, KeyError):
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         try:
             server.start()
@@ -784,6 +868,7 @@ class SandboxRuntime:
             rec = self._phase(layout, rec, phase=Phase.ENDED, ended_at=self.c.clock())
         except OSError:
             return False
+        self.polled = {k: v for k, v in self.polled.items() if k[0] != rec.key}
         with contextlib.suppress(OSError):
             layout.reaped(rec.generation).unlink(missing_ok=True)   # the cause is in the record now
         with contextlib.suppress(OSError):
@@ -1249,6 +1334,15 @@ class SandboxRuntime:
         except OSError:
             raise ResolveFailed("the resolve's intent can't be removed; run the same wsctl resolve again") \
                 from None
+
+
+def _read_reason(r: ExecResult) -> str:
+    """Why a read gave no reading, from its status and the script's own diagnostic only: never its
+    output. Only exit 0 is a reading, so 127 (nothing ran) is a failure like any other."""
+    if r.returncode == 0:
+        return "unparsed"
+    found = READ_REASON.fullmatch(r.stderr)
+    return found.group(1).decode() if found and r.returncode == 1 else f"exit {r.returncode}"
 
 
 def _tip_refusal(action: Action, snap: sessiongit.Snapshot, tip: str | None) -> str:
