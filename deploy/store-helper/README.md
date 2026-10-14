@@ -114,7 +114,7 @@ sudo rm -r /run/heterodyne-store-setup
 ```
 
 - These commands add the two unit files (the staged, checked copies), plus the `sockets.target.wants/` symlink that `enable` creates, start listening on `/run/heterodyne-store/helper.sock`, and remove the stage.
-- To undo: the first part of Rollback.
+- To undo: Rollback (it removes the units first, and everything after them only once no helper runs).
 
 ### Step 5: verity on `/var/lib`'s filesystem
 
@@ -140,24 +140,25 @@ sudo tune2fs -l <device> | command grep -i '^filesystem features'   # confirm: l
 
 ### Step 6: the host config
 
-This step needs the operator's go for the config change. Run it as the service user, not root:
+Run this as the service user, not root. It checks the config and edits nothing:
 
 ```bash step-6
-cfg=${HETERODYNE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/heterodyne}/config.toml
-cp -p -- "$cfg" "$cfg.bak-t12b"
-sed -i '/^\[harnesses\][[:space:]]*$/,/^\[/{/^[[:space:]]*fallback[[:space:]]*=[[:space:]]*true[[:space:]]*$/d}' "$cfg"
-uv run --offline --project <run checkout> heterodyne config check
+cfg=$HOME/.config/heterodyne/config.toml
+/usr/bin/python3 -I -c 'import sys, tomllib; h = tomllib.load(open(sys.argv[1], "rb")).get("harnesses", {}); sys.exit("harnesses.fallback is set: stop and ask the lead" if "fallback" in h else 0)' "$cfg"
+env -u HETERODYNE_CONFIG_DIR -u XDG_CONFIG_HOME uv run --offline --project <run checkout> heterodyne config check
 ```
 
-- `cfg` is the host config, resolved the way `heterodyne` resolves it. The `sed` deletes only a `fallback = true` line in the `[harnesses]` table. It touches no other table, including `[harnesses.<adapter>]`, and it leaves the backup `config.toml.bak-t12b`.
+- `cfg` is the host config that `heterodyne` reads for the service user when `HETERODYNE_CONFIG_DIR` and `XDG_CONFIG_HOME` are unset. `config check` runs with both unset, so it reads the same file. The approval spells out the concrete path.
+- The check parses the file as TOML. It stops (exit 1) if `[harnesses]` sets `fallback` at all, and also if the file is missing or isn't valid TOML. On this host (checked 2026-10-14), the config has no `[harnesses]` table, so it passes.
+- If it stops, nothing is edited. Removing `fallback` takes a fresh approval, for that exact edit.
 - `config check` must report no store problem and no `HELPER_DRIFT`.
-- To undo: `mv "$cfg.bak-t12b" "$cfg"`.
 - `wsd`: on this host (checked 2026-10-14), `wsd` runs under no unit and isn't running, so there is nothing to restart and the restart is not applicable. If `wsd` runs under a unit by execution time, the approval names it, and the restart is `systemctl --user restart <that unit>`.
+- Nothing here changes the host, so there is no undo.
 
 ## Rollback
 
 ```bash rollback
-sudo bash -euo pipefail -s <<'STOP'
+sudo bash -euo pipefail -s <<'ROLLBACK'
 systemctl disable --now heterodyne-store-helper.socket
 systemctl stop 'heterodyne-store-helper@*.service'
 left=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'heterodyne-store-helper@*')
@@ -166,19 +167,19 @@ if pgrep -u heterodyne-store >/dev/null; then
     echo "refused: a process still runs as heterodyne-store" >&2
     exit 1
 fi
-STOP
-
-sudo rm /etc/systemd/system/heterodyne-store-helper.socket /etc/systemd/system/heterodyne-store-helper@.service
-sudo rm -r /etc/systemd/system/heterodyne-store-helper.socket.d
-sudo systemctl daemon-reload
-sudo rm /usr/local/libexec/heterodyne/store_core.py /etc/heterodyne/store-helper.json
-sudo rmdir /usr/local/libexec/heterodyne /etc/heterodyne
-sudo rm -r /var/lib/heterodyne
-sudo userdel heterodyne-store
+rm /etc/systemd/system/heterodyne-store-helper.socket /etc/systemd/system/heterodyne-store-helper@.service
+rm /etc/systemd/system/heterodyne-store-helper.socket.d/10-group.conf
+rmdir /etc/systemd/system/heterodyne-store-helper.socket.d
+systemctl daemon-reload
+rm /usr/local/libexec/heterodyne/store_core.py /etc/heterodyne/store-helper.json
+rmdir /usr/local/libexec/heterodyne /etc/heterodyne
+rmdir /var/lib/heterodyne/harnesses /var/lib/heterodyne
+userdel heterodyne-store
+ROLLBACK
 ```
 
-1. The first part disables the socket, which stops new connections, and then stops every `heterodyne-store-helper@` instance, since `Accept=yes` instances outlive their socket. It stops with `refused:` if any instance is still running, or if any process still runs as `heterodyne-store`. Nothing after it runs until it passes: the store, its owner and an install in progress all stay.
-2. Then the units, the drop-in, the helper copy and the config are removed.
-3. Run `sudo rm -r /var/lib/heterodyne` only if it is empty, or after `wsctl harness list` shows that nothing in the store is in use.
-4. Run `userdel` last, so that no file is left owned by a uid with no user.
-5. The ext4 `verity` feature stays set. `tune2fs` doesn't clear it, and it is harmless without the store.
+The whole rollback is one fail-stop root script. The first failure stops it, and nothing after that runs.
+1. It disables the socket, which stops new connections, and then stops every `heterodyne-store-helper@` instance, since `Accept=yes` instances outlive their socket. It refuses if any instance is still running, or if any process still runs as `heterodyne-store`. Then nothing has been removed.
+2. It removes the units, the drop-in, the helper copy and the config.
+3. It removes the store with `rmdir`, which fails if the store isn't empty. A store with installs in it stops the script there, and the store and its owner (`userdel` is last) are kept. The script never deletes installs. Emptying the store is the operator's decision (after `wsctl harness list` shows nothing in use), and it is not part of this list.
+4. The ext4 `verity` feature stays set. `tune2fs` doesn't clear it, and it is harmless without the store.
