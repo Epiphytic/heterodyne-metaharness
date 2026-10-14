@@ -1,8 +1,20 @@
-# Installing the platform itself (`deploy/install.sh`, continued), r1
+# Installing the platform itself (`deploy/install.sh`, continued), r2
 
 btq-v7sgt. This follows up the host install script: design r3 at `docs/superpowers/specs/2026-10-14-host-install-script-design.md` on branch `design/install-script` (commit `bebf550`), built and merged as PR #97. That design scoped out "installing the platform itself: the venv, and the admind and wsd user units", and this one adds them. Everything r3 says still holds unless this design changes it here.
 
 Liam's requirement (2026-10-14): "anything that's required to install this has to be encapsulated in an install script anyways, otherwise this platform is not installable by others."
+
+**r2 answers review r1** (`docs/reviews/v7sgt-design-r1.md`). The goal is a usable install, not a complete one, so two findings are answered by cutting scope:
+- **Lingering is not the installer's (finding 4, and the linger part of 3).** The preflight refuses when lingering is off, with the exact command to run (D1). The installer never changes it.
+- **`--user-only` is dropped (finding 7).** It becomes a follow-up. Every run is the root run.
+
+The rest are fixed:
+- **The units control their own environment (finding 1).** Each unit unsets the variables that would move its locations and sets, explicitly, the locations the checks used (D3). A test runs against a contaminated manager environment.
+- **The offline preflight is a real build (finding 2).** It builds the full tree in a scratch directory with a disposable copy of the uv cache. A completed release skips it (D2).
+- **Recovery intent is persisted before each replacement (finding 3).** The install record is written before every unit write, not at the end, and keeps its entries across upgrades. Failure-then-rerun tests cover each boundary (D6).
+- **Reconciliation compares the whole identity (finding 5):** the loaded `ExecStart`, `Environment` and `UnsetEnvironment`, plus the running process's full argv, its controlled environment and a unit revision. It checks again after readiness (D4).
+- **Uninstall classifies before it acts (finding 6).** It decides ownership of both units first, and refuses ambiguous state with nothing touched (D6).
+- **Non-blocking:** the build backend's limitation is stated (D2), and `admind initialised` reads admind's database read-only, without `_load()` (D4).
 
 ## Problem
 
@@ -16,48 +28,61 @@ After `sudo bash deploy/install.sh`, the store helper is in place, but the platf
 
 ### D1. What runs as root, and what as the service user
 
-Root is needed only for what it already does: steps 3 to 5 (the store, the helper's units, verity), plus one new thing, lingering. Everything else in this design is the service user's, and the installer runs it through the existing `as_service_user`: `runuser -u <user> -- env -i HOME=… USER=… LOGNAME=… <command>`.
+Root does only what it already does: steps 3 to 5 (the store, the helper's units, verity). Everything else in this design is the service user's, and the installer runs it through the existing `as_service_user`: `runuser -u <user> -- env -i HOME=… USER=… LOGNAME=… <command>`. Every run is the root run, with the pinned command.
 
-- **Lingering (root).** The installer reads `loginctl show-user <user> -p Linger`. If it is `no`, it runs `loginctl enable-linger <user>`, so that the user manager runs at boot without a login. This change starts `user@<uid>.service` if it isn't already running, and it never restarts it. If the installer did it, the install record (D6) says so, and uninstall turns linger off again only in that case.
+- **Lingering is a prerequisite, not a step.** The preflight reads `loginctl show-user <user> -p Linger --value`. Anything but `yes` refuses before any change, `--dry-run` included:
+  ```
+  refused: lingering is off for <user> (or could not be read): run `sudo loginctl enable-linger <user>`, then run the installer again
+  ```
+  `loginctl show-user` fails for a user with no session and no lingering, so a failed read gets the same refusal: it is never taken as `yes`. The installer never runs `enable-linger` or `disable-linger`, and uninstall leaves lingering as it is.
 - **The user manager.** All user-level systemd calls go through one function:
   ```
   as_service_user XDG_RUNTIME_DIR=/run/user/<uid> DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus \
       systemctl --user …
   ```
-  The installer never uses `systemctl --user -M`, `machinectl`, `daemon-reexec`, `systemctl restart user@…` or `--user restart` of any unit except the two below. The preflight requires:
+  The installer never uses `systemctl --user -M`, `machinectl`, `daemon-reexec`, `systemctl restart user@…`, or `--user restart` of any unit except the two below. It never calls `set-environment`, `unset-environment` or `import-environment`. The preflight requires, with no wait:
   - `/run/user/<uid>/bus` is a socket owned by `<uid>`;
   - `systemctl --user is-system-running` reports `running` or `degraded`. `degraded` is normal on a host with unrelated failed units.
 
-  On a host where lingering was just turned on, the installer waits up to 30 s for both, then refuses. It never starts, stops or restarts the user manager itself.
-- **Unprivileged upgrades (`--user-only`).** The service user can run `bash deploy/install.sh --user-only`, with no sudo.
-  - It does only the platform steps. The preflight still checks, read-only, that the store helper is in place: the merged `live_drift` check reads `is-active`, `stat` and `show`, all of which work unprivileged. If the helper isn't in place, it refuses: "run the full install with sudo first".
-  - Steps 3 to 5 and lingering report `skipped (--user-only)`, and the exit code doesn't change, just as with `--no-verity`.
-  - This lets the platform be upgraded without a root step. It grants nothing new, because the service user can already edit the code its daemons run.
+  With lingering on, the manager is already running, so a missing bus is a refusal. The installer never starts, stops or restarts the user manager.
 
 ### D2. A release directory per commit, built offline from `uv.lock`
 
-The platform runs from a release, not from a checkout's work tree. A release is `${XDG_DATA_HOME:-~/.local/share}/heterodyne/releases/<commit>/`, owned by the service user. The installer builds it as the service user:
+The platform runs from a release, not from a checkout's work tree. A release is `~/.local/share/heterodyne/releases/<commit>/`, owned by the service user. It sits under the service user's default data directory: the installer runs under `env -i`, so no `XDG_DATA_HOME` override applies (D3). The installer builds it as the service user:
 
 1. It archives the resolved commit, the whole tree, with the same hardened git as r3: replacement refs, git config and hooks off, and the full ID, never `HEAD`. It extracts the archive into `releases/<commit>/`.
-2. It runs `uv sync --locked --offline --no-dev --python /usr/bin/python3 --project releases/<commit>`, with `UV_PYTHON_DOWNLOADS=never`. That creates `releases/<commit>/.venv` and installs the project editable from the release tree. The install has to be editable: `heterodyne setup` finds `examples/` relative to the package, and a wheel install loses them.
+2. It runs `uv sync --locked --offline --no-dev --python /usr/bin/python3 --project releases/<commit>`, with `UV_PYTHON_DOWNLOADS=never` and `UV_LINK_MODE=copy`. That creates `releases/<commit>/.venv` and installs the project editable from the release tree.
+   - The install has to be editable: `heterodyne setup` finds `examples/` relative to the package, and a wheel install loses them.
    - `--locked` fails if `uv.lock` doesn't match `pyproject.toml`.
-   - uv checks every package against the lock's hashes.
+   - `UV_LINK_MODE=copy` means a release shares no files with the uv cache, so a later `uv cache clean` can't change it.
 3. It writes `releases/<commit>/.complete` last. The file holds the commit, the uv version and `uv.lock`'s sha256.
 
 A `releases/<commit>/` directory that has `.complete` counts as built (`ok`). One without it is a leftover from a failed run: it is removed and rebuilt. The venv can't be built somewhere else and renamed into place, because the venv's scripts and its editable `.pth` record absolute paths.
 
-- **Offline by default. `--fetch` allows the network.** `--fetch` drops `--offline`. That is the fresh-host case, and it is still `--locked` and hash-checked. Without `--fetch`, a package missing from the service user's uv cache is a refusal before any change: "the uv cache lacks a locked package: run with --fetch". To find this out first, the preflight extracts the commit's `pyproject.toml` and `uv.lock` into a service-user `mktemp -d` and runs `uv sync --locked --offline --no-dev --dry-run` there.
-  - **To confirm in implementation:** whether `--dry-run` reports an offline cache miss. A test against an empty `UV_CACHE_DIR` must show it does. If it doesn't, the preflight builds the release into that scratch directory instead.
+**What the hashes cover, and what they don't.** uv checks every package in `uv.lock` against the lock's hashes. That covers the runtime dependencies (msgspec) and nothing else. The editable install also needs the build backend: `[build-system] requires = ["hatchling"]`, unpinned. uv resolves hatchling and its own dependencies outside `uv.lock`, from the cache, or from the index under `--fetch`, and checks no hash for them. The build backend runs as the service user while the release is built, and doesn't run again afterwards. v1 states this limitation. Pinning the build toolchain is a follow-up: for example, uv's build constraints with hashes, or a backend vendored into the tree.
+
+**Offline by default. `--fetch` allows the network.** `--fetch` drops `--offline`. That is the fresh-host case, and it is still `--locked` and hash-checked as above. Without `--fetch`, every package the build needs must already be in the service user's uv cache, and the preflight proves this before any change, as follows.
+
+- **The preflight builds the full tree in a scratch directory, with a disposable cache.** A metadata-only `uv sync --dry-run` can't be used. Against an empty cache, uv 0.11.16 exits 0 with "Would download 2 packages", and it writes cache metadata, while the real offline sync fails (review r1, finding 2). So the preflight runs the real thing, in scratch:
+  1. It creates a service-user scratch directory `~/.cache/heterodyne/preflight.XXXXXX/`. It must be on the same filesystem as the uv cache (`uv cache dir`).
+  2. It makes `cache/` there as a hardlink copy of the uv cache (`cp -al`). That copies no file data: on this host it is about 278,000 links, for a 7.2 GB cache. If the copy fails, for example because the scratch directory is on another filesystem, the preflight refuses: "the uv cache could not be copied for the offline build check". It never falls back to the real cache.
+  3. It extracts the archive into `tree/` there, and runs step 2's exact `uv sync` against it, with `UV_CACHE_DIR=<scratch>/cache`.
+  4. It removes the scratch directory, whatever the result.
+
+  A failed build refuses before any change: "the uv cache lacks a package this release needs: run with --fetch". Its last 20 lines of output go into the failure output, with 64-hex runs masked.
+- **Why a hardlink copy leaves the real cache untouched.** uv replaces cache entries by writing a temporary file or directory and renaming it into place. Its archive entries are immutable. A rename in the copy changes only the copy's directory entry. The implementation proves this with a test: after a scratch build against a hardlink copy of a fixture cache, every file in the fixture has the same inode, size and mtime, and no entry was added. If a future uv writes in place, that test fails.
+- **When the preflight build is skipped.** It is skipped when `releases/<commit>/.complete` exists, because nothing will be built. It is also skipped under `--fetch`, because the network may supply what the cache lacks. Under `--fetch`, a build that fails fails the `release` step, and a rerun rebuilds it.
+- `--dry-run` runs the scratch build, and builds nothing else (D6).
 - **Old releases are kept.** v1 has no automatic pruning, because a running agent's hook commands name the interpreter of the release that launched it (`sys.executable`, `admind/hook.py`). Uninstall lists them, and removing one that no process uses is a manual `rm -r`.
 - **Alternative, not chosen for v1: a root-owned release** (`/opt/heterodyne/releases/<commit>`, read-only to the service user). That would stop agents editing the platform that supervises them. It needs a root-owned `uv` and a root-verified full-tree archive, and it changes who can upgrade. It is filed as a follow-up hardening, not part of this design.
 - The `--checkout` argument now names only the git source. The "run checkout" goes away, along with its `uv sync` prerequisite and the preflight's `uv run … --help`. Step 6's `config check` runs from the release (D5).
 
-### D3. Units are rendered from templates, in the release
+### D3. Units are rendered from templates, in the release, and control their own environment
 
 The two managed units are `heterodyne-admind.service` and `heterodyne-wsd.service`, in `~/.config/systemd/user/`, mode 0644, owned by the service user.
 
-- **admind** uses the existing renderer: the release's `.venv/bin/admind unit`. It is unchanged, and it refuses whitespace, quotes, control characters and sensitive material.
-- **wsd** gets a renderer: `wsd unit`, in `heterodyne/wsd/unit.py`. It shares admind's value checks, which move to a common `heterodyne/units.py`, and it adds `heterodyne/wsd/__main__.py` so that `python -m heterodyne.wsd run` works. The template:
+- **admind** uses the existing renderer, the release's `.venv/bin/admind unit`, changed only in how it writes the environment (below). It still refuses whitespace, quotes, control characters and sensitive material.
+- **wsd** gets a renderer: `wsd unit`, in `heterodyne/wsd/unit.py`. It shares admind's value checks and its environment block, which move to a common `heterodyne/units.py`. It also adds `heterodyne/wsd/__main__.py`, so that `python -m heterodyne.wsd run` works. The template:
   ```
   [Unit]
   Description=heterodyne wsd (workstream daemon)
@@ -80,8 +105,24 @@ The two managed units are `heterodyne-admind.service` and `heterodyne-wsd.servic
   [Install]
   WantedBy=default.target
   ```
-  It passes through the same variables as admind's renderer, and only those. `BTQ_REPO` is never among them (`docs/wsd.md` §1).
-- **The environment both renders capture.** The installer runs both renderers with `env -i`, `HOME`/`USER`/`LOGNAME`, and `PATH=<release>/.venv/bin:<the service user's login PATH>`. The login PATH comes from the merged `login_path`. The service user's own tools (`claude`, `wn-agent`, `uv`) therefore resolve as they do at login, and `admind`, `wsd` and `wsctl` resolve to the release. `HETERODYNE_CONFIG_DIR`, `HETERODYNE_STATE_DIR`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are unset, so the units use the default locations, the same ones step 6 checks. v1 doesn't support hosts that move those locations: the installer can't see a custom location, and the README says so.
+
+**The environment block.** A user service starts from the user manager's environment, and anything that ran `systemctl --user set-environment` or `import-environment` can have put variables there (review r1, finding 1). So the units no longer rely on the variables being absent. Both renderers write the same block:
+```
+Environment=PATH=<release>/.venv/bin:<the service user's login PATH>
+Environment=HETERODYNE_CONFIG_DIR=<config dir>
+Environment=HETERODYNE_STATE_DIR=<state dir>
+Environment=HETERODYNE_RELEASE=<commit>
+Environment=HETERODYNE_UNIT_REV=<12 hex>
+UnsetEnvironment=BTQ_REPO XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
+```
+- **The locations are the ones the checks used.** The installer computes `<config dir>` and `<state dir>` once, as the service user, under `env -i` with only `HOME`, `USER` and `LOGNAME`: the defaults, `~/.config/heterodyne` and `~/.local/state/heterodyne`, as absolute paths. It passes them to both renderers (`--config-dir`, `--state-dir`), and runs `config check` (D5), `admind initialised` (D4) and `wsctl status` with exactly this block's values. The unit therefore runs with the locations that were checked, whatever the manager holds.
+- **What is unset, and why.** systemd applies `UnsetEnvironment=` after `Environment=` (systemd.exec(5)), so the renderer refuses any name that would appear in both lists.
+  - `BTQ_REPO` is unset for both units. wsd must never see it (`docs/wsd.md` §1), and admind has no use for it.
+  - The three `XDG_*` overrides are unset. With them gone, every location the code derives from `HOME` (`heterodyne/config/paths.py`: config, state and the data directory that holds the releases and the managed install store) is the default that the installer used. `HETERODYNE_*_DIR` would win over the first two anyway. The third has no `HETERODYNE_` override, so it must be unset.
+  - Other manager variables are inherited as today. They don't move any location the installer checked.
+- **`HETERODYNE_RELEASE` and `HETERODYNE_UNIT_REV` mark the running generation.** `HETERODYNE_UNIT_REV` is the first 12 hex digits of the render's sha256, computed without that line. A process started from an older render carries an older value. D4 reads both from the running process. Nothing else reads them.
+- **The renderer no longer passes through** `HETERODYNE_CONFIG_DIR`, `HETERODYNE_STATE_DIR`, `XDG_CONFIG_HOME` or `XDG_STATE_HOME` from its own environment. Run by hand without `--config-dir` and `--state-dir`, `admind unit` resolves both from its environment, as `heterodyne/config/paths.py` does, and writes them explicitly, so that `docs/admind.md` §2 keeps working.
+- **v1 supports only the default locations.** A host that relies on moved locations has them pinned back to the defaults by the unit. The README says so.
 - **The marker.** The installer adds one first line to each render: `# Rendered by heterodyne's deploy/install.sh for release <commit>; the next install replaces it.` The units are never committed. They hold install-specific paths (ADR 0001 §15).
 - A render that refuses fails the `services` step before that unit's file is written.
 
@@ -91,40 +132,58 @@ The steps, in order. The summary prints one line for each:
 
 | # | Step | Who | Notes |
 |---|---|---|---|
-| 1 | preflight | both | Every check below, before any change. |
+| 1 | preflight | both | Every check below, before any change, including lingering and the scratch build. |
 | 2 | stage | root | Unchanged from r3 (`/run/heterodyne-install.XXXXXX`, `--expect-sha256`). |
 | 3 | `store` | root | Unchanged. |
 | 4 | `units` | root | Unchanged: the store helper's socket and service. |
-| 5 | `linger` | root | D1. |
-| 6 | `release` | user | D2. |
-| 7 | `config` | user | `config check` from the release (D5). |
-| 8 | `verity` | root | Unchanged. It comes after every check, because it can't be undone. |
-| 9 | `services` | user | admind, then wsd. |
+| 5 | `release` | user | D2. |
+| 6 | `config` | user | `config check` from the release (D5). |
+| 7 | `verity` | root | Unchanged. It comes after every check, because it can't be undone. |
+| 8 | `services` | user | admind, then wsd. |
 
 - **Why the services come last.** wsd uses the store helper, so the helper's socket must be live first. A user unit can't be ordered against a system unit, so the installer enforces this by its step order. At boot, the socket is in `sockets.target`, ahead of any user manager. The services also come after verity, so that wsd never records installs as `verity: false` on a host that supports verity. If a service fails to start, verity is already on. That is harmless, and a rerun is idempotent.
 - **Why admind starts before wsd.** admind is the recovery channel. If wsd then fails to start, the operator can still reach the host. Uninstall stops them in the reverse order.
 
-For each service, the `services` step reconciles from systemd's live state, not from what this run wrote, the same way r3 handles the socket:
+**The expected identity of a service.** For each unit, the installer knows, from the render alone:
+- the file's bytes;
+- `ExecStart`'s argv: `<release>/.venv/bin/python3 -m heterodyne.admind run`, or `… heterodyne.wsd run`;
+- the `Environment=` set and the `UnsetEnvironment=` list (D3).
 
-1. It renders the unit and compares it with the file. If the file differs or is missing, it writes it atomically: it writes `.<unit>.tmp` in the same directory, which systemd ignores, sets mode 0644, then renames it into place.
-2. It always runs `systemctl --user daemon-reload` once, after both files are written. It then requires `NeedDaemonReload=no` for both units, and fails otherwise.
+The installer compares two things against it:
+- **The loaded unit:** `systemctl --user show <unit> -p FragmentPath -p DropInPaths -p ExecStart -p Environment -p UnsetEnvironment -p NeedDaemonReload`. `FragmentPath` must be the managed file. `ExecStart`'s `argv[]` must be the expected argv, and it must be the only command. `Environment` must equal the expected set, and `UnsetEnvironment` the expected list. A drop-in that changes any of these makes the loaded unit differ from the render, which no restart can fix. So the step fails, naming the property and the drop-in.
+- **The running process.** It reads `MainPID`, then, for that PID:
+  - `/proc/<pid>/cmdline`: the full argv must equal `ExecStart`'s;
+  - `/proc/<pid>/environ`: `PATH`, `HETERODYNE_CONFIG_DIR`, `HETERODYNE_STATE_DIR`, `HETERODYNE_RELEASE` and `HETERODYNE_UNIT_REV` must have the expected values, and none of the unset names may be present.
+
+  Both files belong to the service user, and the installer reads them as the service user. Only the named keys are compared, and no value is printed, only key names. An unreadable or missing `/proc` entry fails the check. It never counts as a match.
+
+**The `services` step**, for each service. It reconciles from systemd's live state, not from what this run wrote, the same way r3 handles the socket:
+1. It renders the unit and compares it with the file. If the file differs or is missing, it first updates the install record (D6), then writes `.<unit>.tmp` in the same directory, which systemd ignores, sets mode 0644, and renames it into place.
+2. It always runs `systemctl --user daemon-reload` once, after both files are written. It then requires `NeedDaemonReload=no` and a matching loaded unit, as above, for both, and fails otherwise.
 3. If `is-enabled` isn't `enabled`, it runs `enable`.
-4. **The live check:**
-   - `ActiveState` is `active`, and `SubState` is `running`;
-   - `argv[0]` of `MainPID`'s `/proc/<pid>/cmdline` is the release's `.venv/bin/python3`. That file is world-readable, so it needs no ptrace access.
-
-   If the unit is `failed`, the installer runs `reset-failed` and then `start`. If it is inactive, `start`. If it is active but running another release's interpreter, `restart`. Then it checks readiness:
+4. **The live check:** `ActiveState=active`, `SubState=running`, and a running process that matches as above.
+   - `failed`: it runs `reset-failed`, then `start`;
+   - inactive: `start`;
+   - active, but the process doesn't match (another release, an older render, or a changed environment): `restart`;
+   - active and matching: nothing.
+5. **Readiness**, after any start or restart:
    - **wsd:** `wsctl status` exits 0 within 60 s.
    - **admind:** it is still `active (running)` 15 s later, with `NRestarts` unchanged. admind has no control-socket ping, and adding one is out of scope.
+6. **The re-check after readiness.** It reads `MainPID` and `NRestarts` again. The PID must be the one it checked in step 4, or the one that `start` or `restart` produced, and `NRestarts` must be unchanged. The process's argv and environment are compared again. A unit that restarted during readiness, or came back as something else, fails.
 
-   A unit that isn't ready fails the step, and `journalctl --user -u <unit> -n 20` goes into the failure output.
-5. **Before any change, the preflight refuses a wsd running outside its unit:** the unit is inactive, but `wsctl status` answers. Starting the unit would only restart-loop on wsd's instance lock (exit 1).
+A unit that isn't ready, or fails the re-check, fails the step, and `journalctl --user -u <unit> -n 20` goes into the failure output.
 
-The installer leaves operator drop-ins (`<unit>.d/`) in place. It reports them as `note:`, and its live check reads systemd's effective state, so a drop-in that breaks the live check fails it.
+Before any change, the preflight refuses a wsd running outside its unit: the unit is inactive, but `wsctl status` answers. Starting the unit would only restart-loop on wsd's instance lock (exit 1).
+
+Operator drop-ins (`<unit>.d/`) are left in place, and reported as `note:`. One that changes only other properties (for example `Nice=`) is accepted. One that changes the compared properties fails, as above.
 
 **When a service is skipped (exit 3).** r3's exit 3 meant "everything but verity, which the host doesn't support". It now means "everything is in place except steps skipped for a named reason that only the host or the operator can resolve":
 - **verity unsupported:** as before.
-- **admind not initialised:** a new read-only `admind initialised` exits 0 if admind's store has a group, 1 if not, and 78 on a config error. It prints nothing sensitive. If the result is 1, the installer writes admind's unit but neither enables nor starts it, and reports `skipped (admind init has not run)`. The operator runs `admind init` (docs/admind.md §2) and then runs the installer again.
+- **admind not initialised.** A new `admind initialised` subcommand answers, and it changes nothing:
+  - It doesn't use `_load()`, which opens a writable `Store` (creating the database and running its schema and migrations) and an `Audit` log. It resolves the settings, then opens `<state dir>/admind.db` with sqlite's `file:…?mode=ro` URI, which never creates a file. It reads one row: `kv` where `key = 'group_id_hex'`.
+  - Exit 0: the row exists and isn't empty. Exit 1: the state directory is readable and `admind.db` doesn't exist (`lstat` reports ENOENT), or the database has no such row. Exit 78: a config error. Exit 2: anything else (unreadable, not a regular file, a sqlite error, or a missing `kv` table). The installer treats exit 2 as a failure, never as "not initialised".
+  - It prints only the outcome, never the group ID.
+  - On exit 1, the installer writes admind's unit but neither enables nor starts it, and reports `skipped (admind init has not run)`. The operator runs `admind init` (docs/admind.md §2) and then runs the installer again.
 
 **On purpose (no exit change):**
 - `--no-wsd` writes no wsd unit, and stops and disables an existing managed one. It reports `skipped (--no-wsd)`.
@@ -132,51 +191,82 @@ The installer leaves operator drop-ins (`<unit>.d/`) in place. It reports them a
 
 ### D5. Step 6 runs from the release
 
-`config check` now runs as `<release>/.venv/bin/heterodyne config check`, with the same environment as r3 and the same failure rules: a non-zero exit, a `harnesses problem:` line, or `HELPER_DRIFT`. It is advisory in a dry run. The residual is unchanged: it is service-user code, so it can lie but gains no privilege. In a dry run where the release isn't built yet, the step reports `advisory (the release is not built yet)`.
+`config check` now runs as `<release>/.venv/bin/heterodyne config check`, with r3's environment plus D3's `HETERODYNE_CONFIG_DIR` and `HETERODYNE_STATE_DIR`, the same values the units get. The failure rules are r3's: a non-zero exit, a `harnesses problem:` line, or `HELPER_DRIFT`. It is advisory in a dry run. The residual is unchanged: it is service-user code, so it can lie but gains no privilege. In a dry run where the release isn't built yet, the step reports `advisory (the release is not built yet)`.
 
-### D6. Idempotency, `--dry-run`, and adopting this host's units
+### D6. Idempotency, `--dry-run`, adoption, and uninstall
 
-- **Re-running is safe.** What is in place is `ok`. The release is `ok` if `.complete` is present, a unit file if its bytes match the render, a service if the live check passes. Nothing is restarted unless the live check differs.
+- **Re-running is safe.** What is in place is `ok`: the release if `.complete` is present, a unit file if its bytes match the render, and a service if both its loaded unit and its running process match (D4). Nothing is restarted unless the live check differs.
 - **`--dry-run`** prints `would:` for:
   - the release build;
-  - each unit write;
-  - daemon-reload, enable, and start or restart;
-  - linger.
+  - each unit write, and each adoption backup;
+  - daemon-reload, enable, and start or restart.
 
-  It changes nothing. It doesn't create the release, and it doesn't run uv except for the preflight's scratch `--dry-run`. The shim tests assert that no mutating call is logged, user-level calls included.
-- **The install record** is `${XDG_DATA_HOME:-~/.local/share}/heterodyne/install/record.json`, mode 0600, owned by the service user. It holds the current release's commit, whether the installer enabled lingering, and each adopted unit's backup path. It is written last, after the services step. It holds no secrets and no npubs.
-- **Adopting a hand-made unit.** A unit file whose first line isn't the marker counts as hand-made.
-  - Without `--adopt`, the preflight refuses: "heterodyne-admind.service was not written by the installer: run with --adopt to replace it (the old file is kept)".
-  - With `--adopt`, the installer copies the old file to `install/backup/<unit>.<UTC timestamp>` (0600), then reconciles as above. The new unit runs the release's interpreter, so the live check sees the old process and restarts it once.
-  - A symlink, a non-regular file, or a file another user owns is always refused, `--adopt` or not.
-  - Units the installer doesn't manage, such as `heterodyne-admind-selftest.service`, are never read, written or restarted.
-- **This host today** (checked 2026-10-14, read-only):
-  - `heterodyne-admind.service` is hand-rendered, enabled and active. Its interpreter is the dev checkout's `.venv`, and it has no drop-ins.
-  - `heterodyne-admind-selftest.service` is a static unit and isn't managed.
-  - There is no wsd unit, and wsd isn't running.
-  - Lingering is `yes`, and the user manager reports `degraded`. systemd is 255. uv is 0.11.16, on the login PATH.
-  - `[platform] sandbox` is `bubblewrap`. `docs/wsd.md` says that with it, a running wsd holds every workstream (`runtime_unavailable`) and claims nothing.
+  It changes nothing outside the preflight's scratch directory, which it removes. It doesn't create the release or the record. The shim tests assert that no mutating call is logged, system or user, and that the fake uv cache and the fake home are unchanged afterwards.
 
-  So this host's first run is the pinned command with `--adopt`:
-  - it reports `linger: ok`;
-  - it builds the release;
-  - it replaces admind's unit (with a backup) and restarts admind once, to the release;
-  - it starts wsd, unless the approval adds `--no-wsd` (open decision 1).
+**The install record** is `~/.local/share/heterodyne/install/record.json`, mode 0600, owned by the service user, in a 0700 directory. It holds no secrets and no npubs. Every write is atomic: it writes `.record.json.tmp`, fsyncs it, renames it over the record, and fsyncs the directory. It holds:
+- `release`: the commit of the last completed `services` step;
+- `units`: one entry per managed unit, kept across upgrades until uninstall removes it:
+  - `origin`: `created` (there was no file) or `adopted` (there was a hand-made file);
+  - for `adopted`: `backup`, the backup's file name under `install/backup/`, and `backup_sha256`, which is never printed;
+  - `state`: `writing`, then `written`.
 
-  admind's restart is the usual one: a few seconds without the Marmot channel. The admin agent's tmux scope survives it (docs/admind.md §3, "The agent outlives admind").
-- **Uninstall.** `deploy/uninstall.sh` gets a new first stage, which runs as the service user:
-  - it stops and disables wsd, then admind;
-  - it removes only the unit files that carry the marker;
-  - it runs `daemon-reload`.
+**The order around every unit write**, so that a failure at any point leaves the intent on disk before the change it describes:
+1. For a hand-made file being adopted, it copies the file to `install/backup/<unit>.<UTC timestamp>` (0600, written to a temporary name, fsynced and renamed).
+2. It writes the record with the unit's entry in state `writing`. An entry that already exists keeps its `origin` and `backup`. An upgrade never turns `adopted` into `created`.
+3. It writes the unit file atomically (D4, step 1).
+4. It writes the record with the entry in state `written`.
 
-  With `--restore-adopted`, it puts back each backup the install record lists, and doesn't start it. It turns lingering off only if the record says the installer turned it on. It keeps the releases, the state and the config, and lists the releases. Its existing root steps follow unchanged. Uninstall has the same pinned form as before.
+`release` is updated only after the `services` step's re-check passes.
+
+**A rerun after a failure** first reads the record. A record that is unreadable or malformed refuses before any change, and so does an entry with an unknown state. For each unit, by what the entry and the file show:
+- entry `writing`, and the file carries the marker: the write happened. It is reconciled as usual, and the entry becomes `written`.
+- entry `writing`, origin `adopted`, and the file is hand-made with the backup's bytes: the replacement didn't happen. It continues from step 3, with the same backup and no new one. `--adopt` isn't needed again, because the record holds that intent.
+- entry `writing`, origin `adopted`, and the file is hand-made with other bytes, or there's no file: someone changed it in between. Refused before any change, naming the unit.
+- entry `writing`, origin `created`, and no file: the write didn't happen. It continues from step 3.
+- no entry, and the file carries the marker: refused before any change. That file isn't in the record, so the installer can't know whether replacing it loses anything.
+
+**Adopting a hand-made unit.** A unit file whose first line isn't the marker counts as hand-made.
+- Without `--adopt`, and without an entry for that unit, the preflight refuses: "heterodyne-admind.service was not written by the installer: run with --adopt to replace it (the old file is kept)".
+- With `--adopt`, the installer follows the order above. The new unit's environment and generation differ from the old process's, so the live check restarts admind once.
+- A symlink, a non-regular file, or a file another user owns is always refused, `--adopt` or not. So is a backup in the record that is missing or whose bytes don't match `backup_sha256`.
+- Units the installer doesn't manage, such as `heterodyne-admind-selftest.service`, are never read, written or restarted.
+
+**This host today** (checked 2026-10-14, read-only):
+- `heterodyne-admind.service` is hand-rendered, enabled and active. Its interpreter is the dev checkout's `.venv`, and it has no drop-ins.
+- `heterodyne-admind-selftest.service` is a static unit and isn't managed.
+- There is no wsd unit, and wsd isn't running.
+- Lingering is `yes`, and the user manager reports `degraded`. systemd is 255. uv is 0.11.16, on the login PATH. The uv cache holds about 278,000 entries (7.2 GB), on the home filesystem.
+- `[platform] sandbox` is `bubblewrap`. `docs/wsd.md` says that with it, a running wsd holds every workstream (`runtime_unavailable`) and claims nothing.
+
+So this host's first run is the pinned command with `--adopt`:
+- the preflight passes lingering and runs the scratch build;
+- it builds the release;
+- it backs up admind's unit, records it, replaces it, and restarts admind once, onto the release;
+- it starts wsd, unless the approval adds `--no-wsd` (open decision 1).
+
+admind's restart is the usual one: a few seconds without the Marmot channel. The admin agent's tmux scope survives it (docs/admind.md §3, "The agent outlives admind").
+
+**Uninstall.** `deploy/uninstall.sh` gets a new first stage, which runs as the service user. It decides before it acts.
+
+1. **Classify both units, changing nothing.** It reads the record, then each unit's file, `systemctl --user show` (`LoadState`, `ActiveState`, `FragmentPath`, `UnitFileState`) and, for adopted entries, the backup. Each unit is exactly one of:
+   - **managed:** the file carries the marker, and the record has a `written` entry for it, with `FragmentPath` the managed file. For an adopted entry with `--restore-adopted`, the backup must also exist, be a regular file the service user owns, and match `backup_sha256`.
+   - **absent:** there is no file, no entry, and systemd reports `LoadState=not-found` and inactive.
+   - **not managed:** there is no marker and no entry: a hand-made unit the installer never adopted. It is left alone and reported.
+   - **ambiguous:** anything else. That includes a marker without an entry, an entry without a marker, an entry in state `writing`, an unreadable or malformed record, a symlink, non-regular or foreign-owned file, a `FragmentPath` elsewhere, a unit that is loaded or active with no file, and, with `--restore-adopted`, a missing or mismatched backup.
+2. **If any unit is ambiguous, it refuses**, exit 1, naming each unit and the check, before any stop, disable, removal, restore or daemon-reload. The root teardown doesn't run either.
+3. **Otherwise it acts, wsd first, then admind,** only on managed units: stop, disable, remove the file, then one `daemon-reload`. With `--restore-adopted`, it copies each verified backup back into place, owned by the service user, mode 0644, and doesn't enable or start it. It then removes those units' entries from the record.
+4. It keeps the releases, the state and the config, and lists the releases.
+
+The stage is fail-stop: if any action in it fails, uninstall stops there, exit 1, and the existing root steps don't run. They follow unchanged when it succeeds. Uninstall has the same pinned form as before.
 
 ### D7. The pinned bootstrap stays as it is
 
-The README's `install-pinned` and `uninstall-pinned` blocks are unchanged. The new flags (`--adopt`, `--no-wsd`, `--fetch`, `--user-only`) go after `--service-user <user>` in the same `bash "$b" …` line, and the approval spells them out.
+The README's `install-pinned` and `uninstall-pinned` blocks are unchanged. The new flags go after `--service-user <user>` in the same `bash "$b" …` line, and the approval spells them out:
+- install: `--adopt`, `--no-wsd` and `--fetch`;
+- uninstall: `--restore-adopted`.
+
 - `PATHS` stays `deploy src/heterodyne/harness/resources/store_core.py`. Any new script lives under `deploy/`, and the user-level logic stays in `install.sh` itself, behind `as_service_user`. So `manifest.sh` and its sums are unchanged in form.
 - The release archive is the whole tree, made as the service user. Root doesn't verify it, because root never runs it (D2). It goes into the summary as `release: <commit>`, next to `commit:` and `archive sha256:`.
-- `--user-only` runs unprivileged, so it needs no pinned form. It stages into a `mktemp -d` under `$XDG_RUNTIME_DIR` instead of `/run`, and still takes `--commit` and `--expect-sha256` when it is given them.
 
 ## What the trust model guarantees, revised
 
@@ -186,51 +276,110 @@ r3's root guarantees are unchanged:
 - every root action reads from the stage, never from the checkout.
 
 New:
-- **Releases.** The release's bytes are the resolved commit's, even if the work tree changes after resolution or someone plants a `refs/replace` ref (hardened git, as r3).
+- **Releases.** The release's bytes are the resolved commit's, even if the work tree changes after resolution or someone plants a `refs/replace` ref (hardened git, as r3). Its runtime packages match `uv.lock`'s hashes. Its build backend is resolved, not pinned (D2).
+- **The daemons run with the locations the installer checked**, whatever the user manager's environment holds (D3), and the installer confirms this from the running processes (D4).
 - **The platform runs as the service user, in a directory the service user owns.** The installer claims no integrity for it against the service user or the agents that share its uid. That is today's position, now stated: the alternative in D2 is the follow-up that would change it.
 
 ## Tests (offline and unprivileged, in `tests/test_deploy_store_helper.py`)
 
 They extend r3's fake root and shims.
-- **Shims and fakes:**
-  - `systemctl` tells `--user` calls from system ones, and holds per-unit state: `ActiveState`, `SubState`, `MainPID`, `NRestarts`, `NeedDaemonReload` and enablement;
-  - new shims for `loginctl` and `journalctl`;
-  - `uv`, which writes a fake `.venv/bin/python3` and can be made to fail as an offline cache miss;
-  - `wsctl`, through the release's fake venv;
-  - the cmdline check reads a fake `/proc` under the prefix.
-- **Order:** a failed config check logs no `tune2fs -O` and no `--user start/restart`. Verity runs before any service starts. admind's start comes before wsd's, and uninstall stops wsd before admind.
-- **The user manager is never restarted:** no call contains `daemon-reexec`, `user@`, `-M ` or `machinectl`, and `--user restart` only ever names the two managed units.
-- **Release:**
-  - a fresh build logs `uv sync --locked --offline --no-dev` with `--python /usr/bin/python3`, and writes `.complete` last;
-  - a rerun is `ok` with no `uv sync`;
-  - a release without `.complete` is rebuilt;
-  - a cache miss without `--fetch` refuses before any change, and `--fetch` drops `--offline`;
-  - a work-tree edit or a `refs/replace` ref after resolution leaves the release's bytes equal to the commit's.
-- **Services:**
-  - in place: no start or restart;
-  - inactive: `start`; failed: `reset-failed` then `start`; active on another release's interpreter: `restart`;
-  - `NeedDaemonReload=yes` left after the reload fails;
-  - not ready (wsd's `wsctl status` failing, or admind's `NRestarts` rising) fails, with the journal tail in the output;
-  - a wsd running outside its unit refuses before any change.
-- **Adoption:**
-  - a hand-made admind unit without `--adopt` refuses before any change;
-  - with `--adopt`, the backup is written, then the file is replaced and admind restarted once;
-  - a symlink, or a file owned by someone else, refuses even with `--adopt`;
-  - `heterodyne-admind-selftest.service` is never touched.
-- **Skips:**
-  - admind not initialised: its unit is written but not enabled or started, `skipped (admind init has not run)`, exit 3;
-  - `--no-wsd`: exit unchanged;
-  - `--user-only` by a non-root user: no root step is logged, and a store helper that isn't in place refuses.
-- **Linger:** `Linger=no` logs `loginctl enable-linger <user>` and records it, and uninstall disables it only when the record says so. A bus that doesn't appear within the wait refuses.
-- **The renderers (Python unit tests):** wsd's unit has `TimeoutStopSec` > 120, `RestartPreventExitStatus=78` and `KillMode=control-group`. It has no `BTQ_REPO` even when the environment has one, and unsafe or sensitive values refuse, as with admind's renderer. `systemd-analyze --user verify` passes on both renders.
-- **`--dry-run`** logs no mutating call, system or user.
-- **The pinned blocks** in the README still run as written, with the new flags appended.
+
+**Shims and fakes:**
+- `systemctl` tells `--user` calls from system ones. It holds a manager environment and per-unit state: `ActiveState`, `SubState`, `MainPID`, `NRestarts`, `NeedDaemonReload`, enablement, `FragmentPath`, `DropInPaths`, and the loaded `ExecStart`, `Environment` and `UnsetEnvironment`, parsed from the unit file and its drop-ins.
+  - On `start` or `restart`, it writes the fake process's `/proc/<pid>/cmdline` and `environ` under the prefix. The environment is built as systemd builds it: the manager environment, then `Environment=`, then `UnsetEnvironment=` removed.
+  - It can be told to restart a unit during readiness, or to start it with another argv.
+- `loginctl` and `journalctl`.
+- `uv`. It writes a fake `.venv/bin/python3`, can be made to fail as an offline cache miss, and logs its `UV_CACHE_DIR`.
+- `wsctl`, through the release's fake venv.
+
+**Order:**
+- A failed config check logs no `tune2fs -O` and no `--user start` or `restart`.
+- Verity runs before any service starts.
+- admind's start comes before wsd's, and uninstall stops wsd before admind.
+
+**The user manager is never changed:**
+- no call contains `daemon-reexec`, `user@`, `-M `, `machinectl`, `enable-linger`, `disable-linger`, `set-environment`, `unset-environment` or `import-environment`;
+- `--user restart` only ever names the two managed units.
+
+**Lingering:** `Linger=no`, and a failing `loginctl show-user`, each refuse before any change, `--dry-run` included, and print the exact `sudo loginctl enable-linger <user>` command. A missing or foreign-owned bus refuses.
+
+**The contaminated manager environment (finding 1).** The fake manager holds `BTQ_REPO`, `HETERODYNE_CONFIG_DIR`, `HETERODYNE_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME` and `PATH`, each pointing somewhere else. After an install:
+- each started process's environment has the checked locations and the release `PATH`, and none of `BTQ_REPO` or the `XDG_*` overrides;
+- `config check`, `admind initialised` and `wsctl status` were called with the same location values;
+- the fake manager environment is byte-for-byte what it was, and no environment-changing call is logged.
+
+**Release:**
+- A fresh build logs `uv sync --locked --offline --no-dev` with `--python /usr/bin/python3` and `UV_LINK_MODE=copy`, and writes `.complete` last.
+- A rerun is `ok`, with no `uv sync` and no scratch build.
+- A release without `.complete` is rebuilt.
+- The preflight's build runs on the full tree, with `UV_CACHE_DIR` inside the scratch directory, never the real cache. The scratch directory is gone afterwards, on success and on failure.
+- A cache miss without `--fetch` refuses before any change. `--fetch` skips the scratch build and drops `--offline`.
+- A scratch directory on another filesystem (the `cp -al` failing) refuses, and nothing falls back to the real cache.
+- A work-tree edit or a `refs/replace` ref after resolution leaves the release's bytes equal to the commit's.
+
+**The real uv against an empty cache.** This test has no network, and it skips if `/usr/bin/uv` and the service user's uv are both absent. With an empty `UV_CACHE_DIR` and a copy of the repository's `pyproject.toml`, `uv.lock` and source tree, the preflight's exact `uv sync` fails, and the preflight's wrapper reports the cache-miss refusal. A separate test checks the hardlink-copy property in D2: a scratch build against a hardlink copy of a small fixture cache leaves every fixture file's inode, size and mtime unchanged, and adds nothing.
+
+**Services:**
+- in place: no start or restart;
+- inactive: `start`; failed: `reset-failed`, then `start`;
+- active with another release's argv, with an older `HETERODYNE_UNIT_REV`, or with a manager-supplied `HETERODYNE_STATE_DIR` that the old unit didn't override: `restart`;
+- a drop-in that changes `ExecStart` (another module) or `Environment` (another `PATH`) fails, naming the property, and restarts nothing;
+- a drop-in that changes only `Nice=` is accepted, with a `note:`;
+- `NeedDaemonReload=yes` left after the reload fails;
+- not ready (wsd's `wsctl status` failing, or admind's `NRestarts` rising) fails, with the journal tail in the output;
+- a restart during the readiness window, or a new `MainPID` with another argv afterwards, fails the re-check;
+- an unreadable fake `/proc/<pid>/environ` fails the live check, and isn't taken as a match;
+- a wsd running outside its unit refuses before any change.
+
+**Adoption, and failure then rerun (finding 3).** Each failure is injected by making the named call fail once, and each is followed by a rerun with no injected failure:
+- a hand-made admind unit without `--adopt` refuses before any change;
+- with `--adopt`, the log order is: backup written, record `writing`, unit renamed, record `written`;
+- failure after the backup, before the record: the rerun still needs `--adopt`, makes one more backup and goes on, and the earlier backup stays on disk, unreferenced and listed;
+- failure after the record `writing`, before the rename: the rerun, without `--adopt`, reuses the recorded backup, makes no new one, and completes;
+- failure after the rename, before the record `written`: the rerun marks it `written`, and restarts nothing that already matches;
+- in the `writing` state, a hand-made file that has changed since the backup refuses, naming the unit;
+- a marker file with no record entry refuses;
+- an unreadable or malformed record refuses before any change;
+- an upgrade to a second commit keeps `origin: adopted` and the same backup;
+- a symlink, or a file owned by someone else, refuses even with `--adopt`;
+- `heterodyne-admind-selftest.service` is never touched.
+
+**Uninstall (finding 6):**
+- managed units: wsd is stopped, disabled and removed before admind, then one `daemon-reload`, then the root steps;
+- each ambiguous case in D6 (a marker without an entry, an entry without a marker, a `writing` entry, a malformed record, a symlink, a mismatched backup with `--restore-adopted`, a loaded unit with no file) refuses with exit 1, logs no `stop`, `disable`, `rm` or `daemon-reload`, and runs no root step;
+- a not-managed hand-made unit is left alone and reported;
+- `--restore-adopted` puts the verified backup back, and neither enables nor starts it;
+- a failing `stop` stops the uninstall there, and no root step runs.
+
+**Skips:**
+- admind not initialised: its unit is written but not enabled or started, `skipped (admind init has not run)`, exit 3;
+- `--no-wsd`: exit unchanged.
+
+**`admind initialised` (Python unit tests).** A database with the group gives 0. A state directory without `admind.db` gives 1, and no file is created. A database without the row gives 1. A non-regular `admind.db`, an unreadable one, and a corrupt one each give 2. In every case the state directory's listing and each file's bytes and mtime are unchanged, and no `audit.jsonl` appears. The group ID is never printed.
+
+**The renderers (Python unit tests):**
+- wsd's unit has `TimeoutStopSec` greater than 120, `RestartPreventExitStatus=78` and `KillMode=control-group`;
+- both units have the D3 block exactly, `BTQ_REPO` only ever in `UnsetEnvironment=` even when the rendering environment has it, and no name in both lists;
+- `HETERODYNE_UNIT_REV` changes when any other line of the render changes;
+- unsafe or sensitive values refuse, as with admind's renderer today;
+- `systemd-analyze --user verify` passes on both renders.
+
+**`--dry-run`** logs no mutating call, system or user, and leaves the fake uv cache, home and record unchanged.
+
+**The pinned blocks** in the README still run as written, with the new flags appended.
 
 ## Open decisions for Liam
 
 1. **wsd on this host's first run.** Recommended: start it. With `sandbox = "bubblewrap"` it claims nothing and holds every workstream, so it is ready, and supervised, for the day openshell is turned on. Alternative: `--no-wsd` until then.
 2. **Release directories (D2) instead of the dev checkout's venv.** Recommended: release directories. Running code is then pinned to a commit, and an agent's work-tree edit can't change a daemon on its next restart. The cost is one more directory per installed commit, and admind no longer runs editable from the dev checkout: changing the running code becomes "merge, then rerun the installer".
-3. **`--user-only` unprivileged upgrades (D1).** Recommended: yes. Alternative: every platform upgrade goes through sudo.
+
+## Follow-ups (filed separately, not in this design)
+
+- **`--user-only` unprivileged upgrades.** It needs its own execution helpers, because `runuser` needs root (review r1, finding 7).
+- **Installer-managed lingering.** v1 refuses and prints the command instead (D1).
+- **Pinning the build toolchain** (hatchling and its dependencies), with hashes (D2).
+- **Root-owned releases** (D2's alternative).
+- **Release pruning.**
 
 ## Out of scope
 
@@ -238,6 +387,5 @@ They extend r3's fake root and shims.
 - `admind init` and the operators' acceptance of the invite.
 - The admin agent's first-launch dialogs (docs/admind.md §3).
 - OpenShell, podman 5, the workload image and the agent CLIs (`packaging/sandbox/README.md`).
-- Root-owned releases (D2's alternative).
-- Release pruning.
+- Moved config, state or data locations (D3).
 - launchd (macOS, phase 2).
