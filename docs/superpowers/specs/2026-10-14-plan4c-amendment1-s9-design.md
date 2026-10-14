@@ -340,3 +340,10 @@ S9-10 is no longer a question. The review made it a requirement before Task 6 me
 - T2 (merged) and its `CROSSES_MOUNT` check.
 - E10 and everything else in plan 4c not named here.
 - `/tmp/codex-daemon-<uid>/` stays bound from the session, as in plan 4 (S5).
+
+## 9. Deferred to implementation
+
+The r3 cross-model review (APPROVE, `docs/reviews/p4c-amend1-design-r3.md`) deferred two non-blocking items:
+
+- **§4.4, the positive control's marker.** The clear removes the Codex marker before the sandbox is created, and E25 hides its original path. The positive control therefore runs an identical copy of the marker from the writable worktree. Otherwise the test could fail because its control executable isn't there. The mandatory positive control already prevents a false pass.
+- **§4.2, partial clear evidence.** If the delete pass fails partway, some entries may already be removed when it raises, and no `Cleared` summary is returned. The launch still fails safely, but the journal doesn't record what was deleted. Journaling a summary on failure is deferred.
