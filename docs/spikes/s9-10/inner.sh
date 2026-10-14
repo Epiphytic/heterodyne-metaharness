@@ -19,7 +19,7 @@ for e in /tmp/.run/* /tmp/.run/.[!.]*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     n=/run/${e#/tmp/.run/}
     if [ -L "$e" ]; then cp -P "$e" "$n"
-    elif [ -d "$e" ]; then mkdir "$n" && mount --rbind "$e" "$n"
+    elif [ -d "$e" ]; then mkdir -p "$n" && mount --rbind "$e" "$n"
     else touch "$n" && mount --bind "$e" "$n"; fi
 done
 # The two binds plan 4's Codex.facts declares.
@@ -51,13 +51,19 @@ for _ in $(seq 1 20); do
     if "$PY" -c 'import sys
 from heterodyne.agents.codex import Codex
 from heterodyne.sandbox.spec import SessionLayout
-sys.exit(0 if Codex().server_ready(SessionLayout(sys.argv[1])) else 1)' "$SESSION"; then ready=yes; break; fi
+from pathlib import Path
+sys.exit(0 if Codex().server_ready(SessionLayout(Path(sys.argv[1]))) else 1)' "$SESSION"; then ready=yes; break; fi
     sleep 0.5
 done
 echo "$ready" > "$R/server_ready"
-# shellcheck disable=SC2086
-run timeout -k 2 18 strace $TRACE -o "$R/tui.strace" script -qfec "$TUI" "$R/tui.screen" </dev/null \
-    > /dev/null 2>&1 || true
+# The TUI asks its terminal for the cursor and colours before it draws, so it runs in a private tmux server
+# (socket on this run's /tmp, gone with the namespace). The pane's command is the same `env -i`.
+ENV="env -i HOME=$HOME_DIR CODEX_HOME=$HOME_DIR/.codex PATH=$CLI/bin:/usr/bin:/bin TERM=xterm-256color"
+TMUX_TMPDIR=/tmp tmux -L s9-10 -f /dev/null new-session -d -x 160 -y 48 \
+    "$ENV strace $TRACE -o $R/tui.strace $TUI"
+sleep 14
+TMUX_TMPDIR=/tmp tmux -L s9-10 capture-pane -p -t 0 > "$R/tui.screen" 2>&1 || true
+TMUX_TMPDIR=/tmp tmux -L s9-10 kill-server 2>/dev/null || true
 kill "$SP" 2>/dev/null || true
 wait "$SP" 2>/dev/null || true
 for p in tmp packages; do

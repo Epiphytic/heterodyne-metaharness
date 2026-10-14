@@ -33,14 +33,15 @@ def main() -> None:
     run, variant = Path(sys.argv[1]), sys.argv[2]
     meta = json.loads((run / "argv.json").read_text())
     home = meta["home"].encode()
-    lines = [ln for f in ("server.strace", "tui.strace") if (run / f).exists()
+    lines = [ln for f in ("server.strace", "tui.strace", "tui-resume.strace") if (run / f).exists()
              for ln in (run / f).read_bytes().splitlines()]
     execs = [s[0] for ln in lines if b" execve(" in ln and (s := strings(ln))]
     under_home = [e for e in execs if e.startswith(home + b"/")]
     names = sorted({n for ln in lines if b"sendto(" in ln or b"sendmmsg(" in ln
                     for s in strings(ln) if (n := qname(s))})
     github = any(GITHUB_API in s or b"api.github.com" in s for ln in lines for s in strings(ln))
-    sockets = sorted({s.decode("utf-8", "replace") for ln in lines if b"connect(" in ln and b"AF_UNIX" in ln
+    tui = (run / "tui.strace").read_bytes().splitlines() if (run / "tui.strace").exists() else []
+    sockets = sorted({s.decode("utf-8", "replace") for ln in tui if b"connect(" in ln and b"AF_UNIX" in ln
                       for s in strings(ln)})
     app = meta["app_socket"].removeprefix("unix://")
     tui_connected = any(app in s or "codex-daemon" in s for s in sockets)
@@ -61,11 +62,18 @@ def main() -> None:
         "no_exec_under_home": not under_home,
         "no_api_github_lookup": not github,
     }
-    print(f"S9-10 Part 1, {variant}: {run}")
+    def said(name: str) -> bool:
+        return (run / name).exists() and (run / name).read_text().strip() == "yes"
+
+    if (run / "answered").exists():                          # Part 2 (part2.sh)
+        checks["tui_screen_shows_composer"] = said("composer")
+        checks["new_session_answered"] = said("answered")
+        checks["resume_shows_the_first_prompt"] = said("resumed")
+    print(f"S9-10, {variant}: {run}")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'} {name}")
     print(f"  dns names attempted: {names}")
-    print(f"  unix sockets connected: {sockets}")
+    print(f"  unix sockets the TUI connected to: {sockets}")
     print(f"  execs under the home: {[e.decode('utf-8', 'replace') for e in under_home]}")
     print(f"  left in .codex/packages: {left[:16]}")
     (run / "result.json").write_text(json.dumps({"checks": checks, "dns": names, "sockets": sockets}))

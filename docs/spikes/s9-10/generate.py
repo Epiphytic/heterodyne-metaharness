@@ -3,7 +3,11 @@
 Run from a worktree at the Task 6 PR's head: `python docs/spikes/s9-10/generate.py <T> <store-cli> [--e25]`.
 It prepares the home with `Codex.prepare_home` (and, with `--e25`, clears and makes the empty read-only
 directories as `prepare_install_home` does) and writes `<T>/argv.json` with `server_argv` and `tui_argv` for
-a new session. Part 1 has no resume: a thread needs model traffic (Part 2). Nothing is hand-written."""
+a new session. Part 1 has no resume: a thread needs model traffic (Part 2). Nothing is hand-written.
+
+Part 2 adds `--install <dir>`, which prepares the home with `prepare_install_home` from that install's
+`defaults/` (the live-test effort), and `--resume <thread>`, which leaves the home alone and writes the
+resume argv to `<T>/argv-resume.json`."""
 
 import argparse
 import json
@@ -21,18 +25,30 @@ def main() -> None:
     ap.add_argument("store_cli", type=Path)
     ap.add_argument("--e25", action="store_true")
     ap.add_argument("--model", default="")
+    ap.add_argument("--install", type=Path)
+    ap.add_argument("--resume")
     args = ap.parse_args()
     codex = Codex()
     layout = SessionLayout(args.root / "s")
-    layout.home.mkdir(parents=True, exist_ok=True)
-    worktree = args.root / "wt"
-    worktree.mkdir(exist_ok=True)
-    codex.prepare_home(layout, worktree)
-    if args.e25:
-        exec_dirs.prepare(layout.home, codex.empty_read_only)
     binary = (args.store_cli / "bin" / "codex").resolve(strict=True)
     cli = Cli(binary, args.store_cli.resolve(), codex.version_pin)
     profile = {"model": args.model} if args.model else {}
+    if args.resume:
+        argv = codex.tui_argv(cli, profile, native_id=args.resume, resume=True, label="s9-10")
+        if any(a in ("-c", "--config") or a.startswith("-c") for a in argv):
+            raise SystemExit("tui_resume carries a config override: E9 says no -c")
+        (args.root / "argv-resume.json").write_text(json.dumps({"tui_resume": argv}, indent=1))
+        print(json.dumps({"tui_resume": argv}, indent=1))
+        return
+    layout.home.mkdir(parents=True, exist_ok=True)
+    worktree = args.root / "wt"
+    worktree.mkdir(exist_ok=True)
+    if args.install:
+        codex.prepare_install_home(layout, worktree, args.install)       # E25's clear included
+    else:
+        codex.prepare_home(layout, worktree)
+        if args.e25:
+            exec_dirs.prepare(layout.home, codex.empty_read_only)
     out = {
         "session": str(layout.root), "home": str(layout.home), "bridge": str(layout.bridge),
         "daemon": str(layout.daemon), "worktree": str(worktree),

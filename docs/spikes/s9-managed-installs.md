@@ -1,6 +1,6 @@
 # Spike S9: content, updaters and the backend's bind on the pinned versions
 
-Status: **done.** S9-1 to S9-4 and S9-9 are confirmed; S9-5, S9-6 and S9-7 changed; S9-8 refuted. This is plan 4c Task 1. Each finding below is marked **confirmed**, **refuted** or **changed**, gives the exact flag, key or field and the command that showed it, and names the consumer's stop rule when the result isn't "confirmed".
+Status: **done.** S9-1 to S9-4 and S9-9 are confirmed; S9-5, S9-6 and S9-7 changed; S9-8 refuted. S9-10 (Amendment 1 §4.5, the launcher's own Codex launch shape) Part 1 passed with E25's binds on 2026-10-14; Part 2 is the team lead's run. This is plan 4c Task 1. Each finding below is marked **confirmed**, **refuted** or **changed**, gives the exact flag, key or field and the command that showed it, and names the consumer's stop rule when the result isn't "confirmed".
 
 Versions: codex-cli 0.160.0 (`rust-v0.160.0`, target `x86_64-unknown-linux-musl`) and Claude Code 2.1.286 (npm platform package `@anthropic-ai/claude-code-linux-x64`), OpenShell 0.1.2 with the Podman driver on rootless Podman 5.8.8. The installed CLIs were neither upgraded nor replaced.
 
@@ -25,6 +25,7 @@ Versions: codex-cli 0.160.0 (`rust-v0.160.0`, target `x86_64-unknown-linux-musl`
 | S9-7 | **changed** | aliases in `$CODEX_HOME/tmp/arg0/codex-arg0<random>/`, prepended to `PATH`; the daemon copy in `$CODEX_HOME/packages/` is executed unless `daemon_auto_start = false` | amends T6, T8, T13 |
 | S9-8 | **refuted** | bind fields are only `type`, `source`, `target`, `read_only`, `selinux_label`; Podman always gets `ro,rbind,rprivate`: private, but recursive, and a carried submount stays `rw` | T8 stops (E24) |
 | S9-9 | **confirmed** | `st_dev`, `st_ino`, `st_mode`, `st_nlink`, `st_size`, `st_ctime_ns` and the link target are identical inside; only the mount ID differs | T8 probe |
+| S9-10 | Part 1 **confirmed** (with E25); Part 2 pending | the adapter's own `server_argv` / `tui_argv` and home, production's socket binds, no `-c`: with `.codex/tmp` and `.codex/packages` empty and read-only, no exec under the home, `packages/` empty, no `api.github.com` | Task 6 merge gate |
 
 ## S9-1: the Codex archive's layout (confirmed)
 
@@ -274,6 +275,83 @@ In the S9-8 sandbox (s9-b1), `$T/s98/stat.py` `lstat`ed the tree's root and ever
 All seven fields are identical inside for every entry on the bound file system, including `st_dev` (the ext4 device 259:2) and `st_ctime_ns` to the nanosecond. The only difference for `sub` is the expected one: the host's own namespace doesn't have the tmpfs, so it sees the directory underneath. The mount ID is not one of the fields; it differs inside by construction (each namespace numbers its mounts), so T8's probe can compare `mnt_id` only within one side (entry vs root), never across.
 
 **Verdict: confirmed.** T8's probe may compare `st_dev`, `st_ino`, `st_mode`, `st_nlink`, `st_size`, `st_ctime_ns` and the link target against the host record; none is dropped.
+
+## S9-10: the launcher's own Codex launch shape (Part 1 confirmed with E25; Part 2 pending)
+
+Amendment 1 §4.5. Part 1 is the worker's run: no network, no login. It ran on 2026-10-14 from the Task 6 worktree (branch `p4c-t6`, PR #86) with the scripts in `docs/spikes/s9-10/`. Part 2 (network plus the live-test login, a new session's prompt, then a resume) is the team lead's run and isn't recorded yet.
+
+**The CLI.** `gh release download rust-v0.160.0 -R openai/codex -p codex-package-x86_64-unknown-linux-musl.tar.gz -p codex-package_SHA256SUMS` into a fresh `mktemp -d -p "$XDG_RUNTIME_DIR"` directory, then `sha256sum -c --ignore-missing codex-package_SHA256SUMS`: `codex-package-x86_64-unknown-linux-musl.tar.gz: OK`. Unpacked with `tar -xzf` into `cli/`. `codex-package.json` gives version `0.160.0`, target `x86_64-unknown-linux-musl` and entrypoint `bin/codex`. That download was the only network access.
+
+**Commands.**
+
+```sh
+sh docs/spikes/s9-10/part1.sh <dl>/cli <results>
+# for V in plain e25, each with a fresh T=$(mktemp -d -p "$XDG_RUNTIME_DIR" s9-10.XXXXXX):
+.venv/bin/python docs/spikes/s9-10/generate.py $T <dl>/cli [--e25]     # Codex.prepare_home (+ exec_dirs.prepare)
+timeout -k 5 40 unshare -rmnpf --mount-proc --kill-child sh docs/spikes/s9-10/inner.sh $T <dl>/cli $V <python>
+.venv/bin/python docs/spikes/s9-10/analyze.py $T $V
+```
+
+- **`generate.py`** calls the candidate adapter.
+  - It runs `Codex.prepare_home(SessionLayout($T/s), $T/wt)`.
+  - With `--e25` it also runs `exec_dirs.prepare(home, Codex.empty_read_only)`, which is what `prepare_install_home` adds.
+  - It writes `server_argv(cli)` and `tui_argv(cli, {}, native_id=None, resume=False, …)` to `argv.json`.
+  - It refuses any argv that has `-c`/`--config`.
+- **`inner.sh`** runs in a fresh user, mount, network and PID namespace (uid 0 inside). In order:
+  1. `mount --make-rprivate /`, then a `tmpfs` on `/tmp`.
+  2. `BRIDGE_INSIDE`'s parent `/run` can't be written from a user namespace, so a `tmpfs` goes on `/run` and each host `/run` entry is bound back (`--rbind`).
+  3. `layout.bridge` is bound at `/run/hz-bridge` and `layout.daemon` at `/tmp/codex-daemon-0`, the two binds `Codex.facts` declares.
+  4. For `e25`, one fresh empty directory is bound read-only at `.codex/tmp` and at `.codex/packages`.
+  5. The server starts under `strace -f -qq -s 300 -xx -e trace=execve,connect,sendto,sendmmsg`. Readiness is the adapter's own `Codex.server_ready(layout)`, polled every 0.5 s for up to 10 s.
+  6. The TUI runs in a private tmux server: `tmux -L s9-10 -f /dev/null new-session -d -x 160 -y 48`, with its socket on the run's private `/tmp`. Its screen is captured after 14 s, and the tmux server is killed.
+- **`analyze.py`** decodes the `-xx` buffers.
+
+**The argv**, unchanged from the adapter (both variants; `<dl>` is the download directory):
+
+```
+server:  <dl>/cli/bin/codex app-server --listen unix:///run/hz-bridge/app.sock
+tui_new: <dl>/cli/bin/codex --remote unix:///run/hz-bridge/app.sock --dangerously-bypass-approvals-and-sandbox
+```
+
+No argv has `-c`. The home's `config.toml` is the adapter's: `approval_policy`, `sandbox_mode`, `check_for_update_on_startup = false`, the worktree's `projects` entry, and `[features]` with `apps`, `daemon_auto_start`, `plugins` and `in_app_updates` all false.
+
+**The environment** is `env -i HOME=<home> CODEX_HOME=<home>/.codex PATH=<dl>/cli/bin:/usr/bin:/bin TERM=xterm-256color`, for both the server and the TUI pane. `Codex.versions["0.160.0"].tool_env` names the variables 0.160.0 sets for its own children: `CODEX_CI`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_VERSION`, `COLORTERM`, `GH_PAGER`, `GIT_PAGER`, `LC_ALL`, `LC_CTYPE`, `NO_COLOR` and `PAGER`. It gives no values, and the launcher passes none of them, so the run added none.
+
+**Mounts inside** (from `/proc/self/mountinfo`): `/run/hz-bridge rw` and `/tmp/codex-daemon-0 rw` in both runs. `e25` adds `<home>/.codex/tmp ro` and `<home>/.codex/packages ro`.
+
+**Results**
+
+| | `plain` (no E25 binds) | `e25` (E25's binds) |
+|---|---|---|
+| `server_ready` (the adapter's) | yes | yes |
+| TUI's Unix connects | `/run/hz-bridge/app.sock` (and `/run/user/0/bus`, which fails: no session bus) | the same |
+| TUI screen | the login screen ("Welcome to Codex … Sign in with ChatGPT … Press enter to continue") | the same |
+| `.codex/packages` | never created | empty (inside and on the host) |
+| exec of a path under the home | 6 attempts, all ENOENT: `.codex/tmp/arg0/codex-arg0<random>/lsb_release` and `…/getconf`, from the server and the TUI | none |
+| `.codex/tmp` after the run | `arg0/codex-arg0<random>/` with `apply_patch`, `applypatch`, `codex-linux-sandbox`, `codex-execve-wrapper` and `.lock`, per process | empty |
+| DNS names attempted (`sendto`) | `raw.githubusercontent.com` only (from the TUI) | the same |
+| `api.github.com` in `connect` / `sendto` | none | none |
+| CLI warning | none | `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)` (server and TUI) |
+
+What this shows:
+- **The production arrangement works.** The server reaches the adapter's `server_ready` through the bridge and daemon binds, and the TUI connects to `APP_SOCKET` over `--remote`. With no login, the TUI shows its login screen instead of the composer. That is expected, and Part 2 covers the logged-in path.
+- **E9 reaches the CLI with no `-c`.** No `packages/` appears and nothing is executed from it (`daemon_auto_start = false`). There is no `api.github.com` (`check_for_update_on_startup = false`). The plugin sync's `github.com`, `chatgpt.com` and `ab.chatgpt.com` are gone too (`plugins = false`). The one name left, `raw.githubusercontent.com`, is the announcement tip (S9-5). It isn't an updater, and managed egress denies it.
+- **E25 is what makes the exec condition hold.** Without it, the CLI makes its PATH aliases under `.codex/tmp/arg0/` and resolves commands through them first (S9-7). This run only shows failed lookups (ENOENT), but a file planted there under a common command name would run. With E25's read-only empty directory, no aliases are made and there's no exec attempt under the home.
+
+**Verdict: Part 1 confirmed for the shape Task 6 ships (with E25's binds).** All three pass conditions hold in `e25`: `.codex/packages` stays empty, there's no exec of a path under the home, and there's no `api.github.com` lookup. The `plain` run is the baseline without E25. It meets two of the three, and its exec attempts under `.codex/tmp/arg0/` are the reason E25 exists. Still open for Part 2 / Task 13: whether `apply_patch` works without its shell alias (S9-7), because no Part 1 run invokes a tool.
+
+**Harness notes.** Two first attempts were discarded because of harness bugs, not CLI behaviour:
+- `server_ready` got a `str` instead of a `Path`, so readiness was never seen.
+- `script -qfec … </dev/null` gave the TUI no terminal to answer its cursor and colour queries (`CSI 6n`, OSC 10/11), so it drew nothing. The tmux pane fixes that.
+
+The CLI results of those attempts (DNS names, execs, `packages/`) matched the run above.
+
+**Cleanup.**
+- After each run `ps` showed no process whose arguments contain the run directory, and none was left to kill. The PID namespace with `--kill-child` takes the server, the TUI and tmux down with it.
+- Each `$T` (home, worktree, session layout) was deleted, and `ls -d "$XDG_RUNTIME_DIR"/s9-10.*` finds nothing.
+- `/tmp/codex-daemon-*` on the host wasn't touched: every socket was on the run's private `/tmp`.
+- `~/.codex` and `~/.claude` weren't read or written.
+- The download directory and the results directory (traces, screens, `result.json`) are kept under `$XDG_RUNTIME_DIR` for Part 2 and the review.
 
 ## Cleanup
 
