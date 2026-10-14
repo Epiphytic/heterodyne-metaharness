@@ -468,7 +468,7 @@ def test_details_full_adds_this_turns_tool_calls_and_no_thinking(tmp_path: Path)
 def test_details_full_on_a_turn_without_a_span(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         await terminal_stop(h, LONG)  # no UserPromptSubmit: no span
-        await wait_until(lambda: SUMMARY in h.texts(), 20)
+        await wait_until(lambda: SUMMARY in h.delivered_texts(), 20)  # `!details` finds the latest sent one
         mid = await ask(h, "!details full")
         await wait_until(lambda: delivered(h, mid), 20)
         assert details_texts(h, mid)[0].endswith(f"\n\n{NO_TOOLS}")
