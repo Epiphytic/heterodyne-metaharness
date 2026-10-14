@@ -14,6 +14,7 @@ import re
 import stat
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_PREFIX = b"# Rendered by heterodyne's deploy/install.sh for release "
@@ -205,6 +206,86 @@ def write(file: Path, render: Path) -> None:
     _atomic_write(file, render.read_bytes(), 0o644)
 
 
+@dataclass
+class Expected:
+    argv: list[str]
+    env: dict[str, str]
+    unset: list[str]
+
+
+def _unescape(v: str) -> str:
+    return v.replace("%%", "%")
+
+
+def expected(text: str) -> Expected:
+    """What the render says the unit must run: values have no whitespace (heterodyne.units.check)."""
+    argv: list[str] = []
+    env: dict[str, str] = {}
+    unset: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("ExecStart="):
+            argv = [_unescape(a) for a in line.removeprefix("ExecStart=").split()]
+        elif line.startswith("Environment="):
+            k, _, v = line.removeprefix("Environment=").partition("=")
+            env[k] = _unescape(v)
+        elif line.startswith("UnsetEnvironment="):
+            unset = line.removeprefix("UnsetEnvironment=").split()
+    if not argv:
+        raise Refusal("the render has no ExecStart")
+    return Expected(argv, env, unset)
+
+
+def _props(show_text: str) -> dict[str, list[str]]:
+    props: dict[str, list[str]] = {}
+    for line in show_text.splitlines():
+        k, sep, v = line.partition("=")
+        if sep:
+            props.setdefault(k, []).append(v)
+    return props
+
+
+def _exec_argv(v: str) -> list[str] | None:
+    for part in v.strip("{} ").split(" ; "):
+        if part.startswith("argv[]="):
+            return part.removeprefix("argv[]=").split()
+    return None
+
+
+def loaded_diff(show_text: str, exp: Expected, fragment: str) -> list[str]:
+    props = _props(show_text)
+    diff = []
+    if props.get("FragmentPath") != [fragment]:
+        diff.append("FragmentPath")
+    execs = props.get("ExecStart", [])
+    if len(execs) != 1 or _exec_argv(execs[0]) != exp.argv:
+        diff.append("ExecStart")
+    env = {k: v for k, _, v in (e.partition("=") for e in " ".join(props.get("Environment", [])).split())}
+    if env != exp.env:
+        diff.append("Environment")
+    if " ".join(props.get("UnsetEnvironment", [])).split() != exp.unset:
+        diff.append("UnsetEnvironment")
+    if diff:
+        diff += [f"drop-in {Path(p).name}" for p in " ".join(props.get("DropInPaths", [])).split()]
+    return diff
+
+
+def process_diff(proc: Path, pid: int, exp: Expected) -> list[str]:
+    try:
+        argv = [a.decode() for a in (proc / str(pid) / "cmdline").read_bytes().split(b"\0")[:-1]]
+        raw = (proc / str(pid) / "environ").read_bytes().split(b"\0")
+    except (OSError, UnicodeDecodeError):
+        return ["unreadable"]
+    env: dict[str, str] = {}
+    for item in raw:
+        k, sep, v = item.partition(b"=")
+        if sep:
+            env[k.decode(errors="replace")] = v.decode(errors="replace")
+    diff = [] if argv == exp.argv else ["argv"]
+    diff += [k for k, v in exp.env.items() if env.get(k) != v]
+    diff += [k for k in exp.unset if k in env]
+    return diff
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="platform_state.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -231,6 +312,13 @@ def main(argv: list[str]) -> int:
     d = sub.add_parser("record-drop")
     d.add_argument("--unit", required=True)
     d.add_argument("--record", required=True)
+    ld = sub.add_parser("loaded-diff")
+    ld.add_argument("--render", required=True)
+    ld.add_argument("--fragment", required=True)
+    pd = sub.add_parser("process-diff")
+    pd.add_argument("--render", required=True)
+    pd.add_argument("--proc", required=True)
+    pd.add_argument("--pid", required=True, type=int)
     args = ap.parse_args(argv)
     if getattr(args, "unit", None) is not None and args.unit not in MANAGED:
         ap.error("not a managed unit")
@@ -255,6 +343,12 @@ def main(argv: list[str]) -> int:
             rec = load_record(Path(args.record))
             rec["units"].pop(args.unit, None)
             save_record(Path(args.record), rec)
+        elif args.cmd == "loaded-diff":
+            for line in loaded_diff(sys.stdin.read(), expected(Path(args.render).read_text()), args.fragment):
+                print(line)
+        elif args.cmd == "process-diff":
+            for line in process_diff(Path(args.proc), args.pid, expected(Path(args.render).read_text())):
+                print(line)
     except (Refusal, RecordError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1

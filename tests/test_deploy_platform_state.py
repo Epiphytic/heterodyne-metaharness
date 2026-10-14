@@ -259,3 +259,108 @@ def test_the_script_runs_isolated_and_reads_no_environment(p: Paths) -> None:
                           str(p.backups)], capture_output=True, text=True, timeout=60, check=False,
                          env={"PATH": "/usr/bin:/bin"})
     assert (out.returncode, out.stdout) == (0, "create\n")
+
+
+# --- identity (D4) ---
+
+RENDER = (MARKED + "[Service]\nExecStart=/r/.venv/bin/python3 -m heterodyne.admind run\n"
+          "Environment=PATH=/r/.venv/bin:/usr/bin\nEnvironment=HETERODYNE_CONFIG_DIR=/h/c\n"
+          "Environment=HETERODYNE_STATE_DIR=/h/s\nEnvironment=HETERODYNE_RELEASE=" + C + "\n"
+          "Environment=HETERODYNE_UNIT_REV=0123456789ab\n"
+          "UnsetEnvironment=BTQ_REPO XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME\n")
+ENV = ("PATH=/r/.venv/bin:/usr/bin HETERODYNE_CONFIG_DIR=/h/c HETERODYNE_STATE_DIR=/h/s "
+       f"HETERODYNE_RELEASE={C} HETERODYNE_UNIT_REV=0123456789ab")
+
+
+def show(fragment: str = "/u/heterodyne-admind.service",
+         argv: str = "/r/.venv/bin/python3 -m heterodyne.admind run",
+         env: str = ENV, dropins: str = "") -> str:
+    return (f"FragmentPath={fragment}\nDropInPaths={dropins}\n"
+            f"ExecStart={{ path=/r/.venv/bin/python3 ; argv[]={argv} ; ignore_errors=no ; start_time=[n/a] ; "
+            "stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+            f"Environment={env}\nUnsetEnvironment=BTQ_REPO XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME\n"
+            "NeedDaemonReload=no\n")
+
+
+def test_a_loaded_unit_that_matches_has_no_diff() -> None:
+    assert P.loaded_diff(show(), P.expected(RENDER), "/u/heterodyne-admind.service") == []
+
+
+@pytest.mark.parametrize(("kw", "prop"), [
+    ({"fragment": "/elsewhere/heterodyne-admind.service"}, "FragmentPath"),
+    ({"argv": "/r/.venv/bin/python3 -m heterodyne.other run"}, "ExecStart"),
+    ({"env": ENV.replace("/usr/bin", "/opt/bin")}, "Environment"),
+    ({"env": ENV + " BTQ_REPO=/x"}, "Environment"),
+])
+def test_a_loaded_unit_that_differs_names_the_property(kw: dict[str, str], prop: str) -> None:
+    diff = P.loaded_diff(show(**kw), P.expected(RENDER), "/u/heterodyne-admind.service")
+    assert prop in diff
+
+
+def test_a_second_exec_start_differs() -> None:
+    two = show().replace("NeedDaemonReload",
+                         "ExecStart={ path=/bin/true ; argv[]=/bin/true ; }\nNeedDaemonReload")
+    assert "ExecStart" in P.loaded_diff(two, P.expected(RENDER), "/u/heterodyne-admind.service")
+
+
+def test_a_drop_in_is_named_when_the_unit_differs() -> None:
+    diff = P.loaded_diff(show(argv="/x -m y", dropins="/u/heterodyne-admind.service.d/10-x.conf"),
+                         P.expected(RENDER), "/u/heterodyne-admind.service")
+    assert "drop-in 10-x.conf" in diff
+
+
+def proc(tmp: Path, argv: list[str], env: dict[str, str]) -> Path:
+    d = tmp / "proc" / "41"
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    (d / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0" for k, v in env.items()))
+    return tmp / "proc"
+
+
+GOOD_ENV = ({k: v for k, _, v in (e.partition("=") for e in ENV.split())}
+            | {"HOME": "/h", "SSH_AUTH_SOCK": "/s"})
+GOOD_ARGV = ["/r/.venv/bin/python3", "-m", "heterodyne.admind", "run"]
+
+
+def test_a_matching_process_has_no_diff(tmp_path: Path) -> None:
+    assert P.process_diff(proc(tmp_path, GOOD_ARGV, GOOD_ENV), 41, P.expected(RENDER)) == []
+
+
+@pytest.mark.parametrize(("argv", "env", "line"), [
+    (GOOD_ARGV[:3] + ["other"], GOOD_ENV, "argv"),
+    (GOOD_ARGV, GOOD_ENV | {"HETERODYNE_UNIT_REV": "ffffffffffff"}, "HETERODYNE_UNIT_REV"),
+    (GOOD_ARGV, GOOD_ENV | {"HETERODYNE_STATE_DIR": "/elsewhere"}, "HETERODYNE_STATE_DIR"),
+    (GOOD_ARGV, GOOD_ENV | {"BTQ_REPO": "/b"}, "BTQ_REPO"),
+    (GOOD_ARGV, {k: v for k, v in GOOD_ENV.items() if k != "HETERODYNE_RELEASE"}, "HETERODYNE_RELEASE"),
+])
+def test_a_process_that_differs_names_the_key_not_the_value(tmp_path: Path, argv: list[str],
+                                                            env: dict[str, str], line: str) -> None:
+    diff = P.process_diff(proc(tmp_path, argv, env), 41, P.expected(RENDER))
+    assert diff == [line]
+
+
+def test_an_unreadable_process_is_not_a_match(tmp_path: Path) -> None:
+    assert P.process_diff(tmp_path / "proc", 41, P.expected(RENDER)) == ["unreadable"]
+
+
+def test_process_diff_prints_no_value(tmp_path: Path) -> None:
+    root = proc(tmp_path, GOOD_ARGV, GOOD_ENV | {"HETERODYNE_STATE_DIR": "/secret-ish"})
+    (tmp_path / "render").write_text(RENDER)
+    out = run("process-diff", "--render", str(tmp_path / "render"), "--proc", str(root), "--pid", "41")
+    assert out.stdout == "HETERODYNE_STATE_DIR\n" and "/secret-ish" not in out.stdout + out.stderr
+
+
+def test_a_drop_in_that_changes_nothing_compared_is_no_diff() -> None:
+    shown = show(dropins="/u/heterodyne-admind.service.d/10-nice.conf")
+    assert P.loaded_diff(shown, P.expected(RENDER), "/u/heterodyne-admind.service") == []
+
+
+def test_the_expected_identity_unescapes_percent() -> None:
+    exp = P.expected(RENDER.replace("/r/.venv/bin:/usr/bin", "/r/.venv/bin:/opt/50%%/bin"))
+    assert exp.env["PATH"] == "/r/.venv/bin:/opt/50%/bin" and exp.argv == GOOD_ARGV
+    assert exp.unset == ["BTQ_REPO", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
+
+
+def test_a_render_without_exec_start_refuses() -> None:
+    with pytest.raises(P.Refusal):
+        P.expected(MARKED)
