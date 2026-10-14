@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
@@ -91,6 +92,11 @@ def utc_now() -> int:
     return int(time.time())
 
 
+def no_selection(_adapter: str) -> InstallPin | None:
+    """No adapter has a selected install: the default outside production (plan 4c T7)."""
+    return None
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -103,3 +109,6 @@ class Deps:
     clock: Callable[[], int] = utc_now
     # The trusted host-side read (D9 (d), plan 4b Task 8). The default confirms nothing.
     usage_reader: UsageReader = field(default_factory=NoUsageReader)
+    # The adapter's selected install, read afresh on each call (plan 4c T7): the guard pins it in each new
+    # launch entry. ConfigError when the selection can't be read.
+    selections: Callable[[str], InstallPin | None] = no_selection

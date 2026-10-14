@@ -1,6 +1,6 @@
 """Sandbox settings (ADR 0001 §7, §15): the host's `[sandbox]` and `[platform]` tables, each adapter's
-binary, the profiles, and each workstream's `[sandbox]` additions and effective tiers. Read once when wsd
-starts; a change needs a restart. Errors name keys, never values: `tool_env` may carry paths."""
+binary, the profiles, each workstream's `[sandbox]` additions and effective tiers, and `[harnesses]`. Read
+once when wsd starts; a change needs a restart. Errors name keys, never values: `tool_env` may carry paths."""
 
 import re
 from collections.abc import Mapping
@@ -11,6 +11,8 @@ from typing import Any, cast
 from heterodyne.config import Config, ConfigError, load, paths
 from heterodyne.config.layers import as_table, string_list, table_at
 from heterodyne.config.secret_scan import show
+from heterodyne.harness.settings import HarnessSettings
+from heterodyne.harness.settings import from_config as harness_settings
 
 HOST = re.compile(r"(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+")
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
@@ -51,6 +53,7 @@ class SandboxSettings:
     binaries: Mapping[str, str]              # adapter -> `[adapters.<a>].binary`, as configured
     profiles: Mapping[str, Mapping[str, Any]]
     workstreams: Mapping[str, WsSandbox]
+    harnesses: HarnessSettings               # plan 4c: the managed install store and the recipes
 
 
 def sandbox_settings(env: Mapping[str, str]) -> SandboxSettings:
@@ -58,10 +61,10 @@ def sandbox_settings(env: Mapping[str, str]) -> SandboxSettings:
 
     host = load(env=env)
     streams = {name: load(name, env) for name in workstream_names(paths.config_dir(env))}
-    return from_config(host, streams)
+    return from_config(host, streams, env)
 
 
-def from_config(host: Config, streams: Mapping[str, Config]) -> SandboxSettings:
+def from_config(host: Config, streams: Mapping[str, Config], env: Mapping[str, str]) -> SandboxSettings:
     sb = table_at(host.values, "sandbox", "config")
     unknown = set(sb) - HOST_KEYS
     if unknown:
@@ -107,7 +110,8 @@ def from_config(host: Config, streams: Mapping[str, Config]) -> SandboxSettings:
         egress_approved=approved,
         binaries=binaries,
         profiles=profiles,
-        workstreams={name: _workstream(name, cfg) for name, cfg in streams.items()})
+        workstreams={name: _workstream(name, cfg) for name, cfg in streams.items()},
+        harnesses=harness_settings(host, env))
 
 
 def _workstream(name: str, cfg: Config) -> WsSandbox:

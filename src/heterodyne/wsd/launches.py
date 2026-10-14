@@ -4,7 +4,8 @@ Every launch through the guard gets one entry, keyed (session key, generation): 
 appended to the bead's `metadata.wsd_launches` with read-back, and only then launched. An entry is never
 removed or changed, except that each of the set-once fields (the dispatch mark, the native ID, the
 reported model and the outcome) may be set once while it is empty. Entries and generation sequences
-rebuild from the bead copy alone.
+rebuild from the bead copy alone. Each entry pins the install its launch uses (plan 4c, D2): the host's
+selection when the guard journaled it, or empty when the adapter had none, and never changed after.
 
 A receipt is what `AgentRuntime.launch` returned or raised for one dispatched generation. It is
 journal-only: a session can write bead metadata, so a bead copy would be forgeable, and nothing ever
@@ -16,12 +17,17 @@ from typing import Annotated, Literal
 
 import msgspec
 
+from heterodyne.harness.selection import DIGEST, INSTALL
+
 LAUNCHES_KEY = "wsd_launches"
 SET_ONCE = ("dispatched_at", "native_id", "model_reported", "outcome")
 LAUNCHED = "launched"
 ABANDONED = "abandoned"
 MAX_GENERATION = 2**63 - 1      # SQLite's largest INTEGER: no generation follows it
 Outcome = Literal["launched", "abandoned"]
+# A bead copy's pin is either empty or well formed (it names a path under the store from Task 8 on).
+InstallName = Annotated[str, msgspec.Meta(pattern=f"^(?:{INSTALL.pattern})?$")]
+InstallDigest = Annotated[str, msgspec.Meta(pattern=f"^(?:{DIGEST.pattern})?$")]
 
 
 class LaunchEntry(msgspec.Struct, frozen=True, omit_defaults=True, forbid_unknown_fields=True):
@@ -42,6 +48,14 @@ class LaunchEntry(msgspec.Struct, frozen=True, omit_defaults=True, forbid_unknow
     native_id: str | None = None
     model_reported: str | None = None
     outcome: Outcome | None = None
+    # Plan 4c T7 (D2): the pinned install's name (`<version>-<12 hex>`) and its manifest digest. Set when
+    # journaled, never changed; empty when the adapter had no selection. Last, so positions don't move.
+    install: InstallName = ""
+    install_digest: InstallDigest = ""
+
+    def __post_init__(self) -> None:
+        if bool(self.install) != bool(self.install_digest):
+            raise ValueError("a launch entry pins both an install and its digest, or neither")
 
     @property
     def ident(self) -> tuple[str, int]:

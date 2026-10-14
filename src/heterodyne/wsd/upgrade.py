@@ -1,4 +1,4 @@
-"""The journal upgrade, version 1 to 2 (AU-3 design §3).
+"""The journal upgrades: version 1 to 3 (AU-3 design §3, then plan 4c T7's columns), and 2 to 3.
 
 `cli.run` calls `run` when `Journal()` raises JournalNeedsUpgrade, under the instance lock and before
 `assemble`. Three steps:
@@ -8,10 +8,15 @@
 2. Decide, a pure function: `adopt` gives each legacy bead `adopted` or `held`, or no row for a bead proven
    never to have launched.
 3. Commit, one SQLite transaction on the v1 file: the v2 tables (one `execute` each, never `executescript`,
-   which would commit first), the adoption rows, the adopted entries, the version. Any exception rolls
-   back, so a crash leaves version 1 intact; the `.v1.bak` copy taken first is for the operator only.
+   which would commit first) and version 3's columns, the adoption rows, the adopted entries, the version.
+   Any exception rolls back, so a crash leaves version 1 intact; the `.v1.bak` copy taken first is for
+   the operator only.
 
 The facts are fixed here: an account configured later never un-adopts a session (D2's "at the upgrade").
+
+`run_2_to_3` adds version 3's columns to AU-3's journal in one transaction the same way (a `.v2.bak`
+first). It reads no bead and no account: every existing entry was journaled before any install was
+pinned, so each keeps the empty pin the columns default to.
 """
 
 import json
@@ -36,10 +41,13 @@ from heterodyne.wsd.journal import (
     SCHEMA_VERSION,
     V2_META,
     V2_TABLES,
+    V3_COLUMNS,
     Adoption,
     JournalCorrupt,
     backup_to,
+    check_current,
     check_v1,
+    check_v2,
     launch_row,
     now,
 )
@@ -276,6 +284,8 @@ def _write(db: sqlite3.Connection, verdicts: Sequence[Verdict], at: str, cp: Che
     for stmt in V2_TABLES:
         db.execute(stmt)
         cp(f"upgrade.created.{stmt.split()[2]}")
+    for stmt in V3_COLUMNS:
+        db.execute(stmt)
     db.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", V2_META)
     for v in verdicts:
         db.execute("INSERT INTO adoptions (ws, bead, session_key, verdict, detail, facts) "
@@ -287,7 +297,7 @@ def _write(db: sqlite3.Connection, verdicts: Sequence[Verdict], at: str, cp: Che
     db.execute("INSERT INTO meta (key, value) VALUES ('upgraded_at', ?)", (at,))
     adopted = sum(v.verdict == "adopted" for v in verdicts)
     db.execute("INSERT INTO events (at, ws, bead, kind, detail) VALUES (?, '-', NULL, 'journal_upgraded', ?)",
-               (at, f"version 1 to 2: {adopted} adopted, {len(verdicts) - adopted} held"))
+               (at, f"version 1 to {SCHEMA_VERSION}: {adopted} adopted, {len(verdicts) - adopted} held"))
     cp("upgrade.inserted")
 
 
@@ -297,3 +307,36 @@ def run(beads: BeadsAdapter, accounts: Accounts, path: Path, cp: Checkpoint = no
     legacy, adapters = gather(path, beads, accounts)
     at = now()
     commit(path, adopt(legacy, adapters, at), at, cp)
+
+
+def run_2_to_3(path: Path, cp: Checkpoint = nothing) -> None:
+    """Upgrade the version 2 journal at `path` in place: the install pin's columns, in one transaction.
+    Already version 3 is a no-op; anything else that is not exactly version 2 is JournalCorrupt. Both are
+    decided before the backup is taken, so neither replaces it. Any exception rolls back. Reopen with
+    `Journal(path)`."""
+    db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=rw", uri=True, isolation_level=None,
+                         timeout=BUSY_TIMEOUT)
+    try:
+        if check_current(db):
+            return
+        if not check_v2(db):
+            raise JournalCorrupt("the journal is not version 2")
+        backup_to(db, path.with_name(f"{path.name}.v2.bak"))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if not check_v2(db):
+                raise JournalCorrupt("the journal changed during its upgrade")
+            for stmt in V3_COLUMNS:
+                db.execute(stmt)
+                cp(f"upgrade.v3.{stmt.split()[5]}")
+            db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (SCHEMA_VERSION,))
+            db.execute("INSERT INTO events (at, ws, bead, kind, detail) VALUES (?, '-', NULL, "
+                       "'journal_upgraded', ?)", (now(), f"version 2 to {SCHEMA_VERSION}"))
+            cp("upgrade.v3.inserted")
+            db.execute("COMMIT")
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
+    finally:
+        db.close()

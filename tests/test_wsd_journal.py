@@ -983,3 +983,19 @@ def test_crash_accounting_is_once_per_generation(tmp_path: Path, journal: Journa
         assert reopened.crash_count("alpha", "b1") == 0 and reopened.crash_accounted(one)
     finally:
         reopened.close()
+
+
+def test_a_new_journal_is_version_3_and_keeps_an_entrys_install_pin(tmp_path: Path) -> None:
+    """Plan 4c T7: `launches.install` and `.install_digest`, set when journaled, read back as written."""
+    j = Journal(tmp_path / "state" / "wsd.db")
+    try:
+        assert j.db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("3",)
+        pinned = LaunchEntry("k", 1, "w", "btq-1", "coder", "p", "default", "ck", "", False, "t",
+                             install="0.160.0-0123456789ab",
+                             install_digest="sha256:" + "0123456789abcdef" * 4)
+        j.launch_insert(pinned)
+        j.launch_insert(LaunchEntry("k", 2, "w", "btq-1", "coder", "p", "default", "ck", "", False, "t"))
+        assert j.launches("k") == [pinned, LaunchEntry("k", 2, "w", "btq-1", "coder", "p", "default", "ck",
+                                                       "", False, "t")]
+    finally:
+        j.close()

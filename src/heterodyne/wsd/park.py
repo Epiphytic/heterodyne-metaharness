@@ -30,6 +30,7 @@ budget and never escalates.
 """
 
 import contextlib
+import logging
 import threading
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -93,6 +94,8 @@ from heterodyne.wsd.usage import (
     untrusted_defer_until,
 )
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
+
+log = logging.getLogger(__name__)
 
 PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
                "park.committed", "park.blocked!", "park.blocked", "park.labelled!", "park.labelled",
@@ -1337,7 +1340,7 @@ class Parker:
                     raise EntryConflict(f"generation {generation} of the operation is not journaled")
                 self._bead_write(entry, f"{kind}.entry!")        # a replay: keep, write or conflict
             else:
-                pinned = self._pin(op, rec, accounts)            # step 2
+                pinned = self._pin(op, rec, accounts, adapter)   # step 2
                 if isinstance(pinned, Launch):
                     return pinned
                 op, entry = pinned
@@ -1374,7 +1377,8 @@ class Parker:
                           worktree, resume=op.kind is OpKind.RESUME and not handoff,
                           ref=op.data.get("ref") or None, generation=entry.generation, native_id=native,
                           account=entry.account, credential_key=entry.credential_key, handoff=handoff,
-                          model=entry.model_passed, repo=Path(rec.repo))
+                          model=entry.model_passed, repo=Path(rec.repo), install=entry.install,
+                          install_digest=entry.install_digest)
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)
@@ -1400,10 +1404,13 @@ class Parker:
         launched = [e for e in self.d.journal.launches(session_key) if e.outcome == LAUNCHED]
         return launched[-1].credential_key if launched else None
 
-    def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts) -> tuple[Op, LaunchEntry] | Launch:
+    def _pin(self, op: Op, rec: SessionRecord, accounts: Accounts,
+             adapter: str) -> tuple[Op, LaunchEntry] | Launch:
         """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
         copy. A Deadline or AccountChanged defers the bead inside this op (AU-4 §3.2 entry 3): no session
-        was dispatched for it, so the tail's stop only confirms that."""
+        was dispatched for it, so the tail's stop only confirms that. The entry pins the adapter's selected
+        install as it reads now (plan 4c T7, D2), or none, as also when the selection can't be read (until
+        Task 8 refuses that); a replay dispatches the journaled pin."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
         stale = stale_keys(op)
@@ -1425,8 +1432,16 @@ class Parker:
             self.escalate_from(op, Reason.UNEXPECTED_STATE, f"generations exhausted at {last}")
             return Launch.ENDED
         n = last + 1
+        try:
+            pin = self.d.selections(adapter) if adapter else None
+        except ConfigError:
+            # E23: launches as before T7. Task 8 turns this into a refusal (an unreadable selection is not
+            # "none selected"). The error's text can quote the file, so none of it is logged.
+            log.warning("the install selection can't be read; generation %d pins no install", n)
+            pin = None
         entry = LaunchEntry(rec.session_key, n, self.ws.name, op.bead, rec.role, rec.profile, chosen.account,
-                            chosen.key, self.ws.models.get(rec.profile, ""), False, now())
+                            chosen.key, self.ws.models.get(rec.profile, ""), False, now(),
+                            install=pin.install if pin else "", install_digest=pin.digest if pin else "")
         with j.transaction():
             j.launch_insert(entry)
             op = j.op_step(op.op_id, "entry", {"generation": str(n)})

@@ -71,6 +71,9 @@ def check_host(host: Mapping[str, Any]) -> None:
 
 
 def check_workstream(name: str, ws: Mapping[str, Any], merged_host: Mapping[str, Any]) -> None:
+    if "harnesses" in ws:
+        raise ConfigError(f"workstreams/{name}.toml: [harnesses] is host-only (config.toml); the host "
+                          "chooses the store and the installs (ADR §7 Managed installs)")
     if set(ws) & HOST_ONLY_KEYS:
         raise ConfigError(f"workstreams/{name}.toml: [accounts] and [usage] are host-only (config.toml); "
                           "workstreams choose profiles, never accounts")

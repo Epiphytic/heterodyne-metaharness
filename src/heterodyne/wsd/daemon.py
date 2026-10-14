@@ -58,9 +58,12 @@ import threading
 from collections import deque
 from collections.abc import Callable, Coroutine, Hashable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from heterodyne.config import ConfigError
+from heterodyne.harness import selection
+from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -82,7 +85,7 @@ from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, WorkstreamSettings
+from heterodyne.wsd.workstream import Deps, WorkstreamSettings, no_selection
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -198,13 +201,27 @@ class Parts:
     schedulers: dict[str, Scheduler]
 
 
+def selections_at(config_dir: Path | None) -> Callable[[str], InstallPin | None]:
+    """The adapter's current pin from `config_dir/harnesses.toml`, read again on every call so a `use`
+    applies to the next entry without a restart (plan 4c T7). ConfigError when the file can't be read."""
+    if config_dir is None:
+        return no_selection
+    where = config_dir
+
+    def current(adapter: str) -> InstallPin | None:
+        chosen = selection.load(where).get(adapter)
+        return chosen.current if chosen is not None else None
+    return current
+
+
 def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: AgentRuntime,
              reconciler: Callable[[BeadsAdapter], ActionReconciler] = HoldingReconciler,
              cp: Checkpoint = nothing, usage_reader: UsageReader | None = None) -> Parts:
     beads = BeadsAdapter(factory)
     gate = ClaimGate(s.lock_dir, beads, cp)
     deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
-                usage_reader=usage_reader if usage_reader is not None else NoUsageReader())
+                usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
+                selections=selections_at(s.config_dir))
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
 
 

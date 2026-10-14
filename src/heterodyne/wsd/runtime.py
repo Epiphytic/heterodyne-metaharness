@@ -24,6 +24,10 @@ SETTLED_ACTIONS = frozenset({"pending", "succeeded", "failed"})
 # refuses for these reasons raises exactly these texts and nothing else with them.
 LOGIN_STALE = "the login expires within the session's maximum lifetime; refresh it on the host"
 KEY_CHANGED = "the account's credential key changed after the launch was pinned"
+# Plan 4c (E23): defined by T7, acted on from T8. The LaunchFailed text for an entry with an empty install
+# pin, and the guard's escalation detail when the profile's adapter has no selected install.
+INSTALL_UNPINNED = "the launch entry pins no install"
+NOT_SELECTED = "no install is selected for the profile's adapter; choose one with `wsctl harness use`"
 
 
 class Liveness(StrEnum):
@@ -66,6 +70,10 @@ class LaunchSpec:
     credential_key: str = ""
     # A cross-account relaunch without (b): a fresh native session, never a resume (D7, plan 4b E10).
     handoff: bool = False
+    # The entry's pinned install and its manifest digest (plan 4c T7, D2); empty when the adapter had no
+    # selection. Ignored until T8 binds and verifies it.
+    install: str = ""
+    install_digest: str = ""
 
 
 @dataclass(frozen=True)

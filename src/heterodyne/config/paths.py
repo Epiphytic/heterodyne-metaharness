@@ -33,3 +33,8 @@ def state_dir(env: Mapping[str, str]) -> Path:
     if env.get("HETERODYNE_STATE_DIR"):
         return expand(env["HETERODYNE_STATE_DIR"], env)
     return _xdg_base(env, "XDG_STATE_HOME", _home(env) / ".local" / "state") / "heterodyne"
+
+
+def data_dir(env: Mapping[str, str]) -> Path:
+    """The service user's data directory: the managed install store's location under the fallback."""
+    return _xdg_base(env, "XDG_DATA_HOME", _home(env) / ".local" / "share") / "heterodyne"
