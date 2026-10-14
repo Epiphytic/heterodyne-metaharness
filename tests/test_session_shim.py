@@ -576,10 +576,11 @@ class Fed:
             self.done.set()
 
     def result(self, timeout: float) -> tuple[int, bytes]:
-        try:
-            out, _ = self.proc.communicate(timeout=timeout)   # a TimeoutExpired here fails the test
+        try:                                # not communicate(): that would close a stdin left open
+            rc = self.proc.wait(timeout=timeout)    # a TimeoutExpired here fails the test
             self.writer.join(timeout)
-            return self.proc.returncode, out
+            assert self.proc.stdout is not None
+            return rc, self.proc.stdout.read()
         finally:
             self.proc.kill()
             self.proc.wait()
@@ -756,10 +757,10 @@ def test_an_event_argument_that_disagrees_with_the_payload_is_denied(run: Path, 
 
 def test_run_hook_denies_input_over_the_bound_unparsed(run: Path, live: SessionServer,
                                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_parse(_: bytes) -> object:
+    def no_parse(_: bytes) -> int:
         raise AssertionError("parsed")
 
-    monkeypatch.setattr(shim.json, "loads", no_parse)
+    monkeypatch.setattr(shim, "json_depth", no_parse)        # every parse starts here
     raw = huge_write()
     t = FakeTime()
     assert denied(shim.run_hook(raw, env_for(run), event="PreToolUse", clock=t.clock,
