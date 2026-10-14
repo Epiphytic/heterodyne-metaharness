@@ -462,7 +462,7 @@ uid=0
 while IFS='=' read -r p u; do [[ $root/$p == "$path" ]] && uid=$u; done <"$S/uids"
 echo "$uid ${out#* }"
 """,
-    "findmnt": r"""exec cat "$S/findmnt"
+    "findmnt": r"""exec cat "$S/mount"
 """,
     # no arguments: the usage, then the version line, as e2fsprogs prints them; `-O verity` adds the feature
     # (unless `tune2fs-no-effect`)
@@ -499,7 +499,7 @@ def state() -> dict[str, str]:
         "fail": "", "uids": "", "active": "active\n", "need-reload": "no\n",
         "props": f"Listen={LISTEN} (Stream)\nSocketGroup={MY_GROUP}\nSocketMode=0660\n",
         "sockstat": f"socket {defaults()['owner']} {MY_GROUP} 660\n",
-        "findmnt": "ext4 /dev/fake0\n",
+        "mount": "ext4 /dev/fake0\n",
         "e2fsprogs": "tune2fs 1.47.0 (5-Feb-2023)\n",
         "superblock": FEATURES_OFF.replace("ext_attr", "ext_attr verity"),
         "config-check": "harnesses.store = /var/lib/heterodyne/harnesses    (defaults)\n",
@@ -734,7 +734,8 @@ def test_the_pinned_uninstall_runs_only_the_approved_uninstaller(host: Host, tmp
     out = pinned("uninstall-pinned", host, tmp_path, {
         "<uninstall.sh sum>": sum_of(host.sums, "tree/deploy/uninstall.sh")},
         {"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_LOG": str(log), "STUB_FAIL_ON": NO_PROCESS})
-    calls = log.read_text().splitlines()
+    boot = f"rm -f {tmp_path}/boot."    # the block's own trap removing the copy
+    calls = [c for c in log.read_text().splitlines() if not c.startswith(boot)]
     if changed:
         assert (out.returncode != 0, calls, marker.exists()) == (True, [], False)
     else:
@@ -821,8 +822,8 @@ def test_the_prefix_is_for_the_tests_only(host: Host) -> None:
     assert install_refusal(host, out) == "--prefix is for the tests only"
 
 
-def test_a_staged_run_must_be_the_stages_own_installer(host: Host, tmp_path: Path) -> None:
-    stage = tmp_path / "stage"
+def test_a_staged_run_must_be_the_stages_own_installer(host: Host) -> None:
+    stage = host.root / "run" / "stage"
     (stage / "tree").mkdir(parents=True)
     stage.chmod(0o700)
     out = installer(host, "--staged", str(stage), "--archive-sha256", "0" * 64)
@@ -980,7 +981,7 @@ def test_a_reload_that_leaves_need_daemon_reload_fails(host: Host) -> None:
 # --- verity ---
 
 @pytest.mark.parametrize(("name", "text", "why"), [
-    ("findmnt", "xfs /dev/fake0\n", "not ext4"),
+    ("mount", "xfs /dev/fake0\n", "not ext4"),
     ("", "", "the kernel's ext4 has no verity"),
     ("e2fsprogs", "tune2fs 1.44.5 (15-Dec-2018)\n", "e2fsprogs older than 1.45"),
     ("superblock", "Block size:               1024\nFilesystem features:      has_journal\n",
@@ -1013,7 +1014,7 @@ def test_verity_is_turned_on_when_off(host: Host) -> None:
     ({"tune2fs-no-effect": ""}, "verity is not on after tune2fs"),
     ({"e2fsprogs": "no version here\n"}, "the e2fsprogs version can't be read"),
     ({"superblock": None}, "the superblock can't be read"),
-    ({"findmnt": "ext4 rootfs\n"}, "the store's device can't be read"),
+    ({"mount": "ext4 rootfs\n"}, "the store's device can't be read"),
 ])
 def test_verity_that_breaks_fails_the_install(host: Host, setup: dict[str, str | None], why: str) -> None:
     host.put("superblock", FEATURES_OFF)
