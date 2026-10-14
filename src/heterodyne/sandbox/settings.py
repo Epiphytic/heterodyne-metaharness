@@ -25,6 +25,7 @@ RESERVED_ENV = frozenset({"HOME", "USER", "LANG", "TERM"})
 DENIED_HOSTS = frozenset({"mcp-proxy.anthropic.com"})   # §7 Connectors; spec.py enforces the same set
 LOCAL_CLASSES = frozenset({"worktree_edit"})            # the shim's locally classifiable set (D14)
 WHERE = "config.toml: [sandbox]"
+MAX_HOOK_WAIT = 60                                      # seconds: inside the CLI's PreToolUse timeout
 
 
 @dataclass(frozen=True)
@@ -81,9 +82,10 @@ def from_config(host: Config, streams: Mapping[str, Config], env: Mapping[str, s
     if not isinstance(backend, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", backend):
         raise ConfigError("config.toml: [platform] sandbox must be a backend name")
     hook_wait = table_at(host.values, "timeouts", "config").get("hook_wait_seconds")
-    if isinstance(hook_wait, bool) or not isinstance(hook_wait, int | float) or not 0 < hook_wait <= 60:
+    if (isinstance(hook_wait, bool) or not isinstance(hook_wait, int | float)
+            or not 0 < hook_wait <= MAX_HOOK_WAIT):
         raise ConfigError("[timeouts] hook_wait_seconds must be a number of seconds, more than 0 and at "
-                          "most 60")
+                          f"most {MAX_HOOK_WAIT}")
     adapters = table_at(host.values, "adapters", "config")
     binaries: dict[str, str] = {}
     for adapter in string_list(adapters.get("known", []), "adapters.known"):

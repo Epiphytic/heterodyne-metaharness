@@ -10,21 +10,25 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sandbox_env import fake_jwt, install_fake_cli, short_dir
+from sandbox_env import config_env, fake_jwt, install_fake_cli, short_dir
 
 from heterodyne.agents.base import (
-    HOOK_COMMAND,
     HOOK_EVENTS,
     PRE_TOOL_COMMAND,
     PRE_TOOL_TIMEOUT,
     AdapterError,
+    hook_command,
     hook_group,
+    pre_tool_command,
     write_at,
 )
 from heterodyne.agents.claude_code import CLAUDE_HOOK_EVENTS, SETTINGS_FILE, ClaudeCode
 from heterodyne.agents.codex import APP_SOCKET, Codex
 from heterodyne.agents.registry import ADAPTERS
+from heterodyne.config import ConfigError
+from heterodyne.sandbox import settings
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, RUN_INSIDE, SessionLayout
+from heterodyne.session import shim
 
 ID = "0b1d8c5e-3f7a-4c2d-9e6b-7a8f9c0d1e2f"
 RESOURCES = Path(__file__).resolve().parents[1] / "src" / "heterodyne" / "sandbox" / "resources"
@@ -71,7 +75,7 @@ def test_claude_home_merges_its_state_and_hooks_are_read_only(layout: SessionLay
     assert flag["skipDangerousModePermissionPrompt"] is True
     assert set(flag["hooks"]) == set(CLAUDE_HOOK_EVENTS) == {*HOOK_EVENTS, "StopFailure"}
     assert {e: [h["command"] for g in gs for h in g["hooks"]] for e, gs in flag["hooks"].items()} == {
-        e: [PRE_TOOL_COMMAND if e == "PreToolUse" else HOOK_COMMAND] for e in CLAUDE_HOOK_EVENTS}
+        e: [pre_tool_command() if e == "PreToolUse" else hook_command(e)] for e in CLAUDE_HOOK_EVENTS}
 
 
 def test_claude_drops_a_cached_remote_policy_from_the_home(layout: SessionLayout, tmp_path: Path) -> None:
@@ -100,7 +104,7 @@ def test_codex_leaves_the_worktree_untrusted_so_its_project_config_is_not_loaded
     assert config["approval_policy"] == "never" and config["sandbox_mode"] == "danger-full-access"
     hooks = json.loads((layout.home / ".codex" / "hooks.json").read_text())["hooks"]
     assert {e: [h["command"] for g in gs for h in g["hooks"]] for e, gs in hooks.items()} == {
-        e: [PRE_TOOL_COMMAND if e == "PreToolUse" else HOOK_COMMAND] for e in HOOK_EVENTS}
+        e: [pre_tool_command() if e == "PreToolUse" else hook_command(e)] for e in HOOK_EVENTS}
 
 
 def test_only_pre_tool_use_gets_the_blocking_wrapper_and_a_timeout() -> None:
@@ -110,7 +114,26 @@ def test_only_pre_tool_use_gets_the_blocking_wrapper_and_a_timeout() -> None:
     assert pre == {"type": "command", "command": PRE_TOOL_COMMAND, "timeout": PRE_TOOL_TIMEOUT}
     assert PRE_TOOL_TIMEOUT >= 2 * 60
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
-        assert hook_group(event)["hooks"] == [{"type": "command", "command": HOOK_COMMAND}]
+        assert hook_group(event)["hooks"] == [{"type": "command", "command": hook_command(event)}]
+
+
+def test_each_hook_command_names_its_event_and_the_shim_knows_them_all() -> None:
+    """btq-rcose: the shim reads its event from the trusted command, never from the payload; each
+    command is still fixed per event, so Codex's trusted hashes stay valid."""
+    for event in CLAUDE_HOOK_EVENTS:
+        assert hook_command(event) == f"python3 -I /run/hz/shim.py hook {event}"
+    assert PRE_TOOL_COMMAND == pre_tool_command()
+    assert f"{hook_command('PreToolUse')} ||" in PRE_TOOL_COMMAND
+    assert shim.KNOWN_EVENTS == frozenset(CLAUDE_HOOK_EVENTS)
+
+
+def test_the_hook_input_deadline_sits_inside_the_cli_timeout(tmp_path: Path) -> None:
+    """A late payload returns at HOOK_INPUT_WAIT, before wsd is asked; an answered one within
+    hook_wait_seconds; both well before the CLI cancels the hook and runs the tool (E7)."""
+    assert shim.HOOK_INPUT_WAIT + settings.MAX_HOOK_WAIT < PRE_TOOL_TIMEOUT
+    env = config_env(tmp_path, f"[timeouts]\nhook_wait_seconds = {settings.MAX_HOOK_WAIT + 1}\n")
+    with pytest.raises(ConfigError, match="hook_wait_seconds"):
+        settings.sandbox_settings(env)
 
 
 @pytest.mark.parametrize("stub, code", [
