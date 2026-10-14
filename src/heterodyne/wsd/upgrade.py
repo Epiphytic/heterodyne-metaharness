@@ -45,6 +45,7 @@ from heterodyne.wsd.journal import (
     Adoption,
     JournalCorrupt,
     backup_to,
+    check_current,
     check_v1,
     check_v2,
     launch_row,
@@ -310,10 +311,16 @@ def run(beads: BeadsAdapter, accounts: Accounts, path: Path, cp: Checkpoint = no
 
 def run_2_to_3(path: Path, cp: Checkpoint = nothing) -> None:
     """Upgrade the version 2 journal at `path` in place: the install pin's columns, in one transaction.
-    JournalCorrupt if it is not exactly version 2; any exception rolls back. Reopen with `Journal(path)`."""
+    Already version 3 is a no-op; anything else that is not exactly version 2 is JournalCorrupt. Both are
+    decided before the backup is taken, so neither replaces it. Any exception rolls back. Reopen with
+    `Journal(path)`."""
     db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=rw", uri=True, isolation_level=None,
                          timeout=BUSY_TIMEOUT)
     try:
+        if check_current(db):
+            return
+        if not check_v2(db):
+            raise JournalCorrupt("the journal is not version 2")
         backup_to(db, path.with_name(f"{path.name}.v2.bak"))
         db.execute("BEGIN IMMEDIATE")
         try:

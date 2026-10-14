@@ -30,6 +30,7 @@ budget and never escalates.
 """
 
 import contextlib
+import logging
 import threading
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -93,6 +94,8 @@ from heterodyne.wsd.usage import (
     untrusted_defer_until,
 )
 from heterodyne.wsd.workstream import ConfigInvalid, Deps, WorkstreamSettings, label, place, record
+
+log = logging.getLogger(__name__)
 
 PARK_POINTS = ("lock.waiting", "park.intent", "park.stopped!", "park.stopped", "park.committed!",
                "park.committed", "park.blocked!", "park.blocked", "park.labelled!", "park.labelled",
@@ -1406,7 +1409,8 @@ class Parker:
         """Step 2: gate the account (AU-5 §3.3) and journal generation n+1 with the op's step, then the bead
         copy. A Deadline or AccountChanged defers the bead inside this op (AU-4 §3.2 entry 3): no session
         was dispatched for it, so the tail's stop only confirms that. The entry pins the adapter's selected
-        install as it reads now (plan 4c T7, D2), or none; a replay dispatches the journaled pin."""
+        install as it reads now (plan 4c T7, D2), or none, as also when the selection can't be read (until
+        Task 8 refuses that); a replay dispatches the journaled pin."""
         j, kind = self.d.journal, op.kind.value
         entries = j.launches(rec.session_key)
         stale = stale_keys(op)
@@ -1430,9 +1434,11 @@ class Parker:
         n = last + 1
         try:
             pin = self.d.selections(adapter) if adapter else None
-        except ConfigError as exc:          # an unreadable selection is not "none selected"
-            self.escalate_from(op, Reason.CONFIG_INVALID, str(exc))
-            return Launch.ENDED
+        except ConfigError:
+            # E23: launches as before T7. Task 8 turns this into a refusal (an unreadable selection is not
+            # "none selected"). The error's text can quote the file, so none of it is logged.
+            log.warning("the install selection can't be read; generation %d pins no install", n)
+            pin = None
         entry = LaunchEntry(rec.session_key, n, self.ws.name, op.bead, rec.role, rec.profile, chosen.account,
                             chosen.key, self.ws.models.get(rec.profile, ""), False, now(),
                             install=pin.install if pin else "", install_digest=pin.digest if pin else "")

@@ -502,6 +502,11 @@ def check_v2(db: sqlite3.Connection) -> bool:
     return _schema(db) == EXPECTED_V2 and _version(db) == V2_VERSION
 
 
+def check_current(db: sqlite3.Connection) -> bool:
+    """Whether the file is this version's journal exactly: the current schema and version."""
+    return _schema(db) == EXPECTED_SCHEMA and _version(db) == SCHEMA_VERSION
+
+
 def _check(db: sqlite3.Connection) -> None:
     """Version 3 opens; version 1 or 2, exactly, needs its upgrade; anything else is refused."""
     rows = db.execute("PRAGMA integrity_check").fetchall()
