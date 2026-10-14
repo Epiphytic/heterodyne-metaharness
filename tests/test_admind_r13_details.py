@@ -910,9 +910,13 @@ def test_an_alert_is_delivered_while_a_large_details_is_still_being_staged(
         on_stage(h, lambda calls, parts: calls == 3 and h.daemon.post("alert:x", "urgent alert", None))
         mid_holder.append(await ask(h, "!details", reply_to=sid))
         mid = mid_holder[0]
+        # One 30 s budget for publishing and delivery, plus the fake's reply delay for each of the 300-odd
+        # parts when a sweep sets one: exactly 30 s with the knob unset.
+        loop = asyncio.get_running_loop()
+        end = loop.time() + 30
         await wait_until(lambda: bool(details_texts(h, mid)), 30)    # published, all parts at once
-        # each of the 300-odd parts waits out the fake's reply delay, when a sweep sets one
-        await wait_until(lambda: delivered(h, mid), 30 + len(details_texts(h, mid)) * h.fake.reply_delay)
+        end += len(details_texts(h, mid)) * h.fake.reply_delay
+        await wait_until(lambda: delivered(h, mid), max(0.0, end - loop.time()))
         assert snapshot == {"status": "executing", "visible": 0}  # sent mid-preparation, nothing partial
         assert len(details_texts(h, mid)) > 100 and staged(h) == 0
 
