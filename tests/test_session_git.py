@@ -543,10 +543,16 @@ def make_pack(private: Path, worktree: Path) -> Path:
     return pack
 
 
-@pytest.mark.parametrize("plant", ["object-dir-link", "pack-link", "fifo", "hard-linked-pack", "oversized"])
+@pytest.mark.parametrize(("plant", "taken"), [
+    ("object-dir-link", False), ("pack-link", False), ("fifo", False), ("hard-linked-pack", False),
+    ("oversized", False), ("object-dir-link", True), ("fifo", True)])
 def test_snapshot_refuses_links_special_files_and_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                            plant: str) -> None:
+                                                            plant: str, taken: bool) -> None:
+    """`taken`: the commit's random fan-out directory is one a fixed plant would have used (CI, PR #67)."""
     _, worktree, p, private, made = session_commits(tmp_path)
+    if taken:
+        for fan in ("ab", "cd"):
+            (private / "objects" / fan).mkdir(exist_ok=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     secret = b"outside the private directory\n"
