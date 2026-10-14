@@ -14,6 +14,9 @@ Bead: btq-u63ak. Base: main 093ede5. Test-only: nothing under `src/` changes, an
   - **PID files:** a sleeper's own PID file is written after admission, and failing to write it is harmless.
   - **Spawn proof:** each spawn path has a stated harness boundary and an expected event sequence.
   - **Wording:** stopped survivors are stated as detected failures, the timing claims are narrowed, and readiness is synchronised by pipe.
+- **r4 (after Codex design r3).**
+  - **Stale census fd:** after taking the shared lock, every spawner, and the shell's `--take`, checks that its fd is still the census at the path. Otherwise it refuses, so a teardown that ran between its open and its lock can't be outlived (test 9a).
+  - **Test 2:** the child stops itself, and the test waits until it is stopped.
 
 ## Problem
 
@@ -89,22 +92,26 @@ The sleeper starts nothing, and it never reads its stdin or writes its stdout or
 
 ### Admission: the census is held before the sleeper exists
 
-A sleeper never takes the census itself. Its spawner takes `LOCK_SH | LOCK_NB` on a census fd before the spawn, and the sleeper inherits that open file description. The sleeper therefore holds the census from the instant the process exists: before it is ever scheduled, before its interpreter starts, and through any stop. The spawner's checks also run before the spawn. If the use directory is unset, missing, or its census can't be locked shared (teardown has begun), the spawner raises or exits, and nothing is spawned. There are three spawners:
+A sleeper never takes the census itself. Its spawner takes `LOCK_SH | LOCK_NB` on a census fd before the spawn, and the sleeper inherits that open file description. The sleeper therefore holds the census from the instant the process exists: before it is ever scheduled, before its interpreter starts, and through any stop. The spawner's checks also run before the spawn. If the use directory is unset, missing, or its census can't be locked shared (teardown has begun), the spawner raises or exits, and nothing is spawned.
+
+**The lock must be on the live census.** A spawner opens the census and then locks it, and teardown can run in between: it takes `LOCK_EX`, removes the directory and returns. The spawner's `LOCK_SH` then succeeds on the unlinked inode, which no later teardown looks at. So after taking the shared lock, each spawner calls `os.stat` on `<use-dir>/census` and compares `st_dev` and `st_ino` with `fstat` of its fd. If the path is missing or names another file, it closes the fd and refuses (raises, or exits 97), and spawns nothing. This is sound because teardown removes the directory only while it holds `LOCK_EX`. If the check passes, the spawner's shared lock is on the file the next `end` will lock exclusively, so that `end` can't succeed until the child exits. The sleeper's own `fstat` check (step 1 of "The sleeper") stays, but only as a guard against a wrong `--census-fd`. It comes too late to close this race.
+
+There are three spawners:
 
 - **`spawn(use_dir, *, new_session=False, **popen) -> Popen`.** Used by fake_agent_cli, `hold_stdout` and the probe grandchild.
-  1. It opens the census as an inheritable fd and takes `LOCK_SH | LOCK_NB`.
+  1. It opens the census as an inheritable fd, takes `LOCK_SH | LOCK_NB`, and checks the fd against the path, as above.
   2. It runs `Popen(sleeper argv with --census-fd fd, pass_fds=(fd, *the caller's))`.
   3. It closes its own copy in a `finally`.
 - **`fork_held(use_dir) -> int`.** Used by fake_approve_bead `descendant` and `DESCENDANT`.
-  1. It takes the same lock, then calls `os.fork()`.
+  1. It takes the same lock and makes the same check, then calls `os.fork()`.
   2. The child returns 0. The caller redirects the child's output and execs the sleeper argv with `--census-fd fd`.
   3. The parent closes its copy and returns the child's PID.
 - **The shell prelude `escapes.shell_prelude(dir)`.** Used by `ESCAPED` and the r13 summary scripts at :160 and :354, which are run by summarize through `reap.spawn`. `reap.spawn` closes every inherited fd, so the script opens its own. It's text placed at the top of each script:
   ```sh
   exec 9<"<dir>/census"
-  "<python>" -I "<SLEEPER>" --take 9 || exit 97     # LOCK_SH|LOCK_NB on fd 9, then exit 0
+  "<python>" -I "<SLEEPER>" --take 9 "<dir>" || exit 97   # LOCK_SH|LOCK_NB on fd 9, check fd 9 is <dir>/census, exit 0
   ```
-  `--take` locks the shell's own open file description and then exits. The lock stays, because sh still holds fd 9. Every later `&` child inherits fd 9, and so the lock, at fork. The script then closes fd 9 (`exec 9<&-`) right after its last sleeper spawn, so later commands don't hold the census. The sleeper line is `"<python>" -I "<SLEEPER>" "<dir>" --census-fd 9 [...] &`. This uses test code only: `reap.spawn` and summarize don't change. Checked on Linux: the lock is held while the background child lives after sh closes fd 9, and released when the child exits.
+  `--take` locks the shell's own open file description and checks it against the path, as above. On a mismatch or a missing path it exits 97, and the script spawns nothing. Otherwise it exits 0. The lock stays, because sh still holds fd 9. Every later `&` child inherits fd 9, and so the lock, at fork. The script then closes fd 9 (`exec 9<&-`) right after its last sleeper spawn, so later commands don't hold the census. The sleeper line is `"<python>" -I "<SLEEPER>" "<dir>" --census-fd 9 [...] &`. This uses test code only: `reap.spawn` and summarize don't change. Checked on Linux: the lock is held while the background child lives after sh closes fd 9, and released when the child exits.
 
 **Descriptor ownership is an invariant.** A census fd exists only in three places:
 - in a spawner, from taking the lock until it closes its copy right after the one spawn;
@@ -166,8 +173,12 @@ The readiness waits use the ready pipe or the handle. Each wait has a hang guard
    - Before `end`, `pids/` names it and `LOCK_EX | LOCK_NB` on the census fails.
    - After `end`, the handle's return code is 0, and the use directory is gone.
 2. **Admission happens before the child runs (Python paths).**
-   - `spawn`: the test SIGSTOPs the child by its handle as soon as `spawn` returns, so before it can open or lock anything. The census `LOCK_EX | LOCK_NB` then fails, and `end(bound=0.5)` raises naming its PID (the stopped one: see "Survivors"). The test then SIGCONTs it by its handle, and `end()` succeeds.
-   - `fork_held`: the same, with the stop sent as soon as the parent's `fork_held` returns, so before the child's exec.
+   - The child is gated on its own side, so the test doesn't race a SIGSTOP against the child.
+     - `spawn`: called with a test-only `_gate=True`. The child is then `python -I -c` code that runs `os.kill(os.getpid(), SIGSTOP)` and then `os.execv`s the sleeper argv.
+     - `fork_held`: the test's child code stops itself the same way before its exec.
+   - The test waits with `os.waitpid(pid, WUNTRACED)` (the child is its own) until it is stopped. The child has run no sleeper code and published nothing.
+   - The census `LOCK_EX | LOCK_NB` then fails, and `end(bound=0.5)` raises. The error says the census is held with no PID reported (see "Survivors").
+   - The test then SIGCONTs it by its handle, waits for its ready byte (`pids/` now names it), and `end()` succeeds.
    - These replace r2's "pause before open" and "pause between open and lock" cases. Those windows no longer exist, because the sleeper never opens or locks the census; the test shows the lock held while the child has run nothing.
 3. **Admission happens before the child runs (shell paths).** A prelude script is run with `sh` by the test's own handle, and its sleeper line starts `"<python>" -I -c 'import os, signal; os.kill(os.getpid(), signal.SIGSTOP); ...'`, which stops itself before running the sleeper. While it is stopped, the census `LOCK_EX | LOCK_NB` fails. The test then SIGCONTs it by its PID, which sh printed: the test's own grandchild, still stopped, so its PID can't have been reused. The sleeper then runs and `end()` succeeds. The case where the prelude's `--take` fails (census held exclusively by the test) is also covered: the script exits 97, and its `set -x` trace shows no line after the prelude.
 4. **A missing PID file still ends the sleeper: parent publication.** This covers fake_agent_cli `escaped` and `orphan`, fake_approve_bead `hold_stdout` and `descendant`, `DESCENDANT` and the probe grandchild. In each case the PID file's path is in a directory that doesn't exist. The spawn or fork succeeds, then the parent's publication fails and the parent exits. Each case asserts that `pids/` names an admitted, live sleeper, that no PID file exists, and that `end()` succeeds.
@@ -185,6 +196,11 @@ The readiness waits use the ready pipe or the handle. Each wait has a hang guard
    - A Popen child of a spawner gets only the census fd (shown with `/proc/self/fd` on Linux, and by `fcntl(F_GETFD)` on each other fd up to the soft limit on macOS).
    - The fixture's lifeline isn't inherited by a Popen child of the test: the lifeline is released while that child is still alive, and a sleeper exits.
 8. **A killed holder.** A harness process, the test's own child, makes an `Escapes` use and starts a runnable sleeper. The test SIGKILLs the harness by its handle. The sleeper then exits, which the test shows by taking the census `LOCK_EX` itself, polling within the cleanup budget.
+9a. **A stale census fd is refused.** `spawn` and `fork_held` take a test-only `_between_open_and_lock` callback, run after the open and before the flock.
+    - **Removed.** The callback runs `end()` on the use: it takes `LOCK_EX`, removes the directory and returns. The spawner's flock then succeeds on the unlinked inode, the path check fails, and the spawner raises. The audit harness records no `subprocess.Popen` or `os.fork`.
+    - **Replaced.** The callback runs `end()` and then recreates a census at the same path, which is a new inode. The check fails on the inode, and the spawner raises with nothing spawned.
+    - **Shell.** The test opens the census as fd 9 of a child sh, waits for the sh to signal ready, runs `end()`, then lets the sh run `--take 9 "<dir>"`. It exits 97, and the `sh -x` trace shows no `&` line.
+    - **Positive control.** With a no-op callback, each path spawns an admitted sleeper.
 9. **A late sleeper never waits.** A spawner called after `end` (the directory has been removed) raises before spawning. A sleeper exec'd by hand with a stale `--census-fd` that doesn't match exits 1, which the test sees through its handle. Neither writes the ready byte.
 10. **The fixture's own life.**
     - **After a failure:** a child pytest run, in the style of test_tmux_watchdog.py's `Child`, has a test that starts an escaped sleeper and fails. Its report shows the test failed and teardown passed, and the run directory's census is free.
