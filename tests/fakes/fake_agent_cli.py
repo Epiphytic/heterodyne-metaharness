@@ -16,7 +16,9 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   own). The descendant is a sleeper (tests/fakes/sleeper.py) of the escapes use named by `HZ_ESCAPE_DIR`: it
   ends itself at the test's end. So does `outlive`: it takes that use's census before anything else, and at
   EOF execs the sleeper on it (the same PID and environment). With `HZ_FAKE_PID_FILE` set, it first writes
-  its PID there, so a test can prove it is gone. `HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json`
+  its PID there, so a test can prove it is gone. With `HZ_FAKE_STATUS_FILE` set, it writes its own
+  `NoNewPrivs` value there at start, and with `orphan` or `escaped` appends its descendant's, read just after
+  the spawn. `HZ_FAKE_ROTATE=<text>` replaces `$CODEX_HOME/auth.json`
   with `<text>` (a temporary file, then a rename, as a CLI saving a refreshed login would) before it answers
   `account/rateLimits/read`.
 - `codex app-server --listen unix://PATH`: binds PATH and stays up until PATH is removed.
@@ -125,6 +127,9 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
         tmp = pid_file.with_name(pid_file.name + ".tmp")
         tmp.write_text(str(child.pid))
         tmp.replace(pid_file)
+        if status_file := os.environ.get("HZ_FAKE_STATUS_FILE"):
+            with Path(status_file).open("a") as f:
+                f.write(no_new_privs(child.pid) + "\n")
         return None
     if fault == "error" or not (Path(os.environ["CODEX_HOME"]) / "auth.json").is_file():
         return json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
@@ -134,6 +139,14 @@ def rate_limits(msg: dict[str, Any]) -> str | None:
 
 
 _census: int | None = None      # with `outlive`: the escapes use's census, held from the start
+
+
+def no_new_privs(pid: int | str) -> str:
+    """The process's `NoNewPrivs` value, from its status."""
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("NoNewPrivs:"):
+            return line.split()[1]
+    return "missing"
 
 
 def outlive_eof() -> None:
@@ -151,6 +164,8 @@ def stdio_server() -> None:
         _census = sleeper.held_census(os.environ.get(sleeper.ENV))
     if pid_file := os.environ.get("HZ_FAKE_PID_FILE"):
         Path(pid_file).write_text(str(os.getpid()))
+    if status_file := os.environ.get("HZ_FAKE_STATUS_FILE"):
+        Path(status_file).write_text(no_new_privs("self") + "\n")
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("method") == "initialize":

@@ -16,10 +16,17 @@ The app-server leads its own process group, and the deadline and the end kill th
 output is read through poll against the deadline, never a blocking read: a descendant that keeps the
 pipe open can neither hold the read past its limit nor outlive it in the group.
 
+The host's trusted read runs outside every sandbox, so it starts the app-server through this file's
+second mode (btq-9yiku): it checks the launch conditions (`unprivileged`), sets and confirms
+no_new_privs, then execs. A setuid exec by a descendant then gains nothing, and the app-server keeps
+the trampoline's PID, group and session. Any failure exits 126 before the exec.
+
 Usage: python3 -I codex_usage.py <codex binary> [limit seconds]
+       python3 -I codex_usage.py --exec-no-new-privs <program> [args...]
 """
 
 import contextlib
+import ctypes
 import json
 import os
 import select
@@ -35,6 +42,8 @@ LIMIT_SECONDS = 30.0
 END_SECONDS = 5.0           # how long a killed app-server may take to be reaped
 MAX_ANSWER = 1 << 20        # bytes in one line of the app-server's output
 ENDED = (0, -signal.SIGKILL)  # its own clean exit, or the kill
+PR_SET_NO_NEW_PRIVS = 38
+PR_GET_NO_NEW_PRIVS = 39
 
 
 class AnswerError(Exception):
@@ -78,13 +87,15 @@ def main(argv):
     return 0
 
 
-def read(codex, env, limit):
+def read(codex, env, limit, *, no_new_privs=False):
     """The `rateLimits` of the app-server run with `env` (its CODEX_HOME included), or None if the
     answer has none. Raises on any failure, TimeoutError past `limit` seconds. The app-server is ended
     in a `finally` whatever happens, the timer that bounds it included. Shared with the host's trusted
-    read (sandbox/hostread.py), which loads this file."""
+    read (sandbox/hostread.py), which loads this file and passes `no_new_privs`: the app-server is then
+    started through `barrier_argv()`. In the sandbox the workload is already under no_new_privs."""
     deadline = time.monotonic() + limit
-    proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    argv = [*barrier_argv(), codex, "app-server"] if no_new_privs else [codex, "app-server"]
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
     expired = threading.Event()
 
@@ -183,7 +194,56 @@ def _end(proc):
         raise ExitStatus("codex app-server ended abnormally")
 
 
+def barrier_argv():
+    """The argv prefix that runs the rest of an argv under no_new_privs, through this file's mode."""
+    return [sys.executable, "-I", __file__, "--exec-no-new-privs"]
+
+
+def _own_status():
+    with open("/proc/self/status", encoding="ascii", errors="replace") as f:
+        return f.read()
+
+
+def exec_no_new_privs(argv, *, status=_own_status, prctl=None, execv=os.execv, exit=os._exit):
+    """`python3 -I codex_usage.py --exec-no-new-privs <codex> app-server`: check the launch conditions,
+    set and confirm no_new_privs, then exec argv. Exits 126 if any fails; never returns. The keywords
+    are seams for the tests only."""
+    try:
+        if not unprivileged(status()):
+            exit(126)
+        prctl = prctl or ctypes.CDLL(None, use_errno=True).prctl
+        if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 or prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1:
+            exit(126)
+        execv(argv[0], argv)
+    finally:
+        exit(126)
+
+
+def unprivileged(status):
+    """The launch conditions, from one read of status: uids all this user's and not 0, and CapPrm,
+    CapEff and CapAmb zero. CapInh doesn't count: under no_new_privs it can't be raised. A missing or
+    unparsable line is false."""
+    fields = {}
+    for line in status.splitlines():
+        name, sep, value = line.partition(":")
+        if sep:
+            fields[name] = value.split()
+    uid = os.getuid()
+    if uid == 0 or fields.get("Uid") != [str(uid)] * 4:
+        return False
+    for name in ("CapPrm", "CapEff", "CapAmb"):
+        value = fields.get(name)
+        try:
+            if value is None or len(value) != 1 or int(value[0], 16) != 0:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--exec-no-new-privs"]:
+        exec_no_new_privs(sys.argv[2:])
     try:
         sys.exit(main(sys.argv[1:]))
     except Exception as exc:  # noqa: BLE001 - any failure is "no reading", decided on the host

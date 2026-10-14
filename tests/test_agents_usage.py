@@ -1,5 +1,6 @@
 """Plan 4b Task 5: what the CLIs' usage payloads mean (S7 (3), (5)), and the in-sandbox Codex read."""
 
+import errno
 import importlib.util
 import json
 import os
@@ -344,3 +345,145 @@ def test_a_descendant_holding_the_output_open_never_holds_the_read(tmp_path: Pat
     assert list((tmp_path / "tmp").iterdir()) == []
     if fault == "orphan":
         wait_for(lambda: gone(child))           # reaped by whoever inherited it, once killed
+
+
+# --- the no_new_privs trampoline (btq-9yiku) ---
+
+def own_no_new_privs() -> str:
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("NoNewPrivs:"):
+            return line.split()[1]
+    raise AssertionError("no NoNewPrivs line")
+
+
+def test_the_default_read_starts_the_app_server_directly(tmp_path: Path,
+                                                         started: list[subprocess.Popen[str]]) -> None:
+    """The in-sandbox read keeps its direct launch; its app-server inherits the reader's no_new_privs,
+    whatever that is (the sandbox's workload already runs under it)."""
+    codex = install_fake_cli(tmp_path, "codex")
+    report = tmp_path / "no-new-privs"
+    assert usage_module().read(str(codex), {**read_env(tmp_path), "HZ_FAKE_STATUS_FILE": str(report)},
+                               5) == SNAPSHOT
+    assert [p.args for p in started] == [[str(codex), "app-server"]]
+    assert report.read_text().split() == [own_no_new_privs()]
+
+
+def status_of(uids: tuple[int, ...] | None = None, **caps: str) -> str:
+    """A /proc/self/status: this user's uids on all four fields and no capabilities, unless given."""
+    uid = os.getuid()
+    real, effective, saved, fs = uids or (uid,) * 4
+    sets = {"CapInh": "0" * 16, "CapPrm": "0" * 16, "CapEff": "0" * 16, "CapBnd": "000001ffffffffff",
+            "CapAmb": "0" * 16, **caps}
+    lines = ["Name:\tpython3", f"Uid:\t{real}\t{effective}\t{saved}\t{fs}",
+             *(f"{name}:\t{value}" for name, value in sets.items() if value), "NoNewPrivs:\t0"]
+    return "\n".join(lines) + "\n"
+
+
+CAP_SETUID = f"{1 << 7:016x}"
+
+
+@pytest.mark.parametrize(("status", "ok"), [
+    (status_of(), True),
+    (status_of(CapInh=CAP_SETUID), True),
+    (status_of(CapPrm=CAP_SETUID), False),
+    (status_of(CapEff=CAP_SETUID), False),
+    (status_of(CapAmb=CAP_SETUID), False),
+    (status_of(CapEff="8000000000000000"), False),
+    (status_of((0, os.getuid(), os.getuid(), os.getuid())), False),
+    (status_of((os.getuid(), 0, os.getuid(), os.getuid())), False),
+    (status_of((os.getuid(), os.getuid(), 0, os.getuid())), False),
+    (status_of((os.getuid(), os.getuid(), os.getuid(), 0)), False),
+    (status_of((os.getuid(), os.getuid(), os.getuid() + 1, os.getuid())), False),
+    (status_of(CapPrm=""), False),
+    (status_of(CapEff=""), False),
+    (status_of(CapAmb=""), False),
+    (status_of(CapEff="not-hex"), False),
+    ("Name:\tpython3\n", False),
+], ids=["clean", "inheritable-only", "permitted", "effective", "ambient", "high-bit", "real-0", "effective-0",
+        "saved-0", "fs-0", "saved-other", "no-permitted", "no-effective", "no-ambient", "bad-hex", "no-uid"])
+def test_the_launch_conditions(status: str, ok: bool) -> None:
+    """This user's uid on all four fields and never 0, and no permitted, effective or ambient
+    capability. Inheritable ones are suppressed under no_new_privs, so they don't count."""
+    assert usage_module().unprivileged(status) is ok
+
+
+class Exited(Exception):
+    pass
+
+
+def trampoline(status: str | BaseException, prctl: dict[int, int], execv: BaseException | None = None
+               ) -> tuple[list[tuple[Any, ...]], set[int]]:
+    """Run exec_no_new_privs in this process with every seam faked: what it called, and the codes it
+    exited with. Nothing really execs, and no real prctl runs."""
+    calls: list[tuple[Any, ...]] = []
+    codes: set[int] = set()
+
+    def read() -> str:
+        if isinstance(status, BaseException):
+            raise status
+        return status
+
+    def fake_prctl(*args: int) -> int:
+        calls.append(("prctl", *args))
+        return prctl[args[0]]
+
+    def fake_execv(path: str, argv: list[str]) -> None:
+        calls.append(("execv", path, list(argv)))
+        if execv is not None:
+            raise execv
+
+    def fake_exit(code: int) -> None:
+        codes.add(code)
+        raise Exited(code)
+
+    with pytest.raises(Exited):
+        usage_module().exec_no_new_privs(["/x/codex", "app-server"], status=read, prctl=fake_prctl,
+                                         execv=fake_execv, exit=fake_exit)
+    return calls, codes
+
+
+@pytest.mark.parametrize("status", [status_of(CapEff=CAP_SETUID), status_of((0, 0, 0, 0)),
+                                    OSError(errno.EACCES, "denied")],
+                         ids=["capability", "root", "unreadable"])
+def test_a_trampoline_whose_launch_conditions_fail_exits_126_untouched(status: Any) -> None:
+    assert trampoline(status, {38: 0, 39: 1}) == ([], {126})
+
+
+def test_a_trampoline_that_cant_set_no_new_privs_exits_126() -> None:
+    assert trampoline(status_of(), {38: -1, 39: 1}) == ([("prctl", 38, 1, 0, 0, 0)], {126})
+
+
+def test_a_trampoline_that_cant_confirm_no_new_privs_exits_126() -> None:
+    assert trampoline(status_of(), {38: 0, 39: 0}) == ([("prctl", 38, 1, 0, 0, 0), ("prctl", 39, 0, 0, 0, 0)],
+                                                       {126})
+
+
+def test_a_trampoline_whose_exec_fails_exits_126() -> None:
+    calls, codes = trampoline(status_of(), {38: 0, 39: 1}, OSError(errno.ENOENT, "no such file"))
+    assert calls[-1] == ("execv", "/x/codex", ["/x/codex", "app-server"]) and codes == {126}
+
+
+def test_a_trampoline_sets_then_confirms_then_execs() -> None:
+    calls, _ = trampoline(status_of(), {38: 0, 39: 1})
+    assert calls == [("prctl", 38, 1, 0, 0, 0), ("prctl", 39, 0, 0, 0, 0),
+                     ("execv", "/x/codex", ["/x/codex", "app-server"])]
+
+
+def test_the_trampoline_mode_execs_its_argv_under_no_new_privs(tmp_path: Path) -> None:
+    """The script's own mode, end to end: the exec'd program sees NoNewPrivs 1, with the same PID. If the
+    runner itself doesn't meet the launch conditions, it exits 126 instead."""
+    probe = ("import os; status = open('/proc/self/status').read();"
+             " print(os.getpid(), status.split('NoNewPrivs:')[1].split()[0])")
+    proc = subprocess.Popen([sys.executable, "-I", str(USAGE), "--exec-no-new-privs",
+                             sys.executable, "-I", "-c", probe], stdout=subprocess.PIPE, text=True)
+    out, _ = proc.communicate(timeout=60)
+    if usage_module().unprivileged(Path("/proc/self/status").read_text()):
+        assert (proc.returncode, out.split()) == (0, [str(proc.pid), "1"])
+    else:
+        assert (proc.returncode, out) == (126, "")
+
+
+def test_the_trampoline_mode_without_a_program_exits_126() -> None:
+    proc = subprocess.run([sys.executable, "-I", str(USAGE), "--exec-no-new-privs"], capture_output=True,
+                          timeout=60, check=False)
+    assert (proc.returncode, proc.stdout) == (126, b"")

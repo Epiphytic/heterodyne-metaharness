@@ -1,7 +1,16 @@
 """The trusted host-side usage read (ADR 0001 §4.4 D9 (d), plan 4b E4). Codex only: S7 found no host
 read for Claude. A short-lived `codex app-server` over stdio, in a scratch CODEX_HOME holding a copy of
 the account's login, under the account's D8 lock. The account's own login directory never collects the
-app-server's state. Logs carry no path, key or token: only fixed texts and exception type names."""
+app-server's state. Logs carry no path, key or token: only fixed texts and exception type names.
+
+The app-server starts under no_new_privs, through codex_usage.py's trampoline, which first checks the
+launch conditions: this user's uid on every field and never 0, and no permitted, effective or ambient
+capability (btq-9yiku). So every holder descends from an app-server that can't gain privilege, and a
+process with a uid that is neither this user's nor in this user's current `/etc/subuid` ranges can't be
+one. That holds while this user's effective allocation stays stable for the lifetime of its
+namespaces: the `/etc/subuid` entries as resolved through its login name and uid. Its stated residuals
+are a delegated spawn, a privileged helper's mapping, homes from before the change, and an
+administrative change to that allocation."""
 
 import contextlib
 import importlib.util
@@ -9,6 +18,7 @@ import json
 import logging
 import math
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -174,21 +184,86 @@ def _facts(status: str) -> dict[str, str]:
     return {key: value.strip() for key, _, value in (line.partition(":") for line in status.splitlines())}
 
 
-def _ours(facts: Mapping[str, str]) -> bool:
-    """Whether the process runs with this user's real or effective uid. Status stays readable when the
-    environment doesn't (another user's process, or one of ours made non-dumpable)."""
-    if "Uid" not in facts:
-        return True             # no Uid line: not ruled out
+Ranges = tuple[tuple[int, int], ...]
+_DECIMAL = re.compile(r"[0-9]+")
+
+
+def _read_text(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _login() -> str:
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _subordinate_uids(read: Callable[[str], str] = _read_text, login: Callable[[], str] = _login,
+                      uid: int | None = None) -> Ranges | None:
+    """This user's subordinate uid ranges, `(start, count)`: the `/etc/subuid` lines whose first field
+    is its login name or numeric uid, as `newuidmap` reads them. None means unknown, so every uid counts
+    as this user's: a failed name lookup, an unreadable or malformed file (any line, other users'
+    included, that isn't `name:start:count` in decimal with a positive count), or an unreadable
+    `/etc/nsswitch.conf` or one with a `subid:` source, which isn't parsed. A missing file is no
+    ranges: `newuidmap` then maps none for this user."""
+    uid = os.getuid() if uid is None else uid
+    try:
+        nsswitch = read("/etc/nsswitch.conf")
+    except FileNotFoundError:
+        nsswitch = ""
+    except (OSError, ValueError):
+        return None
+    for line in nsswitch.splitlines():
+        if line.partition("#")[0].partition(":")[0].strip() == "subid":
+            return None
+    try:
+        names = {login(), str(uid)}
+    except KeyError:
+        return None
+    try:
+        text = read("/etc/subuid")
+    except FileNotFoundError:
+        return ()
+    except (OSError, ValueError):
+        return None
+    ranges: list[tuple[int, int]] = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        fields = line.split(":")
+        if len(fields) != 3 or not all(_DECIMAL.fullmatch(field) for field in fields[1:]):
+            return None
+        start, count = int(fields[1]), int(fields[2])
+        if count <= 0:
+            return None
+        if fields[0] in names:
+            ranges.append((start, count))
+    return tuple(ranges)
+
+
+def _ours(facts: Mapping[str, str], subordinate: Ranges | None) -> bool:
+    """Whether the process runs with this user's real or effective uid, or one in this user's
+    subordinate ranges (any uid, if those are unknown): a descendant can reach those without privilege
+    by joining a namespace this user owns. Status stays readable when the environment doesn't (another
+    user's process, or one of ours made non-dumpable)."""
+    if "Uid" not in facts or subordinate is None:
+        return True             # no Uid line, or the ranges unknown: not ruled out
     real, effective = (int(u) for u in facts["Uid"].split()[:2])
-    return bool({real, effective} & {os.getuid(), os.geteuid()})
+    if {real, effective} & {os.getuid(), os.geteuid()}:
+        return True
+    return any(start <= u < start + count for start, count in subordinate for u in (real, effective))
 
 
-def _ruled_out(pid: str, facts: Mapping[str, str], since: float | None) -> bool:
+def _ruled_out(pid: str, facts: Mapping[str, str], since: float | None, subordinate: Ranges | None) -> bool:
     """A live process whose environment can't be read is not a holder only if it is another user's, or
     started before the earliest home was made (`since`, less the slack). Anything else may be one. The
     start time is field 22, on the boot clock in clock ticks; an exec keeps it (`de_thread` gives the
-    new leader the old one's), so it is the same process's whichever image `stat` reads."""
-    if not _ours(facts):
+    new leader the old one's), so it is the same process's whichever image `stat` reads.
+
+    Another user's process can't be a holder because every holder descends from an app-server started
+    under no_new_privs with the launch conditions checked (codex_usage.py's trampoline): it can gain no
+    uid but this user's and its subordinate ones. That rests on this user's effective allocation (its
+    `/etc/subuid` entries as resolved through its login name and uid) staying stable for the lifetime
+    of its namespaces; an administrative change to it is a stated residual (btq-9yiku)."""
+    if not _ours(facts, subordinate):
         return True
     return since is not None and int(_stat(pid)[19]) / os.sysconf("SC_CLK_TCK") < since - SLACK_SECONDS
 
@@ -219,7 +294,7 @@ def _matched(fd: int, environ: bytes, marks: set[bytes]) -> str:
     return _CLEAR if marks.isdisjoint(environ.split(b"\0")) else _MATCH
 
 
-def _judge(pid: str, fd: int, marks: set[bytes], since: float | None) -> str:
+def _judge(pid: str, fd: int, marks: set[bytes], since: float | None, subordinate: Ranges | None) -> str:
     """One process's outcome: _MATCH (a holder), _CLEAR (not one), or _SETTLE (not known yet: the scan
     is incomplete and runs again). Raises _Unknown for a live process that may be a holder, or
     FileNotFoundError or ProcessLookupError once the process is gone.
@@ -258,7 +333,7 @@ def _judge(pid: str, fd: int, marks: set[bytes], since: float | None) -> str:
         return _SETTLE if group is None else _matched(fd, group, marks)
     if why == "empty" or int(_stat(pid)[6]) & PF_EXITING:
         return _SETTLE
-    if why == "refused" and _ruled_out(pid, facts, since):
+    if why == "refused" and _ruled_out(pid, facts, since, subordinate):
         return _CLEAR
     raise _Unknown("a process that may hold a home can't be read")
 
@@ -268,7 +343,9 @@ def _holders(marks: set[bytes], since: float | None) -> tuple[list[int], list[in
     scan couldn't judge yet (see `_judge`), whose pidfds it closed: while any is settling the scan is
     incomplete. The pidfd is opened before the process is read. A process that is gone is skipped. An
     unknown, or any other failure (a pidfd that can't be opened, `/proc` that can't be listed), means
-    the scan is incomplete, so it raises, with every pidfd it opened closed."""
+    the scan is incomplete, so it raises, with every pidfd it opened closed. This user's subordinate
+    uids are read once, before any process."""
+    subordinate = _subordinate_uids()
     found: list[int] = []
     settling: list[int] = []
     try:
@@ -280,7 +357,7 @@ def _holders(marks: set[bytes], since: float | None) -> tuple[list[int], list[in
             except ProcessLookupError:
                 continue
             try:
-                outcome = _judge(entry.name, fd, marks, since)
+                outcome = _judge(entry.name, fd, marks, since, subordinate)
             except (FileNotFoundError, ProcessLookupError):
                 os.close(fd)             # gone
                 continue
@@ -398,7 +475,7 @@ class HostUsageReader:
         try:
             _write_new(scratch, LOGIN, original)
             limits = _usage_module().read(str(cli.binary), {**self.env, "CODEX_HOME": str(scratch)},
-                                          self.limit_seconds)
+                                          self.limit_seconds, no_new_privs=True)
             report = parse_rate_limits(limits, HOST_SOURCE)
             if report is None:
                 raise NoRateLimits("the answer held no rate limits")
