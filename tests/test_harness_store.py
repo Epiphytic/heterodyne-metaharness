@@ -198,3 +198,16 @@ def test_open_store_takes_the_fallback_only_when_it_is_set(tmp_path: Path) -> No
     assert isinstance(local, hs.LocalStore) and local.fallback and local.root == root
     helper = hs.open_store(Settings(root, False, tmp_path / "s.sock"))
     assert isinstance(helper, hs.HelperStore) and not helper.fallback and helper.root == root
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_recover_reports_what_it_recovered(tmp_path: Path, kind: str) -> None:
+    root = store_dir(tmp_path)
+    with open_kind(kind, root) as store:
+        staged = stage(store, tmp_path)
+        publishing = root / ".publishing"
+        publishing.mkdir()
+        (publishing / f"{staged.id}.record.json").write_bytes(b"{}")     # P1 cut short before its intent
+        assert store.recover() == [(staged.id, "restarted")]
+        assert store.recover() == []
+        assert store.outcome(staged.id) == "staged"

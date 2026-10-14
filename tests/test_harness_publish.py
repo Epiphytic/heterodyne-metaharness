@@ -243,6 +243,7 @@ def test_a_same_size_rewrite_at_any_point_of_publish_is_refused(tmp_path: Path, 
 
 def test_a_chmod_and_restore_during_publish_is_refused(tmp_path: Path) -> None:
     staged = staged_codex(tmp_path)
+    name = install_name(tmp_path, staged)
     path = staged_root(tmp_path, staged) / "cli" / "codex-resources" / "voice" / "README"
 
     def hook(point: str) -> None:
@@ -253,7 +254,7 @@ def test_a_chmod_and_restore_during_publish_is_refused(tmp_path: Path) -> None:
     store = store_of(tmp_path)
     assert refused(lambda: sc.publish(store, staged.id, staged.digest, hook=hook)) == (
         sc.CHANGED_DURING_PUBLISH)
-    assert_gone(tmp_path, install_name(tmp_path, staged))
+    assert_gone(tmp_path, name)
 
 
 def test_only_the_roots_change_time_may_move_at_the_rename(tmp_path: Path) -> None:
@@ -447,7 +448,7 @@ def test_a_conflicting_install_name_is_refused(tmp_path: Path) -> None:
 
     def hook(point: str) -> None:
         if point == "P1.intent":
-            theirs.mkdir()
+            theirs.mkdir(parents=True)
             (theirs / "theirs").write_bytes(b"x")
 
     store3 = store_of(tmp_path / "third")
@@ -561,7 +562,9 @@ def test_verify_rerecords_a_tree_whose_bytes_were_restored(tmp_path: Path) -> No
     _, name = published(tmp_path)
     path = install_root(tmp_path, name) / FIRST_FILE
     rewrite(path)
-    rewrite(path, bytes(CODEX_TREE["bin/codex"]))
+    original = CODEX_TREE["bin/codex"]
+    assert isinstance(original, bytes)
+    rewrite(path, original)
     with pytest.raises(sc.Mismatch) as e:
         check_published(tmp_path, name)
     assert e.value.constant == sc.ENTRY_CHANGED
@@ -656,3 +659,14 @@ def test_sweep_skips_a_staging_that_is_still_being_built(tmp_path: Path) -> None
     # its builder died (the lock is free) and it never committed: a crash leftover, removed at any age
     assert sc.sweep(store, time.time(), 24) == 1
     assert [p for p in staging.iterdir() if p.name.startswith(building)] == []
+
+
+def test_a_temp_file_left_by_a_crash_mid_write_is_removed_by_recovery(tmp_path: Path) -> None:
+    staged = staged_codex(tmp_path)
+    store = store_of(tmp_path)
+    publishing = store / ".publishing"
+    publishing.mkdir()
+    (publishing / f"{staged.id}.record.json.tmp").write_bytes(b"{")
+    assert sc.recover(store) == []
+    assert list(publishing.iterdir()) == []
+    assert sc.outcome(store, staged.id) == "staged"
