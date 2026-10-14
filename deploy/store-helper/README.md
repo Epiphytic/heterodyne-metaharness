@@ -81,11 +81,11 @@ bash "$b" --checkout <checkout> --commit <commit> --expect-sha256 <archive sum> 
 - `mktemp` creates the copy as root, mode 0600, in `/run`, which the service user can't write. After the copy, edits to the checkout can't touch it, and a copy whose sum isn't the approval's runs nothing.
 - The copy is outside the checkout, so it is given `--checkout`.
 
-It prints each step as it goes, then a summary: one line per step (`store`, `units`, `verity`, `config`), each `ok`, `changed`, `skipped (<why>)` or `failed (<why>)`, then the commit and the archive's sha256. Exit 0: everything is in place. 3: everything but verity, which the host doesn't support. 1: a refusal (`refused: <check>`, before any change) or a failure. 2: a usage error. Re-running it is always safe.
+It prints each step as it goes, then a summary: one line per step (`store`, `units`, `config`, `verity`), each `ok`, `changed`, `skipped (<why>)`, `failed (<why>)` or (a dry run's config check) `advisory (<why>; ...)`, then the commit and the archive's sha256. Exit 0: everything is in place. 3: everything but verity, which the host doesn't support. 1: a refusal (`refused: <check>`, before any change) or a failure. 2: a usage error. Re-running it is always safe.
 
 ## What the installer does
 
-1. **Preflight**, with no change: root; the service user (`--service-user`, or else `$SUDO_USER`; not root, and existing); the tools; `/usr/bin/python3` 3.12 or later; the pinned form on a checkout the service user can change; the host config (below); `uv` and the run checkout; the commit, resolved once. A work tree that differs from the commit is reported, as advice only.
+1. **Preflight**, with no change: root; the service user (`--service-user`, or else `$SUDO_USER`; not root, and existing); the tools; `/usr/bin/python3` 3.12 or later; the pinned form on a checkout the service user can change; the host config (below); `uv` and the run checkout; the verity probe (below); the commit, resolved once. A work tree that differs from the commit is reported, as advice only.
 2. **Stage**: the archive, its check against `--expect-sha256`, and the stage's copy of the installer, as above. A trap removes the stage, on success and failure alike.
 3. **Store (step 3)**: the staged `setup-store.sh --staged <stage>/tree --service-user <service user>`. It checks the stage (root's, 0700), then the staged helper (a regular file that parses), and then the host, before it makes any change. It refuses if:
    - the service user is root or doesn't exist;
@@ -98,11 +98,11 @@ It prints each step as it goes, then a summary: one line per step (`store`, `uni
    - `systemctl daemon-reload` always runs, and systemd must then report `NeedDaemonReload=no` for the socket and the helper;
    - `systemctl enable heterodyne-store-helper.socket`;
    - the live check: the socket is active, `/run/heterodyne-store/helper.sock` is a socket owned by `heterodyne-store` with the service user's group and mode 0660, and `systemctl show -p SocketGroup,SocketMode,Listen` matches the units. An inactive socket is started, a drifted one restarted, and the check runs again; a mismatch then fails the install.
-5. **Verity (step 5)** on `/var/lib`'s filesystem, unless `--no-verity`:
+5. **Config check (step 6)**, before verity, since verity can't be undone, as the service user with `HETERODYNE_CONFIG_DIR` and `XDG_CONFIG_HOME` unset: `uv run --offline --project <checkout> heterodyne config check`. A non-zero exit, a store problem (`harnesses problem:`) or `HELPER_DRIFT` fails the install, and verity is not touched; in a dry run either is reported only (`advisory (<why>; ...)`), since the dry run made none of the changes that might fix it. Before any change, the preflight also checks the config that this reads (`~/.config/heterodyne/config.toml`): it may be missing, but if it exists it must be valid TOML and must not set `[harnesses] fallback`. Nothing edits it.
+6. **Verity (step 5)** on `/var/lib`'s filesystem, last, unless `--no-verity`. The preflight reads the filesystem (its type and device, the kernel feature, the e2fsprogs version, and the superblock's block size and features), and the staged run reads it again before its first change and refuses if it differs. Anything it can't read is a refusal, before any change. Then:
    - the host can't have it (not ext4, no `/sys/fs/ext4/features/verity`, e2fsprogs older than 1.45, or a block size that isn't the page size): `skipped`, and the exit is 3;
    - already on: `ok`;
-   - otherwise it warns that the change can't be undone, runs `tune2fs -O verity <device>` (allowed on a mounted ext4), and reads the features line again, which must now list `verity`. A failure there is `failed`, exit 1.
-6. **Config check (step 6)**, as the service user with `HETERODYNE_CONFIG_DIR` and `XDG_CONFIG_HOME` unset: `uv run --offline --project <checkout> heterodyne config check`. A non-zero exit, a store problem (`harnesses problem:`) or `HELPER_DRIFT` fails the install; in a dry run it is reported only. Before any change, the preflight also checks the config that this reads (`~/.config/heterodyne/config.toml`): it may be missing, but if it exists it must be valid TOML and must not set `[harnesses] fallback`. Nothing edits it.
+   - otherwise it warns that the change can't be undone, runs `tune2fs -O verity <device>` (allowed on a mounted ext4), and reads the features line again, which must now list `verity`. A failure there is `failed`, exit 1: the one failure that can come after the other steps' changes.
 
 The changes, and their undo:
 

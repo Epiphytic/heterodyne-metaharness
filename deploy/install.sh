@@ -28,7 +28,7 @@ readonly STAGE_PARENT=/run
 readonly HOST_CONFIG=.config/heterodyne/config.toml
 readonly VERITY_FEATURE=/sys/fs/ext4/features/verity
 readonly PYTHON=/usr/bin/python3
-readonly STEPS=(store units verity config)
+readonly STEPS=(store units config verity)
 
 # Exit 1 with the message when the service user's config sets `[harnesses] fallback`, or can't be read as
 # TOML. A missing file is empty, as heterodyne reads it.
@@ -59,6 +59,7 @@ usage() {
 }
 
 dry_run=0 verity=1 service_user=${SUDO_USER:-} checkout="" commit="" expect="" staged="" archive_sum="" prefix=""
+probe=""
 while (($#)); do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
@@ -70,6 +71,7 @@ while (($#)); do
         --staged) (($# >= 2)) || usage; staged=$2; shift 2 ;;
         --archive-sha256) (($# >= 2)) || usage; archive_sum=$2; shift 2 ;;
         --prefix) (($# >= 2)) || usage; prefix=$2; shift 2 ;;
+        --verity-probe) (($# >= 2)) || usage; probe=$2; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -119,6 +121,46 @@ login_path() {
     path=$(runuser -l "$service_user" -c 'printf "%s\n" "$PATH"' 2>/dev/null </dev/null) \
         || refuse "the service user's login shell does not run"
     printf '%s' "${path##*$'\n'}"
+}
+
+# The value of the superblock field `$2` in `tune2fs -l`'s output `$1`.
+superblock_field() {
+    local line
+    while IFS= read -r line; do
+        if [[ $line == "$2:"* ]]; then
+            line=${line#"$2:"}
+            echo "${line#"${line%%[![:space:]]*}"}"
+            return
+        fi
+    done <<<"$1"
+}
+
+has_verity() { [[ " $1 " == *" verity "* ]]; }
+
+# What verity under /var/lib needs, read before any change: `on <device>`, `off <device>`, or
+# `unsupported <check>` when the host can't have it. What it can't read is a refusal.
+verity_probe() {
+    local mnt fstype device text line major="" minor="" sb block features
+    mnt=$(findmnt -no FSTYPE,SOURCE --target "$(host /var/lib)" 2>/dev/null) \
+        || refuse "the store's filesystem can't be found"
+    read -r fstype device <<<"$mnt"
+    [[ $fstype == ext4 ]] || { echo "unsupported not ext4"; return; }
+    [[ -e $(host "$VERITY_FEATURE") ]] || { echo "unsupported the kernel's ext4 has no verity"; return; }
+    text=$(tune2fs 2>&1) || true    # no arguments: the usage and the version, and exit 1
+    while IFS= read -r line; do
+        if [[ $line =~ ^tune2fs\ ([0-9]+)\.([0-9]+) ]]; then
+            major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]}
+        fi
+    done <<<"$text"
+    [[ -n $major ]] || refuse "the e2fsprogs version can't be read"
+    ((major > 1 || (major == 1 && minor >= 45))) || { echo "unsupported e2fsprogs older than 1.45"; return; }
+    [[ $device == /dev/* ]] || refuse "the store's device can't be read"
+    sb=$(tune2fs -l "$device" 2>/dev/null) || refuse "the superblock can't be read"
+    block=$(superblock_field "$sb" "Block size")
+    features=$(superblock_field "$sb" "Filesystem features")
+    [[ -n $block && -n $features ]] || refuse "the superblock can't be read"
+    [[ $block == "$(getconf PAGESIZE)" ]] || { echo "unsupported the block size is not the page size"; return; }
+    if has_verity "$features"; then echo "on $device"; else echo "off $device"; fi
 }
 
 if [[ -z $staged ]]; then
@@ -173,6 +215,10 @@ if [[ -z $staged ]]; then
     as_service_user PATH="$service_path" uv run --offline --project "$repo" heterodyne --help >/dev/null 2>&1 \
         </dev/null || refuse "the run checkout does not run heterodyne (run uv sync there first)"
 
+    if ((verity)); then
+        probe=$(verity_probe) || exit 1
+    fi
+
     # The commit, resolved once: every later git call names it, never HEAD.
     resolved=$(service_git rev-parse --verify --quiet "${commit:-HEAD}^{commit}") \
         || refuse "the commit can't be resolved"
@@ -202,7 +248,7 @@ if [[ -z $staged ]]; then
     args=(--staged "$stage" --checkout "$checkout" --commit "$resolved" --archive-sha256 "$archive_sum"
           --service-user "$service_user")
     if ((dry_run)); then args+=(--dry-run); fi
-    if ((!verity)); then args+=(--no-verity); fi
+    if ((verity)); then args+=(--verity-probe "$probe"); else args+=(--no-verity); fi
     if [[ -n $prefix ]]; then args+=(--prefix "$prefix"); fi
     rc=0
     bash "$installer" "${args[@]}" || rc=$?
@@ -278,6 +324,13 @@ lists_change() {
     done <<<"$1"
     return 1
 }
+
+# The filesystem as the preflight read it, read again before the first change.
+if ((verity)); then
+    [[ -n $probe ]] || usage
+    now=$(verity_probe) || exit 1
+    [[ $now == "$probe" ]] || refuse "the store's filesystem changed since the preflight"
+fi
 
 # --- step 3: the store owner, the store and the helper copy ---
 
@@ -357,21 +410,30 @@ else
 fi
 if ((unit_changes)); then finish_step "$changed"; else finish_step ok; fi
 
-# --- step 5: verity on the store's filesystem ---
+# --- step 6: the host config, as heterodyne reads it for the service user, before step 5's change, which
+# can't be undone ---
 
-# The value of the superblock field `$2` in `tune2fs -l`'s output `$1`.
-superblock_field() {
-    local line
+begin config
+service_path=$(login_path)
+why=""
+if out=$(as_service_user PATH="$service_path" uv run --offline --project "$repo" heterodyne config check 2>&1 \
+    </dev/null); then
     while IFS= read -r line; do
-        if [[ $line == "$2:"* ]]; then
-            line=${line#"$2:"}
-            echo "${line#"${line%%[![:space:]]*}"}"
-            return
-        fi
-    done <<<"$1"
-}
+        if [[ $line == "harnesses problem: "* ]]; then why="config check reports a store problem"; fi
+    done <<<"$out"
+else
+    why="config check failed"
+fi
+printf '%s\n' "$out"
+if [[ -z $why ]]; then
+    finish_step ok
+elif ((dry_run)); then
+    finish_step "advisory ($why; the changes above may fix it)"    # a dry run made none of them
+else
+    fail "$why"
+fi
 
-has_verity() { [[ " $1 " == *" verity "* ]]; }
+# --- step 5: verity on the store's filesystem, last: it can't be undone ---
 
 # The host can't have verity: the install carries on, and its exit is 3.
 unsupported() {
@@ -380,36 +442,18 @@ unsupported() {
 }
 
 verity_step() {
-    local mnt fstype device text line major="" minor="" sb block features
-    mnt=$(findmnt -no FSTYPE,SOURCE --target "$(host /var/lib)") || fail "the store's filesystem can't be found"
-    read -r fstype device <<<"$mnt"
-    [[ $fstype == ext4 ]] || { unsupported "not ext4"; return; }
-    [[ -e $(host "$VERITY_FEATURE") ]] || { unsupported "the kernel's ext4 has no verity"; return; }
-    text=$(tune2fs 2>&1) || true    # no arguments: the usage and the version, and exit 1
-    while IFS= read -r line; do
-        if [[ $line =~ ^tune2fs\ ([0-9]+)\.([0-9]+) ]]; then
-            major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]}
-        fi
-    done <<<"$text"
-    [[ -n $major ]] || fail "the e2fsprogs version can't be read"
-    ((major > 1 || (major == 1 && minor >= 45))) || { unsupported "e2fsprogs older than 1.45"; return; }
-    [[ $device == /dev/* ]] || fail "the store's device can't be read"
-    sb=$(tune2fs -l "$device" 2>/dev/null) || fail "the superblock can't be read"
-    block=$(superblock_field "$sb" "Block size")
-    features=$(superblock_field "$sb" "Filesystem features")
-    [[ -n $block && -n $features ]] || fail "the superblock can't be read"
-    [[ $block == "$(getconf PAGESIZE)" ]] || { unsupported "the block size is not the page size"; return; }
-    if has_verity "$features"; then
-        echo "ok: verity is on"
-        finish_step ok
-        return
-    fi
+    local kind rest sb
+    read -r kind rest <<<"$probe"
+    case $kind in
+        unsupported) unsupported "$rest"; return ;;
+        on) echo "ok: verity is on"; finish_step ok; return ;;
+    esac
     if ((!dry_run)); then
         echo "warning: the ext4 verity feature can't be cleared once it is set"
     fi
-    change tune2fs -O verity "$device" || fail "tune2fs -O verity failed"
+    change tune2fs -O verity "$rest" || fail "tune2fs -O verity failed"
     if ((!dry_run)); then
-        sb=$(tune2fs -l "$device" 2>/dev/null) || fail "the superblock can't be read"
+        sb=$(tune2fs -l "$rest" 2>/dev/null) || fail "the superblock can't be read"
         has_verity "$(superblock_field "$sb" "Filesystem features")" || fail "verity is not on after tune2fs"
     fi
     finish_step "$changed"
@@ -422,21 +466,3 @@ else
     finish_step "skipped (--no-verity)"
 fi
 
-# --- step 6: the host config, as heterodyne reads it for the service user ---
-
-begin config
-service_path=$(login_path)
-out=$(as_service_user PATH="$service_path" uv run --offline --project "$repo" heterodyne config check 2>&1 \
-    </dev/null) || { printf '%s\n' "$out"; fail "config check failed"; }
-printf '%s\n' "$out"
-problems=0
-while IFS= read -r line; do
-    if [[ $line == "harnesses problem: "* ]]; then problems=1; fi
-done <<<"$out"
-if ((problems)) && ((dry_run)); then
-    finish_step "problems (the changes above may fix them)"
-elif ((problems)); then
-    fail "config check reports a store problem"
-else
-    finish_step ok
-fi

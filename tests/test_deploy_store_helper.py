@@ -478,15 +478,30 @@ case $1 in
     *) exit 99 ;;
 esac
 """,
-    # what would be installed is kept under `installed/`, by the destination's name
-    "install": r"""mkdir -p "$S/installed"
-dest=${!#}
-cp -- "${@: -2:1}" "$S/installed/${dest##*/}"
+    # installs into the fake root, with `-o` and `-g` dropped (the stat shim reads it as root's) and the
+    # destination's directory writable for the copy only; fails before writing when `install-fail` names
+    # the destination
+    "install": r"""dest=${!#}
+if [[ -f $S/install-fail && ${dest##*/} == "$(cat "$S/install-fail")" ]]; then
+    echo "install: injected failure" >&2
+    exit 1
+fi
+args=()
+while (($# > 2)); do
+    case $1 in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac
+done
+dir=${dest%/*}
+mode=$(/usr/bin/stat -c %a -- "$dir")
+chmod u+w -- "$dir"
+rc=0
+/usr/bin/install "${args[@]}" -- "$1" "$dest" || rc=$?
+chmod "$mode" -- "$dir"
+exit "$rc"
 """,
     "useradd": "",
     "uv": r"""case "$*" in
     *" heterodyne --help") ;;
-    *" heterodyne config check") cat "$S/config-check" ;;
+    *" heterodyne config check") cat "$S/config-check"; exit "$(cat "$S/config-check-rc")" ;;
     *) exit 99 ;;
 esac
 """,
@@ -502,6 +517,7 @@ def state() -> dict[str, str]:
         "mount": "ext4 /dev/fake0\n",
         "e2fsprogs": "tune2fs 1.47.0 (5-Feb-2023)\n",
         "superblock": FEATURES_OFF.replace("ext_attr", "ext_attr verity"),
+        "config-check-rc": "0\n",
         "config-check": "harnesses.store = /var/lib/heterodyne/harnesses    (defaults)\n",
     }
 
@@ -560,7 +576,7 @@ class Host:
         return sorted((self.root / "run").glob("heterodyne-install.*"))
 
     def installed(self, unit: Path) -> bytes:
-        return (self.shims / "installed" / unit.name).read_bytes()
+        return (self.root / "etc/systemd/system" / unit.name).read_bytes()
 
 
 def unseal_all(root: Path) -> None:
@@ -627,7 +643,7 @@ def install_refusal(host: Host, out: subprocess.CompletedProcess[str]) -> str:
     return line.removeprefix(REFUSED)
 
 
-ALL_IN_PLACE = {"store": "changed", "units": "changed", "verity": "ok", "config": "ok"}
+ALL_IN_PLACE = {"store": "changed", "units": "changed", "config": "ok", "verity": "ok"}
 
 
 @pytest.mark.parametrize("script", [SCRIPT, MANIFEST, INSTALL, UNINSTALL], ids=lambda p: p.name)
@@ -963,6 +979,23 @@ def test_a_failed_reload_or_restart_is_repaired_by_the_next_run(host: Host, fail
     assert socket_actions(host) == ["systemctl restart heterodyne-store-helper.socket"]
 
 
+def test_a_run_that_installed_one_unit_and_failed_is_completed_by_the_next(host: Host) -> None:
+    host.put("install-fail", f"{SERVICE_UNIT.name}\n")
+    out = installer(host)
+    assert out.returncode == 1
+    assert summary(out)["units"] == "failed (a unit can't be installed)"
+    assert host.installed(SOCKET_UNIT) == SOCKET_UNIT.read_bytes()
+    assert not (host.root / "etc/systemd/system" / SERVICE_UNIT.name).exists()
+    (host.shims / "install-fail").unlink()
+    host.put("calls.log", "")
+    out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c.rsplit("/", 1)[-1] for c in host.calls() if c.startswith("install ")] == [SERVICE_UNIT.name]
+    assert f"ok: /etc/systemd/system/{SOCKET_UNIT.name}" in out.stdout.splitlines()
+    assert [host.installed(u) for u in (SOCKET_UNIT, SERVICE_UNIT)] == [SOCKET_UNIT.read_bytes(),
+                                                                       SERVICE_UNIT.read_bytes()]
+
+
 def test_a_socket_still_drifted_after_the_restart_fails(host: Host) -> None:
     host.put("sockstat", f"socket {defaults()['owner']} root 660\n")
     out = installer(host)
@@ -1012,21 +1045,46 @@ def test_verity_is_turned_on_when_off(host: Host) -> None:
 @pytest.mark.parametrize(("setup", "why"), [
     ({"fail": "tune2fs -O\n"}, "tune2fs -O verity failed"),
     ({"tune2fs-no-effect": ""}, "verity is not on after tune2fs"),
+])
+def test_verity_that_breaks_fails_the_install(host: Host, setup: dict[str, str], why: str) -> None:
+    host.put("superblock", FEATURES_OFF)
+    for name, text in setup.items():
+        host.put(name, text)
+    out = installer(host)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert summary(out) == {**ALL_IN_PLACE, "verity": f"failed ({why})"}
+
+
+@pytest.mark.parametrize(("setup", "why"), [
     ({"e2fsprogs": "no version here\n"}, "the e2fsprogs version can't be read"),
     ({"superblock": None}, "the superblock can't be read"),
+    ({"superblock": "Block size:               4096\n"}, "the superblock can't be read"),
     ({"mount": "ext4 rootfs\n"}, "the store's device can't be read"),
+    ({"fail": "findmnt\n"}, "the store's filesystem can't be found"),
 ])
-def test_verity_that_breaks_fails_the_install(host: Host, setup: dict[str, str | None], why: str) -> None:
-    host.put("superblock", FEATURES_OFF)
+def test_verity_the_preflight_cannot_read_refuses_before_any_change(host: Host, setup: dict[str, str | None],
+                                                                     why: str) -> None:
     for name, text in setup.items():
         if text is None:
             (host.shims / name).unlink()
         else:
             host.put(name, text)
     out = installer(host)
+    assert install_refusal(host, out) == why
+    changes = ("install ", "systemctl daemon-reload", "systemctl enable")
+    assert not [c for c in host.calls() if c.startswith(changes)]
+
+
+def test_a_filesystem_that_changes_after_the_preflight_refuses_before_any_change(host: Host) -> None:
+    host.put("superblock", FEATURES_OFF)
+    superblock = shlex.quote(str(host.shims / "superblock"))
+    hook(host, "archive", f"sed -i 's/^Block size:.*/Block size: 1024/' {superblock}")
+    out = installer(host)
     assert out.returncode == 1, out.stdout + out.stderr
-    assert summary(out)["verity"] == f"failed ({why})"
-    assert summary(out)["config"] == "not run"
+    assert "refused: the store's filesystem changed since the preflight" in out.stderr.splitlines()
+    assert host.mutations() == []
+    assert set(summary(out).values()) == {"not run"}
+    assert host.stages() == []
 
 
 def test_no_verity_skips_the_step_on_purpose(host: Host) -> None:
@@ -1047,14 +1105,43 @@ def test_a_store_problem_in_config_check_fails_the_install(host: Host, problem: 
     assert summary(out)["config"] == "failed (config check reports a store problem)"
 
 
+FAILED_CHECKS = [
+    ({"config-check-rc": "1\n"}, "config check failed"),
+    ({"config-check": state()["config-check"] + "harnesses problem: HELPER_DRIFT\n"},
+     "config check reports a store problem"),
+]
+
+
+@pytest.mark.parametrize(("setup", "why"), FAILED_CHECKS)
+def test_a_failed_config_check_stops_before_verity_is_turned_on(host: Host, setup: dict[str, str],
+                                                                why: str) -> None:
+    host.put("superblock", FEATURES_OFF)
+    for name, text in setup.items():
+        host.put(name, text)
+    out = installer(host)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert summary(out) == {**ALL_IN_PLACE, "config": f"failed ({why})", "verity": "not run"}
+    assert not [c for c in host.calls() if c.startswith("tune2fs -O")]
+
+
+@pytest.mark.parametrize(("setup", "why"), FAILED_CHECKS)
+def test_a_failed_config_check_is_advice_in_a_dry_run(host: Host, setup: dict[str, str], why: str) -> None:
+    for name, text in setup.items():
+        host.put(name, text)
+    out = installer(host, "--dry-run")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["config"] == f"advisory ({why}; the changes above may fix it)"
+    assert host.mutations() == []
+
+
 def test_a_dry_run_makes_no_change(host: Host) -> None:
     host.put("superblock", FEATURES_OFF)
     host.put("active", "inactive\n")
     out = installer(host, "--dry-run")
     assert out.returncode == 0, out.stdout + out.stderr
     assert host.mutations() == []
-    assert summary(out) == {"store": "would change", "units": "would change", "verity": "would change",
-                            "config": "ok"}
+    assert summary(out) == {"store": "would change", "units": "would change", "config": "ok",
+                            "verity": "would change"}
     assert "would: systemctl start heterodyne-store-helper.socket" in out.stdout.splitlines()
     assert "would: tune2fs -O verity /dev/fake0" in out.stdout.splitlines()
     assert host.stages() == []
