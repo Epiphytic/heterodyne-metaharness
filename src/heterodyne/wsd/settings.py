@@ -42,6 +42,8 @@ class WsdSettings:
     btq_locations: dict[str, str]
     workstreams: tuple[WorkstreamSettings, ...]
     accounts: Accounts | None = None     # the host's accounts: the journal upgrade's adapter facts (AU-3 §3)
+    # The host's config directory, where `harnesses.toml` is (plan 4c T7). None: no install is selected.
+    config_dir: Path | None = None
 
     @property
     def journal(self) -> Path:
@@ -144,7 +146,8 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
         btq_checkout=_path(btq.get("btq"), env, f"{BEADS} btq"),
         btq_locations=_locations(btq, env),
         workstreams=streams,
-        accounts=ConfiguredAccounts.from_config(host, env))
+        accounts=ConfiguredAccounts.from_config(host, env),
+        config_dir=paths.config_dir(env))
 
 
 def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits, usage: UsageSettings,
