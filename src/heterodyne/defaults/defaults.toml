@@ -20,7 +20,9 @@ escalate = ["push_branch", "open_pr", "merge_pr", "deploy", "notify", "new_egres
 hard_deny = ["modify_harness_config", "modify_policy", "modify_sandbox"]
 locked = ["modify_harness_config", "modify_policy", "modify_sandbox"]
 
-# Executable of each adapter's CLI. Hosts override with an absolute path if it is not on PATH.
+# Executable of each adapter's CLI: admind only, once sandboxed agents run their managed install
+# ([harnesses]; until then wsd's launches use it too). Hosts override with an absolute path if it is not
+# on PATH.
 [adapters.claude-code]
 binary = "claude"
 
@@ -82,3 +84,15 @@ usage_poll_seconds = 600                # how often a session's in-sandbox usage
 # Variables for the openshell and podman commands only (for example the PATH of a side-by-side podman).
 # Never passed into a sandbox.
 [sandbox.tool_env]
+
+# Managed installs (§7). Host only, like harnesses.toml (the selection, which only wsd writes). The store's
+# default is the store owner's /var/lib/heterodyne/harnesses; with fallback = true (no store owner: wsd
+# runs the helper's steps itself, an accepted risk, §17 item 13) it is
+# ${XDG_DATA_HOME:-~/.local/share}/heterodyne/harnesses. `approval_workstream` has no default: `install`
+# refuses without it. Recipes are `[harnesses.<adapter>]` tables, written by the host.
+[harnesses]
+fallback = false
+owner = "heterodyne-store"
+helper_socket = "/run/heterodyne-store/helper.sock"
+helper_copy = "/usr/local/libexec/heterodyne/store_core.py"
+staging_hours = 24
