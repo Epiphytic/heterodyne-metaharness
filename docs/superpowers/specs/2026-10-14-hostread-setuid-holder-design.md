@@ -2,15 +2,17 @@
 
 The source is the FINDING-PROD in the btq-19fh0 design review r2 (`/tmp/review-19fh0-r2.md`, rated High). The saved-uid analysis is in r1 (`/tmp/review-19fh0-r1.md`). That finding was noted as out of scope in `docs/superpowers/specs/2026-10-14-hostread-uid-first-design.md` (19fh0, pending Liam's ask 4gt8).
 
-Reviews: `docs/reviews/9yiku-design-r1.md` (REVISE) and `docs/reviews/9yiku-design-r2.md` (REVISE).
+Reviews: `docs/reviews/9yiku-design-r1.md` (REVISE) and `docs/reviews/9yiku-design-r2.md` (REVISE). r4 also answers team-lead's question on r3 (do the non-identity processes pin homes?).
 
 Line numbers are at origin/main e65ade7.
 
-**Recommendation (r3): (a), plus a subordinate-uid check in `_ours`. The check reads the allocation file, and its limits are stated as a PoC residual.**
+**Recommendation (r4): (a), plus a check in `_ours` on this user's subordinate uids and on the kernel's mapping.**
 - The host read's app-server is started under `PR_SET_NO_NEW_PRIVS`, through an exec trampoline.
 - The trampoline first checks the launch conditions below and fails closed if they don't hold.
-- `_ours` also counts this user's subordinate uids (`/etc/subuid`) as this user's. r1 found that a descendant can reach them even under no_new_privs; I reproduced that on this host (below).
-- r2 showed that the file's current entries don't bound the kernel's existing mappings. Checking the kernel's mapping instead (`/proc/<pid>/uid_map`) would be sound. On this host it costs about one read in 25, and it leaves credential copies behind, so it is rejected ("Why not the kernel's mapping"). The gap is root's edits to the allocation file, which r3 states as residual 4, and the invariant is qualified to match.
+- A foreign-uid process is ruled out only when the kernel's mapping proves it isn't in a namespace this user's processes can reach. That means its `/proc/<pid>/uid_map` is the initial namespace's identity map, or is non-empty and maps nothing of this user's own uid or current subordinate ranges (`/etc/subuid`). Anything else is kept.
+  - r1 found that a descendant can reach the subordinate uids even under no_new_privs. I reproduced that on this host (below).
+  - r2 showed that the allocation file alone doesn't bound the kernel's existing mappings.
+  - r3 measured "keep every non-identity map": it would have kept about one read in 25. The narrowed rule keeps none of this host's foreign processes (below).
 - Rule 5's order is unchanged.
 - (b) is rejected because of its cost, and so (c) is rejected too.
 
@@ -72,42 +74,67 @@ On this host, 2026-10-14 (no root, no podman):
   4. Its environ read was refused: it joined after its last exec, so its memory map's namespace is the initial one.
   5. Rule 5 would clear it.
 
-**The check that closes it, while the allocation is unchanged.** `_ours` also counts a real or effective uid in this user's subordinate ranges:
-- **Where the ranges come from.** `/etc/subuid` lines whose first field is this user's login name or numeric uid, as `newuidmap` reads them. They are read once per scan.
-  - The login name is `pwd.getpwuid(os.getuid())`'s. If that lookup fails, every uid counts as ours.
-  - Every matching line is taken, so a user with several ranges gets all of them.
-  - A line `name:start:count` covers `start` through `start + count - 1`, both ends included.
-  - A line whose start or count isn't a decimal integer, whose count is 0 or less, or which doesn't have exactly three fields, makes the file malformed. That applies to other users' lines too, since `newuidmap` would also be reading a damaged file.
-- **Missing file.** No ranges. With no subordinate uids, `newuidmap` maps nothing for this user, so no namespace this user maps through it holds any.
-- **Unreadable or malformed file, an unreadable `/etc/nsswitch.conf`, or an nsswitch `subid:` source** (which this design doesn't parse). Every uid counts as ours. That fails closed with (b)'s cost below, on such hosts only.
-- **What it doesn't bound (r2 BLOCKING).** The kernel keeps a namespace's mapping after `/etc/subuid` changes. So the check reads an allocation, not a mapping, and it is wrong when the two differ:
-  - a range removed from this user's lines, or the file deleted, while a namespace mapped from it still lives;
-  - a range added between the scan's read of the file and a helper's `newuidmap` call.
-  
-  Both need root to edit `/etc/subuid`. Residual 4 states them, and the premise in "Changes" is qualified to match.
+**The check that closes it (r4).** Let S be this user's uid A together with its current subordinate ranges. A live, refused-environ process is ruled out by its uid only if:
+1. neither its real nor its effective uid is in S; **and**
+2. its `/proc/<pid>/uid_map` proves it is outside every namespace this user's processes can reach. The map proves that when it reads exactly `0 0 4294967295` (the initial namespace), or when it is non-empty, well-formed, and every one of its outside ranges is disjoint from S.
 
-**Why not the kernel's mapping (r2 option 1).** I worked this through and measured it, then rejected it on cost.
-- **The rule.** A foreign-uid process would be ruled out only if `/proc/<pid>/uid_map` reads exactly `0 0 4294967295`, which is the initial namespace's identity map. Anything else, even one other line, means a non-initial namespace, and the process would be `_Unknown`. That subsumes the subuid check: the escape above needs a non-initial namespace, whatever the allocation file says.
-- **It would be sound.** The reads would go status (foreign uid), then `uid_map`, then signal 0 through the pidfd that was opened before the reads.
-  - **Exits.** `ENOENT` or `ESRCH` at any of the three reads means gone, as now.
-  - **An unreadable map** (`EACCES`, for example under `hidepid`) would fail closed, as `_Unknown`.
-  - **The two reads are of one namespace.** A thread group shares one user namespace: `setns` and `unshare` of `CLONE_NEWUSER` need a single-threaded caller, and `clone` refuses `CLONE_NEWUSER` with `CLONE_THREAD`. An exec keeps the namespace. So, unlike most of status, the namespace is a group fact, like the uid and the start time. That holds even when an exec moves a worker into the leader's PID between the reads.
-  - **It is monotone.** A task can join or create only namespaces below its own, never return to an ancestor. So an identity map at the later read shows the group was in the initial namespace at the status read, and there, under the launch conditions, it couldn't have taken the foreign uid.
-  - **A process that joins after we read it.** If it joined before the status read, the later `uid_map` read shows a non-identity map, so it is kept. If it joins after the status read, the status showed a uid it had while still in the initial namespace, which is either ours (kept) or one it couldn't have reached (so it is no holder). Switching to a uid mapped by the joined namespace comes after the join. Rule 5's existing order handles that, and no re-read is needed.
-  - **A reader outside the initial namespace** sees no identity maps at all, so every foreign process would be kept. That fails closed.
-- **What it would cost, measured on this host on 2026-10-14.**
-  - 670 to 678 live foreign processes had refused environs. All their `uid_map`s were readable, and 48 to 50 were non-identity. They come from chrome's sandbox under uid 1000, from containers whose uids are mapped by root (1065536 to 1066536, outside every `/etc/subuid` range here), and from system services with a namespace of their own (uids 0, 116 and 126).
-  - The start-time clause would still clear those that started before the home. So the cost is the young ones.
-  - **The read path.** Over 180 s, sampled every 0.5 s, a non-identity foreign process younger than 2 s existed in 8 of 346 samples; younger than 5 s in 14; younger than 10 s in 23. Chrome starts and ends them all the time. A read's cleanup window is its duration plus the 1 s slack, so about 4% of reads would raise `_Unknown`, be discarded and keep their home (`DIAG_SCRATCH_KEPT`).
-  - **Recovery.** Each kept home holds a copy of the login, and recovery would remove it only at a start with no non-identity foreign process younger than the oldest home. At one instant, 5 had started within the last hour, mostly container processes. A container restarted after a home was kept would block recovery for as long as it runs.
-  - (b) costs more (123 blockers in a day), but this cost is still not small, and it compounds: a discarded read is how the homes that block recovery are made.
-- **The trade.** With the allocation check (r2 option 2), the gap is root's edits to a file that root owns, made while this user's namespaces from the old allocation live. That is the same trust class as residual 2, where root maps any uid. With the kernel's mapping (option 1), the gap is closed, but about one read in 25 would be lost, along with an on-disk credential copy that might never be recovered on a shared host. For the PoC I pick option 2. A narrower kernel-map rule is possible (for example, keeping only the non-identity processes whose uid isn't in another user's current range), but it brings back an allocation-file dependence of its own, so it isn't proposed.
+Anything else is `_Unknown` (kept): an empty map, a malformed one, one that overlaps S anywhere, or an unreadable one. The start-time clause still applies after this, as today.
 
-**What the check costs.** A refused process in the subordinate range, started after the home, becomes `_Unknown`: the home is kept, and the read is discarded or recovery kept.
-- Ordinary rootless-container processes don't reach that point. Each one's environ is readable, because this user owns its namespace and so has `CAP_SYS_PTRACE` there for the read's access check. That holds for both the task's namespace and its memory map's, since they exec'd inside it.
-- Only a process that joined after its last exec, or one in a namespace nested under a subordinate owner, is refused.
-- On this host now, 0 processes run in the range.
-- The 19fh0 pins and the new rule-5 pin use foreign uids outside the range. Tests patch the ranges.
+**Why a disjoint map proves it.** These are kernel rules ([user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)).
+- **Which namespaces a descendant can be in.** Under the launch conditions, a descendant can only be in the initial namespace or in this user's tree. This user's tree means the namespaces created by this user's processes, and those nested under them.
+  - Joining a namespace needs `CAP_SYS_ADMIN` in it. Without privilege, that holds only for namespaces owned by one of the task's own uids, or nested under one.
+  - Another user's chrome or podman namespace is owned by that user. So a descendant can't enter it, unless that user's uid is in S, which would be a misconfigured allocation.
+- **What those namespaces can map.** Every non-empty map in this user's tree maps only uids from S, as it stood when the map was written. A map is written once, by one of three writers:
+  - a process with the owner's uid, which may map only that one uid (A for a top-level namespace);
+  - `newuidmap`, which maps the caller's own uid and its `/etc/subuid` ranges;
+  - a process with `CAP_SETUID` in the parent namespace, which can map only uids the parent maps, so nested maps stay inside their parent's.
+
+  The only other writer is root in the initial namespace, which is residual 2. So by induction, a non-empty map that is disjoint from S, while S is unchanged, is not this user's tree.
+- **Why an empty map is kept.** A namespace that was just made has an empty map until one is written. A task can be in it with a uid it switched to earlier, in its parent.
+- **Why the uid check stays.** A uid in S is kept whatever the map says, as in r3. It costs nothing on this host: 0 processes run in the range.
+
+**The reads, and their edge cases.** The reads go status (foreign uid), then `uid_map` (one open, read to EOF), then signal 0 through the pidfd that was opened before the reads, as `_matched` does.
+- **Exits.** `ENOENT` or `ESRCH` at any of the three means gone, as now.
+- **An unreadable map** (`EACCES`, for example under `hidepid`, or any other `OSError`) fails closed, as `_Unknown`.
+- **The two reads are of one namespace.** A thread group shares one user namespace: `setns` and `unshare` of `CLONE_NEWUSER` need a single-threaded caller, and `clone` refuses `CLONE_NEWUSER` with `CLONE_THREAD`. An exec keeps the namespace. So, unlike most of status, the namespace is a group fact, like the uid and the start time `_judge` already relies on. That holds even when an exec moves a worker into the leader's PID between the reads.
+- **The map is stable.** A namespace's map can be written only once. The kernel publishes it whole: the extent count is set after the extents, behind a write barrier. So a non-empty read is the namespace's final map. An empty read is kept anyway.
+- **A process that moves between or after the reads.** A task can only move down: it can join or create namespaces below its own, never an ancestor's. It also can't move into another user's tree (above).
+  - If it was in this user's tree at the status read, every later namespace is too. Its map is then non-empty and overlaps S, or is empty; either way it is kept.
+  - If it was in the initial namespace at the status read, its uid then was one it held with no capability and no gain from exec, so it was A. A foreign uid at the status read means it was never a descendant. This holds whatever map the later read sees.
+  - So rule 5's existing order handles a process that joins after we read it, and no re-read is needed.
+- **A reader outside the initial namespace.** It sees maps relative to its own namespace, so the rule's premise fails. Once per scan, `/proc/self/uid_map` must be the identity; if it isn't, every foreign process is `_Unknown`. That fails closed. wsd's is the identity on this host.
+
+**Where S comes from.** `/etc/subuid` lines whose first field is this user's login name or numeric uid, as `newuidmap` reads them. They are read once per scan.
+- The login name is `pwd.getpwuid(os.getuid())`'s. If that lookup fails, S is "everything".
+- Every matching line is taken, so a user with several ranges gets all of them.
+- A line `name:start:count` covers `start` through `start + count - 1`, both ends included.
+- A line whose start or count isn't a decimal integer, whose count is 0 or less, or which doesn't have exactly three fields, makes the file malformed. That applies to other users' lines too, since `newuidmap` would also be reading a damaged file.
+- **Missing file.** S is {A}. With no subordinate uids, `newuidmap` maps nothing for this user beyond A.
+- **Unreadable or malformed file, an unreadable `/etc/nsswitch.conf`, or an nsswitch `subid:` source** (which this design doesn't parse). S is everything, so every foreign uid is kept. That fails closed with (b)'s cost below, on such hosts only.
+
+**What it still doesn't bound: root's edits to the allocation (r2 BLOCKING, narrowed).** The kernel keeps a map after `/etc/subuid` changes. The rule above is wrong only for a namespace in this user's tree whose map overlaps neither A nor any of this user's current ranges. That needs root to edit `/etc/subuid`:
+- root removes or reassigns a range while a namespace that maps only that range, and never A, still lives; or
+- root adds a range after the scan read the file, and a helper at once maps a namespace with only that range.
+
+Ordinary rootless namespaces map A as well: podman `--userns=keep-id`, `unshare --map-auto --map-root-user`, and this host's reproduction above. So the removal case also needs a namespace built without A. Residual 4 states these cases.
+
+**What it costs, measured on this host on 2026-10-14** (r3's question: do the non-identity processes pin homes?).
+- **The population.** 671 live foreign processes had refused environs, and 50 of them had non-identity maps. All the maps were readable, and none was empty. Grouped by map:
+
+  | processes | uid | outside ranges | age |
+  |---|---|---|---|
+  | 18 + 12 + 6 | 1065536–1066536 | 1065536 (1048576) | 23 min to 4.3 days |
+  | 3 | 1066536 | 1066536 (1), 1165536 (65536) | 4.2 days |
+  | 9 | 1000 (chrome's sandbox) | 1000 (1) | 56 s to 20.7 days |
+  | 3 | 0, 116, 126 (system services) | 0 (1), and their own uid | 14 to 27 days |
+
+- **Some are always present, so the unnarrowed rule would pin homes.** Chrome, the containers and the services live for days. The start-time clause clears those started before a home. But every one started after a home would keep it for as long as it lives, and chrome makes new ones often. r3's 180 s sample found a non-identity process younger than 5 s in 14 of 346 samples. That is (b)'s cost, smaller.
+- **The narrowed rule keeps none of them.** Every map above is disjoint from S (A = 1001, plus 165536 with 65536 uids). So all 50 are ruled out at once, as today. Over a further 120 s, sampled every 0.5 s (231 samples), no foreign refused process was kept by the rule in any sample.
+- **What does get kept** is a refused process in a namespace that maps this user's uid or ranges, and that started after the home:
+  - Ordinary rootless-container processes don't reach that point. Each one's environ is readable, because this user owns its namespace and so has `CAP_SYS_PTRACE` there for the read's access check. That holds for both the task's namespace and its memory map's, since they exec'd inside it.
+  - Only a process that joined after its last exec, or one in a namespace nested under a subordinate owner, is refused. Those are exactly the ones that may be holders.
+- **Per scan,** the rule adds one small `uid_map` read for each foreign refused process (about 50 here) and one `/etc/subuid` read.
+- The 19fh0 pins and the new rule-5 pins use foreign uids outside S and an identity map, unless a pin says otherwise. Tests patch S and the map reader.
 
 **How it is set.** Python has no `os.prctl`, and `preexec_fn` is unsafe in a threaded process such as wsd. So the host read launches through `codex_usage.py` itself, in a new mode:
 
@@ -158,11 +185,11 @@ This would remove the premise rather than enforce it: another user's refused pro
   - Filtering by session misses a `setsid()` descendant, which is the reported scenario.
   - Filtering by cgroup needs enforced membership. `systemd-run --scope` alone doesn't stop a descendant from asking a delegated service to start a process elsewhere.
   - Filtering by uid fails because the attack leaves all four uids foreign, and r1 (19fh0) showed per-task uid reads can't be made complete.
-- The subordinate-range check above is the one uid hybrid that holds. It is sound because the ranges a descendant can reach without privilege are exactly this user's, as long as root doesn't change them (residual 4).
+- The check above is the one uid hybrid that holds. It is sound because a descendant can reach only namespaces of this user's tree, and their maps hold only S, as long as root doesn't change the allocation (residual 4).
 
 ### (c) both
 
-(c) has (b)'s cost. With (a) and the subordinate check in place, (b) would only add protection against the residuals below, and it doesn't fully close them either. Rejected.
+(c) has (b)'s cost. With (a) and the check in place, (b) would only add protection against the residuals below, and it doesn't fully close them either. Rejected.
 
 ## Does no_new_privs break the pinned app-server?
 
@@ -196,22 +223,22 @@ The one thing no_new_privs can change is the bwrap probe, on a host where bwrap 
    - an already-privileged service, which could start it as any user.
 
    It is not a descendant, so the holder contract doesn't cover it today, and the pinned app-server's descendants (above) do nothing of the kind. Closing it would need enforced cgroup membership for the read and every service it can reach, which is not proposed.
-2. **A privileged helper that maps a namespace outside the subordinate ranges.** Root, or a service with `CAP_SETUID` in the initial namespace, can write any `uid_map` for a namespace the descendant made, and so give it any host uid. `newuidmap` can't do this; it maps only the caller's ranges. This is the privileged-service case of residual 1, applied to the descendant's own credentials. Accepted the same way.
+2. **A privileged helper that maps a namespace outside S.** Root, or a service with `CAP_SETUID` in the initial namespace, can write any `uid_map` for a namespace the descendant made, and so give it any host uid. A map that is disjoint from S, or a full identity map, would then rule the descendant out. `newuidmap` can't do this; it maps only the caller's uid and ranges. This is the privileged-service case of residual 1, applied to the descendant's own credentials. Accepted the same way.
 3. **Homes from before the change.** `recover` at the first start after deployment may meet a holder from a read launched without no_new_privs. This happens once, and needs a crash plus a uid transition before the upgrade. Accepted.
-4. **Root changes this user's subordinate allocation (r3).** These cases need root to edit `/etc/subuid`:
-   - root removes a range from this user's lines, or deletes the file, while a namespace mapped from that range lives;
-   - root reassigns the range to another user while such a namespace lives;
-   - root adds a range during a scan, after the file was read, and a helper maps it at once.
+4. **Root changes this user's subordinate allocation (r3, narrowed in r4).** These cases need root to edit `/etc/subuid`, and a namespace of this user's whose map holds neither A nor any range still allocated to this user:
+   - root removes or reassigns a range, or deletes the file, while such a namespace lives;
+   - root adds a range during a scan, after the file was read, and a helper at once maps such a namespace with only that range.
 
-   In each, a descendant can hold a uid that the scan doesn't count as this user's. These are root's edits to a file root owns, the same trust class as residual 2. The kernel-mapping check that would close them costs about one read in 25 on this host (above). Accepted for the PoC.
+   The usual rootless tools map A too (podman keep-id, `unshare --map-auto --map-root-user`), so the namespace must also have been built without A. These are root's edits to a file root owns, the same trust class as residual 2. Closing them would mean keeping every non-identity map, which r3 measured at about one read in 25 on this host. Accepted for the PoC.
 
 ## Interaction with other work
 
 - **btq-19fh0 (ask 4gt8).** Its three pins are in the zombie-leader branch (`:252–258`), which this design doesn't touch.
-  - Its pins use another user's uid on all four fields. That uid must be outside the subordinate ranges, which the tests patch to a fixed set, so they stay valid in either merge order.
+  - Its pins use another user's uid on all four fields. That uid must be outside S, which the tests patch to a fixed set. The map reader's seam defaults to the identity map, so the pins stay valid in either merge order.
   - (a) makes their mixed-uid and saved-uid holders impossible for app-server descendants under the launch conditions, but the pins test the scan for any process, so they stay as defence in depth.
   - Both designs extend `status_text` in `tests/test_sandbox_hostread.py` with a `uids` argument. This design uses the same signature (four fields, defaulting to this user's), so whichever lands second merges trivially.
-- **The flakes2 holder scan.** The rule order, settling, `PF_EXITING`, the zombie branch and the read path's settling are unchanged. Only `_ours`, which only rule 5 calls, widens.
+- **The flakes2 holder scan.** The rule order, settling, `PF_EXITING`, the zombie branch and the read path's settling are unchanged. Only rule 5's uid clause narrows: `_ours` widens to S, and a foreign uid also needs the map proof. Both are called only from rule 5.
+  - The map read sits between status and the existing pidfd use. Its `ENOENT` and `ESRCH` follow the scan's "gone" path, and any other error is `_Unknown`, like the scan's other unknowns.
   - no_new_privs doesn't change dumpability, so an app-server descendant's environ stays readable to the reader.
   - A descendant of ours that makes itself non-dumpable is still `_Unknown` (kept), as today.
 - **u63ak.** The fakes run under the trampoline unchanged. The outlive fake's exec into the sleeper, and the sleepers' census and lifeline, need no privilege.
@@ -247,11 +274,25 @@ The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the 
    - false for uid 0 on any field, for a uid that isn't ours, for any non-zero bit in `CapPrm`, `CapEff` or `CapAmb` (with `CAP_SETUID` as the named case), and for a status missing any of those lines;
    - `CapInh` non-zero alone stays true.
 5. **The trampoline is the group leader the client kills.** The existing `escaped` and `orphan` tests' assertions stay unchanged under the trampoline: the descendant is ended, the scratch is empty and `server_gone()` holds. They run as regression.
-6. **The subordinate ranges.** `hostread._subordinate_uids` is patched to `{(200000, 65536)}`. With flakes2's `Scripted`/`Seam`, take a seam child with status `S`, `PF_EXITING` clear, and environ refused:
-   - with uid 200500 on all four fields, it is `_Unknown` (kept, no kill);
-   - with uid 300000, it is cleared at once (`rmtree`, no kill, `DIAG_RECOVERED`), which pins that rule 5's uid clause still clears another user's process;
-   - with our uid in the real or effective field, it is `_Unknown`, as today.
-   - The 200500 case fails today.
+6. **The uid clause, S and the map.** `hostread._subordinate_uids` is patched to `{(200000, 65536)}`, and `hostread._uid_map` (the reader of `/proc/<pid>/uid_map`) is a seam that returns a text or raises. With flakes2's `Scripted`/`Seam`, take a seam child with status `S`, `PF_EXITING` clear, and environ refused. "Kept" means `_Unknown` (no kill, no `rmtree`); "cleared" means cleared at once (`rmtree`, no kill, `DIAG_RECOVERED`).
+   - **The uid:**
+     - uid 200500 on all four fields: kept, whatever the map;
+     - our uid in the real or effective field: kept, as today;
+     - uid 300000 with the identity map `0 0 4294967295`: cleared. This pins that rule 5's uid clause still clears another user's process in the initial namespace.
+   - **The map, for uid 300000:**
+     - `0 300000 65536` (disjoint): cleared;
+     - `0 <A> 1` then `1 300000 65536` (one line maps A): kept;
+     - `0 200000 10` (overlaps S only): kept;
+     - endpoints: `0 199990 10` (ends at 199999) is cleared, and `0 199991 10` (ends at 200000) is kept; likewise `0 265536 10` is cleared and `0 265535 10` is kept;
+     - an empty map: kept;
+     - a malformed map (two fields, a non-numeric field, or a count of 0): kept;
+     - an identity map with a second line: kept;
+     - the reader raising `PermissionError`, or another `OSError`: kept;
+     - the reader raising `FileNotFoundError` or `ProcessLookupError`: gone (skipped, as today);
+     - signal 0 through the pidfd raising `ProcessLookupError` after a disjoint map: gone.
+   - **Order:** with `Scripted`, the status read comes before the map read, and the map read before the pidfd signal.
+   - **The reader's own map:** with `/proc/self/uid_map`'s seam returning `0 1001 1`, uid 300000 with a disjoint map is kept.
+   - The 200500, overlap, empty, malformed, unreadable and own-map cases fail today, because rule 5 clears them.
 7. **Parsing `/etc/subuid`** (unit, on file texts, with the user's name and uid given; the readers are seams that return a text or raise):
    - lines by name and by numeric uid are taken, and other users' lines are ignored;
    - **several ranges:** two lines for the user, one by name and one by uid, give both ranges;
@@ -262,15 +303,16 @@ The new tests are in `tests/test_sandbox_hostread.py` unless noted, and use the 
    - an nsswitch `subid:` line, or an unreadable `/etc/nsswitch.conf`, gives "all";
    - **a failed name lookup:** `getpwuid` raising `KeyError` gives "all".
 
-No test makes a real uid transition, which would need a setuid binary or root. The setns reproduction above used `unshare --map-auto` and is not a test: it depends on `/etc/subuid` and setuid `newuidmap`. The kernel guarantees are cited; tests 1, 3b, 4, 6 and 7 show the barrier, its branches, the check and the widened rule are in place.
+No test makes a real uid transition, which would need a setuid binary or root. The setns reproduction above used `unshare --map-auto` and is not a test: it depends on `/etc/subuid` and setuid `newuidmap`. The kernel guarantees are cited; tests 1, 3b, 4, 6 and 7 show the barrier, its branches, the check and the narrowed rule are in place. The cost figures above are host measurements from 2026-10-14, not tests.
 
 ## Changes, if approved
 
 - `src/heterodyne/sandbox/resources/codex_usage.py`: `exec_no_new_privs` (with its test seams), `unprivileged`, `barrier_argv`, the `--exec-no-new-privs` mode, and `read(..., no_new_privs=False)`.
 - `src/heterodyne/sandbox/hostread.py`:
   - the call at `:400` passes `no_new_privs=True`;
-  - `_subordinate_uids()` (`/etc/subuid`, as above), read once per scan;
-  - `_ours` counts those ranges;
-  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid that is neither this user's nor in this user's current `/etc/subuid` ranges can't be one. That holds while root leaves this user's allocation unchanged during the lifetime of its namespaces, and apart from the residuals above.
+  - `_subordinate_uids()` (`/etc/subuid`, as above), and the reader's own `/proc/self/uid_map` check, both once per scan;
+  - `_uid_map(pid)` and the map proof (identity, or non-empty, well-formed and disjoint from S), read between status and the pidfd signal;
+  - `_ours` counts S, and `_ruled_out`'s uid clause also needs the map proof;
+  - `_ruled_out`'s and the module's docstrings state the premise: under the launch conditions, every holder descends from an app-server under no_new_privs, so a process with a uid outside S, whose namespace's map is the identity or is disjoint from S, can't be one. That holds while root leaves this user's allocation unchanged during the lifetime of its namespaces (residual 4), and apart from the other residuals above.
 - `tests/fakes/fake_agent_cli.py`: the `HZ_FAKE_STATUS_FILE` report.
 - The tests above. No ADR change: D9 and E4 already put the reader outside the sandbox. A line in plan 4b E4's notes records the barrier and the launch conditions.
