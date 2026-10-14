@@ -8,7 +8,7 @@ import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,8 @@ from harness_env import (
 from heterodyne.harness.resources import store_core as sc
 
 STORE_CORE = Path(sc.__file__)
-TREE = {"cli/README": b"the codex package\n", "cli/bin/codex": EXECUTABLE + b"exit 0\n",
+README = b"the codex package\n"
+TREE = {"cli/README": README, "cli/bin/codex": EXECUTABLE + b"exit 0\n",
         "cli/codex": ("link", "bin/codex"), "content/skills/a/SKILL.md": b"# a\n", "defaults": ("dir",)}
 
 
@@ -282,6 +283,139 @@ def test_an_entry_added_to_a_directory_already_listed_fails_the_walk(root: Path,
     monkeypatch.setattr(sc, "statx_at", adding)
     assert walk_refusal(root) == sc.ENTRY_CHANGED
     assert added == ["defaults"]
+
+
+def change_in_cli(root: Path, how: str) -> None:
+    """Add, rewrite or rename an entry under cli/, restoring every mode afterwards."""
+    cli = root / "cli"
+    cli.chmod(0o755)
+    readme = cli / "README"
+    if how == "add":
+        (cli / "extra").write_bytes(b"late")
+        (cli / "extra").chmod(0o444)
+    elif how == "rewrite":
+        readme.chmod(0o644)
+        readme.write_bytes(b"the codex packag!\n")              # the same size
+        readme.chmod(0o444)
+    else:
+        readme.rename(cli / "READ")
+    cli.chmod(0o555)
+
+
+@pytest.mark.parametrize("check", ["walk", "fast"])
+@pytest.mark.parametrize("how", ["add", "rewrite", "rename"])
+def test_a_change_to_a_subtree_the_walk_has_finished_fails_it(root: Path, how: str, check: str,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    m, rec = manifest_of(root), record_of(root)                 # of the tree before the change
+    real = sc.statx_at
+    changed: list[str] = []
+
+    def changing(dirfd: int, name: str) -> sc.Stat:
+        if name == "defaults" and not changed:          # cli/ and content/ are done, and closed
+            changed.append(name)
+            change_in_cli(root, how)
+        return real(dirfd, name)
+
+    monkeypatch.setattr(sc, "statx_at", changing)
+    fds = fd_count()
+    refusal = walk_refusal(root) if check == "walk" else fast_refusal(root, m, rec)
+    assert refusal == sc.ENTRY_CHANGED
+    assert changed == ["defaults"]
+    assert fd_count() == fds                            # refused in the second pass, which closed its fds
+
+
+def rewrite(path: Path, data: bytes) -> None:
+    path.chmod(0o644)
+    path.write_bytes(data)
+    path.chmod(0o444)
+
+
+README_GROWN = b"the codex package, grown\n"
+README_SAME_SIZE = b"the codex packag!\n"
+
+
+@pytest.mark.parametrize("data", [README_GROWN, None], ids=["grown", "touched"])
+def test_a_file_changed_before_it_is_opened_is_refused(root: Path, fd: int, data: bytes | None,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    m = manifest_of(root)
+    readme = root / "cli" / "README"
+    real_open, real_traverse = sc._open, sc._traverse
+    passes: list[int] = []
+    changed: list[str] = []
+
+    def changing(name: str, flags: int, dirfd: int) -> int:
+        if name == "README" and flags == sc.FILE_FLAGS and not changed:
+            changed.append(name)
+            if data is None:                            # only the ctime moves
+                readme.chmod(0o644)
+                readme.chmod(0o444)
+            else:
+                rewrite(readme, data)
+        return real_open(name, flags, dirfd)
+
+    def counted(root_fd: int) -> Generator[tuple[str, sc.Stat, str | None]]:
+        passes.append(root_fd)
+        return real_traverse(root_fd)
+
+    monkeypatch.setattr(sc, "_open", changing)
+    monkeypatch.setattr(sc, "_traverse", counted)
+    with pytest.raises(sc.WalkRefused) as e:
+        sc.entries_of(fd)
+    assert e.value.constant == sc.ENTRY_CHANGED
+    assert len(passes) == 1                             # refused by the hash, not by the second walk
+    if data is not None:
+        changed.clear()
+        rewrite(readme, README)
+        with pytest.raises(sc.Mismatch) as e2:
+            sc.rehash(fd, m)
+        assert e2.value.constant == sc.ENTRY_CHANGED
+        assert changed == ["README"]
+
+
+@pytest.mark.parametrize("data", [README_GROWN, README_SAME_SIZE], ids=["grown", "same-size"])
+def test_a_file_changed_while_it_is_read_is_refused(root: Path, fd: int, data: bytes,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    m = manifest_of(root)
+    readme = root / "cli" / "README"
+    real_traverse = sc._traverse
+    passes: list[int] = []
+    changed: list[int] = []
+
+    def changing(f: int, n: int) -> bytes:
+        if not changed:                                 # the first file read is cli/README
+            changed.append(f)
+            rewrite(readme, data)
+        return os.read(f, n)
+
+    def counted(root_fd: int) -> Generator[tuple[str, sc.Stat, str | None]]:
+        passes.append(root_fd)
+        return real_traverse(root_fd)
+
+    monkeypatch.setattr(sc, "_traverse", counted)
+    with pytest.raises(sc.WalkRefused) as e:
+        sc.entries_of(fd, read=changing)
+    assert e.value.constant == sc.ENTRY_CHANGED
+    assert len(passes) == 1
+    changed.clear()
+    rewrite(readme, README)
+    with pytest.raises(sc.Mismatch) as e2:
+        sc.rehash(fd, m, read=changing)
+    assert e2.value.constant == sc.ENTRY_CHANGED        # not CONTENT_CHANGED: the read itself is refused
+    assert len(changed) == 1
+
+
+def test_a_read_shorter_than_the_file_is_refused(root: Path, fd: int) -> None:
+    m = manifest_of(root)
+
+    def short(f: int, n: int) -> bytes:
+        return os.read(f, n)[:-1] if os.lseek(f, 0, os.SEEK_CUR) == 0 else b""
+
+    with pytest.raises(sc.WalkRefused) as e:
+        sc.entries_of(fd, read=short)
+    assert e.value.constant == sc.ENTRY_CHANGED
+    with pytest.raises(sc.Mismatch) as e2:
+        sc.rehash(fd, m, read=short)
+    assert e2.value.constant == sc.ENTRY_CHANGED        # not CONTENT_CHANGED: the length is checked first
 
 
 def userns() -> bool:

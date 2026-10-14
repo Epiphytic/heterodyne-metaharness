@@ -326,13 +326,31 @@ def walk(root_fd: int) -> Generator[tuple[str, Stat, str | None]]:
     bytes, as `(path, stat, link target)`. Follows no link and opens nothing but directories. Refuses
     (`WalkRefused`) an entry that is not a directory, a file or a link, a hard link, a name that isn't
     UTF-8, more than MAX_ENTRIES entries, a path deeper than MAX_DEPTH, an entry on another mount than the
-    root, a directory that changed while it was walked, and, once the walk is done, a link that doesn't
-    resolve inside the tree."""
+    root, a directory that changed while it was walked, and, once the walk is done, a tree that a second
+    full walk doesn't find identical (`ENTRY_CHANGED`) or a link that doesn't resolve inside the tree.
+
+    The second walk is what makes the result a snapshot. Each pass observes every entry once, at some
+    instant in it; an entry both passes observe identically, `(dev, ino, ctime_ns)` included, was
+    unchanged from its first observation to its second, since any change to it moves its ctime. Every
+    such interval spans the instant between the passes, so the walk describes the tree as it was then,
+    including the subtrees the first pass had already finished when something changed them."""
+    first: list[tuple[str, Stat, str | None]] = []
+    with contextlib.closing(_traverse(root_fd)) as entries:
+        for item in entries:
+            first.append(item)
+            yield item
+    with contextlib.closing(_traverse(root_fd)) as entries:
+        if list(entries) != first:
+            raise WalkRefused(ENTRY_CHANGED)
+    _check_links({path: st.kind for path, st, _ in first},
+                 {path: target for path, _, target in first if target is not None})
+
+
+def _traverse(root_fd: int) -> Generator[tuple[str, Stat, str | None]]:
+    """One pass of `walk`, without the second pass or the link check."""
     root = statx_at(root_fd, "")
     if root.kind != "dir":
         raise WalkRefused(BAD_TYPE)
-    kinds: dict[str, str] = {}
-    targets: dict[str, str] = {}
     count = 0
     # Each frame: the directory's fd (the root's is the caller's), its path, its statx, its sorted names
     # and the index of the next one.
@@ -365,11 +383,9 @@ def walk(root_fd: int) -> Generator[tuple[str, Stat, str | None]]:
                 raise WalkRefused(BAD_TYPE)
             if st.kind != "dir" and st.nlink != 1:
                 raise WalkRefused(HARD_LINK)
-            kinds[path] = st.kind
             target = None
             if st.kind == "link":
                 target = _readlink(dirfd, name)
-                targets[path] = target
             elif st.kind == "dir":
                 child = _open_dir(dirfd, name, st)
                 try:
@@ -379,7 +395,6 @@ def walk(root_fd: int) -> Generator[tuple[str, Stat, str | None]]:
                     raise
                 stack.append((child, path, st, names_below, 0))
             yield path, st, target
-        _check_links(kinds, targets)
     finally:
         for dirfd, *_ in stack:
             if dirfd != root_fd:
@@ -471,6 +486,9 @@ def _resolve(kinds: dict[str, str], targets: dict[str, str], parent: list[str], 
 Record = dict[str, tuple[int, int, int]]
 
 
+Reader = Callable[[int, int], bytes]
+
+
 def record(root_fd: int) -> Record:
     """Every entry's `(dev, ino, ctime_ns)` and the root's own under `""`, from one walk."""
     rec: Record = {"": statx_at(root_fd, "").triple}
@@ -480,13 +498,14 @@ def record(root_fd: int) -> Record:
     return rec
 
 
-def entries_of(root_fd: int) -> tuple[Entry, ...]:
-    """The manifest entries of the tree at `root_fd`, from one walk, each file hashed by fd. A file that
-    isn't the one the walk saw refuses (`ENTRY_CHANGED`)."""
+def entries_of(root_fd: int, *, read: Reader = os.read) -> tuple[Entry, ...]:
+    """The manifest entries of the tree at `root_fd`, from one walk, each file hashed by fd through `read`.
+    A file whose statx, before or after it was read, isn't exactly the walk's, or whose length isn't its
+    size, refuses (`WalkRefused(ENTRY_CHANGED)`)."""
     out: list[Entry] = []
     with contextlib.closing(walk(root_fd)) as entries:
         for path, st, target in entries:
-            sha = _hash_file(root_fd, path, os.read, st) if st.kind == "file" else None
+            sha = _hash_file(root_fd, path, read, st.__eq__, WalkRefused) if st.kind == "file" else None
             out.append(Entry(path, cast(Kind, st.kind), st.mode, st.size, st.nlink, sha, target))
     return tuple(sorted(out, key=lambda e: _path_key(e.path)))
 
@@ -523,22 +542,28 @@ def check_fast(root_fd: int, m: Manifest, rec: Record) -> None:
             raise Mismatch(constant)
 
 
-Reader = Callable[[int, int], bytes]
-
-
 def rehash(root_fd: int, m: Manifest, *, read: Reader = os.read) -> None:
     """Every regular file's sha256 is its manifest entry's, read by fd through `read` (`CONTENT_CHANGED`).
-    A file that is gone or no longer a regular file refuses (`ENTRY_MISSING`, `ENTRY_CHANGED`)."""
+    A file that is gone refuses (`ENTRY_MISSING`); one that is no longer a regular file with the entry's
+    mode, size and link count, before or after it was read, or whose length isn't its size, refuses
+    (`ENTRY_CHANGED`)."""
     for e in sorted(m.entries, key=lambda e: _path_key(e.path)):
-        if e.kind == "file" and _hash_file(root_fd, e.path, read, None) != e.sha256:
+        if e.kind != "file":
+            continue
+        if _hash_file(root_fd, e.path, read, _fits(e), Mismatch) != e.sha256:
             raise Mismatch(CONTENT_CHANGED)
 
 
-def _hash_file(root_fd: int, path: str, read: Reader, st: Stat | None) -> str:
+def _fits(e: Entry) -> Callable[[Stat], bool]:
+    return lambda now: (now.mode, now.size, now.nlink) == (e.mode, e.size, e.nlink)
+
+
+def _hash_file(root_fd: int, path: str, read: Reader, fits: Callable[[Stat], bool],
+               refuse: type[Refused]) -> str:
     """The sha256 of the regular file at `path` under `root_fd`, opened component by component without
-    following a link. With `st`, the file must be the one it describes (`WalkRefused(ENTRY_CHANGED)`);
-    without, a file that is gone or not regular is a `Mismatch`."""
-    refuse: type[Refused] = WalkRefused if st is not None else Mismatch
+    following a link. The opened file's statx must be a regular file's that `fits`, and must be the same
+    after the read, which must return exactly its size (`refuse(ENTRY_CHANGED)`); a file that is gone is
+    `refuse(ENTRY_MISSING)`."""
     *dirs, name = path.split("/")
     fd = -1
     dirfd = root_fd
@@ -560,11 +585,15 @@ def _hash_file(root_fd: int, path: str, read: Reader, st: Stat | None) -> str:
                 raise refuse(ENTRY_MISSING if exc.errno == errno.ENOENT else ENTRY_CHANGED) from None
             raise
         now = statx_at(fd, "")
-        if now.kind != "file" or (st is not None and not _same(now, st)):
+        if now.kind != "file" or not fits(now):
             raise refuse(ENTRY_CHANGED)
         h = hashlib.sha256()
+        length = 0
         while chunk := read(fd, CHUNK):
             h.update(chunk)
+            length += len(chunk)
+        if length != now.size or statx_at(fd, "") != now:   # it changed while it was read
+            raise refuse(ENTRY_CHANGED)
         return h.hexdigest()
     finally:
         if fd >= 0:
