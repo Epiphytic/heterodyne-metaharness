@@ -27,11 +27,13 @@ from heterodyne.wsd import asks as asks_module
 from heterodyne.wsd import relay
 from heterodyne.wsd import scheduler as scheduler_module
 from heterodyne.wsd.asks import (
+    AMBIGUOUS_BODY,
     ANSWER_CHOICE,
     ANSWER_CUT,
     ANSWER_FREE,
     ANSWER_WITHHELD,
     ASK_ENDED,
+    ASK_POST_AMBIGUOUS,
     ASK_POST_UNKNOWN,
     ASK_UNPOSTABLE,
     CARD_HEAD,
@@ -980,7 +982,7 @@ def test_a_failed_cancel_is_retried(tmp_path: Path, fake: FakeAskSock, step: str
     rig.pickup()
     assert cancels(fake) == 2
     row = rig.journal.ask(stop_ref())
-    assert row is not None and (row.state, row.next_at) == ("delivered", None)
+    assert row is not None and (row.state, row.cancel_owed, row.next_at) == ("delivered", 0, None)
 
 
 def test_a_refused_cancel_is_not_retried(tmp_path: Path, fake: FakeAskSock) -> None:
@@ -994,7 +996,7 @@ def test_a_refused_cancel_is_not_retried(tmp_path: Path, fake: FakeAskSock) -> N
     rig.pickup()
     assert cancels(fake) == 1
     row = rig.journal.ask(stop_ref())
-    assert row is not None and (row.state, row.next_at) == ("delivered", None)
+    assert row is not None and (row.state, row.cancel_owed, row.next_at) == ("delivered", 0, None)
 
 
 def crash_soon(rig: Rig, point: str) -> None:
@@ -1095,9 +1097,9 @@ def test_an_uncertain_repost_never_takes_the_original_ask(tmp_path: Path, fake: 
         assert (again.state, again.ask_id) == ("posted", new[0])
         assert rig.state(B) == BeadState.WAITING_INPUT.value and fake.notices == []
     else:
-        assert (again.state, again.why, again.ask_id) == ("refused", ASK_POST_UNKNOWN, None)
+        assert (again.state, again.why, again.ask_id) == ("refused", ASK_POST_AMBIGUOUS, None)
         assert rig.state(B) == BeadState.STUCK.value
-        assert [n.body for n in fake.notices] == [UNKNOWN_BODY.format(bead=B, child=child)]
+        assert [n.body for n in fake.notices] == [AMBIGUOUS_BODY.format(bead=B, child=child)]
 
 
 def test_a_choice_answer_uses_the_posted_choices_not_the_beads_metadata(tmp_path: Path,

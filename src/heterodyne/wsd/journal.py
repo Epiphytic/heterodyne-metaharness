@@ -171,7 +171,9 @@ V5_TABLES = (
     state TEXT NOT NULL CHECK (state IN ({_among(ASK_STATES)})), round INTEGER NOT NULL DEFAULT 0,
     answer TEXT CHECK (length(answer) <= {ANSWER_MAX}), choice TEXT, why TEXT,
     uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)), attempts INTEGER NOT NULL DEFAULT 0,
-    next_at INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    next_at INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, choices TEXT,
+    child_done INTEGER NOT NULL DEFAULT 0 CHECK (child_done IN (0, 1)),
+    cancel_owed INTEGER CHECK (cancel_owed IN (0, 1)))""",
     f"""CREATE TABLE notices (ref TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT,
     kind TEXT NOT NULL CHECK (kind IN ({_among(NOTICE_KINDS)})), title TEXT NOT NULL, body TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ({_among(NOTICE_STATES)})), notice_id TEXT, attempts INTEGER NOT NULL
@@ -403,7 +405,9 @@ def _notice(r: tuple[object, ...]) -> NoticeRow:
 class AskRow:
     """One ask by its `ref` (plan 5i part 2 T5): `child` is the question or approval bead, pinned once
     (`ask_pin`); `uncertain` is 1 while a post's outcome is unknown; `next_at` (epoch seconds) is when an
-    `owed` row is due. `created_at` and `updated_at` are ISO times."""
+    `owed` row is due. `created_at` and `updated_at` are ISO times. T6: `choices` is the JSON list the card
+    was posted with (trusted, unlike the bead's metadata); `child_done` is 1 once the answer's comment and
+    close are on the question bead; `cancel_owed` is 1 while the delivered ask's admind cancel is owed."""
     ref: str
     ws: str
     bead: str
@@ -421,17 +425,22 @@ class AskRow:
     next_at: int | None
     created_at: str
     updated_at: str
+    choices: str | None = None
+    child_done: int = 0
+    cancel_owed: int | None = None
 
 
 _ASK_COLS = ", ".join(f.name for f in dataclasses.fields(AskRow))
-_ASK_SET = frozenset({"ask_id", "state", "why", "uncertain", "attempts", "next_at"})
+_ASK_SET = frozenset({"ask_id", "state", "why", "uncertain", "attempts", "next_at", "choices", "child_done",
+                      "cancel_owed"})
 
 
 def _ask(r: tuple[object, ...]) -> AskRow:
     return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), _opt(r[4]), _opt(r[5]), _opt(r[6]), str(r[7]),
                   int(cast(int, r[8])), _opt(r[9]), _opt(r[10]), _opt(r[11]), int(cast(int, r[12])),
                   int(cast(int, r[13])), None if r[14] is None else int(cast(int, r[14])), str(r[15]),
-                  str(r[16]))
+                  str(r[16]), _opt(r[17]), int(cast(int, r[18])),
+                  None if r[19] is None else int(cast(int, r[19])))
 
 
 class AskPinRefused(Exception):
@@ -1699,6 +1708,13 @@ class Journal:
                               "next_at = NULL, updated_at = ? WHERE ref = ?", (answer, choice, now(), ref))
         if cur.rowcount != 1:
             raise KeyError("ask_answer: no such ask")
+
+    @_locked
+    def ask_ids(self, ws: str) -> set[str]:
+        """Every ask ID the workstream's rows hold: admind asks wsd already knows as one of its own."""
+        rows = self.db.execute("SELECT ask_id FROM asks WHERE ws = ? AND ask_id IS NOT NULL",
+                               (ws,)).fetchall()
+        return {str(r[0]) for r in rows}
 
     @_locked
     def ask_pin(self, ws: str, ref: str, bead: str) -> None:

@@ -728,7 +728,8 @@ def test_startup_upgrades_version_3(tmp_path: Path) -> None:
 # --- plan 5i part 2: version 4 to 5, the ask bridge's tables ---
 
 ASKS = ["ref", "ws", "bead", "kind", "child", "ask_id", "context_digest", "state", "round", "answer",
-        "choice", "why", "uncertain", "attempts", "next_at", "created_at", "updated_at"]
+        "choice", "why", "uncertain", "attempts", "next_at", "created_at", "updated_at",
+        "choices", "child_done", "cancel_owed"]
 NOTICES = ["ref", "ws", "bead", "kind", "title", "body", "state", "notice_id", "attempts", "next_at",
            "why", "created_at", "updated_at"]
 RESUME_NOTES = ["seq", "ws", "bead", "ref", "text", "delivered_at", "steer_attempts"]
