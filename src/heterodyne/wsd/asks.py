@@ -109,6 +109,7 @@ class AskBridge:
     # --- part 1's ResumeNotes ---
 
     def notes_for(self, ws: str, bead: str) -> NoteBatch:
+        self._reconcile(ws, bead)       # startup recovery may compose a brief before any pickup
         return NoteBatch(tuple(self.journal.notes(ws, bead)))
 
     def notes_delivered(self, ws: str, bead: str, upto: int) -> None:
@@ -119,8 +120,9 @@ class AskBridge:
     def on_stop(self, parker: "Parker", event: SessionEvent) -> None:
         if event.close_requested or not self._running_on(event):
             return              # step 1: a close is part 3's, and a Stop of another generation is stale
-        if self.journal.refusal_owed(event.ws, event.bead, event.session_key, event.generation):
-            return              # step 1b: the turn the agent was told to end; `advance` steers the refusal
+        ws, bead, key, gen = event.ws, event.bead, event.session_key, event.generation
+        if self.journal.refused_in_turn(ws, bead, key, gen, event.turn):
+            return              # step 1b: the turn the agent was told to end; its note is steered or briefed
         raise NotImplementedError("a Stop's question needs BeadsAdapter.create (Task 4)")
 
     def on_question(self, parker: "Parker", event: SessionEvent) -> None:
@@ -165,7 +167,8 @@ class AskBridge:
 
     def advance(self, now: int) -> None:
         """At each pickup, after part 1's dispatch and before the sweep and the resume pass: the owed
-        notices, then the pending notes of the beads that run."""
+        notices, then the pending notes of the beads that run. A steer a crash cut off is uncertain first."""
+        self._reconcile(self.ws)
         if self.notices is not None:
             self.notices.retry_owed(now)
             for bead, ref in self.journal.events_without_notice(self.ws, STEER_UNCERTAIN_EVENT):
@@ -175,10 +178,33 @@ class AskBridge:
             if current is not None:
                 self._steer_notes(current)
 
+    def _reconcile(self, ws: str, bead: str | None = None) -> None:
+        """Every steer whose outcome was never journaled (a crash cut it off) may have arrived: its notes
+        are delivered-uncertain, as SteerUncertain's are, and its event is the one stuck notice `advance`
+        owes (events_without_notice). Never steered again, and never on a brief."""
+        for steer in self.journal.steers_unended(ws, bead):
+            log.warning("a steer of %d notes to %s was cut off and may have arrived", len(steer.refs),
+                        steer.bead)
+            with self.journal.transaction():
+                self._delivered_uncertain(steer.ws, steer.bead, steer.session_key, steer.generation,
+                                          steer.refs)
+
+    def _delivered_uncertain(self, ws: str, bead: str, session_key: str, generation: int,
+                             refs: Sequence[str]) -> str:
+        """The notes delivered, the steer ended and its steer_uncertain event, in the caller's transaction."""
+        ref = f"steer-uncertain:{session_key}:g{generation}"
+        for each in refs:
+            self.journal.note_delivered(ws, bead, each)
+        self.journal.steer_ended(ws, bead)
+        self.journal.emit_once(ws, bead, STEER_UNCERTAIN_EVENT, STEER_UNCERTAIN.format(bead=bead), ref)
+        return ref
+
     def _steer_notes(self, launch: LaunchEntry) -> None:
-        """One steer of the bead's oldest pending notes. Its attempt is counted, and committed, before the
-        steer, so a crash during it counts too; a refused steer delivered nothing and gives it back. One
-        steer per pickup: a delivered steer starts a turn, and the Stop that ends it wakes the next pickup."""
+        """One steer of the bead's oldest pending notes. It is journaled as started, in one transaction with
+        its attempt, before the steer; its outcome ends it. One a crash cut off is reconciled as uncertain
+        (`_reconcile`), so it is never resent. A refused steer delivered nothing and gives its attempt
+        back. One steer per pickup: a delivered steer starts a turn, and the Stop that ends it wakes the
+        next pickup."""
         ws, bead = launch.ws, launch.bead
         limit = STEER_MAX - len(STEER_HEAD.encode("utf-8")) - NOTE_HEADER
         batch = _batch(self.journal.steerable_notes(ws, bead, limit))
@@ -187,22 +213,19 @@ class AskBridge:
         refs = [ref for ref, _ in batch]
         with self.journal.transaction():
             self.journal.note_steer_attempt(refs, 1)
+            self.journal.steer_started(ws, bead, launch.session_key, launch.generation, refs)
         try:
             self.runtime.steer(launch.session_key, launch.generation, steer_text([t for _, t in batch]))
         except SteerRefused:
             with self.journal.transaction():
                 self.journal.note_steer_attempt(refs, -1)
+                self.journal.steer_ended(ws, bead)
             return
         except SteerUncertain:
-            # Delivered, uncertain (part 1): never steered again and never on a brief. Only a crash
-            # during the steer leaves the attempt standing, bounded by STEER_ATTEMPTS.
+            # Delivered, uncertain (part 1): never steered again and never on a brief.
             log.warning("a steer of %d notes to %s may not have arrived", len(refs), bead)
-            ref = f"steer-uncertain:{launch.session_key}:g{launch.generation}"
             with self.journal.transaction():
-                for each in refs:
-                    self.journal.note_delivered(ws, bead, each)
-                self.journal.emit_once(ws, bead, STEER_UNCERTAIN_EVENT, STEER_UNCERTAIN.format(bead=bead),
-                                       ref)
+                ref = self._delivered_uncertain(ws, bead, launch.session_key, launch.generation, refs)
             self.cp("asks.uncertain")
             if self.notices is not None:
                 _uncertain_notice(self.notices, ws, bead, ref)
@@ -211,3 +234,4 @@ class AskBridge:
         with self.journal.transaction():
             for ref in refs:
                 self.journal.note_delivered(ws, bead, ref)
+            self.journal.steer_ended(ws, bead)

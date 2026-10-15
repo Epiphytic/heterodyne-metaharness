@@ -158,7 +158,7 @@ ASK_STATES = ("creating", "owed", "posted", "answered", "approved", "denied", "u
 NOTICE_STATES = ("owed", "sending", "posted", "uncertain", "refused", "withheld")
 NOTICE_KINDS = ("stuck", "waiting", "closed", "review")
 ANSWER_MAX = 16000
-STEER_ATTEMPTS = 3          # a note steered this often is left to the next resume brief
+STEER_ATTEMPTS = 3          # a guard: a crash mid-steer delivers its notes uncertain (StartedSteer)
 
 
 def _among(values: tuple[str, ...]) -> str:
@@ -188,6 +188,8 @@ V5_TABLES = (
     """CREATE TABLE refusals (event_id TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT NOT NULL,
     session_key TEXT NOT NULL, generation INTEGER NOT NULL, turn INTEGER NOT NULL, text TEXT NOT NULL,
     created_at TEXT NOT NULL)""",
+    """CREATE TABLE steers (ws TEXT NOT NULL, bead TEXT NOT NULL, session_key TEXT NOT NULL,
+    generation INTEGER NOT NULL, refs TEXT NOT NULL, started_at TEXT NOT NULL, PRIMARY KEY (ws, bead))""",
 )
 SCHEMA = V4_SCHEMA + "".join(f"{stmt};\n" for stmt in V5_TABLES)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
@@ -1570,15 +1572,36 @@ class Journal:
         return RefusedRequest(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), str(row[5]))
 
     @_locked
-    def refusal_owed(self, ws: str, bead: str, session_key: str, generation: int) -> bool:
-        """Whether a refused request of this generation still owes its note to a steer: undelivered, and
-        steered fewer than STEER_ATTEMPTS times."""
-        row = self.db.execute("SELECT 1 FROM refusals AS r JOIN resume_notes AS n "
-                              "ON n.ref = 'refused:' || r.event_id WHERE r.ws = ? AND r.bead = ? "
-                              "AND r.session_key = ? AND r.generation = ? AND n.delivered_at IS NULL "
-                              "AND n.steer_attempts < ? LIMIT 1",
-                              (ws, bead, session_key, generation, STEER_ATTEMPTS)).fetchone()
+    def refused_in_turn(self, ws: str, bead: str, session_key: str, generation: int, turn: int) -> bool:
+        """Whether a request of this generation's `turn` was refused: that turn's Stop is the one the agent
+        was told to end it with, whether or not the refusal's note is delivered yet."""
+        row = self.db.execute("SELECT 1 FROM refusals WHERE ws = ? AND bead = ? AND session_key = ? "
+                              "AND generation = ? AND turn = ? LIMIT 1",
+                              (ws, bead, session_key, generation, turn)).fetchone()
         return row is not None
+
+    @_locked
+    def steer_started(self, ws: str, bead: str, session_key: str, generation: int,
+                      refs: Iterable[str]) -> None:
+        """Record a steer of the notes `refs` before it is made, inside the caller's transaction. One per
+        bead: the last one's outcome ends it (steer_ended), or a restart finds it (steers_unended)."""
+        self.db.execute("INSERT INTO steers (ws, bead, session_key, generation, refs, started_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (ws, bead, session_key, generation, msgspec.json.encode(list(refs)).decode(), now()))
+
+    @_locked
+    def steer_ended(self, ws: str, bead: str) -> None:
+        """The bead's steer has its outcome journaled, inside the caller's transaction."""
+        self.db.execute("DELETE FROM steers WHERE ws = ? AND bead = ?", (ws, bead))
+
+    @_locked
+    def steers_unended(self, ws: str, bead: str | None = None) -> list[StartedSteer]:
+        """The workstream's steers (or the bead's) whose outcome was never journaled, by bead."""
+        rows = self.db.execute("SELECT bead, session_key, generation, refs FROM steers WHERE ws = ? "
+                               "AND (? IS NULL OR bead = ?) ORDER BY started_at, rowid",
+                               (ws, bead, bead)).fetchall()
+        return [StartedSteer(ws, str(r[0]), str(r[1]), int(r[2]),
+                             tuple(msgspec.json.decode(str(r[3]), type=list[str]))) for r in rows]
 
     @_locked
     def events_without_notice(self, ws: str, kind: str) -> list[tuple[str, str]]:
