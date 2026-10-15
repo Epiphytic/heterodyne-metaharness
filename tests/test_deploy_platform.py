@@ -156,6 +156,7 @@ def test_the_real_cache_is_unchanged_by_the_scratch_build(host: Host) -> None:
     before = host.uvcache_snapshot()
     installer(host, "--dry-run")
     assert host.uvcache_snapshot() == before and len(before) == 3
+    assert not (host.shims / "uvcache/new-entry").exists()
 
 
 def test_a_failed_scratch_build_is_removed_and_its_output_masked(host: Host) -> None:
@@ -264,8 +265,9 @@ def wheel(d: Path, name: str) -> None:
             z.writestr(n, b)
 
 
-def files_of(d: Path) -> dict[Path, tuple[int, int, int]]:
-    return {p.relative_to(d): (p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns)
+def files_of(d: Path) -> dict[Path, tuple[int, int, int, bytes]]:
+    return {p.relative_to(d): (p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns,
+                               hashlib.sha256(p.read_bytes()).digest())
             for p in d.rglob("*") if p.is_file() and not p.is_symlink()}
 
 
@@ -295,10 +297,15 @@ def test_a_build_against_a_hardlink_copy_of_the_cache_leaves_the_original_unchan
     assert any(p.parts[0] == "archive-v0" for p in snap)
     subprocess.run(["cp", "-al", "--", str(tmp_path / "orig"), str(tmp_path / "copy")], check=True,
                    timeout=120)
+    assert files_of(tmp_path / "copy") == snap  # every file the same inode: hardlinks, not copies
     sync('"w1", "w2"', tmp_path / "copy")
-    assert (proj / ".venv").is_dir()
+    site = next((proj / ".venv").glob("lib/python3*/site-packages"))
+    assert (site / "w1" / "__init__.py").is_file() and (site / "w2" / "__init__.py").is_file()
+    after = files_of(tmp_path / "copy")
+    w1 = [p for p in snap if p.parts[0] == "archive-v0" and any("w1" in q for q in p.parts)]
+    assert w1 and all(after[p][0] == snap[p][0] for p in w1)  # read in place, not re-extracted
     assert files_of(tmp_path / "orig") == snap
-    assert len(files_of(tmp_path / "copy")) > len(snap)
+    assert len(after) > len(snap)
 
 
 # --- the services (D4, D6) ---

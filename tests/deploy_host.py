@@ -2,6 +2,7 @@
 Shared by test_deploy_store_helper.py and test_deploy_platform.py."""
 
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -214,6 +215,15 @@ exec @PYTHON@ @MANAGER@ @ROOT@ "$S" "$@"
             echo "error: w not found in the cache, sha256 $digest" >&2
             exit 2
         fi
+        if [[ -n ${UV_CACHE_DIR-} && -d $UV_CACHE_DIR ]]; then
+            # as uv writes its cache: an entry replaced by rename, and a new one
+            first=$(cd "$UV_CACHE_DIR" && find . -type f -print -quit)
+            if [[ -n $first ]]; then
+                printf 'replaced\n' >"$UV_CACHE_DIR/.tmp-replace"
+                mv -f -- "$UV_CACHE_DIR/.tmp-replace" "$UV_CACHE_DIR/$first"
+            fi
+            printf 'new\n' >"$UV_CACHE_DIR/new-entry"
+        fi
         project=${*: -1}
         [[ ${*: -2:1} == --project && -d $project ]] || exit 99
         mkdir -p "$project/.venv/bin"
@@ -341,9 +351,10 @@ class Host:
     def clear_calls(self) -> None:
         (self.shims / "calls.log").write_text("")
 
-    def uvcache_snapshot(self) -> dict[str, tuple[int, int, int]]:
+    def uvcache_snapshot(self) -> dict[str, tuple[int, int, int, bytes]]:
         cache = self.shims / "uvcache"
-        return {str(p.relative_to(cache)): (p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns)
+        return {str(p.relative_to(cache)): (p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns,
+                                            hashlib.sha256(p.read_bytes()).digest())
                 for p in cache.rglob("*") if p.is_file()}
 
     def env_of(self, name: str) -> dict[str, str]:
