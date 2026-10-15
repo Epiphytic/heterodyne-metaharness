@@ -78,7 +78,8 @@ FIELDS: dict[str, Any] = {
     "kind_approval": True, "digest": D, "posted_digest": None, "gaps": [], "design_review_valid": True,
     "adr_revision": None, "approvers": ["op"], "decision": None, "approved_by": None, "approved_digest": None,
     "denied_by": None, "denied_digest": None, "via": None, "via_ref": None, "decided": False,
-    "gate_valid": None, "gate_reasons": [], "links": LINKS, "readout": LINES}
+    "gate_valid": None, "gate_reasons": [], "gate_preview": {"valid": True, "reasons": []}, "links": LINKS,
+    "readout": LINES}
 APPROVE = Attempt("k7m2", MID, "approve", "op", "marmot:" + ref_id(MID), D, None)
 DENY = Attempt("k7m2", MID, "deny", "op", "marmot:" + ref_id(MID), D, "too broad")
 OPS = {"operators": (operator("op", OPERATOR_HEX), operator("llctest", SECOND_HEX))}
@@ -609,7 +610,7 @@ def test_settle(fields: dict[str, Any], a: Attempt, settled: str) -> None:
 ])
 def test_postable_refuses(fields: dict[str, Any], why: str) -> None:
     refusal = approvals.postable(readout(**fields))
-    assert refusal is not None and why in refusal
+    assert refusal is not None and why in refusal[0] and refusal[1] == "not postable"
 
 
 def test_postable_accepts() -> None:

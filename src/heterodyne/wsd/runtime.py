@@ -148,6 +148,8 @@ class Resolution:
     action: Action
     tip: str | None
     ref: str            # the keep ref, or ""
+    key: str
+    end: "Ended | None"     # wpyv5: the record's end, carried to the journal; None from an older intent
 
 
 class ResolveRefused(Exception):

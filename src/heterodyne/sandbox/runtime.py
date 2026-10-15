@@ -193,6 +193,34 @@ class Intent(msgspec.Struct, frozen=True, kw_only=True):
     ref: str = ""                     # the keep ref
     step: str                         # CONFIRMED, IMPORTED, MOVED or REMOVED
     dir_id: tuple[int, int]           # the session directory's (st_dev, st_ino) when it was confirmed
+    end_cause: str = ""               # wpyv5: the record's end, as `ended()` maps it; "" is no evidence
+    reached_running: bool = False
+    ran_seconds: int | None = None    # the operator's detail only, as in g08sd
+
+
+def _end_of(rec: SessionRecord) -> Ended:
+    """g08sd: an ended record's end. Whether it ran is this generation's `started_at`, never `ran` (which
+    persists across generations); the duration is detail only. `ended()` and a resolve both read it here."""
+    if rec.end_cause:
+        try:
+            cause = EndCause(rec.end_cause)
+        except ValueError:
+            cause = EndCause.DIED
+    else:                                    # ended before g08sd
+        cause = EndCause.LEGACY_LIFETIME if rec.stop_reason == "lifetime" else EndCause.DIED
+    ran = rec.ended_at - rec.started_at if rec.started_at > 0 and rec.ended_at >= rec.started_at else None
+    return Ended(rec.generation, cause, rec.started_at > 0, ran)
+
+
+def _intent_end(intent: Intent) -> Ended | None:
+    """wpyv5: the end an intent carries, or None for one written before wpyv5."""
+    if not intent.end_cause:
+        return None
+    try:
+        cause = EndCause(intent.end_cause)
+    except ValueError:
+        cause = EndCause.DIED
+    return Ended(intent.generation, cause, intent.reached_running, intent.ran_seconds)
 
 
 def printable(raw: bytes) -> str:
@@ -467,20 +495,11 @@ class SandboxRuntime:
             return self.queued.pop(ws, [])
 
     def ended(self, session_key: str) -> Ended | None:
-        """g08sd: the latest generation's end, from its record. Whether it ran is this generation's
-        `started_at`, never `ran` (which persists across generations); the duration is detail only."""
+        """g08sd: the latest generation's end, from its record (`_end_of`)."""
         rec = read_record(self.layout(session_key))
         if rec is None or rec.phase is not Phase.ENDED:
             return None
-        if rec.end_cause:
-            try:
-                cause = EndCause(rec.end_cause)
-            except ValueError:
-                cause = EndCause.DIED
-        else:                                    # ended before g08sd
-            cause = EndCause.LEGACY_LIFETIME if rec.stop_reason == "lifetime" else EndCause.DIED
-        ran = rec.ended_at - rec.started_at if rec.started_at > 0 and rec.ended_at >= rec.started_at else None
-        return Ended(rec.generation, cause, rec.started_at > 0, ran)
+        return _end_of(rec)
 
     # --- the launch ---
 
@@ -1252,11 +1271,14 @@ class SandboxRuntime:
                 self._can_land(p, snap)
             elif action == "keep":
                 self._can_keep(p, snap, rec.bead, ref)
+            end = _end_of(rec)                  # wpyv5: in the intent before the record can go
             try:
                 st = os.lstat(self.c.sessions / sid)
                 intent = self._write_intent(Intent(ws=ws, bead=rec.bead, key=rec.key, generation=generation,
                                                    tip=tip, action=action, ref=ref, step=CONFIRMED,
-                                                   dir_id=(st.st_dev, st.st_ino)))
+                                                   dir_id=(st.st_dev, st.st_ino), end_cause=end.cause.value,
+                                                   reached_running=end.reached_running,
+                                                   ran_seconds=end.ran_seconds))
             except OSError:
                 raise ResolveFailed("the resolve's intent can't be written; nothing was changed") from None
             return self._advance(intent, (p, snap))
@@ -1376,7 +1398,8 @@ class SandboxRuntime:
                 self.cp("removed.recorded")
         except OSError:
             raise ResolveFailed(STEP_FAILED) from None
-        return Resolution(intent.ws, intent.bead, sid, gen, intent.action, intent.tip, intent.ref)
+        return Resolution(intent.ws, intent.bead, sid, gen, intent.action, intent.tip, intent.ref, intent.key,
+                          _intent_end(intent))
 
     def finish_resolution(self, ws: str, sid: str, generation: int) -> None:
         intent = self._read_intent(sid, generation)

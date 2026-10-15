@@ -93,7 +93,7 @@ def test_the_purpose_is_never_inferred(valid: bool | None) -> None:
 def test_postable_refuses_any_other_purpose(purpose: str) -> None:
     assert approvals.postable(readout(purpose=purpose)) == (      # the value itself is never echoed
         "the bead is not approvable as written; send it back for grooming: its purpose must be design or "
-        "execution")
+        "execution", "not postable")
     assert asks.approval_label(readout(purpose=purpose)) == asks.NO_PURPOSE
 
 

@@ -1710,8 +1710,9 @@ def test_unlanded_view_shows_a_diverged_tip(rig: RuntimeRig) -> None:
 def test_resolve_land(rig: RuntimeRig) -> None:
     key, made = make_unlanded(rig)
     sid = short_id(key)
+    end = rig.runtime.ended(key)
     done = rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
-    assert done == Resolution("alpha", "btq-1", sid, 1, "land", made, "")
+    assert done == Resolution("alpha", "btq-1", sid, 1, "land", made, "", key, end)
     assert host_tip(rig, "btq/btq-1") == made and landings(rig) == 1
     assert not os.path.lexists(rig.runtime.layout(key).root) and not os.path.lexists(trash_path(rig, key))
     rig.runtime.finish_resolution("alpha", sid, 1)
@@ -1730,8 +1731,9 @@ def test_resolve_keep(rig: RuntimeRig) -> None:
     key, made = make_unlanded(rig, diverge=True)
     sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
     ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
+    end = rig.runtime.ended(key)
     done = rig.runtime.resolve_unlanded("alpha", sid, 1, "keep", made)
-    assert done == Resolution("alpha", "btq-1", sid, 1, "keep", made, ref)
+    assert done == Resolution("alpha", "btq-1", sid, 1, "keep", made, ref, key, end)
     assert host_tip(rig, ref) == made and host_tip(rig, "btq/btq-1") == branch
     assert not os.path.lexists(rig.runtime.layout(key).root)
 
@@ -2054,6 +2056,16 @@ def resolving_wsd(rig: RuntimeRig, runtime: SandboxRuntime, cp: Any = nothing) -
         j.close()
 
 
+def crash_ends(rig: RuntimeRig) -> list[tuple[str, str]]:
+    """btq-wpyv5: every end a resolve carried into the journal."""
+    j = Journal(journal_at(rig))
+    try:
+        rows = j.db.execute("SELECT key, value FROM meta WHERE key LIKE 'crash_end:%' ORDER BY key")
+        return [(str(k), str(v)) for k, v in rows.fetchall()]
+    finally:
+        j.close()
+
+
 def resolved(rig: RuntimeRig) -> list[tuple[str, str | None, str | None, str]]:
     j = Journal(journal_at(rig))
     try:
@@ -2084,6 +2096,7 @@ def test_a_resolve_job_replays_from_each_point_with_one_journal_entry(rig: Runti
         assert wsd.resolve_one("alpha", sid, 1, "keep", made).result == "refused"    # nothing left to resolve
     ref = f"refs/heads/unlanded/btq-1/{sid}-g1"
     assert resolved(rig) == [("alpha", "btq-1", f"{sid}-g1", f"action=keep tip={made} ref={ref}")]
+    assert [k for k, _ in crash_ends(rig)] == [f"crash_end:alpha:btq-1:{key}:1"]
     assert runtime.sessions("alpha") == [] and not os.path.lexists(intent_path(rig, key))
     assert host_tip(rig, ref) == made and not os.path.lexists(rig.runtime.layout(key).root)
 
@@ -2095,11 +2108,12 @@ def test_a_failed_journal_entry_keeps_the_removed_intent_and_the_hold(
     with resolving_wsd(rig, rig.runtime) as wsd:
         def busy(*args: object) -> bool:
             raise JournalBusy("SQLITE_BUSY")
-        monkeypatch.setattr(wsd.parts.journal, "emit_once", busy)
+        monkeypatch.setattr(wsd.parts.journal, "emit_resolved", busy)
         reply = wsd.resolve_one("alpha", sid, 1, "land", made)
         assert reply.result == "failed" and "JournalBusy" in reply.message
         intent = msgspec.json.decode(intent_path(rig, key).read_bytes())
         assert intent["step"] == "removed" and not os.path.lexists(rig.runtime.layout(key).root)
+        assert crash_ends(rig) == []
         assert host_tip(rig, "btq/btq-1") == made
         for runtime in (rig.runtime, restarted(rig)):
             with pytest.raises(RuntimeUnavailable, match=f"resolve of session {sid} is unfinished"):
@@ -2121,9 +2135,114 @@ def test_a_resolved_generation_has_no_end_to_read(rig: RuntimeRig, action: Actio
     before = rig.runtime.ended(key)
     assert before is not None and before.generation == 1
     layout.reaped(1).write_text("{}")                        # a marker left beside the record
-    rig.runtime.resolve_unlanded("alpha", short_id(key), 1, action, made)
+    done = rig.runtime.resolve_unlanded("alpha", short_id(key), 1, action, made)
+    assert (done.key, done.end) == (key, before)               # wpyv5: carried to the journal instead
     rig.runtime.finish_resolution("alpha", short_id(key), 1)
     assert rig.runtime.ended(key) is None and not os.path.lexists(layout.reaped(1))
+
+
+# --- btq-wpyv5: the resolve carries the generation's end ---
+
+ENDINGS = {"stopped": ("stopped", ""), "lifetime": ("lifetime", ""), "died": ("died", ""),
+           "legacy lifetime": ("", "lifetime"), "legacy death": ("", "")}
+
+
+def ended_as(rig: RuntimeRig, key: str, ending: str) -> Ended:
+    """The record rewritten to end as `ending` (its end cause and stop reason), and `ended()` of it."""
+    cause, reason = ENDINGS[ending]
+    layout = rig.runtime.layout(key)
+    write_record(layout, msgspec.structs.replace(record(rig, key), end_cause=cause, stop_reason=reason))
+    end = rig.runtime.ended(key)
+    assert end is not None and end.generation == 1
+    return end
+
+
+def intent_end(rig: RuntimeRig, key: str) -> Ended:
+    raw = msgspec.json.decode(intent_path(rig, key).read_bytes())
+    return Ended(raw["generation"], EndCause(raw["end_cause"]), raw["reached_running"], raw["ran_seconds"])
+
+
+@pytest.mark.parametrize("ending", list(ENDINGS))
+@pytest.mark.parametrize("action", ["land", "keep", "discard"])
+def test_the_confirmed_intent_carries_the_records_end(rig: RuntimeRig, action: Action, ending: str) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    end = ended_as(rig, key, ending)
+    crash_at(rig, "imported")
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, action, made)
+    assert msgspec.json.decode(intent_path(rig, key).read_bytes())["step"] == "confirmed"
+    assert intent_end(rig, key) == end
+    done = restarted(rig).resolve_unlanded("alpha", sid, 1, action, made)
+    assert (done.key, done.end) == (key, end)
+
+
+@pytest.mark.parametrize("point", RESOLVE_POINTS)
+def test_a_replay_takes_the_end_from_the_intent(rig: RuntimeRig, point: str) -> None:
+    """Before step 3 the record is still there, and a rewritten end cause is not read again; after it, the
+    record is in the trash or gone."""
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    end = ended_as(rig, key, "stopped")
+    crash_at(rig, point)
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
+    layout = rig.runtime.layout(key)
+    if os.path.lexists(layout.record):
+        write_record(layout, msgspec.structs.replace(record(rig, key), end_cause="died"))
+    done = restarted(rig).resolve_unlanded("alpha", sid, 1, "land", made)
+    assert end.cause is EndCause.STOPPED and done.end == end
+
+
+@pytest.mark.parametrize("point", RESOLVE_POINTS)
+def test_an_intent_from_before_wpyv5_has_no_end(rig: RuntimeRig, point: str) -> None:
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    crash_at(rig, point)
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    path = intent_path(rig, key)
+    raw = msgspec.json.decode(path.read_bytes())
+    for field in ("end_cause", "reached_running", "ran_seconds"):
+        raw.pop(field, None)
+    path.write_bytes(msgspec.json.encode(raw))
+    runtime = restarted(rig)
+    done = runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    assert (done.key, done.end) == (key, None)
+    runtime.finish_resolution("alpha", sid, 1)
+    assert runtime.sessions("alpha") == [] and not os.path.lexists(path)
+
+
+def test_an_unknown_cause_in_an_intent_is_a_death(rig: RuntimeRig) -> None:
+    """Required by the wpyv5 approval: an intent's end cause the runtime doesn't know is carried as a
+    death, as `ended()` maps an unknown record cause."""
+    key, made = make_unlanded(rig)
+    sid = short_id(key)
+    crash_at(rig, "imported")
+    with pytest.raises(Crash):
+        rig.runtime.resolve_unlanded("alpha", sid, 1, "discard", made)
+    path = intent_path(rig, key)
+    raw = msgspec.json.decode(path.read_bytes())
+    path.write_bytes(msgspec.json.encode({**raw, "end_cause": "healthy", "reached_running": True}))
+    done = restarted(rig).resolve_unlanded("alpha", sid, 1, "discard", made)
+    assert done.end is not None and (done.end.cause, done.end.reached_running) == (EndCause.DIED, True)
+
+
+def test_a_manual_land_then_resolve_land_carries_the_end(rig: RuntimeRig) -> None:
+    """docs/wsd.md §5, manual steps 2 and 3, then `wsctl resolve --land` with wsd running: the branch is
+    already at the tip, so nothing is imported, and the end is carried."""
+    key, made = make_unlanded(rig)
+    sid, branch = short_id(key), host_tip(rig, "btq/btq-1")
+    end = ended_as(rig, key, "stopped")
+    host_git(rig, "fetch", "-q", "--no-tags", str(rig.runtime.layout(key).git), "btq/btq-1")
+    host_git(rig, "update-ref", "refs/heads/btq/btq-1", "FETCH_HEAD", branch)
+    assert host_tip(rig, "btq/btq-1") == made
+    objects = host_git(rig, "count-objects", "-v")
+    done = rig.runtime.resolve_unlanded("alpha", sid, 1, "land", made)
+    rig.runtime.finish_resolution("alpha", sid, 1)
+    assert host_git(rig, "count-objects", "-v") == objects and landings(rig) == 0
+    assert host_tip(rig, "btq/btq-1") == made and (done.key, done.end) == (key, end)
+    assert end.cause is EndCause.STOPPED and rig.runtime.sessions("alpha") == []
 
 
 # --- plan 4b Task 7: the runtime's signals ---

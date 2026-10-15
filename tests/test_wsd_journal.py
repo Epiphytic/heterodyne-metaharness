@@ -18,6 +18,7 @@ from heterodyne.wsd.journal import (
     OpConflict,
     OpKind,
     OpStatus,
+    ResolvedEnd,
 )
 from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.states import BeadState, IllegalTransition, Reason, WsState, allowed
@@ -983,6 +984,81 @@ def test_crash_accounting_is_once_per_generation(tmp_path: Path, journal: Journa
         assert reopened.crash_count("alpha", "b1") == 0 and reopened.crash_accounted(one)
     finally:
         reopened.close()
+
+
+# --- btq-wpyv5: a resolve carries the generation's end into the journal ---
+
+STOPPED_END = ResolvedEnd(cause="stopped", reached_running=True, ran_seconds=60)
+
+
+class _TornMeta:
+    """The journal's connection, except that the `crash_end:` insert raises: after the event's insert,
+    inside emit_resolved's transaction."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self.real = db
+
+    def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+        if sql.startswith("INSERT OR IGNORE INTO meta") and "crash_end:" in str(args):
+            raise SimulatedCrash("after the event's insert")
+        return self.real.execute(sql, *args)  # pyright: ignore[reportArgumentType]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.real, name)
+
+
+def _resolved_rows(journal: Journal) -> tuple[int, list[tuple[str, str]]]:
+    events = journal.db.execute("SELECT count(*) FROM events WHERE kind = 'unlanded_resolved'").fetchone()
+    rows = journal.db.execute("SELECT key, value FROM meta WHERE key LIKE 'crash_end:%' ORDER BY key")
+    return int(events[0]), [(str(k), str(v)) for k, v in rows.fetchall()]
+
+
+def test_emit_resolved_writes_the_event_and_the_end_once(tmp_path: Path, journal: Journal) -> None:
+    one = _launched(1)
+    args = ("alpha", "b1", "action=land tip=none", "hz0-g1", one.session_key, 1)
+    assert journal.emit_resolved(*args, STOPPED_END)
+    died = ResolvedEnd(cause="died", reached_running=False, ran_seconds=None)
+    assert not journal.emit_resolved(*args, died)
+    events, rows = _resolved_rows(journal)
+    assert events == 1 and [k for k, _ in rows] == ["crash_end:alpha:b1:sk-crash:1"]
+    assert journal.resolved_end(one) == STOPPED_END                        # the first end, never replaced
+
+    journal.emit_once("alpha", "b1", "unlanded_resolved", "action=discard tip=none", "hz0-g2")   # pre-wpyv5
+    assert journal.resolved_end(_launched(2)) is None
+    assert not journal.emit_resolved("alpha", "b1", "action=discard tip=none", "hz0-g2", "sk-crash", 2,
+                                     STOPPED_END)
+    assert journal.resolved_end(_launched(2)) == STOPPED_END and _resolved_rows(journal)[0] == 2
+
+    assert journal.emit_resolved("alpha", "b1", "action=discard tip=none", "hz0-g3", "sk-crash", 3, None)
+    assert journal.resolved_end(_launched(3)) is None and _resolved_rows(journal)[0] == 3
+
+    real = journal.db
+    journal.db = _TornMeta(real)  # type: ignore[assignment]
+    with pytest.raises(SimulatedCrash):
+        journal.emit_resolved("alpha", "b1", "action=discard tip=none", "hz0-g4", "sk-crash", 4, STOPPED_END)
+    journal.db = real
+    assert _resolved_rows(journal)[0] == 3 and journal.resolved_end(_launched(4)) is None  # both rolled back
+    journal.close()
+    reopened = Journal(tmp_path / "state" / "wsd.db")            # the schema check passes with the rows
+    try:
+        assert reopened.resolved_end(one) == STOPPED_END
+    finally:
+        reopened.close()
+
+
+def test_resolved_end_is_an_exact_key(journal: Journal) -> None:
+    journal.emit_resolved("alpha", "b1", "action=land tip=none", "hz0-g2", "sk-crash", 2, STOPPED_END)
+    assert journal.resolved_end(_launched(2)) == STOPPED_END
+    for neighbour in (_launched(1), _launched(3), _launched(2, "b2"), _launched(2, key="sk-crash2"),
+                      _launched(2, key="sk-cras"), LaunchEntry("sk-crash", 2, "beta", "b1", "coder", "p",
+                                                               "default", "ck", "", False,
+                                                               "2026-10-13T00:00:00Z", outcome=LAUNCHED)):
+        assert journal.resolved_end(neighbour) is None
+    for generation, value in ((5, "not json"), (6, '{"cause": 1}')):
+        journal.db.execute("INSERT INTO meta (key, value) VALUES (?, ?)",
+                           (f"crash_end:alpha:b1:sk-crash:{generation}", value))
+    assert journal.resolved_end(_launched(5)) is None and journal.resolved_end(_launched(6)) is None
+    journal.close()
 
 
 def test_a_new_journal_is_version_3_and_keeps_an_entrys_install_pin(tmp_path: Path) -> None:
