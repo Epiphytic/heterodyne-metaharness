@@ -1,10 +1,13 @@
 """Plan 4c Task 8: what wsd dispatches when the adapter has no selected install, and for an entry journaled
 before installs were pinned (schema 2)."""
 
+import gc
 import json
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes.checkpoints import CrashAt, SimulatedCrash
@@ -12,8 +15,29 @@ from wsd_env import FAKE_PINS, WS, Rig, make_rig
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.beads import NEEDS_HUMAN
+from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED, ExecDirCleared
 from heterodyne.wsd.states import Reason
+
+
+@pytest.fixture(autouse=True)
+def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Close every journal a test opened (a rig keeps its last one open), so their descriptors don't
+    close later inside another test's count of open descriptors (test_wsd_gate checks that a refusal
+    leaks none)."""
+    opened: list[Journal] = []
+    real = Journal.__init__
+
+    def tracked(self: Journal, *args: Any, **kwargs: Any) -> None:
+        opened.append(self)
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Journal, "__init__", tracked)
+    yield
+    for each in opened:
+        if hasattr(each, "db"):
+            each.close()
+    gc.collect()
 
 
 def started(tmp_path: Path) -> Rig:
