@@ -242,20 +242,106 @@ def test_a_notice_a_crash_cut_off_is_sent_at_the_next_pickup(tmp_path: Path) -> 
     assert rig.runtime.steers == []
 
 
-def test_a_crash_during_the_steer_counts_an_attempt(tmp_path: Path) -> None:
-    rig = started(tmp_path)
+def uncertain_events(rig: Rig) -> int:
+    [(n,)] = rig.journal.db.execute("SELECT count(*) FROM events WHERE kind = ?",
+                                    (asks.STEER_UNCERTAIN_EVENT,)).fetchall()
+    return int(n)
+
+
+def crashed_after_the_steer(tmp_path: Path, posts: Posts) -> tuple[Rig, str]:
+    """A refusal steered, then wsd died before journaling the steer's outcome; wsd restarted."""
+    rig = with_notices(tmp_path, posts)
     rig.restart(CrashAt("asks.steered!"))
     question = ev(rig, "question", 1, body={})
     rig.runtime.event(WS, question, ev(rig, "stop", 2))
     with pytest.raises(SimulatedCrash):
         rig.pickup()
-    ref = f"refused:{question.event_id}"
-    assert len(rig.runtime.steers) == 1                     # pasted, then wsd died before marking it
+    assert len(rig.runtime.steers) == 1 and posts.sent == []      # pasted, then wsd died before marking it
     rig.restart()
-    assert not delivered(rig, ref) and attempts(rig, ref) == 1
+    return rig, question.event_id
+
+
+def test_a_steer_a_crash_cut_off_is_delivered_uncertain_and_never_resent(tmp_path: Path) -> None:
+    """The lead's B1 ruling: a steer whose outcome was never journaled may have arrived. The next pickup
+    marks its notes delivered-uncertain and tells the operator once; nothing sends them again."""
+    posts = Posts()
+    rig, event_id = crashed_after_the_steer(tmp_path, posts)
+    ref = f"refused:{event_id}"
+    assert not delivered(rig, ref)
     rig.pickup()
-    assert len(rig.runtime.steers) == 2 and rig.runtime.steers[0] == rig.runtime.steers[1]
-    assert delivered(rig, ref) and attempts(rig, ref) == 2
+    rig.pickup()
+    assert len(rig.runtime.steers) == 1 and delivered(rig, ref)
+    assert posts.sent == [(STEER_UNCERTAIN.format(bead=B), STEER_UNCERTAIN_BODY)]
+    assert uncertain_events(rig) == 1 and rig.journal.steers_unended(WS) == []
+    rig.restart()
+    park_and_resume(rig)
+    assert refused(event_id, QUESTION_INCOMPLETE) not in rig.runtime.launches[-1].brief
+    rig.pickup()
+    assert len(rig.runtime.steers) == 1 and len(posts.sent) == 1 and uncertain_events(rig) == 1
+
+
+def test_a_brief_before_the_next_pickup_never_carries_a_steer_a_crash_cut_off(tmp_path: Path) -> None:
+    """Startup recovery may compose a resume brief before any pickup: the steer is reconciled there too."""
+    posts = Posts()
+    rig, event_id = crashed_after_the_steer(tmp_path, posts)
+    batch = bridge(rig).notes_for(WS, B)
+    assert refused(event_id, QUESTION_INCOMPLETE) not in [t for _, t in batch.notes]
+    assert delivered(rig, f"refused:{event_id}") and uncertain_events(rig) == 1
+    assert posts.sent == []                                 # the notice goes out at the next pickup
+    rig.pickup()
+    rig.pickup()
+    assert posts.sent == [(STEER_UNCERTAIN.format(bead=B), STEER_UNCERTAIN_BODY)]
+    assert len(rig.runtime.steers) == 1 and uncertain_events(rig) == 1
+
+
+def test_an_ended_steer_leaves_nothing_to_reconcile(tmp_path: Path) -> None:
+    """Negative control: every outcome (delivered, refused, uncertain) ends the started record."""
+    rig = started(tmp_path)
+    rig.journal.note_add(WS, B, "answer:1", "one")
+    rig.runtime.steer_error = SteerRefused("mid-turn")
+    rig.pickup()
+    assert rig.journal.steers_unended(WS) == [] and not delivered(rig, "answer:1")
+    rig.pickup()
+    assert rig.journal.steers_unended(WS) == [] and delivered(rig, "answer:1")
+    rig.journal.note_add(WS, B, "answer:2", "two")
+    rig.runtime.steer_error = SteerUncertain("the paste may have landed")
+    rig.pickup()
+    assert rig.journal.steers_unended(WS) == [] and uncertain_events(rig) == 1
+    rig.restart()
+    rig.pickup()
+    assert uncertain_events(rig) == 1
+
+
+def inbox_status(rig: Rig, event_id: str) -> list[str]:
+    rows = rig.journal.db.execute("SELECT status FROM inbox WHERE event_id = ?", (event_id,)).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def test_the_stop_of_a_refused_turn_is_held_after_its_note_is_steered(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lead's B2 ordering: the refusal, then its turn's Stop logged after the pickup's ingest and
+    before its advance, which steers the note. The next pickup takes that Stop: held, no question."""
+    rig = started(tmp_path)
+    question, stop = ev(rig, "question", 1, body={}), ev(rig, "stop", 2, text="Which colour?")
+    real = bridge(rig).advance
+
+    def late_stop(now: int) -> None:
+        rig.runtime.report(WS, stop)                        # logged after this pickup's ingest
+        real(now)
+
+    monkeypatch.setattr(bridge(rig), "advance", late_stop)
+    rig.runtime.event(WS, question)
+    rig.pickup()
+    note = refused(question.event_id, QUESTION_INCOMPLETE)
+    assert rig.runtime.steers == [(rig.key(B), 1, steer_text([note]))]
+    assert delivered(rig, f"refused:{question.event_id}")
+    rig.pickup()
+    assert inbox_status(rig, stop.event_id) == [InboxStatus.COMMITTED.value]
+    nothing_created(rig)
+    later = ev(rig, "stop", 3, turn=2, text="Which colour?")   # the steered turn's own end: not held
+    rig.runtime.event(WS, later)
+    rig.pickup()
+    assert inbox_status(rig, later.event_id) != [InboxStatus.COMMITTED.value]
 
 
 def test_a_refusal_for_a_session_that_ended_rides_the_next_brief(tmp_path: Path) -> None:

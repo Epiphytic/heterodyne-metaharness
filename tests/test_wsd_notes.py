@@ -1,12 +1,13 @@
 """Plan 5i part 2 Task 2: the resume notes and the refusals in the journal (schema 5)."""
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from wsd_env import WS
 
-from heterodyne.wsd.journal import Journal, RefusedRequest
+from heterodyne.wsd.journal import Journal, RefusedRequest, StartedSteer
 from heterodyne.wsd.states import BeadState
 
 B = "btq-1"
@@ -138,21 +139,41 @@ def test_refusals_insert_is_idempotent_by_event_id(tmp_path: Path, j: Journal) -
     assert Journal(tmp_path / "wsd.db").refusal("k:g1:e3") == RefusedRequest(WS, B, "k", 1, 2, "fixed text")
 
 
-def test_a_refusal_is_owed_while_its_note_is_undelivered_and_steerable(j: Journal) -> None:
+def test_a_refusal_holds_the_stops_of_its_own_turn_whatever_its_note(j: Journal) -> None:
     with j.transaction():
         j.refusal_add(WS, B, "k:g1:e3", "k", 1, 2, "fixed text")
         j.note_add(WS, B, "refused:k:g1:e3", "fixed text")
-    assert j.refusal_owed(WS, B, "k", 1) is True
-    assert j.refusal_owed(WS, B, "k", 2) is False                   # another generation's Stop
-    assert j.refusal_owed(WS, B, "other", 1) is False
-    assert j.refusal_owed(WS, "btq-2", "k", 1) is False
-    for _ in range(3):
-        j.note_steer_attempt(["refused:k:g1:e3"], 1)
-    assert j.refusal_owed(WS, B, "k", 1) is False                   # left to the next brief: no longer owed
-    j.note_steer_attempt(["refused:k:g1:e3"], -1)
-    assert j.refusal_owed(WS, B, "k", 1) is True
+    assert j.refused_in_turn(WS, B, "k", 1, 2) is True
+    assert j.refused_in_turn(WS, B, "k", 1, 3) is False             # a later turn's Stop
+    assert j.refused_in_turn(WS, B, "k", 1, 1) is False
+    assert j.refused_in_turn(WS, B, "k", 2, 2) is False             # another generation's Stop
+    assert j.refused_in_turn(WS, B, "other", 1, 2) is False
+    assert j.refused_in_turn(WS, "btq-2", "k", 1, 2) is False
+    assert j.refused_in_turn("beta", B, "k", 1, 2) is False
     j.note_delivered(WS, B, "refused:k:g1:e3")
-    assert j.refusal_owed(WS, B, "k", 1) is False
+    assert j.refused_in_turn(WS, B, "k", 1, 2) is True              # delivery doesn't end it
+
+
+def test_a_started_steer_stands_until_its_outcome_ends_it(tmp_path: Path, j: Journal) -> None:
+    with j.transaction():
+        j.steer_started(WS, B, "k", 1, ["a", "b"])
+        j.steer_started(WS, "btq-2", "k2", 3, ["c"])
+    assert j.steers_unended(WS) == [StartedSteer(WS, B, "k", 1, ("a", "b")),
+                                    StartedSteer(WS, "btq-2", "k2", 3, ("c",))]
+    assert j.steers_unended(WS, B) == [StartedSteer(WS, B, "k", 1, ("a", "b"))]
+    assert j.steers_unended("beta") == []
+    with pytest.raises(sqlite3.IntegrityError):
+        j.steer_started(WS, B, "k", 1, ["d"])                       # one steer of a bead at a time
+    with pytest.raises(Crash), j.transaction():
+        j.steer_ended(WS, B)
+        raise Crash
+    assert j.steers_unended(WS, B) != []
+    j.close()
+    reopened = Journal(tmp_path / "wsd.db")
+    assert reopened.steers_unended(WS, B) == [StartedSteer(WS, B, "k", 1, ("a", "b"))]
+    reopened.steer_ended(WS, B)
+    reopened.steer_ended(WS, B)                                     # ending an ended steer is a no-op
+    assert reopened.steers_unended(WS) == [StartedSteer(WS, "btq-2", "k2", 3, ("c",))]
 
 
 def test_ask_open_reads_only_the_given_states_of_the_bead(j: Journal) -> None:

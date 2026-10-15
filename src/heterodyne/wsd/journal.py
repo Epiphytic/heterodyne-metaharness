@@ -410,6 +410,17 @@ class RefusedRequest:
 
 
 @dataclass(frozen=True)
+class StartedSteer:
+    """A steer of the bead's notes `refs` into one generation, journaled before the steer and ended with
+    its outcome: one that a restart still finds may have arrived (plan 5i part 2, the lead's B1)."""
+    ws: str
+    bead: str
+    session_key: str
+    generation: int
+    refs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class HarnessEvent:
     id: int
     at: str
