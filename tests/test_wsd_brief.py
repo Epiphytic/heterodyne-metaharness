@@ -7,9 +7,20 @@ from typing import Any
 import pytest
 from wsd_env import WS, Rig, make_rig
 
+from heterodyne.tmux import has_controls
 from heterodyne.wsd import brief
 from heterodyne.wsd.beads import Bead
-from heterodyne.wsd.brief import HOWTO, NOTE_MAX, NOTES_MAX, TEXT_MAX, NoteBatch, compose, fit
+from heterodyne.wsd.brief import (
+    BRIEF_MAX,
+    HOWTO,
+    NOTE_MAX,
+    NOTES_MAX,
+    TEXT_MAX,
+    TITLE_MAX,
+    NoteBatch,
+    compose,
+    fit,
+)
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.scheduler import Outcome
 
@@ -31,8 +42,9 @@ def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         each.close()
 
 
-def bead(description: str = "Make the widget blue.", acceptance: str = "The widget is blue.") -> Bead:
-    return Bead(B, "Blue widget", "in_progress", None, (), {}, (),
+def bead(description: str = "Make the widget blue.", acceptance: str = "The widget is blue.",
+         title: str = "Blue widget") -> Bead:
+    return Bead(B, title, "in_progress", None, (), {}, (),
                 raw={"description": description, "acceptance_criteria": acceptance})
 
 
@@ -91,6 +103,50 @@ def test_fit_always_takes_the_first_note_whole() -> None:
     assert fit(NoteBatch()) == brief.Fitted((), None, 0)
 
 
+HOSTILE = "a\x1b[201~\rsecond\r\nthird\x07\x9b31m\x7f\x00 \ud800"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_hostile_bead_text_and_notes_reach_the_brief_escaped(resume: bool) -> None:
+    # T4 c1 B1: an embedded paste terminator and CRs must not end the paste and submit extra prompts.
+    got = fit(NoteBatch(((1, "note " + HOSTILE),)))
+    text = compose(bead(description=HOSTILE, acceptance=HOSTILE, title="Blue " + HOSTILE), resume=resume,
+                   ops=frozenset(), notes=got.texts, more=got.more)
+    assert not has_controls(text)
+    text.encode("utf-8")                                    # strict: the paste can always encode it
+    assert "a\\x1b[201~\nsecond\n" in text and "\\x07\\x9b31m\\x7f\\x00 \\ud800" in text
+    first = text.splitlines()[0]
+    verb = "are resumed" if resume else "are working"
+    assert first.startswith(f"You {verb} on bead {B}: Blue a\\x1b[201~ ")
+    assert "second third" in first                          # the title stays on its line
+
+
+def test_notes_are_budgeted_as_escaped() -> None:
+    noisy = "\x1b" * 2000                                   # 2,000 bytes raw, 8,000 shown
+    got = fit(NoteBatch(tuple((n, noisy) for n in range(10))))
+    assert got.texts[0] == "\\x1b" * 2000
+    assert sum(len(t.encode()) + brief.NOTE_HEADER for t in got.texts) <= NOTES_MAX
+    assert len(got.texts) == 2 and got.more == 8
+
+
+def test_the_title_is_bounded() -> None:
+    text = compose(bead(title="t" * (TITLE_MAX * 4)), resume=False, ops=frozenset())
+    first = text.splitlines()[0]
+    assert "t" * TITLE_MAX in first and "t" * (TITLE_MAX + 1) not in first and "[cut:" in first
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_the_largest_brief_fits_brief_max(resume: bool) -> None:
+    # T4 c1 NB: a large title went past BRIEF_MAX. Every field at its limit (controls grow fourfold when
+    # escaped), every op explained and the largest notes still fit.
+    worst = "\x1b" * (BRIEF_MAX // 2)
+    batch = NoteBatch(((1, worst), *((n, "n" * 200) for n in range(2, 400))))
+    got = fit(batch)
+    text = compose(bead(description=worst, acceptance=worst, title=worst), resume=resume,
+                   ops=frozenset(HOWTO), notes=got.texts, more=got.more)
+    assert len(text.encode("utf-8")) <= BRIEF_MAX
+
+
 class Notes:
     """Part 2's resume notes as part 1 relies on them: undelivered `(seq, text)` in order, acked by upto."""
 
@@ -115,9 +171,24 @@ def test_a_first_launch_is_briefed_from_the_bead(tmp_path: Path) -> None:
     assert spec.brief == compose(rig.beads.show(WS, B), resume=False, ops=frozenset())
 
 
+class ReceiptFirst(Notes):
+    """Notes that check, as they are acked, that the launch's started receipt is already in the journal."""
+
+    def __init__(self, rig: Rig, texts: tuple[str, ...]) -> None:
+        super().__init__(texts)
+        self.rig = rig
+        self.receipts: list[str | None] = []
+
+    def notes_delivered(self, ws: str, bead: str, upto: int) -> None:
+        spec = self.rig.runtime.launches[-1]
+        receipt = self.rig.journal.receipt(spec.session_key, spec.generation)
+        self.receipts.append(None if receipt is None else receipt.kind)
+        super().notes_delivered(ws, bead, upto)
+
+
 def test_a_resume_carries_the_notes_and_marks_them_delivered_after_the_receipt(tmp_path: Path) -> None:
     rig = make_rig(tmp_path)
-    notes = Notes(("The operator answered: blue.",))
+    notes = ReceiptFirst(rig, ("The operator answered: blue.",))
     rig.notes = notes
     rig.restart()
     rig.world.add(B)
@@ -126,6 +197,26 @@ def test_a_resume_carries_the_notes_and_marks_them_delivered_after_the_receipt(t
     park_and_resume(rig)
     assert "The operator answered: blue." in rig.runtime.launches[-1].brief
     assert notes.delivered == [(WS, B, 7)]
+    assert notes.receipts == ["started"]              # acked only once the started receipt was written
+
+
+def test_a_receipt_that_cannot_be_written_leaves_the_notes_pending(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = make_rig(tmp_path)
+    notes = Notes(("keep me",))
+    rig.notes = notes
+    rig.restart()
+    rig.world.add(B)
+    assert rig.pickup() is Outcome.STARTED
+
+    def unwritable(_receipt: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.journal, "receipt_put", unwritable)
+    with pytest.raises(OSError, match="disk full"):
+        park_and_resume(rig)
+    assert "keep me" in rig.runtime.launches[-1].brief      # launched with the note, but never acked
+    assert notes.delivered == [] and notes.notes_for(WS, B).notes == ((7, "keep me"),)
 
 
 def test_an_overflowing_brief_leaves_the_rest_pending_across_a_restart(tmp_path: Path) -> None:

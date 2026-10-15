@@ -56,6 +56,7 @@ from heterodyne.session.server import BoundaryBusy, SessionServer
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain, has_controls
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
+from heterodyne.wsd.brief import BRIEF_MAX
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
@@ -746,7 +747,16 @@ class SandboxRuntime:
 
     def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
         """D5: the brief is pasted once the self-test's probe turn has ended, and is confirmed by the next
-        UserPromptSubmit."""
+        UserPromptSubmit. Like a steer it may carry no terminal control (`has_controls`; compose escapes the
+        bead's text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX."""
+        if has_controls(text):
+            raise _StepFailed("the brief has terminal control characters")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise _StepFailed("the brief is not valid UTF-8") from None
+        if size > BRIEF_MAX:
+            raise _StepFailed("the brief is too long")
         if not self._until(lambda: server.turns().idle, BRIEF_SECONDS):
             raise _StepFailed("the agent's first turn did not end")
         before = server.turns().prompts

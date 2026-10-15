@@ -53,8 +53,9 @@ from heterodyne.sandbox.runtime import (
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
-from heterodyne.wsd import gitwip, ids
+from heterodyne.wsd import brief, gitwip, ids
 from heterodyne.wsd.accounts import ConfiguredAccounts
+from heterodyne.wsd.beads import Bead
 from heterodyne.wsd.checkpoints import nothing
 from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock
 from heterodyne.wsd.daemon import Wsd, assemble
@@ -2874,3 +2875,38 @@ def spool(rig: RuntimeRig, key: str) -> list[dict[str, Any]]:
     """The session server's spool of hook payloads (`SessionLayout.events`)."""
     path = rig.runtime.layout(key).events(1)
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_hostile_bead_is_briefed_as_one_prompt(rig: RuntimeRig, profile: str) -> None:
+    # T4 c1 B1: a paste terminator and CRs in the bead's text or a note can't split the brief.
+    rig.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"
+    hostile = "a\x1b[201~\rsecond\rthird\x1b[200~"
+    shown = Bead("btq-1", "Blue " + hostile, "in_progress", None, (), {}, (),
+                 raw={"description": hostile, "acceptance_criteria": hostile})
+    got = brief.fit(brief.NoteBatch(((1, "note " + hostile),)))
+    text = brief.compose(shown, resume=False, ops=frozenset(), notes=got.texts, more=got.more)
+    spec = replace(launch_spec(rig, profile), brief=text)
+    rig.runtime.launch(spec)
+    prompts = [row["payload"]["prompt"] for row in spool(rig, spec.session_key)
+               if row["payload"].get("hook_event_name") == "UserPromptSubmit"]
+    assert prompts[1:] == [text]                   # the probe's prompt, then exactly one: the whole brief
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+@pytest.mark.parametrize(("text", "why"), [
+    ("a\x1b[201~\rsecond\r", "terminal control"),
+    ("lone \ud800", "not valid UTF-8"),
+    ("x" * (brief.BRIEF_MAX + 1), "too long"),
+], ids=["controls", "surrogate", "too-long"])
+def test_a_brief_that_is_unsafe_to_paste_fails_the_launch_unpasted(rig: RuntimeRig, text: str, why: str,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    pasted: list[str] = []
+
+    def noted(_real: Callable[[str, str], None], _name: str, t: str) -> None:
+        pasted.append(t)
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, noted))
+    with pytest.raises(LaunchFailed, match=why):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief=text))
+    assert pasted == []

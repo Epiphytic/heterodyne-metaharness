@@ -3,7 +3,9 @@
 The first brief gives the bead, its acceptance criteria and the rules; a resume brief says where it is and
 carries the notes left for it since it last ran (part 2's answers and decisions, part 3's review findings),
 oldest first. A how-to line appears only for an op wsd handles, so a session is never told to use a
-request that would be refused. The bead's text and the notes are passed through, cut to fit.
+request that would be refused. The bead's text and the notes are passed through, cut to fit. They are
+untrusted, so their terminal controls are shown escaped first (`escape_controls`): an ESC or CR could
+otherwise end the bracketed paste and submit the rest as prompts of its own. The title is kept to one line.
 """
 
 import logging
@@ -11,15 +13,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from heterodyne.tmux import escape_controls
 from heterodyne.wsd.beads import Bead
 
 log = logging.getLogger(__name__)
 
+TITLE_MAX = 512                 # UTF-8 bytes of the bead's title
 TEXT_MAX = 12288                # UTF-8 bytes each of the description and the acceptance criteria
 NOTES_MAX = 16384               # UTF-8 bytes of notes in all (the first note may go past it)
 NOTE_MAX = 65536                # UTF-8 bytes of one note: part 2's are at most 12,000, part 3's about 54,000
 NOTE_HEADER = 16                # the "--- i ---" line before each note (i <= NOTES_MAX // NOTE_HEADER)
-BRIEF_MAX = 2 * TEXT_MAX + NOTES_MAX + NOTE_MAX + 4096
+BRIEF_MAX = TITLE_MAX + 2 * TEXT_MAX + NOTES_MAX + NOTE_MAX + 4096
 PENDING = ("[{n} more notes are pending; they will reach you as a message while you work, or in your next "
            "resume brief]")
 REQUEST = "/run/hz/ws-request"
@@ -70,11 +74,15 @@ class NoNotes:
         return None
 
 
-def _cut(text: str, limit: int) -> str:
+def _cut(text: str, limit: int, sep: str = "\n") -> str:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
         return text
-    return raw[:limit].decode("utf-8", "ignore") + f"\n[cut: {len(raw) - limit} more bytes]"
+    return raw[:limit].decode("utf-8", "ignore") + f"{sep}[cut: {len(raw) - limit} more bytes]"
+
+
+def _title(bead: Bead) -> str:
+    return _cut(" ".join(escape_controls(bead.title).split("\n")), TITLE_MAX, " ")
 
 
 def _rules(bead: Bead, ops: frozenset[str]) -> list[str]:
@@ -90,7 +98,8 @@ def fit(batch: NoteBatch) -> Fitted:
     writer's bug), so every brief makes progress; the rest stay pending for the steer or the next brief."""
     texts: list[str] = []
     used, upto = 0, None
-    for seq, text in batch.notes:
+    for seq, note in batch.notes:
+        text = escape_controls(note)
         raw = len(text.encode("utf-8"))
         size = raw + NOTE_HEADER                            # its "--- i ---" line counts too
         if texts and used + size > NOTES_MAX:
@@ -116,16 +125,16 @@ def _notes(notes: tuple[str, ...], more: int) -> list[str]:
 def compose(bead: Bead, *, resume: bool, ops: frozenset[str], notes: tuple[str, ...] = (),
             more: int = 0) -> str:
     if resume:
-        lines = [f"You are resumed on bead {bead.id}: {bead.title}. Continue where you left off.", "",
+        lines = [f"You are resumed on bead {bead.id}: {_title(bead)}. Continue where you left off.", "",
                  "The rules still apply:", *_rules(bead, ops)]
     else:
         description = bead.raw.get("description")
         acceptance = bead.raw.get("acceptance_criteria")
-        lines = [f"You are working on bead {bead.id}: {bead.title}", ""]
+        lines = [f"You are working on bead {bead.id}: {_title(bead)}", ""]
         if isinstance(description, str) and description.strip():
-            lines += [_cut(description.strip(), TEXT_MAX), ""]
+            lines += [_cut(escape_controls(description.strip()), TEXT_MAX), ""]
         if isinstance(acceptance, str) and acceptance.strip():
-            lines += ["Acceptance criteria:", _cut(acceptance.strip(), TEXT_MAX), ""]
+            lines += ["Acceptance criteria:", _cut(escape_controls(acceptance.strip()), TEXT_MAX), ""]
         lines += ["How to work:", *_rules(bead, ops)]
     if notes:
         lines += _notes(notes, more)
