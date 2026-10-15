@@ -25,9 +25,10 @@ from heterodyne.wsd.asks import (
     AskBridge,
     steer_text,
 )
-from heterodyne.wsd.journal import Journal
+from heterodyne.wsd.journal import InboxStatus, Journal
 from heterodyne.wsd.runtime import SessionEvent, SteerRefused
 from heterodyne.wsd.scheduler import Outcome
+from heterodyne.wsd.session_events import SURFACE
 from heterodyne.wsd.states import BeadState
 
 B = "btq-1"
@@ -50,7 +51,7 @@ def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def bridge_of(rig: Rig) -> AskBridge:
-    return AskBridge(rig.journal, rig.beads, rig.runtime, rig.notices, None, rig.clock, ws=WS, cp=rig.cp)
+    return AskBridge(rig.journal, rig.beads, rig.runtime, None, None, rig.clock, ws=WS, cp=rig.cp)
 
 
 def started(tmp_path: Path) -> Rig:
@@ -88,8 +89,11 @@ def delivered(rig: Rig, ref: str) -> bool:
 
 
 def nothing_created(rig: Rig) -> None:
-    """No bead, no ask and no park: a refusal creates nothing but its row and its note."""
+    """No bead, no ask and no park: a refusal creates nothing but its row and its note. Every session
+    event was handled, none failed (a Stop taken for a question would fail here, before the question half)."""
     assert set(rig.world.beads) == {B}
+    rows = rig.journal.db.execute("SELECT status FROM inbox WHERE surface = ?", (SURFACE,)).fetchall()
+    assert {r[0] for r in rows} <= {InboxStatus.COMMITTED.value}
     assert rig.journal.db.execute("SELECT count(*) FROM asks").fetchone() == (0,)
     assert rig.state(B) == BeadState.RUNNING.value
     assert rig.journal.ops_open(WS) == []

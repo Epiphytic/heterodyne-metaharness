@@ -136,3 +136,29 @@ def test_refusals_insert_is_idempotent_by_event_id(tmp_path: Path, j: Journal) -
     assert j.refusal("k:g1:e4") is None and j.notes(WS, B) == []
     j.close()
     assert Journal(tmp_path / "wsd.db").refusal("k:g1:e3") == RefusedRequest(WS, B, "k", 1, 2, "fixed text")
+
+
+def test_a_refusal_is_owed_while_its_note_is_undelivered_and_steerable(j: Journal) -> None:
+    with j.transaction():
+        j.refusal_add(WS, B, "k:g1:e3", "k", 1, 2, "fixed text")
+        j.note_add(WS, B, "refused:k:g1:e3", "fixed text")
+    assert j.refusal_owed(WS, B, "k", 1) is True
+    assert j.refusal_owed(WS, B, "k", 2) is False                   # another generation's Stop
+    assert j.refusal_owed(WS, B, "other", 1) is False
+    assert j.refusal_owed(WS, "btq-2", "k", 1) is False
+    for _ in range(3):
+        j.note_steer_attempt(["refused:k:g1:e3"], 1)
+    assert j.refusal_owed(WS, B, "k", 1) is False                   # left to the next brief: no longer owed
+    j.note_steer_attempt(["refused:k:g1:e3"], -1)
+    assert j.refusal_owed(WS, B, "k", 1) is True
+    j.note_delivered(WS, B, "refused:k:g1:e3")
+    assert j.refusal_owed(WS, B, "k", 1) is False
+
+
+def test_ask_open_reads_only_the_given_states_of_the_bead(j: Journal) -> None:
+    j.db.execute("INSERT INTO asks (ref, ws, bead, kind, state, created_at, updated_at) "
+                 "VALUES ('q:1', ?, ?, 'question', 'posted', 'now', 'now')", (WS, B))
+    assert j.ask_open(WS, B, ("creating", "posted")) is True
+    assert j.ask_open(WS, B, ("delivered",)) is False
+    assert j.ask_open(WS, "btq-2", ("posted",)) is False
+    assert j.ask_open("beta", B, ("posted",)) is False

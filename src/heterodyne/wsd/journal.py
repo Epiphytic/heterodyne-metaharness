@@ -1558,6 +1558,26 @@ class Journal:
             return None
         return RefusedRequest(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), str(row[5]))
 
+    @_locked
+    def refusal_owed(self, ws: str, bead: str, session_key: str, generation: int) -> bool:
+        """Whether a refused request of this generation still owes its note to a steer: undelivered, and
+        steered fewer than STEER_ATTEMPTS times."""
+        row = self.db.execute("SELECT 1 FROM refusals AS r JOIN resume_notes AS n "
+                              "ON n.ref = 'refused:' || r.event_id WHERE r.ws = ? AND r.bead = ? "
+                              "AND r.session_key = ? AND r.generation = ? AND n.delivered_at IS NULL "
+                              "AND n.steer_attempts < ? LIMIT 1",
+                              (ws, bead, session_key, generation, STEER_ATTEMPTS)).fetchone()
+        return row is not None
+
+    @_locked
+    def ask_open(self, ws: str, bead: str, states: Iterable[str]) -> bool:
+        """Whether an `asks` row of the bead is in one of `states`."""
+        wanted = tuple(states)
+        row = self.db.execute(f"SELECT 1 FROM asks WHERE ws = ? AND bead = ? "  # noqa: S608 - placeholders only
+                              f"AND state IN ({', '.join('?' * len(wanted))}) LIMIT 1",
+                              (ws, bead, *wanted)).fetchone()
+        return row is not None
+
     # --- notices (plan 5i part 2 T3) ---
 
     @_locked
