@@ -25,7 +25,13 @@ from heterodyne.agents.base import Adapter, write_private
 from heterodyne.platform import peer_pidfd_checked
 from heterodyne.sandbox.backend import BackendError
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
-from heterodyne.sandbox.spec import AGENT_PROBE_INSIDE, LAUNCHER_ENV, PROBES_INSIDE, Bind
+from heterodyne.sandbox.spec import (
+    AGENT_PROBE_INSIDE,
+    INSTALL_RECORD_INSIDE,
+    LAUNCHER_ENV,
+    PROBES_INSIDE,
+    Bind,
+)
 
 PROBES_SOURCE = Path(__file__).resolve().with_name("resources") / "probes.py"
 # The agent-path probe as the host requires to see it in /proc: the image's python, isolated mode (no
@@ -39,7 +45,8 @@ OPENSHELL_ENV = frozenset({"OPENSHELL_SANDBOX", "OPENSHELL_USER_ENVIRONMENT", "S
                            "container", "HOSTNAME", "DEBIAN_FRONTEND", "SHELL"})
 SHELL_ENV = frozenset({"PWD", "SHLVL", "_", "OLDPWD"})
 COMMON_CHECKS = ("real-home-canary-unreadable", "non-allowlisted-host-blocked", "direct-network-blocked",
-                 "control-op-rejected", "wsd-socket-absent", "allowlisted-host-reachable")
+                 "control-op-rejected", "wsd-socket-absent", "allowlisted-host-reachable", "managed-install",
+                 "empty-read-only")
 PROTECTION_CHECKS = ("probe-tamper-denied", "proc-readonly", "probe-files-readonly", "cgroupfs-readonly")
 TAIL_CHECKS = ("hook-event-accepted", "host-env-not-inherited", "openshell-control-material-unreadable",
                "other-accounts", *PROTECTION_CHECKS)
@@ -204,9 +211,11 @@ def other_accounts(others: Sequence[tuple[str, Path]], logins: Sequence[Bind]) -
     return found
 
 
-def env_allowed(adapter: Adapter, path: str) -> frozenset[str]:
+def env_allowed(adapter: Adapter, path: str, version: str) -> frozenset[str]:
+    """The probe's allowed environment: on the agent path also the tool variables the CLI at `version` (a
+    version the adapter declares, as the launch verified) sets for its tools."""
     base = LAUNCHER_ENV | OPENSHELL_ENV | SHELL_ENV
-    return base | adapter.tool_env if path == "agent" else base
+    return base | adapter.versions[version].tool_env if path == "agent" else base
 
 
 def probe_config(ctx: ProbeContext, path: str) -> dict[str, Any]:
@@ -219,8 +228,8 @@ def probe_config(ctx: ProbeContext, path: str) -> dict[str, Any]:
             "other_accounts": other_accounts(ctx.others, ctx.spec.logins), "chosen": chosen,
             "allowed": ctx.settings.probe_allowed_host, "denied": ctx.settings.probe_denied_host,
             "model_host": ctx.adapter.model_hosts[0], "wsd_socket": str(ctx.wsd_socket),
-            "env_allowed": sorted(env_allowed(ctx.adapter, path)),
-            "env_user": sorted(LAUNCHER_ENV | OPENSHELL_ENV)}
+            "env_allowed": sorted(env_allowed(ctx.adapter, path, ctx.cli.version)),
+            "env_user": sorted(LAUNCHER_ENV | OPENSHELL_ENV), "install_record": str(INSTALL_RECORD_INSIDE)}
 
 
 def log_needles(ctx: ProbeContext, path: str) -> list[tuple[str, str]]:
@@ -349,7 +358,8 @@ class OpenShellSelfTest:
                 cgroup = workload_cgroup(self.proc, root)       # the workload's tasks, frozen to be read
             except (OSError, ValueError):
                 raise SelfTestFailed("workload-cgroup") from None
-            verify = ProcVerifier(netns, str(ctx.cli.binary), env_allowed(ctx.adapter, "agent"),
+            allowed = env_allowed(ctx.adapter, "agent", ctx.cli.version)
+            verify = ProcVerifier(netns, str(ctx.cli.binary), allowed,
                                   namespaces=self._namespaces(ctx), root_pid=root, root_start=root_start,
                                   cgroup=cgroup, ptrace_scope=self.ptrace_scope, proc=self.proc,
                                   cgroupfs=self.cgroupfs)

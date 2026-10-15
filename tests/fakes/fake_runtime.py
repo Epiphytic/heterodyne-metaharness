@@ -7,6 +7,7 @@ known)."""
 
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd.runtime import (
+    INSTALL_UNPINNED,
     LOGIN_STALE,
     Action,
     EndCause,
@@ -73,6 +74,8 @@ class FakeRuntime:
         if current is not None and current.liveness is Liveness.LIVE:
             return self._started(spec)
         self.attempts.append(spec)
+        if not spec.install or not spec.install_digest:
+            raise LaunchFailed(INSTALL_UNPINNED)        # as SandboxRuntime refuses an entry with no pin
         if spec.credential_key in self.stale_keys:
             raise LaunchFailed(LOGIN_STALE)
         if self.launch_failures or spec.bead in self.failing_beads:

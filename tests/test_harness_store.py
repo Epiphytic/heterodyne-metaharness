@@ -17,7 +17,7 @@ from harness_env import (
     LOGIN_NAMES,
     artifact_fds,
     codex_part,
-    install_root,
+    published_root,
     rewrite,
     sample_manifest,
     store_dir,
@@ -139,7 +139,7 @@ def test_verify_and_remove(tmp_path: Path, kind: str) -> None:
         staged = stage(store, tmp_path)
         name = store.publish(staged.id, staged.digest)
         store.verify("codex", name)
-        path = install_root(tmp_path, name) / FIRST_FILE
+        path = published_root(tmp_path, name) / FIRST_FILE
         data = path.read_bytes()
         rewrite(path)
         assert refused(lambda: store.verify("codex", name)) == sc.CONTENT_CHANGED
@@ -149,7 +149,7 @@ def test_verify_and_remove(tmp_path: Path, kind: str) -> None:
         assert store.state("codex", name) == "published"
         store.remove("codex", name)
         assert store.list() == []
-        assert not os.path.lexists(install_root(tmp_path, name))
+        assert not os.path.lexists(published_root(tmp_path, name))
 
 
 @pytest.mark.parametrize("kind", KINDS)

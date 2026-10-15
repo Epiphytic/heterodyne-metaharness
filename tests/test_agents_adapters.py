@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import harness_env as he
 import pytest
-from sandbox_env import config_env, fake_jwt, install_fake_cli, short_dir
+from sandbox_env import config_env, fake_jwt, short_dir
 
 from heterodyne.agents import codex as codex_mod
 from heterodyne.agents import config_files
@@ -22,11 +22,11 @@ from heterodyne.agents.base import (
     OWNS_KEY,
     PRE_TOOL_COMMAND,
     PRE_TOOL_TIMEOUT,
+    Adapter,
     AdapterError,
-    find_binary,
+    Cli,
     hook_command,
     hook_group,
-    install_root,
     pre_tool_command,
     profile_args,
     write_at,
@@ -59,24 +59,32 @@ def test_registry_names_both_adapters() -> None:
     assert (ADAPTERS["claude-code"].assigns_id, ADAPTERS["codex"].assigns_id) == (False, True)
 
 
+def prepare(adapter: Adapter, layout: SessionLayout, worktree: Path) -> None:
+    """The launch's home from an install with no defaults and no content: the launcher's keys alone."""
+    bare = layout.root / "bare-install"
+    bare.mkdir(exist_ok=True)
+    adapter.prepare_install_home(layout, worktree, bare)
+
+
+def fake_cli(tmp_path: Path, adapter: str) -> Cli:
+    """The fake CLI, published at its declared version and verified (plan 4c E23)."""
+    return he.store_fixture(tmp_path / "installs", adapter).cli()
+
+
 @pytest.mark.parametrize("adapter", ["claude-code", "codex"])
-def test_locate_reads_the_version_without_running_the_cli(tmp_path: Path, adapter: str) -> None:
-    binary = install_fake_cli(tmp_path, adapter)
-    cli = ADAPTERS[adapter].locate(binary.name, str(binary.parent))
-    pin = ADAPTERS[adapter].version_pin
-    assert (cli.binary, cli.root, cli.version) == (binary, binary.parent.parent, pin)
-
-
-def test_locate_refuses_a_missing_binary(tmp_path: Path) -> None:
-    with pytest.raises(AdapterError, match="not found"):
-        ClaudeCode().locate("claude", str(tmp_path))
+def test_a_verified_install_gives_the_cli_its_manifest_version(tmp_path: Path, adapter: str) -> None:
+    fixture = he.store_fixture(tmp_path, adapter)
+    cli = fixture.cli()
+    assert (cli.binary, cli.root, cli.install, cli.digest) == (fixture.binary, fixture.root,
+                                                               fixture.pin.install, fixture.pin.digest)
+    assert cli.version in ADAPTERS[adapter].versions
 
 
 def test_claude_home_merges_its_state_and_hooks_are_read_only(layout: SessionLayout, tmp_path: Path) -> None:
     conf = layout.home / ".claude"
     conf.mkdir()
     (conf / ".claude.json").write_text(json.dumps({"numStartups": 7, "projects": {"/elsewhere": {}}}))
-    ClaudeCode().prepare_home(layout, tmp_path / "wt")
+    prepare(ClaudeCode(), layout, tmp_path / "wt")
     state = json.loads((conf / ".claude.json").read_text())
     assert state["numStartups"] == 7 and state["hasCompletedOnboarding"] is True
     assert state["projects"][str(tmp_path / "wt")]["hasTrustDialogAccepted"] is True
@@ -94,12 +102,12 @@ def test_claude_drops_a_cached_remote_policy_from_the_home(layout: SessionLayout
     conf = layout.home / ".claude"
     conf.mkdir()
     (conf / "remote-settings.json").write_text(json.dumps({"disableAllHooks": True}))
-    ClaudeCode().prepare_home(layout, tmp_path / "wt")
+    prepare(ClaudeCode(), layout, tmp_path / "wt")
     assert not (conf / "remote-settings.json").exists()
     victim = tmp_path / "victim"
     victim.write_text("keep")
     (conf / "remote-settings.json").symlink_to(victim)
-    ClaudeCode().prepare_home(layout, tmp_path / "wt")
+    prepare(ClaudeCode(), layout, tmp_path / "wt")
     assert not (conf / "remote-settings.json").is_symlink() and victim.read_text() == "keep"
 
 
@@ -108,7 +116,7 @@ def test_codex_leaves_the_worktree_untrusted_so_its_project_config_is_not_loaded
     """codex-cli 0.160 loads a trusted project's .codex/config.toml, which can turn hooks off, override
     the approval policy or trust its own hooks; for an untrusted project it loads none of it, and our
     user-level approval_policy and sandbox_mode still apply (checked offline with app-server config/read)."""
-    Codex().prepare_home(layout, tmp_path / "wt")
+    prepare(Codex(), layout, tmp_path / "wt")
     config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
     assert config["projects"][str(tmp_path / "wt")] == {"trust_level": "untrusted"}
     assert config["approval_policy"] == "never" and config["sandbox_mode"] == "danger-full-access"
@@ -173,12 +181,12 @@ def test_the_pre_tool_use_wrapper_turns_every_failure_into_a_block(tmp_path: Pat
 
 
 def test_codex_home_is_rewritten_and_stale_sockets_go(layout: SessionLayout, tmp_path: Path) -> None:
-    Codex().prepare_home(layout, tmp_path / "wt")
+    prepare(Codex(), layout, tmp_path / "wt")
     stale = socket.socket(socket.AF_UNIX)
     stale.bind(str(layout.bridge / "app.sock"))
     stale.close()
     (layout.home / ".codex" / "config.toml").write_text("model = 'x'\n")
-    Codex().prepare_home(layout, tmp_path / "wt")
+    prepare(Codex(), layout, tmp_path / "wt")
     config = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
     assert config == {"approval_policy": "never", "sandbox_mode": "danger-full-access",
                       "check_for_update_on_startup": False,
@@ -192,8 +200,7 @@ def test_codex_home_is_rewritten_and_stale_sockets_go(layout: SessionLayout, tmp
 
 
 def test_codex_facts_bind_the_bridge_and_daemon(layout: SessionLayout, tmp_path: Path) -> None:
-    binary = install_fake_cli(tmp_path, "codex")
-    facts = Codex().facts(layout, Codex().locate("codex", str(binary.parent)), 1234)
+    facts = Codex().facts(layout, fake_cli(tmp_path, "codex"), 1234)
     assert [(b.source, str(b.target), b.read_only) for b in facts.binds] == [
         (layout.bridge, str(BRIDGE_INSIDE), False),
         (layout.daemon, "/tmp/codex-daemon-1234", False)]  # noqa: S108
@@ -280,8 +287,7 @@ def test_access_expiry(tmp_path: Path) -> None:
 
 
 def test_tui_argv(tmp_path: Path) -> None:
-    claude = ClaudeCode().locate("claude", str(install_fake_cli(tmp_path, "claude-code").parent))
-    codex = Codex().locate("codex", str(install_fake_cli(tmp_path, "codex").parent))
+    claude, codex = fake_cli(tmp_path, "claude-code"), fake_cli(tmp_path, "codex")
     first = ClaudeCode().tui_argv(claude, {"model": "m-1"}, native_id=ID, resume=False, label="bd-1 · coder")
     assert first[1:3] == ["--session-id", ID] and first[-2:] == ["--name", "bd-1 · coder"]
     assert str(RUN_INSIDE / SETTINGS_FILE) in first
@@ -325,7 +331,7 @@ def test_a_linked_config_dir_refuses_the_home(layout: SessionLayout, tmp_path: P
     outside.mkdir()
     (layout.home / ADAPTERS[adapter].config_subdir).symlink_to(outside)
     with pytest.raises(AdapterError, match="won't follow"):
-        ADAPTERS[adapter].prepare_home(layout, tmp_path / "wt")
+        prepare(ADAPTERS[adapter], layout, tmp_path / "wt")
     with pytest.raises(AdapterError, match="won't follow"):
         ADAPTERS[adapter].has_state(layout.home, ID)
     assert list(outside.iterdir()) == []
@@ -341,7 +347,7 @@ def test_linked_files_and_temp_names_are_replaced_not_followed(layout: SessionLa
     conf.mkdir()
     (conf / name).symlink_to(victim)
     (conf / f".{name}.tmp").symlink_to(victim)               # the old, predictable temporary name
-    ADAPTERS[adapter].prepare_home(layout, tmp_path / "wt")
+    prepare(ADAPTERS[adapter], layout, tmp_path / "wt")
     assert victim.read_text() == '{"stolen": true}'
     assert not (conf / name).is_symlink() and "stolen" not in (conf / name).read_text()
 
@@ -387,8 +393,8 @@ def test_a_failed_sync_leaves_the_old_content(tmp_path: Path, monkeypatch: pytes
 
 
 def test_trust_refuses_a_config_swapped_for_a_link(layout: SessionLayout, tmp_path: Path) -> None:
-    codex = install_fake_cli(tmp_path, "codex")
-    Codex().prepare_home(layout, tmp_path)
+    codex = fake_cli(tmp_path, "codex").binary
+    prepare(Codex(), layout, tmp_path)
     listed = trust_listing(layout, codex, tmp_path)
     victim = tmp_path / "victim"
     victim.write_text("keep\n")
@@ -405,13 +411,13 @@ def test_codex_run_files_ship_the_trust_lister() -> None:
 
 
 def test_codex_trust_round_trip(layout: SessionLayout, tmp_path: Path) -> None:
-    codex = install_fake_cli(tmp_path, "codex")
-    Codex().prepare_home(layout, tmp_path)
+    codex = fake_cli(tmp_path, "codex").binary
+    prepare(Codex(), layout, tmp_path)
     listed = trust_listing(layout, codex, tmp_path)
     assert len(json.loads(listed)) == len(HOOK_EVENTS)
     assert Codex().apply_trust(layout, listed) == len(HOOK_EVENTS)
     assert json.loads(trust_listing(layout, codex, tmp_path)) == []
-    Codex().prepare_home(layout, tmp_path)            # a new launch rewrites config.toml: trust again
+    prepare(Codex(), layout, tmp_path)            # a new launch rewrites config.toml: trust again
     assert len(json.loads(trust_listing(layout, codex, tmp_path))) == len(HOOK_EVENTS)
 
 
@@ -424,7 +430,7 @@ def test_codex_trust_round_trip(layout: SessionLayout, tmp_path: Path) -> None:
 ])
 def test_apply_trust_refuses_anything_unexpected(layout: SessionLayout, tmp_path: Path,
                                                  entry: object) -> None:
-    Codex().prepare_home(layout, tmp_path)
+    prepare(Codex(), layout, tmp_path)
     hooks = str(layout.home / ".codex" / "hooks.json")
     text = json.dumps([entry]).replace("HOOKS", hooks.replace("\\", "\\\\"))
     before = (layout.home / ".codex" / "config.toml").read_text()
@@ -440,8 +446,8 @@ def test_the_trust_lister_refuses_a_listing_it_cannot_vouch_for(layout: SessionL
     """An empty answer is what the host reads as "every shim hook is trusted": a failed load, a listing
     for another directory, an unknown status, or a shim hook missing, disabled or changed must refuse
     the launch instead."""
-    codex = install_fake_cli(tmp_path, "codex")
-    Codex().prepare_home(layout, tmp_path)
+    codex = fake_cli(tmp_path, "codex").binary
+    prepare(Codex(), layout, tmp_path)
     Codex().apply_trust(layout, trust_listing(layout, codex, tmp_path))   # all trusted: [] from here on
     assert json.loads(trust_listing(layout, codex, tmp_path)) == []
     proc = run_lister(layout, codex, tmp_path, fault)
@@ -456,7 +462,7 @@ def run_fake_tui(binary: Path, args: list[str], cwd: Path, env: dict[str, str]) 
 def test_the_fake_codex_fires_only_hooks_it_trusts(tmp_path: Path) -> None:
     """As the real Codex does: an untrusted hook, or one whose command changed since it was trusted, does
     not run."""
-    codex, home, out = install_fake_cli(tmp_path, "codex"), tmp_path / "codex-home", tmp_path / "out"
+    codex, home, out = fake_cli(tmp_path, "codex").binary, tmp_path / "codex-home", tmp_path / "out"
     home.mkdir()
     out.mkdir()
     commands = {name: f"cat > {out / name}" for name in ("trusted", "modified", "untrusted")}
@@ -477,7 +483,7 @@ def test_the_fake_codex_fires_only_hooks_it_trusts(tmp_path: Path) -> None:
 @pytest.mark.parametrize("adapter", ["claude-code", "codex"])
 def test_the_fake_gives_each_hook_its_cwd(tmp_path: Path, adapter: str) -> None:
     """The shim resolves a relative file_path only against the hook's cwd, so the fake must send one."""
-    binary, home, out = install_fake_cli(tmp_path, adapter), tmp_path / "home", tmp_path / "out.json"
+    binary, home, out = fake_cli(tmp_path, adapter).binary, tmp_path / "home", tmp_path / "out.json"
     home.mkdir()
     work = tmp_path / "wt"
     work.mkdir()
@@ -504,7 +510,7 @@ def test_worktree_settings_neither_disable_nor_add_claude_hooks(layout: SessionL
                                                                 planted: dict[str, object]) -> None:
     """The worktree is the agent's: its .claude/settings.json and settings.local.json, and the home's
     settings.json, must not turn our hooks off or add hooks of their own."""
-    cli = ClaudeCode().locate("claude", str(install_fake_cli(tmp_path, "claude-code").parent))
+    cli = fake_cli(tmp_path, "claude-code")
     run, out, work = tmp_path / "run", tmp_path / "out", tmp_path / "wt"
     for folder in (run, out, work / ".claude", layout.home / ".claude"):
         folder.mkdir(parents=True)
@@ -531,14 +537,13 @@ def test_turn_end_events_per_adapter() -> None:
 # --- plan 4c Task 6 (with Amendment 1 §4): declared versions, layouts, owned keys and updaters ---
 
 def test_each_adapter_declares_its_s7_pin() -> None:
-    assert set(Codex().versions) == {"0.160.0"} and Codex().version_pin == "0.160.0"
-    assert set(ClaudeCode().versions) == {"2.1.286"} and ClaudeCode().version_pin == "2.1.286"
+    assert set(Codex().versions) == {"0.160.0"}
+    assert set(ClaudeCode().versions) == {"2.1.286"}
 
 
 @pytest.mark.parametrize("adapter", ["claude-code", "codex"])
 def test_tool_env_is_per_declared_version(adapter: str) -> None:
     a = ADAPTERS[adapter]
-    assert a.tool_env == a.versions[a.version_pin].tool_env
     assert all(d.presentation <= a.content_kinds for d in a.versions.values())
 
 
@@ -571,16 +576,6 @@ def test_codex_names_its_release_assets() -> None:
 def test_registry_login_names_is_the_union_of_the_adapters() -> None:
     assert login_names() == frozenset({"auth.json", ".credentials.json"}) == he.LOGIN_NAMES
     assert login_names() == frozenset(n for a in ADAPTERS.values() for n in a.login_names)
-
-
-@pytest.mark.parametrize("adapter", ["claude-code", "codex"])
-def test_the_old_lookup_still_works_and_agrees_with_the_declared_versions(tmp_path: Path,
-                                                                           adapter: str) -> None:
-    binary = install_fake_cli(tmp_path, adapter)
-    cli = ADAPTERS[adapter].locate(binary.name, str(binary.parent))
-    assert cli.version in ADAPTERS[adapter].versions
-    assert (cli.install, cli.digest) == ("", "")
-    assert install_root(find_binary(str(binary), "")) == cli.root
 
 
 def install_with_defaults(tmp_path: Path, name: str, text: str) -> Path:
@@ -808,7 +803,7 @@ def test_an_install_without_defaults_is_the_launcher_alone(layout: SessionLayout
     install = tmp_path / "install"
     install.mkdir()
     Codex().prepare_install_home(layout, tmp_path / "wt", install)
-    Codex().prepare_home(layout, tmp_path / "wt2")
+    prepare(Codex(), layout, tmp_path / "wt2")
     first = tomllib.loads((layout.home / ".codex" / "config.toml").read_text())
     assert first["features"]["plugins"] is False
     assert json.loads(ClaudeCode().run_files(install=install)[SETTINGS_FILE]) == json.loads(
@@ -830,17 +825,16 @@ def test_the_generated_toml_round_trips_any_default_string(layout: SessionLayout
 
 
 def test_the_updater_is_off_in_what_the_adapter_generates(layout: SessionLayout, tmp_path: Path) -> None:
-    for prepare in (lambda: Codex().prepare_home(layout, tmp_path / "wt"),
-                    lambda: Codex().prepare_install_home(layout, tmp_path / "wt", tmp_path)):
-        prepare()
+    for again in (lambda: prepare(Codex(), layout, tmp_path / "wt"),
+                  lambda: Codex().prepare_install_home(layout, tmp_path / "wt", tmp_path)):
+        again()
         text = (layout.home / ".codex" / "config.toml").read_text()
         top = text.split("\n[", 1)[0]
         assert "check_for_update_on_startup = false" in top.splitlines()
         features = tomllib.loads(text)["features"]
         assert {k: features[k] for k in ("daemon_auto_start", "plugins", "in_app_updates", "apps")} == {
             "daemon_auto_start": False, "plugins": False, "in_app_updates": False, "apps": False}
-    binary = install_fake_cli(tmp_path, "claude-code")
-    facts = ClaudeCode().facts(layout, ClaudeCode().locate("claude", str(binary.parent)), 1234)
+    facts = ClaudeCode().facts(layout, fake_cli(tmp_path, "claude-code"), 1234)
     assert facts.extra_env == {"ENABLE_CLAUDEAI_MCP_SERVERS": "false", "DISABLE_AUTOUPDATER": "1",
                                "DISABLE_UPDATES": "1"}
     assert set(facts.extra_env) <= LAUNCHER_ENV
@@ -853,7 +847,7 @@ OVERRIDES = ("-c", "--config", "--enable", "--disable")
 
 
 def test_codex_argv_carries_no_config_override(tmp_path: Path) -> None:
-    codex = Codex().locate("codex", str(install_fake_cli(tmp_path, "codex").parent))
+    codex = fake_cli(tmp_path, "codex")
     argvs = [Codex().server_argv(codex) or [],
              Codex().tui_argv(codex, {"model": "m"}, native_id=None, resume=False, label="x"),
              Codex().tui_argv(codex, {"model": "m"}, native_id=ID, resume=True, label="x")]
@@ -874,8 +868,7 @@ def test_profile_args_at_launch_refuses_what_config_refuses(tmp_path: Path, adap
     with pytest.raises(AdapterError) as refused:
         profile_args(profile, adapter)
     assert str(refused.value) == OWNS_KEY
-    binary = install_fake_cli(tmp_path, adapter)
-    cli = ADAPTERS[adapter].locate(binary.name, str(binary.parent))
+    cli = fake_cli(tmp_path, adapter)
     native = None if adapter == "codex" else ID
     with pytest.raises(AdapterError):
         ADAPTERS[adapter].tui_argv(cli, profile, native_id=native, resume=False, label="x")

@@ -26,11 +26,9 @@ from heterodyne.agents.base import (
     checked_id,
     content_items,
     epoch_or_none,
-    find_binary,
     has_file,
     home_dir,
     hook_group,
-    install_root,
     profile_args,
     read_json,
     read_json_at,
@@ -138,9 +136,7 @@ class ClaudeCode:
     config_subdir = ".claude"
     login_names: tuple[str, ...] = (".credentials.json",)
     model_hosts: tuple[str, ...] = ("api.anthropic.com",)
-    version_pin = "2.1.286"
     versions: Mapping[str, Declared] = {"2.1.286": Declared(TOOL_ENV, KINDS)}
-    tool_env = versions[version_pin].tool_env
     install_layout = InstallLayout("npm", "@anthropic-ai/claude-code-<target>",
                                    store_core.Layout("package.json", "version", None, None, "claude"),
                                    "package/")
@@ -166,21 +162,13 @@ class ClaudeCode:
     assigns_id = False
     turn_end_events: tuple[str, ...] = ("Stop", "StopFailure")
 
-    def locate(self, binary: str, path: str) -> Cli:
-        real = find_binary(binary, path)
-        root = install_root(real)
-        version = read_json(root / "package.json").get("version")
-        if not isinstance(version, str) or not version:
-            raise AdapterError("the claude-code CLI version can't be read")
-        return Cli(real, root, version)
-
     def facts(self, layout: SessionLayout, cli: Cli, uid: int) -> AgentFacts:
         return AgentFacts(cli_root=cli.root, cli_binary=cli.binary, config_var=self.config_var,
                           config_dir=layout.home / self.config_subdir, login_names=self.login_names,
                           model_hosts=self.model_hosts,
                           extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false", **UPDATER_ENV})
 
-    def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
+    def _prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
         conf = home_dir(layout.home, self.config_subdir)
         try:
             # Remote managed settings outrank our hooks and the cache is the agent's to write.
@@ -204,7 +192,7 @@ class ClaudeCode:
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
                              install: Path) -> tuple[exec_dirs.Cleared, ...]:
         """The defaults go into the run directory's settings file (run_files), not the home."""
-        self.prepare_home(layout, worktree)
+        self._prepare_home(layout, worktree)
         return exec_dirs.prepare(layout.home, self.empty_read_only)
 
     def run_files(self, *, usage: bool = False, limits: bool = False,

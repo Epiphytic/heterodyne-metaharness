@@ -11,7 +11,7 @@ import msgspec
 import pytest
 from fakes.checkpoints import CrashAt, SimulatedCrash
 from fakes.fake_btq import World, factory
-from wsd_env import WS, Rig, make_rig
+from wsd_env import FAKE_PINS, WS, Rig, make_rig
 
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
@@ -42,9 +42,9 @@ from heterodyne.wsd.launches import (
     decode_launches,
     encode_entry,
 )
-from heterodyne.wsd.park import DEFER_STEPS, UNRECEIPTED
+from heterodyne.wsd.park import DEFER_STEPS, SELECTION_UNREADABLE, UNRECEIPTED
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED, LaunchSpec, RuntimeUnavailable, Started
+from heterodyne.wsd.runtime import LaunchSpec, RuntimeUnavailable, Started
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.states import BeadState, Reason
 
@@ -696,52 +696,43 @@ def test_a_selection_change_applies_to_the_next_entry_only(tmp_path: Path) -> No
 
 
 def test_a_resume_takes_the_selection_at_its_own_launch(tmp_path: Path) -> None:
-    rig = resumable(tmp_path)                    # generation 1 launched with no selection
+    rig = resumable(tmp_path)                    # generation 1 launched with the rig's selection
     select(rig, {"claude-code": PIN_B})
     rig.pickup()
     one, two = rig.runtime.launches
-    assert (one.install, two.install, two.install_digest) == ("", PIN_B.install, PIN_B.digest)
-    assert two.resume and pins_of(rig) == [("", ""), (PIN_B.install, PIN_B.digest)]
+    first = FAKE_PINS["claude-code"]
+    assert (one.install, two.install, two.install_digest) == (first.install, PIN_B.install, PIN_B.digest)
+    assert two.resume and pins_of(rig) == [(first.install, first.digest), (PIN_B.install, PIN_B.digest)]
 
 
-def test_no_selection_journals_an_empty_pin_and_dispatches_unchanged(tmp_path: Path) -> None:
-    """E23: nothing refuses an empty pin until Task 8 (which escalates it as `NOT_SELECTED`)."""
-    rig = started(tmp_path)
-    select(rig, {"codex": PIN_A})                # another adapter's selection is not this one's
-    assert rig.pickup() is Outcome.STARTED
-    [spec] = rig.runtime.launches
-    assert (spec.install, spec.install_digest) == ("", "") and pins_of(rig) == [("", "")]
-    assert all(b'"install' not in raw for raw in raw_entries(rig))
-    assert INSTALL_UNPINNED and NOT_SELECTED and INSTALL_UNPINNED != NOT_SELECTED
-
-
-def test_an_unreadable_selection_journals_an_empty_pin_and_launches_as_before(
+def test_an_unreadable_selection_escalates_config_invalid_and_journals_nothing(
         tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """E23 (r1 finding 1): until Task 8 refuses it, an unreadable selection launches as before T7."""
+    """Plan 4c T8: an unreadable selection is not "none selected", and refuses as one does; the error's
+    text (which can quote the file) is in neither the row nor the log."""
     def unreadable(_adapter: str) -> InstallPin | None:
         raise ConfigError(f"harnesses.toml exists but can't be read {PIN_A.install}")
     rig = started(tmp_path)
     rig.selections = unreadable
     rig.restart()
-    assert rig.pickup() is Outcome.STARTED
-    [spec] = rig.runtime.launches
-    assert (spec.install, spec.install_digest) == ("", "") and pins_of(rig) == [("", "")]
-    [warning] = [r for r in caplog.records if r.name == "heterodyne.wsd.park"]
-    assert warning.levelname == "WARNING" and PIN_A.install not in warning.getMessage()
+    rig.pickup()
+    assert rig.runtime.calls == 0 and pins_of(rig) == []
+    row = rig.journal.state(WS, "btq-1")
+    assert row is not None and (row.reason, row.detail) == (Reason.CONFIG_INVALID, SELECTION_UNREADABLE)
+    assert NEEDS_HUMAN in rig.world.beads["btq-1"].labels
+    assert not [r for r in caplog.records if PIN_A.install in r.getMessage()]
 
 
-def test_a_malformed_selection_for_another_adapter_does_not_stop_this_launch(tmp_path: Path) -> None:
-    """The real harnesses.toml reader: a broken `[codex]` table fails the whole file, and the Claude
-    launch still goes ahead with an empty pin (E23)."""
+def test_a_malformed_selection_for_another_adapter_stops_this_launch_too(tmp_path: Path) -> None:
+    """The real harnesses.toml reader: a broken `[codex]` table fails the whole file, so the Claude launch
+    can't tell what is selected for it either."""
     config = tmp_path / "config"
     config.mkdir()
     (config / "harnesses.toml").write_text(f'[codex]\nuse = "{PIN_A.install}"\n')     # no digest
     rig = started(tmp_path)
     rig.selections = selections_at(config)
     rig.restart()
-    assert rig.pickup() is Outcome.STARTED
-    [spec] = rig.runtime.launches
-    assert spec.install == "" and pins_of(rig) == [("", "")]
+    rig.pickup()
+    assert rig.runtime.calls == 0 and pins_of(rig) == [] and row_reason(rig) is Reason.CONFIG_INVALID
 
 
 def test_the_bead_copy_carries_the_pin_and_rebuilds_with_it(tmp_path: Path) -> None:

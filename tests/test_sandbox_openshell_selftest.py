@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
+import harness_env as he
 import pytest
 from sandbox_env import config_env, short_dir
 
@@ -37,7 +38,7 @@ from heterodyne.sandbox.openshell_selftest import (
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed
 from heterodyne.sandbox.settings import sandbox_settings
-from heterodyne.sandbox.spec import Bind, SandboxSpec, SessionLayout
+from heterodyne.sandbox.spec import INSTALL_RECORD_INSIDE, Bind, SandboxSpec, SessionLayout
 from heterodyne.session.server import TurnState
 from heterodyne.tmux import Tmux
 
@@ -90,7 +91,7 @@ def context(tmp_path: Path, backend: StubBackend, others: tuple[tuple[str, Path]
                         cli=Cli(tmp_path / "codex", tmp_path, "0.160.0"), token="fake-session-token",  # noqa: S106
                         others=others, real_home_canary=tmp_path / "real-home" / ".heterodyne-canary",
                         wsd_socket=tmp_path / "state" / "wsd" / "ctl.sock", settings=settings,
-                        turns=TurnState)
+                        turns=TurnState, install=he.published(tmp_path / "i", "codex").verified())
 
 
 def passing_logs(ctx: ProbeContext) -> list[str]:
@@ -140,9 +141,9 @@ def test_other_accounts_skip_an_alias_of_the_chosen_login(tmp_path: Path) -> Non
 
 
 def test_env_allowed_adds_the_cli_tool_env_on_the_agent_path_only() -> None:
-    assert "CODEX_THREAD_ID" in env_allowed(Codex(), "agent")
-    assert "CODEX_THREAD_ID" not in env_allowed(Codex(), "exec")
-    assert {"HOME", "OPENSHELL_SANDBOX", "PWD"} <= env_allowed(Codex(), "exec")
+    assert "CODEX_THREAD_ID" in env_allowed(Codex(), "agent", "0.160.0")
+    assert "CODEX_THREAD_ID" not in env_allowed(Codex(), "exec", "0.160.0")
+    assert {"HOME", "OPENSHELL_SANDBOX", "PWD"} <= env_allowed(Codex(), "exec", "0.160.0")
 
 
 def test_the_probe_config_has_no_submount_switch(tmp_path: Path) -> None:
@@ -151,7 +152,8 @@ def test_the_probe_config_has_no_submount_switch(tmp_path: Path) -> None:
     with held_canaries(ctx):
         cfg = probe_config(ctx, "exec")
     assert set(cfg) == {"path", "real_home_canary", "oa_canary", "other_accounts", "chosen", "allowed",
-                        "denied", "model_host", "wsd_socket", "env_allowed", "env_user"}
+                        "denied", "model_host", "wsd_socket", "env_allowed", "env_user", "install_record"}
+    assert cfg["install_record"] == str(INSTALL_RECORD_INSIDE)       # a path to the record, no switch
     assert not any(word in json.dumps(sorted(cfg)) for word in ("recursive", "submount", "bind", "mount"))
 
 
