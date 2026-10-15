@@ -312,9 +312,10 @@ def test_a_jump_onto_a_damaged_marker_advances_and_the_later_events_run(tmp_path
     stop = Handler()
     rig = started(tmp_path, stop=stop)
     key = rig.key(B)
-    rig.runtime.report(WS, ev(rig, n=1), SessionEvent(f"{key}:g1:e1026", "damaged", WS, B, key, 1, 0),
-                       ev(rig, n=1027))
+    rig.runtime.report(WS, ev(rig, n=1), SessionEvent(f"{key}:g1:e1026", "damaged", WS, B, key, 1, 0))
     rig.pickup()
+    assert rig.journal.session_cursors(WS) == {key: (1, 1026)}           # at the marker's number
+    rig.runtime.report(WS, ev(rig, n=1027))
     rig.pickup()
     assert stop.seen == [f"{key}:g1:e1", f"{key}:g1:e1027"]
     assert statuses(rig) == [InboxStatus.COMMITTED.value, InboxStatus.NEEDS_HUMAN.value,
