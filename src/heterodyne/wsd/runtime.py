@@ -28,6 +28,9 @@ KEY_CHANGED = "the account's credential key changed after the launch was pinned"
 # pin, and the guard's escalation detail when the profile's adapter has no selected install.
 INSTALL_UNPINNED = "the launch entry pins no install"
 NOT_SELECTED = "no install is selected for the profile's adapter; choose one with `wsctl harness use`"
+# Plan 4c T9: one text for a tainted install: `harness.verify`'s refusal and the park's `why` (Task 10).
+INSTALL_TAINTED = ("the install is tainted: a verification of it failed; check it with "
+                   "`wsctl harness verify` or remove it")
 
 
 class Liveness(StrEnum):

@@ -15,10 +15,8 @@ from heterodyne.agents.base import UNDECLARED_VERSION, Adapter, Cli
 from heterodyne.harness.resources import store_core as sc
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
-from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED
+from heterodyne.wsd.runtime import INSTALL_TAINTED, INSTALL_UNPINNED, NOT_SELECTED
 
-INSTALL_TAINTED = ("the install is tainted: a verification of it failed; check it with "
-                   "`wsctl harness verify` or remove it")
 STORE_UNSAFE = "the install store's location is unsafe; `heterodyne config check` lists its problems"
 NO_SUCH_INSTALL = sc.NO_SUCH_INSTALL
 META_UNREADABLE = "the install's meta manifest or record is missing, unreadable or malformed"
@@ -127,12 +125,15 @@ def clear_taint(taint_dir: Path, adapter: str, install: str) -> None:
 
 
 def verify_pin(store: Store, adapter: Adapter, pin: InstallPin, taint_dir: Path, *,
-               problems: Callable[[], Sequence[str]], mark: Taint = taint) -> VerifiedInstall:
+               problems: Callable[[], Sequence[str]], mark: Taint = taint,
+               io_taints: bool = True) -> VerifiedInstall:
     """The install `pin` names, checked in E22's order: no taint marker (`INSTALL_TAINTED`), no store problem
     (`STORE_UNSAFE`; `problems` raising counts as one), the install exists (`NO_SUCH_INSTALL`), its meta files
     read (`META_UNREADABLE`), the meta manifest's digest is the pin's (`DIGEST_DIFFERS`), `check_fast` passes
     (`INSTALL_CHANGED`), and its version is one the adapter declares (`UNDECLARED_VERSION`). For a refusal in
-    `TAINTING`, `mark` writes the marker before `VerifyRefused` is raised."""
+    `TAINTING`, `mark` writes the marker before `VerifyRefused` is raised. Without `io_taints` (the taint
+    watch, plan 4c T9), an OSError reading the meta files or walking the tree is raised as it is: a read
+    that failed is no evidence of a change."""
     if not sc.PLAIN.fullmatch(adapter.name) or not sc.INSTALL.fullmatch(pin.install):
         raise VerifyRefused(NO_SUCH_INSTALL)        # before any path is built from the names
     try:
@@ -158,7 +159,11 @@ def verify_pin(store: Store, adapter: Adapter, pin: InstallPin, taint_dir: Path,
     try:
         try:
             meta = sc.read_meta(store.root, adapter.name, pin.install)
-        except (sc.Refused, OSError):
+        except sc.Refused:
+            meta = None
+        except OSError:
+            if not io_taints:
+                raise
             meta = None
         if meta is None:
             raise refuse(META_UNREADABLE)
@@ -167,7 +172,11 @@ def verify_pin(store: Store, adapter: Adapter, pin: InstallPin, taint_dir: Path,
             raise refuse(DIGEST_DIFFERS)
         try:
             sc.check_fast(root_fd, manifest, record)
-        except (sc.Refused, OSError):
+        except sc.Refused:
+            raise refuse(INSTALL_CHANGED) from None
+        except OSError:
+            if not io_taints:
+                raise
             raise refuse(INSTALL_CHANGED) from None
     finally:
         os.close(root_fd)

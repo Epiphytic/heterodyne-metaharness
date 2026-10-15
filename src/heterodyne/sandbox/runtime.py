@@ -64,6 +64,7 @@ from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
+    INSTALL_TAINTED,
     INSTALL_UNPINNED,
     KEY_CHANGED,
     LOGIN_STALE,
@@ -97,6 +98,7 @@ SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
 MAX_QUEUED = 256        # reports a workstream keeps between drains: a flooding session keeps only its newest
+TAINT_SECONDS = 600     # plan 4c T9: how old an install in use's last walk may get before `expire` walks it
 USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py's own limit is 30)
 DIAG_USAGE_READ = "an in-sandbox usage read gave no reading"
 READ_REASON = re.compile(rb"codex_usage: ([A-Za-z]+)\n")       # the script's one stderr line (Task 5)
@@ -317,6 +319,8 @@ class SandboxRuntime:
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
+        self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
+        self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
 
     # --- names ---
 
@@ -408,6 +412,8 @@ class SandboxRuntime:
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
         installed = self._cli(adapter, spec)
+        with self.walk_lock:
+            self.walked[(adapter.name, installed.name)] = self.c.clock()    # the launch's verify walked it
         protected, others = self._logins(adapter, spec.account)
         checked = self._pinned(adapter, spec, protected.chosen_files)
         try:
@@ -477,6 +483,7 @@ class SandboxRuntime:
                 continue
             if not stopped:
                 failed.append("a session at its maximum lifetime could not be stopped")
+        self._watch(now, due_only=True)          # after the lifetime pass, which a walk never holds up
         if failed:
             raise RuntimeUnavailable(failed[0])
 
@@ -561,6 +568,41 @@ class SandboxRuntime:
                 queue = self.queued.setdefault(rec.ws, [])
                 queue.append(InstallTainted(rec.key, rec.generation, adapter, install))
                 del queue[:-MAX_QUEUED]
+
+    def _watch(self, now: int, *, due_only: bool) -> None:
+        """Plan 4c T9 (E17's second path): walk every install a live session runs, or with `due_only` each
+        one whose last walk is `TAINT_SECONDS` old. A mismatch writes the marker (in `verify_pin`, before it
+        raises) and queues one InstallTainted per live session on the install, into its own workstream's
+        queue; so does a marker already there, since sessions may have started on the install after it was
+        written. Anything else (an unsafe store, a missing install, an undeclared version, an I/O failure)
+        is no evidence: it is logged, and the install stays due. Never raises."""
+        try:
+            live = [r for r in self._records() if r.phase is not Phase.ENDED and r.install]
+        except RuntimeUnavailable:
+            log.warning("taint watch: the session records can't be listed")
+            return
+        pins = sorted({(r.adapter, r.install, r.install_digest) for r in live})
+        with self.walk_lock:
+            for name, install, digest in pins:
+                last = self.walked.get((name, install))
+                if due_only and last is not None and now - last < TAINT_SECONDS:
+                    continue
+                adapter = self.c.adapters.get(name)
+                if adapter is None:
+                    log.warning("taint watch: no adapter %s for install %s", name, install)
+                    continue
+                try:
+                    hv.verify_pin(self.c.store, adapter, InstallPin(install, digest), self.c.taint_dir,
+                                  problems=self.c.store_problems, mark=hv.taint, io_taints=False)
+                except hv.VerifyRefused as exc:
+                    if exc.constant not in (*hv.TAINTING, INSTALL_TAINTED):
+                        log.warning("taint watch: %s %s can't be walked: %s", name, install, exc.constant)
+                        continue
+                    self._tainted(name, install)
+                except Exception:  # noqa: BLE001 - a walk that can't run is logged, never raised
+                    log.warning("taint watch: %s %s can't be walked", name, install, exc_info=True)
+                    continue
+                self.walked[(name, install)] = now
 
     def _cli(self, adapter: Adapter, spec: LaunchSpec) -> hv.VerifiedInstall:
         """The launch entry's pinned install, verified (D2): never the selection, which may have moved since
@@ -935,6 +977,7 @@ class SandboxRuntime:
             journaled = False                # stop it anyway; landing and `ended` wait for a durable record
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
+        self._watch(self.c.clock(), due_only=False)    # T9: the tree as the generation left it, `stopping`
         if rec.created:              # a create that failed or timed out may still land: its watcher stays
             with contextlib.suppress(*TMUX_ERRORS):
                 self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
