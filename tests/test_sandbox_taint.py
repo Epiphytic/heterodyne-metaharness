@@ -41,9 +41,8 @@ pytestmark = needs_tools
 # section: the record's pin fields, where the rig's store and taint markers live, and the walk's check. ---
 
 def install_of(rec: SessionRecord) -> str:
-    """The install the session's generation runs (E15's pin, as the record keeps it; `install_name` if the
-    lead's rename of T8's `SessionRecord.install` lands)."""
-    return rec.install
+    """The install the session's generation runs (E15's pin, as the record keeps it)."""
+    return rec.install_name
 
 
 def store_root(rig: RuntimeRig) -> Path:

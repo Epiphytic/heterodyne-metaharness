@@ -585,11 +585,11 @@ class SandboxRuntime:
         written. Anything else (an unsafe store, a missing install, an undeclared version, an I/O failure)
         is no evidence: it is logged, and the install stays due. Never raises."""
         try:
-            live = [r for r in self._records() if r.phase is not Phase.ENDED and r.install]
+            live = [r for r in self._records() if r.phase is not Phase.ENDED and r.install_name]
         except RuntimeUnavailable:
             log.warning("taint watch: the session records can't be listed")
             return
-        pins = sorted({(r.adapter, r.install, r.install_digest) for r in live})
+        pins = sorted({(r.adapter, r.install_name, r.install_digest) for r in live})
         with self.walk_lock:
             for name, install, digest in pins:
                 last = self.walked.get((name, install))
