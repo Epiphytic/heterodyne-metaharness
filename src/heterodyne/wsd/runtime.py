@@ -170,9 +170,10 @@ class SessionEvent:
 
 @dataclass(frozen=True)
 class EventBatch:
-    """What `session_events` read: events ordered by (key, generation, n), with no gap after each key's
-    cursor. `ends[(key, g)] = n`: generation g's log is final at n (nothing will follow it). `more`: a
-    key had more events than the limit."""
+    """What `session_events` read: events ordered by (key, generation, n) after each key's cursor. Ordinary
+    events are contiguous; only a `damaged` event may follow a gap, since it stands for every number after
+    the event before it (or the cursor) up to its own. `ends[(key, g)] = n`: generation g's log is final at
+    n (nothing will follow it). `more`: a key had more events than the limit."""
     events: tuple[SessionEvent, ...] = ()
     ends: Mapping[tuple[str, int], int] = field(
         default_factory=lambda: cast(Mapping[tuple[str, int], int], {}))
