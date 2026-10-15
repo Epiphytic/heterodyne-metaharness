@@ -90,6 +90,8 @@ SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
 STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
 BRIEF_SECONDS = 60.0    # the probe turn's end, then the brief's prompt (plan 5i T4)
+STEER_SECONDS = 5.0     # the most a steer's paste may take; never more than half the session's hook wait
+STEER_MIN_SECONDS = 1.0     # less than this leaves too little for a paste and its settle
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -493,7 +495,11 @@ class SandboxRuntime:
         a restart the turn state is empty, so the next turn end must come first. The socket spends the
         boundary before the paste and holds back turn events until it is over (`at_boundary`), so a boundary
         a steer (even an uncertain one) pasted at is spent until the next turn end, and concurrent steers
-        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline."""
+        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline.
+
+        Turn events wait for the paste, and their hooks' shim gives up after the hook wait
+        (hook_wait_seconds) and lets the turn go on, so the paste is bounded to half of it: a prompt hook
+        that arrives during a paste is still answered, and recorded, in time."""
         try:
             rec = read_record(self.layout(session_key))
         except RuntimeUnavailable:
@@ -513,12 +519,15 @@ class SandboxRuntime:
         server = self.servers.get(session_key)
         if server is None:
             raise SteerRefused("the session is mid-turn")
+        seconds = min(STEER_SECONDS, self.c.settings.hook_wait_seconds / 2)
+        if seconds < STEER_MIN_SECONDS:
+            raise SteerRefused("the hook wait is too short to steer")
         failed = False
 
         def deliver() -> bool:
             nonlocal failed
             try:
-                self.c.tmux.paste(rec.tmux_session, text)
+                self.c.tmux.paste(rec.tmux_session, text, seconds=seconds)
             except TmuxPasteUncertain:
                 raise                       # it may have landed: the boundary stays spent
             except TmuxError:

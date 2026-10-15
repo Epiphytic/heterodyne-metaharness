@@ -8,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 from fakes.fake_btq import World, factory
 from sandbox_env import (
     RuntimeRig,
+    WatchedGate,
     bead_worktree,
     fresh_logins,
     launch_spec,
@@ -51,6 +53,7 @@ from heterodyne.sandbox.runtime import (
     write_record,
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
+from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
 from heterodyne.wsd import brief, gitwip, ids
@@ -2549,7 +2552,7 @@ def test_steer_refuses_a_second_steer_until_the_first_turn_ends(rig: RuntimeRig,
     server = rig.runtime.servers[spec.session_key]
     stops = server.turns().stops
     pasted: list[str] = []
-    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, text: pasted.append(text))
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, text, **_: pasted.append(text))
     rig.runtime.steer(spec.session_key, 1, "first")         # delivered; its turn hasn't started yet
     with pytest.raises(SteerRefused, match="mid-turn"):     # the boundary it pasted at is spent
         rig.runtime.steer(spec.session_key, 1, "second")
@@ -2599,7 +2602,7 @@ def test_an_uncertain_paste_is_uncertain(rig: RuntimeRig, profile: str,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
     spec, _pane = idle_session(rig, profile)
 
-    def uncertain(_name: str, _text: str) -> None:
+    def uncertain(_name: str, _text: str, **_: object) -> None:
         raise TmuxPasteUncertain("maybe")
 
     monkeypatch.setattr(rig.runtime.c.tmux, "paste", uncertain)
@@ -2614,7 +2617,7 @@ def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,
     spec, _pane = idle_session(rig, "p-one")
     calls: list[str] = []
 
-    def failed(_name: str, text: str) -> None:
+    def failed(_name: str, text: str, **_: object) -> None:
         calls.append(text)
         if len(calls) == 1:
             raise TmuxError("tmux paste failed (OSError)")
@@ -2645,7 +2648,7 @@ class BlockedPaste:
         self.release = threading.Event()
         self.pasted: list[str] = []
 
-    def __call__(self, _name: str, text: str) -> None:
+    def __call__(self, _name: str, text: str, **_: object) -> None:
         self.pasted.append(text)
         self.entered.set()
         assert self.release.wait(10)
@@ -2665,7 +2668,7 @@ def test_steer_refuses_a_running_turn(rig: RuntimeRig, profile: str, tmp_path: P
     assert not server.turns().idle
     pasted: list[str] = []
     with monkeypatch.context() as m:
-        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, text: pasted.append(text))
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, text, **_: pasted.append(text))
         with pytest.raises(SteerRefused, match="mid-turn"):
             rig.runtime.steer(spec.session_key, 1, "hello")
     assert pasted == []
@@ -2702,13 +2705,15 @@ def test_a_turn_event_waits_for_a_delivering_steer(rig: RuntimeRig, monkeypatch:
     before = server.turns()
     paste = BlockedPaste()
     monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste)
+    gate = WatchedGate(server)
+    monkeypatch.setattr(server, "_turn_gate", gate)
     steer = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
     steer.start()
     prompt = threading.Thread(target=hook, args=(server, "UserPromptSubmit"))
     try:
         assert paste.entered.wait(10)
         prompt.start()
-        prompt.join(0.3)
+        assert gate.waiting.wait(10)                        # the prompt's handler is at the gate
         assert prompt.is_alive()                            # held until the delivery is over
         assert server.turns() == before
     finally:
@@ -2725,7 +2730,7 @@ def test_a_turn_event_waits_for_a_delivering_steer(rig: RuntimeRig, monkeypatch:
 def test_steer_refuses_terminal_controls(rig: RuntimeRig, text: str, monkeypatch: pytest.MonkeyPatch) -> None:
     spec, _pane = idle_session(rig, "p-one")
     pasted: list[str] = []
-    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t: pasted.append(t))
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
     with pytest.raises(SteerRefused, match="terminal control"):
         rig.runtime.steer(spec.session_key, 1, text)
     assert pasted == []
@@ -2736,7 +2741,7 @@ def test_steer_refuses_terminal_controls(rig: RuntimeRig, text: str, monkeypatch
 def test_steer_refuses_text_that_is_not_utf8(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
     spec, _pane = idle_session(rig, "p-one")
     pasted: list[str] = []
-    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t: pasted.append(t))
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
     with pytest.raises(SteerRefused, match="not valid UTF-8"):
         rig.runtime.steer(spec.session_key, 1, "lone \ud800 surrogate")
     assert pasted == []
@@ -2763,7 +2768,7 @@ def test_a_rebind_after_a_spent_boundary_steers_after_a_turn_end(rig: RuntimeRig
     spec, pane = idle_session(rig, profile)
     pasted: list[str] = []
     with monkeypatch.context() as m:
-        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, t: pasted.append(t))
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
         rig.runtime.steer(spec.session_key, 1, "spent")     # pasted nowhere: the boundary is spent
     rig.runtime.servers.pop(spec.session_key).close()
     rig.runtime.sessions("alpha")                           # rebinds it
@@ -2782,7 +2787,7 @@ def test_a_new_generation_after_a_spent_boundary_can_be_steered(rig: RuntimeRig,
                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
     spec, _pane = idle_session(rig, profile)
     with monkeypatch.context() as m:
-        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, _t: None)
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, _t, **_: None)
         rig.runtime.steer(spec.session_key, 1, "spent")
     first = record(rig, spec.session_key)
     rig.runtime.stop(spec.session_key)
@@ -2910,3 +2915,40 @@ def test_a_brief_that_is_unsafe_to_paste_fails_the_launch_unpasted(rig: RuntimeR
     with pytest.raises(LaunchFailed, match=why):
         rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief=text))
     assert pasted == []
+@ADAPTERS
+def test_a_prompt_hook_during_the_longest_steer_is_answered_and_recorded_in_time(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c2 B1: the shim gives up after its hook wait and lets the turn start, so a prompt that waits for
+    # a paste must still be answered within it. The paste is bounded to half the hook wait; here it takes
+    # all of that bound, and the real shim's UserPromptSubmit, sent mid-paste, is still recorded in time.
+    spec, _pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    before = server.turns()
+    wait = json.loads((server.path.parent / shim.CONFIG_FILE).read_text())["wait_seconds"]
+    entered, bounds = threading.Event(), list[float | None]()
+
+    def slow(_name: str, _text: str, *, seconds: float | None = None) -> None:
+        bounds.append(seconds)
+        entered.set()
+        time.sleep(seconds if seconds is not None else 15.0)   # the whole bound (unbounded: one tmux step)
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", slow)
+    gate = WatchedGate(server)
+    monkeypatch.setattr(server, "_turn_gate", gate)
+    steer = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
+    steer.start()
+    answer: list[tuple[int, str]] = []
+    try:
+        assert entered.wait(10)
+        raw = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": None, "prompt": "typed"})
+        env = {"HZ_SESSION_SOCKET": str(server.path), "HOME": str(rig.home)}
+        start = time.monotonic()
+        answer.append(shim.run_hook(raw.encode(), env, event="UserPromptSubmit"))
+        took = time.monotonic() - start
+        prompts = server.turns().prompts                    # as the shim answers: the agent's turn starts
+    finally:
+        steer.join(30)
+    assert gate.waiting.is_set()                            # it did wait for the paste
+    assert prompts == before.prompts + 1                    # recorded before the shim gave up
+    assert answer == [(0, "")] and took < wait
+    assert bounds == [min(runtime_mod.STEER_SECONDS, wait / 2)]

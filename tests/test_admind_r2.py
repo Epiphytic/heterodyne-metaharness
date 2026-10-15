@@ -80,7 +80,8 @@ class PaneTmux(FakeTmux):
         monkeypatch.setattr(self.real, "_run", self._run)
         monkeypatch.setattr("heterodyne.tmux.time.sleep", lambda _s: None)
 
-    def _run(self, *args: str, data: bytes | None = None, check: bool = True) -> Any:
+    def _run(self, *args: str, data: bytes | None = None, check: bool = True,
+             timeout: float = 15.0) -> Any:
         if args[0] == "load-buffer":
             assert data is not None
             self.buffers[args[2]] = data.decode()

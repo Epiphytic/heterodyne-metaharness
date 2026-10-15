@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 from tmux_guard import new_test_tmux
 
-from heterodyne.tmux import Tmux, TmuxError, escape_controls, has_controls
+from heterodyne.tmux import (
+    MIN_STEP,
+    PASTE_SETTLE,
+    Tmux,
+    TmuxError,
+    TmuxPasteUncertain,
+    escape_controls,
+    has_controls,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
@@ -180,3 +188,66 @@ def test_escaped_text_shows_its_controls_and_carries_none(text: str, shown: str)
     assert escape_controls(text) == shown
     assert not has_controls(escape_controls(text))
     escape_controls(text).encode("utf-8")                   # strict: always pasteable
+
+
+class SlowTmux:
+    """tmux commands that take `delay[command]` seconds, or time out (TimeoutExpired once their timeout
+    passes) when that is longer than the timeout they were given. Notes (command, timeout, when run)."""
+
+    def __init__(self, delay: dict[str, float]) -> None:
+        self.delay = delay
+        self.calls: list[tuple[str, float, float]] = []
+
+    def __call__(self, argv: list[str], *, input: bytes | None,
+                 timeout: float) -> subprocess.CompletedProcess[bytes]:
+        command = next(a for a in argv if a in ("load-buffer", "paste-buffer", "send-keys", "delete-buffer"))
+        self.calls.append((command, timeout, time.monotonic()))
+        took = self.delay.get(command, 0.0)
+        if took > timeout:
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        time.sleep(took)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def commands(self) -> list[str]:
+        return [c for c, _, _ in self.calls]
+
+
+def bounded_paste(tmux: Tmux, monkeypatch: pytest.MonkeyPatch, delay: dict[str, float],
+                  seconds: float) -> tuple[SlowTmux, float, BaseException | None]:
+    slow = SlowTmux(delay)
+    monkeypatch.setattr(tmux, "_exec", slow)
+    start, raised = time.monotonic(), None
+    try:
+        tmux.paste("s", "hello", seconds=seconds)
+    except TmuxError as exc:
+        raised = exc
+    end = start + seconds
+    for command, timeout, at in slow.calls:     # no command may run past the bound (cleanup: MIN_STEP)
+        assert at + timeout <= end + (MIN_STEP if command == "delete-buffer" else 0) + 0.05, command
+    return slow, time.monotonic() - start, raised
+
+
+def test_a_bounded_paste_gives_each_command_only_what_is_left(tmux: Tmux,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {}, 2.0)
+    assert raised is None and slow.commands()[:3] == ["load-buffer", "paste-buffer", "send-keys"]
+    assert took < 2.0
+
+
+def test_a_bounded_paste_with_no_time_left_after_the_load_pastes_nothing(
+        tmux: Tmux, monkeypatch: pytest.MonkeyPatch) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {"load-buffer": 0.6}, 1.0)
+    assert type(raised) is TmuxError                    # not uncertain: nothing reached the pane
+    assert "paste-buffer" not in slow.commands() and took < 1.0 + MIN_STEP + 0.1
+    assert 1.0 - 0.6 < PASTE_SETTLE + 2 * MIN_STEP      # the case is the one it claims
+
+
+@pytest.mark.parametrize("hung", ["paste-buffer", "send-keys"])
+def test_a_bounded_paste_that_hangs_ends_within_its_bound(tmux: Tmux, monkeypatch: pytest.MonkeyPatch,
+                                                         hung: str) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {hung: 60.0}, 1.5)
+    assert isinstance(raised, TmuxPasteUncertain)
+    assert took < 1.5 + MIN_STEP + 0.1
+    if hung == "paste-buffer":
+        assert "send-keys" not in slow.commands()

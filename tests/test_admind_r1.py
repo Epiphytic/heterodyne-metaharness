@@ -509,7 +509,8 @@ def scripted_tmux(monkeypatch: pytest.MonkeyPatch, fail: dict[str, BaseException
     t = Tmux("hz-test-never-started")
     calls: list[str] = []
 
-    def fake_run(*args: str, data: bytes | None = None, check: bool = True) -> Any:
+    def fake_run(*args: str, data: bytes | None = None, check: bool = True,
+                 timeout: float = 15.0) -> Any:
         calls.append(args[0])
         if args[0] in fail:
             raise fail[args[0]]

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from sandbox_env import wait_for
+from sandbox_env import WatchedGate, wait_for
 
 from heterodyne.session.server import MAX_DEPTH, BoundaryBusy, SessionServer, TurnState
 
@@ -376,11 +376,13 @@ def test_a_failed_delivery_gives_the_boundary_back_and_a_raising_one_spends_it(s
         server.at_boundary(lambda: True)
 
 
-def test_turn_events_wait_for_a_delivery(server: SessionServer) -> None:
+def test_turn_events_wait_for_a_delivery(server: SessionServer, monkeypatch: pytest.MonkeyPatch) -> None:
     turn(server, "UserPromptSubmit")
     turn(server, "Stop")
     before = server.turns()
     entered, release = threading.Event(), threading.Event()
+    gate = WatchedGate(server)
+    monkeypatch.setattr(server, "_turn_gate", gate)
 
     def deliver() -> bool:
         entered.set()
@@ -392,7 +394,7 @@ def test_turn_events_wait_for_a_delivery(server: SessionServer) -> None:
     prompt = threading.Thread(target=turn, args=(server, "UserPromptSubmit"))
     prompt.start()
     try:
-        prompt.join(0.3)
+        assert gate.waiting.wait(10)                        # its handler is at the gate
         assert prompt.is_alive()
         ask(server.path, req(TOKEN, "hook_event", {"hook_event_name": "Notification"}))   # not a turn event
         assert server.turns() == before
