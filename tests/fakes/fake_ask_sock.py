@@ -8,7 +8,8 @@ open, per hour, undelivered notices) are flags and counters the test sets.
 
 `script` scripts the next connections, one entry each: "drop" closes after reading without a reply,
 "hang" never replies, "garbage" replies with a line that is not JSON, "failed" replies with admind's
-internal error, and any other string is a refusal with that message. `frames` holds every raw request line.
+internal error, any other string is a refusal with that message, and bytes are written as the raw reply.
+`frames` holds every raw request line.
 """
 
 import asyncio
@@ -47,7 +48,7 @@ class FakeAskSock:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.frames: list[bytes] = []
-        self.script: deque[str] = deque()
+        self.script: deque[str | bytes] = deque()
         self.asks: dict[str, FakeAsk] = {}
         self.notices: list[NoticePost] = []
         self.latched = False
@@ -119,7 +120,9 @@ class FakeAskSock:
                 assert self._release is not None
                 await self._release.wait()
                 return
-            if step == "garbage":
+            if isinstance(step, bytes):
+                writer.write(step)
+            elif step == "garbage":
                 writer.write(b"not json\n")
             else:
                 reply = (asks.failed() if step == "failed" else asks.refused(step) if step is not None

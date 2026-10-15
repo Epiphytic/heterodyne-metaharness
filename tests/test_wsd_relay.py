@@ -4,10 +4,17 @@ This is the only module that imports both `wsd.relay` and `admind`: it proves th
 encode exactly as admind's, and that admind's replies and refusal texts map as the client expects.
 """
 
+import ast
+import asyncio
+import logging
 import os
+import re
+import secrets
 import socket
 import subprocess
 import sys
+import threading
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -123,6 +130,18 @@ def test_the_mirrored_refusal_texts_are_admind_s() -> None:
     assert relay.BEAD_BUSY == daemon.BEAD_BUSY
     assert relay.NOTICE_MESSAGES == notices.MESSAGES
     assert relay.MAX_REPLY == asks.MAX_REPLY
+
+
+@pytest.mark.parametrize(("mirror", "theirs"), [
+    (relay.AskPost, asks.AskPost), (relay.AskGet, asks.AskGet), (relay.AskList, asks.AskList),
+    (relay.AskCancel, asks.AskCancel), (relay.NoticePost, notices.NoticePost),
+    (relay.LinkSpec, links.LinkSpec)])
+def test_the_request_structs_keep_admind_s_schema_policy(mirror: type[msgspec.Struct],
+                                                         theirs: type[msgspec.Struct]) -> None:
+    ours, admind_s = mirror.__struct_config__, theirs.__struct_config__
+    assert ours.forbid_unknown_fields and admind_s.forbid_unknown_fields
+    assert (ours.tag, ours.omit_defaults, ours.frozen) == (admind_s.tag, admind_s.omit_defaults,
+                                                           admind_s.frozen)
 
 
 def test_relay_does_not_import_admind() -> None:
@@ -274,3 +293,138 @@ def test_poster_for_always_matches_admind_poster_rule(ws: str) -> None:
 def test_poster_for_keeps_a_slug() -> None:
     assert relay.poster_for("Hermes-Main") == "wsd-hermes-main"
     assert relay.poster_for("a" * 100) == "wsd-" + "a" * 28
+
+
+# --- every ask refusal admind can send is classified ---------------------------------------------
+def refusal_sites() -> set[str]:
+    """Each refusal text daemon.py can reply with, as source: the argument of every `asks.refused(...)`,
+    the message of every `approval_refused(...)`, and what `approval_post_refusal` and `prepare_approval`
+    return. Request-level refusals (ctl's "malformed request", `asks.check`) are validation: permanent."""
+    sites: set[str] = set()
+    for node in ast.walk(ast.parse(Path(daemon.__file__).read_text())):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "refused" and ast.unparse(node.func.value) == "asks":
+                sites.add(ast.unparse(node.args[0]))
+            elif node.func.attr == "approval_refused":
+                sites.add(ast.unparse(node.args[1]))
+        elif isinstance(node, ast.FunctionDef) and node.name in ("approval_post_refusal", "prepare_approval"):
+            for r in ast.walk(node):
+                if isinstance(r, ast.Return) and r.value is not None:
+                    value = r.value.elts[0] if isinstance(r.value, ast.Tuple) else r.value
+                    sites.add(f"{node.name}: {ast.unparse(value)}")
+    return sites
+
+
+# Each site, with sample texts and whether the client must call them retryable. A site with no samples
+# passes another site's text through (named in its comment), or is not a refusal.
+REFUSAL_SITES: dict[str, list[tuple[str, bool]]] = {
+    "ASK_BUSY": [(daemon.ASK_BUSY, True)],
+    "ASK_LATCHED": [(daemon.ASK_LATCHED, True)],
+    "ASK_TOO_MANY": [(daemon.ASK_TOO_MANY, True)],
+    "ASK_TOO_OFTEN": [(daemon.ASK_TOO_OFTEN, True)],
+    "BEAD_BUSY.format(bead=bead)": [(daemon.BEAD_BUSY.format(bead="ws-1"), True)],
+    "asks.ASK_LINK_TOO_LONG": [(asks.ASK_LINK_TOO_LONG, False)],
+    "f'admind could not read {bead} ({exc.word}); try again.'": [
+        ("admind could not read ws-1 (timeout); try again.", False)],
+    "f'ask {row.ask_id} is {row.status}; only an open or answered ask can be cancelled'": [
+        ("ask abcd is decided; only an open or answered ask can be cancelled", False)],
+    "f'no ask {show(req.ask_id, False)}'": [("no ask abcd", False)],
+    "refusal or ASK_NO_APPROVALS": [(daemon.ASK_NO_APPROVALS, False)],   # or approval_post_refusal's
+    "approval_post_refusal: ASK_BEAD_BUSY.format(ask_id=busy.ask_id, bead=bead)": [
+        (daemon.ASK_BEAD_BUSY.format(ask_id="abcd", bead="ws-1"), True)],
+    "approval_post_refusal: ASK_LATCHED": [(daemon.ASK_LATCHED, True)],
+    "approval_post_refusal: ASK_NO_APPROVALS": [(daemon.ASK_NO_APPROVALS, False)],
+    "approval_post_refusal: ASK_TOO_MANY": [(daemon.ASK_TOO_MANY, True)],
+    "approval_post_refusal: ASK_TOO_OFTEN": [(daemon.ASK_TOO_OFTEN, True)],
+    "approval_post_refusal: None": [],                      # not a refusal
+    "prepare_approval: redact(refusal[0])": [               # approvals.postable's: the bead isn't ready
+        ("approve-bead gave no gate preview for this bead; try again", False)],
+    "prepare_approval: card": [(asks.TOO_LONG, False), (asks.REDACTED, False),
+                               (asks.ASK_LINK_TOO_LONG, False)],
+    "prepare_approval: refusal": [],                        # approval_post_refusal's
+    "prepare_approval: FreshCard(row, card)": [],           # not a refusal
+    "*fresh": [],                                           # prepare_approval's
+    "message": [],                                          # approval_refused's own: its callers'
+    "notices.MESSAGES[result]": [],                         # a notice: its codes, NOTICE_RETRYABLE
+}
+
+
+def test_every_ask_refusal_site_in_admind_is_classified() -> None:
+    assert refusal_sites() == set(REFUSAL_SITES)
+
+
+@pytest.mark.parametrize(("message", "retryable"),
+                         [sample for samples in REFUSAL_SITES.values() for sample in samples])
+def test_each_classified_refusal_maps_as_its_site_says(message: str, retryable: bool) -> None:
+    assert relay.RelayRefused(message).retryable is retryable
+
+
+# --- the refusal text never reaches str, repr or a log (c1 B1) -------------------------------------
+def test_a_refusal_never_carries_admind_s_text(fake: FakeAskSock, caplog: pytest.LogCaptureFixture) -> None:
+    hex64 = secrets.token_hex(32)
+    message = f"first line\nsecond line {hex64}\n"
+    fake.script.extend([message, message])
+    log = logging.getLogger("test_wsd_relay")
+    caught: list[Exception] = []
+    for call in (lambda: relay.post_ask(fake.path, question()),
+                 lambda: relay.post_notice(fake.path, poster="wsd-ws1", title="t")):
+        try:
+            call()
+        except (relay.RelayRefused, relay.NoticeRefused) as exc:
+            log.exception("refused")
+            caught.append(exc)
+    ask_refusal, notice_refusal = caught
+    assert isinstance(ask_refusal, relay.RelayRefused) and ask_refusal.message == message
+    assert not ask_refusal.retryable
+    assert isinstance(notice_refusal, relay.NoticeRefused) and notice_refusal.code == relay.NOTICE_OTHER
+    shown = [caplog.text] + [t for exc in caught
+                             for t in (str(exc), repr(exc), *traceback.format_exception(exc))]
+    for text in shown:
+        assert "second line" not in text and not re.search(r"[0-9a-f]{64}", text)
+    assert all("\n" not in t for exc in caught for t in (str(exc), repr(exc)))
+
+
+def test_a_refusal_s_text_is_a_fixed_diagnostic() -> None:
+    assert str(relay.RelayRefused(daemon.ASK_LATCHED)) == "ask.sock refused the request (retryable)"
+    assert str(relay.RelayRefused("anything else")) == "ask.sock refused the request (permanent)"
+    assert repr(relay.RelayRefused("x")) == "RelayRefused('ask.sock refused the request (permanent)')"
+    assert str(relay.NoticeRefused("rate-hour")) == "notice refused: rate-hour"
+
+
+# --- write faults and the reply limit -----------------------------------------------------------
+@pytest.mark.parametrize("fault", ["write", "drain"])
+def test_a_write_or_drain_fault_is_uncertain(fake: FakeAskSock, monkeypatch: pytest.MonkeyPatch,
+                                              fault: str) -> None:
+    real = getattr(asyncio.StreamWriter, fault)
+
+    def broken(self: asyncio.StreamWriter, *args: object) -> object:
+        if threading.current_thread() is threading.main_thread():     # the client's, not the fake's
+            raise BrokenPipeError
+        return real(self, *args)
+
+    monkeypatch.setattr(asyncio.StreamWriter, fault, broken)
+    with pytest.raises(relay.RelayUncertain) as info:
+        relay.post_ask(fake.path, question(), timeout=2.0)
+    assert not isinstance(info.value, relay.RelayUnavailable)
+    with pytest.raises(relay.NoticeUncertain):
+        relay.post_notice(fake.path, poster="wsd-ws1", title="t", timeout=2.0)
+
+
+def reply_of(size: int) -> bytes:
+    """admind's refusal, padded to exactly `size` bytes before its newline."""
+    pad = size - len(msgspec.json.encode(asks.refused("")))
+    return msgspec.json.encode(asks.refused("x" * pad)) + b"\n"
+
+
+def test_a_reply_of_admind_s_limit_is_read(fake: FakeAskSock) -> None:
+    fake.script.append(reply_of(relay.MAX_REPLY))
+    with pytest.raises(relay.RelayRefused) as info:
+        relay.post_ask(fake.path, question())
+    assert len(info.value.message) > relay.MAX_REPLY - 100
+
+
+@pytest.mark.parametrize("size", [relay.MAX_REPLY + 1, relay.MAX_REPLY + 2, 2 * relay.MAX_REPLY])
+def test_a_reply_over_admind_s_limit_is_uncertain(fake: FakeAskSock, size: int) -> None:
+    fake.script.append(reply_of(size))
+    with pytest.raises(relay.RelayUncertain):
+        relay.post_ask(fake.path, question())
