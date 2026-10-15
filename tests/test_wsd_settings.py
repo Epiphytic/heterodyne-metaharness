@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from heterodyne.config import ConfigError
-from heterodyne.wsd.settings import resolve, restart_fields, restart_view
+from heterodyne.admind import asks
+from heterodyne.config import ConfigError, paths
+from heterodyne.wsd.settings import RelaySettings, resolve, restart_fields, restart_view
 
 
 @pytest.fixture(autouse=True)
@@ -135,3 +136,60 @@ def test_the_credential_locks_live_in_the_state_dir(cfg: Path) -> None:
     s = resolve(env(cfg))
     assert s.credlock_dir == s.state_dir / "credlocks"
     assert s.credlock_dir != s.lock_dir
+
+
+# --- plan 5i part 2: [wsd.relay], admind's interim relay ---
+
+def with_relay(cfg: Path, text: str) -> None:
+    write(cfg, "config.toml", (cfg / "config.toml").read_text() + f"[wsd.relay]\n{text}\n")
+
+
+def test_relay_settings_defaults_and_bounds(cfg: Path) -> None:
+    r = resolve(env(cfg)).relay
+    assert r == RelaySettings(enabled=True, ask_socket=paths.state_dir(env(cfg)) / "admind" / asks.ASK_SOCKET,
+                              question_rounds_before_human=3, owed_hours_before_human=24,
+                              notice_backoff_seconds=60.0)
+    assert r.ask_socket == cfg / ".local" / "state" / "heterodyne" / "admind" / "ask.sock"   # admind's own
+    with_relay(cfg, f'enabled = false\nask_socket = "{cfg}/run/ask.sock"\nquestion_rounds_before_human = 1\n'
+               'owed_hours_before_human = 720\nnotice_backoff_seconds = 1800')
+    assert resolve(env(cfg)).relay == RelaySettings(False, cfg / "run" / "ask.sock", 1, 720, 1800.0)
+
+
+def test_relay_ask_socket_expands_home(cfg: Path) -> None:
+    with_relay(cfg, 'ask_socket = "~/s/ask.sock"')
+    assert resolve(env(cfg)).relay.ask_socket == cfg / "s" / "ask.sock"
+
+
+@pytest.mark.parametrize(("text", "match"), [
+    ('enabled = "yes"', "enabled must be true or false"),
+    ("enabled = 1", "enabled must be true or false"),
+    ('ask_socket = "relative.sock"', "ask_socket must be an absolute path"),
+    ('ask_socket = ""', "ask_socket must be a path"),
+    ("question_rounds_before_human = 0", "question_rounds_before_human must be an integer from 1 to 100"),
+    ("question_rounds_before_human = 101", "question_rounds_before_human must be an integer from 1 to 100"),
+    ("question_rounds_before_human = true", "question_rounds_before_human must be an integer"),
+    ("owed_hours_before_human = 0", "owed_hours_before_human must be an integer from 1 to 720"),
+    ("owed_hours_before_human = 721", "owed_hours_before_human must be an integer from 1 to 720"),
+    ("owed_hours_before_human = 2.5", "owed_hours_before_human must be an integer from 1 to 720"),
+    ("notice_backoff_seconds = 0", "notice_backoff_seconds must be a number of seconds"),
+    ("notice_backoff_seconds = 1801", "notice_backoff_seconds must be a number of seconds"),
+    ("notice_backoff_seconds = false", "notice_backoff_seconds must be a number of seconds"),
+    ("backoff = 5", "unknown keys"),
+])
+def test_bad_relay_settings_are_refused(cfg: Path, text: str, match: str) -> None:
+    with_relay(cfg, text)
+    with pytest.raises(ConfigError, match=rf"\[wsd.relay\] .*{match}|\[wsd.relay\]: {match}"):
+        resolve(env(cfg))
+
+
+def test_relay_settings_are_host_only(cfg: Path) -> None:
+    write(cfg, "workstreams/alpha.toml", (cfg / "workstreams/alpha.toml").read_text()
+          + "[wsd.relay]\nenabled = false\n")
+    with pytest.raises(ConfigError, match="not allowed in a workstream"):
+        resolve(env(cfg))
+
+
+def test_a_relay_setting_change_needs_a_restart(cfg: Path) -> None:
+    running = restart_view(resolve(env(cfg)))
+    with_relay(cfg, "question_rounds_before_human = 4")
+    assert restart_fields(running, restart_view(resolve(env(cfg)))) == ["relay"]
