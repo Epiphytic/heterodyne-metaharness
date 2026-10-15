@@ -65,10 +65,11 @@ INSTALL = Path("/opt/codex")
 def install_spec() -> SandboxSpec:
     """spec() with the CLI's install root bound read-only at its host path, as build_spec binds it."""
     base = spec()
-    return dataclasses.replace(base, binds=(*base.binds, Bind(INSTALL, INSTALL, True)), install=INSTALL)
+    return dataclasses.replace(base, binds=(*base.binds, Bind(INSTALL, INSTALL, True, install=True)),
+                               install=INSTALL)
 
 
-def test_the_install_bind_is_exactly_the_four_s9_8_fields() -> None:
+def test_the_install_bind_carries_exactly_the_s9_8_fields() -> None:
     """Unsupported (today, and on every gateway outside NONRECURSIVE_VERSIONS): option A's object."""
     mounts = driver_config(install_spec(), nonrecursive=False)["podman"]["mounts"]
     assert mounts[2] == {"type": "bind", "source": "/opt/codex", "target": "/opt/codex", "read_only": True}
@@ -84,6 +85,17 @@ def test_a_supported_gateway_adds_recursive_false_to_the_install_bind_only() -> 
     plain = driver_config(install_spec())["podman"]["mounts"]
     assert mounts[:2] + mounts[3:] == plain[:2] + plain[3:]
     assert [len(m) for m in mounts] == [4, 4, 5, 4]
+
+
+def test_only_the_bind_marked_install_gets_recursive_false() -> None:
+    """The mode keys on the bind build_spec marks, not on a path: the install's path bound without the
+    mark keeps option A's four fields."""
+    base = spec()
+    unmarked = dataclasses.replace(base, binds=(*base.binds, Bind(INSTALL, INSTALL, True)), install=INSTALL)
+    assert all(len(m) == 4 for m in driver_config(unmarked, nonrecursive=True)["podman"]["mounts"])
+    marked = [m for m in driver_config(install_spec(), nonrecursive=True)["podman"]["mounts"] if len(m) == 5]
+    assert marked == [{"type": "bind", "source": "/opt/codex", "target": "/opt/codex", "read_only": True,
+                       "recursive": False}]
 
 
 def test_create_argv_carries_the_bind_mode() -> None:

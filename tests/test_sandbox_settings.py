@@ -18,7 +18,6 @@ def test_defaults(tmp_path: Path) -> None:
     assert s.lock_wait_seconds == 60
     assert s.usage_poll_seconds == 600
     assert s.hook_wait_seconds == 5.0
-    assert s.binaries == {"claude-code": "claude", "codex": "codex"}
     assert s.profiles["p-two"]["adapter"] == "codex"
     assert dict(s.tool_env) == {}
     assert s.egress_approved == ()

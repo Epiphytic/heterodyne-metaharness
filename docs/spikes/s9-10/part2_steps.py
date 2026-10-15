@@ -55,7 +55,8 @@ def main() -> None:
         return
     if step == "trust":
         cli_root = Path(sys.argv[3]).resolve()
-        cli = Cli(cli_root / "bin" / "codex", cli_root, codex.version_pin)
+        [version] = codex.versions   # the spike's adapter declares one version (plan 4c E12)
+        cli = Cli(cli_root / "bin" / "codex", cli_root, version)
         argv = codex.trust_argv(cli, Path(sys.argv[4]))
         if argv is None:
             raise SystemExit("codex has no trust step")

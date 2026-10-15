@@ -13,6 +13,7 @@ which is how an uncertain write looks to wsd.
 
 import contextlib
 import hashlib
+import json
 import subprocess
 import threading
 from collections.abc import Generator
@@ -21,12 +22,15 @@ from pathlib import Path
 from typing import Any
 
 HOST = "testhost"
+ASK_FIELDS = ("effect", "excludes", "why", "risks", "refs")      # btq's
 
 
 @dataclass
 class FakeBead:
     id: str
     title: str = "a task"
+    description: str = ""
+    issue_type: str = "task"
     status: str = "open"
     assignee: str | None = None
     labels: list[str] = field(default_factory=list)
@@ -56,6 +60,7 @@ class World:
         self.stolen: set[str] = set()      # beads another worker claims first (a lost race)
         self.worktrees: list[str] = []
         self.approvals = {"approval-1"}     # design approvals btq's gate accepts
+        self.created: list[str] = []        # beads `bd create` made, in order
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
@@ -106,8 +111,10 @@ class World:
 
     def json(self, bead: FakeBead, detail: bool) -> dict[str, Any]:
         out: dict[str, Any] = {"id": bead.id, "title": bead.title, "status": bead.status,
-                               "priority": 2, "issue_type": "task",
+                               "priority": 2, "issue_type": bead.issue_type,
                                "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}
+        if bead.description:
+            out["description"] = bead.description
         if bead.assignee:
             out["assignee"] = bead.assignee
         if bead.labels:
@@ -142,6 +149,25 @@ class FakeQueue:
         self.state = world.state_root / hashlib.sha256(self.worker.encode()).hexdigest()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._exclusive = threading.Lock()
+        self.policy: dict[str, Any] = {}
+
+    def ask_digest(self, issue: Any) -> tuple[str | None, list[str]]:
+        """btq's `ask_digest`, simplified: SHA-256 over the title, description and `metadata.ask`, with a
+        gap for an ask that is not exactly btq's fields."""
+        if not isinstance(issue, dict):
+            return None, ["issue is not an object"]
+        fields: dict[str, Any] = issue
+        metadata = fields.get("metadata")
+        ask = metadata.get("ask") if isinstance(metadata, dict) else None
+        if isinstance(ask, str):
+            try:
+                ask = json.loads(ask)
+            except ValueError:
+                ask = None
+        if not isinstance(ask, dict) or set(ask) != set(ASK_FIELDS):
+            return None, ["metadata.ask is not exactly btq's ask fields"]
+        body = json.dumps([fields.get("title"), fields.get("description", ""), ask], sort_keys=True)
+        return hashlib.sha256(body.encode()).hexdigest(), []
 
     def _get(self, bead_id: str) -> FakeBead:
         bead = self.world.beads.get(bead_id)
@@ -273,6 +299,8 @@ class FakeQueue:
             _, bead_id, text = args
             self._get(bead_id).comments.append(text)
             return {"text": text}
+        if verb == "create":
+            return self._create(args)
         if verb == "update":
             bead_id, flag, pair = args
             assert flag == "--set-metadata"
@@ -283,6 +311,44 @@ class FakeQueue:
                 self._get(bead_id).metadata[key] = value
             return [self.world.json(self._get(bead_id), detail=False)]
         raise AssertionError(f"fake bd does not support {verb}")
+
+    def _create(self, args: list[str]) -> Any:
+        """`bd create`: the title positional or as `--title`; `--description`, `--type` (the bead's
+        `issue_type`), `--labels` (comma separated) or repeated `--label`/`-l`, and `--metadata` (a JSON
+        object); `--flag=value` or `--flag value`. Answers with the created bead, as bd 1.1's `create --json`
+        does."""
+        values: dict[str, list[str]] = {}
+        title: str | None = None
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--json":
+                i += 1
+                continue
+            if arg.startswith("-"):
+                name, eq, value = arg.partition("=")
+                if not eq:
+                    i += 1
+                    value = args[i]
+                values.setdefault(name.lstrip("-"), []).append(value)
+            else:
+                assert title is None, f"fake bd create: a second positional {arg!r}"
+                title = arg
+            i += 1
+        title = title if title is not None else values.pop("title", [""])[-1]
+        labels = [lbl for v in values.get("labels", []) + values.get("label", []) + values.get("l", [])
+                  for lbl in v.split(",") if lbl]
+        metadata: dict[str, Any] = {}
+        for raw in values.get("metadata", []):
+            parsed = json.loads(raw)
+            assert isinstance(parsed, dict), "fake bd create: --metadata is not a JSON object"
+            metadata.update(parsed)
+        bead_id = f"btq-h{len(self.world.created) + 1}"
+        bead = FakeBead(bead_id, title=title, description=values.get("description", [""])[-1],
+                        issue_type=values.get("type", ["task"])[-1], labels=labels, metadata=metadata)
+        self.world.beads[bead_id] = bead
+        self.world.created.append(bead_id)
+        return self.world.json(bead, detail=True)
 
 
 def factory(world: World):  # noqa: ANN201 - returns a QueueFactory

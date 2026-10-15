@@ -29,8 +29,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from heterodyne.agents.base import AdapterError, jwt_exp
-from heterodyne.agents.codex import HOST_SOURCE, USAGE_SOURCE, Codex, parse_rate_limits
+from heterodyne.agents.base import AdapterError, Cli, jwt_exp
+from heterodyne.agents.codex import HOST_SOURCE, USAGE_SOURCE, parse_rate_limits
 from heterodyne.fsutil import private_dir
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
@@ -57,7 +57,6 @@ DIAG_READ_FAILED = "a trusted usage read failed"
 DIAG_NOT_READ = "a trusted usage read was not run"
 NOT_PINNED_KEY = "the account's key is not the pinned one"
 TOO_CLOSE = "the login expires within the read margin"
-NOT_AT_PIN = "the codex CLI is not at its pinned version"
 
 
 class NoRateLimits(Exception):
@@ -425,14 +424,13 @@ def recover(scratch_root: Path, *, seconds: float = RECOVER_SECONDS) -> None:
 
 
 class HostUsageReader:
-    def __init__(self, accounts: Accounts, binary: str, path: str, credlocks: Path, scratch_root: Path,
+    def __init__(self, accounts: Accounts, cli: Callable[[], Cli], credlocks: Path, scratch_root: Path,
                  lock_wait_seconds: float, *, env: Mapping[str, str], read_margin_seconds: int = 300,
                  limit_seconds: float = 30.0, clock: Callable[[], int] = utc_now,
                  wait_clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.accounts = accounts
-        self.binary = binary                 # `[adapters.codex] binary`, located on each read
-        self.path = path
+        self.cli = cli                       # the current selection's install, verified on each read
         self.credlocks = credlocks
         self.scratch_root = scratch_root
         self.lock_wait_seconds = lock_wait_seconds
@@ -442,7 +440,6 @@ class HostUsageReader:
         self.clock = clock
         self.wait_clock = wait_clock
         self.sleep = sleep
-        self.adapter = Codex()
 
     def read(self, profile: str, account: str, credential_key: str) -> TrustedRead | None:
         if self.accounts.adapter(profile) != ADAPTER:
@@ -466,9 +463,7 @@ class HostUsageReader:
         original = _read_regular(login)
         if _expiry(original) - self.clock() < self.read_margin_seconds:
             raise _NotRead(TOO_CLOSE)         # S7 (4): only an expired token is refreshed; keep clear of it
-        cli = self.adapter.locate(self.binary, self.path)
-        if cli.version != self.adapter.version_pin:
-            raise _NotRead(NOT_AT_PIN)
+        cli = self.cli()        # refuses (LaunchFailed) unless the selected install verifies now
         private_dir(self.scratch_root)
         made_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)    # before the home: its holders start after
         scratch = Path(tempfile.mkdtemp(prefix=home_prefix(made_ns), dir=self.scratch_root))

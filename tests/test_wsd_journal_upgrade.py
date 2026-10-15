@@ -9,10 +9,10 @@ from pathlib import Path
 
 import msgspec
 import pytest
-from fakes.checkpoints import CrashAt, SimulatedCrash
+from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import ADAPTERS, PROFILES, WS, Rig, accounts_at, git_repo, login_home, make_rig
+from wsd_env import ADAPTERS, PROFILES, WS, Rig, accounts_at, git_repo, login_home, make_rig, selected_config
 
 from heterodyne.wsd import cli, ids, upgrade
 from heterodyne.wsd.accounts import ConfiguredAccounts
@@ -22,6 +22,8 @@ from heterodyne.wsd.journal import (
     V1_SCHEMA,
     V2_META,
     V2_TABLES,
+    V4_TABLES,
+    V5_TABLES,
     Adoption,
     Journal,
     JournalCorrupt,
@@ -37,6 +39,8 @@ from heterodyne.wsd.states import Reason
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 V2 = [stmt.split()[2] for stmt in V2_TABLES]
+V4 = [stmt.split()[2] for stmt in V4_TABLES]
+V5 = [stmt.split()[2] for stmt in V5_TABLES]
 V1_TABLES = ("meta", "inbox", "ops", "beads", "holds", "workstreams", "events")
 
 
@@ -59,12 +63,12 @@ def db_path(rig: Rig) -> Path:
 
 
 def to_v1(rig: Rig) -> None:
-    """Make the rig's journal plan 3's: the version 2 tables dropped and version 1, and every bead without
-    `wsd_launches`. What the runtime and the beads say of each session is kept."""
+    """Make the rig's journal plan 3's: the version 2, 4 and 5 tables dropped and version 1, and every bead
+    without `wsd_launches`. What the runtime and the beads say of each session is kept."""
     rig.journal.close()
     db = sqlite3.connect(db_path(rig), isolation_level=None)
     try:
-        for table in ["receipts", *(t for t in V2 if t != "receipts")]:
+        for table in [*V5, *V4, "receipts", *(t for t in V2 if t != "receipts")]:
             db.execute(f"DROP TABLE {table}")
         db.execute("DELETE FROM meta WHERE key = 'usage_receipt_seq'")
         db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
@@ -163,7 +167,7 @@ def test_the_upgrade_keeps_every_v1_row(tmp_path: Path, v1: Path) -> None:
     for table in V1_TABLES:
         kept = before[table] - {("schema_version", "1")}
         assert kept <= after[table], table
-    assert ("schema_version", "3") in after["meta"]          # plan 4c T7: straight to version 3
+    assert ("schema_version", "5") in after["meta"]          # plan 4c T7, T10, plan 5i-2: to the current one
     assert [r[4] for r in after["events"] - before["events"]] == ["journal_upgraded"]
     Journal(v1).close()                                      # the current version's check passes
     assert (v1.parent / "wsd.db.v1.bak").exists()
@@ -216,7 +220,8 @@ def test_the_daemon_exits_1_when_beads_are_down_at_the_upgrade(tmp_path: Path) -
     repo = git_repo(tmp_path / "repos" / "proj")
     accounts = accounts_at(login_home(tmp_path / "home"))
     ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
-    s = WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts)
+    s = WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts,
+                    config_dir=selected_config(tmp_path / "config"))
     s.state_dir.mkdir(parents=True, mode=0o700)
     v1_journal(s.journal)
     db = sqlite3.connect(s.journal, isolation_level=None)
@@ -575,7 +580,9 @@ def test_the_upgrade_from_2_to_3_keeps_every_row_and_rolls_back_on_failure(tmp_p
             assert [r[4] for r in after[table] - kept] == ["journal_upgraded"]
         else:
             assert after[table] == kept, table
-    j = Journal(path)                                        # the version 3 check passes
+    upgrade.run_3_to_4(path)                                 # plan 4c T10, plan 5i-2: on to the current one
+    upgrade.run_4_to_5(path)
+    j = Journal(path)
     try:
         [entry] = j.launches("k")
         assert (entry.install, entry.install_digest, entry.outcome) == ("", "", "launched")
@@ -615,11 +622,265 @@ def test_startup_upgrades_version_2_without_the_hosts_accounts(tmp_path: Path) -
         j.close()
 
 
-def test_the_upgrade_from_1_lands_on_version_3(tmp_path: Path, v1: Path) -> None:
+def test_the_upgrade_from_1_lands_on_the_current_version(tmp_path: Path, v1: Path) -> None:
     upgrade.run(*no_beads(tmp_path), v1)
     j = Journal(v1)
     try:
         assert j.db.execute("PRAGMA table_info(launches)").fetchall()[-2:] == [
             (16, "install", "TEXT", 1, "''", 0), (17, "install_digest", "TEXT", 1, "''", 0)]
+    finally:
+        j.close()
+
+
+# --- plan 4c T10: version 3 to 4, the harness tables ---
+
+HARNESS_INSTALLS = ["staging_id", "adapter", "digest", "version", "approval_bead", "context_digest", "ask_id",
+                    "state", "install", "failure", "created_at", "updated_at"]
+HARNESS_EVENTS = ["id", "at", "actor", "action", "adapter", "install", "detail"]
+
+
+def v3_journal(path: Path) -> None:
+    """Version 3 as T7's upgrade leaves it, with its rows."""
+    v2_journal(path)
+    upgrade.run_2_to_3(path)
+
+
+def v4_points(tmp_path: Path) -> list[str]:
+    """The 3-to-4 upgrade's checkpoints, as a run on a copy reports them."""
+    path = tmp_path / "probe" / "wsd.db"
+    v3_journal(path)
+    seen = Recorder()
+    upgrade.run_3_to_4(path, seen)
+    points = [p for p in seen.seen if p.startswith("upgrade.v4")]
+    assert points, seen.seen
+    return points
+
+
+def columns(path: Path, table: str) -> list[str]:
+    db = sqlite3.connect(path)
+    try:
+        return [str(r[1]) for r in db.execute(f"PRAGMA table_info({table})")]
+    finally:
+        db.close()
+
+
+def test_the_upgrade_from_3_to_4_keeps_every_row_and_rolls_back_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v3_journal(path)
+    before = all_rows(path)
+    with pytest.raises(JournalNeedsUpgrade) as needs:
+        Journal(path)
+    assert needs.value.version == "3"
+    for point in v4_points(tmp_path):
+        with pytest.raises(SimulatedCrash):
+            upgrade.run_3_to_4(path, CrashAt(point))
+        assert all_rows(path) == before, point                  # rolled back whole: still version 3
+        with pytest.raises(JournalNeedsUpgrade):
+            Journal(path)
+    upgrade.run_3_to_4(path)
+    after = all_rows(path)
+    assert (after["harness_installs"], after["harness_events"]) == (set(), set())
+    for table, kept in before.items():
+        if table == "meta":
+            assert kept - {("schema_version", "3")} <= after[table]
+            assert ("schema_version", "4") in after[table]
+        elif table == "events":
+            assert [r[4] for r in after[table] - kept] == ["journal_upgraded"]
+        else:
+            assert after[table] == kept, table
+    assert columns(path, "harness_installs") == HARNESS_INSTALLS
+    assert columns(path, "harness_events") == HARNESS_EVENTS
+    assert (path.parent / "wsd.db.v3.bak").exists()
+    with pytest.raises(JournalNeedsUpgrade) as needs:           # plan 5i-2: version 4 is no longer current
+        Journal(path)
+    assert needs.value.version == "4"
+
+
+def test_the_harness_installs_state_is_checked(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v3_journal(path)
+    upgrade.run_3_to_4(path)
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        row = ("s-1", "codex", "", "0.160.0", "", "", "", "{}", "", "", "2026-10-14T00:00:00+00:00",
+               "2026-10-14T00:00:00+00:00")
+        for state in ("staged", "posted", "approved", "published", "denied", "expired", "failed"):
+            db.execute(f"INSERT INTO harness_installs ({', '.join(HARNESS_INSTALLS)}) "  # noqa: S608
+                       f"VALUES ({', '.join('?' * len(row))})", (f"s-{state}", *row[1:7], state, *row[8:]))
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(f"INSERT INTO harness_installs ({', '.join(HARNESS_INSTALLS)}) "  # noqa: S608
+                       f"VALUES ({', '.join('?' * len(row))})", (*row[:7], "selected", *row[8:]))
+    finally:
+        db.close()
+
+
+def test_startup_upgrades_version_3(tmp_path: Path) -> None:
+    s = WsdSettings(tmp_path / "state", 1.0, 1.0, 1, tmp_path / "btq", {}, ())
+    v3_journal(s.journal)
+    j = cli._open(s, factory(World(tmp_path / "btq-state")))      # type: ignore[attr-defined]
+    try:
+        assert j.harness_install("s-none") is None
+        assert list(j.harness_events()) == []
+    finally:
+        j.close()
+
+
+# --- plan 5i part 2: version 4 to 5, the ask bridge's tables ---
+
+ASKS = ["ref", "ws", "bead", "kind", "child", "ask_id", "context_digest", "state", "round", "answer",
+        "choice", "why", "uncertain", "attempts", "next_at", "created_at", "updated_at"]
+NOTICES = ["ref", "ws", "bead", "kind", "title", "body", "state", "notice_id", "attempts", "next_at",
+           "why", "created_at", "updated_at"]
+RESUME_NOTES = ["seq", "ws", "bead", "ref", "text", "delivered_at", "steer_attempts"]
+NUDGES = ["ws", "bead", "rounds", "last_head"]
+DENIED_ASKS = ["session_key", "effect_digest"]
+REFUSALS = ["event_id", "ws", "bead", "session_key", "generation", "turn", "text", "created_at"]
+
+
+def v4_journal(path: Path) -> None:
+    """Version 4 as plan 4c T10's upgrade leaves it, with its rows and a harness install."""
+    v3_journal(path)
+    upgrade.run_3_to_4(path)
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        at = "2026-10-14T00:00:00+00:00"
+        db.execute(f"INSERT INTO harness_installs ({', '.join(HARNESS_INSTALLS)}) "  # noqa: S608
+                   f"VALUES ({', '.join('?' * len(HARNESS_INSTALLS))})",
+                   ("s-1", "codex", "d", "0.160.0", "btq-a", "c", "ask-1", "posted", "", "", at, at))
+    finally:
+        db.close()
+
+
+def v5_points(tmp_path: Path) -> list[str]:
+    path = tmp_path / "probe" / "wsd.db"
+    v4_journal(path)
+    seen = Recorder()
+    upgrade.run_4_to_5(path, seen)
+    points = [p for p in seen.seen if p.startswith("upgrade.v5")]
+    assert points, seen.seen
+    return points
+
+
+def test_the_upgrade_from_4_to_5_keeps_every_row_and_rolls_back_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v4_journal(path)
+    before = all_rows(path)
+    with pytest.raises(JournalNeedsUpgrade) as needs:
+        Journal(path)
+    assert needs.value.version == "4"
+    for point in v5_points(tmp_path):
+        with pytest.raises(SimulatedCrash):
+            upgrade.run_4_to_5(path, CrashAt(point))
+        assert all_rows(path) == before, point                  # rolled back whole: still version 4
+        with pytest.raises(JournalNeedsUpgrade):
+            Journal(path)
+    upgrade.run_4_to_5(path)
+    after = all_rows(path)
+    assert all(after[t] == set() for t in V5)
+    for table, kept in before.items():
+        if table == "meta":
+            assert kept - {("schema_version", "4")} <= after[table]
+            assert ("schema_version", "5") in after[table]
+        elif table == "events":
+            assert [r[4] for r in after[table] - kept] == ["journal_upgraded"]
+        else:
+            assert after[table] == kept, table
+    for table, names in (("asks", ASKS), ("notices", NOTICES), ("resume_notes", RESUME_NOTES),
+                         ("nudges", NUDGES), ("denied_asks", DENIED_ASKS), ("refusals", REFUSALS)):
+        assert columns(path, table) == names, table
+    assert (path.parent / "wsd.db.v4.bak").exists()
+    Journal(path).close()                                       # the version 5 check passes
+
+
+def test_repeating_the_upgrade_from_4_to_5_is_a_no_op_and_anything_else_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v4_journal(path)
+    upgrade.run_4_to_5(path)
+    backup = path.parent / "wsd.db.v4.bak"
+    kept, after = backup.read_bytes(), all_rows(path)
+    upgrade.run_4_to_5(path)
+    assert backup.read_bytes() == kept and all_rows(path) == after
+    for older in (v3_journal, v2_journal):
+        other = tmp_path / older.__name__ / "wsd.db"
+        older(other)
+        with pytest.raises(JournalCorrupt):
+            upgrade.run_4_to_5(other)
+        assert not (other.parent / "wsd.db.v4.bak").exists()
+
+
+def test_the_earlier_upgrades_are_no_ops_on_version_5(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    v4_journal(path)
+    upgrade.run_4_to_5(path)
+    after = all_rows(path)
+    upgrade.run_3_to_4(path)
+    upgrade.run_2_to_3(path)
+    assert all_rows(path) == after
+
+
+def insert(path: Path, table: str, values: dict[str, object]) -> None:
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        db.execute(f"INSERT INTO {table} ({', '.join(values)}) "  # noqa: S608
+                   f"VALUES ({', '.join('?' * len(values))})", tuple(values.values()))
+    finally:
+        db.close()
+
+
+AT = "2026-10-15T00:00:00+00:00"
+CLOCK = 1760486400                      # notices keep the injected clock's epoch seconds
+
+
+@pytest.mark.parametrize(("table", "base", "column", "good", "bad"), [
+    ("asks", {"ref": "q", "ws": WS, "bead": "btq-1", "state": "owed", "created_at": AT, "updated_at": AT},
+     "kind", ["question", "approval"], ["merge", "", None]),
+    ("asks", {"ref": "q", "ws": WS, "bead": "btq-1", "kind": "question", "created_at": AT, "updated_at": AT},
+     "state", ["creating", "owed", "posted", "answered", "approved", "denied", "unverified", "ended",
+               "refused", "delivered", "released"], ["open", "", None]),
+    ("asks", {"ref": "q", "ws": WS, "bead": "btq-1", "kind": "question", "state": "answered",
+              "created_at": AT, "updated_at": AT},
+     "answer", [None, "", "a" * 16000], ["a" * 16001]),
+    ("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "created_at": CLOCK,
+                 "updated_at": CLOCK},
+     "state", ["owed", "sending", "posted", "uncertain", "refused", "withheld"], ["sent", "", None]),
+    ("notices", {"ref": "n", "ws": WS, "title": "t", "body": "", "state": "owed", "created_at": CLOCK,
+                 "updated_at": CLOCK},
+     "kind", ["stuck", "waiting", "closed", "review"], ["question", "", None]),
+    *(("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "state": "owed",
+                   "created_at": CLOCK, "updated_at": CLOCK},
+       column, [CLOCK, 0], [AT, 1760486400.5, None])
+      for column in ("created_at", "updated_at")),
+    ("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "state": "owed",
+                 "created_at": CLOCK, "updated_at": CLOCK},
+     "next_at", [None, CLOCK], [AT, 1760486400.5]),
+])
+def test_the_bridge_tables_check_their_states(tmp_path: Path, table: str, base: dict[str, object],
+                                              column: str, good: list[object], bad: list[object]) -> None:
+    path = tmp_path / "state" / "wsd.db"
+    Journal(path).close()
+    for i, value in enumerate(good):
+        insert(path, table, {**base, "ref": f"r-{i}", column: value})
+    for value in bad:
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(path, table, {**base, "ref": "r-bad", column: value})
+
+
+def test_startup_upgrades_version_4(tmp_path: Path) -> None:
+    s = WsdSettings(tmp_path / "state", 1.0, 1.0, 1, tmp_path / "btq", {}, ())
+    v4_journal(s.journal)
+    j = cli._open(s, factory(World(tmp_path / "btq-state")))      # type: ignore[attr-defined]
+    try:
+        assert j.notes(WS, "btq-1") == []
+        assert j.harness_install("s-1") is not None
+    finally:
+        j.close()
+
+
+def test_startup_upgrades_version_3_on_to_5(tmp_path: Path) -> None:
+    s = WsdSettings(tmp_path / "state", 1.0, 1.0, 1, tmp_path / "btq", {}, ())
+    v3_journal(s.journal)
+    j = cli._open(s, factory(World(tmp_path / "btq-state")))      # type: ignore[attr-defined]
+    try:
+        assert j.notes(WS, "btq-1") == []
     finally:
         j.close()

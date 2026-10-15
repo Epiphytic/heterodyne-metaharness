@@ -20,9 +20,8 @@ escalate = ["push_branch", "open_pr", "merge_pr", "deploy", "notify", "new_egres
 hard_deny = ["modify_harness_config", "modify_policy", "modify_sandbox"]
 locked = ["modify_harness_config", "modify_policy", "modify_sandbox"]
 
-# Executable of each adapter's CLI: admind only, once sandboxed agents run their managed install
-# ([harnesses]; until then wsd's launches use it too). Hosts override with an absolute path if it is not
-# on PATH.
+# Executable of each adapter's CLI, for admind only: sandboxed agents run their managed install
+# ([harnesses]), never this one (plan 4c Q5). Hosts override with an absolute path if it is not on PATH.
 [adapters.claude-code]
 binary = "claude"
 
@@ -55,6 +54,14 @@ launch_failures_before_human = 2
 park_attempts_before_human = 3
 inbox_attempts_before_human = 3
 coder_role = "coder"
+
+# admind's interim relay as wsd uses it (plan 5i part 2). `ask_socket` defaults to admind's own, under the
+# host's state directory.
+[wsd.relay]
+enabled = true
+question_rounds_before_human = 3
+owed_hours_before_human = 24
+notice_backoff_seconds = 60
 
 # Usage-aware scheduling (§4.4 D3-D5). Host only; accounts have no defaults.
 [usage]
@@ -89,7 +96,8 @@ usage_poll_seconds = 600                # how often a session's in-sandbox usage
 # default is the store owner's /var/lib/heterodyne/harnesses; with fallback = true (no store owner: wsd
 # runs the helper's steps itself, an accepted risk, §17 item 13) it is
 # ${XDG_DATA_HOME:-~/.local/share}/heterodyne/harnesses. `approval_workstream` has no default: `install`
-# refuses without it. Recipes are `[harnesses.<adapter>]` tables, written by the host.
+# refuses without it, and without `[admind] approve_bead` (no decision could be read). Recipes are
+# `[harnesses.<adapter>]` tables, written by the host: none ship here.
 [harnesses]
 fallback = false
 owner = "heterodyne-store"
