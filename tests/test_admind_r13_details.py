@@ -29,8 +29,10 @@ from test_admind_r13_replies import (
     said,
     sent_for,
     session,
-    terminal_stop,
     tool,
+)
+from test_admind_r13_replies import (
+    terminal_stop as unowned_terminal_stop,
 )
 
 from heterodyne.admind import chunk, commands, hook, summarize
@@ -41,6 +43,25 @@ from heterodyne.admind.store import Store
 
 SUMMARY = f"short summary\n\n{summarize.FOOTER}"
 NO_TOOLS = "(tool calls are not available for this turn)"
+
+
+def owned_turn(h: Harness, text: str = "go", *, anchor: bool = True) -> None:
+    """A previously dispatched operator request for synthetic transcript/hook fixtures."""
+    h.seq += 1
+    mid = f"{h.seq:064x}"
+    h.store.claim_inbound(mid, sender_key=OPERATOR_HEX)
+    h.store.set("in_flight", mid)
+    h.store.set("in_flight_text", text)
+    if anchor:
+        h.store.set("anchor", mid)
+
+
+async def terminal_stop(h: Harness, reply: str | None, path: Path | None = None, **kw: Any) -> None:
+    """Complete a known operator turn without a transcript span, for details rendering tests."""
+    await session(h)                               # startup must finish before reservation is seeded
+    owned_turn(h)
+    await unowned_terminal_stop(h, reply, path, **kw)
+    await wait_until(lambda: h.store.get("in_flight") is None)
 
 
 def test_parse_details() -> None:
@@ -433,6 +454,7 @@ def test_details_full_adds_this_turns_tool_calls_and_no_thinking(tmp_path: Path)
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old"), tool("Before"), result("earlier output")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(
@@ -482,6 +504,7 @@ def test_details_full_says_so_when_the_reader_is_busy(tmp_path: Path) -> None:
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), tool("Bash", command="ls"), result("x")])
@@ -513,6 +536,7 @@ def test_a_slow_transcript_read_says_so(tmp_path: Path, monkeypatch: pytest.Monk
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), tool("Bash", command="ls")])
@@ -571,7 +595,7 @@ def test_an_alert_is_sent_before_the_rest_of_a_long_details(tmp_path: Path) -> N
         def on_send(req: dict[str, Any]) -> None:
             if str(req["idempotency_key"]).startswith("details:") and not relayed:
                 relayed.append(True)  # an alert arrives while the first chunk is going out
-                h.daemon.post("alert:x", "urgent alert", None)
+                h.daemon.post("alert:x", "urgent alert", None, owner=None)
 
         h.fake.on_send = on_send
         mid = await ask(h, "!details", reply_to=sid)
@@ -642,6 +666,7 @@ def test_details_full_is_refused_if_admind_stops_being_authorised_during_the_rea
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), tool("Bash")])
@@ -672,6 +697,7 @@ def test_details_full_never_shows_a_secret_hidden_in_a_structured_name(tmp_path:
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         value = {"label": sep + token}
@@ -740,12 +766,14 @@ def plant_batch(h: Harness, path: Path, sid: str, n: int) -> None:
     size = append(path, [prompt("go"), tool("Bash", command="ls"), result("out")])
     batch = h.store.open_batch(time.time(), 3600)
     for i in range(n):
+        mid = f"{i + 1000:064x}"
+        h.store.claim_inbound(mid, sender_key=OPERATOR_HEX)
         turn = h.store.add_turn(
-            f"k{i}", sid, None, f"— op · 12:00 UTC · “t{i}”", f"reply {i}", str(path), 0, size, "summarizing"
+            f"k{i}", sid, mid, f"— op · 12:00 UTC · “t{i}”", f"reply {i}", str(path), 0, size, "summarizing"
         )
         h.store.add_to_batch(turn, batch)
     h.store.close_batch(batch)
-    h.store.enqueue("batch:1.0", "batch", None)
+    h.store.enqueue("batch:1.0", "batch", None, ownership_kind="request", owners=(OPERATOR_HEX,))
     h.store.record_post("batch:1.0", "batch", None, batch)
     row = h.store.next_pending()
     assert row is not None
@@ -833,6 +861,7 @@ def test_details_full_is_capped_in_total_and_says_so(tmp_path: Path, monkeypatch
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), *[tool(f"T{i}", n="x" * 100) for i in range(200)]])
@@ -907,7 +936,8 @@ def test_an_alert_is_delivered_while_a_large_details_is_still_being_staged(
                 snapshot["visible"] = len(details_texts(h, mid_holder[0]))
 
         h.fake.on_send = on_send
-        on_stage(h, lambda calls, parts: calls == 3 and h.daemon.post("alert:x", "urgent alert", None))
+        on_stage(h, lambda calls, parts: calls == 3
+                 and h.daemon.post("alert:x", "urgent alert", None, owner=None))
         mid_holder.append(await ask(h, "!details", reply_to=sid))
         mid = mid_holder[0]
         # One 30 s budget for publishing and delivery, plus the fake's reply delay for each of the 300-odd
@@ -938,7 +968,7 @@ def test_a_guard_that_fails_while_staging_leaves_nothing_visible(
         elif how == "transition":
             h.daemon.changing = True
         else:
-            h.daemon.operators.pop(OPERATOR_HEX)  # the sender is no longer an authorised operator
+            h.store.set("group_operators", "[]")  # confirmed membership no longer authorizes this sender
 
     async def scenario(h: Harness) -> None:
         await h.say("long " + "w" * 6000)
@@ -994,7 +1024,7 @@ def test_an_old_staging_is_purged_when_admind_restarts(tmp_path: Path) -> None:
 def test_the_sender_losing_authority_during_the_read_is_noticed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # every other check (latch, changing, group, subscription) still passes: only the sender is gone
+    # Transport checks still pass; removing confirmed authority must stop the pending requester effect.
     started = threading.Event()
     release = threading.Event()
 
@@ -1009,6 +1039,7 @@ def test_the_sender_losing_authority_during_the_read_is_noticed(
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), tool("Bash")])
@@ -1016,7 +1047,7 @@ def test_the_sender_losing_authority_during_the_read_is_noticed(
         await summary_delivered(h)
         mid = await ask(h, "!details full")
         await wait_until(started.is_set)
-        h.daemon.operators.pop(OPERATOR_HEX)
+        h.store.set("group_operators", "[]")
         assert not h.daemon.sender_current(mid) and h.daemon.authorised()
         release.set()
         await wait_until(lambda: inbound_status(h, mid) == "dropped")
@@ -1064,6 +1095,7 @@ def test_the_parts_published_are_bounded_by_the_row_limit(
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await wait_until(lambda: h.store.get("turn_start") is not None)
         append(path, [prompt("go"), *[tool(f"T{i}", n="x" * 100) for i in range(400)]])

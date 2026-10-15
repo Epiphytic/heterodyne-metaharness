@@ -169,6 +169,26 @@ async def terminal_stop(h: Harness, reply: str | None, path: Path | None = None,
     await h.daemon.hooks.put(h.event("Stop", sid, None if path is None else str(path), reply, **kw))
 
 
+def owned_turn(h: Harness, *, anchor: bool = True) -> str:
+    """Reserve an authenticated dispatched request for synthetic pipeline fixtures."""
+    h.seq += 1
+    mid = f"{h.seq:064x}"
+    h.store.claim_inbound(mid, sender_key=OPERATOR_HEX)
+    h.store.set("in_flight", mid)
+    h.store.set("in_flight_text", "go")
+    if anchor:
+        h.store.set("anchor", mid)
+    return mid
+
+
+async def owned_stop(h: Harness, reply: str | None, path: Path | None = None, **kw: Any) -> None:
+    """Finish a known operator request; terminal_stop deliberately remains unowned."""
+    await session(h)
+    owned_turn(h)
+    await terminal_stop(h, reply, path, **kw)
+    await waited(h, lambda: h.store.get("in_flight") is None, "request completion")
+
+
 def audit_records(h: Harness) -> list[dict[str, Any]]:
     return [json.loads(line) for line in (h.settings.state_dir / "audit.jsonl").read_text().splitlines()]
 
@@ -279,7 +299,7 @@ def test_summarizer_failure_goes_to_the_backstop(tmp_path: Path, body: str | Non
 @needs_tmux
 def test_failures_are_audited_without_reply_text(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "reply " + TOKEN + " " + "w" * 900)  # the operator's own text is audited whole
+        await owned_stop(h, "reply " + TOKEN + " " + "w" * 900)  # the operator's own text is audited whole
         await batch_arrives(h)
         raw = (h.settings.state_dir / "audit.jsonl").read_text()
         assert "w" * 50 not in raw and TOKEN not in raw
@@ -293,8 +313,8 @@ def test_failures_are_audited_without_reply_text(tmp_path: Path) -> None:
 @needs_tmux
 def test_two_failures_in_one_window_make_one_batch(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "first " + "y" * 900)
-        await terminal_stop(h, "second " + "z" * 900)
+        await owned_stop(h, "first " + "y" * 900)
+        await owned_stop(h, "second " + "z" * 900)
         await recorded_then_close(h, 2)
         text = await batch_arrives(h)
         assert text.index("first ") < text.index("second ")
@@ -309,7 +329,7 @@ def test_two_failures_in_one_window_make_one_batch(tmp_path: Path) -> None:
 def test_a_big_batch_is_one_message_with_whole_lines(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
         for r in range(3):
-            await terminal_stop(h, "\n".join(f"r{r}-{i:03d}-" + "z" * 190 for i in range(100)))
+            await owned_stop(h, "\n".join(f"r{r}-{i:03d}-" + "z" * 190 for i in range(100)))
         await recorded_then_close(h, 3)
         text = await batch_arrives(h)
         lines = text.splitlines()
@@ -326,7 +346,7 @@ def test_a_big_batch_is_one_message_with_whole_lines(tmp_path: Path) -> None:
 @needs_tmux
 def test_a_batch_over_the_transport_limit_is_shortened(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "\n".join(f"{i:02d}-" + "q" * 2000 for i in range(49)))
+        await owned_stop(h, "\n".join(f"{i:02d}-" + "q" * 2000 for i in range(49)))
         text = await batch_arrives(h)
         assert len(text) <= backstop.BATCH_MAX_CHARS
         assert all(re.search(r"…\(\+\d+ chars\)$", line) for line in text.splitlines()[2:])
@@ -342,10 +362,14 @@ def test_a_batch_over_the_transport_limit_is_shortened(tmp_path: Path) -> None:
 def test_a_turn_left_summarizing_is_summarized_after_startup(tmp_path: Path) -> None:
     def before(h: Harness) -> None:
         configure('echo "short summary"')(h)
+        h.seq += 1
+        mid = f"{h.seq:064x}"
+        h.store.claim_inbound(mid, sender_key=OPERATOR_HEX)
+        h.store.set_inbound(mid, "dispatched")
         h.store.add_turn(
             "reply:old:1",
             "old",
-            None,
+            mid,
             backstop.origin(None, now(), None),
             LONG,
             None,
@@ -355,7 +379,7 @@ def test_a_turn_left_summarizing_is_summarized_after_startup(tmp_path: Path) -> 
         )
 
     async def scenario(h: Harness) -> None:
-        await h.until(lambda: f"short summary\n\n{summarize.FOOTER}" in h.texts())
+        await waited(h, lambda: f"short summary\n\n{summarize.FOOTER}" in h.texts(), "restarted summary")
         assert [t.status for t in h.store.turns_with_status("summarized")] == ["summarized"]
 
     run_with(tmp_path, scenario, before)
@@ -364,7 +388,7 @@ def test_a_turn_left_summarizing_is_summarized_after_startup(tmp_path: Path) -> 
 @needs_tmux
 def test_an_open_batch_is_posted_after_a_restart(tmp_path: Path) -> None:
     async def first(h: Harness) -> None:
-        await terminal_stop(h, "kept " + "k" * 900)
+        await owned_stop(h, "kept " + "k" * 900)
         await h.until(lambda: len(h.store.turns_with_status("batched")) == 1)
         assert batches(h) == []
 
@@ -514,7 +538,7 @@ def test_a_slow_transcript_read_sends_the_notice_to_the_backstop(
 
     async def scenario(h: Harness) -> None:
         try:
-            await terminal_stop(h, None, tmp_path / "x.jsonl")
+            await owned_stop(h, None, tmp_path / "x.jsonl")
             text = await batch_arrives(h)
             assert EXTRACT_FAILED in text and "never used" not in text
             assert h.store.get("busy") is None
@@ -533,6 +557,7 @@ def test_a_symlinked_transcript_is_unreadable_not_empty(tmp_path: Path) -> None:
         link = tmp_path / "links" / f"{sid}.jsonl"
         link.parent.mkdir()
         link.symlink_to(real)
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(link), prompt="go"))
         await h.until(lambda: h.store.get("busy") is not None)
         await h.daemon.hooks.put(h.event("Stop", sid, str(link)))
@@ -548,7 +573,7 @@ NO_REPLY_TEXT = "(the admin agent's turn ended without a text reply)"
 @needs_tmux
 def test_a_turn_without_a_span_is_unreadable_not_empty(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, None, tmp_path / "x.jsonl")  # no UserPromptSubmit was seen for it
+        await owned_stop(h, None, tmp_path / "x.jsonl")  # no UserPromptSubmit was seen for it
         text = await batch_arrives(h)
         assert EXTRACT_FAILED in text and NO_REPLY_TEXT not in text
 
@@ -564,6 +589,7 @@ def test_the_turn_records_its_transcript_span(tmp_path: Path) -> None:
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         path.write_bytes(b"x" * 99 + b"\n")
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await h.until(lambda: h.store.get("turn_start") is not None)
         with path.open("ab") as fh:
@@ -584,9 +610,12 @@ def test_a_stale_launch_stop_has_no_span(tmp_path: Path) -> None:
         path = tmp_path / f"{sid}.jsonl"
         path.write_bytes(b"x" * 10)
         await h.daemon.hooks.put(HookEvent("Stop", str(sid), str(path), "own text", launch=None))
-        await h.until(lambda: "own text" in h.texts())
+        await h.until(lambda: len(h.store.turns_with_status("verbatim")) == 1)
         turn = h.store.turns_with_status("verbatim")[0]
         assert (turn.transcript_start, turn.transcript_end) == (None, None)
+        await waited(h, lambda: outbox_status(h, f"{turn.key}:0") == "quarantined",
+                     "stale unowned reply quarantine")
+        assert "own text" not in h.texts()
 
     run_with(tmp_path, scenario, configure(None))
 
@@ -612,6 +641,7 @@ def test_a_turn_that_changes_during_extraction_is_not_recorded(
     async def scenario(h: Harness) -> None:
         try:
             sid = await session(h)
+            owned_turn(h)
             path = tmp_path / f"{sid}.jsonl"
             path.write_bytes(b"x\n")
             stop = asyncio.create_task(h.daemon.on_stop(h.event("Stop", sid, str(path)), validate=True))
@@ -643,7 +673,7 @@ def test_a_hex_value_in_a_reply_never_reaches_the_chat(tmp_path: Path) -> None:
 @needs_tmux
 def test_the_backstop_is_redacted(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, f"token {TOKEN} key {HEX}\n" + "w" * 900)
+        await owned_stop(h, f"token {TOKEN} key {HEX}\n" + "w" * 900)
         text = await batch_arrives(h)
         assert TOKEN not in text and HEX not in text and "<redacted" in text
         assert "w" * 900 in text
@@ -660,6 +690,7 @@ def test_the_fallback_reply_holds_every_text_of_the_turn(tmp_path: Path) -> None
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         append(path, [prompt("old"), said("old answer")])
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await h.until(lambda: h.store.get("turn_start") is not None)
         append(
@@ -715,11 +746,11 @@ def test_replies_at_the_verbatim_limits_are_posted_whole_and_just_over_are_summa
 
     async def scenario(h: Harness) -> None:
         for reply in (lines8, chars800):
-            await terminal_stop(h, reply)
+            await owned_stop(h, reply)
             await h.until(lambda r=reply: r in h.texts())  # type: ignore[misc]
         assert [t.text for t in h.store.turns_with_status("verbatim")] == [lines8, chars800]
         for reply in (lines8 + "\nline 8", chars800 + "x"):
-            await terminal_stop(h, reply)
+            await owned_stop(h, reply)
         await h.until(lambda: h.texts().count(f"SUMMARIZED\n\n{summarize.FOOTER}") == 2)
         assert len(h.store.turns_with_status("summarized")) == 2
         assert lines8 + "\nline 8" not in h.texts() and chars800 + "x" not in h.texts()
@@ -1105,6 +1136,7 @@ def test_a_surrogate_in_a_transcript_reply_sends_the_notice_to_the_backstop(tmp_
         sid = await session(h)
         path = tmp_path / f"{sid}.jsonl"
         path.write_bytes(b"")
+        owned_turn(h, anchor=False)
         await h.daemon.hooks.put(h.event("UserPromptSubmit", sid, str(path), prompt="go"))
         await h.until(lambda: h.store.get("busy") is not None and h.store.get("turn_start") is not None)
         append(path, [said("lone \ud800 surrogate")])
@@ -1119,7 +1151,7 @@ def test_a_surrogate_in_a_transcript_reply_sends_the_notice_to_the_backstop(tmp_
 @needs_tmux
 def test_a_surrogate_in_the_events_own_text_sends_the_notice_to_the_backstop(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "own \ud800 text")
+        await owned_stop(h, "own \ud800 text")
         text = await batch_arrives(h)
         assert EXTRACT_FAILED in text and "own" not in text
         await h.until(lambda: h.store.get("busy") is None)
@@ -1138,7 +1170,7 @@ def test_a_failing_record_falls_back_without_the_text_that_failed(
     )
 
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "anything")
+        await owned_stop(h, "anything")
         text = await batch_arrives(h)
         assert EXTRACT_FAILED in text
         await h.until(lambda: h.store.get("busy") is None)
@@ -1158,7 +1190,7 @@ def test_a_failing_audit_does_not_hold_dispatch_on_an_unreadable_turn(tmp_path: 
             real(kind, **fields)
 
         h.daemon.audit.write = write  # type: ignore[method-assign]
-        await terminal_stop(h, None, tmp_path / "x.jsonl")
+        await owned_stop(h, None, tmp_path / "x.jsonl")
         text = await batch_arrives(h)
         assert EXTRACT_FAILED in text
         await h.until(lambda: h.store.get("busy") is None)
@@ -1191,7 +1223,7 @@ def test_the_heavy_work_on_a_reply_runs_off_the_event_loop(
     monkeypatch.setattr(summarize, "redact", off_loop("summary", summarize.redact))
 
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, LONG)
+        await owned_stop(h, LONG)
         await batch_arrives(h)
         assert seen == {"prepare": True, "summary": True, "render": True}
 
@@ -1201,7 +1233,7 @@ def test_the_heavy_work_on_a_reply_runs_off_the_event_loop(
 @needs_tmux
 def test_a_command_is_answered_while_a_huge_reply_is_processed(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, HUGE)
+        await owned_stop(h, HUGE)
         mid = await h.say("!ps")
         await h.until(lambda: any(r.get("reply_to_message_id_hex") == mid for r in h.fake.sent), 30)
         await batch_arrives(h)
@@ -1222,7 +1254,7 @@ def test_a_command_is_answered_while_a_huge_reply_is_processed(tmp_path: Path) -
 def test_the_default_limits_route_at_the_boundary(tmp_path: Path, reply: str, mode: str) -> None:
     async def scenario(h: Harness) -> None:
         assert (h.settings.reply_verbatim_lines, h.settings.reply_verbatim_chars) == (8, 800)
-        await terminal_stop(h, reply)
+        await owned_stop(h, reply)
         await h.until(
             lambda: (
                 len(h.store.turns_with_status("verbatim"))
@@ -1240,7 +1272,7 @@ def test_the_default_limits_route_at_the_boundary(tmp_path: Path, reply: str, mo
 @needs_tmux
 def test_a_timed_out_wait_explains_itself_without_secrets(tmp_path: Path) -> None:
     async def scenario(h: Harness) -> None:
-        await terminal_stop(h, "reply " + TOKEN + " " + "w" * 900)
+        await owned_stop(h, "reply " + TOKEN + " " + "w" * 900)
         await h.until(lambda: len(h.store.turns_with_status("batched")) == 1)
         for n, lead in enumerate(("\n", "\t")):  # a repr or json escape would hide where a token starts
             secret = lead + TOKEN
@@ -1290,3 +1322,18 @@ def test_clean_redacts_before_any_formatting() -> None:
         shown = repr(clean(value)) + json.dumps(clean(value), default=str)
         assert TOKEN not in shown and TOKEN[4:] not in shown, value
     assert clean(7) == 7 and clean(None) is None and clean(True) is True
+
+
+@needs_tmux
+def test_terminal_reply_without_request_provenance_is_quarantined(tmp_path: Path) -> None:
+    async def scenario(h: Harness) -> None:
+        await terminal_stop(h, "unowned private reply")
+        await waited(h, lambda: h.store.db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1,
+                     "the unowned turn to be retained")
+        await waited(h, lambda: h.store.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE status = 'quarantined' AND ownership_kind = 'unknown'"
+        ).fetchone()[0] > 0, "the unowned reply to be quarantined")
+        assert not any("unowned private reply" in text for text in h.texts())
+        assert h.store.db.execute("SELECT text FROM turns").fetchone()[0] == "unowned private reply"
+
+    run_with(tmp_path, scenario, configure(None))

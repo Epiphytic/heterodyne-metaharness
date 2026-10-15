@@ -35,5 +35,6 @@ def lock_waiters(lock: asyncio.Lock) -> int:
 
 def hold(daemon: Any, mid: str, text: str, sender: str = OPERATOR_HEX) -> None:
     """Queue a prompt the way `on_message` does: with its sender recorded (a missing sender fails closed)."""
+    daemon.store.claim_inbound(mid, sender_key=sender)
     daemon.senders[mid] = sender
     daemon.held.append((mid, text))

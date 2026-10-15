@@ -29,10 +29,9 @@ class Pending:
 
 
 def settle(reported: Reported, count: int | None, pending: Pending) -> Outcome:
-    """Commit only on reported success with the `to` count; abort only on reported failure with the
-    `from` count; anything else latches. A count alone never confirms a change (step 4)."""
-    if reported == "ok" and count == pending.to_count:
+    """Only the explicit mutation response decides authority; observations never settle a mutation."""
+    if reported == "ok":
         return "commit"
-    if reported == "failed" and count == pending.from_count:
+    if reported == "failed":
         return "abort"
-    return "latch"
+    return "latch"     # historical internal outcome name; daemon retains a membership-only hold

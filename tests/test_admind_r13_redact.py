@@ -153,7 +153,7 @@ def test_audit_is_whole_and_posts_are_redacted(tmp_path: Path) -> None:
         await wait_until(lambda: any(r.get("kind") == "inbound" and len(str(r.get("text", ""))) > 4000
                                      for r in records(h.settings.state_dir / "audit.jsonl")))
         assert any(r.get("message_id") == ref_id(mid) for r in records(h.settings.state_dir / "audit.jsonl"))
-        h.daemon.post("probe", f"see {HEX}", None)
+        h.daemon.post("probe", f"see {HEX}", None, owner=None)
         await wait_until(lambda: any("see <redacted hex key>" == t for t in h.texts()))
 
     h = run_with(tmp_path, scenario)
