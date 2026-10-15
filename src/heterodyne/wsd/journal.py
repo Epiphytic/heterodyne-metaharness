@@ -1544,10 +1544,12 @@ class Journal:
     @_locked
     def notice_add(self, ref: str, ws: str, bead: str | None, kind: str, title: str, body: str, state: str,
                    next_at: int | None, at: int, why: str | None = None) -> bool:
-        """A notice, once per `ref` (in any state), inside the caller's transaction. True only if new."""
-        cur = self.db.execute("INSERT OR IGNORE INTO notices (ref, ws, bead, kind, title, body, state, "
+        """A notice, once per `ref` (in any state), inside the caller's transaction. True only if new.
+
+        Only a `ref` conflict is ignored; `OR IGNORE` would also drop a row that fails a CHECK, silently."""
+        cur = self.db.execute("INSERT INTO notices (ref, ws, bead, kind, title, body, state, "
                               "next_at, why, created_at, updated_at) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (ref) DO NOTHING",
                               (ref, ws, bead, kind, title, body, state, next_at, why, at, at))
         return cur.rowcount == 1
 
