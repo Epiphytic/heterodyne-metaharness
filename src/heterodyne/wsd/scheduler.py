@@ -42,10 +42,14 @@ unconfirmed stop holds, and the operation stays open), then it ends, with any ho
 dropped.
 """
 
+import dataclasses
+import json
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from heterodyne.agents.exec_dirs import shown_name
 from heterodyne.config import ConfigError
 from heterodyne.wsd.accounts import AccountChanged, Chosen
 from heterodyne.wsd.beads import (
@@ -83,7 +87,15 @@ from heterodyne.wsd.park import (
     parked_state,
     resumable,
 )
-from heterodyne.wsd.runtime import LimitSeen, RuntimeUnavailable, Signal, UsageSeen
+from heterodyne.wsd.runtime import (
+    INSTALL_TAINTED,
+    ExecDirCleared,
+    InstallTainted,
+    LimitSeen,
+    RuntimeUnavailable,
+    Signal,
+    UsageSeen,
+)
 from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
 from heterodyne.wsd.usage import decide, ingest_untrusted
@@ -96,6 +108,7 @@ RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 # Rows of unclaimed ready beads, dropped once the bead is no longer listed.
 UNLISTED = frozenset({Reason.UNCLAIMABLE, Reason.ACCOUNT_REPOINTED})
 KEPT = frozenset({BeadState.HELD, BeadState.STUCK})     # never counted in the wake time
+log = logging.getLogger(__name__)
 MAX_HELD = 256
 
 
@@ -144,7 +157,7 @@ class Scheduler:
         # The quota wake time the last pickup computed (§3.6), in UTC epoch seconds; never journaled.
         self.wake_at: int | None = None
         # Plan 4b E8: limit reports a failed pickup didn't handle, retried first by the next; never journaled.
-        self.held: list[LimitSeen] = []
+        self.held: list[Signal] = []          # limit reports and notices a failed pickup didn't handle
 
     # --- entry point ---
 
@@ -158,6 +171,10 @@ class Scheduler:
     def pickup(self, trigger: Trigger) -> Outcome:
         with self.parker.entry():
             self.wake_at = None
+            try:
+                self.d.harness.advance(self.d.clock())
+            except Exception:  # noqa: BLE001 - an install approval's trouble never stops the workstream
+                log.exception("advancing the install approvals failed")
             try:
                 outcome = self._pickup(trigger)
             except BeadsUnavailable as exc:
@@ -229,23 +246,46 @@ class Scheduler:
     def _signals(self, now: int) -> None:
         """Plan 4b E8: the limit reports held from a failed pickup, then the reports the workstream's
         sessions sent since the last pickup, oldest first. If handling one raises, it and the limit
-        reports after it are held for the next pickup, and the error goes on."""
+        reports and notices (B1, B2) after it are held for the next pickup (every notice, the newest
+        `MAX_HELD` limit reports), and the error goes on."""
         batch: list[Signal] = [*self.held, *self.d.runtime.signals(self.ws.name)]
         self.held = []
         for i, signal in enumerate(batch):
             try:
                 self._signal(signal, now)
             except BaseException:
-                self.held = [s for s in batch[i:] if isinstance(s, LimitSeen)][-MAX_HELD:]
+                rest = batch[i:]
+                notices: list[Signal] = [s for s in rest if not isinstance(s, UsageSeen | LimitSeen)]
+                self.held = [*notices, *[s for s in rest if isinstance(s, LimitSeen)][-MAX_HELD:]]
                 raise
 
     def _signal(self, signal: Signal, now: int) -> None:
         """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
         bead only with (e). A report for a launch the journal doesn't have as this workstream's is
-        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time)."""
+        dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time).
+        An install taint (plan 4c E17) holds the launch's bead for the operator unless it no longer runs
+        (the marker already refuses every launch on the install), then writes the install's alert; an
+        alert that fails is logged, never raised, so it can't drop the hold. A cleared exec dir is journaled
+        as `exec_dir_cleared` once per session, generation and path, its names redacted and bounded again
+        (`shown_name`)."""
         j, name = self.d.journal, self.ws.name
         entry = j.launch(signal.session_key, signal.generation)
         if entry is None or entry.ws != name:
+            return
+        if isinstance(signal, InstallTainted):
+            row = j.state(name, entry.bead)
+            if row is not None and row.state in (BeadState.RUNNING, BeadState.WAITING_INPUT):
+                self.parker.park(entry.bead, (), INSTALL_TAINTED, True)
+            try:
+                self.d.harness.tainted(signal.adapter, signal.install)
+            except Exception:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
+                log.exception("alerting install %s's taint failed", signal.install)
+            return
+        if isinstance(signal, ExecDirCleared):
+            shown = dataclasses.replace(signal, names=tuple(shown_name(n) for n in signal.names))
+            detail = json.dumps(dataclasses.asdict(shown), sort_keys=True)
+            j.emit_once(name, entry.bead, "exec_dir_cleared", detail,
+                        f"exec_dir_cleared:{signal.session_key}:{signal.generation}:{signal.path}")
             return
         caps = capabilities(self.ws.accounts, entry.profile)
         if isinstance(signal, UsageSeen):

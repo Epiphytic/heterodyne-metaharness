@@ -188,6 +188,116 @@ def curl(host):
     return rc, out, issuer_of(out), http_status(out)
 
 
+def unescape(field):
+    """A mountinfo path decoded: the kernel writes a space, tab, newline and backslash in it as `\\040`,
+    `\\011`, `\\012` and `\\134`."""
+    escapes = {'\\040': ' ', '\\011': '\t', '\\012': '\n', '\\134': '\\'}
+    out, i = [], 0
+    while i < len(field):
+        if field[i:i + 4] in escapes:
+            out.append(escapes[field[i:i + 4]])
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return ''.join(out)
+
+
+def mountinfo_problem(text, install):
+    """None when `install` is the mount point of exactly one line of `text` (/proc/self/mountinfo), that
+    mount is read-only with no `shared:` or `master:` tag, and no mount point lies below it; else the
+    MI_* reason. Paths are compared decoded, by whole component. A line that can't be parsed could be
+    any mount, so it counts as one more at the install."""
+    mine, below = [], False
+    for line in text.split('\n'):
+        if not line:
+            continue
+        fields = line.split(' ')
+        if len(fields) < 7 or '-' not in fields[6:]:
+            return 'MI_NOT_ONE_MOUNT'
+        point = unescape(fields[4])
+        if point == install:
+            mine.append(fields)
+        elif point.startswith(install.rstrip('/') + '/'):
+            below = True
+    if len(mine) != 1:
+        return 'MI_NOT_ONE_MOUNT'
+    fields = mine[0]
+    if 'ro' not in fields[5].split(','):
+        return 'MI_NOT_READ_ONLY'
+    if any(t.startswith(('shared:', 'master:')) for t in fields[6:fields.index('-', 6)]):
+        return 'MI_PROPAGATES'
+    return 'MI_SUBMOUNT' if below else None
+
+
+def listing(dir_fd, prefix, found, limit, depth=0):
+    """Every entry below the directory `dir_fd`, by fd and following no link, into `found` as the record
+    writes it: [path, kind, mode, size, nlink, dev, ino, ctime_ns, link target or None]. Past `limit`
+    entries or 64 levels it stops: the listing already differs."""
+    if depth > 64:
+        raise OSError(errno.ELOOP, 'too deep')
+    with os.scandir(dir_fd) as entries:
+        names = sorted(e.name for e in entries)
+    for name in names:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        kind = ('dir' if stat.S_ISDIR(st.st_mode) else 'file' if stat.S_ISREG(st.st_mode)
+                else 'link' if stat.S_ISLNK(st.st_mode) else 'other')
+        path = prefix + name
+        found[path] = [path, kind, stat.S_IMODE(st.st_mode), st.st_size, st.st_nlink, st.st_dev, st.st_ino,
+                       st.st_ctime_ns, os.readlink(name, dir_fd=dir_fd) if kind == 'link' else None]
+        if len(found) > limit:
+            raise OSError(errno.E2BIG, 'more entries than the record')
+        if kind == 'dir':
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+            try:
+                listing(child, path + '/', found, limit, depth + 1)
+            finally:
+                os.close(child)
+
+
+def walk_problem(record):
+    """None when the install path opens, following no link, as a directory with the record's root
+    `(dev, ino, mode, ctime_ns)`, and a walk by fd finds exactly the record's entries, field by field;
+    else MI_ROOT_DIFFERS or MI_LISTING_DIFFERS. A bind of another tree over the root, or a change made
+    after the host verified it, shows here."""
+    try:
+        root = os.open(record['path'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return 'MI_ROOT_DIFFERS'
+    try:
+        st = os.fstat(root)
+        if [st.st_dev, st.st_ino, stat.S_IMODE(st.st_mode), st.st_ctime_ns] != record['root']:
+            return 'MI_ROOT_DIFFERS'
+        want = {e[0]: e for e in record['entries']}
+        found = {}
+        try:
+            listing(root, '', found, len(want))
+        except OSError:
+            return 'MI_LISTING_DIFFERS'
+        return None if found == want else 'MI_LISTING_DIFFERS'
+    finally:
+        os.close(root)
+
+
+def empty_problem(path):
+    """None when `path` is a directory, not a link, with no entries, on a read-only mount (E25); else the
+    ER_* reason. A directory that can't be listed can't be shown empty."""
+    try:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            return 'ER_MISSING'
+    except OSError:
+        return 'ER_MISSING'
+    try:
+        if os.listdir(path):
+            return 'ER_NOT_EMPTY'
+    except OSError:
+        return 'ER_NOT_EMPTY'
+    try:
+        return None if os.statvfs(path).f_flag & os.ST_RDONLY else 'ER_NOT_READ_ONLY'
+    except OSError:
+        return 'ER_NOT_READ_ONLY'
+
+
 # 1. Real home: the canary (readable outside just before) gives ENOENT or EACCES/EPERM here.
 r = open_result(cfg['real_home_canary'])
 check('real-home-canary-unreadable', r in ('ENOENT', 'EACCES', 'EPERM'), f"open(canary) -> {r}")
@@ -327,6 +437,29 @@ for c in cfg['chosen']:
     ok &= same is True and w in ('EROFS', 'EACCES', 'EPERM')
     ev.append(f"chosen:{c['path']} sha256-match={same} write->{w}")
 check('other-accounts', ok and bool(cfg['chosen']), '; '.join(ev))
+
+# 10b. The managed install (plan 4c T8, E24): the install path is one read-only mount that propagates
+#      nothing, with nothing mounted below it (the backend's bind is recursive, so this keeps a submount
+#      out), and a walk by fd finds exactly the tree the host verified (the record, read-only here).
+#      E25: each of the adapter's exec directories is an empty directory on a read-only mount.
+try:
+    with open(cfg['install_record']) as f:
+        record = json.load(f)
+except (OSError, ValueError):
+    record = None
+if record is None:
+    reason = 'MI_ROOT_DIFFERS'                  # nothing to compare the tree against
+else:
+    try:
+        with open('/proc/self/mountinfo') as f:
+            reason = mountinfo_problem(f.read(), record['path'])
+    except OSError:
+        reason = 'MI_NOT_ONE_MOUNT'
+    reason = reason or walk_problem(record)
+check('managed-install', reason is None, reason or 'ok')
+empty = [empty_problem(p) for p in (record or {}).get('empty_read_only', [])]
+reason = 'ER_MISSING' if record is None else next((r for r in empty if r), None)
+check('empty-read-only', reason is None, reason or 'ok')
 # 11. Probe protection (§7, D23, Amendment 1). Nothing in the workload may trace this probe or write its
 #     memory. OpenShell's child seccomp filter answers ptrace, process_vm_writev, pidfd_getfd and unshare
 #     with EPERM, whatever Yama allows (it allows a parent, as here). Landlock keeps /proc read-only, so
@@ -366,7 +499,8 @@ check('probe-tamper-denied', {attach, vm, getfd, unshare} == {'EPERM'} and mem =
       f'unshare(0) -> {unshare}; open(/proc/<child>/mem, rw) -> {mem}')
 comm = open_result('/proc/self/comm', 'r+b')
 check('proc-readonly', comm == 'EACCES', f'open(/proc/self/comm, rw) -> {comm}')
-own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-probe.json']
+own = [f'{RUN}/hz-tamper', f'{RUN}/probes.py', f'{RUN}/token', f'{RUN}/agent-probe.json',
+       f'{RUN}/install-record.json']
 res = {p: open_result(p, 'ab') for p in own}
 check('probe-files-readonly', all(v in ('EROFS', 'EACCES', 'EPERM') for v in res.values()),
       ' '.join(f'{p}->{v}' for p, v in res.items()))

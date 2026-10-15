@@ -8,7 +8,6 @@ import errno
 import json
 import os
 import secrets
-import shutil
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -88,6 +87,10 @@ class InstallLayout:
     locator: str                # the release repository, or the npm package with `<target>` in it
     layout: store_core.Layout
     strip: str                  # the prefix every member of the artifact has
+    # A release's: the asset (`{target}` in it), its SHA256SUMS asset, and the tag (`{version}` in it).
+    asset: str = ""
+    sums: str = ""
+    tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,20 +115,6 @@ def epoch_or_none(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return int(value) if value == value and abs(value) < 1e15 else None    # NaN != NaN
-
-
-def find_binary(binary: str, path: str) -> Path:
-    found = binary if os.sep in binary else shutil.which(binary, path=path)
-    if not found:
-        raise AdapterError("the CLI binary was not found")
-    real = Path(os.path.realpath(found))
-    if not real.is_file() or not os.access(real, os.X_OK):
-        raise AdapterError("the CLI binary was not found")
-    return real
-
-
-def install_root(binary: Path) -> Path:
-    return binary.parent.parent if binary.parent.name == "bin" else binary.parent
 
 
 def hook_group(event: str, matcher: str | None = None) -> dict[str, Any]:
@@ -284,8 +273,6 @@ class Adapter(Protocol):
     config_subdir: str
     login_names: tuple[str, ...]
     model_hosts: tuple[str, ...]
-    version_pin: str
-    tool_env: frozenset[str]          # what the pinned CLI adds to its tools' environment (S5 item 11)
     prompt_marker: str                # its ready prompt, as tmux captures it
     assigns_id: bool                  # the CLI assigns the native ID itself (Codex's thread), else wsd does
     turn_end_events: tuple[str, ...]  # hook events that end a turn (plan 4b E14)
@@ -296,8 +283,6 @@ class Adapter(Protocol):
     owned_keys: frozenset[str]        # dotted keys the launcher writes, or drops, last (E9)
     empty_read_only: tuple[PurePosixPath, ...]   # home-relative exec directories, presented empty (E25)
     profile_flags: Mapping[str, bool]            # the flags a profile's args may carry (Q4)
-
-    def locate(self, binary: str, path: str) -> Cli: ...
 
     def check_content(self, kind: str, tree: Path) -> None:
         """Refuse the content item at `tree`: UNKNOWN_KIND, OWNS_KEY or CONTENT_MALFORMED."""
@@ -310,13 +295,12 @@ class Adapter(Protocol):
 
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
                              install: Path) -> "tuple[Cleared, ...]":
-        """prepare_home for a managed install: `defaults/` merged under the launcher's keys, and each
-        `empty_read_only` path made an empty directory. Returns what it cleared."""
+        """The synthetic home for a launch from the managed install at `install`: `defaults/` merged under
+        the launcher's keys, and each `empty_read_only` path made an empty directory. Returns what it
+        cleared."""
         ...
 
     def facts(self, layout: SessionLayout, cli: Cli, uid: int) -> AgentFacts: ...
-
-    def prepare_home(self, layout: SessionLayout, worktree: Path) -> None: ...
 
     def has_state(self, home: Path, native_id: str | None) -> bool:
         """The synthetic home holds resumable state for this native ID. Raises AdapterError for an ID

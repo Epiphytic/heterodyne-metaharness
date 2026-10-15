@@ -2511,6 +2511,42 @@ def read_staged(store: Path, staging_id: str) -> Manifest:
     return parse(data)
 
 
+def open_install(store: Path, adapter: str, install: str) -> int:
+    """The published install's root, opened as a directory without following a link and without the store
+    lock (the launcher's read, plan 4c Task 8). A name that is not an adapter's or an install's, or a path
+    that doesn't exist, refuses (`NO_SUCH_INSTALL`); any other failure raises OSError."""
+    if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
+        raise Refused(NO_SUCH_INSTALL)
+    fds: list[int] = []
+    try:
+        fds.append(_open_store(store))
+        for name in (adapter, install):
+            fds.append(_open(name, DIR_FLAGS, fds[-1]))
+        return fds.pop()
+    except FileNotFoundError:
+        raise Refused(NO_SUCH_INSTALL) from None
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def read_meta(store: Path, adapter: str, install: str) -> tuple[Manifest, Record] | None:
+    """The install's meta manifest and record, read without the store lock: a published install's meta
+    files are replaced only by a rename. None when either is missing; a malformed one refuses
+    (`MANIFEST_MALFORMED`, `RECORD_MALFORMED`), and one that can't be read raises OSError."""
+    if not PLAIN.fullmatch(adapter) or not INSTALL.fullmatch(install):
+        raise Refused(NO_SUCH_INSTALL)
+    store_fd = _open_store(store)
+    try:
+        data = _meta(store_fd, adapter, install, "manifest")
+        rec = _meta(store_fd, adapter, install, "record")
+    finally:
+        os.close(store_fd)
+    if data is None or rec is None:
+        return None
+    return parse(data), _record_of(rec)
+
+
 # --- the store helper (plan 4c E1, E3): one request a connection, as JSON, its artifacts as fds ---
 
 PEER_REFUSED = "the peer is not the service user"

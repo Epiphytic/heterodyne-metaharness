@@ -12,6 +12,7 @@ import io
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -22,11 +23,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import IO, Any
 
+import harness_env as he
 import pytest
 from escapes import FAKES, Escapes
 from sandbox_env import wait_for
 
 from heterodyne.agents.codex import Codex
+from heterodyne.harness import verify
 from heterodyne.sandbox.openshell_selftest import AGENT_CHECKS, EXEC_CHECKS, OPENSHELL_ENV, env_allowed
 from heterodyne.sandbox.spec import LAUNCHER_ENV
 
@@ -42,6 +45,8 @@ OTHER_LOGIN = "/outside/accounts/work/auth.json"
 WSD_SOCKET = "/outside/state/wsd/ctl.sock"
 ALLOWED, DENIED, MODEL = "probe.example.org", "denied.example.org", "chatgpt.com"
 SYNTHETIC = "198.18.0.7"                       # OpenShell's policy DNS answers from 198.18.0.0/15
+RECORD = f"{RUN}/install-record.json"
+EMPTY = ("/sandbox/home/.codex/tmp", "/sandbox/home/.codex/packages")     # E25's, inside
 
 
 def cert(issuer: str) -> str:
@@ -86,6 +91,9 @@ class World:
     runs: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])    # each curl Popen's kwargs
     spawned: list[list[str]] = field(default_factory=list[list[str]])          # every other Popen's argv
     ends: dict[int, "FakeEnd"] = field(default_factory=dict[int, "FakeEnd"])    # capture ends, by fd
+    read_write: set[str] = field(default_factory=set[str])       # paths outside the cgroupfs on a rw mount
+    install: str = ""                      # the managed install's path: a real, verified host directory
+    evidence: dict[str, str] = field(default_factory=dict[str, str])     # each check's, from the last run
     acks: list[int] = field(default_factory=list[int])      # len(reported) at each wait for the ACK
 
     def at(self, path: str | os.PathLike[str]) -> Path:
@@ -103,6 +111,16 @@ class World:
             raise OSError(errno.EROFS, os.strerror(errno.EROFS), file)
         return self.at(file).open(mode)
 
+    def record(self) -> dict[str, Any]:
+        return json.loads(self.at(RECORD).read_text())
+
+    def put_record(self, record: dict[str, Any]) -> None:
+        self.put(RECORD, json.dumps(record))
+
+    def mounts(self, *lines: str) -> None:
+        """/proc/self/mountinfo: the base mounts, then `lines`."""
+        self.put("/proc/self/mountinfo", "".join(f"{ln}\n" for ln in (*BASE_MOUNTS, *lines)))
+
     def answer(self, host: str) -> tuple[int, str, str]:
         if host in self.curl:
             return self.curl[host]
@@ -116,8 +134,17 @@ class World:
                 "other_accounts": [{"account": "work", "class": "present", "paths": [OTHER_LOGIN]}],
                 "chosen": [{"path": CHOSEN, "sha256": hashlib.sha256(LOGIN.encode()).hexdigest()}],
                 "allowed": ALLOWED, "denied": DENIED, "model_host": MODEL, "wsd_socket": WSD_SOCKET,
-                "env_allowed": sorted(env_allowed(Codex(), self.path)),
-                "env_user": sorted(LAUNCHER_ENV | OPENSHELL_ENV)}
+                "env_allowed": sorted(env_allowed(Codex(), self.path, "0.160.0")),
+                "env_user": sorted(LAUNCHER_ENV | OPENSHELL_ENV), "install_record": RECORD}
+
+
+BASE_MOUNTS = ("22 1 0:20 / / rw,relatime - overlay overlay rw",
+               "23 22 0:21 / /proc rw,nosuid - proc proc rw")
+
+
+def mount(point: str, options: str = "ro,nosuid,nodev", tags: str = "") -> str:
+    """One /proc/self/mountinfo line mounting `point`: its options, then any optional fields."""
+    return f"41 22 8:1 /store {point} {options}{' ' + tags if tags else ''} - ext4 /dev/sda1 rw"
 
 
 def fake_socket(world: World) -> type:
@@ -203,6 +230,8 @@ def fake_statvfs(world: World) -> Callable[[str], SimpleNamespace]:
     def statvfs(path: str) -> SimpleNamespace:
         if not world.at(path).exists():
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+        if path != CGROUPFS:
+            return SimpleNamespace(f_flag=0 if path in world.read_write else os.ST_RDONLY)
         if world.cgroupfs not in ("ro", "rw"):
             code = getattr(errno, world.cgroupfs)
             raise OSError(code, os.strerror(code), path)
@@ -263,6 +292,12 @@ def world(tmp_path: Path) -> World:
     w.denied["/proc/self/comm"] = errno.EACCES
     w.put(f"{CGROUPFS}/cgroup.freeze", "0\n")              # the container's own, mounted read-only
     w.put(f"{CGROUPFS}/cgroup.procs", "1\n")
+    installed = he.published(tmp_path / "installs", "codex").verified()
+    w.install = str(installed.root)
+    w.put(RECORD, verify.install_record(installed, EMPTY))
+    w.mounts(mount(w.install))
+    for path in EMPTY:
+        w.at(path).mkdir(parents=True)
     return w
 
 
@@ -312,6 +347,8 @@ def run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> 
         lines = capsys.readouterr().out.splitlines()
         assert lines[-1] == f"DONE {rc}"               # the probes' explicit completion, last
         verdicts = [ln.split()[:2] for ln in lines if ln.startswith(("PASS ", "FAIL "))]
+        world.evidence = {ln.split()[1]: ln.split(" ", 2)[2] for ln in lines
+                          if ln.startswith(("PASS ", "FAIL "))}
         return rc, {name: verdict == "PASS" for verdict, name in verdicts}
     return go
 
@@ -458,6 +495,127 @@ def test_an_absent_cgroupfs_passes(world: World, run: Callable[[World], Results]
     assert not world.at(f"{CGROUPFS}/cgroup.freeze").exists()     # r+: nothing is created
 
 
+def _record(change: Callable[[dict[str, Any]], None]) -> Callable[[World], None]:
+    def go(w: World) -> None:
+        record = w.record()
+        change(record)
+        w.put_record(record)
+    return go
+
+
+def _mounts(*lines: Callable[[World], str]) -> Callable[[World], None]:
+    """/proc/self/mountinfo with these lines (each built from the world) in place of the install's."""
+    return lambda w: w.mounts(*(line(w) for line in lines))
+
+
+def _first_entry(field_at: int, value: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda r: r["entries"][0].__setitem__(field_at, value)
+
+
+def _file_for_dir(w: World) -> None:
+    w.at(EMPTY[0]).rmdir()
+    w.put(EMPTY[0], "")
+
+
+def _make_not_empty(w: World) -> None:
+    w.put(f"{EMPTY[1]}/left-over", "x")
+
+
+def _moved_record(w: World) -> None:
+    w.put_record({**w.record(), "path": f"{w.install}-gone"})
+    w.mounts(mount(f"{w.install}-gone"))
+
+
+def _unlink_record(w: World) -> None:
+    w.at(RECORD).unlink()
+
+
+MANAGED_INSTALL_CONTROLS: list[tuple[str, Callable[[World], None], dict[str, str]]] = [
+    ("the install not mounted", _mounts(), {"managed-install": "MI_NOT_ONE_MOUNT"}),
+    ("the install mounted twice", _mounts(lambda w: mount(w.install), lambda w: mount(w.install)),
+     {"managed-install": "MI_NOT_ONE_MOUNT"}),
+    ("a mountinfo line that doesn't parse", _mounts(lambda w: mount(w.install), lambda w: "41 22 8:1 /x"),
+     {"managed-install": "MI_NOT_ONE_MOUNT"}),
+    ("the install mounted read-write", _mounts(lambda w: mount(w.install, "rw,nosuid")),
+     {"managed-install": "MI_NOT_READ_ONLY"}),
+    ("the install's mount shared", _mounts(lambda w: mount(w.install, tags="shared:7")),
+     {"managed-install": "MI_PROPAGATES"}),
+    ("the install's mount a slave", _mounts(lambda w: mount(w.install, tags="master:3")),
+     {"managed-install": "MI_PROPAGATES"}),
+    ("a mount below the install", _mounts(lambda w: mount(w.install), lambda w: mount(f"{w.install}/bin")),
+     {"managed-install": "MI_SUBMOUNT"}),
+    ("another root at the install path", _record(lambda r: r["root"].__setitem__(1, r["root"][1] + 1)),
+     {"managed-install": "MI_ROOT_DIFFERS"}),
+    ("the root's mode not the record's", _record(lambda r: r["root"].__setitem__(2, 0o755)),
+     {"managed-install": "MI_ROOT_DIFFERS"}),
+    ("no install at the mounted path", _moved_record, {"managed-install": "MI_ROOT_DIFFERS"}),
+    ("an entry missing from the tree", _record(lambda r: r["entries"].append(
+        ["not-there", "file", 0o444, 0, 1, 0, 0, 0, None])), {"managed-install": "MI_LISTING_DIFFERS"}),
+    ("an entry the record lacks", _record(lambda r: r["entries"].pop()),
+     {"managed-install": "MI_LISTING_DIFFERS"}),
+    ("an entry's size not the record's", _record(_first_entry(3, 12345)),
+     {"managed-install": "MI_LISTING_DIFFERS"}),
+    ("an entry's inode not the record's", _record(_first_entry(6, 1)),
+     {"managed-install": "MI_LISTING_DIFFERS"}),
+    ("no record", _unlink_record, {"managed-install": "MI_ROOT_DIFFERS", "empty-read-only": "ER_MISSING"}),
+    ("a record that doesn't parse", lambda w: w.put(RECORD, "{"),
+     {"managed-install": "MI_ROOT_DIFFERS", "empty-read-only": "ER_MISSING"}),
+    ("an exec directory missing", lambda w: w.at(EMPTY[0]).rmdir(), {"empty-read-only": "ER_MISSING"}),
+    ("an exec directory replaced by a file", _file_for_dir, {"empty-read-only": "ER_MISSING"}),
+    ("an exec directory not empty", _make_not_empty, {"empty-read-only": "ER_NOT_EMPTY"}),
+    ("an exec directory on a read-write mount", lambda w: w.read_write.add(EMPTY[1]),
+     {"empty-read-only": "ER_NOT_READ_ONLY"}),
+]
+
+
+@pytest.mark.parametrize("break_it, failing", [(f, c) for _, f, c in MANAGED_INSTALL_CONTROLS],
+                         ids=[name for name, _, _ in MANAGED_INSTALL_CONTROLS])
+def test_each_broken_install_rule_fails_its_check_with_its_reason(
+        world: World, run: Callable[[World], Results], break_it: Callable[[World], None],
+        failing: dict[str, str]) -> None:
+    """Plan 4c T8 (E24, E25): the Managed install probe's checks, one reason each."""
+    break_it(world)
+    rc, results = run(world)
+    assert rc == 1
+    assert {name for name, ok in results.items() if not ok} == failing.keys()
+    assert {name: world.evidence[name] for name in failing} == {n: f"[{r}]" for n, r in failing.items()}
+
+
+def test_an_enforcing_world_shows_the_install_checks_passing(world: World,
+                                                             run: Callable[[World], Results]) -> None:
+    rc, _ = run(world)
+    assert rc == 0
+    assert (world.evidence["managed-install"], world.evidence["empty-read-only"]) == ("[ok]", "[ok]")
+
+
+def test_a_mount_point_that_shares_only_a_prefix_is_not_a_submount(world: World,
+                                                                   run: Callable[[World], Results]) -> None:
+    world.mounts(mount(world.install), mount(f"{world.install}-next"), mount(f"{world.install}x/bin"))
+    rc, results = run(world)
+    assert rc == 0 and results["managed-install"]
+
+
+def test_an_escaped_mount_point_below_the_install_is_a_submount(world: World,
+                                                                run: Callable[[World], Results]) -> None:
+    """The kernel writes a space in a mount point as \\040: decoded, the point is below the install."""
+    world.mounts(mount(world.install), mount(f"{world.install}/a\\040b"))
+    rc, results = run(world)
+    assert rc == 1 and world.evidence["managed-install"] == "[MI_SUBMOUNT]"
+
+
+def test_an_escaped_install_path_is_its_mount(tmp_path: Path) -> None:
+    mountinfo_problem = probe_function("mountinfo_problem", "unescape")
+    install = "/sandbox/store/codex/a b"
+    assert mountinfo_problem(mount("/sandbox/store/codex/a\\040b") + "\n", install) is None
+    assert mountinfo_problem(mount(install.replace(" ", "\\011")) + "\n", install) == "MI_NOT_ONE_MOUNT"
+
+
+def test_the_record_of_a_real_install_matches_its_walk(tmp_path: Path) -> None:
+    walk_problem = probe_function("walk_problem", "listing")
+    installed = he.published(tmp_path / "installs", "claude-code").verified()
+    assert walk_problem(json.loads(verify.install_record(installed))) is None
+
+
 def test_every_program_the_probe_runs_reports_on_a_socket(world: World,
                                                           run: Callable[[World], Results]) -> None:
     """D23 (Amendment 1): curl, by its path and with no curlrc, its output on the capture socket pair and no
@@ -553,14 +711,18 @@ def test_any_complete_nonzero_status_counts_as_reached(world: World, run: Callab
     assert rc == 0 and all(results.values())
 
 
-def probe_function(name: str) -> Callable[..., Any]:
-    """One function from the probe script, defined on its own: the script runs its checks when loaded."""
+def probe_function(name: str, *needs: str) -> Callable[..., Any]:
+    """One function from the probe script, defined on its own with the functions it `needs`: the script
+    runs its checks when loaded."""
     tree = ast.parse(PROBES.read_text())
-    [fn] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
-    scope: dict[str, Any] = {"socket": socket, "subprocess": subprocess, "time": time, "CAPTURE_SECONDS": 30,
+    fns: list[ast.stmt] = [n for n in tree.body
+                           if isinstance(n, ast.FunctionDef) and n.name in (name, *needs)]
+    assert len(fns) == 1 + len(needs)
+    scope: dict[str, Any] = {"socket": socket, "subprocess": subprocess, "time": time, "os": os,
+                             "stat": stat, "errno": errno, "CAPTURE_SECONDS": 30,
                              "CAPTURE_BYTES": 1 << 20, "TIMED_OUT": "timeout",
                              "OVERFLOW": "overflow"}
-    exec(compile(ast.Module([fn], []), str(PROBES), "exec"), scope)  # noqa: S102 - the probe's own code
+    exec(compile(ast.Module(fns, []), str(PROBES), "exec"), scope)  # noqa: S102 - the probe's own code
     return scope[name]
 
 

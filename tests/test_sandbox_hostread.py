@@ -16,14 +16,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import harness_env as he
 import pytest
 import sleeper
 from escapes import FAKES, Escapes
-from sandbox_env import fake_jwt, install_fake_cli
+from sandbox_env import fake_jwt
 from wsd_env import Clock, accounts_at
 
 from heterodyne.agents.codex import HOST_SOURCE, USAGE_SOURCE
 from heterodyne.config import ConfigError
+from heterodyne.harness import verify
 from heterodyne.sandbox import hostread
 from heterodyne.sandbox.hostread import (
     DIAG_NOT_READ,
@@ -60,15 +62,16 @@ class Rig:
         self.login.chmod(0o600)
         self.accounts = accounts_at(self.home)
         self.key = self.accounts.current_key("codex", "default")
-        self.codex = install_fake_cli(tmp_path / "i", "codex")
+        self.install = he.selected_install(tmp_path / "i")
+        self.codex = self.install.binary
         self.scratch = tmp_path / "hostread"
         self.credlocks = tmp_path / "k"
         self.pid_file = tmp_path / "read.pid"
         self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home),
                     "HZ_FAKE_PID_FILE": str(self.pid_file), "HZ_FAKE_RATE_LIMITS": json.dumps(SNAPSHOT),
                     **env}
-        self.reader = HostUsageReader(self.accounts, str(self.codex), os.environ["PATH"], self.credlocks,
-                                      self.scratch, 1, env=self.env, limit_seconds=5, clock=self.clock)
+        self.reader = HostUsageReader(self.accounts, self.install.cli, self.credlocks, self.scratch, 1,
+                                      env=self.env, limit_seconds=5, clock=self.clock)
 
     def read(self, profile: str = "p-two", key: str | None = None) -> TrustedRead | None:
         return self.reader.read(profile, "default", self.key if key is None else key)
@@ -354,11 +357,12 @@ def test_a_failed_read_is_none_names_why_and_leaves_nothing(tmp_path: Path, logg
     assert rig.login.read_text() == rig.original
 
 
-def test_a_missing_cli_stops_before_anything_starts(tmp_path: Path, logged: Callable[[], list[str]]) -> None:
+def test_an_install_that_fails_verification_stops_before_anything_starts(
+        tmp_path: Path, logged: Callable[[], list[str]]) -> None:
     rig = Rig(tmp_path)
-    shutil.rmtree(tmp_path / "i")
+    verify.taint(rig.install.taint_dir, "codex", rig.install.pin.install, verify.INSTALL_CHANGED)
     assert rig.read() is None
-    assert logged() == [f"{DIAG_READ_FAILED}: AdapterError"]     # locate's, never a reading or a refusal
+    assert logged() == [f"{DIAG_READ_FAILED}: VerifyRefused"]    # the check's, never a reading or a refusal
     assert not rig.scratch.exists() and not rig.pid_file.exists()
 
 

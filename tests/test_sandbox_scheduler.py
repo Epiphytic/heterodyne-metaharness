@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -46,7 +47,8 @@ def both(request: pytest.FixtureRequest) -> Iterator[Both]:
         try:            # the Journal closes whatever fails below: an open one breaks test_wsd_gate's fd count
             rt = runtime_rig(root / "x", tmux, rig.clock)
             rig.ws = replace(rig.ws, accounts=rt.runtime.c.accounts)   # one Accounts, as in wsd
-            rig.deps = replace(rig.deps, runtime=rt.runtime)
+            rig.selections = lambda adapter: rt.installs[adapter].pin  # the runtime's store: one selection
+            rig.deps = replace(rig.deps, runtime=rt.runtime, selections=rig.selections)
             rig.parker = Parker(rig.ws, rig.deps)
             rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
             try:
@@ -324,3 +326,23 @@ def test_a_reaped_lifetime_end_resets_the_crash_count_through_the_guard(both: Bo
     rig.pickup()
     assert rig.journal.crash_count(WS, "btq-1") == 1 and rig.state("btq-1") == "running"
     assert both.record("btq-1").generation == 4
+
+
+def test_a_credential_named_leftover_is_journaled_redacted(both: Both) -> None:
+    """Codex T8 r2: a workload's file left in an exec dir is cleared at the next launch and journaled as
+    `exec_dir_cleared`, its credential-shaped name redacted (never written to the journal)."""
+    rig, rt = both.rig, both.rt
+    secret = "ghp_" + "a1" * 12            # built here: no credential-shaped literal in the repo
+    rig.world.add("btq-1")
+    on_profile(rig, "btq-1", "p-two")      # Codex: `.codex/packages` is an exec dir
+    assert rig.pickup() is Outcome.STARTED
+    first = both.record("btq-1")
+    packages = rt.runtime.layout(first.key).home / ".codex" / "packages"
+    packages.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (packages / secret).write_bytes(b"x")  # what generation 1 left behind
+    rig.clock.advance(first.deadline - rt.runtime.c.settings.stop_margin_seconds - rig.clock())
+    assert rig.pickup() is Outcome.BUSY    # stopped and relaunched: generation 2's launch clears it
+    assert both.record("btq-1").generation == 2 and not any(packages.iterdir())
+    rig.pickup()                           # the notice is drained and journaled
+    [event] = [e for e in rig.journal.events_since(0) if e.kind == "exec_dir_cleared"]
+    assert secret not in event.detail and json.loads(event.detail)["files"] == 1

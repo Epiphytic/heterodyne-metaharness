@@ -56,7 +56,8 @@ def test_holding_reconciler_never_reads_a_non_string_as_settled(tmp_path: Path) 
 
 def test_fake_runtime_that_is_down_never_confirms_a_stop() -> None:
     runtime = FakeRuntime()
-    spec = LaunchSpec("alpha", "btq-a", "coder", "p", "k", "l", Path("/nonexistent"), False)
+    spec = LaunchSpec("alpha", "btq-a", "coder", "p", "k", "l", Path("/nonexistent"), False,
+                      install="fake-install", install_digest="sha256:fake")
     runtime.launch(spec)
     runtime.up = False
     with pytest.raises(RuntimeUnavailable):

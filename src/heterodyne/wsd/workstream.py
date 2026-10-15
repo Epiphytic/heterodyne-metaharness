@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
@@ -97,6 +98,35 @@ def no_selection(_adapter: str) -> InstallPin | None:
     return None
 
 
+class HarnessHooks(Protocol):
+    """What the scheduler and start-up call on wsd's harness ops (plan 4c T10)."""
+
+    def advance(self, now: int) -> None:
+        """Move every open install approval on: expire, read the decision, publish."""
+        ...
+
+    def recover(self) -> None:
+        """Start-up's: close interrupted `use` ops and finish interrupted publishes."""
+        ...
+
+    def tainted(self, adapter: str, install: str) -> None:
+        """An install was found tainted: write its alert."""
+        ...
+
+
+class NoHarness:
+    """No managed installs: the default outside production."""
+
+    def advance(self, now: int) -> None:
+        pass
+
+    def recover(self) -> None:
+        pass
+
+    def tainted(self, adapter: str, install: str) -> None:
+        pass
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -112,3 +142,5 @@ class Deps:
     # The adapter's selected install, read afresh on each call (plan 4c T7): the guard pins it in each new
     # launch entry. ConfigError when the selection can't be read.
     selections: Callable[[str], InstallPin | None] = no_selection
+    # wsd's harness ops (plan 4c T10): each pickup advances the install approvals, and a taint alerts.
+    harness: HarnessHooks = field(default_factory=NoHarness)

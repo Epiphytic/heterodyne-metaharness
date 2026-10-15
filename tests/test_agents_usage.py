@@ -13,9 +13,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import harness_env as he
 import pytest
 from escapes import Escapes
-from sandbox_env import install_fake_cli, wait_for
+from sandbox_env import wait_for
 
 from heterodyne.agents.base import STATUS_COMMAND, Cli, UsageReport
 from heterodyne.agents.claude_code import SETTINGS_FILE, STATUS_SOURCE, ClaudeCode
@@ -156,8 +157,12 @@ def gone(pid_file: Path) -> bool:
     return False
 
 
+def fake_codex(tmp_path: Path) -> Path:
+    return he.published(tmp_path / "installs", "codex").binary
+
+
 def run_usage(tmp_path: Path, limit: str = "30", **env: str) -> subprocess.CompletedProcess[bytes]:
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     home = tmp_path / "codex-home"
     home.mkdir(exist_ok=True)
     scratch = tmp_path / "tmp"
@@ -247,7 +252,7 @@ def read_env(tmp_path: Path) -> dict[str, str]:
 
 
 def test_read_answers_and_reaps_the_app_server(tmp_path: Path, started: list[subprocess.Popen[str]]) -> None:
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     assert usage_module().read(str(codex), read_env(tmp_path), 5) == SNAPSHOT
     assert ended(started)
 
@@ -255,7 +260,7 @@ def test_read_answers_and_reaps_the_app_server(tmp_path: Path, started: list[sub
 def test_a_timer_that_cannot_start_still_ends_the_app_server(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
     module = usage_module()
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
 
     def refuse(_self: threading.Timer) -> None:
         raise RuntimeError("can't start new thread")
@@ -285,7 +290,7 @@ class LateTimer:
 def test_an_answer_that_races_the_deadline_is_a_timeout(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
     module = usage_module()
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     monkeypatch.setattr(module.threading, "Timer", LateTimer)
     with pytest.raises(TimeoutError):
         module.read(str(codex), read_env(tmp_path), 5)
@@ -295,7 +300,7 @@ def test_an_answer_that_races_the_deadline_is_a_timeout(
 def test_an_app_server_that_cannot_be_reaped_fails_the_read(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: list[subprocess.Popen[str]]) -> None:
     module = usage_module()
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     real_wait = POPEN.wait
 
     # quoted: the `started` fixture has replaced subprocess.Popen with a function by now
@@ -314,7 +319,7 @@ def test_a_scratch_home_that_stays_is_no_reading(tmp_path: Path, monkeypatch: py
                                                  capsys: pytest.CaptureFixture[str],
                                                  started: list[subprocess.Popen[str]]) -> None:
     module = usage_module()
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     env = read_env(tmp_path)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -360,7 +365,7 @@ def test_the_default_read_starts_the_app_server_directly(tmp_path: Path,
                                                          started: list[subprocess.Popen[str]]) -> None:
     """The in-sandbox read keeps its direct launch; its app-server inherits the reader's no_new_privs,
     whatever that is (the sandbox's workload already runs under it)."""
-    codex = install_fake_cli(tmp_path, "codex")
+    codex = fake_codex(tmp_path)
     report = tmp_path / "no-new-privs"
     assert usage_module().read(str(codex), {**read_env(tmp_path), "HZ_FAKE_STATUS_FILE": str(report)},
                                5) == SNAPSHOT

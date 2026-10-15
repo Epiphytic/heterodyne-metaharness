@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from heterodyne.agents.base import Adapter, Cli
+from heterodyne.harness.verify import VerifiedInstall
 from heterodyne.sandbox.backend import Backend
 from heterodyne.sandbox.settings import SandboxSettings
 from heterodyne.sandbox.spec import SandboxSpec, SessionLayout
@@ -36,6 +37,7 @@ class ProbeContext:
     wsd_socket: Path
     settings: SandboxSettings
     turns: Callable[[], TurnState]
+    install: VerifiedInstall                     # plan 4c T8: the install `cli` was verified from
 
 
 class SelfTest(Protocol):
