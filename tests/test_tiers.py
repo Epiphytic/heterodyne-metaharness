@@ -41,8 +41,9 @@ def test_a_leaf_module_selects_the_tests_that_reach_it() -> None:
 
 
 def test_a_transitive_import_counts() -> None:
-    # test_admind_cli imports admind.cli, which reaches admind.redact only through other modules.
-    assert "tests/test_admind_cli.py" in select_tests.select(["src/heterodyne/admind/redact.py"])
+    # test_admind_cli imports admind.cli, which reaches admind.summarize only through other modules. (Not
+    # admind.redact: since plan 4c T8 the agents' exec dirs use it, so it is shared core.)
+    assert "tests/test_admind_cli.py" in select_tests.select(["src/heterodyne/admind/summarize.py"])
 
 
 def test_a_module_named_in_a_string_counts() -> None:

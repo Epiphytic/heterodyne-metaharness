@@ -12,7 +12,7 @@ import pytest
 from fakes.checkpoints import CrashAt, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import ADAPTERS, PROFILES, WS, Rig, accounts_at, git_repo, login_home, make_rig
+from wsd_env import ADAPTERS, PROFILES, WS, Rig, accounts_at, git_repo, login_home, make_rig, selected_config
 
 from heterodyne.wsd import cli, ids, upgrade
 from heterodyne.wsd.accounts import ConfiguredAccounts
@@ -216,7 +216,8 @@ def test_the_daemon_exits_1_when_beads_are_down_at_the_upgrade(tmp_path: Path) -
     repo = git_repo(tmp_path / "repos" / "proj")
     accounts = accounts_at(login_home(tmp_path / "home"))
     ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
-    s = WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts)
+    s = WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts,
+                    config_dir=selected_config(tmp_path / "config"))
     s.state_dir.mkdir(parents=True, mode=0o700)
     v1_journal(s.journal)
     db = sqlite3.connect(s.journal, isolation_level=None)

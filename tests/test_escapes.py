@@ -23,7 +23,8 @@ from typing import Any
 
 import pytest
 from escapes import Escapes, reported, sleeper
-from sandbox_env import FAKE_CLI, short_dir
+from harness_env import FAKE_CLI
+from sandbox_env import short_dir
 from test_admind_approvals import DESCENDANT
 from test_admind_r13_summary import SETSID, escaped_body, grandchild_body, group_sleeper_body
 from test_sandbox_probes import grandchild_code

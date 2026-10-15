@@ -1,6 +1,6 @@
-"""Sandbox settings (ADR 0001 §7, §15): the host's `[sandbox]` and `[platform]` tables, each adapter's
-binary, the profiles, each workstream's `[sandbox]` additions and effective tiers, and `[harnesses]`. Read
-once when wsd starts; a change needs a restart. Errors name keys, never values: `tool_env` may carry paths."""
+"""Sandbox settings (ADR 0001 §7, §15): the host's `[sandbox]` and `[platform]` tables, the profiles, each
+workstream's `[sandbox]` additions and effective tiers, and `[harnesses]`. Read once when wsd starts; a change
+needs a restart. Errors name keys, never values: `tool_env` may carry paths."""
 
 import re
 from collections.abc import Mapping
@@ -51,7 +51,6 @@ class SandboxSettings:
     usage_poll_seconds: int                  # E5: the in-sandbox usage read's interval, when (c) or (e) is on
     hook_wait_seconds: float
     egress_approved: tuple[str, ...]
-    binaries: Mapping[str, str]              # adapter -> `[adapters.<a>].binary`, as configured
     profiles: Mapping[str, Mapping[str, Any]]
     workstreams: Mapping[str, WsSandbox]
     harnesses: HarnessSettings               # plan 4c: the managed install store and the recipes
@@ -86,13 +85,6 @@ def from_config(host: Config, streams: Mapping[str, Config], env: Mapping[str, s
             or not 0 < hook_wait <= MAX_HOOK_WAIT):
         raise ConfigError("[timeouts] hook_wait_seconds must be a number of seconds, more than 0 and at "
                           f"most {MAX_HOOK_WAIT}")
-    adapters = table_at(host.values, "adapters", "config")
-    binaries: dict[str, str] = {}
-    for adapter in string_list(adapters.get("known", []), "adapters.known"):
-        binary = table_at(adapters, adapter, "adapters").get("binary")
-        if not isinstance(binary, str) or not binary:
-            raise ConfigError(f"[adapters.{adapter}] binary must be a command name or path")
-        binaries[adapter] = binary
     profiles = {name: dict(cast(Mapping[str, Any], value))
                 for name, value in table_at(host.values, "profiles", "config.toml").items()}
     return SandboxSettings(
@@ -110,7 +102,6 @@ def from_config(host: Config, streams: Mapping[str, Config], env: Mapping[str, s
         usage_poll_seconds=_int(sb, "usage_poll_seconds", 60, 86_400),
         hook_wait_seconds=float(hook_wait),
         egress_approved=approved,
-        binaries=binaries,
         profiles=profiles,
         workstreams={name: _workstream(name, cfg) for name, cfg in streams.items()},
         harnesses=harness_settings(host, env))

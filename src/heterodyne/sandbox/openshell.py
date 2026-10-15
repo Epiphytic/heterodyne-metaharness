@@ -49,7 +49,7 @@ def driver_config(spec: SandboxSpec, nonrecursive: bool = False) -> dict[str, An
     four keys on every bind, which any OpenShell takes."""
     def mount(b: Bind) -> dict[str, Any]:
         m = {"type": "bind", "source": str(b.source), "target": str(b.target), "read_only": b.read_only}
-        return {**m, "recursive": False} if nonrecursive and b.target == spec.install else m
+        return {**m, "recursive": False} if nonrecursive and b.install else m
     return {"podman": {"mounts": [*map(mount, spec.binds), *map(mount, spec.logins)]}}
 
 

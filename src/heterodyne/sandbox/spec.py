@@ -3,7 +3,8 @@ and gets in its environment, and the credential check every launch runs on it. B
 (openshell.py); adapters contribute `AgentFacts`; nothing here names an adapter or a backend.
 
 Every host path is bound at the same path inside, except the generation's run directory, which is
-`/run/hz` (read-only). Names follow D1 and paths follow D2 of plan 4.
+`/run/hz` (read-only), and its empty directory, bound read-only over the adapter's `empty_read_only` paths
+in the home (plan 4c E25). Names follow D1 and paths follow D2 of plan 4.
 """
 
 import hashlib
@@ -12,7 +13,7 @@ import posixpath
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from heterodyne.sandbox.settings import DENIED_HOSTS, HOST
 
@@ -31,6 +32,7 @@ SHIM_INSIDE = RUN_INSIDE / "shim.py"
 SHIM_CONFIG_INSIDE = RUN_INSIDE / "shim.json"
 PROBES_INSIDE = RUN_INSIDE / "probes.py"
 AGENT_PROBE_INSIDE = RUN_INSIDE / "agent-probe.json"
+INSTALL_RECORD_INSIDE = RUN_INSIDE / "install-record.json"     # the Managed install probe's input (plan 4c)
 REQUEST_INSIDE = RUN_INSIDE / "ws-request"
 SYSTEM_READ_ONLY = ("/usr", "/lib", "/lib64", "/etc", "/proc", "/dev/urandom")
 SYSTEM_READ_WRITE = ("/tmp", "/dev/null", "/dev/tty", "/dev/pts")  # noqa: S108 - the sandbox's own /tmp
@@ -45,6 +47,9 @@ BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 LAUNCHER_ENV = frozenset({"HOME", "PATH", "LANG", "TERM", "USER", "HZ_SESSION_SOCKET", "CLAUDE_CONFIG_DIR",
                           "CODEX_HOME", "ENABLE_CLAUDEAI_MCP_SERVERS", "DISABLE_AUTOUPDATER",
                           "DISABLE_UPDATES"})
+
+
+INSIDE_LOGIN_DIR = "a bind would reach into the chosen account's login directory"
 
 
 class SpecRefused(Exception):
@@ -63,8 +68,8 @@ def sandbox_name(key: str, generation: int) -> str:
 
 @dataclass(frozen=True)
 class SessionLayout:
-    """One session's host directory (D2). Only `home`, `bridge`, `git` and `run(gen)` are ever bound in;
-    the record, the event spools, the scratch and the canary stay outside every bind."""
+    """One session's host directory (D2). Only `home`, `bridge`, `git`, `run(gen)` and `empty(gen)` are ever
+    bound in; the record, the event spools, the scratch and the canary stay outside every bind."""
     root: Path
 
     @classmethod
@@ -98,6 +103,11 @@ class SessionLayout:
     def run(self, generation: int) -> Path:
         return self.root / f"r{generation}"
 
+    def empty(self, generation: int) -> Path:
+        """E25: the empty, 0555 directory bound read-only over each of the adapter's `empty_read_only`
+        paths. The launcher remakes it before every create."""
+        return self.run(generation) / "empty"
+
     def socket(self, generation: int) -> Path:
         return self.run(generation) / "s.sock"
 
@@ -121,6 +131,7 @@ class Bind:
     source: Path            # host
     target: Path            # inside
     read_only: bool
+    install: bool = False   # the managed install's bind (E24): `driver_config` writes it with S9-8's fields
 
 
 @dataclass(frozen=True)
@@ -144,6 +155,7 @@ class AgentFacts:
     extra_env: Mapping[str, str] = field(default_factory=dict[str, str])
     binds: tuple[Bind, ...] = ()
     read_write: tuple[str, ...] = ()
+    empty_read_only: tuple[PurePosixPath, ...] = ()  # E25: home-relative, each bound to `layout.empty(gen)`
 
 
 @dataclass(frozen=True)
@@ -212,9 +224,10 @@ def build_spec(i: SpecInput) -> SandboxSpec:
         logins.append(Bind(source, i.agent.config_dir / login, True))
     worktree_ro = i.role in READ_ONLY_ROLES
     binds = (Bind(i.layout.home, i.layout.home, False),
+             *(Bind(i.layout.empty(i.generation), i.layout.home / p, True) for p in i.agent.empty_read_only),
              Bind(i.worktree, i.worktree, worktree_ro),
              Bind(i.layout.run(i.generation), RUN_INSIDE, True),
-             Bind(i.agent.cli_root, i.agent.cli_root, True),
+             Bind(i.agent.cli_root, i.agent.cli_root, True, install=True),
              *i.agent.binds,
              *i.git_binds,
              *(Bind(m, m, True) for m in i.extra_ro_mounts))
@@ -282,11 +295,10 @@ def _route(path: Path) -> tuple[Path, ...]:
 def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) -> None:
     """D10. The login binds are exactly the chosen account's login files, read-only. No other bind's
     source, by its own path or its canonical one, equals or contains the real home, a login directory or
-    a login file, or lies inside another account's login directory (r15 §7), by its own path or any the
-    kernel walks through to resolve it (`_route`): a symlink out of that directory doesn't excuse a route
-    into it. A source strictly inside the chosen account's own login directory that holds no login file
-    is allowed: the Codex CLI installs under its default login directory, and plan 4 chooses only the
-    default (D11)."""
+    a login file, or lies inside any account's login directory, the chosen one's included (r15 §7, plan 4c
+    `INSIDE_LOGIN_DIR`), by its own path or any the kernel walks through to resolve it (`_route`): a
+    symlink out of that directory doesn't excuse a route into it. The CLI comes from the managed install
+    store now, which is never inside a login directory, so nothing is bound from one."""
     want = {_real(p) for p in protected.chosen_files}
     got = [_real(b.source) for b in spec.logins]
     if sorted(got) != sorted(want) or not all(b.read_only for b in spec.logins):
@@ -294,6 +306,7 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
     guarded = {q for p in (protected.chosen_dir, *protected.chosen_files, *protected.other_dirs,
                            *protected.other_files) for q in (p, _real(p))}
     other_dirs = {q for p in protected.other_dirs for q in (p, _real(p))}
+    chosen_dir = {protected.chosen_dir, _real(protected.chosen_dir)}
     homes = {real_home, _real(real_home)}
     for b in spec.binds:
         for source in {b.source, _real(b.source)}:
@@ -303,3 +316,5 @@ def check_credentials(spec: SandboxSpec, protected: Protected, real_home: Path) 
                 raise SpecRefused("a bind would expose a login directory or login file")
         if any(q.is_relative_to(d) for q in (b.source, *_route(b.source)) for d in other_dirs):
             raise SpecRefused("a bind would reach into another account's login directory")
+        if any(q.is_relative_to(d) for q in (b.source, *_route(b.source)) for d in chosen_dir):
+            raise SpecRefused(INSIDE_LOGIN_DIR)

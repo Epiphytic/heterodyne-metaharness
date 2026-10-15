@@ -4,10 +4,15 @@ no message carries a path."""
 
 import hashlib
 import os
+import pwd
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from heterodyne.harness.settings import HarnessSettings
 
 STORE_IN_LOGIN_DIR = "STORE_IN_LOGIN_DIR"
 LOGIN_DIR_IN_STORE = "LOGIN_DIR_IN_STORE"
@@ -183,3 +188,50 @@ def helper_problems(installed: Path, packaged: Path) -> list[str]:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def worktrees(env: Mapping[str, str]) -> list[Path]:
+    """Every workstream's repositories and their btq worktrees (`<repo>-btq-<id>`, §4.3)."""
+    # Imported here: config and wsd.settings import heavily, and the store's checks need them only here.
+    from heterodyne import config as hconfig
+    from heterodyne.config import layers, paths
+    from heterodyne.wsd.settings import workstream_names
+
+    found: list[Path] = []
+    for name in workstream_names(paths.config_dir(env)):
+        ws = hconfig.load(name, env)
+        for value in layers.table_at(ws.values, "repos", f"workstreams/{name}.toml").values():
+            if isinstance(value, str):
+                repo = paths.expand(value, env)
+                found += [repo, *btq_worktrees(repo)]
+    return found
+
+
+def btq_worktrees(repo: Path) -> list[Path]:
+    """`repo`'s btq worktree siblings. When its parent can't be listed (glob would quietly find none), the
+    parent stands in for them, so a store there still counts as in a worktree."""
+    try:
+        names = [p.name for p in repo.parent.iterdir()]
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [repo.parent]
+    return [repo.parent / n for n in sorted(names) if n.startswith(f"{repo.name}-btq-")]
+
+
+def location_problems(h: "HarnessSettings", login_dirs: Iterable[Path], env: Mapping[str, str]) -> list[str]:
+    """`store_problems` for the configured store, with this process as the service user, every
+    workstream's worktrees and the state directory, then `HELPER_DRIFT` unless under the fallback. What
+    `config check` prints and what a launch refuses on (`STORE_UNSAFE`) are this one list."""
+    from heterodyne.config import paths
+
+    try:
+        owner_uid: int | None = pwd.getpwnam(h.owner).pw_uid
+    except KeyError:
+        owner_uid = None
+    problems = store_problems(h.store, login_dirs=login_dirs, worktrees=worktrees(env),
+                              state_dir=paths.state_dir(env), service_uid=os.getuid(), owner_uid=owner_uid,
+                              fallback=h.fallback)
+    if not h.fallback:
+        problems += helper_problems(h.helper_copy, packaged_helper())
+    return problems

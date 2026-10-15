@@ -3,6 +3,7 @@ the process's open file-descriptor count. Checksums are computed here at run tim
 
 import base64
 import contextlib
+import dataclasses
 import gc
 import gzip
 import hashlib
@@ -10,11 +11,18 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
+from heterodyne.agents.base import Cli
+from heterodyne.agents.registry import ADAPTERS
+from heterodyne.harness import selection, verify
 from heterodyne.harness.resources import store_core as sc
+from heterodyne.harness.selection import InstallPin, Selection
+from heterodyne.harness.store import LocalStore
+from heterodyne.wsd.runtime import NOT_SELECTED
 
 Spec = bytes | tuple[str] | tuple[str, str]
 EXECUTABLE = b"#!/bin/sh\n"     # a file whose content starts like this is made executable
@@ -222,6 +230,34 @@ def claude_part(tree: Mapping[str, Spec] | None = None) -> tuple[sc.Part, bytes]
     return part_of("cli", data, fmt="tgz", strip=CLAUDE_STRIP, kind="npm", checksum=sri_of(data)), data
 
 
+def host_part(adapter: str, source: Path) -> tuple[sc.Part, bytes]:
+    """The `cli` part of the host's unpacked CLI package at `source` (live tests only, until Task 10
+    fetches one): each file and link with its own mode, under the adapter's strip prefix and with directory
+    members as its release ships them."""
+    claude = adapter == "claude-code"
+    prefix = CLAUDE_STRIP if claude else CODEX_STRIP
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as z, \
+            tarfile.open(fileobj=z, mode="w", format=tarfile.PAX_FORMAT) as t:
+        for here, dirs, files in os.walk(source):
+            dirs.sort()
+            rel = Path(here).relative_to(source)
+            links = [d for d in dirs if Path(here, d).is_symlink()]       # walked as links, never followed
+            for name in [] if claude else [d for d in dirs if d not in links]:
+                t.add(Path(here, name), prefix + str(rel / name), recursive=False)
+            for name in sorted(files) + links:
+                t.add(Path(here, name), prefix + str(rel / name), recursive=False)
+    data = out.getvalue()
+    if claude:
+        return part_of("cli", data, fmt="tgz", strip=CLAUDE_STRIP, kind="npm", checksum=sri_of(data)), data
+    return part_of("cli", data, strip=CODEX_STRIP), data
+
+
+def defaults_part(name: str, data: bytes) -> tuple[sc.Part, bytes]:
+    """The `defaults` part (E4): one file, `name`, in the CLI's own format."""
+    return part_of("defaults", data, fmt="file", strip=name), data
+
+
 def store_dir(tmp_path: Path) -> Path:
     store = tmp_path / "store"
     store.mkdir(mode=0o755, exist_ok=True)
@@ -306,7 +342,7 @@ def install_name(tmp_path: Path, staged: sc.Staged) -> str:
     return sc.install_name(m.version, staged.digest)
 
 
-def install_root(tmp_path: Path, name: str, adapter: str = "codex") -> Path:
+def published_root(tmp_path: Path, name: str, adapter: str = "codex") -> Path:
     return store_of(tmp_path) / adapter / name
 
 
@@ -348,3 +384,103 @@ class RewriteAfterFirstFile:
 
 
 FIRST_FILE = "cli/bin/codex"          # the first file of CODEX_TREE in canonical order, the first one hashed
+
+
+# --- a published, selected fake CLI for the launcher (plan 4c Task 8) ---
+
+FAKE_CLI = Path(__file__).resolve().parent / "fakes" / "fake_agent_cli.py"
+TAINT_DIR = "harness-taint"
+
+
+def fake_wrapper(name: str) -> bytes:
+    """The fake CLI's entry point: a shell wrapper that runs fake_agent_cli.py as `name`."""
+    return f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" --as={name} "$@"\n'.encode()
+
+
+def fake_tree(adapter: str) -> dict[str, Spec]:
+    """The adapter's fixture tree at its declared version, its entry point the fake wrapper."""
+    if adapter == "codex":
+        return {**CODEX_TREE, "bin/codex": fake_wrapper("codex")}
+    return {**CLAUDE_TREE, "claude": fake_wrapper("claude")}
+
+
+def select(config_dir: Path, adapter: str, pin: InstallPin) -> None:
+    """`pin` as the adapter's selection in `config_dir`'s harnesses.toml, the others kept."""
+    chosen = dict(selection.load(config_dir))
+    chosen[adapter] = Selection(adapter, pin)
+    selection.write(config_dir, chosen)
+
+
+@dataclasses.dataclass(frozen=True)
+class Fixture:
+    """One published install of the fake CLI: its store, pin and root, and the taint directory a launcher
+    beside it uses."""
+    store: LocalStore
+    adapter: str
+    pin: InstallPin
+    root: Path
+    taint_dir: Path
+    config_dir: Path | None
+
+    @property
+    def binary(self) -> Path:
+        return self.root / (CODEX_ENTRY if self.adapter == "codex" else CLAUDE_ENTRY)
+
+    def verified(self) -> verify.VerifiedInstall:
+        """The current selection (or, without a config dir, this pin), verified now."""
+        pin = self.pin
+        if self.config_dir is not None:
+            current = selection.load(self.config_dir).get(self.adapter)
+            if current is None or current.current is None:
+                raise verify.VerifyRefused(NOT_SELECTED)
+            pin = current.current
+        return verify.verify_pin(self.store, ADAPTERS[self.adapter], pin, self.taint_dir, problems=list)
+
+    def cli(self) -> Cli:
+        return self.verified().cli
+
+
+CODEX_ENTRY = "cli/bin/codex"
+CLAUDE_ENTRY = "cli/claude"
+
+
+def store_fixture(root: Path, adapter: str, config_dir: Path | None = None, *,
+                  tree: Mapping[str, Spec] | None = None,
+                  parts: Sequence[tuple[sc.Part, bytes]] | None = None) -> Fixture:
+    """The fake CLI (or `tree`, or the ready `parts`, `cli` first) staged and published at its declared
+    version into a LocalStore at `root/store`, and, with `config_dir`, selected there. The taint directory
+    is `root/harness-taint`."""
+    store_path = root / "store"
+    store_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store = LocalStore(store_path)
+    tree = fake_tree(adapter) if tree is None else tree
+    if adapter == "codex":
+        layout, target = CODEX_LAYOUT, str(CODEX_PACKAGE["target"])
+        parts = parts if parts is not None else [codex_part(tree)]
+    else:
+        layout, target = CLAUDE_LAYOUT, CLAUDE_TARGET
+        parts = parts if parts is not None else [claude_part(tree)]
+    with artifact_fds(root / f"artifacts-{adapter}", [data for _, data in parts]) as fds:
+        staged = store.stage(adapter, layout, [p for p, _ in parts], fds, LOGIN_NAMES, verity=False,
+                             target=target)
+    name = store.publish(staged.id, staged.digest)
+    pin = InstallPin(name, staged.digest)
+    if config_dir is not None:
+        select(config_dir, adapter, pin)
+    return Fixture(store, adapter, pin, store_path / adapter / name, root / TAINT_DIR, config_dir)
+
+
+PUBLISHED: dict[tuple[Path, str], Fixture] = {}
+
+
+def published(root: Path, adapter: str) -> Fixture:
+    """`store_fixture(root, adapter)`, published once however often a test asks for it."""
+    if (root, adapter) not in PUBLISHED:
+        PUBLISHED[root, adapter] = store_fixture(root, adapter)
+    return PUBLISHED[root, adapter]
+
+
+def selected_install(root: Path, adapter: str = "codex") -> Fixture:
+    """`store_fixture` with its own config dir (`root/config`) holding the selection: `cli` verifies the
+    current selection on every call, as the launcher's `verified_cli` does."""
+    return store_fixture(root, adapter, root / "config")

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from sandbox_env import config_env
-from wsd_env import accounts_at
+from wsd_env import accounts_at, selected_config
 
 from heterodyne import platform
 from heterodyne.config import ConfigError
@@ -59,6 +59,8 @@ def test_openshell_builds_the_sandbox_runtime(tmp_path: Path) -> None:
     assert c.real_home_canary == c.real_home / CANARY
     assert c.tmux.socket_name == TMUX_SOCKET and c.tmux.launcher is not None
     assert c.tmux.launcher()[1:4] == ("--user", "--scope", "--collect")
+    assert (c.taint_dir, c.config_dir) == (tmp_path / "state" / "wsd" / "harness-taint", tmp_path / "config")
+    assert isinstance(c.store_problems(), list)          # worked out on each call, not at build time
 
 
 def test_setup_records_no_runtime_until_the_operator_selects_openshell(tmp_path: Path) -> None:
@@ -113,18 +115,22 @@ def test_wsd_run_uses_the_built_runtime(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(cli, "_factory", lambda _s: None)
     monkeypatch.setattr(cli, "run", run)
     monkeypatch.setattr(cli, "build_runtime", lambda _s, _env: NoRuntime())
-    monkeypatch.setattr(cli, "build_usage_reader", lambda _s, _env: NoUsageReader())
+    monkeypatch.setattr(cli, "build_usage_reader", lambda _s, _env, _runtime: NoUsageReader())
     assert cli.wsd_main(["run"]) == 0 and isinstance(seen[0], NoRuntime)
     assert isinstance(readers[0], NoUsageReader)
     monkeypatch.setattr(cli, "build_runtime", refused)
     assert cli.wsd_main(["run"]) == cli.EX_CONFIG
 
 
-def test_the_reader_needs_the_sandbox_runtime_and_a_codex_binary(tmp_path: Path) -> None:
+def test_the_reader_needs_the_sandbox_runtime_and_a_selected_codex_install(tmp_path: Path) -> None:
     env = config_env(tmp_path, "")
-    assert isinstance(build_usage_reader(settings(tmp_path, env), env), NoUsageReader)
+    assert isinstance(build_usage_reader(settings(tmp_path, env), env, NoRuntime()), NoUsageReader)
     env = config_env(tmp_path, '[platform]\nsandbox = "openshell"\n')
-    reader = build_usage_reader(settings(tmp_path, env), env)
+    runtime = build_runtime(settings(tmp_path, env), env)
+    assert isinstance(build_usage_reader(settings(tmp_path, env), env, runtime), NoUsageReader)
+    selected_config(Path(env["HETERODYNE_CONFIG_DIR"]))
+    assert isinstance(build_usage_reader(settings(tmp_path, env), env, NoRuntime()), NoUsageReader)
+    reader = build_usage_reader(settings(tmp_path, env), env, runtime)
     assert isinstance(reader, HostUsageReader)
     assert reader.credlocks == settings(tmp_path, env).credlock_dir
     assert reader.scratch_root == settings(tmp_path, env).state_dir / "hostread"
