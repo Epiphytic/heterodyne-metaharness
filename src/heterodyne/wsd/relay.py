@@ -164,12 +164,13 @@ class RelayUncertain(Exception):
 
 class RelayRefused(Exception):
     """admind refused the request with `message`. `retryable`: only the latch, a busy post or bead, and
-    the active-ask limits (open, per hour, in flight), which pass on their own."""
+    the active-ask limits (open, per hour, in flight), which pass on their own. `message` is admind's
+    untrusted text, kept only to classify the refusal: str and repr are a fixed diagnostic."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(f"ask.sock refused: {message}")
-        self.message = message
         self.retryable = any(p.fullmatch(message) for p in _RETRYABLE_ASK)
+        super().__init__(f"ask.sock refused the request ({'retryable' if self.retryable else 'permanent'})")
+        self.message = message
 
 
 class NoticeUnavailable(RelayUnavailable):
@@ -225,6 +226,8 @@ async def _exchange(sock: Path, req: AskRequest, timeout: float) -> AskReply:
         await _close(writer)
     if not line.endswith(b"\n"):
         raise RelayUncertain("no reply")
+    if len(line) > MAX_REPLY + 1:                           # the stream's limit allows a little more
+        raise RelayUncertain("reply too long")
     try:
         reply = msgspec.json.decode(line, type=AskReply)
     except msgspec.DecodeError:
