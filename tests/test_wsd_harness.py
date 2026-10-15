@@ -1264,6 +1264,30 @@ def test_install_refuses_up_front_when_no_approval_could_take_effect(h: H, refus
     assert not (h.tmp / "store" / ".staged").exists() or not any((h.tmp / "store" / ".staged").iterdir())
 
 
+def test_one_rows_error_does_not_stop_advance_or_log_every_pickup(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    bad, r1 = posted(h, "codex")
+    good, r2 = posted(h, "claude-code")
+    approve(h, r1.approval_bead)
+    approve(h, r2.approval_bead)
+    real = h.ops._decide
+
+    def decide(r: Any) -> None:
+        if r.staging_id == bad:
+            raise sqlite3.OperationalError("disk I/O error")
+        real(r)
+
+    monkeypatch.setattr(h.ops, "_decide", decide)
+    with caplog.at_level(logging.WARNING, logger=wh.__name__):
+        h.ops.advance(h.clock())
+        h.ops.advance(h.clock())
+    assert row(h, good).state == "published" and row(h, bad).state == "posted"
+    assert len([rec for rec in caplog.records if rec.levelno >= logging.ERROR]) == 1
+    monkeypatch.setattr(h.ops, "_decide", real)
+    h.ops.advance(h.clock())
+    assert row(h, bad).state == "published"
+
+
 def test_an_open_approval_expires_after_staging_hours(h: H) -> None:
     staging_id, _ = posted(h)
     h.ops.advance(h.clock() + 23 * 3600)

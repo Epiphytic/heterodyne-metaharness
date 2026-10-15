@@ -164,6 +164,7 @@ class HarnessOps:
         self.guard_locks = guard_locks
         self.store_problems = store_problems
         self.repo = repo
+        self.failing: set[str] = set()          # staging IDs whose last advance raised (logged once)
         self.readout_refusal = readout_refusal  # why `readout` can't work (NO_APPROVE_BEAD...), or ""
         self.lock = threading.RLock()
         self.alerts_lock = threading.Lock()
@@ -354,17 +355,30 @@ class HarnessOps:
     # --- advance and recover ---
 
     def advance(self, now: int) -> None:
-        """Expire, decide and publish each open row (E13, E21)."""
+        """Expire, decide and publish each open row (E13, E21). A row that raises is logged, once until it
+        advances again, and the loop goes on to the next."""
         with self.lock:
             for row in self.journal.harness_installs(*OPEN):
-                if row.state in ("staged", "posted") and \
-                        epoch(row.created_at) + self.settings.staging_hours * 3600 < now:
-                    self._end(row, "expired", "")
-                elif row.state == "posted":
-                    self._decide(row)
-                elif row.state == "approved":
-                    self._recover_store()
-                    self._settle(row)
+                try:
+                    self._advance(row, now)
+                except Exception:  # noqa: BLE001 - one row's trouble never stops the others; it retries
+                    if row.staging_id in self.failing:
+                        log.debug("install %s: advancing failed again", self._name(row), exc_info=True)
+                    else:
+                        self.failing.add(row.staging_id)
+                        log.exception("install %s: advancing failed; retried each pickup", self._name(row))
+                else:
+                    self.failing.discard(row.staging_id)
+
+    def _advance(self, row: HarnessInstall, now: int) -> None:
+        expired = epoch(row.created_at) + self.settings.staging_hours * 3600 < now
+        if row.state in ("staged", "posted") and expired:
+            self._end(row, "expired", "")
+        elif row.state == "posted":
+            self._decide(row)
+        elif row.state == "approved":
+            self._recover_store()
+            self._settle(row)
 
     def _decide(self, row: HarnessInstall) -> None:
         try:
