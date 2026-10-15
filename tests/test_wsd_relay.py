@@ -241,10 +241,9 @@ def test_notice_refusals_carry_admind_s_code(fake: FakeAskSock, code: str, retry
 
 
 def test_admind_s_own_notice_refusals_carry_their_code(fake: FakeAskSock) -> None:
-    def code(**kw: str) -> str:
-        args = {"poster": "wsd-ws1", "title": "t", **kw}
+    def code(poster: str = "wsd-ws1", title: str = "t", body: str = "") -> str:
         with pytest.raises(relay.NoticeRefused) as info:
-            relay.post_notice(fake.path, **args)
+            relay.post_notice(fake.path, poster=poster, title=title, body=body)
         return info.value.code
 
     assert code(title="two\nlines") == "title"
