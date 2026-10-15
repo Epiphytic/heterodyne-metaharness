@@ -1,18 +1,28 @@
+import subprocess
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from sandbox_env import config_env
 from wsd_env import accounts_at, selected_config
 
+import heterodyne
 from heterodyne import platform
-from heterodyne.config import ConfigError
-from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_runtime, build_usage_reader
+from heterodyne.admind import settings as admind_settings
+from heterodyne.config import ConfigError, paths
+from heterodyne.sandbox import build as build_module
+from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_harness, build_runtime, build_usage_reader
 from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import SandboxRuntime
-from heterodyne.wsd import cli
+from heterodyne.wsd import btq, cli
+from heterodyne.wsd import harness as wh
+from heterodyne.wsd.harness import HarnessOps
+from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
@@ -101,11 +111,13 @@ def test_wsd_run_uses_the_built_runtime(tmp_path: Path, monkeypatch: pytest.Monk
     s = settings(tmp_path, env)
     seen: list[AgentRuntime] = []
     readers: list[UsageReader | None] = []
+    builders: list[object] = []
 
     def run(_s: WsdSettings, _f: object, runtime: AgentRuntime, *,
-            usage_reader: UsageReader | None = None) -> int:
+            usage_reader: UsageReader | None = None, harness: object = None) -> int:
         seen.append(runtime)
         readers.append(usage_reader)
+        builders.append(harness)
         return 0
 
     def refused(_s: WsdSettings, _env: Mapping[str, str]) -> AgentRuntime:
@@ -117,7 +129,7 @@ def test_wsd_run_uses_the_built_runtime(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(cli, "build_runtime", lambda _s, _env: NoRuntime())
     monkeypatch.setattr(cli, "build_usage_reader", lambda _s, _env, _runtime: NoUsageReader())
     assert cli.wsd_main(["run"]) == 0 and isinstance(seen[0], NoRuntime)
-    assert isinstance(readers[0], NoUsageReader)
+    assert isinstance(readers[0], NoUsageReader) and callable(builders[0])
     monkeypatch.setattr(cli, "build_runtime", refused)
     assert cli.wsd_main(["run"]) == cli.EX_CONFIG
 
@@ -134,3 +146,82 @@ def test_the_reader_needs_the_sandbox_runtime_and_a_selected_codex_install(tmp_p
     assert isinstance(reader, HostUsageReader)
     assert reader.credlocks == settings(tmp_path, env).credlock_dir
     assert reader.scratch_root == settings(tmp_path, env).state_dir / "hostread"
+
+
+NO_QUEUES = cast(btq.QueueFactory, None)        # never called: nothing here installs
+ADMIND = """
+[platform]
+service_manager = "systemd"
+[admind]
+{approve_bead}
+[admind.marmot]
+relays = ["wss://relay.example.org"]
+"""
+
+
+@pytest.mark.parametrize(("host", "refusal"), [
+    ("", wh.NO_APPROVE_BEAD),                                                   # no [admind]
+    (ADMIND.format(approve_bead='profile = "p-one"'), wh.NO_APPROVE_BEAD),      # approve_bead unset
+    (ADMIND.format(approve_bead='approve_bead = "/usr/bin/true"'), wh.ADMIND_INVALID),   # no profile
+    (ADMIND.format(approve_bead='profile = "p-one"\napprove_bead = "relative"'), wh.ADMIND_INVALID),
+])
+def test_an_install_refusal_says_why_no_decision_is_read(tmp_path: Path, host: str, refusal: str) -> None:
+    """A missing `[admind] approve_bead` and an `[admind]` that doesn't validate each get their own refusal,
+    which `install` gives before it stages or asks, and which wsd's start says once; the readout still
+    fails, as a backstop."""
+    env = config_env(tmp_path, host)
+    journal = Journal(tmp_path / "journal.sqlite")
+    notices: list[str] = []
+    try:
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: (),
+                            notice=notices.append)
+        assert isinstance(ops, HarnessOps) and ops.readout_refusal == refusal
+        assert notices == [f"wsctl harness install will refuse every install: {refusal}"]
+        with pytest.raises(btq.ReadoutFailed):
+            ops.readout("btq-1")
+    finally:
+        journal.close()
+
+
+def test_a_valid_admind_with_approve_bead_reads_the_decisions(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    env = config_env(tmp_path, "")
+    monkeypatch.setattr(admind_settings, "resolve", lambda _cfg, _env: SimpleNamespace(
+        approve_bead=Path("/usr/bin/true")))
+    monkeypatch.setattr(build_module, "load", lambda env: SimpleNamespace(values={"admind": {
+        "approve_bead": "/usr/bin/true"}}))
+    journal = Journal(tmp_path / "journal.sqlite")
+    notices: list[str] = []
+    try:
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: (),
+                            notice=notices.append)
+        assert isinstance(ops, HarnessOps) and ops.readout_refusal == "" and notices == []
+        readout = cast("partial[Any]", ops.readout)
+        assert readout.func is btq.approval_readout and readout.keywords == {"binary": Path("/usr/bin/true")}
+    finally:
+        journal.close()
+
+
+def test_wsd_builds_the_harness_operations_against_admind(tmp_path: Path) -> None:
+    """Plan 4c T10: the asks go to admind's ask socket and the alerts to its alerts directory. With admind
+    not set up no decision can be read, so every readout fails."""
+    env = config_env(tmp_path, "")
+    s = settings(tmp_path, env)
+    journal = Journal(tmp_path / "journal.sqlite")
+    try:
+        ops = build_harness(s, env, NO_QUEUES, NoRuntime(), journal, lambda: ())
+        assert isinstance(ops, HarnessOps)
+        state = paths.state_dir(env)
+        assert ops.ask_socket == state / "admind" / "ask.sock" and ops.alerts_dir == state / "alerts"
+        assert ops.taint_dir == s.state_dir / "harness-taint"
+        # The commit ref names this checkout by path, as btq resolves it, and its HEAD.
+        checkout = Path(heterodyne.__file__).resolve().parents[2]
+        assert ops.repo == str(checkout)
+        head = subprocess.run(["git", "-C", ops.repo, "rev-parse", "HEAD"], capture_output=True, check=True)
+        assert ops.commit == head.stdout.decode().strip()
+        with pytest.raises(btq.ReadoutFailed):
+            ops.readout("btq-1")
+        no_accounts = WsdSettings(s.state_dir, 60, 3600, 3, tmp_path / "btq", {}, (), None)
+        assert build_harness(no_accounts, env, NO_QUEUES, NoRuntime(), journal, lambda: ()) is None
+    finally:
+        journal.close()

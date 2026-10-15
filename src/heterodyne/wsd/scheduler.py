@@ -44,6 +44,7 @@ dropped.
 
 import dataclasses
 import json
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -87,6 +88,7 @@ from heterodyne.wsd.park import (
     resumable,
 )
 from heterodyne.wsd.runtime import (
+    INSTALL_TAINTED,
     ExecDirCleared,
     InstallTainted,
     LimitSeen,
@@ -106,6 +108,7 @@ RESUMABLE_ROWS = frozenset({BeadState.PARKED, BeadState.WAITING_INPUT})
 # Rows of unclaimed ready beads, dropped once the bead is no longer listed.
 UNLISTED = frozenset({Reason.UNCLAIMABLE, Reason.ACCOUNT_REPOINTED})
 KEPT = frozenset({BeadState.HELD, BeadState.STUCK})     # never counted in the wake time
+log = logging.getLogger(__name__)
 MAX_HELD = 256
 
 
@@ -168,6 +171,10 @@ class Scheduler:
     def pickup(self, trigger: Trigger) -> Outcome:
         with self.parker.entry():
             self.wake_at = None
+            try:
+                self.d.harness.advance(self.d.clock())
+            except Exception:  # noqa: BLE001 - an install approval's trouble never stops the workstream
+                log.exception("advancing the install approvals failed")
             try:
                 outcome = self._pickup(trigger)
             except BeadsUnavailable as exc:
@@ -256,14 +263,23 @@ class Scheduler:
         """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
         bead only with (e). A report for a launch the journal doesn't have as this workstream's is
         dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time).
-        An install taint is left to plan 4c Task 10: the marker already refuses every launch on it. A
-        cleared exec dir is journaled as `exec_dir_cleared` once per session, generation and path, its names
-        redacted and bounded again (`shown_name`)."""
-        if isinstance(signal, InstallTainted):
-            return
+        An install taint (plan 4c E17) holds the launch's bead for the operator unless it no longer runs
+        (the marker already refuses every launch on the install), then writes the install's alert; an
+        alert that fails is logged, never raised, so it can't drop the hold. A cleared exec dir is journaled
+        as `exec_dir_cleared` once per session, generation and path, its names redacted and bounded again
+        (`shown_name`)."""
         j, name = self.d.journal, self.ws.name
         entry = j.launch(signal.session_key, signal.generation)
         if entry is None or entry.ws != name:
+            return
+        if isinstance(signal, InstallTainted):
+            row = j.state(name, entry.bead)
+            if row is not None and row.state in (BeadState.RUNNING, BeadState.WAITING_INPUT):
+                self.parker.park(entry.bead, (), INSTALL_TAINTED, True)
+            try:
+                self.d.harness.tainted(signal.adapter, signal.install)
+            except Exception:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
+                log.exception("alerting install %s's taint failed", signal.install)
             return
         if isinstance(signal, ExecDirCleared):
             shown = dataclasses.replace(signal, names=tuple(shown_name(n) for n in signal.names))
