@@ -2,13 +2,13 @@ import contextlib
 import json
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 from sandbox_env import wait_for
 
-from heterodyne.session.server import MAX_DEPTH, SessionServer, TurnState
+from heterodyne.session.server import MAX_DEPTH, BoundaryBusy, SessionServer, TurnState
 
 TOKEN = "fake-session-token"  # noqa: S105 (test value)
 THREAD = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
@@ -327,3 +327,87 @@ def test_nothing_reaches_the_callback_after_close(tmp_path: Path) -> None:
     s.close()
     s._record({"hook_event_name": "Stop"})     # a handler still unwinding after close  # noqa: SLF001
     assert seen == [] and not s.turns().idle
+
+
+def turn(server: SessionServer, event: str) -> None:
+    ask(server.path, req(TOKEN, "hook_event", {"hook_event_name": event}))
+
+
+def noting(calls: list[str], name: str) -> Callable[[], bool]:
+    """A delivery that notes it ran and reached the session."""
+    def deliver() -> bool:
+        calls.append(name)
+        return True
+    return deliver
+
+
+def test_at_boundary_spends_the_boundary_before_delivering(server: SessionServer) -> None:
+    calls: list[str] = []
+    with pytest.raises(BoundaryBusy):                       # no turn has ended yet
+        server.at_boundary(noting(calls, "early"))
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+
+    def deliver() -> bool:
+        with pytest.raises(BoundaryBusy):                   # spent before delivery; and the gate is held
+            server.at_boundary(noting(calls, "nested"))
+        calls.append("first")
+        return True
+
+    server.at_boundary(deliver)
+    with pytest.raises(BoundaryBusy):
+        server.at_boundary(noting(calls, "again"))
+    assert calls == ["first"]
+    turn(server, "UserPromptSubmit")
+    with pytest.raises(BoundaryBusy):                       # mid-turn
+        server.at_boundary(noting(calls, "mid"))
+    turn(server, "Stop")
+    server.at_boundary(noting(calls, "next"))
+    assert calls == ["first", "next"]
+
+
+def test_a_failed_delivery_gives_the_boundary_back_and_a_raising_one_spends_it(server: SessionServer) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    server.at_boundary(lambda: False)
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    with pytest.raises(BoundaryBusy):
+        server.at_boundary(lambda: True)
+
+
+def test_turn_events_wait_for_a_delivery(server: SessionServer) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    before = server.turns()
+    entered, release = threading.Event(), threading.Event()
+
+    def deliver() -> bool:
+        entered.set()
+        return release.wait(10)
+
+    delivery = threading.Thread(target=server.at_boundary, args=(deliver,))
+    delivery.start()
+    assert entered.wait(10)
+    prompt = threading.Thread(target=turn, args=(server, "UserPromptSubmit"))
+    prompt.start()
+    try:
+        prompt.join(0.3)
+        assert prompt.is_alive()
+        ask(server.path, req(TOKEN, "hook_event", {"hook_event_name": "Notification"}))   # not a turn event
+        assert server.turns() == before
+    finally:
+        release.set()
+        delivery.join(10)
+        prompt.join(10)
+    assert server.turns().prompts == before.prompts + 1 and not server.turns().idle
+
+
+def test_a_closed_server_has_no_boundary(tmp_path: Path) -> None:
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl")
+    s.start()
+    turn(s, "UserPromptSubmit")
+    turn(s, "Stop")
+    s.close()
+    with pytest.raises(BoundaryBusy):
+        s.at_boundary(lambda: True)

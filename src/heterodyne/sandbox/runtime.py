@@ -52,7 +52,7 @@ from heterodyne.sandbox.spec import (
     short_id,
 )
 from heterodyne.session import shim
-from heterodyne.session.server import SessionServer
+from heterodyne.session.server import BoundaryBusy, SessionServer
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
@@ -89,6 +89,9 @@ SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
 STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
 BRIEF_SECONDS = 60.0    # the probe turn's end, then the brief's prompt (plan 5i T4)
+# Terminal controls a steer may not carry: all of C0 but tab and newline, DEL and C1. ESC could end the
+# bracketed paste early (`\x1b[201~`) and CR then submit what follows as prompts of its own.
+STEER_UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -307,7 +310,6 @@ class SandboxRuntime:
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
-        self.steered: dict[str, tuple[SessionServer, int]] = {}     # key -> (socket, turn ends) at a steer
 
     # --- names ---
 
@@ -490,8 +492,10 @@ class SandboxRuntime:
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
         """D4: paste into the session's pane, only at a turn boundary this process's socket has seen. After
-        a restart the turn state is empty, so the next turn end must come first; and a boundary a steer
-        (even an uncertain one) pasted at is spent until the next turn end."""
+        a restart the turn state is empty, so the next turn end must come first. The socket spends the
+        boundary before the paste and holds back turn events until it is over (`at_boundary`), so a boundary
+        a steer (even an uncertain one) pasted at is spent until the next turn end, and concurrent steers
+        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline."""
         try:
             rec = read_record(self.layout(session_key))
         except RuntimeUnavailable:
@@ -500,21 +504,38 @@ class SandboxRuntime:
             raise SteerRefused("the session is not running")
         if rec.generation != generation:
             raise SteerRefused("the session is running another generation")
-        if len(text.encode("utf-8", "replace")) > STEER_MAX:
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise SteerRefused("the text is not valid UTF-8") from None
+        if STEER_UNSAFE.search(text):
+            raise SteerRefused("the text has terminal control characters")
+        if size > STEER_MAX:
             raise SteerRefused("the text is too long to steer")
         server = self.servers.get(session_key)
-        turns = None if server is None else server.turns()
-        if server is None or turns is None or not turns.idle or self.steered.get(session_key) == (
-                server, turns.stops):
+        if server is None:
             raise SteerRefused("the session is mid-turn")
+        failed = False
+
+        def deliver() -> bool:
+            nonlocal failed
+            try:
+                self.c.tmux.paste(rec.tmux_session, text)
+            except TmuxPasteUncertain:
+                raise                       # it may have landed: the boundary stays spent
+            except TmuxError:
+                failed = True               # nothing reached the pane: the boundary is given back
+                return False
+            return True
+
         try:
-            self.c.tmux.paste(rec.tmux_session, text)
+            server.at_boundary(deliver)
+        except BoundaryBusy:
+            raise SteerRefused("the session is mid-turn") from None
         except TmuxPasteUncertain:
-            self.steered[session_key] = (server, turns.stops)
             raise SteerUncertain("the steer may have been delivered") from None
-        except TmuxError:
-            raise SteerRefused("the paste failed before reaching the session") from None
-        self.steered[session_key] = (server, turns.stops)
+        if failed:
+            raise SteerRefused("the paste failed before reaching the session")
 
     def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
         return None                                                 # plan 5i Task 3 wires the wake

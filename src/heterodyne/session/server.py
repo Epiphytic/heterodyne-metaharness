@@ -10,6 +10,12 @@ events file outside the sandbox. `TurnState` keeps only what the runtime reads: 
 turn event and whether it ended a turn (one of the adapter's turn-end events, D13; plan 4b E14), and the
 first SessionStart's session ID if it is a canonical UUID (the Codex thread ID, D8).
 
+A steer (plan 5i D4) delivers at a turn boundary through `at_boundary`, which spends the boundary before
+delivering and holds the turn gate while it does: a turn event that arrives meanwhile is recorded only once
+the delivery is over, so it never slips between the idle check and the paste, and two steers never share a
+boundary. The spent boundary belongs to this server, so a rebind or a new generation starts with none.
+Text an operator types into the pane is outside the gate.
+
 The session is untrusted with wsd's resources too: at most `max_handlers` connections are served at
 once (more are closed unread), each request has one absolute deadline however its bytes trickle in, and
 `close` returns only once no connection is left and nothing more can be recorded or spooled.
@@ -41,6 +47,10 @@ MALFORMED = {"ok": False, "error": "malformed"}
 UNAVAILABLE = {"ok": False, "error": "unavailable"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TURN_EVENTS = ("UserPromptSubmit", "Stop")
+
+
+class BoundaryBusy(Exception):
+    """No turn boundary to deliver at: mid-turn, already spent, another delivery under way, or closed."""
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,8 @@ class SessionServer:
         self.served = 0
         self._state = TurnState()
         self._lock = threading.Lock()
+        self._turn_gate = threading.Lock()  # held by a delivery; taken before _lock by turn events
+        self._spent: int | None = None      # the turn-end count whose boundary a delivery used
         self._slots = threading.BoundedSemaphore(max_handlers)
         self._closed = threading.Event()
         self._sock: socket.socket | None = None
@@ -128,6 +140,24 @@ class SessionServer:
     def turns(self) -> TurnState:
         with self._lock:
             return self._state
+
+    def at_boundary(self, deliver: Callable[[], bool]) -> None:
+        """Run `deliver` at the current turn boundary, spending it first; raise BoundaryBusy if there is
+        none to spend. No turn event is recorded until `deliver` returns. If it returns False (nothing
+        reached the session) the boundary is given back; if it raises, the boundary stays spent."""
+        if not self._turn_gate.acquire(blocking=False):
+            raise BoundaryBusy
+        try:
+            with self._lock:
+                stops = self._state.stops
+                if self._closed.is_set() or not self._state.idle or self._spent == stops:
+                    raise BoundaryBusy
+                self._spent = stops
+            if not deliver():
+                with self._lock:
+                    self._spent = None
+        finally:
+            self._turn_gate.release()
 
     def _accept(self, sock: socket.socket) -> None:
         while not self._closed.is_set():
@@ -253,7 +283,8 @@ class SessionServer:
         the lock and only while open, so nothing is recorded or reported once close has returned. A
         callback that fails drops its own report: the reply and the turn state are unaffected."""
         event = payload.get("hook_event_name")
-        with self._lock:
+        turn = event == "UserPromptSubmit" or (isinstance(event, str) and event in self.turn_ends)
+        with self._turn_gate if turn else contextlib.nullcontext(), self._lock:
             if self._closed.is_set():
                 return
             s = self._state

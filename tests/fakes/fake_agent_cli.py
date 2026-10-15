@@ -32,6 +32,8 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   (Claude), after each turn it runs the `--settings` layer's `statusLine` command, if it has one, with
   `{"session_id", "rate_limits": <json>}` on stdin, as 2.1.286 runs it after an API response.
   `HZ_FAKE_BRACKETED=1` asks for bracketed paste and submits a whole paste as one prompt.
+  With `HZ_FAKE_HOLD_FILE=<path>`, a turn doesn't end (no Stop) while that file exists, for at most
+  30 seconds, so a test can steer into a running turn.
 """
 
 import contextlib
@@ -42,6 +44,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -310,6 +313,10 @@ def tui() -> None:
         if log is not None:
             with log.open("a") as fh:
                 fh.write(json.dumps({"user": line}) + "\n")
+        hold = os.environ.get("HZ_FAKE_HOLD_FILE")
+        deadline = time.monotonic() + 30
+        while hold and Path(hold).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)                         # the turn is still running
         failure = os.environ.get("HZ_FAKE_STOP_FAILURE") if ADAPTER == "claude" else None
         if failure:
             fire(commands.get("StopFailure", []), "StopFailure", session, error=failure,
