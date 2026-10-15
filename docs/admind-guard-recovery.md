@@ -45,11 +45,14 @@ edit the deployed checkout or a live release target to avoid that decision.
    scope must cover the actual installer effects and any options; `--no-wsd`
    also stops a managed wsd and is not a harmless preview flag.
 2. Stop admind for a bounded migration window. Take a second SQLite-consistent
-   stopped backup into a fresh preparation directory. Use the reviewed migration
-   on the stopped database only under the concrete deployment authority. Compare
-   original identities, confirmed set, asks, histories and delivery rows before
-   allowing traffic. Keep both backups private. Never access encrypted stores.
-3. Start admind and confirm its service and subscription are stable. Report the
+   stopped backup into a fresh preparation directory. Keep both backups private.
+   Never access encrypted stores.
+3. Start the reviewed admind under the concrete deployment authority. Its Store
+   initialization automatically migrates the live database before recovery or
+   delivery. Confirm its service and subscription are stable. Compare original
+   identities, confirmed set, asks, histories and delivery rows before allowing
+   traffic. Quarantined rows stay held; there is no release tool in this version.
+   Report the
    **actual live migration and quarantine counts before rearm**. Any preservation
    failure or authority expansion stops recovery. Restart retains the old latch;
    never clear SQLite latch keys manually.

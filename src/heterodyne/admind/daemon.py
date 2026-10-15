@@ -2945,6 +2945,25 @@ class Admind:
             batch = self.store.open_batch(self.wallclock(), self.batch_seconds)
             self.store.add_to_batch(turn_id, batch)
 
+    def hold_untrusted_turn(self, row: TurnRow) -> bool:
+        """Retain an ineligible contribution separately, so it cannot poison another reply's batch.
+
+        The caller has refreshed policy. Reuse terminal turn status and durable outbox dispositions;
+        the retained payload is never automatically released or added to a later batch.
+        """
+        owners = self.request_owners(row.reply_to)
+        if owners and all(key in self.operators for key in owners):
+            return False
+        status = "suppressed" if owners else "quarantined"
+        reason = "requester-revoked" if owners else "unproven-owner"
+        key = f"held-turn:{row.turn_id}"
+        with self.store.transaction():
+            self.post(key, row.text, row.reply_to, owner=owners)
+            self.store.hold_group(key, status, reason)
+            self.store.set_turn_status(row.turn_id, "summarized")
+        self.audit_quietly("reply", action=status, reason=reason, turn=row.turn_id)
+        return True
+
     async def summary_loop(self) -> None:
         """Summarize every turn that waits for one (B9). Rows are read from the database on every pass, so
         a failure at any step leaves the row for the next pass, without a restart."""
@@ -2964,10 +2983,7 @@ class Admind:
         backstop's fails, the exception reaches summary_loop and the row is tried again."""
         if not self.refresh_authority():
             return  # unreadable policy is temporary; keep the summary recoverable
-        owners = self.request_owners(row.reply_to)
-        if not owners or any(key not in self.operators for key in owners):
-            # Do not launch an external summarizer for an unproven or revoked requester.
-            self.queue_backstop(row.turn_id)
+        if self.hold_untrusted_turn(row):
             return
         if not self.authorised(row.reply_to):
             return  # subscription/startup/recovery holds must not discard pending summary work
@@ -2996,12 +3012,22 @@ class Admind:
     async def close_due_batches(self) -> None:
         """Post each batch whose window has passed, as one unthreaded message (B10)."""
         for batch, attempt in self.store.due_batches(self.wallclock(), self.batch_seconds):
-            rows = self.store.batch_turns(batch)
+            if not self.refresh_authority():
+                return  # unreadable policy leaves every contribution recoverable
+            rows = [row for row in self.store.batch_turns(batch)
+                    if row.status == "batched" and not self.hold_untrusted_turn(row)]
             key = f"batch:{batch}.{attempt}"        # a new key per attempt: the outbox ignores a known key
             text = await asyncio.to_thread(render_batch, rows)
+            if not self.refresh_authority():
+                return
+            # Rendering yields: exclude newly revoked contributions before the next render pass.
+            current = [row for row in rows if not self.hold_untrusted_turn(row)]
+            if len(current) != len(rows):
+                continue
             with self.store.transaction():
-                self.post(key, text, None, owner=self.batch_owners(rows))
-                self.store.record_post(key, "batch", None, batch)
+                if rows:
+                    self.post(key, text, None, owner=self.batch_owners(rows))
+                    self.store.record_post(key, "batch", None, batch)
                 self.store.close_batch(batch)
             self.audit_quietly("backstop", action="posted", batch=batch, replies=len(rows),
                                lines=len(text.splitlines()), chars=len(text))
@@ -3109,6 +3135,13 @@ class Admind:
         queued = reopened = None
         with self.store.transaction():
             self.store.mark_failed(seq)
+            if re.fullmatch(r"membership-event:[0-9]+", key):
+                state = guard_state.notice_state(self.store.get("membership_notice"))
+                if state["unresolved"] == key:
+                    state["unresolved"] = None
+                    state["last_sent"] = self.wallclock()
+                    state["pending"] = True
+                    self.store.set("membership_notice", json.dumps(state, sort_keys=True))
             part_parent = self.report_part(key)
             post = self.store.post_record(key)
             turn = None if post is None or post.turn_id is None else self.store.turn(post.turn_id)

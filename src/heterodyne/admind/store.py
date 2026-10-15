@@ -452,8 +452,9 @@ class Store:
         if status not in {"quarantined", "suppressed", "delayed"}:
             raise ValueError("invalid group disposition")
         self.db.execute("UPDATE outbox SET status = ?, hold_reason = ?, not_before = ? "
-                        "WHERE delivery_group = ? AND status IN ('pending', 'delayed', 'quarantined')",
-                        (status, reason, not_before, group))
+                        "WHERE delivery_group = ? AND (status IN ('pending', 'delayed') "
+                        "OR (status = 'quarantined' AND ? != 'delayed'))",
+                        (status, reason, not_before, group, status))
 
     @_locked
     def limit_delay(self, group: str, not_before: float) -> None:

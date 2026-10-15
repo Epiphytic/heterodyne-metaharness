@@ -11,7 +11,7 @@ from fakes.settings import OPERATOR_HEX, SECOND_HEX, make_settings, operator
 
 from heterodyne.admind import guard, guard_state, membership
 from heterodyne.admind.audit import Audit
-from heterodyne.admind.daemon import Admind
+from heterodyne.admind.daemon import Admind, render_batch
 from heterodyne.admind.settings import Operator
 from heterodyne.admind.store import Store
 from heterodyne.marmot.control import ControlError, GroupStateChanged
@@ -125,6 +125,37 @@ def test_other_group_event_does_not_touch_generation_or_notices(tmp_path: Path) 
     d.on_event(GroupStateChanged(account_id_hex="a" * 64, group_id_hex="c" * 64, change="member_added"))
     assert d.group_events == 0 and d.store.get("membership_notice") is None
     d.store.close()
+
+
+def test_matching_count_cannot_confirm_a_policy_only_operator(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        probe.count = 3  # equals daemon plus both policy identities, still proves no identity
+        assert await d.check_group()
+        assert d.confirmed_operators() == {OPERATOR_HEX}
+        assert d.refresh_authority() and set(d.operators) == {OPERATOR_HEX}
+        d.store.close()
+    asyncio.run(scenario())
+
+
+def test_unknown_startup_latch_is_preserved_before_recovery(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        d, _probe = make(tmp_path)
+        d.store.delete("group_operators")
+        d.policy_operators = (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        class BeforeRecovery(Exception):
+            pass
+        def reached_recovery(_chars: int) -> int:
+            assert (d.store.get("latched") or "").startswith("admind does not know which operators")
+            assert d.store.get("group_operators") is None and d.operators == {}
+            raise BeforeRecovery
+        monkeypatch.setattr(d.store, "redact_pending_outbox", reached_recovery)
+        with pytest.raises(BeforeRecovery):
+            await d.run()
+        d.store.close()
+    asyncio.run(scenario())
 
 
 def test_stale_response_changes_no_replacement_state_and_checks_serialize(tmp_path: Path) -> None:
@@ -288,6 +319,105 @@ def test_local_result_notice_is_not_observation_throttled(tmp_path: Path) -> Non
     asyncio.run(scenario())
 
 
+def test_terminal_notice_failure_retries_after_cadence_without_blocking_replies(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        at = [1000.0]
+        d.wallclock = lambda: at[0]
+        d.observe_membership(kind="member_added")
+        d.flush_membership_notice()
+        row = d.store.next_pending()
+        assert row is not None
+        d.send_failed(row.seq, row.key)
+        state = guard_state.notice_state(d.store.get("membership_notice"))
+        assert state["unresolved"] is None and state["pending"] and state["last_sent"] == 1000
+        d.observe_membership(kind="member_removed")
+        d.post("unrelated", "ordinary reply", None, owner=(OPERATOR_HEX,))
+        await d.outbox_pass()
+        assert probe.sent == ["ordinary reply"]
+        at[0] = 1060
+        await d.outbox_pass()
+        assert len(probe.sent) == 2 and "member_removed=1" in probe.sent[-1]
+        assert guard_state.notice_state(d.store.get("membership_notice"))["unresolved"] is None
+        d.store.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("unproven", [False, True])
+@pytest.mark.parametrize("already_batched", [False, True])
+def test_untrusted_turn_cannot_poison_current_requesters_backstop(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unproven: bool, already_batched: bool) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        bad_mid = "b" * 64
+        d.store.claim_inbound(MID, sender_key=OPERATOR_HEX)
+        if not unproven:
+            d.store.claim_inbound(bad_mid, sender_key=SECOND_HEX)
+        bad = d.store.add_turn("bad", "session", bad_mid, "bad origin", "excluded secret",
+                               None, None, None, "summarizing")
+        good = d.store.add_turn("good", "session", MID, "good origin", "current reply",
+                                None, None, None, "summarizing")
+        async def failed_summary(*_args: Any, **_kwargs: Any) -> str:
+            raise RuntimeError("offline summarizer failure")
+        monkeypatch.setattr("heterodyne.admind.daemon.summarize.summarize", failed_summary)
+        if already_batched:
+            d.queue_backstop(bad)
+            d.queue_backstop(good)
+        else:
+            for turn_id in (bad, good):
+                row = d.store.turn(turn_id)
+                assert row is not None
+                await d.summarize_turn(row)
+        d.wallclock = lambda: 2000
+        await d.close_due_batches()
+        await d.outbox_pass()
+        assert len(probe.sent) == 1 and "current reply" in probe.sent[0]
+        assert "excluded secret" not in probe.sent[0] and "bad origin" not in probe.sent[0]
+        assert d.store.db.execute("SELECT status FROM outbox WHERE key = ?", (f"held-turn:{bad}",)
+                                  ).fetchone() == ("quarantined" if unproven else "suppressed",)
+        assert d.store.turn(bad).status == "summarized"  # type: ignore[union-attr]
+        d.store.close()
+    asyncio.run(scenario())
+
+
+def test_delaying_a_quarantined_group_never_releases_it(tmp_path: Path) -> None:
+    d, _probe = make(tmp_path)
+    d.post("unknown", "held payload", None, owner=())
+    d.store.hold_group("unknown", "quarantined", "unproven-owner")
+    d.store.hold_group("unknown", "delayed", "notice-cadence", 1000)
+    d.store.release_delayed(2000)
+    assert d.store.db.execute("SELECT status,hold_reason FROM outbox WHERE key='unknown'").fetchone() == (
+        "quarantined", "unproven-owner")
+    d.store.close()
+
+
+def test_revocation_during_batch_render_rebuilds_without_revoked_contribution(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        d.store.set("group_operators", json.dumps([OPERATOR_HEX, SECOND_HEX]))
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        for mid, sender, text in ((MID, OPERATOR_HEX, "current reply"),
+                                  ("b" * 64, SECOND_HEX, "revoked reply")):
+            d.store.claim_inbound(mid, sender_key=sender)
+            turn = d.store.add_turn(mid, "session", mid, "origin", text, None, None, None, "summarizing")
+            d.queue_backstop(turn)
+        def revoke_while_rendering(rows: Any) -> str:
+            d.load_operators = lambda: (operator("op", OPERATOR_HEX),)
+            return render_batch(rows)
+        monkeypatch.setattr("heterodyne.admind.daemon.render_batch", revoke_while_rendering)
+        d.wallclock = lambda: 2000
+        await d.close_due_batches()
+        await d.outbox_pass()
+        assert not probe.sent  # first render was discarded, never queued with stale contributions
+        await d.close_due_batches()
+        await d.outbox_pass()
+        assert len(probe.sent) == 1 and "current reply" in probe.sent[0]
+        assert "revoked reply" not in probe.sent[0]
+        d.store.close()
+    asyncio.run(scenario())
+
+
 def test_explicit_success_uses_provisional_count_and_next_observation_replaces_it(tmp_path: Path) -> None:
     async def scenario() -> None:
         d, probe = make(tmp_path)
@@ -352,7 +482,9 @@ def test_summary_does_not_launch_after_requester_revocation(
             pytest.fail("revoked request launched external summarizer")
         monkeypatch.setattr("heterodyne.admind.daemon.summarize.summarize", forbidden)
         await d.summarize_turn(row)
-        assert d.store.turn(turn_id).status == "batched"  # type: ignore[union-attr]
+        assert d.store.turn(turn_id).status == "summarized"  # type: ignore[union-attr]
+        assert d.store.db.execute("SELECT status FROM outbox WHERE key = ?", (f"held-turn:{turn_id}",)
+                                  ).fetchone() == ("suppressed",)
         d.store.close()
 
     asyncio.run(scenario())
