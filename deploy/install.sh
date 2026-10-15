@@ -216,8 +216,8 @@ unmake() {
 # is empty, since it only decides between actions that go ahead.
 plan_check() {
     local u msg
-    dir_check "user unit directory" --dir "$user_units" --kind units
-    dir_check "install directory" --dir "$install_dir" --kind private
+    dir_check "user unit directory" --dir "$user_units" --kind units --home "$(host "$service_home")"
+    dir_check "install directory" --dir "$install_dir" --kind private --home "$(host "$service_home")"
     for u in "${wanted[@]}"; do
         if ! msg=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render /dev/null \
             --backup-dir "$backups" "${plan_flags[@]}" 2>&1 >/dev/null </dev/null); then
@@ -736,8 +736,9 @@ write_unit() {    # $1 unit, $2 render
                 user_change "record $u as being written" platform record-set --unit "$u" --state writing \
                     --record "$record" --origin created
             fi
-            ((dry_run)) || platform dir --what "user unit directory" --dir "$user_units" --kind units --make \
-                </dev/null >/dev/null || fail "the user unit directory can't be made"
+            ((dry_run)) || platform dir --what "user unit directory" --dir "$user_units" --kind units \
+                --home "$(host "$service_home")" --make </dev/null >/dev/null \
+                || fail "the user unit directory can't be made"
             user_change "write $u" platform write --unit "$u" --file "$user_units/$u" --render "$r"
             user_change "record $u as written" platform record-set --unit "$u" --state written --record "$record"
             written=1 ;;

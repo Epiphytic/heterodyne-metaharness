@@ -520,20 +520,59 @@ def test_wsd_lock_absent_free_held_and_refused(tmp_path: Path) -> None:
 
 
 def test_user_dir_makes_checks_and_reports_what_it_made(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
     d = tmp_path / "a" / "b" / "user"
-    assert P.user_dir(d, "units", make=False) is None and not d.exists()
-    assert P.user_dir(d, "units", make=True) == tmp_path / "a"
-    assert stat.S_IMODE(d.stat().st_mode) == 0o700 and P.user_dir(d, "units", make=True) is None
+    assert P.user_dir(d, "units", make=False, home=tmp_path) is None and not d.exists()
+    assert P.user_dir(d, "units", make=True, home=tmp_path) == tmp_path / "a"
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert P.user_dir(d, "units", make=True, home=tmp_path) is None
     d.chmod(0o775)
     with pytest.raises(P.Refusal, match="can be written by others"):
-        P.user_dir(d, "units", make=False)
-    assert P.user_dir(d, "private", make=False) is None      # private dirs are narrowed when written
+        P.user_dir(d, "units", make=False, home=tmp_path)
+    assert P.user_dir(d, "private", make=False, home=tmp_path) is None  # narrowed when written
     d.chmod(0o700)
     link = tmp_path / "link"
     link.symlink_to(d)
     for kind in ("units", "private"):
         with pytest.raises(P.Refusal, match="not the service user's directory"):
-            P.user_dir(link, kind, make=False)
+            P.user_dir(link, kind, make=False, home=tmp_path)
+        with pytest.raises(P.Refusal, match="not under the service user's home"):
+            P.user_dir(d, kind, make=False, home=tmp_path / "a" / "b" / "user")
+
+
+@pytest.mark.parametrize("kind", ["units", "private"])
+@pytest.mark.parametrize("below", [False, True])
+def test_a_unit_or_install_ancestor_that_is_a_link_refuses_and_nothing_is_made_through_it(
+        tmp_path: Path, kind: str, below: bool) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if below:                                  # the directory already there, beyond the link
+        (elsewhere / "systemd" / "user").mkdir(parents=True, mode=0o700)
+    before = sorted(elsewhere.rglob("*"))
+    (home / ".config").symlink_to(elsewhere)
+    d = home / ".config" / "systemd" / "user"
+    for make in (False, True):
+        with pytest.raises(P.Refusal, match="not the service user's directory"):
+            P.user_dir(d, kind, make=make, home=home)
+    assert sorted(elsewhere.rglob("*")) == before
+
+
+@pytest.mark.parametrize("kind", ["units", "private"])
+@pytest.mark.parametrize("writable", ["home", ".config"])
+def test_a_unit_or_install_ancestor_others_can_write_refuses_before_anything_is_made_under_it(
+        tmp_path: Path, kind: str, writable: str) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    level = home if writable == "home" else home / ".config"
+    level.mkdir(mode=0o700, exist_ok=True)
+    level.chmod(0o777)
+    d = home / ".config" / "systemd" / "user"
+    for make in (False, True):
+        with pytest.raises(P.Refusal, match="is under a directory others can write"):
+            P.user_dir(d, kind, make=make, home=home)
+    assert not (home / ".config" / "systemd").exists()
 
 
 def test_the_scratch_dir_is_walked_from_the_home_and_never_made_through_a_link(tmp_path: Path) -> None:

@@ -934,6 +934,10 @@ def test_a_fresh_install_makes_the_unit_directory_the_service_users_and_private(
     ("scratch-symlink", "the scratch directory is not the service user's directory"),
     ("scratch-ancestor-symlink", "the scratch directory is not the service user's directory"),
     ("scratch-readable", "the scratch directory can be read by others"),
+    ("units-ancestor-symlink", "the user unit directory is not the service user's directory"),
+    ("units-ancestor-writable", "the user unit directory is under a directory others can write"),
+    ("install-ancestor-symlink", "the install directory is not the service user's directory"),
+    ("install-ancestor-writable", "the install directory is under a directory others can write"),
 ])
 def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(host: Host, where: str,
                                                                              why: str) -> None:
@@ -944,11 +948,14 @@ def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(hos
     elsewhere.mkdir()
     target = {"units-writable": units, "units-symlink": units, "install-symlink": install,
               "scratch-symlink": scratch, "scratch-ancestor-symlink": scratch.parent,
-              "scratch-readable": scratch}[where]
+              "scratch-readable": scratch, "units-ancestor-symlink": host.home() / ".config",
+              "units-ancestor-writable": host.home() / ".config",
+              "install-ancestor-symlink": host.home() / ".local",
+              "install-ancestor-writable": host.home() / ".local"}[where]
     target.parent.mkdir(parents=True, exist_ok=True)
-    if where in ("units-writable", "scratch-readable"):
-        target.mkdir()
-        target.chmod(0o777 if where == "units-writable" else 0o755)
+    if where == "scratch-readable" or where.endswith("-writable"):
+        target.mkdir(exist_ok=True)
+        target.chmod(0o755 if where == "scratch-readable" else 0o777)
     else:
         target.symlink_to(elsewhere)
     out = installer(host)
