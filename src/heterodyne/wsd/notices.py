@@ -30,6 +30,7 @@ TITLE_MAX = 200                 # admind's notices.MAX_TITLE
 BODY_MAX_CHARS = 3500           # admind's notices.MAX_BODY_CHARS
 BODY_MAX_LINES = 40             # admind's notices.MAX_BODY_LINES
 TRUNCATED = "(truncated)"
+BACKOFF_LIMIT = 7 * 24 * 3600   # the longest retry backoff, in seconds: 604800
 RETRY_PER_CALL = 3              # so one pickup never spends admind's hourly notice cap
 WITHHELD = "withheld:"
 WITHHELD_TITLE = "wsd notice for {subject} withheld: it contained {kind}."
@@ -59,15 +60,27 @@ def check_title(title: str) -> None:
         raise ValueError(f"a notice title must be one line of 1-{TITLE_MAX} characters")
 
 
+def _seconds(name: str, value: object) -> float:
+    """A backoff from config, checked when Notices is built so a bad one never fails mid-send."""
+    # Compared before any conversion: nan fails both bounds, and 10**400 has no float.
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value <= BACKOFF_LIMIT:
+        raise ValueError(f"notice {name} must be seconds, more than 0 and at most {BACKOFF_LIMIT}")
+    return float(value)
+
+
 class Notices:
     def __init__(self, journal: Journal, sock: Path, *, clock: Callable[[], int], backoff: float = 60.0,
                  backoff_max: float = 1800.0, owed_hours: int = 24, timeout: float = 30.0,
                  cp: Checkpoint = nothing, post: PostNotice = relay.post_notice) -> None:
+        self.backoff = _seconds("backoff", backoff)
+        self.backoff_max = _seconds("backoff_max", backoff_max)
+        if self.backoff > self.backoff_max:
+            raise ValueError("notice backoff must be at most backoff_max")
         self.journal = journal
         self.sock = sock
         self.clock = clock
-        self.backoff = backoff
-        self.backoff_max = backoff_max
+        # Doublings past which the delay is backoff_max; log2 of each, since their ratio can overflow.
+        self.doublings = math.ceil(math.log2(self.backoff_max) - math.log2(self.backoff))
         self.owed_hours = owed_hours
         self.timeout = timeout
         self.cp = cp
@@ -151,5 +164,8 @@ class Notices:
             self.cp("notice.outcome")
 
     def _next(self, now: int, attempts: int) -> int:
-        # 2.0 ** 1023 is the largest finite power; past float range the product is inf, which the cap clamps.
-        return now + math.ceil(min(self.backoff * 2.0 ** min(attempts - 1, 1023), self.backoff_max))
+        doubled = attempts - 1
+        if doubled >= self.doublings:
+            return now + math.ceil(self.backoff_max)
+        # Below `doublings` the product stays under 2 * backoff_max, so ldexp cannot overflow.
+        return now + math.ceil(min(math.ldexp(self.backoff, doubled), self.backoff_max))
