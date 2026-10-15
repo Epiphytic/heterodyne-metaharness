@@ -25,6 +25,7 @@ from heterodyne.wsd import notices, relay
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.states import BeadState
+from heterodyne.wsd.workstream import NoticeSink
 
 WS, BEAD = "ws1", "ws1-1"
 T0 = 1_800_000_000
@@ -90,6 +91,14 @@ def rig() -> Iterator[Rig]:
 def send(n: notices.Notices, ref: str = "stuck:ws1-1:1", title: str = "ws1-1 is stuck",
          body: str = "why") -> None:
     n.send(WS, BEAD, "stuck", title, body, ref)
+
+
+# --- part 1's NoticeSink --------------------------------------------------------------------------
+def test_notices_satisfies_part1_notice_sink(rig: Rig) -> None:
+    sink: NoticeSink = rig.notices()        # pyright checks Notices against part 1's Protocol
+    fake = rig.start()
+    sink.send(WS, BEAD, "stuck", "ws1-1 is stuck", "why", "stuck:ws1-1:1")
+    assert [n.title for n in fake.notices] == ["ws1-1 is stuck"]
 
 
 # --- at most once ------------------------------------------------------------------------------

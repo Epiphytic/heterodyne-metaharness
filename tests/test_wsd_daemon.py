@@ -25,14 +25,14 @@ from heterodyne.config import ConfigError
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.sandbox.spec import short_id
-from heterodyne.wsd import cli, ctl, daemon, ids, journal, park, scheduler
+from heterodyne.wsd import cli, ctl, daemon, ids, journal, notices, park, scheduler
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
 from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.runtime import EndCause, Ended, ResolveFailed, ResolveRefused, Session, UnlandedView
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
-from heterodyne.wsd.settings import CTL_SOCKET, WsdSettings, resolve
+from heterodyne.wsd.settings import CTL_SOCKET, RelaySettings, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.usage import NoUsageReader
 from heterodyne.wsd.workstream import NoHarness, WorkstreamSettings
@@ -2675,3 +2675,38 @@ def test_resolve_takes_the_config_directory_for_selections(tmp_path: Path,
     selection.write(d, {"codex": Selection("codex", pin)})
     chosen = assemble(s, Journal(s.journal), factory(World(tmp_path / "btq-state")), FakeRuntime())
     assert chosen.schedulers["alpha"].d.selections("codex") == pin
+
+
+# --- notices (plan 5i part 2 T3): Deps.notices from [wsd.relay] -------------------------------------
+def with_relay(tmp_path: Path, enabled: bool = True) -> WsdSettings:
+    relay = RelaySettings(enabled, tmp_path / "admind" / "ask.sock", 2, 6, 90.0)
+    return replace(settings(tmp_path), relay=relay)
+
+
+@pytest.mark.parametrize("relay", ["absent", "disabled"])
+def test_assemble_wires_no_notices_without_an_enabled_relay(tmp_path: Path, relay: str) -> None:
+    s = settings(tmp_path) if relay == "absent" else with_relay(tmp_path, enabled=False)
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime())
+    assert [sch.d.notices for sch in parts.schedulers.values()] == [None]
+
+
+def test_assemble_wires_one_notices_client_from_the_relay_settings(tmp_path: Path) -> None:
+    s = with_relay(tmp_path)
+    assert s.relay is not None
+    cp = Recorder()
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime(), cp=cp)
+    (sch,) = parts.schedulers.values()
+    n = sch.d.notices
+    assert isinstance(n, notices.Notices)
+    assert (n.journal, n.sock, n.backoff, n.owed_hours) == (parts.journal, s.relay.ask_socket, 90.0, 6)
+    assert n.clock is sch.d.clock and n.cp is cp
+
+
+def test_assemble_recovers_a_notice_cut_off_in_flight_before_any_pickup(tmp_path: Path) -> None:
+    s = with_relay(tmp_path)
+    j = Journal(s.journal)
+    with j.transaction():
+        j.notice_add("stuck:ws-1:1", WS, None, "stuck", "t", "b", "sending", None, 1)
+    assemble(s, j, factory(World(tmp_path / "w")), FakeRuntime())
+    row = j.notice("stuck:ws-1:1")
+    assert row is not None and row.state == "uncertain"
