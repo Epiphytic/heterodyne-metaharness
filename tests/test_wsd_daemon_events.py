@@ -16,6 +16,7 @@ from wsd_env import PROFILES, WS, accounts_at, git_repo, login_home
 
 from heterodyne.wsd.daemon import Wsd, assemble
 from heterodyne.wsd.journal import Journal
+from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import SessionEvent
 from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
@@ -163,10 +164,24 @@ def test_ops_are_gated_per_workstream(tmp_path: Path) -> None:
     assert calls == [{"alpha": frozenset({"close"}), "beta": frozenset({"ask"}), "gamma": frozenset()}]
 
 
+def launched(wsd: Wsd, ev: SessionEvent) -> None:
+    """Journal the event's generation as launched for its workstream and bead, so ingest attributes it."""
+    entry = LaunchEntry(ev.session_key, ev.generation, ev.ws, ev.bead, "coder", "p-one", "default", "ck-a",
+                        "", False, "2026-10-15T00:00:00Z", outcome=LAUNCHED)
+    wsd.parts.journal.launch_insert(entry)
+
+
 def test_a_wake_from_another_thread_runs_a_turn_ended_pickup(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     wsd = build(tmp_path, settings(tmp_path), runtime)
-    handled(wsd, WS, {"close": h})
+    got: list[SessionEvent] = []
+
+    def close(parker: Parker, event: SessionEvent) -> None:
+        del parker
+        got.append(event)
+
+    handled(wsd, WS, {"close": close})
+    launched(wsd, event())
     seen = spy_pickups(wsd)
 
     async def scenario() -> None:
@@ -185,6 +200,7 @@ def test_a_wake_from_another_thread_runs_a_turn_ended_pickup(tmp_path: Path) -> 
     assert turn_ended(seen) == [Trigger(TriggerKind.TURN_ENDED)]
     assert turn_ended(seen)[0].ref is None
     assert runtime.logs[WS] == [event()]
+    assert got == [event()]                 # the woken pickup ingested it and its handler ran
 
 
 def test_a_burst_of_wakes_runs_a_bounded_number_of_pickups(tmp_path: Path) -> None:
