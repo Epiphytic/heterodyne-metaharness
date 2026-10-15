@@ -41,6 +41,7 @@ from heterodyne.sandbox.spec import INSTALL_RECORD_INSIDE
 from heterodyne.wsd.runtime import (
     INSTALL_UNPINNED,
     NOT_SELECTED,
+    ExecDirCleared,
     InstallTainted,
     LaunchFailed,
     LaunchSpec,
@@ -452,6 +453,21 @@ def test_a_session_tainted_twice_before_a_drain_is_signalled_once(rig: RuntimeRi
             rig.runtime.verified_cli(ADAPTERS["codex"])
         verify.clear_taint(f.taint_dir, "codex", f.pin.install)     # the next verify walks again
     assert [s.session_key for s in tainted_signals(rig)] == [key]
+
+
+def test_a_leftover_exec_dir_is_cleared_and_noticed_for_the_journal(rig: RuntimeRig) -> None:
+    """Codex T8 r1 B2 (Amendment 1 §4.2): each clear reaches wsd as an `ExecDirCleared` notice, with the
+    session, generation and adapter and the bounded summary; wsd journals it as `exec_dir_cleared`."""
+    f = rig.installs["codex"]
+    spec = codex_spec(rig, f.pin)
+    packages = rig.runtime.layout(spec.session_key).home / ".codex" / "packages"
+    packages.mkdir(mode=0o700, parents=True)
+    (packages / "leftover").write_bytes(b"x")
+    rig.runtime.launch(spec)
+    assert not any(packages.iterdir())
+    notices = [s for s in rig.runtime.signals("alpha") if isinstance(s, ExecDirCleared)]
+    assert notices == [ExecDirCleared(spec.session_key, 1, "codex", ".codex/packages", files=1, links=0,
+                                      dirs=0, bytes=1, names=("leftover",))]
 
 
 def test_a_taint_survives_a_restart(rig: RuntimeRig) -> None:

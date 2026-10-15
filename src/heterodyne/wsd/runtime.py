@@ -113,7 +113,23 @@ class InstallTainted:
     install: str
 
 
-type Signal = UsageSeen | LimitSeen | InstallTainted
+@dataclass(frozen=True)
+class ExecDirCleared:
+    """A launch found leftover content in one of the adapter's empty read-only exec directories (plan 4c E25)
+    and cleared it: Amendment 1 §4.2's bounded summary, counts and at most 16 sanitized names, never any
+    contents. wsd journals it as `exec_dir_cleared`, once per session, generation and path."""
+    session_key: str
+    generation: int
+    adapter: str
+    path: str                   # relative to the session's home
+    files: int
+    links: int
+    dirs: int
+    bytes: int
+    names: tuple[str, ...]
+
+
+type Signal = UsageSeen | LimitSeen | InstallTainted | ExecDirCleared
 
 
 Action = Literal["land", "keep", "discard"]

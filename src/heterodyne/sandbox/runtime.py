@@ -71,6 +71,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    ExecDirCleared,
     InstallTainted,
     LaunchFailed,
     LaunchSpec,
@@ -673,6 +674,9 @@ class SandboxRuntime:
             log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
                         spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
                         cleared.dirs, cleared.bytes)
+            self._notice(spec.ws, ("cleared", spec.session_key, gen, str(cleared.path)), ExecDirCleared(
+                spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
+                cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
         token = secrets.token_hex(16)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,

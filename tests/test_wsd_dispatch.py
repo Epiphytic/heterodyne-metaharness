@@ -1,6 +1,7 @@
 """Plan 4c Task 8: what wsd dispatches when the adapter has no selected install, and for an entry journaled
 before installs were pinned (schema 2)."""
 
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from wsd_env import FAKE_PINS, WS, Rig, make_rig
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.beads import NEEDS_HUMAN
-from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED
+from heterodyne.wsd.runtime import INSTALL_UNPINNED, NOT_SELECTED, ExecDirCleared
 from heterodyne.wsd.states import Reason
 
 
@@ -65,3 +66,22 @@ def test_an_entry_from_schema_2_dispatches_as_install_unpinned(tmp_path: Path) -
     [launched] = rig.runtime.launches
     assert (launched.generation, launched.install, launched.install_digest) == (2, pin.install, pin.digest)
     assert rig.state("btq-1") == "running"
+
+
+def test_an_exec_dir_cleared_notice_is_journaled_once(tmp_path: Path) -> None:
+    """Codex T8 r1 B2 (Amendment 1 §4.2): the `exec_dir_cleared` journal entry carries the session, the
+    generation, the adapter and the bounded summary; a repeated notice journals nothing more."""
+    rig = started(tmp_path)
+    rig.pickup()
+    [launched] = rig.runtime.launches
+    notice = ExecDirCleared(launched.session_key, launched.generation, "codex", ".codex/packages", files=1,
+                            links=0, dirs=0, bytes=1, names=("leftover",))
+    rig.runtime.report(WS, notice, notice)
+    rig.pickup()
+    rig.runtime.report(WS, notice)
+    rig.pickup()
+    [event] = [e for e in rig.journal.events_since(0) if e.kind == "exec_dir_cleared"]
+    assert (event.ws, event.bead) == (WS, "btq-1")
+    assert json.loads(event.detail) == {
+        "session_key": launched.session_key, "generation": launched.generation, "adapter": "codex",
+        "path": ".codex/packages", "files": 1, "links": 0, "dirs": 0, "bytes": 1, "names": ["leftover"]}
