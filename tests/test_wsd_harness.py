@@ -1167,7 +1167,7 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
     assert parks == [("btq-1", (), INSTALL_TAINTED, True)]
     assert HELD in rig.beads.show(WS, "btq-1").labels
     alerts = [p for p in h.alerts.iterdir() if not p.name.startswith(".")]
-    assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}\.json", alerts[0].name)
+    assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}-[0-9]+\.json", alerts[0].name)
     assert a in alerts[0].read_text()
     rig.runtime.report(WS, InstallTainted(key, 1, "codex", a))     # again: still one alert for the install
     rig.pickup()
@@ -1188,6 +1188,27 @@ def test_a_taint_whose_alert_cannot_be_written_still_holds_the_bead(rigged: tupl
         rig.pickup()                                    # the dropped alert doesn't fail every pickup
     finally:
         h.alerts.chmod(0o700)
+
+
+def alert_names(h: H) -> list[str]:
+    return sorted(p.name for p in h.alerts.iterdir() if not p.name.startswith("."))
+
+
+def test_a_retaint_after_verify_alerts_again_and_verify_and_remove_delete_the_old_alert(h: H) -> None:
+    _, a = published(h)
+    h.ops.tainted("codex", a)
+    h.ops.tainted("codex", a)
+    [first] = alert_names(h)
+    h.ops.verify("codex", a)
+    assert alert_names(h) == []
+    h.ops.tainted("codex", a)                       # tainted again after the clear: a new alert
+    h.ops.tainted("codex", a)
+    [second] = alert_names(h)
+    assert second != first
+    assert re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}-[0-9]+\.json", second)
+    h.ops.remove("codex", a)
+    assert alert_names(h) == []
+    assert [e.action for e in events(h) if e.action == "tainted"] == ["tainted", "tainted"]
 
 
 def install_files(h: H, adapter: str, install: str) -> list[Path]:

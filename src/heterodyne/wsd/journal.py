@@ -341,6 +341,7 @@ class HarnessEvent:
 _HARNESS_COLS = ", ".join(f.name for f in dataclasses.fields(HarnessInstall))
 _HARNESS_SET = frozenset({"approval_bead", "context_digest", "ask_id", "state", "install", "failure"})
 HARNESS_OPEN = "harness_open:"      # a `use` op on an install, open until it ends: `<adapter>:<install>`
+HARNESS_TAINTS = "harness_taints:"  # how many times an install's taint was cleared: `<adapter>:<install>`
 _DATA = msgspec.json.Decoder(dict[str, str])
 _LAUNCH_COLS = ("session_key", "generation", "ws", "bead", "role", "profile", "account", "credential_key",
                 "model_passed", "dispatched_at", "native_id", "model_reported", "outcome", "adopted",
@@ -1358,6 +1359,19 @@ class Journal:
     @_locked
     def harness_close(self, adapter: str, install: str) -> None:
         self.db.execute("DELETE FROM meta WHERE key = ?", (f"{HARNESS_OPEN}{adapter}:{install}",))
+
+    @_locked
+    def harness_taints(self, adapter: str, install: str) -> int:
+        """How many times the install's taint was cleared (by `verify` or a removal): its taint alert's
+        sequence, so a taint after a clear alerts again."""
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?",
+                              (f"{HARNESS_TAINTS}{adapter}:{install}",)).fetchone()
+        return 0 if row is None else int(row[0])
+
+    @_locked
+    def harness_taint_cleared(self, adapter: str, install: str) -> None:
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET "
+                        "value = CAST(value AS INTEGER) + 1", (f"{HARNESS_TAINTS}{adapter}:{install}",))
 
     @_locked
     def harness_close_all(self) -> int:

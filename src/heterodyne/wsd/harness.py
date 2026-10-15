@@ -559,6 +559,7 @@ class HarnessOps:
                 self.journal.harness_event(at, ACTOR_CTL, "verify", adapter, install, exc.constant)
                 raise HarnessRefused(exc.constant) from None
             verify.clear_taint(self.taint_dir, adapter, install)
+            self._clear_alert(adapter, install)
             self.journal.harness_event(at, ACTOR_CTL, "verify", adapter, install, "verified")
 
     # --- remove and prune (E16) ---
@@ -603,6 +604,7 @@ class HarnessOps:
         except StoreRefused as exc:
             raise HarnessRefused(exc.constant) from None
         verify.clear_taint(self.taint_dir, adapter, install)
+        self._clear_alert(adapter, install)
         self.journal.harness_event(iso(self.clock()), ACTOR_CTL, action, adapter, install)
 
     def remove(self, adapter: str, install: str) -> None:
@@ -679,7 +681,7 @@ class HarnessOps:
             return Listing(out, self.store.fallback)
 
     def tainted(self, adapter: str, install: str) -> None:
-        """An install was found tainted (E17): its one alert, and the event."""
+        """An install was found tainted (E17): its one alert (until the taint is cleared), and the event."""
         if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
             log.warning("a taint report names no install wsd alerts on")
             return
@@ -688,8 +690,25 @@ class HarnessOps:
                 f"restored, `wsctl harness verify {adapter} {install}` clears it; or remove it.")
         with self.alerts_lock:
             at = self.clock()
-            if alerts.write(self.alerts_dir, f"harness-taint-{adapter}-{install[-12:]}", text, at=at):
+            if alerts.write(self.alerts_dir, self._alert_id(adapter, install), text, at=at):
                 self.journal.harness_event(iso(at), ACTOR_WSD, "tainted", adapter, install)
+
+    def _alert_id(self, adapter: str, install: str) -> str:
+        """One alert per taint: admind relays an alert ID once, so each clear moves to the next sequence."""
+        return f"harness-taint-{adapter}-{install[-12:]}-{self.journal.harness_taints(adapter, install)}"
+
+    def _clear_alert(self, adapter: str, install: str) -> None:
+        """The taint is cleared: the next one gets a new alert, and this one's file goes. The sequence moves
+        first, so a crash between the two leaves at worst a stale alert, never a taint without one."""
+        if not ALERT_ADAPTER.fullmatch(adapter):
+            return
+        with self.alerts_lock:
+            old = self._alert_id(adapter, install)
+            self.journal.harness_taint_cleared(adapter, install)
+            try:
+                (self.alerts_dir / f"{old}.json").unlink(missing_ok=True)
+            except OSError:
+                log.warning("install %s: its old taint alert could not be removed", install, exc_info=True)
 
 
 def _check_archive(impl: Adapter, kind: str, archive: Path) -> None:
