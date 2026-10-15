@@ -33,7 +33,7 @@ from heterodyne.sandbox.settings import sandbox_settings
 from heterodyne.tmux import Tmux
 from heterodyne.wsd import btq
 from heterodyne.wsd.accounts import Accounts
-from heterodyne.wsd.harness import HarnessOps
+from heterodyne.wsd.harness import ADMIND_INVALID, NO_APPROVE_BEAD, HarnessOps
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
 from heterodyne.wsd.settings import WsdSettings
@@ -148,15 +148,21 @@ def _commit(root: Path) -> str:
     return out.stdout.decode(errors="replace").strip()
 
 
-def _no_readout(bead: str) -> btq.Readout | btq.Busy:
-    raise btq.ReadoutFailed("[admind] approve_bead is not set")
+def _no_readout(why: str, bead: str) -> btq.Readout | btq.Busy:
+    raise btq.ReadoutFailed(why)
 
 
-def _approve_bead(env: Mapping[str, str]) -> Path | None:
+def _approve_bead(env: Mapping[str, str]) -> tuple[Path | None, str]:
+    """`[admind] approve_bead` and "", or None and why no decision can be read: the key is unset, or
+    `[admind]` doesn't validate. `install` refuses with that before it stages or asks."""
     try:
-        return admind_settings.resolve(load(env=env), env).approve_bead
+        cfg = load(env=env)
+        if table_at(cfg.values, "admind", "config").get("approve_bead") is None:
+            return None, NO_APPROVE_BEAD
+        binary = admind_settings.resolve(cfg, env).approve_bead
     except ConfigError:
-        return None             # admind isn't set up here: no decision can be read, so none is applied
+        return None, ADMIND_INVALID
+    return (binary, "") if binary is not None else (None, NO_APPROVE_BEAD)
 
 
 def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFactory, runtime: AgentRuntime,
@@ -168,8 +174,9 @@ def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFact
         return None
     harnesses = sandbox_settings(env).harnesses
     state, root = paths.state_dir(env), _checkout()
-    binary = _approve_bead(env)
-    readout = _no_readout if binary is None else partial(btq.approval_readout, binary=binary)
+    binary, refusal = _approve_bead(env)
+    readout = (partial(_no_readout, refusal) if binary is None
+               else partial(btq.approval_readout, binary=binary))
     fetcher = Fetcher(HttpsOpener(), s.state_dir / "harness-cache", time.monotonic, FETCH_SECONDS,
                       login_dirs=_logins(s.accounts))
     return HarnessOps(
@@ -177,4 +184,4 @@ def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFact
         readout=readout, ask_socket=state / "admind" / asks.ASK_SOCKET, config_dir=_config_dir(s, env),
         taint_dir=s.state_dir / "harness-taint", alerts_dir=state / "alerts", runtime=runtime,
         clock=utc_now, commit=_commit(root), repo=str(root), guard_locks=guard_locks,
-        store_problems=_store_problems(harnesses, s.accounts, env))
+        store_problems=_store_problems(harnesses, s.accounts, env), readout_refusal=refusal)

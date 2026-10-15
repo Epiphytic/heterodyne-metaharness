@@ -1253,6 +1253,17 @@ def test_install_refuses_without_a_recipe_or_an_approval_workstream(h: H) -> Non
     assert h.world.created == [] and h.asks.posts == [] and h.opener.asked == []
 
 
+@pytest.mark.parametrize("refusal", ["NO_APPROVE_BEAD", "ADMIND_INVALID"])
+def test_install_refuses_up_front_when_no_approval_could_take_effect(h: H, refusal: str) -> None:
+    """Without `[admind] approve_bead`, or with an `[admind]` that doesn't validate, no decision can be
+    read: the install refuses before it fetches, stages or asks."""
+    h.ops = make_ops(h, readout_refusal=getattr(wh, refusal))
+    assert refused(lambda: h.ops.install("codex", None)) == getattr(wh, refusal)
+    assert h.world.created == [] and h.asks.posts == [] and h.opener.asked == []
+    assert h.journal.harness_installs("staged", "posted", "approved", "failed") == []
+    assert not (h.tmp / "store" / ".staged").exists() or not any((h.tmp / "store" / ".staged").iterdir())
+
+
 def test_an_open_approval_expires_after_staging_hours(h: H) -> None:
     staging_id, _ = posted(h)
     h.ops.advance(h.clock() + 23 * 3600)

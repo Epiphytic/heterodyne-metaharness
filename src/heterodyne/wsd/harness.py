@@ -55,6 +55,8 @@ log = logging.getLogger(__name__)
 NO_RECIPE = "the adapter has no recipe in [harnesses]"
 NO_APPROVAL_WORKSTREAM = "[harnesses] approval_workstream is unset; an install needs it for its approval"
 NO_COMMIT = "the running harness commit is unknown; an install's approval needs it"
+NO_APPROVE_BEAD = "[admind] approve_bead is unset, so no install's approval could take effect"
+ADMIND_INVALID = "[admind] is invalid, so no install's approval can be read; `admind ask list` says why"
 UNSUPPORTED_SOURCE = "the recipe has defaults or npm content, which this version does not install"
 NOT_APPROVED = "the install's approval did not verify"
 DENIED = "the install's approval was denied"
@@ -143,7 +145,8 @@ class HarnessOps:
                  alerts_dir: Path, runtime: AgentRuntime, clock: Callable[[], int], commit: str, repo: str,
                  cp: Checkpoint = nothing,
                  guard_locks: Callable[[], Sequence[AbstractContextManager[Any]]] = _no_locks,
-                 store_problems: Callable[[], Sequence[str]] = _no_problems) -> None:
+                 store_problems: Callable[[], Sequence[str]] = _no_problems,
+                 readout_refusal: str = "") -> None:
         self.settings = settings
         self.store = store
         self.fetcher = fetcher
@@ -161,6 +164,7 @@ class HarnessOps:
         self.guard_locks = guard_locks
         self.store_problems = store_problems
         self.repo = repo
+        self.readout_refusal = readout_refusal  # why `readout` can't work (NO_APPROVE_BEAD...), or ""
         self.lock = threading.RLock()
         self.alerts_lock = threading.Lock()
         self.code: tuple[str, int, dict[str, str]] | None = None   # the prune code, when, and what it lists
@@ -178,6 +182,8 @@ class HarnessOps:
             raise HarnessRefused(NO_APPROVAL_WORKSTREAM)
         if not self.commit:
             raise HarnessRefused(NO_COMMIT)
+        if self.readout_refusal:
+            raise HarnessRefused(self.readout_refusal)
         if recipe.defaults is not None or any(c.git is None or c.commit is None for c in recipe.content):
             raise HarnessRefused(UNSUPPORTED_SOURCE)
         version = recipe.version if version is None else version

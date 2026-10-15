@@ -1,7 +1,9 @@
 import subprocess
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from sandbox_env import config_env
@@ -9,13 +11,16 @@ from wsd_env import accounts_at, selected_config
 
 import heterodyne
 from heterodyne import platform
+from heterodyne.admind import settings as admind_settings
 from heterodyne.config import ConfigError, paths
+from heterodyne.sandbox import build as build_module
 from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_harness, build_runtime, build_usage_reader
 from heterodyne.sandbox.hostread import HostUsageReader
 from heterodyne.sandbox.openshell import OpenShellBackend
 from heterodyne.sandbox.openshell_selftest import OpenShellSelfTest
 from heterodyne.sandbox.runtime import SandboxRuntime
 from heterodyne.wsd import btq, cli
+from heterodyne.wsd import harness as wh
 from heterodyne.wsd.harness import HarnessOps
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.runtime import AgentRuntime, NoRuntime
@@ -144,6 +149,51 @@ def test_the_reader_needs_the_sandbox_runtime_and_a_selected_codex_install(tmp_p
 
 
 NO_QUEUES = cast(btq.QueueFactory, None)        # never called: nothing here installs
+ADMIND = """
+[platform]
+service_manager = "systemd"
+[admind]
+{approve_bead}
+[admind.marmot]
+relays = ["wss://relay.example.org"]
+"""
+
+
+@pytest.mark.parametrize(("host", "refusal"), [
+    ("", wh.NO_APPROVE_BEAD),                                                   # no [admind]
+    (ADMIND.format(approve_bead='profile = "p-one"'), wh.NO_APPROVE_BEAD),      # approve_bead unset
+    (ADMIND.format(approve_bead='approve_bead = "/usr/bin/true"'), wh.ADMIND_INVALID),   # no profile
+    (ADMIND.format(approve_bead='profile = "p-one"\napprove_bead = "relative"'), wh.ADMIND_INVALID),
+])
+def test_an_install_refusal_says_why_no_decision_is_read(tmp_path: Path, host: str, refusal: str) -> None:
+    """A missing `[admind] approve_bead` and an `[admind]` that doesn't validate each get their own refusal,
+    which `install` gives before it stages or asks; the readout still fails, as a backstop."""
+    env = config_env(tmp_path, host)
+    journal = Journal(tmp_path / "journal.sqlite")
+    try:
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: ())
+        assert isinstance(ops, HarnessOps) and ops.readout_refusal == refusal
+        with pytest.raises(btq.ReadoutFailed):
+            ops.readout("btq-1")
+    finally:
+        journal.close()
+
+
+def test_a_valid_admind_with_approve_bead_reads_the_decisions(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    env = config_env(tmp_path, "")
+    monkeypatch.setattr(admind_settings, "resolve", lambda _cfg, _env: SimpleNamespace(
+        approve_bead=Path("/usr/bin/true")))
+    monkeypatch.setattr(build_module, "load", lambda env: SimpleNamespace(values={"admind": {
+        "approve_bead": "/usr/bin/true"}}))
+    journal = Journal(tmp_path / "journal.sqlite")
+    try:
+        ops = build_harness(settings(tmp_path, env), env, NO_QUEUES, NoRuntime(), journal, lambda: ())
+        assert isinstance(ops, HarnessOps) and ops.readout_refusal == ""
+        readout = cast("partial[Any]", ops.readout)
+        assert readout.func is btq.approval_readout and readout.keywords == {"binary": Path("/usr/bin/true")}
+    finally:
+        journal.close()
 
 
 def test_wsd_builds_the_harness_operations_against_admind(tmp_path: Path) -> None:
