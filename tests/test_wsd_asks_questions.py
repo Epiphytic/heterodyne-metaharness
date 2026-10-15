@@ -361,6 +361,40 @@ def test_admind_down_leaves_the_question_owed_and_the_bead_waiting(tmp_path: Pat
     assert row is not None and (row.state, row.ask_id) == ("posted", card.ask_id) and card.post.bead == child
 
 
+# The question bead's text, edited between the park and the post, is read back untrusted (lead's ruling on
+# call 1): (bead's text without the framing, the shown text the card must hold, a text it must never hold).
+EDITS = [
+    ("Blue \x1b[31mor green?", "Blue \\x1b[31mor green?", "\x1b"),
+    ("Blue\x07 or green?", "Blue\\x07 or green?", "\x07"),
+    ("Blue\r\nor green?", "Blue\nor green?", "\r"),
+    ("Use SECRET for blue?", WITHHELD_TEXT.format(kind="sk- API key"), "SECRET"),
+    ("x" * (QUESTION_MAX + 50), "x" * (QUESTION_MAX - len(CUT_MARK)) + CUT_MARK, "x" * (QUESTION_MAX + 1)),
+    ("Blue \\ green?", "Blue \\ green?", "Blue \\\\ green?"),   # step 5's own text: not escaped twice
+]
+
+
+@pytest.mark.parametrize(("edited", "shown", "never"), EDITS,
+                         ids=["esc", "bel", "crlf", "secret", "long", "backslash"])
+@pytest.mark.parametrize("framed", [True, False], ids=["framed", "unframed"])
+def test_a_question_beads_text_read_back_is_scanned_and_escaped_again(tmp_path: Path, fake: FakeAskSock,
+                                                                       edited: str, shown: str, never: str,
+                                                                       framed: bool) -> None:
+    edited, never = edited.replace("SECRET", SECRET), never.replace("SECRET", SECRET)
+    rig = asking(tmp_path, fake)
+    fake.stop()
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    rig.pickup()
+    [child] = questions(rig)
+    rig.world.beads[child].description = edited + (QUESTION_FRAMING.format(bead=B) if framed else "")
+    fake.start()
+    rig.clock.advance(BACKOFF)
+    rig.pickup()
+    [card] = cards(fake)
+    assert card.post.body.split("\n\n")[1] == shown
+    assert never not in card.post.body + card.post.title
+    assert admind_asks.check(to_admind(card.post)) is None
+
+
 def test_an_uncertain_post_is_found_by_list_before_posting_again(tmp_path: Path, fake: FakeAskSock) -> None:
     rig = asking(tmp_path, fake)
     fake.script.append("lost")                              # admind takes the post; its reply is lost
