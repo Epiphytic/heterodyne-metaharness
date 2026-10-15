@@ -11,7 +11,7 @@ from heterodyne.wsd import cli, ctl
 INSTALL = "0.160.0-0123456789ab"
 
 
-def harness(action: str, **kw: object) -> ctl.CtlRequest:
+def harness(action: ctl.HarnessAction, **kw: str) -> ctl.CtlRequest:
     return ctl.CtlRequest("harness", harness=ctl.HarnessRequest(action, **kw))
 
 
@@ -69,7 +69,8 @@ def test_wsctl_harness_list_shows_each_install_and_its_state(tmp_path: Path, mon
 
 def test_wsctl_harness_prune_prints_the_code_and_a_refusal_exits_1(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(cli, "_settings", lambda: settings(tmp_path))
+    s = settings(tmp_path)
+    monkeypatch.setattr(cli, "_settings", lambda: s)
     monkeypatch.setattr(cli, "_ask", lambda s, req: ctl.CtlReply(
         "ok", "prune would remove 1 install(s); run wsctl harness prune --confirm 0a1b2c3d within 10 minutes",
         {INSTALL: {"adapter": "codex"}}))

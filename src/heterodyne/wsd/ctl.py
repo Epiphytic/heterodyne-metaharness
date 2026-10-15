@@ -1,5 +1,6 @@
 """wsd's host control socket (ADR 0001 §4.3, §9): `wsd tick <job>` from the timers, and `wsctl pause`,
-`resume`, `status` and `reload` (AU-4 §5.2), `unlanded` and `resolve` (btq-xb56t, docs/wsd.md §5).
+`resume`, `status` and `reload` (AU-4 §5.2), `unlanded` and `resolve` (btq-xb56t, docs/wsd.md §5), and
+`harness` (plan 4c Task 10).
 
 One JSON request per connection, one JSON reply, each a single newline-terminated line. A request is at
 most MAX_REQUEST bytes and a reply at most MAX_REPLY bytes; the client reads up to MAX_REPLY, and a reply
@@ -37,8 +38,42 @@ def _no_data() -> dict[str, dict[str, str]]:
     return {}
 
 
+HarnessAction = Literal["list", "install", "verify", "use", "rollback", "remove", "prune"]
+
+
+class HarnessRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """`wsctl harness <action>`: which fields each action takes is `refusal`'s."""
+    action: HarnessAction
+    adapter: str | None = None
+    install: str | None = None
+    version: str | None = None      # install only
+    confirm: str | None = None      # prune only: the code a first prune gave
+
+
+# The fields each harness action takes: (required, optional).
+HARNESS_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "list": (frozenset(), frozenset({"adapter"})),
+    "install": (frozenset({"adapter"}), frozenset({"version"})),
+    "verify": (frozenset({"adapter", "install"}), frozenset()),
+    "use": (frozenset({"adapter", "install"}), frozenset()),
+    "rollback": (frozenset({"adapter"}), frozenset()),
+    "remove": (frozenset({"adapter", "install"}), frozenset()),
+    "prune": (frozenset(), frozenset({"confirm"})),
+}
+
+
+def _harness_refusal(h: HarnessRequest) -> str:
+    given = {name for name in ("adapter", "install", "version", "confirm") if getattr(h, name) is not None}
+    required, optional = HARNESS_FIELDS[h.action]
+    if not required <= given:
+        return f"harness {h.action} needs {' and '.join(sorted(required - given))}"
+    if given - required - optional:
+        return f"harness {h.action} takes no {' or '.join(sorted(given - required - optional))}"
+    return ""
+
+
 class CtlRequest(msgspec.Struct, frozen=True):
-    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve"]
+    op: Literal["tick", "status", "pause", "resume", "reload", "unlanded", "resolve", "harness"]
     job: Literal["pickup", "reconcile"] | None = None      # tick only
     ws: str | None = None       # None: every workstream (tick and status); pause, resume, unlanded and
     #                             resolve need one, and reload takes none
@@ -47,6 +82,7 @@ class CtlRequest(msgspec.Struct, frozen=True):
     generation: int | None = None                           # resolve only
     tip: str | None = None                                  # resolve only: the confirmation
     action: Literal["land", "keep", "discard"] | None = None    # resolve only
+    harness: HarnessRequest | None = None                   # harness only
 
 
 class CtlReply(msgspec.Struct, frozen=True):
@@ -80,6 +116,12 @@ def refusal(req: CtlRequest) -> str:
         return "reload takes no workstream; it reloads them all"
     if req.all and req.op != "status":
         return "only status takes all"
+    if (req.op == "harness") != (req.harness is not None):
+        return "harness needs a harness request; nothing else takes one"
+    if req.harness is not None:
+        if req.ws is not None:
+            return "harness takes no workstream"
+        return _harness_refusal(req.harness)
     return ""
 
 

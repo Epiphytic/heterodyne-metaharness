@@ -9,7 +9,7 @@ from heterodyne.wsd import ctl
 INSTALL = "0.160.0-0123456789ab"
 
 
-def harness(action: str, **kw: object) -> ctl.CtlRequest:
+def harness(action: ctl.HarnessAction, **kw: str) -> ctl.CtlRequest:
     return ctl.CtlRequest("harness", harness=ctl.HarnessRequest(action, **kw))
 
 

@@ -257,7 +257,8 @@ class H:
         self.codex_artifact, self.claude_artifact = codex, claude
         self.opener = Opener({**codex_files(codex), **npm_files(claude, registry=REGISTRY)})
         store_dir(self.tmp)
-        self.store = LocalStore(self.tmp / "store", clock=self.clock)
+        # The store's sweep ages stagings by their files' mtimes, so it keeps the real clock.
+        self.store = LocalStore(self.tmp / "store")
         self.ops = make_ops(self)
 
     # where things are

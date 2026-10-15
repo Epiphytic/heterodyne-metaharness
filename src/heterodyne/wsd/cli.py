@@ -1,4 +1,5 @@
-"""`wsd` (run, tick) and `wsctl` (pause, resume, status, reload) command lines (ADR 0001 §4.3, §9, §16).
+"""`wsd` (run, tick) and `wsctl` (pause, resume, status, reload, unlanded, resolve, harness) command lines
+(ADR 0001 §4.3, §9, §16).
 
 Every command except `wsd run` asks the running wsd over its control socket. `wsctl pause` goes through
 wsd as §4.3 requires: wsd sets btq's shared pause flag under the workstream's claim lock, so a pause is
@@ -18,7 +19,11 @@ recovery replays like any other.
 
 A version 1 journal (plan 3's) is upgraded in place before anything else uses it (`upgrade.run`, AU-3 §3).
 If the beads can't be read for it, the file is left untouched and `wsd run` exits 1: retrying is safe. A
-version 2 journal (AU-3's) gets plan 4c's install pin columns the same way (`upgrade.run_2_to_3`).
+version 2 journal (AU-3's) gets plan 4c's install pin columns the same way (`upgrade.run_2_to_3`), and a
+version 3 one plan 4c T10's install tables (`upgrade.run_3_to_4`).
+
+`wsctl harness` manages the installs (plan 4c T10). Its `remove` and `prune` take every workstream's
+operation lock (the schedulers' parker locks, in name order) before they check what is in use.
 """
 
 import argparse
@@ -27,10 +32,13 @@ import os
 import signal
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
+from functools import partial
+from typing import Any
 
 from heterodyne.config import ConfigError
 from heterodyne.sandbox import hostread
-from heterodyne.sandbox.build import build_runtime, build_usage_reader
+from heterodyne.sandbox.build import build_harness, build_runtime, build_usage_reader
 from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
@@ -46,6 +54,10 @@ from heterodyne.wsd.journal import (
 from heterodyne.wsd.runtime import AgentRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
 from heterodyne.wsd.usage import UsageReader
+from heterodyne.wsd.workstream import HarnessHooks
+
+Locks = Callable[[], Sequence[AbstractContextManager[Any]]]
+HarnessBuilder = Callable[[Journal, Locks], HarnessHooks | None]
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
 
@@ -59,7 +71,8 @@ def _factory(s: WsdSettings) -> btq.QueueFactory:
 
 
 def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
-        exit_now: Callable[[int], object] = os._exit, *, usage_reader: UsageReader | None = None) -> int:
+        exit_now: Callable[[int], object] = os._exit, *, usage_reader: UsageReader | None = None,
+        harness: HarnessBuilder | None = None) -> int:
     try:
         lock = instance_lock(s.instance_lock)
     except AlreadyRunning:
@@ -80,7 +93,11 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
         try:
             if journal.fresh:
                 journal.emit("-", None, "journal_created")
-            daemon = Wsd(s, assemble(s, journal, factory, runtime, usage_reader=usage_reader))
+            locks: list[AbstractContextManager[Any]] = []      # every workstream's, once assembled
+            hooks = None if harness is None else harness(journal, lambda: tuple(locks))
+            parts = assemble(s, journal, factory, runtime, usage_reader=usage_reader, harness=hooks)
+            locks.extend(sched.parker.lock for _, sched in sorted(parts.schedulers.items()))
+            daemon = Wsd(s, parts)
             asyncio.run(_serve(daemon))
             return 0
         except ctl.SocketPathTaken as exc:
@@ -179,7 +196,9 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
         s = _settings()
         if args.cmd == "run":
             runtime = build_runtime(s, os.environ)
-            return run(s, _factory(s), runtime, usage_reader=build_usage_reader(s, os.environ, runtime))
+            factory = _factory(s)
+            return run(s, factory, runtime, usage_reader=build_usage_reader(s, os.environ, runtime),
+                       harness=partial(build_harness, s, os.environ, factory, runtime))
     except ConfigError as exc:
         print(f"wsd: {exc}", file=sys.stderr)
         return EX_CONFIG
@@ -188,6 +207,30 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
         return EX_CONFIG
     reply = _ask(s, ctl.CtlRequest("tick", job=args.job, ws=args.ws))
     return 1 if reply is None else _print(reply)
+
+
+def _harness_parser(harness: argparse.ArgumentParser) -> None:
+    """`wsctl harness`: managed installs (plan 4c Task 10)."""
+    actions = harness.add_subparsers(dest="action", required=True)
+    listing = actions.add_parser("list", help="show each install and its state")
+    listing.add_argument("adapter", nargs="?")
+    install = actions.add_parser("install", help="fetch and stage an install, then ask for its approval")
+    install.add_argument("adapter")
+    install.add_argument("version", nargs="?", help="the recipe's version when not given")
+    for name, text in (("verify", "rehash an install against its manifest"),
+                       ("use", "select an install for new sessions"),
+                       ("remove", "remove an install no session or selection uses")):
+        one = actions.add_parser(name, help=text)
+        one.add_argument("adapter")
+        one.add_argument("install")
+    actions.add_parser("rollback", help="select the install selected before").add_argument("adapter")
+    prune = actions.add_parser("prune", help="show what prune would remove, or remove it with --confirm")
+    prune.add_argument("--confirm", metavar="CODE", help="the code the last prune printed")
+
+
+def _harness_request(args: argparse.Namespace) -> ctl.HarnessRequest:
+    fields = {k: getattr(args, k, None) for k in ("adapter", "install", "version", "confirm")}
+    return ctl.HarnessRequest(args.action, **{k: v for k, v in fields.items() if v is not None})
 
 
 def wsctl_main(argv: Sequence[str] | None = None) -> int:
@@ -211,6 +254,7 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
                          ("discard", "drop the session's commits")):
         actions.add_argument(f"--{action}", dest="action", action="store_const", const=action, help=text)
     resolve.add_argument("--tip", help="the session's tip, as wsctl unlanded shows it: the confirmation")
+    _harness_parser(sub.add_parser("harness", help="list, install, verify, use and remove managed installs"))
     args = parser.parse_args(argv)
     if args.cmd == "resolve" and args.action != "discard" and args.tip is None:
         resolve.error(f"--{args.action} needs --tip")
@@ -225,6 +269,9 @@ def wsctl_main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "unlanded":
             reply = _ask(s, ctl.CtlRequest("unlanded", ws=args.ws))
             return 1 if reply is None else _print_unlanded(reply)
+        if args.cmd == "harness":
+            reply = _ask(s, ctl.CtlRequest("harness", harness=_harness_request(args)))
+            return 1 if reply is None else _print(reply)
         if args.cmd == "resolve":
             reply = _ask(s, ctl.CtlRequest("resolve", ws=args.ws, session=args.session,
                                            generation=args.generation, action=args.action, tip=args.tip))

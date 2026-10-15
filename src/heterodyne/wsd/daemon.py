@@ -53,6 +53,7 @@ import asyncio
 import concurrent.futures as cf
 import contextlib
 import dataclasses
+import logging
 import os
 import threading
 from collections import deque
@@ -67,8 +68,9 @@ from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
-from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, refusal
+from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, HarnessRequest, refusal
 from heterodyne.wsd.gate import ClaimGate
+from heterodyne.wsd.harness import HarnessOps, HarnessRefused, Pruning
 from heterodyne.wsd.journal import Journal, JournalBusy, ResolvedEnd
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import (
@@ -85,7 +87,7 @@ from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, WorkstreamSettings, no_selection
+from heterodyne.wsd.workstream import Deps, HarnessHooks, NoHarness, WorkstreamSettings, no_selection
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -110,6 +112,8 @@ class JobFailed(Exception):
 STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
 PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last one asked is applied
 RELOAD = "reload"
+NO_HARNESS = "managed installs are not set up in this wsd"
+log = logging.getLogger(__name__)
 
 
 def _resolve() -> WsdSettings:
@@ -199,6 +203,7 @@ class Parts:
     beads: BeadsAdapter
     gate: ClaimGate
     schedulers: dict[str, Scheduler]
+    harness: HarnessHooks = dataclasses.field(default_factory=NoHarness)
 
 
 def selections_at(config_dir: Path | None) -> Callable[[str], InstallPin | None]:
@@ -216,13 +221,15 @@ def selections_at(config_dir: Path | None) -> Callable[[str], InstallPin | None]
 
 def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: AgentRuntime,
              reconciler: Callable[[BeadsAdapter], ActionReconciler] = HoldingReconciler,
-             cp: Checkpoint = nothing, usage_reader: UsageReader | None = None) -> Parts:
+             cp: Checkpoint = nothing, usage_reader: UsageReader | None = None,
+             harness: HarnessHooks | None = None) -> Parts:
     beads = BeadsAdapter(factory)
     gate = ClaimGate(s.lock_dir, beads, cp)
+    hooks = harness if harness is not None else NoHarness()
     deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
                 usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
-                selections=selections_at(s.config_dir))
-    return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
+                selections=selections_at(s.config_dir), harness=hooks)
+    return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams}, hooks)
 
 
 class Wsd:
@@ -291,7 +298,12 @@ class Wsd:
         return self._locked(name, work)
 
     def startup(self) -> dict[str, Outcome]:
-        """Recover every workstream, then run one startup pickup each (§3.3 step 6 comes after this)."""
+        """Settle the managed installs (plan 4c T10: before any pickup, so no guard reads a pin meanwhile),
+        recover every workstream, then run one startup pickup each (§3.3 step 6 comes after this)."""
+        try:
+            self.parts.harness.recover()
+        except Exception:  # noqa: BLE001 - the rows stay as they were; the next advance retries the publishes
+            log.exception("the managed installs' recovery failed")
         for name in self.parts.schedulers:
             self.recover_one(name)
         return {name: self.pickup_one(name, Trigger(TriggerKind.STARTUP)) for name in self.parts.schedulers}
@@ -308,6 +320,42 @@ class Wsd:
             return {"over": str(counts.over), "requota": str(counts.requota),
                     "unchanged": str(counts.unchanged)}
         return self._locked(name, work)
+
+    def harness_one(self, h: HarnessRequest) -> CtlReply:
+        """`wsctl harness <action>` (plan 4c T10), in a worker thread: `remove` and `prune` take every
+        workstream's operation lock themselves."""
+        ops = self.parts.harness
+        if not isinstance(ops, HarnessOps):
+            return CtlReply("refused", NO_HARNESS)
+        adapter, install = h.adapter or "", h.install or ""
+        try:
+            if h.action == "list":
+                listing = ops.list(h.adapter)
+                where = " (fallback store)" if listing.fallback else ""
+                return CtlReply("ok", f"{len(listing.installs)} install(s){where}", listing.installs)
+            if h.action == "install":
+                staging_id = ops.install(adapter, h.version)
+                return CtlReply("ok", f"staged {staging_id}; its approval is being created and posted")
+            if h.action == "verify":
+                ops.verify(adapter, install)
+                return CtlReply("ok", f"{adapter} {install} verified")
+            if h.action == "use":
+                ops.use(adapter, install)
+                return CtlReply("ok", f"{adapter} uses {install} from its next launch")
+            if h.action == "rollback":
+                ops.rollback(adapter)
+                return CtlReply("ok", f"{adapter} rolled back; its next launch uses the previous install")
+            if h.action == "remove":
+                ops.remove(adapter, install)
+                return CtlReply("ok", f"{adapter} {install} removed")
+            done = ops.prune(h.confirm)
+            data = {name: {"adapter": a} for name, a in done.adapters.items()}
+            if isinstance(done, Pruning):
+                return CtlReply("ok", f"prune would remove {len(done.installs)} install(s); run wsctl "
+                                      f"harness prune --confirm {done.code} within 10 minutes", data)
+            return CtlReply("ok", f"pruned {len(done.installs)} install(s)", data)
+        except HarnessRefused as exc:
+            return CtlReply("refused", exc.constant)
 
     def set_pause(self, name: str, paused: bool) -> CtlReply:
         """§4.3: the flag is set under the claim lock, so once this returns no claim can start. A flag that
@@ -496,6 +544,9 @@ class Wsd:
             return await self._pause_state(req.ws, req.op == "pause")
         if req.op == RELOAD:
             return await self._reload()
+        if req.op == "harness" and req.harness is not None:
+            harness = req.harness
+            return await asyncio.to_thread(self.harness_one, harness)
         if req.op == "unlanded" and req.ws is not None:
             name = req.ws
             return await self._run(name, ("unlanded", name), lambda: self.unlanded_one(name))
