@@ -2363,6 +2363,38 @@ def test_a_launch_without_a_brief_forwards_from_the_probe_turns_end(rig: Runtime
     assert [(e.kind, e.turn, e.text) for e in got] == [("stop", 1, "echo: an operator's turn")]
 
 
+@pytest.mark.parametrize("brief", ["", "start"])
+def test_a_turn_that_ends_before_the_launch_sees_the_probes_end_is_an_event(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, brief: str) -> None:
+    # T4 final B1: a whole turn runs between the probe's end and the launch's wait seeing it; its Stop is
+    # still logged, because the probe's own hook started the forwarding.
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset()})
+    spec = replace(launch_spec(rig, "p-one"), brief=brief)
+    servers: list[SessionServer] = []
+    real_server, real_until = rig.runtime._server, rig.runtime._until
+    gap: list[bool] = []
+
+    def serving(*args: Any) -> SessionServer:
+        servers.append(real_server(*args))
+        return servers[-1]
+
+    def until(pred: Callable[[], bool], seconds: float) -> bool:
+        done = real_until(pred, seconds)
+        if done and not gap and servers and servers[-1].turns().stops >= 1:    # the probe's turn has ended
+            gap.append(True)
+            stops = servers[-1].turns().stops
+            rig.tmux.paste(record(rig, spec.session_key).tmux_session, "GAP-TURN")
+            wait_for(lambda: servers[-1].turns().stops == stops + 1)      # answered before the wait returns
+        return done
+
+    monkeypatch.setattr(rig.runtime, "_server", serving)
+    monkeypatch.setattr(rig.runtime, "_until", until)
+    rig.runtime.launch(spec)
+    assert gap == [True]
+    want = ["echo: GAP-TURN"] + (["echo: start"] if brief else [])
+    assert [e.text for e in pulled(rig, len(want)).events] == want
+
+
 def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> None:
     spec = briefed(rig, frozenset({"close"}))
     evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"     # the fake's paths are host paths

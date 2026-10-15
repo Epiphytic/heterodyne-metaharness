@@ -926,7 +926,7 @@ class SandboxRuntime:
                               "refresh the login on the host")
         if spec.brief:
             self._check_brief(spec.brief)
-        self._forward(server, events_log)
+        self._forward(events_log)
         if spec.brief:
             self._brief(server, rec, spec.brief)
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
@@ -945,13 +945,17 @@ class SandboxRuntime:
         if size > BRIEF_MAX:
             raise _StepFailed("the brief is too long")
 
-    def _forward(self, server: SessionServer, log: EventLog) -> None:
-        """The event log forwards once the self-test's probe turn has ended, brief or none: the probe's turn
-        is never an event, and every turn after it is (a brief's is the first)."""
-        if not self._until(lambda: server.turns().idle, BRIEF_SECONDS):
+    def _forward(self, log: EventLog) -> None:
+        """The event log forwards from the self-test's probe turn's end, brief or none: the hook that ends
+        it starts forwarding (`EventLog.start`, in `_server`'s callback, before the hook is answered), so
+        the probe's turn is never an event and every turn after it is, even one that ends before this
+        wait sees it (a brief's is the first otherwise)."""
+        def forwarding() -> bool:
+            with log.lock:
+                return log.forwarding
+
+        if not self._until(forwarding, BRIEF_SECONDS):
             raise _StepFailed("the agent's first turn did not end")
-        with log.lock:
-            log.forwarding = True
 
     def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
         """D5: the brief (checked by `_check_brief`) is pasted once the probe turn has ended (`_forward`),
@@ -1006,7 +1010,10 @@ class SandboxRuntime:
         layout, key, gen = self.layout(rec.key), rec.key, rec.generation
 
         def heard(payload: dict[str, Any]) -> None:
-            if payload.get("hook_event_name") == "Stop" and events_log.stop(payload) is not None:
+            event = payload.get("hook_event_name")
+            if event in adapter.turn_end_events and events_log.start():
+                pass                        # the probe's end: never an event, and forwarding starts here
+            elif event == "Stop" and events_log.stop(payload) is not None:
                 self._woke(rec.ws)
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
