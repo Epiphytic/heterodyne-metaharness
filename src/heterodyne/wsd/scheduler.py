@@ -69,6 +69,7 @@ from heterodyne.wsd.beads import (
     WorktreeConflict,
 )
 from heterodyne.wsd.gate import Paused
+from heterodyne.wsd.harness import install_label
 from heterodyne.wsd.headroom import Deadline, clamp_bound, epoch, wake_time
 from heterodyne.wsd.journal import Op, OpKind, OpStatus
 from heterodyne.wsd.launches import LAUNCHED
@@ -279,7 +280,8 @@ class Scheduler:
             try:
                 self.d.harness.tainted(signal.adapter, signal.install)
             except Exception as exc:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
-                log.error("alerting install %s's taint failed (%s)", signal.install, type(exc).__name__)
+                log.error("alerting install %s's taint failed (%s)",
+                          install_label(signal.adapter, signal.install), type(exc).__name__)
             return
         if isinstance(signal, ExecDirCleared):
             shown = dataclasses.replace(signal, names=tuple(shown_name(n) for n in signal.names))

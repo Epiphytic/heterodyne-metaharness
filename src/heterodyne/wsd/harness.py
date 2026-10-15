@@ -140,9 +140,18 @@ def _no_locks() -> Sequence[AbstractContextManager[Any]]:
 
 
 def _label(adapter: str, digest: str) -> str:
-    """A log's name for an install: its adapter and the first 12 hex of its manifest digest (the tail of its
-    install name). Never its version, which is the package's own, upstream text (T10 c3)."""
+    """A log's or alert's name for an install: its adapter and the first 12 hex of its manifest digest (the
+    tail of its install name). Never its version, which is the package's own, upstream text the scan may
+    miss even once published (T10 c3)."""
     return f"{adapter} manifest {digest.removeprefix(sc.SHA256_PREFIX)[:12]}"
+
+
+def install_label(adapter: str, install: str) -> str:
+    """`_label` from an install name. A name that is not one (a runtime's report is untrusted) is labelled
+    by nothing it holds."""
+    if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
+        return f"{adapter if ALERT_ADAPTER.fullmatch(adapter) else 'an'} install (malformed name)"
+    return _label(adapter, install[-12:])
 
 
 class HarnessOps:
@@ -657,7 +666,8 @@ class HarnessOps:
                 try:
                     self._remove(adapter, install, "prune")
                 except HarnessRefused as exc:
-                    log.warning("prune: %s was not removed: %s", install, exc.constant)
+                    log.warning("prune: %s was not removed: %s", install_label(adapter, install),
+                                exc.constant)
                     continue
                 gone[install] = adapter
             if not gone:
@@ -703,9 +713,10 @@ class HarnessOps:
         if not ALERT_ADAPTER.fullmatch(adapter) or not sc.INSTALL.fullmatch(install):
             log.warning("a taint report names no install wsd alerts on")
             return
-        text = (f"The {adapter} install {install} is tainted: its tree is not the one its manifest "
-                "describes. Every launch on it refuses, and the beads running on it are held. Once it is "
-                f"restored, `wsctl harness verify {adapter} {install}` clears it; or remove it.")
+        text = (f"The install {install_label(adapter, install)} is tainted: its tree is not the one its "
+                "manifest describes. Every launch on it refuses, and the beads running on it are held. Once "
+                f"it is restored, `wsctl harness verify {adapter} <name>` clears it, with the name "
+                f"`wsctl harness list {adapter}` shows for it; or remove it.")
         with self.alerts_lock:
             at = self.clock()
             if alerts.write(self.alerts_dir, self._alert_id(adapter, install), text, at=at):
@@ -726,8 +737,8 @@ class HarnessOps:
             try:
                 (self.alerts_dir / f"{old}.json").unlink(missing_ok=True)
             except OSError as exc:
-                log.warning("install %s: its old taint alert could not be removed (%s)", install,
-                            type(exc).__name__)
+                log.warning("install %s: its old taint alert could not be removed (%s)",
+                            install_label(adapter, install), type(exc).__name__)
 
 
 def _check_archive(impl: Adapter, kind: str, archive: Path) -> None:

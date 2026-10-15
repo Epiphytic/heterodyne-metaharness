@@ -1217,7 +1217,7 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
     assert HELD in rig.beads.show(WS, "btq-1").labels
     alerts = [p for p in h.alerts.iterdir() if not p.name.startswith(".")]
     assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}-[0-9]+\.json", alerts[0].name)
-    assert a in alerts[0].read_text()
+    assert f"codex manifest {a[-12:]}" in alerts[0].read_text()
     rig.runtime.report(WS, InstallTainted(key, 1, "codex", a))     # again: still one alert for the install
     rig.pickup()
     assert [p.name for p in h.alerts.iterdir() if not p.name.startswith(".")] == [alerts[0].name]
@@ -1556,3 +1556,58 @@ def test_an_incomplete_approval_logs_how_many_gaps_never_their_text(
         r = settle(h, h.ops.install("codex", None))
     assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE)
     assert "btq finds the approval incomplete (1 gap)" in caplog.text and not leaked(caplog)
+
+
+# --- T10 c3 fix: a published install's name still holds upstream text the scanner may miss (its token pattern
+# wants a boundary before `ghp_`, so `vghp_...` passes), so no log or alert names an install by it. ---
+
+GHP = "v" + "ghp_" + hashlib.sha256(b"t10 ghp version").hexdigest()[:36]
+
+
+def published_ghp(h: H) -> str:
+    package = json.dumps({**CODEX_PACKAGE, "version": GHP}).encode()
+    archive = tar_of({**CODEX_TREE, "codex-package.json": package}, prefix=CODEX_STRIP)
+    h.opener.files.update(codex_files(archive))
+    _, install = published(h)
+    assert GHP in install
+    return install
+
+
+def test_a_published_installs_upstream_version_never_reaches_a_log_or_alert(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    a = published_ghp(h)
+    label = f"codex manifest {a[-12:]}"
+    h.ops.tainted("codex", a)
+    [alert] = alert_names(h)
+    text = (h.alerts / alert).read_text()
+    assert GHP not in text and label in text and "wsctl harness list codex" in text
+    with caplog.at_level(logging.DEBUG):
+        with monkeypatch.context() as m:
+            m.setattr(Path, "unlink", raising(OSError(5, "unlink")))
+            h.ops._clear_alert("codex", a)
+        monkeypatch.setattr(h.ops, "_remove", raising(wh.HarnessRefused(wh.IN_USE)))
+        assert h.ops.prune(h.ops.prune(None).code).installs == []
+    assert f"install {label}: its old taint alert could not be removed (OSError)" in caplog.text
+    assert f"prune: {label} was not removed: {wh.IN_USE}" in caplog.text
+    assert GHP not in caplog.text
+
+
+def test_a_failed_taint_alert_names_the_install_by_its_label(
+        rigged: tuple[Rig, H], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A runtime's taint report is untrusted, and may name an install no selection could hold."""
+    rig, h = rigged
+    _, running = published(h)
+    select(h, "codex", pin_of(h, "codex", running))
+    assert rig.pickup() is Outcome.STARTED
+    a = f"{GHP}-{running[-12:]}"
+    monkeypatch.setattr(h.ops, "tainted", raising(RuntimeError("alert")))
+    rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
+    with caplog.at_level(logging.DEBUG):
+        rig.pickup()
+    assert f"alerting install codex manifest {a[-12:]}'s taint failed (RuntimeError)" in caplog.text
+    assert GHP not in caplog.text
+
+
+@pytest.mark.parametrize("install", ["", "no-digest-tail", GHP + "-xyz"])
+def test_a_malformed_install_name_is_labelled_by_nothing_it_holds(install: str) -> None:
+    assert wh.install_label("codex", install) == "codex install (malformed name)"
