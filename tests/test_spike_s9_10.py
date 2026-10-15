@@ -807,3 +807,24 @@ def test_dns_payloads_never_raises_on_hostile_strace_text(text: str) -> None:
     payloads, dropped = ANALYZER.dns_payloads(text.encode())
     assert isinstance(dropped, int) and dropped >= 0
     assert all(isinstance(p, bytes) for p in payloads)
+
+
+# --- c2: sendmmsg's own vlen must equal the entries shown ---
+
+@pytest.mark.parametrize(("shown", "vlen"), [(1, 0), (2, 1), (2, 3), (1, HUGE)],
+                         ids=["1-of-0", "2-of-1", "2-of-3", "1-of-huge"])
+def test_a_sendmmsg_vlen_unlike_the_entries_shown_is_dropped_whole(tmp_path: Path, shown: int,
+                                                                  vlen: int | str) -> None:
+    good = sendmmsg_of([(inet(53), [dns("good.example")])])
+    entries: list[tuple[str, list[bytes | str]]] = [(inet(53), [dns(f"poc{i}.example")])
+                                                    for i in range(shown)]
+    bad = sendmmsg_of(entries).replace(f"], {shown}, MSG_NOSIGNAL", f"], {vlen}, MSG_NOSIGNAL", 1)
+    assert f"], {vlen}, " in bad
+    result, _ = listed(tmp_path, good, bad)
+    assert result["dns"] == ["good.example"] and result["dns_dropped"] == shown
+
+
+def test_an_unfinished_sendmmsg_with_its_vlen_is_read(tmp_path: Path) -> None:
+    line = sendmmsg_of([(inet(53), [dns("slow.example")])]).rsplit(") = ", 1)[0] + " <unfinished ...>"
+    result, _ = listed(tmp_path, line, "7 <... sendmmsg resumed>) = 1")
+    assert result["dns"] == ["slow.example"] and result["dns_dropped"] == 0
