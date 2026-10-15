@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# The store helper's whole host setup (plan 4c Task 12): the store owner, the store and the helper copy
-# (step 3), the helper's units (step 4), ext4 verity under /var/lib (step 5) and the host config check
-# (step 6). deploy/store-helper/README.md says which form to run; on a checkout the service user can change,
-# only the pinned form, which runs a root-only copy of this file whose sum the approval names:
+# The whole install, as root: the store helper's host setup (plan 4c Task 12) and the platform itself (design
+# btq-v7sgt). The steps, in order, one summary line each: `store` (the store owner, the store and the helper
+# copy), `units` (the helper's units), `release` (the commit's tree and its venv, built offline from
+# uv.lock as the service user), `config` (the host config check, run from the release), `verity` (ext4
+# verity under /var/lib, after every check, since it can't be undone) and `services` (the admind and wsd
+# user units, rendered from the release, reconciled on the loaded unit and the running process, on the
+# service user's own manager). deploy/store-helper/README.md says which form to run; on a checkout the
+# service user can change, only the pinned form, which runs a root-only copy of this file whose sum the
+# approval names:
 #
 #   sudo bash deploy/install.sh [--dry-run] [--no-verity] [--fetch] [--adopt] [--no-wsd]
 #                               [--service-user USER] [--checkout DIR] [--commit ID --expect-sha256 SUM]
 #
+# --fetch lets uv use the network for the release (still locked and hash-checked); --adopt replaces a
+# hand-made admind or wsd unit, keeping a backup; --no-wsd writes no wsd unit, and stops and disables a
+# managed one. Lingering for the service user is a prerequisite, never changed here.
+#
 # This first stage runs every check before the first change, resolves the commit once, archives it as the
 # service user into a root-only stage, checks the archive against --expect-sha256 before extracting it, and
-# then runs the stage's copy of itself (`--staged`), which does steps 3 to 6 from the commit's own bytes.
+# then runs the stage's copy of itself (`--staged`), which does the steps from the commit's own bytes.
 # Re-running is safe: what is in place is reported `ok:`, each change is printed before it runs (`change:`),
-# and `--dry-run` prints each as `would:` instead. Exit 0: everything is in place; 3: everything but
-# verity, which the host doesn't support; 1: a refusal (`refused: <check>`) or a failure; 2: a usage error.
+# and `--dry-run` prints each as `would:` instead. Exit 0: everything is in place; 3: everything but a step
+# skipped for a reason only the host or the operator can resolve (verity, which the host doesn't support, or
+# admind, until `admind init` has run); 1: a refusal (`refused: <check>`) or a failure; 2: a usage error.
 # `--prefix DIR` (the tests only, with HZ_INSTALL_TEST=1) puts DIR in place of / for every host path, and
 # keeps PATH, so that shims stand in for the host's commands.
 set -euo pipefail

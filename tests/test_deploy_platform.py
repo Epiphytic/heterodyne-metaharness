@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 from deploy_host import (
     ADMIND,
+    CHECKOUT,
     FEATURES_OFF,
     ME,
+    README,
     REPO,
     SHIM_HEAD,
     WSD,
@@ -25,6 +27,9 @@ from deploy_host import (
     host_path,
     install_refusal,
     installer,
+    pinned,
+    readme_block,
+    sum_of,
     summary,
 )
 
@@ -588,13 +593,18 @@ def test_a_dry_run_after_an_install_reports_a_drift_and_changes_nothing(host: Ho
 ROOT_TOOLS = {"rm": "", "rmdir": "", "userdel": "", "pgrep": "exit 1\n"}
 
 
-def uninstaller(host: Host, *args: str) -> subprocess.CompletedProcess[str]:
+def root_tools(host: Host) -> Path:
     tools = host.shims / "root-tools"
     if not tools.exists():
         tools.mkdir()
         for name, body in ROOT_TOOLS.items():
             (tools / name).write_text(SHIM_HEAD.replace("@SHIMS@", shlex.quote(str(host.shims))) + body)
             (tools / name).chmod(0o755)
+    return tools
+
+
+def uninstaller(host: Host, *args: str) -> subprocess.CompletedProcess[str]:
+    tools = root_tools(host)
     argv = ["bash", str(host.repo / "deploy" / "uninstall.sh"), "--prefix", str(host.root),
             "--service-user", ME, *args]
     return subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False,
@@ -696,3 +706,61 @@ def test_the_uninstall_prefix_is_for_the_tests_only(host: Host) -> None:
                          capture_output=True, text=True, timeout=60, check=False,
                          env={k: v for k, v in os.environ.items() if k != "HZ_INSTALL_TEST"})
     assert (out.returncode, out.stderr) == (1, "refused: --prefix is for the tests only\n")
+
+
+# --- the docs, and the pinned blocks with the new flags (D7) ---
+
+def test_the_pinned_install_runs_with_the_new_flags_appended(host: Host, tmp_path: Path) -> None:
+    old = host.hand_made_admind()
+    out = pinned("install-pinned", host, tmp_path, {
+        "<checkout>": CHECKOUT, "<commit>": host.commit,
+        "<install.sh sum>": sum_of(host.sums, "deploy/install.sh"),
+        "<archive sum>": sum_of(host.sums, "archive.tar"),
+        "--service-user <service user>": f"--service-user {ME} --prefix {host.root}"},
+        {"PATH": host_path(host), "HZ_INSTALL_TEST": "1"}, extra=("--adopt", "--no-wsd"))
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert summary(out)["services"] == "skipped (--no-wsd)"
+    assert [b.read_bytes() for b in host.backups()] == [old] and not host.unit_file(WSD).exists()
+
+
+def test_the_pinned_uninstall_runs_with_restore_adopted_appended(host: Host, tmp_path: Path) -> None:
+    old = host.hand_made_admind()
+    assert installer(host, "--adopt").returncode == 0
+    tools = root_tools(host)
+    out = pinned("uninstall-pinned", host, tmp_path, {
+        "<uninstall.sh sum>": sum_of(host.sums, "tree/deploy/uninstall.sh")},
+        {"PATH": f"{tools}:{host_path(host)}", "HZ_INSTALL_TEST": "1"},
+        extra=("--prefix", str(host.root), "--service-user", ME, "--restore-adopted"))
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.unit_file(ADMIND).read_bytes() == old
+
+
+def test_the_pinned_blocks_are_unchanged() -> None:
+    assert readme_block("install-pinned").splitlines()[-1] == (
+        'bash "$b" --checkout <checkout> --commit <commit> --expect-sha256 <archive sum> '
+        "--service-user <service user>'")
+    assert readme_block("uninstall-pinned").splitlines()[-1] == "bash \"$b\"'"
+
+
+def test_the_readme_names_every_flag_the_prerequisites_and_the_limits() -> None:
+    text = README.read_text()
+    for flag in ("--adopt", "--no-wsd", "--fetch", "--restore-adopted", "--dry-run", "--no-verity"):
+        assert f"`{flag}`" in text, flag
+    for words in ("loginctl enable-linger", "hatchling", "`release`", "`services`", "admind init",
+                  "skipped (admind init has not run)", "~/.local/share/heterodyne/releases/<commit>",
+                  "record.json"):
+        assert words in text, words
+    assert "uv run --offline --project" not in text      # the run checkout is gone (D2)
+
+
+def test_the_install_header_names_the_steps_and_the_flags() -> None:
+    header = "".join(line for line in (REPO / "deploy" / "install.sh").read_text().splitlines(keepends=True)
+                     if line.startswith("#"))
+    for words in ("--adopt", "--no-wsd", "--fetch", "release", "services", "admind init"):
+        assert words in header, words
+
+
+def test_the_docs_say_the_installer_writes_the_units() -> None:
+    assert "deploy/install.sh" in (REPO / "docs" / "admind.md").read_text()
+    wsd = (REPO / "docs" / "wsd.md").read_text()
+    assert "heterodyne-wsd.service" in wsd and "TimeoutStopSec=150" in wsd
