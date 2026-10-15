@@ -921,16 +921,17 @@ class SandboxRuntime:
             raise _StepFailed("the launch outlasted its login's lifetime window; "
                               "refresh the login on the host")
         if spec.brief:
-            self._brief(server, rec, spec.brief, events_log)
+            self._check_brief(spec.brief)
+        self._forward(server, events_log)
+        if spec.brief:
+            self._brief(server, rec, spec.brief)
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
                           error="")
         return Started(rec.tmux_session, pane, pid, native)
 
-    def _brief(self, server: SessionServer, rec: SessionRecord, text: str, log: EventLog) -> None:
-        """D5: the brief is pasted once the self-test's probe turn has ended, and is confirmed by the next
-        UserPromptSubmit. Like a steer it may carry no terminal control (`has_controls`; compose escapes the
-        bead's text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX. The event log
-        forwards from the paste on, so the probe's turn is never an event and the brief's is the first."""
+    def _check_brief(self, text: str) -> None:
+        """D5: like a steer a brief may carry no terminal control (`has_controls`; compose escapes the bead's
+        text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX."""
         if has_controls(text):
             raise _StepFailed("the brief has terminal control characters")
         try:
@@ -939,11 +940,19 @@ class SandboxRuntime:
             raise _StepFailed("the brief is not valid UTF-8") from None
         if size > BRIEF_MAX:
             raise _StepFailed("the brief is too long")
+
+    def _forward(self, server: SessionServer, log: EventLog) -> None:
+        """The event log forwards once the self-test's probe turn has ended, brief or none: the probe's turn
+        is never an event, and every turn after it is (a brief's is the first)."""
         if not self._until(lambda: server.turns().idle, BRIEF_SECONDS):
             raise _StepFailed("the agent's first turn did not end")
-        before = server.turns().prompts
         with log.lock:
             log.forwarding = True
+
+    def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
+        """D5: the brief (checked by `_check_brief`) is pasted once the probe turn has ended (`_forward`),
+        and is confirmed by the next UserPromptSubmit."""
+        before = server.turns().prompts
         try:
             self.c.tmux.paste(rec.tmux_session, text)
         except TmuxPasteUncertain:

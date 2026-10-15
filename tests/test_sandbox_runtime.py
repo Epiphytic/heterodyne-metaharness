@@ -2352,6 +2352,17 @@ def test_the_probe_turn_is_never_an_event(rig: RuntimeRig) -> None:
     assert [e.text for e in pulled(rig, 1).events] == ["echo: start"]
 
 
+def test_a_launch_without_a_brief_forwards_from_the_probe_turns_end(rig: RuntimeRig) -> None:
+    # The lead's ruling: forwarding starts once the probe turn has ended, brief or none.
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset()})
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert rig.runtime.logs[spec.session_key].forwarding
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "an operator's turn")
+    got = pulled(rig, 1).events
+    assert [(e.kind, e.turn, e.text) for e in got] == [("stop", 1, "echo: an operator's turn")]
+
+
 def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> None:
     spec = briefed(rig, frozenset({"close"}))
     evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"     # the fake's paths are host paths
