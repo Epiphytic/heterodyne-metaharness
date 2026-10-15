@@ -360,6 +360,68 @@ def wsd_lock(path: Path) -> str:
         os.close(fd)
 
 
+def user_dir(d: Path, kind: str, make: bool, what: str = "user unit directory",
+             home: Path | None = None) -> Path | None:
+    """A directory the installer writes into: made when `make` (0700, a level at a time, so a level that
+    appears meanwhile fails rather than being followed), then checked to be a real directory of the
+    service user's. A unit directory (`kind` "units") must also not be writable by others, since systemd
+    loads what is in it; a private one is narrowed to 0700 when it is written. Absent and not made passes:
+    the first write makes it. Returns the topmost level it made. `what` names it in a refusal. A scratch
+    directory (`kind` "scratch") is walked from `home` instead: see `_scratch_dir`."""
+    if kind == "scratch":
+        return _scratch_dir(d, make, what, home)
+    made = None
+    if make:
+        missing = []
+        p = d
+        while not os.path.lexists(p):
+            missing.append(p)
+            p = p.parent
+        for m in reversed(missing):
+            m.mkdir(mode=0o700)
+        made = missing[-1] if missing else None
+    try:
+        st = os.lstat(d)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise Refusal(f"the {what} is not the service user's directory")
+    if kind == "units" and stat.S_IMODE(st.st_mode) & 0o022:
+        raise Refusal(f"the {what} can be written by others")
+    return made
+
+
+def _scratch_dir(d: Path, make: bool, what: str, home: Path | None) -> Path | None:
+    """The scratch parent, whose renders root reads back: every level from the service user's home down is
+    checked with lstat to be a real directory of the user's, never a symlink, and no level above the
+    directory may be writable by others, who could rename a child and put another in its place. A missing
+    level is made 0700 only once its parent has passed, so nothing is created through a link. The directory
+    itself must be private. It is refused rather than narrowed, so that a dry run changes nothing."""
+    if home is None or d == home or not d.is_relative_to(home):
+        raise Refusal(f"the {what} is not under the service user's home")
+    st = home.stat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise Refusal(f"the {what} is not the service user's directory")
+    made, p = None, home
+    for part in d.relative_to(home).parts:
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            raise Refusal(f"the {what} is under a directory others can write")
+        p = p / part
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            if not make:
+                return None
+            p.mkdir(mode=0o700)
+            made = made or p
+            st = os.lstat(p)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise Refusal(f"the {what} is not the service user's directory")
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        raise Refusal(f"the {what} can be read by others")
+    return made
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="platform_state.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -405,6 +467,13 @@ def main(argv: list[str]) -> int:
         rs.add_argument(a, required=True)
     wl = sub.add_parser("wsd-lock")
     wl.add_argument("--lock", required=True)
+    dd = sub.add_parser("dir")
+    dd.add_argument("--dir", required=True)
+    dd.add_argument("--kind", required=True, choices=("units", "private", "scratch"))
+    dd.add_argument("--home")
+    dd.add_argument("--what", required=True, choices=("user unit directory", "install directory",
+                                                      "scratch directory"))
+    dd.add_argument("--make", action="store_true")
     args = ap.parse_args(argv)
     if getattr(args, "unit", None) is not None and args.unit not in MANAGED:
         ap.error("not a managed unit")
@@ -450,6 +519,11 @@ def main(argv: list[str]) -> int:
             return 1 if any(kind == "ambiguous" for _, kind, _ in rows) else 0
         elif args.cmd == "wsd-lock":
             print(wsd_lock(Path(args.lock)))
+        elif args.cmd == "dir":
+            made = user_dir(Path(args.dir), args.kind, args.make, args.what,
+                            Path(args.home) if args.home else None)
+            if made is not None:
+                print(made)
         elif args.cmd == "restore":
             restore(args.unit, load_record(Path(args.record)), Path(args.unit_dir), Path(args.backup_dir))
     except (Refusal, RecordError) as exc:

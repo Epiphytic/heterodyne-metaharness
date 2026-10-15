@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -515,3 +517,58 @@ def test_wsd_lock_absent_free_held_and_refused(tmp_path: Path) -> None:
     (tmp_path / "wsd" / "dir.lock").mkdir()
     with pytest.raises(P.Refusal):
         P.wsd_lock(tmp_path / "wsd" / "dir.lock")
+
+
+def test_user_dir_makes_checks_and_reports_what_it_made(tmp_path: Path) -> None:
+    d = tmp_path / "a" / "b" / "user"
+    assert P.user_dir(d, "units", make=False) is None and not d.exists()
+    assert P.user_dir(d, "units", make=True) == tmp_path / "a"
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700 and P.user_dir(d, "units", make=True) is None
+    d.chmod(0o775)
+    with pytest.raises(P.Refusal, match="can be written by others"):
+        P.user_dir(d, "units", make=False)
+    assert P.user_dir(d, "private", make=False) is None      # private dirs are narrowed when written
+    d.chmod(0o700)
+    link = tmp_path / "link"
+    link.symlink_to(d)
+    for kind in ("units", "private"):
+        with pytest.raises(P.Refusal, match="not the service user's directory"):
+            P.user_dir(link, kind, make=False)
+
+
+def test_the_scratch_dir_is_walked_from_the_home_and_never_made_through_a_link(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    d = home / ".cache" / "heterodyne"
+    assert P.user_dir(d, "scratch", make=False, home=home) is None and not d.exists()
+    assert P.user_dir(d, "scratch", make=True, home=home) == home / ".cache"
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    d.chmod(0o755)
+    with pytest.raises(P.Refusal, match="can be read by others"):
+        P.user_dir(d, "scratch", make=True, home=home)
+    assert stat.S_IMODE(d.stat().st_mode) == 0o755          # refused, never narrowed
+    shutil.rmtree(home / ".cache")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (home / ".cache").symlink_to(elsewhere)
+    for make in (False, True):
+        with pytest.raises(P.Refusal, match="not the service user's directory"):
+            P.user_dir(d, "scratch", make=make, home=home)
+    assert list(elsewhere.iterdir()) == []
+    with pytest.raises(P.Refusal, match="not under the service user's home"):
+        P.user_dir(tmp_path / "other", "scratch", make=True, home=home)
+
+
+@pytest.mark.parametrize("writable", ["home", ".cache"])
+def test_a_scratch_ancestor_others_can_write_refuses_before_anything_is_made_under_it(tmp_path: Path,
+                                                                                    writable: str) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    level = home if writable == "home" else home / ".cache"
+    level.mkdir(mode=0o700, exist_ok=True)
+    level.chmod(0o777)
+    d = home / ".cache" / "heterodyne"
+    for make in (False, True):
+        with pytest.raises(P.Refusal, match="is under a directory others can write"):
+            P.user_dir(d, "scratch", make=make, home=home)
+    assert not d.exists() and (writable == ".cache" or not (home / ".cache").exists())

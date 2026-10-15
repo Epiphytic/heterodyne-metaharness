@@ -8,6 +8,7 @@ import hashlib
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import zipfile
 from collections.abc import Iterator
@@ -20,6 +21,7 @@ from deploy_host import (
     FEATURES_OFF,
     ME,
     README,
+    REFUSED,
     REPO,
     SHIM_HEAD,
     WSD,
@@ -145,7 +147,7 @@ def test_a_dry_run_builds_only_in_scratch_on_a_disposable_cache_and_removes_it(h
     [env] = uv_envs(host)
     cache = host.home() / ".cache/heterodyne"
     assert env.startswith(f"UV_CACHE_DIR={cache}/preflight.") and env.endswith("/cache")
-    assert list(cache.iterdir()) == []
+    assert not cache.exists()
     assert not release_dir(host).exists()
 
 
@@ -159,7 +161,7 @@ def test_a_failed_scratch_build_is_removed_and_its_output_masked(host: Host) -> 
     host.put("uv-miss", "")
     out = installer(host)
     assert install_refusal(host, out) == "the uv cache lacks a package this release needs: run with --fetch"
-    assert list((host.home() / ".cache/heterodyne").iterdir()) == []
+    assert not (host.home() / ".cache/heterodyne").exists()
     assert "w not found in the cache, sha256 <hex>" in out.stdout
     assert not release_dir(host).exists()
 
@@ -186,7 +188,7 @@ def test_a_cache_that_cannot_be_hardlinked_refuses_and_never_uses_the_real_cache
     why = install_refusal(host, installer(host))
     assert why == "the uv cache could not be copied for the offline build check"
     assert uv_envs(host) == []
-    assert list((host.home() / ".cache/heterodyne").iterdir()) == []
+    assert not (host.home() / ".cache/heterodyne").exists()
 
 
 def test_a_work_tree_edit_after_resolution_leaves_the_release_the_commits(host: Host) -> None:
@@ -808,3 +810,92 @@ def test_the_docs_say_the_installer_writes_the_units() -> None:
     assert "deploy/install.sh" in (REPO / "docs" / "admind.md").read_text()
     wsd = (REPO / "docs" / "wsd.md").read_text()
     assert "heterodyne-wsd.service" in wsd and "TimeoutStopSec=150" in wsd
+
+
+def tree_of(d: Path) -> dict[str, tuple[int, bytes]]:
+    return {str(p.relative_to(d)): (p.lstat().st_mode,
+                                    p.read_bytes() if p.is_file() and not p.is_symlink() else b"")
+            for p in sorted(d.rglob("*"))}
+
+
+def test_a_dry_run_leaves_a_fresh_home_as_it_found_it(host: Host) -> None:
+    before = tree_of(host.home())
+    out = installer(host, "--dry-run")
+    assert out.returncode in (0, 3), out.stdout + out.stderr
+    assert tree_of(host.home()) == before
+
+
+def test_a_fresh_install_makes_the_unit_directory_the_service_users_and_private(host: Host) -> None:
+    assert installer(host).returncode == 0
+    d = host.unit_file(ADMIND).parent
+    st = d.lstat()
+    assert stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) & 0o022 == 0
+
+
+@pytest.mark.parametrize(("where", "why"), [
+    ("units-writable", "the user unit directory can be written by others"),
+    ("units-symlink", "the user unit directory is not the service user's directory"),
+    ("install-symlink", "the install directory is not the service user's directory"),
+    ("scratch-symlink", "the scratch directory is not the service user's directory"),
+    ("scratch-ancestor-symlink", "the scratch directory is not the service user's directory"),
+    ("scratch-readable", "the scratch directory can be read by others"),
+])
+def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(host: Host, where: str,
+                                                                             why: str) -> None:
+    units = host.home() / ".config/systemd/user"
+    install = host.home() / ".local/share/heterodyne/install"
+    scratch = host.home() / ".cache/heterodyne"
+    elsewhere = host.home() / "elsewhere"
+    elsewhere.mkdir()
+    target = {"units-writable": units, "units-symlink": units, "install-symlink": install,
+              "scratch-symlink": scratch, "scratch-ancestor-symlink": scratch.parent,
+              "scratch-readable": scratch}[where]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if where in ("units-writable", "scratch-readable"):
+        target.mkdir()
+        target.chmod(0o777 if where == "units-writable" else 0o755)
+    else:
+        target.symlink_to(elsewhere)
+    out = installer(host)
+    assert install_refusal(host, out) == why
+    assert not release_dir(host).exists() and started(host) == [] and list(elsewhere.iterdir()) == []
+
+
+def failing_mktemp(host: Host, where: str) -> None:
+    """A logged mktemp shim, which fails when its directory is under `where`."""
+    tool = host.shims / "mktemp"
+    head = SHIM_HEAD.replace("@SHIMS@", shlex.quote(str(host.shims)))
+    tool.write_text(head + 'exec /usr/bin/mktemp "$@"\n')
+    tool.chmod(0o755)
+    host.put("fail", f"mktemp -d {host.home()}/.cache/heterodyne/{where}.\n")
+
+
+def test_a_scratch_directory_that_cannot_be_made_leaves_the_home_as_it_found_it(host: Host) -> None:
+    before = tree_of(host.home())
+    failing_mktemp(host, "preflight")
+    out = installer(host, "--dry-run")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert out.stderr.splitlines()[-1] == f"{REFUSED}the offline build check has no scratch directory"
+    assert host.mutations() == [] and host.stages() == []
+    assert tree_of(host.home()) == before
+
+
+def test_a_render_directory_that_cannot_be_made_in_a_dry_run_leaves_the_home_as_found(host: Host) -> None:
+    assert installer(host).returncode == 0
+    shutil.rmtree(host.home() / ".cache/heterodyne")
+    before = tree_of(host.home())
+    failing_mktemp(host, "render")
+    out = installer(host, "--dry-run")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "no render directory" in out.stderr
+    assert tree_of(host.home()) == before
+
+
+def test_a_dry_run_with_a_completed_release_leaves_the_home_as_it_found_it(host: Host) -> None:
+    """The services step renders into the scratch parent to compare, and must remove what it made."""
+    assert installer(host).returncode == 0
+    shutil.rmtree(host.home() / ".cache/heterodyne")
+    before = tree_of(host.home())
+    out = installer(host, "--dry-run")
+    assert out.returncode in (0, 3), out.stdout + out.stderr
+    assert tree_of(host.home()) == before

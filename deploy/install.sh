@@ -190,11 +190,34 @@ wsd_outside_check() {
     esac
 }
 
+# `platform dir` before any change: its refusal is the install's, as one line.
+dir_check() {
+    local what=$1 err
+    shift
+    if err=$(platform dir --what "$what" "$@" 2>&1 1>/dev/null </dev/null); then return 0; fi
+    err=${err%%$'\n'*}
+    [[ $err == "refused: "* ]] && refuse "${err#refused: }"
+    refuse "the $what can't be checked"
+}
+
+# The levels `platform dir --make` made (the deepest is `$1`, the topmost `$2`), removed again, so the
+# preflight leaves the service user's home as it found it. Nothing made: nothing to do.
+unmake() {
+    local d=$1 top=$2
+    [[ -n $top ]] || return 0
+    while true; do
+        as_service_user PATH="$user_tools" rmdir -- "$d" </dev/null || return 1
+        [[ $d != "$top" ]] || return 0
+        d=${d%/*}
+    done
+}
 
 # platform_state.py plan for each wanted unit as its files are now: a refusal is the install's. The render
 # is empty, since it only decides between actions that go ahead.
 plan_check() {
     local u msg
+    dir_check "user unit directory" --dir "$user_units" --kind units
+    dir_check "install directory" --dir "$install_dir" --kind private
     for u in "${wanted[@]}"; do
         if ! msg=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render /dev/null \
             --backup-dir "$backups" "${plan_flags[@]}" 2>&1 >/dev/null </dev/null); then
@@ -346,32 +369,6 @@ if [[ -z $staged ]]; then
         echo "note: the work tree differs from the commit (advice only: the commit's bytes are installed)"
     fi
 
-    # The offline build, proven before any change (design btq-v7sgt D2): the release's exact `uv sync`, on
-    # the full tree, in a scratch directory, against a hardlink copy of the service user's uv cache, which
-    # uv's rename-into-place writes can't reach through. Never the real cache: a copy that fails refuses.
-    # Skipped for a built release, and under --fetch, where the network may supply what the cache lacks.
-    if [[ ! -f $releases/$resolved/.complete ]] && ((!fetch)); then
-        cache=$(as_service_user PATH="$service_path" uv cache dir 2>/dev/null </dev/null) && [[ -n $cache ]] \
-            || refuse "the uv cache can't be found"
-        scratch_parent=$(host "$service_home")/.cache/heterodyne
-        as_service_user PATH="$user_tools" mkdir -p -m 0700 -- "$scratch_parent" \
-            || refuse "the offline build check has no scratch directory"
-        scratch=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/preflight.XXXXXX" \
-            </dev/null) || refuse "the offline build check has no scratch directory"
-        trap 'as_service_user PATH="$user_tools" rm -rf -- "$scratch"' EXIT
-        as_service_user PATH="$user_tools" cp -al -- "$cache" "$scratch/cache" >/dev/null 2>&1 </dev/null \
-            || refuse "the uv cache could not be copied for the offline build check"
-        as_service_user PATH="$user_tools" mkdir -- "$scratch/tree" || refuse "the commit can't be archived"
-        extract_tree "$resolved" "$scratch/tree" || refuse "the commit can't be archived"
-        if ! out=$(uv_sync "$scratch/tree" "$scratch/cache" 2>&1); then
-            printf '%s\n' "$out" | tail -n 20 | sed -E 's/[0-9a-f]{64}/<hex>/g'
-            refuse "the uv cache lacks a package this release needs: run with --fetch"
-        fi
-        as_service_user PATH="$user_tools" rm -rf -- "$scratch" \
-            || refuse "the scratch directory can't be removed"
-        trap - EXIT
-    fi
-
     stage=$(mktemp -d "$(host "$STAGE_PARENT")/heterodyne-install.XXXXXX")
     trap 'rm -rf -- "$stage"' EXIT
     service_git archive --format=tar "$resolved" -- "${PATHS[@]}" >"$stage/archive.tar" \
@@ -386,6 +383,38 @@ if [[ -z $staged ]]; then
     installer=$stage/tree/deploy/install.sh
     [[ -f $installer && ! -L $installer ]] || refuse "the commit has no installer"
     PLATFORM_PY=$(<"$stage/tree/deploy/platform_state.py") || refuse "the commit has no platform_state.py"
+
+    # The offline build, proven before any change (design btq-v7sgt D2): the release's exact `uv sync`, on
+    # the full tree, in a scratch directory, against a hardlink copy of the service user's uv cache, which
+    # uv's rename-into-place writes can't reach through. Never the real cache: a copy that fails refuses.
+    # Skipped for a built release, and under --fetch, where the network may supply what the cache lacks.
+    if [[ ! -f $releases/$resolved/.complete ]] && ((!fetch)); then
+        cache=$(as_service_user PATH="$service_path" uv cache dir 2>/dev/null </dev/null) && [[ -n $cache ]] \
+            || refuse "the uv cache can't be found"
+        scratch_parent=$(host "$service_home")/.cache/heterodyne
+        dir_check "scratch directory" --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")"
+        made=$(platform dir --what "scratch directory" --dir "$scratch_parent" --kind scratch \
+            --home "$(host "$service_home")" --make </dev/null 2>/dev/null) \
+            || refuse "the offline build check has no scratch directory"
+        # armed before the scratch is allocated, so a failed mktemp still removes the levels just made
+        scratch=""
+        trap '[[ -z $scratch ]] || as_service_user PATH="$user_tools" rm -rf -- "$scratch"
+              unmake "$scratch_parent" "$made"; rm -rf -- "$stage"' EXIT
+        scratch=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/preflight.XXXXXX" \
+            </dev/null) || refuse "the offline build check has no scratch directory"
+        as_service_user PATH="$user_tools" cp -al -- "$cache" "$scratch/cache" >/dev/null 2>&1 </dev/null \
+            || refuse "the uv cache could not be copied for the offline build check"
+        as_service_user PATH="$user_tools" mkdir -- "$scratch/tree" || refuse "the commit can't be archived"
+        extract_tree "$resolved" "$scratch/tree" || refuse "the commit can't be archived"
+        if ! out=$(uv_sync "$scratch/tree" "$scratch/cache" 2>&1); then
+            printf '%s\n' "$out" | tail -n 20 | sed -E 's/[0-9a-f]{64}/<hex>/g'
+            refuse "the uv cache lacks a package this release needs: run with --fetch"
+        fi
+        as_service_user PATH="$user_tools" rm -rf -- "$scratch" \
+            || refuse "the scratch directory can't be removed"
+        unmake "$scratch_parent" "$made" || refuse "the scratch directory can't be removed"
+        trap 'rm -rf -- "$stage"' EXIT
+    fi
     plan_check
     wsd_outside_check
 
@@ -454,6 +483,8 @@ summary() {
     fi
     if ((rc == 0)) && [[ ${result[services]:-} == "skipped (admind init has not run)" ]]; then rc=3; fi
     if [[ -n ${renders:-} ]]; then as_service_user PATH="$user_tools" rm -rf -- "$renders" || true; fi
+    # a dry run's render parent levels, whether or not the render directory was allocated
+    ((!dry_run)) || unmake "${scratch_parent:-}" "${render_made:-}" || true
     exit "$rc"
 }
 trap summary EXIT
@@ -652,12 +683,11 @@ else
     finish_step "skipped (--no-verity)"
 fi
 
-
 # --- the services: admind, then wsd, reconciled from the user manager's live state (design btq-v7sgt D4) ---
 
 ready_wsd=60 settle_admind=15
 if [[ -n $prefix ]]; then ready_wsd=${HZ_INSTALL_READY_SECONDS:-0} settle_admind=${HZ_INSTALL_READY_SECONDS:-0}; fi
-svc_changes=0 written=0 renders=""
+svc_changes=0 written=0 renders="" render_made=""
 declare -A st=()
 
 # A user-level change: printed, and run unless --dry-run. The description stands in for the command, which
@@ -675,7 +705,8 @@ daemon_of() { local u=${1#heterodyne-}; printf '%s' "${u%.service}"; }    # admi
 
 render_unit() {    # $1 unit, $2 output file
     as_service_user "${location_env[@]}" "$vbin/$(daemon_of "$1")" unit --python "$vbin/python3" \
-        --config-dir "$config_dir" --state-dir "$state_dir" --release "$commit" >"$2" </dev/null
+        --config-dir "$config_dir" --state-dir "$state_dir" --release "$commit" </dev/null \
+        | as_service_user PATH="$user_tools" tee -- "$2" >/dev/null
 }
 
 # One unit's file, in the D6 order: the backup, the record's `writing`, the write, the record's `written`.
@@ -705,8 +736,8 @@ write_unit() {    # $1 unit, $2 render
                 user_change "record $u as being written" platform record-set --unit "$u" --state writing \
                     --record "$record" --origin created
             fi
-            ((dry_run)) || as_service_user PATH="$user_tools" mkdir -p -- "$user_units" \
-                || fail "the user unit directory can't be made"
+            ((dry_run)) || platform dir --what "user unit directory" --dir "$user_units" --kind units --make \
+                </dev/null >/dev/null || fail "the user unit directory can't be made"
             user_change "write $u" platform write --unit "$u" --file "$user_units/$u" --render "$r"
             user_change "record $u as written" platform record-set --unit "$u" --state written --record "$record"
             written=1 ;;
@@ -791,7 +822,8 @@ else
     as_service_user "${location_env[@]}" "$vbin/admind" initialised >/dev/null 2>&1 </dev/null || init_rc=$?
     case $init_rc in 0|1) ;; *) fail "admind initialised can't tell (exit $init_rc)" ;; esac
     scratch_parent=$(host "$service_home")/.cache/heterodyne
-    as_service_user PATH="$user_tools" mkdir -p -m 0700 -- "$scratch_parent" || fail "no render directory"
+    render_made=$(platform dir --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")" \
+        --what "scratch directory" --make </dev/null) || fail "no render directory"
     renders=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/render.XXXXXX" </dev/null) \
         || fail "no render directory"
     for u in "${wanted[@]}"; do
@@ -849,6 +881,10 @@ else
     done
     as_service_user PATH="$user_tools" rm -rf -- "$renders" || fail "the render directory can't be removed"
     renders=""
+    if ((dry_run)); then
+        unmake "$scratch_parent" "$render_made" || fail "the render directory can't be removed"
+        render_made=""
+    fi
     if [[ -n $skipped ]]; then
         finish_step "$skipped"
     elif ((no_wsd)); then
