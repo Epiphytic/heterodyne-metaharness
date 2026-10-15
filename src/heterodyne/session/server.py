@@ -14,9 +14,15 @@ A steer (plan 5i D4) delivers at a turn boundary through `at_boundary`, which sp
 delivering and holds the turn gate while it does: a turn event that arrives meanwhile is recorded only once
 the delivery is over, so it never slips between the idle check and the paste, and two steers never share a
 boundary. A hook's shim gives up after its own wait and lets the turn go on, so a delivery must end well
-within that wait (the runtime bounds a steer's paste to half of it). The spent boundary belongs to this
-server, so a rebind or a new generation starts with none.
-Text an operator types into the pane is outside the gate.
+within that wait (the runtime bounds a steer's paste to half of the generation's installed wait). The spent
+boundary belongs to this server, so a rebind or a new generation starts with none.
+
+A delivery that raised may still land: tmux can't cancel a command whose client timed out, so its paste
+or its Enter may run after the gate is gone. Nothing is delivered at this server again (BoundaryUncertain),
+so no later Enter of ours submits what a late paste left. What the gate can't cover: a late Enter from a
+timed-out send-keys, which submits that one delivery once, maybe mid-turn; text a late paste-buffer left
+in the input line, which waits there until an operator presses Enter in the pane; a hook already in flight
+before the boundary was spent; and text an operator types into the pane.
 
 The session is untrusted with wsd's resources too: at most `max_handlers` connections are served at
 once (more are closed unread), each request has one absolute deadline however its bytes trickle in, and
@@ -55,6 +61,10 @@ class BoundaryBusy(Exception):
     """No turn boundary to deliver at: mid-turn, already spent, another delivery under way, or closed."""
 
 
+class BoundaryUncertain(BoundaryBusy):
+    """An earlier delivery raised, so it may still land: nothing is delivered at this server again."""
+
+
 @dataclass(frozen=True)
 class TurnState:
     prompts: int = 0
@@ -89,6 +99,7 @@ class SessionServer:
         self._lock = threading.Lock()
         self._turn_gate = threading.Lock()  # held by a delivery; taken before _lock by turn events
         self._spent: int | None = None      # the turn-end count whose boundary a delivery used
+        self._uncertain = False             # a delivery raised: it may yet land, so no other one runs
         self._slots = threading.BoundedSemaphore(max_handlers)
         self._closed = threading.Event()
         self._sock: socket.socket | None = None
@@ -146,16 +157,25 @@ class SessionServer:
     def at_boundary(self, deliver: Callable[[], bool]) -> None:
         """Run `deliver` at the current turn boundary, spending it first; raise BoundaryBusy if there is
         none to spend. No turn event is recorded until `deliver` returns. If it returns False (nothing
-        reached the session) the boundary is given back; if it raises, the boundary stays spent."""
+        reached the session) the boundary is given back; if it raises, the boundary stays spent and every
+        later call raises BoundaryUncertain, touching nothing: what it sent may still land."""
         if not self._turn_gate.acquire(blocking=False):
             raise BoundaryBusy
         try:
             with self._lock:
+                if self._uncertain:
+                    raise BoundaryUncertain
                 stops = self._state.stops
                 if self._closed.is_set() or not self._state.idle or self._spent == stops:
                     raise BoundaryBusy
                 self._spent = stops
-            if not deliver():
+            try:
+                delivered = deliver()
+            except BaseException:
+                with self._lock:
+                    self._uncertain = True
+                raise
+            if not delivered:
                 with self._lock:
                     self._spent = None
         finally:

@@ -52,7 +52,7 @@ from heterodyne.sandbox.spec import (
     short_id,
 )
 from heterodyne.session import shim
-from heterodyne.session.server import BoundaryBusy, SessionServer
+from heterodyne.session.server import BoundaryBusy, BoundaryUncertain, SessionServer
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain, has_controls
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
@@ -90,6 +90,8 @@ POLL_SECONDS = 0.1
 STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
 STEER_SECONDS = 5.0     # the most a steer's paste may take; never more than half the session's hook wait
 STEER_MIN_SECONDS = 1.0     # less than this leaves too little for a paste and its settle
+STEER_UNCERTAIN = ("a steer may have been delivered; nothing more is pasted into this generation, and "
+                   "its note must not be delivered again without an operator")
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -493,11 +495,14 @@ class SandboxRuntime:
         a restart the turn state is empty, so the next turn end must come first. The socket spends the
         boundary before the paste and holds back turn events until it is over (`at_boundary`), so a boundary
         a steer (even an uncertain one) pasted at is spent until the next turn end, and concurrent steers
-        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline.
+        can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline. After an
+        uncertain steer nothing more is pasted into that generation (`BoundaryUncertain`): tmux may still
+        run the paste or its Enter late, and no later Enter may submit what it left or deliver it twice.
 
-        Turn events wait for the paste, and their hooks' shim gives up after the hook wait
-        (hook_wait_seconds) and lets the turn go on, so the paste is bounded to half of it: a prompt hook
-        that arrives during a paste is still answered, and recorded, in time."""
+        Turn events wait for the paste, and their hooks' shim gives up after the hook wait and lets the turn
+        go on, so the paste is bounded to half of it: a prompt hook that arrives during a paste is still
+        answered, and recorded, in time. The wait is the one installed in the generation's shim.json, which a
+        rebind keeps, not the settings' hook_wait_seconds now."""
         try:
             rec = read_record(self.layout(session_key))
         except RuntimeUnavailable:
@@ -517,7 +522,11 @@ class SandboxRuntime:
         server = self.servers.get(session_key)
         if server is None:
             raise SteerRefused("the session is mid-turn")
-        seconds = min(STEER_SECONDS, self.c.settings.hook_wait_seconds / 2)
+        try:        # the generation's own: a rebind keeps the shim.json it was launched with
+            wait = shim.installed_wait(self.layout(session_key).run(generation))
+        except (OSError, ValueError):
+            raise SteerRefused("the session's hook wait can't be read") from None
+        seconds = min(STEER_SECONDS, wait / 2)
         if seconds < STEER_MIN_SECONDS:
             raise SteerRefused("the hook wait is too short to steer")
         failed = False
@@ -535,9 +544,12 @@ class SandboxRuntime:
 
         try:
             server.at_boundary(deliver)
+        except BoundaryUncertain:
+            raise SteerRefused("an earlier steer to this session is uncertain") from None
         except BoundaryBusy:
             raise SteerRefused("the session is mid-turn") from None
         except TmuxPasteUncertain:
+            log.warning("%s: %s", session_key, STEER_UNCERTAIN)
             raise SteerUncertain("the steer may have been delivered") from None
         if failed:
             raise SteerRefused("the paste failed before reaching the session")
