@@ -781,7 +781,7 @@ class SandboxRuntime:
                 spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
                 cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
-        token = secrets.token_hex(16)
+        token = secrets.token_hex(shim.TOKEN_HEX // 2)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
                        "local_classes": sorted(ws.local_classes), "worktree": str(spec.worktree)}
         caps = self._caps(spec.profile)

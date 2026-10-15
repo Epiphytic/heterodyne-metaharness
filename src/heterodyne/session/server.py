@@ -99,10 +99,12 @@ class SessionServer:
         self._acceptor = acceptor           # only a started thread is ever joined
 
     def close(self) -> None:
-        """Stop admitting, wake every connection, wait for every request callback already running (no new
-        one starts), and wait (bounded) for each handler. Once this returns, nothing a session sent is
-        recorded, spooled or handed to the runtime, even by a handler still unwinding. A callback must
-        never wait for close; one that calls close itself is not waited for."""
+        """Stop admitting, wake every connection, and wait, all within one CLOSE_SECONDS bound, for the
+        request callbacks already running and then each handler. No new callback starts once close has
+        begun. Once this returns, nothing a session sent is recorded or spooled, even by a handler still
+        unwinding. A callback still running then (blocked, perhaps on a lock its closer holds, or closing
+        this server itself) is never waited on further: its effect is its owner's to refuse at commit, as
+        the runtime's event log refuses appends once the teardown has closed it (plan 5i D2)."""
         with self._lock:
             self._closed.set()
             sock, self._sock = self._sock, None
@@ -114,12 +116,14 @@ class SessionServer:
         for conn in handlers:
             with contextlib.suppress(OSError):
                 conn.shutdown(socket.SHUT_RDWR)
-        me = threading.get_ident()
+        me, end = threading.get_ident(), time.monotonic() + CLOSE_SECONDS
         with self._lock:
             while any(n for t, n in self._calling.items() if t != me):
-                self._idle.wait()
+                left = end - time.monotonic()
+                if left <= 0:
+                    break                       # never waited on further: the owner refuses its effect
+                self._idle.wait(left)
         try:
-            end = time.monotonic() + CLOSE_SECONDS
             for thread in [self._acceptor, *handlers.values()]:
                 if thread is not None and thread is not threading.current_thread():
                     thread.join(max(0.0, end - time.monotonic()))
@@ -248,8 +252,8 @@ class SessionServer:
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Plan 5i: a request naming an `op` goes to the runtime's callback, outside the lock (it writes
         the event log and must not hold up hooks), and only while open: it is counted in under the lock
-        that close takes to begin, and close waits until it is counted out. Anything else, or no callback,
-        is unsupported as before."""
+        that close takes to begin, and close waits (bounded) until it is counted out. Anything else, or no
+        callback, is unsupported as before."""
         if self.on_request is None or not isinstance(payload.get("op"), str):
             return UNSUPPORTED
         me = threading.get_ident()

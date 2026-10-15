@@ -3,7 +3,6 @@
 import json
 import socket
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -254,12 +253,23 @@ def test_a_lost_reply_after_the_callback_committed_is_answered_from_the_first(
     assert rc == 0 and reply["ref"] == "sk-a:g1:e1" and len(effects) == 1
 
 
-def test_close_waits_for_a_callback_in_flight_and_starts_no_more(run: Path,
-                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-    """Codex T2 c1 B1: no callback starts once close has begun, and close returns only after every
-    callback already running has finished, so none applies its effect after teardown. The callback here
-    outlasts close's bounded wait for handler threads."""
-    monkeypatch.setattr(server, "CLOSE_SECONDS", 0.05)
+RID_A, RID_B = "0123456789abcdef", "fedcba9876543210"
+ACCEPTED = {"ok": True, "ref": "sk-a:g1:e1", "message": "accepted"}
+
+
+def send(run: Path, rid: str) -> socket.socket:
+    """One raw ws_request on the session socket, left open: its handler runs the callback."""
+    line = json.dumps({"token": TOKEN, "type": "ws_request",
+                       "payload": {"op": "close", "rid": rid, "evidence": "x"}}) + "\n"
+    client = socket.socket(socket.AF_UNIX)
+    client.connect(str(run / "s.sock"))
+    client.sendall(line.encode())
+    return client
+
+
+def test_close_waits_for_a_callback_in_flight_and_starts_no_more(run: Path) -> None:
+    """Codex T2 c1 B1: no callback starts once close has begun, and close waits (bounded) for one already
+    running, so a callback that finishes in time applies its effect before close returns."""
     entered, release = threading.Event(), threading.Event()
     order: list[str] = []
 
@@ -267,28 +277,138 @@ def test_close_waits_for_a_callback_in_flight_and_starts_no_more(run: Path,
         entered.set()
         release.wait(10)
         order.append(f"effect {payload['rid']}")
-        return {"ok": True, "ref": "sk-a:g1:e1", "message": "accepted"}
+        return ACCEPTED
 
     s, seen = serve(run, slow)
-    line = json.dumps({"token": TOKEN, "type": "ws_request",
-                       "payload": {"op": "close", "rid": "0123456789abcdef", "evidence": "x"}}) + "\n"
-    client = socket.socket(socket.AF_UNIX)
-    client.connect(str(run / "s.sock"))
-    client.sendall(line.encode())
-    assert entered.wait(5)
+    client = send(run, RID_A)
 
     def closing() -> None:
         s.close()
         order.append("closed")
 
     closer = threading.Thread(target=closing)
-    closer.start()
-    time.sleep(0.3)
-    assert closer.is_alive()                                    # still waiting for the callback
-    late = {"op": "close", "rid": "fedcba9876543210", "evidence": "x"}
-    assert s._request(late) == UNSUPPORTED  # pyright: ignore[reportPrivateUsage]
-    release.set()
-    closer.join(10)
-    client.close()
+    try:
+        assert entered.wait(5)
+        closer.start()
+        assert s._closed.wait(5)  # close has begun  # pyright: ignore[reportPrivateUsage]
+        late = {"op": "close", "rid": RID_B, "evidence": "x"}
+        assert s._request(late) == UNSUPPORTED  # pyright: ignore[reportPrivateUsage]
+    finally:
+        release.set()
+        closer.join(10)
+        client.close()
     assert not closer.is_alive()
-    assert order == ["effect 0123456789abcdef", "closed"] and len(seen) == 1
+    assert order == [f"effect {RID_A}", "closed"] and len(seen) == 1
+
+
+def test_close_is_bounded_when_a_callback_needs_a_lock_the_closer_holds(
+        run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T2 c2 B1: the closer holds a lock (a journal transaction, say) that the callback needs; close
+    must return anyway. The callback's late effect is its owner's to refuse at commit (the runtime closes
+    the event log after the server: test_a_stopped_generations_log_refuses_a_late_request)."""
+    monkeypatch.setattr(server, "CLOSE_SECONDS", 0.2)
+    journal, entered = threading.Lock(), threading.Event()
+    returned = threading.Event()
+
+    def needs_journal(_p: dict[str, Any]) -> dict[str, Any]:
+        entered.set()
+        with journal:
+            return ACCEPTED
+
+    s, _ = serve(run, needs_journal)
+    client = None
+
+    def closing() -> None:
+        with journal:
+            assert entered.wait(5)
+            s.close()
+            returned.set()
+
+    closer = threading.Thread(target=closing, daemon=True)
+    closer.start()
+    try:
+        client = send(run, RID_A)
+        assert returned.wait(5)                                 # close returned while holding the lock
+    finally:
+        closer.join(10)
+        if client is not None:
+            client.close()
+        s.close()
+
+
+def test_a_callback_that_closes_its_own_server_returns(run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T2 c2 B2: close never waits on the callback that called it; nothing is served afterwards."""
+    monkeypatch.setattr(server, "CLOSE_SECONDS", 0.2)
+    done = threading.Event()
+    holder: list[SessionServer] = []
+
+    def closes(_p: dict[str, Any]) -> dict[str, Any]:
+        holder[0].close()
+        done.set()
+        return ACCEPTED
+
+    s, _ = serve(run, closes)
+    holder.append(s)
+    client = send(run, RID_A)
+    try:
+        assert done.wait(5)
+        assert s._request({"op": "close", "rid": RID_B, "evidence": "x"}) == UNSUPPORTED  # pyright: ignore[reportPrivateUsage]
+    finally:
+        client.close()
+        s.close()
+
+
+def test_two_callbacks_closing_at_once_both_return(run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T2 c2 B1: two callbacks call close together; neither waits on the other past the bound."""
+    monkeypatch.setattr(server, "CLOSE_SECONDS", 0.2)
+    both = threading.Barrier(2, timeout=5)
+    done: list[str] = []
+    finished = threading.Semaphore(0)
+    holder: list[SessionServer] = []
+
+    def closes(payload: dict[str, Any]) -> dict[str, Any]:
+        both.wait()                                             # both are callbacks before either closes
+        holder[0].close()
+        done.append(payload["rid"])
+        finished.release()
+        return ACCEPTED
+
+    s, _ = serve(run, closes)
+    holder.append(s)
+    clients = [send(run, RID_A), send(run, RID_B)]
+    try:
+        assert finished.acquire(timeout=5) and finished.acquire(timeout=5)   # each close returned
+    finally:
+        for c in clients:
+            c.close()
+        s.close()
+    assert sorted(done) == [RID_A, RID_B]
+
+
+def test_a_request_at_the_line_limit_is_sent(tmp_path: Path) -> None:
+    """Codex T2 c2 NB: the early size check uses the launch token's real length, so the largest request
+    that fits one line with it is sent, and one byte more is refused, config or not."""
+    d = tmp_path / "r1"
+    d.mkdir()
+    (d / shim.TOKEN_FILE).write_text("0" * shim.TOKEN_HEX)
+    (d / shim.CONFIG_FILE).write_text(json.dumps({"wait_seconds": 2}))
+    s = SessionServer(d / "s.sock", "0" * shim.TOKEN_HEX, tmp_path / "e.jsonl",
+                      on_request=lambda _p: ACCEPTED)
+    s.start()
+
+    def line(n: int) -> int:
+        payload = {"op": "close", "rid": RID_A, "evidence": "\x01" * n}
+        return len(shim._encode({"token": "0" * shim.TOKEN_HEX, "type": "ws_request",  # pyright: ignore[reportPrivateUsage]
+                                 "payload": payload})) + 1
+
+    n = (shim.MAX_LINE - line(0)) // 6
+    assert line(n) <= shim.MAX_LINE < line(n + 1)
+    ev = tmp_path / "ev"
+    try:
+        ev.write_bytes(b"\x01" * n)
+        assert request(d, "close", "--evidence-file", str(ev)) == (0, ACCEPTED)
+        ev.write_bytes(b"\x01" * (n + 1))
+        assert request(tmp_path / "absent", "close", "--evidence-file", str(ev)) == (
+            2, {"ok": False, "error": "too_large"})
+    finally:
+        s.close()
