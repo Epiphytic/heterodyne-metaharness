@@ -71,7 +71,6 @@ ACTOR_WSD = "wsd"               # what `advance`, `recover` and a taint did on t
 APPROVED_POINT = "harness.approved"         # just after a row's `approved` is journaled
 USE_INTENT_POINT = "harness.use.intent"     # just after a `use` op is journaled open
 OPEN = ("staged", "posted", "approved")     # rows whose install is still to come
-REPO = "Epiphytic/heterodyne-metaharness"
 SESSION = "wsd-harness"         # wsd's btq session on the approval workstream
 CODE_SECONDS = 600              # a prune code's life
 ASK_SECONDS = 10.0              # one `ask.sock` exchange
@@ -141,10 +140,10 @@ def _no_locks() -> Sequence[AbstractContextManager[Any]]:
 class HarnessOps:
     def __init__(self, *, settings: HarnessSettings, store: Store, fetcher: Fetcher, queues: QueueFactory,
                  journal: Journal, readout: Readouts, ask_socket: Path, config_dir: Path, taint_dir: Path,
-                 alerts_dir: Path, runtime: AgentRuntime, clock: Callable[[], int], commit: str,
+                 alerts_dir: Path, runtime: AgentRuntime, clock: Callable[[], int], commit: str, repo: str,
                  cp: Checkpoint = nothing,
                  guard_locks: Callable[[], Sequence[AbstractContextManager[Any]]] = _no_locks,
-                 store_problems: Callable[[], Sequence[str]] = _no_problems, repo: str = REPO) -> None:
+                 store_problems: Callable[[], Sequence[str]] = _no_problems) -> None:
         self.settings = settings
         self.store = store
         self.fetcher = fetcher

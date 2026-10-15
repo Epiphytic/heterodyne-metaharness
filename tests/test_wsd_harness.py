@@ -95,16 +95,17 @@ TAINTED = verify.INSTALL_TAINTED        # `use`'s refusal of a tainted install (
 READOUT_DEADLINE = "READOUT_SECONDS"    # `wsd.btq`'s deadline for one `approve-bead --json` read
 
 
-def make_ops(h: "H") -> Any:
+def make_ops(h: "H", **overrides: Any) -> Any:
     """`HarnessOps` as `daemon.assemble` builds it. `queues` is wsd's queue factory: the approval bead goes
     through `queues(approval_workstream, <wsd's session>)`. `readout` is `approval_readout` with the
     `approve-bead` path bound. `guard_locks` gives every workstream's operation lock, which `remove` and
     `prune` hold (E16)."""
-    return wh.HarnessOps(
-        settings=h.settings, store=h.store, fetcher=h.fetcher, queues=factory(h.world), journal=h.journal,
-        readout=partial(wbtq.approval_readout, binary=h.approve_bead), ask_socket=h.asks.path,
-        config_dir=h.config, taint_dir=h.taint, alerts_dir=h.alerts, runtime=h.runtime, clock=h.clock,
-        commit=COMMIT, cp=h.cp, guard_locks=h.guard_locks)
+    return wh.HarnessOps(**{
+        "settings": h.settings, "store": h.store, "fetcher": h.fetcher, "queues": factory(h.world),
+        "journal": h.journal, "readout": partial(wbtq.approval_readout, binary=h.approve_bead),
+        "ask_socket": h.asks.path, "config_dir": h.config, "taint_dir": h.taint, "alerts_dir": h.alerts,
+        "runtime": h.runtime, "clock": h.clock, "commit": COMMIT, "repo": CHECKOUT, "cp": h.cp,
+        "guard_locks": h.guard_locks, **overrides})
 
 
 def row(h: "H", staging_id: str) -> Any:
@@ -138,6 +139,7 @@ def assembled(s: WsdSettings, journal: Journal, runtime: FakeRuntime, world: Wor
 # --- the rig ---
 
 COMMIT = hashlib.sha1(b"the running harness commit").hexdigest()  # noqa: S324 - a commit ID's form
+CHECKOUT = "/srv/heterodyne-metaharness"    # the running harness checkout, by path as btq resolves it
 TARGET = str(CODEX_PACKAGE["target"])
 OPERATOR = "operator-a"
 PREDICATE_LOG = "predicate {}"          # how the log names the failing predicate (E13)
@@ -493,7 +495,7 @@ def test_install_stages_creates_the_approval_bead_and_posts_the_ask(h: H) -> Non
     install = sc.install_name(m.version, sc.digest(m))
     assert ask["effect"] == f"publish codex install {install} manifest {shown}"
     assert digests.parse_display(ask["effect"].rsplit(" manifest ", 1)[1]) == digests.of_manifest(m)
-    assert ask["refs"] == [{"kind": "commit", "repo": "Epiphytic/heterodyne-metaharness", "id": COMMIT}]
+    assert ask["refs"] == [{"kind": "commit", "repo": CHECKOUT, "id": COMMIT}]
     digest, gaps = h.queue().ask_digest(bead)
     assert gaps == [] and bead["metadata"]["context_digest"] == digest == r.context_digest
     assert bead["title"] == f"Add the codex 0.160.0 managed install ({install})"
@@ -504,6 +506,34 @@ def test_install_stages_creates_the_approval_bead_and_posts_the_ask(h: H) -> Non
     assert (r.adapter, r.version, r.digest) == ("codex", "0.160.0", sc.digest(m))
     [post] = h.asks.posts
     assert post == {"type": "post", "kind": "approval", "bead": r.approval_bead}
+
+
+class RealDigest:
+    """A fake queue whose `ask_digest` is the real btq's, over the fake's `show`."""
+
+    def __init__(self, queue: Any, module: Any) -> None:
+        self.queue, self.module = queue, module
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.queue, name)
+
+    def ask_digest(self, issue: Any) -> tuple[str | None, list[str]]:
+        return self.module.ask_digest(issue, self.queue.show)
+
+
+@pytest.mark.skipif(not os.environ.get("BTQ_REPO"), reason="needs $BTQ_REPO (a beads-task-queue checkout)")
+def test_the_install_ask_resolves_under_real_btq(h: H) -> None:
+    """The real btq's `ask_digest` over the composed ask: its commit ref names a checkout by path, which btq
+    resolves with git, so the ask is posted without a gap."""
+    module = wbtq.load(Path(os.environ["BTQ_REPO"]))
+    checkout, commit = skill_repo(h.tmp / "checkout")
+    fake = factory(h.world)
+    h.ops = make_ops(h, queues=lambda ws, session: RealDigest(fake(ws, session), module), repo=str(checkout),
+                     commit=commit)
+    _, r = posted(h)
+    bead = show(h, r.approval_bead)
+    assert ask_of(bead)["refs"] == [{"kind": "commit", "repo": str(checkout), "id": commit}]
+    assert module.ask_digest(bead, h.queue().show) == (r.context_digest, [])
 
 
 def test_install_passes_every_adapters_login_names_to_stage(h: H, monkeypatch: pytest.MonkeyPatch) -> None:

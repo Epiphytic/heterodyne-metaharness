@@ -131,10 +131,15 @@ def _logins(accounts: Accounts) -> list[Path]:
             for n in (DEFAULT_ACCOUNT, *accounts.configured(a))]
 
 
-def _commit() -> str:
-    """The harness checkout's HEAD, which an install approval names; "" when this is not a git checkout (the
+def _checkout() -> Path:
+    """The harness checkout, which an install approval's commit ref names by path: btq resolves a ref's
+    repo as a local git repository."""
+    return Path(heterodyne.__file__).resolve().parents[2]
+
+
+def _commit(root: Path) -> str:
+    """The checkout's HEAD, which an install approval names; "" when this is not a git checkout (the
     install then refuses `NO_COMMIT`)."""
-    root = Path(heterodyne.__file__).resolve().parents[2]
     try:
         out = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD^{commit}"],
                              stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_SECONDS, check=True)
@@ -162,7 +167,7 @@ def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFact
     if s.accounts is None:
         return None
     harnesses = sandbox_settings(env).harnesses
-    state = paths.state_dir(env)
+    state, root = paths.state_dir(env), _checkout()
     binary = _approve_bead(env)
     readout = _no_readout if binary is None else partial(btq.approval_readout, binary=binary)
     fetcher = Fetcher(HttpsOpener(), s.state_dir / "harness-cache", time.monotonic, FETCH_SECONDS,
@@ -171,5 +176,5 @@ def build_harness(s: WsdSettings, env: Mapping[str, str], factory: btq.QueueFact
         settings=harnesses, store=open_store(harnesses), fetcher=fetcher, queues=factory, journal=journal,
         readout=readout, ask_socket=state / "admind" / asks.ASK_SOCKET, config_dir=_config_dir(s, env),
         taint_dir=s.state_dir / "harness-taint", alerts_dir=state / "alerts", runtime=runtime,
-        clock=utc_now, commit=_commit(), guard_locks=guard_locks,
+        clock=utc_now, commit=_commit(root), repo=str(root), guard_locks=guard_locks,
         store_problems=_store_problems(harnesses, s.accounts, env))

@@ -1,3 +1,4 @@
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -6,6 +7,7 @@ import pytest
 from sandbox_env import config_env
 from wsd_env import accounts_at, selected_config
 
+import heterodyne
 from heterodyne import platform
 from heterodyne.config import ConfigError, paths
 from heterodyne.sandbox.build import CANARY, TMUX_SOCKET, build_harness, build_runtime, build_usage_reader
@@ -156,6 +158,11 @@ def test_wsd_builds_the_harness_operations_against_admind(tmp_path: Path) -> Non
         state = paths.state_dir(env)
         assert ops.ask_socket == state / "admind" / "ask.sock" and ops.alerts_dir == state / "alerts"
         assert ops.taint_dir == s.state_dir / "harness-taint"
+        # The commit ref names this checkout by path, as btq resolves it, and its HEAD.
+        checkout = Path(heterodyne.__file__).resolve().parents[2]
+        assert ops.repo == str(checkout)
+        head = subprocess.run(["git", "-C", ops.repo, "rev-parse", "HEAD"], capture_output=True, check=True)
+        assert ops.commit == head.stdout.decode().strip()
         with pytest.raises(btq.ReadoutFailed):
             ops.readout("btq-1")
         no_accounts = WsdSettings(s.state_dir, 60, 3600, 3, tmp_path / "btq", {}, (), None)
