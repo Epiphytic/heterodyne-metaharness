@@ -201,7 +201,7 @@ Where r15's items land:
 | `keep-id`: only the mount table keeps a file out | `packaging/sandbox/gateway.toml` (Task 12); the real-home and Other accounts probes (Task 8) |
 | gateway: bind mounts enabled, resource admission disabled | `packaging/sandbox/gateway.toml` (Task 12) |
 | the turn-boundary lifetime stop and the relaunch | D13, Task 10 (the exposure deadline, the reaper), Task 11 |
-| crash-loop accounting (plan 3's P1) | btq-g08sd: `docs/superpowers/specs/2026-10-13-g08sd-crash-loop-accounting-design.md` (the end cause, the reaper's marker, the launch guard's accounting) |
+| crash-loop accounting (plan 3's P1) | btq-g08sd: `docs/superpowers/specs/2026-10-13-g08sd-crash-loop-accounting-design.md` (the end cause, the reaper's marker, the launch guard's accounting); amended by btq-wpyv5, `docs/superpowers/specs/2026-10-14-wpyv5-resolve-end-evidence-design.md` (a resolve carries the end) |
 | agents commit to their local `btq/<id>` branch (§7) | D26, Task 7A, Task 10, Task 14 |
 | §7 Result channel (peer credentials, exe/argv, untraced, netns, environment, CLI ancestor) | Task 9 |
 | §7 Probe protection | D23, Task 9A, Task 9B, Task 9C, Task 15 |
