@@ -13,6 +13,8 @@ from typing import Any, cast
 from heterodyne.wsd.btq import Readout
 
 DECISIONS = ("approve", "deny")
+REASON_MAX = 500                # characters of a deny reason kept
+NOTE = ". Note: "               # approve-bead's decision_comment, before a deny's --note
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,8 @@ class Approved:
 
 @dataclass(frozen=True)
 class Denied:
-    pass
+    """`reason` is the denier's own note, raw and untrusted: whatever shows it escapes it."""
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,10 +106,33 @@ def _list(value: Any) -> list[Any]:
     return cast(list[Any], value) if isinstance(value, list) else []
 
 
+def _deny_reason(shown: Any, by: Any, digest: Any) -> str | None:
+    """The note in approve-bead's decision comment, which `bd close --reason` keeps as the bead's
+    `close_reason`: "Denied by <by> at <at> via <source>; context_digest=<digest>[; adr_revision=<r>].
+    Note: <text>". Only the denier's own decision on this digest counts; anything else is None."""
+    text = _field(shown, "close_reason")
+    if not (isinstance(text, str) and _text(by) and _text(digest) and text.startswith(f"Denied by {by} at ")):
+        return None
+    mark = f"; context_digest={digest}"
+    at = text.find(mark)
+    if at < 0:
+        return None
+    rest = text[at + len(mark):]
+    if rest.startswith("; adr_revision="):
+        cut = rest.find(NOTE)
+    elif rest.startswith(NOTE):
+        cut = 0
+    else:
+        return None
+    if cut < 0:
+        return None
+    return rest[cut + len(NOTE):].strip()[:REASON_MAX] or None
+
+
 def verdict(readout: Readout, shown: Any, recomputed: tuple[str | None, list[str]], expect: Expected,
             view: Any) -> Verdict:
     """E13's predicates 2-10, in order. `shown` is the bead from `queue.show`, and `recomputed` btq's
-    `ask_digest` of it. `view` is plan 5i's (its deny reasons); T10 passes None."""
+    `ask_digest` of it. A Denied's reason comes from `shown`'s close_reason; `view` is unused (None)."""
     r = readout
     if not (isinstance(r.id, str) and r.id == expect.bead):
         return Unverified(2)
@@ -120,7 +146,7 @@ def verdict(readout: Readout, shown: Any, recomputed: tuple[str | None, list[str
             or any(v is not None and not isinstance(v, str) for v in (r.denied_by, r.denied_digest))):
         return Unverified(5)                    # UNSET is neither None nor a str
     if r.decision == "deny" or r.denied_by is not None or r.denied_digest is not None:
-        return Denied()
+        return Denied(_deny_reason(shown, r.denied_by, r.denied_digest))
     digest, gaps = recomputed
     if not (_text(r.digest) and r.digest == digest and r.gaps == []
             and gaps == []):
