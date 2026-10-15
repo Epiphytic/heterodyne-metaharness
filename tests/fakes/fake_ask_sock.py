@@ -10,7 +10,8 @@ open, per hour, undelivered notices) are flags and counters the test sets.
 "lost" handles the request as usual and then closes without its reply, "hang" never replies, "garbage"
 replies with a line that is not JSON, "failed" replies with admind's internal error, any other string is a
 refusal with that message, and bytes are written as the raw reply.
-`frames` holds every raw request line.
+`frames` holds every raw request line. A list holds the active asks, then only the RECENT_TERMINAL newest
+finished ones, as admind's does.
 """
 
 import asyncio
@@ -26,6 +27,9 @@ from heterodyne.admind import asks, daemon, notices
 from heterodyne.admind.notices import NoticePost
 
 CHUNK_CHARS = 2000
+
+
+RECENT_TERMINAL = 20     # admind's list: its active asks, then only the 20 newest finished ones
 
 
 @dataclass
@@ -153,7 +157,9 @@ class FakeAskSock:
         if isinstance(req, asks.AskPost):
             return self._post(req)
         if isinstance(req, asks.AskList):
-            listed = [a.summary() for a in self.asks.values()]
+            active = [a for a in self.asks.values() if a.status in asks.ACTIVE]
+            done = [a for a in reversed(self.asks.values()) if a.status not in asks.ACTIVE][:RECENT_TERMINAL]
+            listed = [a.summary() for a in active + done]
             return asks.AskReply("ok", f"{len(listed)} asks", asks=listed)
         ask = self.asks.get(asks.normalise_id(req.ask_id) or "")
         if ask is None:

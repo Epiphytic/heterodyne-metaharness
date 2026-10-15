@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 QUESTION_TITLE = "Question from {bead}: {line}"
 NO_TEXT = "The agent stopped without saying anything and without closing the bead."
 ASK_UNPOSTABLE = "the question could not be posted to the operator"
+ASK_POST_UNKNOWN = "a post of the question had an unknown outcome and admind no longer lists it"
 # The refusals: each completes "Your request <ref> was refused: <why>." (REFUSED_NOTE).
 ACTIONS_UNSUPPORTED = ("it asks for an action that is never approved from inside the sandbox (a push, a PR, "
                        "a merge, a deploy or a notification)")
@@ -95,6 +96,11 @@ ROUNDS_BODY = ("The agent working on {bead} ended {rounds} turns in a row with a
 UNPOSTABLE_TITLE = "{bead}'s question could not be posted"
 UNPOSTABLE_BODY = ("admind refused the question the agent working on {bead} asked, so wsd marked the task "
                    "needs-human. The question is on bead {child}.")
+UNKNOWN_BODY = ("wsd can't tell whether admind took the question the agent working on {bead} asked: a "
+                "reply was lost, and admind's list no longer shows it. wsd will not post it again, so it "
+                "marked the task needs-human. The question is on bead {child}. Ask the admin agent to check "
+                "its asks for it, then release the task.")
+TITLE_WITHHELD = "its title withheld: it contained a {kind}"
 OWED_BACKOFF_MAX = 1800         # seconds between an owed question's attempts, at most
 RECOVER_FAILED = "an ask could not be continued this pickup (%s); it is tried again at the next"
 NOT_WAITING = "an ask's task is not waiting on its question bead; it is not posted"

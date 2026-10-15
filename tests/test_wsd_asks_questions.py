@@ -12,7 +12,7 @@ from typing import Any
 
 import msgspec
 import pytest
-from fake_ask_sock import FakeAsk, FakeAskSock
+from fake_ask_sock import RECENT_TERMINAL, FakeAsk, FakeAskSock
 from fakes.checkpoints import CrashAt, SimulatedCrash
 from fakes.fake_btq import World, factory
 from hypothesis import HealthCheck, given, settings
@@ -25,6 +25,7 @@ from heterodyne.admind import daemon as admind_daemon
 from heterodyne.wsd import asks as asks_module
 from heterodyne.wsd import relay
 from heterodyne.wsd.asks import (
+    ASK_POST_UNKNOWN,
     ASK_UNPOSTABLE,
     CARD_HEAD,
     CARD_REQUEST,
@@ -37,6 +38,9 @@ from heterodyne.wsd.asks import (
     ROUNDS_BODY,
     ROUNDS_DETAIL,
     ROUNDS_TITLE,
+    TITLE_SHOWN,
+    TITLE_WITHHELD,
+    UNKNOWN_BODY,
     UNPOSTABLE_TITLE,
     WITHHELD_TEXT,
     AskBridge,
@@ -301,6 +305,25 @@ def test_secret_text_is_withheld_everywhere(tmp_path: Path, fake: FakeAskSock) -
         assert SECRET not in dump, table
 
 
+def test_a_secret_in_the_tasks_title_is_withheld_from_the_card(tmp_path: Path, fake: FakeAskSock) -> None:
+    rig = asking(tmp_path, fake)
+    rig.world.beads[B].title = f"Paint with {SECRET}"
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    rig.pickup()
+    [card] = cards(fake)
+    withheld = TITLE_WITHHELD.format(kind="sk- API key")
+    assert card.post.body.startswith(CARD_HEAD.format(bead=B, title=withheld))
+    assert SECRET not in card.post.title + card.post.body
+    assert all(SECRET.encode() not in f for f in fake.frames)
+
+
+def test_a_key_cut_short_in_the_tasks_title_is_withheld_whole(tmp_path: Path) -> None:
+    """A key cut short by TITLE_SHOWN is withheld whole, never shown in part."""
+    title = "x" * (TITLE_SHOWN - 30) + SECRET           # the cut would keep the key's first 30 characters
+    post = question_card(WS, B, title, "btq-2", "Blue or green?", 1, 1, LIMIT, list(D4_CHOICES), "A")
+    assert TITLE_WITHHELD.format(kind="sk- API key") in post.body and "sk-" not in post.body
+
+
 def test_progress_resets_the_round_count(tmp_path: Path, fake: FakeAskSock) -> None:
     rig = asking(tmp_path, fake)
     rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
@@ -417,18 +440,65 @@ def test_an_uncertain_post_is_found_by_list_before_posting_again(tmp_path: Path,
     assert len(cards(fake)) == 1 and posts(fake) == 1
 
 
-def test_a_post_that_was_not_taken_is_posted_after_the_list(tmp_path: Path, fake: FakeAskSock) -> None:
-    """Negative control: an uncertain post admind never took (dropped unread) is posted again, once."""
+def unknown(rig: Rig, fake: FakeAskSock, child: str) -> None:
+    """The question's post has an unknown outcome and is no longer in admind's list: never posted again;
+    the row refused (ASK_POST_UNKNOWN), the task escalated needs-human, one unpostable:<ref> notice."""
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.state, row.why, row.uncertain) == ("refused", ASK_POST_UNKNOWN, 0)
+    assert rig.state(B) == BeadState.STUCK.value and NEEDS_HUMAN in rig.world.beads[B].labels
+    assert [(n.title, n.body) for n in fake.notices] == [(UNPOSTABLE_TITLE.format(bead=B),
+                                                          UNKNOWN_BODY.format(bead=B, child=child))]
+    refs = rig.journal.db.execute("SELECT ref FROM notices").fetchall()
+    assert refs == [(f"unpostable:{stop_ref()}",)]
+    for _ in range(3):
+        rig.clock.advance(BACKOFF)
+        rig.pickup()
+    assert len(fake.notices) == 1
+
+
+def test_an_uncertain_post_missing_from_the_list_is_never_posted_again(tmp_path: Path,
+                                                                       fake: FakeAskSock) -> None:
+    """A post whose outcome is unknown (here admind never read it) and that admind's list lacks fails
+    closed: the list holds only the 20 newest finished asks, so absence does not prove it was never posted."""
     rig = asking(tmp_path, fake)
     fake.script.append("drop")
     rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
     rig.pickup()
-    assert cards(fake) == []
+    [child] = questions(rig)
     rig.clock.advance(BACKOFF)
     rig.pickup()
+    unknown(rig, fake, child)
+    assert cards(fake) == [] and posts(fake) == 1
+
+
+def test_a_posted_question_aged_out_of_adminds_list_is_not_posted_twice(tmp_path: Path,
+                                                                         fake: FakeAskSock) -> None:
+    rig = asking(tmp_path, fake)
+    fake.script.append("lost")                              # admind takes the post; its reply is lost
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    rig.pickup()
+    [child] = questions(rig)
     [card] = cards(fake)
-    row = rig.journal.ask(stop_ref())
-    assert row is not None and (row.state, row.ask_id) == ("posted", card.ask_id)
+    fake.decide(card.ask_id, "cancelled")
+    for i in range(RECENT_TERMINAL):                         # newer finished asks push it out of the list
+        other = msgspec.structs.replace(card.post, kind="merge", bead=None)
+        fake.asks[f"old{i}"] = FakeAsk(other, f"old{i}", status="approved")
+    rig.clock.advance(BACKOFF)
+    rig.pickup()
+    unknown(rig, fake, child)
+    assert cards(fake) == [card] and posts(fake) == 1
+
+
+def test_the_fake_lists_active_asks_and_only_the_newest_finished_ones(fake: FakeAskSock) -> None:
+    """Negative control on the fake, as admind's own list (RECENT_TERMINAL finished asks)."""
+    sent = to_admind(question_card(WS, B, "t", "btq-2", "Blue or green?", 1, 1, LIMIT, list(D4_CHOICES), "A"))
+    assert isinstance(sent, admind_asks.AskPost)
+    for i in range(RECENT_TERMINAL + 2):
+        fake.asks[f"done{i}"] = FakeAsk(sent, f"done{i}", status="approved")
+    fake.asks["live"] = FakeAsk(sent, "live")
+    listed = [a.ask_id for a in relay.list_asks(fake.path)]
+    assert listed[0] == "live" and len(listed) == RECENT_TERMINAL + 1
+    assert "done0" not in listed and "done1" not in listed and f"done{RECENT_TERMINAL + 1}" in listed
 
 
 def test_a_retryable_refusal_leaves_the_question_owed(tmp_path: Path, fake: FakeAskSock) -> None:
@@ -457,8 +527,7 @@ def test_a_permanent_refusal_escalates(tmp_path: Path, fake: FakeAskSock) -> Non
     assert cards(fake) == [] and len(fake.notices) == 1
 
 
-@pytest.mark.parametrize("point", ["asks.row", "asks.created!", "asks.parked", "asks.posting",
-                                   "asks.posted!"])
+@pytest.mark.parametrize("point", ["asks.row", "asks.created!", "asks.parked", "asks.posted!"])
 def test_a_crash_at_each_step_is_resumed_without_a_second_bead_or_card(tmp_path: Path, fake: FakeAskSock,
                                                                        point: str) -> None:
     rig = asking(tmp_path, fake)
@@ -477,6 +546,21 @@ def test_a_crash_at_each_step_is_resumed_without_a_second_bead_or_card(tmp_path:
     assert row is not None and (row.state, row.child, row.ask_id) == ("posted", child, card.ask_id)
     assert card.post.bead == child and rig.state(B) == BeadState.WAITING_INPUT.value
     assert blockers(rig) == {child}
+
+
+def test_a_crash_between_marking_a_post_uncertain_and_posting_fails_closed(tmp_path: Path,
+                                                                          fake: FakeAskSock) -> None:
+    """At asks.posting nothing was posted, but wsd can't tell that from a post whose reply was lost."""
+    rig = asking(tmp_path, fake)
+    rig.restart(CrashAt("asks.posting"))
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    rig.restart()
+    rig.pickup()
+    [child] = questions(rig)
+    unknown(rig, fake, child)
+    assert cards(fake) == [] and posts(fake) == 0
 
 
 def test_ws_request_question_uses_the_agents_choices_when_valid_and_d4_otherwise(tmp_path: Path,
