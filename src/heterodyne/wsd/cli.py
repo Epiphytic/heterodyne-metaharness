@@ -38,7 +38,7 @@ from typing import Any
 
 from heterodyne.config import ConfigError
 from heterodyne.sandbox import hostread
-from heterodyne.sandbox.build import build_harness, build_runtime, build_usage_reader
+from heterodyne.sandbox.build import FETCH_SECONDS, build_harness, build_runtime, build_usage_reader
 from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
@@ -60,6 +60,7 @@ Locks = Callable[[], Sequence[AbstractContextManager[Any]]]
 HarnessBuilder = Callable[[Journal, Locks], HarnessHooks | None]
 
 EX_CONFIG = 78  # sysexits: configuration error; the unit does not restart on it
+INSTALL_SECONDS = FETCH_SECONDS + 600.0     # `harness install`: its fetch, then staging and checks
 
 
 def _settings() -> WsdSettings:
@@ -155,8 +156,14 @@ async def _serve(daemon: Wsd) -> None:
 
 
 def _ask(s: WsdSettings, req: ctl.CtlRequest) -> ctl.CtlReply | None:
+    """`harness install` replies once its fetch and staging are done, so it waits longer than the rest."""
+    installing = req.harness is not None and req.harness.action == "install"
     try:
-        return asyncio.run(ctl.request(s.socket, req))
+        return asyncio.run(ctl.request(s.socket, req, INSTALL_SECONDS if installing else ctl.REPLY_SECONDS))
+    except ctl.CtlNoReply:
+        print("wsd did not answer in time; it may still be working on the request"
+              + (": run `wsctl harness list` before installing again" if installing else ""), file=sys.stderr)
+        return None
     except ctl.CtlUnavailable:
         print("wsd is not running (no answer on its control socket)", file=sys.stderr)
         return None

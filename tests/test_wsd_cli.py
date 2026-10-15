@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from test_wsd_daemon import settings
 
+from heterodyne.sandbox.build import FETCH_SECONDS
 from heterodyne.wsd import cli, ctl
 
 INSTALL = "0.160.0-0123456789ab"
@@ -80,3 +81,32 @@ def test_wsctl_harness_prune_prints_the_code_and_a_refusal_exits_1(
     monkeypatch.setattr(cli, "_ask", lambda s, req: ctl.CtlReply("refused", "the install is in use"))
     assert cli.wsctl_main(["harness", "remove", "codex", INSTALL]) == 1
     assert "in use" in capsys.readouterr().out
+
+
+def test_a_harness_install_waits_out_its_fetch_and_staging(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """`install` answers once its fetch and staging are done: the client waits well past the fetch's own
+    deadline, so a slow fetch is never mistaken for a missing wsd (whose retry would post a second ask)."""
+    waits: dict[str, float] = {}
+
+    async def request(path: Path, req: ctl.CtlRequest, timeout: float = 0.0) -> ctl.CtlReply:
+        waits[req.harness.action if req.harness else req.op] = timeout
+        return ctl.CtlReply("ok", "done")
+
+    monkeypatch.setattr(ctl, "request", request)
+    s = settings(tmp_path)
+    cli._ask(s, harness("install", adapter="codex"))
+    cli._ask(s, harness("list"))
+    cli._ask(s, ctl.CtlRequest("status"))
+    assert waits["install"] >= FETCH_SECONDS + 300 and waits["list"] == waits["status"] < waits["install"]
+
+
+def test_no_answer_from_a_running_wsd_is_not_reported_as_wsd_not_running(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    async def request(path: Path, req: ctl.CtlRequest, timeout: float = 0.0) -> ctl.CtlReply:
+        raise ctl.CtlNoReply("TimeoutError")
+
+    monkeypatch.setattr(ctl, "request", request)
+    assert cli._ask(settings(tmp_path), harness("install", adapter="codex")) is None
+    err = capsys.readouterr().err
+    assert "not running" not in err and "did not answer" in err and "wsctl harness list" in err

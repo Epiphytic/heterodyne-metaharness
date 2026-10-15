@@ -30,6 +30,7 @@ MAX_REQUEST = 4096
 MAX_REPLY = 1 << 20         # 1 MiB; status leaves finished beads out unless asked, to stay well inside it
 READ_SECONDS = 5.0
 CLOSE_SECONDS = 2.0
+REPLY_SECONDS = 600.0       # how long a client waits for its reply
 WRITE_SECONDS = 30.0        # a client that doesn't read its reply in this time is dropped
 TOO_LARGE = "reply too large"
 
@@ -93,6 +94,10 @@ class CtlReply(msgspec.Struct, frozen=True):
 
 class CtlUnavailable(Exception):
     """No wsd is listening (or it did not answer)."""
+
+
+class CtlNoReply(CtlUnavailable):
+    """wsd took the request but no reply came: it may still be working on it."""
 
 
 Handler = Callable[[CtlRequest], Awaitable[CtlReply]]
@@ -236,7 +241,7 @@ def frame(reply: CtlReply) -> bytes:
     return line
 
 
-async def request(path: Path, req: CtlRequest, timeout: float = 600.0) -> CtlReply:
+async def request(path: Path, req: CtlRequest, timeout: float = REPLY_SECONDS) -> CtlReply:
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(path), limit=MAX_REPLY + 1), 5)
@@ -248,7 +253,7 @@ async def request(path: Path, req: CtlRequest, timeout: float = 600.0) -> CtlRep
         line = await asyncio.wait_for(reader.readline(), timeout)
         return msgspec.json.decode(line, type=CtlReply)
     except (OSError, TimeoutError, ValueError, msgspec.DecodeError) as exc:
-        raise CtlUnavailable(type(exc).__name__) from None
+        raise CtlNoReply(type(exc).__name__) from None
     finally:
         writer.close()
         with contextlib.suppress(Exception):
