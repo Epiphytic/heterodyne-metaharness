@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from heterodyne.agents.exec_dirs import shown_name
 from heterodyne.config import ConfigError
 from heterodyne.wsd.accounts import AccountChanged, Chosen
 from heterodyne.wsd.beads import (
@@ -256,7 +257,8 @@ class Scheduler:
         bead only with (e). A report for a launch the journal doesn't have as this workstream's is
         dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time).
         An install taint is left to plan 4c Task 10: the marker already refuses every launch on it. A
-        cleared exec dir is journaled as `exec_dir_cleared` once per session, generation and path."""
+        cleared exec dir is journaled as `exec_dir_cleared` once per session, generation and path, its names
+        redacted and bounded again (`shown_name`)."""
         if isinstance(signal, InstallTainted):
             return
         j, name = self.d.journal, self.ws.name
@@ -264,7 +266,8 @@ class Scheduler:
         if entry is None or entry.ws != name:
             return
         if isinstance(signal, ExecDirCleared):
-            detail = json.dumps(dataclasses.asdict(signal), sort_keys=True)
+            shown = dataclasses.replace(signal, names=tuple(shown_name(n) for n in signal.names))
+            detail = json.dumps(dataclasses.asdict(shown), sort_keys=True)
             j.emit_once(name, entry.bead, "exec_dir_cleared", detail,
                         f"exec_dir_cleared:{signal.session_key}:{signal.generation}:{signal.path}")
             return
