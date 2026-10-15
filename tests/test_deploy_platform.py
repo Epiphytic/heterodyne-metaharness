@@ -951,6 +951,9 @@ def test_a_fresh_install_makes_the_unit_directory_the_service_users_and_private(
     ("units-ancestor-writable", "the user unit directory is under a directory others can write"),
     ("install-ancestor-symlink", "the install directory is not the service user's directory"),
     ("install-ancestor-writable", "the install directory is under a directory others can write"),
+    ("releases-symlink", "the releases directory is not the service user's directory"),
+    ("release-symlink", "the release directory is not the service user's directory"),
+    ("backup-symlink", "the backup directory is not the service user's directory"),
 ])
 def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(host: Host, where: str,
                                                                              why: str) -> None:
@@ -964,7 +967,9 @@ def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(hos
               "scratch-readable": scratch, "units-ancestor-symlink": host.home() / ".config",
               "units-ancestor-writable": host.home() / ".config",
               "install-ancestor-symlink": host.home() / ".local",
-              "install-ancestor-writable": host.home() / ".local"}[where]
+              "install-ancestor-writable": host.home() / ".local",
+              "releases-symlink": release_dir(host).parent, "release-symlink": release_dir(host),
+              "backup-symlink": install / "backup"}[where]
     target.parent.mkdir(parents=True, exist_ok=True)
     if where == "scratch-readable" or where.endswith("-writable"):
         target.mkdir(exist_ok=True)
@@ -973,7 +978,8 @@ def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(hos
         target.symlink_to(elsewhere)
     out = installer(host)
     assert install_refusal(host, out) == why
-    assert not release_dir(host).exists() and started(host) == [] and list(elsewhere.iterdir()) == []
+    assert not (release_dir(host) / ".complete").exists()
+    assert started(host) == [] and list(elsewhere.iterdir()) == []
 
 
 @pytest.mark.parametrize("branch", ["fetch", "completed"])
@@ -1004,6 +1010,17 @@ def test_a_scratch_refusal_comes_before_any_root_change_with_no_scratch_build(ho
     out = installer(host, *(["--fetch"] if branch == "fetch" else []))
     assert install_refusal(host, out) == why
     assert started(host) == [] and list(elsewhere.iterdir()) == []
+
+
+def test_a_backup_directory_link_refuses_an_adoption_before_any_root_change(host: Host) -> None:
+    host.hand_made_admind()
+    elsewhere = host.home() / "elsewhere"
+    elsewhere.mkdir()
+    host.install_dir().mkdir(parents=True)
+    (host.install_dir() / "backup").symlink_to(elsewhere)
+    out = installer(host, "--fetch", "--adopt")
+    assert install_refusal(host, out) == "the backup directory is not the service user's directory"
+    assert list(elsewhere.iterdir()) == []
 
 
 def failing_mktemp(host: Host, where: str) -> None:

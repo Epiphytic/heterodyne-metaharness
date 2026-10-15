@@ -214,14 +214,25 @@ unmake() {
     done
 }
 
+# Every directory the install writes into, walked from the service user's home before any change, in every
+# branch: the preflight's, and again before the first change. `$1` is the commit. (The config and state
+# directories are read here, never written.)
+paths_check() {
+    local home
+    home=$(host "$service_home")
+    dir_check "user unit directory" --dir "$user_units" --kind units --home "$home"
+    dir_check "install directory" --dir "$install_dir" --kind private --home "$home"
+    dir_check "backup directory" --dir "$backups" --kind private --home "$home"
+    dir_check "releases directory" --dir "$releases" --kind private --home "$home"
+    dir_check "release directory" --dir "$releases/$1" --kind private --home "$home"
+    dir_check "scratch directory" --dir "$scratch_parent" --kind scratch --home "$home"
+}
+
 # platform_state.py plan for each wanted unit as its files are now: a refusal is the install's. The render
 # is empty, since it only decides between actions that go ahead.
 plan_check() {
     local u msg
-    dir_check "user unit directory" --dir "$user_units" --kind units --home "$(host "$service_home")"
-    dir_check "install directory" --dir "$install_dir" --kind private --home "$(host "$service_home")"
-    # every branch renders the services into it, the ones that skip the offline build check too
-    dir_check "scratch directory" --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")"
+    paths_check "$1"
     for u in "${wanted[@]}"; do
         if ! msg=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render /dev/null \
             --backup-dir "$backups" "${plan_flags[@]}" 2>&1 >/dev/null </dev/null); then
@@ -418,7 +429,7 @@ if [[ -z $staged ]]; then
         unmake "$scratch_parent" "$made" || refuse "the scratch directory can't be removed"
         trap 'rm -rf -- "$stage"' EXIT
     fi
-    plan_check
+    plan_check "$resolved"
     wsd_outside_check
 
     args=(--staged "$stage" --checkout "$checkout" --commit "$resolved" --archive-sha256 "$archive_sum"
@@ -519,7 +530,7 @@ fi
 
 # The user state as the preflight read it, read again before the first change.
 service_path=$(login_path)
-plan_check
+plan_check "$commit"
 wsd_outside_check
 
 # --- step 3: the store owner, the store and the helper copy ---

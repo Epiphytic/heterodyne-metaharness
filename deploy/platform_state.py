@@ -448,7 +448,8 @@ def main(argv: list[str]) -> int:
     dd.add_argument("--kind", required=True, choices=("units", "private", "scratch"))
     dd.add_argument("--home", required=True)
     dd.add_argument("--what", required=True, choices=("user unit directory", "install directory",
-                                                      "scratch directory"))
+                                                      "backup directory", "releases directory",
+                                                      "release directory", "scratch directory"))
     dd.add_argument("--make", action="store_true")
     args = ap.parse_args(argv)
     if getattr(args, "unit", None) is not None and args.unit not in MANAGED:
