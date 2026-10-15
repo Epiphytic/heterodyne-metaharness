@@ -53,7 +53,7 @@ from heterodyne.sandbox.spec import (
 )
 from heterodyne.session import shim
 from heterodyne.session.server import BoundaryBusy, SessionServer
-from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
+from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain, has_controls
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -89,9 +89,6 @@ SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
 STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
 BRIEF_SECONDS = 60.0    # the probe turn's end, then the brief's prompt (plan 5i T4)
-# Terminal controls a steer may not carry: all of C0 but tab and newline, DEL and C1. ESC could end the
-# bracketed paste early (`\x1b[201~`) and CR then submit what follows as prompts of its own.
-STEER_UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -508,7 +505,7 @@ class SandboxRuntime:
             size = len(text.encode("utf-8"))
         except UnicodeEncodeError:
             raise SteerRefused("the text is not valid UTF-8") from None
-        if STEER_UNSAFE.search(text):
+        if has_controls(text):
             raise SteerRefused("the text has terminal control characters")
         if size > STEER_MAX:
             raise SteerRefused("the text is too long to steer")
