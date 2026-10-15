@@ -222,7 +222,7 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
     gate = ClaimGate(s.lock_dir, beads, cp)
     deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
                 usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
-                selections=selections_at(s.config_dir))
+                selections=selections_at(s.config_dir), inbox_attempts=s.inbox_attempts_before_human)
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams})
 
 
@@ -241,6 +241,8 @@ class Wsd:
         self.wanted_pause: dict[str, bool] = {}     # the last pause or resume asked, per workstream
         self.wakes: dict[str, asyncio.TimerHandle] = {}     # the armed quota wake, per workstream
         self.waking: set[asyncio.Task[None]] = set()        # wake pickups not yet finished
+        self.loop: asyncio.AbstractEventLoop | None = None  # serve's loop, for the runtime's wakes
+        self.event_wakes: set[str] = set()      # a session event wake scheduled, its pickup not yet queued
 
     # --- blocking work (worker threads) ---
 
@@ -477,10 +479,44 @@ class Wsd:
         for handle in self.wakes.values():
             handle.cancel()
         self.wakes.clear()
+        self.event_wakes.clear()
         tasks = list(self.waking)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    # --- session event wakes (plan 5i) ---
+
+    def wake(self, name: str) -> None:
+        """Called by the runtime from a socket thread once a session event is logged: one TURN_ENDED pickup
+        with no ref, which joins any queued pickup with no ref, so a burst costs at most one queued job."""
+        loop = self.loop
+        if loop is None or self.stopping or name not in self.parts.schedulers:
+            return
+        with contextlib.suppress(RuntimeError):         # the loop has closed: nothing to wake
+            loop.call_soon_threadsafe(self._event_wake, name)
+
+    def _event_wake(self, name: str) -> None:
+        if self.stopping or name in self.event_wakes:
+            return
+        self.event_wakes.add(name)
+        task = asyncio.get_running_loop().create_task(self._event_pickup(name))
+        self.waking.add(task)
+        task.add_done_callback(self.waking.discard)
+
+    async def _event_pickup(self, name: str) -> None:
+        self.event_wakes.discard(name)      # from here a new event queues behind this pickup
+        with contextlib.suppress(JobFailed, Stopping):
+            await self.pickup(name, Trigger(TriggerKind.TURN_ENDED))
+
+    def _subscribe(self) -> None:
+        """D6: each runtime learns, per workstream it serves, the ops that workstream handles."""
+        runtimes: dict[int, tuple[AgentRuntime, dict[str, frozenset[str]]]] = {}
+        for name, s in self.parts.schedulers.items():
+            _, ops = runtimes.setdefault(id(s.d.runtime), (s.d.runtime, {}))
+            ops[name] = frozenset(s.d.session_handlers) - {"stop"}
+        for runtime, ops in runtimes.values():
+            runtime.subscribe(self.wake, ops)
 
     async def handle(self, req: CtlRequest) -> CtlReply:
         why = refusal(req)
@@ -647,6 +683,8 @@ class Wsd:
         """Run until `stop` is set or a timer dies. Returns (or raises) only once no job is running, or
         raises Undrained if some still are after DRAIN_SECONDS. A stop during startup goes straight to
         the drain; the socket and the timers never start after it."""
+        self.loop = asyncio.get_running_loop()
+        self._subscribe()               # before any pickup: a session event from now on wakes its lane
         starting = asyncio.create_task(self._startup())
         stopped = asyncio.create_task(stop.wait())
         try:
