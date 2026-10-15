@@ -2788,7 +2788,8 @@ def test_a_new_generation_after_a_spent_boundary_can_be_steered(rig: RuntimeRig,
     rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
     pane = record(rig, spec.session_key).tmux_session
     server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
     rig.tmux.paste(pane, "start")
-    wait_for(lambda: server.turns().idle)
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
     rig.runtime.steer(spec.session_key, 2, "second generation")
     wait_for(lambda: "echo: second generation" in rig.tmux.capture(pane, 50))
