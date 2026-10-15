@@ -1171,3 +1171,12 @@ def test_a_long_run_of_failures_never_overflows_the_backoff(tmp_path: Path, fake
     rig.pickup()
     row = rig.journal.ask(stop_ref())
     assert row is not None and row.state == "delivered" and row.next_at == rig.clock() + OWED_BACKOFF_MAX
+
+
+@pytest.mark.parametrize("body", ["UNKNOWN_BODY", "AMBIGUOUS_BODY", "ENDED_BODY"])
+def test_every_task_6_body_ends_with_what_to_ask_the_admin_agent(body: str) -> None:
+    """Operator texts are state-only and close with what to ask the admin agent: no command, no host."""
+    text = str(getattr(asks_module, body))
+    tail = text[text.rindex(". ") + 2:]
+    assert tail.startswith("Ask the admin agent"), body
+    assert "host" not in text and "`" not in text and "$" not in text, body

@@ -130,12 +130,14 @@ REPOST = ":repost"
 ASK_POST_AMBIGUOUS = "a post of the question had an unknown outcome and admind lists more than one match"
 AMBIGUOUS_BODY = ("wsd can't tell which of admind's asks is the question the agent working on {bead} asked: "
                   "a reply was lost, and admind lists more than one new ask for its bead. wsd will not post "
-                  "it again, so it marked the task needs-human. The question is on bead {child}.")
+                  "it again, so it marked the task needs-human. The question is on bead {child}. Ask the "
+                  "admin agent to check its asks for them, then release the task.")
 BACKOFF_DOUBLINGS = 16          # the backoff's exponent, capped before the power
 ASK_REPOSTED = "the question's ask ended without an answer; it was posted again"
 ASK_ENDED = "the question's ask ended without an answer, twice"
 ENDED_BODY = ("The question the agent working on {bead} asked ended in admind twice without an answer, so "
-              "wsd marked the task needs-human. The question is on bead {child}.")
+              "wsd marked the task needs-human. The question is on bead {child}. Ask the admin agent to "
+              "release the task once the question is settled.")
 NO_ANSWER = "a question's answer could not be read this pickup (%s); it is read again at the next"
 NO_CANCEL = "a delivered question's ask could not be cancelled (%s); it is tried again later"
 OWED_BACKOFF_MAX = 1800         # seconds between an owed question's attempts, at most
