@@ -2326,10 +2326,17 @@ def pulled(rig: RuntimeRig, want: int, since: Mapping[str, tuple[int, int]] | No
     return got
 
 
+def launch_briefed(rig: RuntimeRig, spec: LaunchSpec) -> None:
+    """Launch `spec` (with a brief) and wait for the brief's Stop in its log: launch returns once the
+    brief is taken, and its Stop may still be on its way."""
+    rig.runtime.launch(spec)
+    wait_for(lambda: rig.runtime.logs[spec.session_key].last >= 1)
+
+
 def briefed(rig: RuntimeRig, ops: frozenset[str] = frozenset(), profile: str = "p-one") -> LaunchSpec:
     rig.runtime.subscribe(lambda _ws: None, {"alpha": ops})
     spec = replace(launch_spec(rig, profile), brief="start")
-    rig.runtime.launch(spec)
+    launch_briefed(rig, spec)
     return spec
 
 
@@ -2411,7 +2418,7 @@ def test_ops_are_enabled_per_workstream(rig: RuntimeRig) -> None:
     rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"}),
                                              "beta": frozenset({"question"})})     # D6: not alpha's
     spec = replace(launch_spec(rig, "p-one"), brief="start")
-    rig.runtime.launch(spec)
+    launch_briefed(rig, spec)
     assert ws_request(rig, spec.session_key, "question", '{"text": "hm"}') == (
         1, {"ok": False, "error": "unsupported"})
     evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"
@@ -2425,7 +2432,7 @@ def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> No
     reaches a log the teardown has closed, and is refused at commit, never logged after the end."""
     rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
     spec = replace(launch_spec(rig, "p-one"), brief="start")
-    rig.runtime.launch(spec)
+    launch_briefed(rig, spec)
     late = rig.runtime.logs[spec.session_key]
     rig.runtime.stop(spec.session_key)
     assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
@@ -2440,7 +2447,7 @@ def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
     monkeypatch.setattr(session_server, "CLOSE_SECONDS", 0.1)
     rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
     spec = replace(launch_spec(rig, "p-one"), brief="start")
-    rig.runtime.launch(spec)
+    launch_briefed(rig, spec)
     layout = rig.runtime.layout(spec.session_key)
     late = rig.runtime.logs[spec.session_key]
     real = late.request
