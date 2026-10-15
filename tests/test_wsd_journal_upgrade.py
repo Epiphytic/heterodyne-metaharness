@@ -828,6 +828,7 @@ def insert(path: Path, table: str, values: dict[str, object]) -> None:
 
 
 AT = "2026-10-15T00:00:00+00:00"
+CLOCK = 1760486400                      # notices keep the injected clock's epoch seconds
 
 
 @pytest.mark.parametrize(("table", "base", "column", "good", "bad"), [
@@ -839,12 +840,19 @@ AT = "2026-10-15T00:00:00+00:00"
     ("asks", {"ref": "q", "ws": WS, "bead": "btq-1", "kind": "question", "state": "answered",
               "created_at": AT, "updated_at": AT},
      "answer", [None, "", "a" * 16000], ["a" * 16001]),
-    ("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "created_at": AT,
-                 "updated_at": AT},
+    ("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "created_at": CLOCK,
+                 "updated_at": CLOCK},
      "state", ["owed", "sending", "posted", "uncertain", "refused", "withheld"], ["sent", "", None]),
-    ("notices", {"ref": "n", "ws": WS, "title": "t", "body": "", "state": "owed", "created_at": AT,
-                 "updated_at": AT},
+    ("notices", {"ref": "n", "ws": WS, "title": "t", "body": "", "state": "owed", "created_at": CLOCK,
+                 "updated_at": CLOCK},
      "kind", ["stuck", "waiting", "closed", "review"], ["question", "", None]),
+    *(("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "state": "owed",
+                   "created_at": CLOCK, "updated_at": CLOCK},
+       column, [CLOCK, 0], [AT, 1760486400.5, None])
+      for column in ("created_at", "updated_at")),
+    ("notices", {"ref": "n", "ws": WS, "kind": "stuck", "title": "t", "body": "", "state": "owed",
+                 "created_at": CLOCK, "updated_at": CLOCK},
+     "next_at", [None, CLOCK], [AT, 1760486400.5]),
 ])
 def test_the_bridge_tables_check_their_states(tmp_path: Path, table: str, base: dict[str, object],
                                               column: str, good: list[object], bad: list[object]) -> None:

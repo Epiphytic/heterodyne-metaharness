@@ -174,9 +174,10 @@ V5_TABLES = (
     next_at INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
     f"""CREATE TABLE notices (ref TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT,
     kind TEXT NOT NULL CHECK (kind IN ({_among(NOTICE_KINDS)})), title TEXT NOT NULL, body TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ({_among(NOTICE_STATES)})), notice_id TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER, why TEXT, created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL)""",
+    state TEXT NOT NULL CHECK (state IN ({_among(NOTICE_STATES)})), notice_id TEXT, attempts INTEGER NOT NULL
+    DEFAULT 0, next_at INTEGER CHECK (next_at IS NULL OR typeof(next_at) = 'integer'), why TEXT,
+    created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'),
+    updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'))""",
     """CREATE TABLE resume_notes (seq INTEGER PRIMARY KEY AUTOINCREMENT, ws TEXT NOT NULL, bead TEXT NOT NULL,
     ref TEXT NOT NULL UNIQUE, text TEXT NOT NULL, delivered_at TEXT,
     steer_attempts INTEGER NOT NULL DEFAULT 0 CHECK (steer_attempts >= 0))""",
