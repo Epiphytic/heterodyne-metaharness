@@ -22,6 +22,7 @@ from heterodyne.wsd.journal import (
     V1_SCHEMA,
     V2_META,
     V2_TABLES,
+    V4_TABLES,
     Adoption,
     Journal,
     JournalCorrupt,
@@ -37,6 +38,7 @@ from heterodyne.wsd.states import Reason
 from heterodyne.wsd.workstream import WorkstreamSettings
 
 V2 = [stmt.split()[2] for stmt in V2_TABLES]
+V4 = [stmt.split()[2] for stmt in V4_TABLES]
 V1_TABLES = ("meta", "inbox", "ops", "beads", "holds", "workstreams", "events")
 
 
@@ -59,12 +61,12 @@ def db_path(rig: Rig) -> Path:
 
 
 def to_v1(rig: Rig) -> None:
-    """Make the rig's journal plan 3's: the version 2 tables dropped and version 1, and every bead without
-    `wsd_launches`. What the runtime and the beads say of each session is kept."""
+    """Make the rig's journal plan 3's: the version 2 and 4 tables dropped and version 1, and every bead
+    without `wsd_launches`. What the runtime and the beads say of each session is kept."""
     rig.journal.close()
     db = sqlite3.connect(db_path(rig), isolation_level=None)
     try:
-        for table in ["receipts", *(t for t in V2 if t != "receipts")]:
+        for table in [*V4, "receipts", *(t for t in V2 if t != "receipts")]:
             db.execute(f"DROP TABLE {table}")
         db.execute("DELETE FROM meta WHERE key = 'usage_receipt_seq'")
         db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")

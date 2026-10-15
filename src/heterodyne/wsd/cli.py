@@ -35,7 +35,14 @@ from heterodyne.wsd import btq, ctl, upgrade
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.daemon import Undrained, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
-from heterodyne.wsd.journal import V2_VERSION, Journal, JournalBusy, JournalCorrupt, JournalNeedsUpgrade
+from heterodyne.wsd.journal import (
+    V2_VERSION,
+    V3_VERSION,
+    Journal,
+    JournalBusy,
+    JournalCorrupt,
+    JournalNeedsUpgrade,
+)
 from heterodyne.wsd.runtime import AgentRuntime
 from heterodyne.wsd.settings import WsdSettings, resolve
 from heterodyne.wsd.usage import UsageReader
@@ -102,16 +109,24 @@ def run(s: WsdSettings, factory: btq.QueueFactory, runtime: AgentRuntime,
 
 
 def _open(s: WsdSettings, factory: btq.QueueFactory) -> Journal:
-    try:
-        return Journal(s.journal)
-    except JournalNeedsUpgrade as needs:
-        if needs.version == V2_VERSION:
-            upgrade.run_2_to_3(s.journal)          # adds columns only: no bead or account is read
+    """The journal, upgraded a version at a time until it opens. Each upgrade either lands its version or
+    leaves the file as it was; a version asked for twice is JournalCorrupt, so the loop ends."""
+    seen: set[str] = set()
+    while True:
+        try:
             return Journal(s.journal)
-        if s.accounts is None:
-            raise ConfigError("the journal upgrade needs the host's accounts") from None
-        upgrade.run(BeadsAdapter(factory), s.accounts, s.journal)
-        return Journal(s.journal)
+        except JournalNeedsUpgrade as needs:
+            if needs.version in seen:
+                raise JournalCorrupt("the journal upgrade did not land") from None
+            seen.add(needs.version)
+            if needs.version == V3_VERSION:
+                upgrade.run_3_to_4(s.journal)      # adds empty tables only
+            elif needs.version == V2_VERSION:
+                upgrade.run_2_to_3(s.journal)      # adds columns only: no bead or account is read
+            elif s.accounts is None:
+                raise ConfigError("the journal upgrade needs the host's accounts") from None
+            else:
+                upgrade.run(BeadsAdapter(factory), s.accounts, s.journal)
 
 
 async def _serve(daemon: Wsd) -> None:
