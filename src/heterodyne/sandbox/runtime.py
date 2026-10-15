@@ -53,7 +53,7 @@ from heterodyne.sandbox.spec import (
 )
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
-from heterodyne.tmux import Tmux, TmuxError
+from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -78,6 +78,7 @@ from heterodyne.wsd.runtime import (
     Signal,
     Started,
     SteerRefused,
+    SteerUncertain,
     UnlandedView,
     UsageSeen,
 )
@@ -86,6 +87,7 @@ DEFAULT_ACCOUNT = "default"
 TRUST_SECONDS = 90
 SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
+STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -304,6 +306,7 @@ class SandboxRuntime:
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
+        self.steered: dict[str, tuple[SessionServer, int]] = {}     # key -> (socket, turn ends) at a steer
 
     # --- names ---
 
@@ -485,7 +488,32 @@ class SandboxRuntime:
         return EventBatch()
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
-        raise SteerRefused("steering is not implemented yet")     # plan 5i Task 5
+        """D4: paste into the session's pane, only at a turn boundary this process's socket has seen. After
+        a restart the turn state is empty, so the next turn end must come first; and a boundary a steer
+        (even an uncertain one) pasted at is spent until the next turn end."""
+        try:
+            rec = read_record(self.layout(session_key))
+        except RuntimeUnavailable:
+            raise SteerRefused("the session record can't be read") from None
+        if rec is None or rec.phase is not Phase.RUNNING:
+            raise SteerRefused("the session is not running")
+        if rec.generation != generation:
+            raise SteerRefused("the session is running another generation")
+        if len(text.encode("utf-8", "replace")) > STEER_MAX:
+            raise SteerRefused("the text is too long to steer")
+        server = self.servers.get(session_key)
+        turns = None if server is None else server.turns()
+        if server is None or turns is None or not turns.idle or self.steered.get(session_key) == (
+                server, turns.stops):
+            raise SteerRefused("the session is mid-turn")
+        try:
+            self.c.tmux.paste(rec.tmux_session, text)
+        except TmuxPasteUncertain:
+            self.steered[session_key] = (server, turns.stops)
+            raise SteerUncertain("the steer may have been delivered") from None
+        except TmuxError:
+            raise SteerRefused("the paste failed before reaching the session") from None
+        self.steered[session_key] = (server, turns.stops)
 
     def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
         return None                                                 # plan 5i Task 3 wires the wake

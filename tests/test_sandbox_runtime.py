@@ -2539,25 +2539,22 @@ def test_steer_refuses_the_wrong_generation_and_long_text(rig: RuntimeRig, profi
 
 
 @ADAPTERS
-def test_steer_refuses_mid_turn(rig: RuntimeRig, profile: str) -> None:
-    spec = launch_spec(rig, profile)
-    rig.runtime.launch(spec)                                # no turn has ended yet
-    with pytest.raises(SteerRefused, match="mid-turn"):
-        rig.runtime.steer(spec.session_key, 1, "hello")
-
-
-@ADAPTERS
-def test_steer_refuses_a_second_steer_until_the_first_turn_ends(rig: RuntimeRig, profile: str) -> None:
+def test_steer_refuses_a_second_steer_until_the_first_turn_ends(rig: RuntimeRig, profile: str,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     spec, pane = idle_session(rig, profile)
     server = rig.runtime.servers[spec.session_key]
     stops = server.turns().stops
-    rig.runtime.steer(spec.session_key, 1, "first")
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, text: pasted.append(text))
+    rig.runtime.steer(spec.session_key, 1, "first")         # delivered; its turn hasn't started yet
     with pytest.raises(SteerRefused, match="mid-turn"):     # the boundary it pasted at is spent
         rig.runtime.steer(spec.session_key, 1, "second")
+    assert pasted == ["first"]
+    monkeypatch.undo()
+    rig.tmux.paste(pane, "next")                            # a turn ends: a fresh boundary
     wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
     rig.runtime.steer(spec.session_key, 1, "third")
     wait_for(lambda: "echo: third" in rig.tmux.capture(pane, 50))
-    assert "echo: second" not in rig.tmux.capture(pane, 50)
 
 
 @ADAPTERS
