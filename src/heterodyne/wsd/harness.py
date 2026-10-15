@@ -325,8 +325,9 @@ class HarnessOps:
                 if row is not None and row.state == "staged":
                     self.journal.harness_set(staging_id, iso(self.clock()), state="posted",
                                              ask_id=_ask_id(reply))
-        except Exception:
-            log.exception("install %s: the approval could not be created or posted", install)
+        except Exception as exc:  # noqa: BLE001 - logged by type only: btq's errors carry `bd`'s stderr
+            log.error("install %s: the approval could not be created or posted (%s)", install,
+                      type(exc).__name__)
             self._fail_open(staging_id, ASK_UNPOSTABLE)
 
     def _fail_open(self, staging_id: str, constant: str) -> None:
@@ -356,17 +357,21 @@ class HarnessOps:
 
     def advance(self, now: int) -> None:
         """Expire, decide and publish each open row (E13, E21). A row that raises is logged, once until it
-        advances again, and the loop goes on to the next."""
+        advances again, and the loop goes on to the next. Every harness failure is logged by its exception's
+        type only, never its text or traceback: an exception can quote untrusted text (btq's `bd` stderr, a
+        readout's field names)."""
         with self.lock:
             for row in self.journal.harness_installs(*OPEN):
                 try:
                     self._advance(row, now)
-                except Exception:  # noqa: BLE001 - one row's trouble never stops the others; it retries
+                except Exception as exc:  # noqa: BLE001 - one row's trouble never stops the others; it retries
+                    kind = type(exc).__name__
                     if row.staging_id in self.failing:
-                        log.debug("install %s: advancing failed again", self._name(row), exc_info=True)
+                        log.debug("install %s: advancing failed again (%s)", self._name(row), kind)
                     else:
                         self.failing.add(row.staging_id)
-                        log.exception("install %s: advancing failed; retried each pickup", self._name(row))
+                        log.error("install %s: advancing failed; retried each pickup (%s)", self._name(row),
+                                  kind)
                 else:
                     self.failing.discard(row.staging_id)
 
@@ -433,8 +438,8 @@ class HarnessOps:
     def _recover_store(self) -> None:
         try:
             self.store.recover()
-        except Exception:  # noqa: BLE001 - `outcome` then says what the store has
-            log.warning("the store's recovery failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - `outcome` then says what the store has
+            log.warning("the store's recovery failed (%s)", type(exc).__name__)
 
     def _settle(self, row: HarnessInstall) -> None:
         """An approved row, from what the store reports (E21): staged is published; a published outcome
@@ -712,8 +717,9 @@ class HarnessOps:
             self.journal.harness_taint_cleared(adapter, install)
             try:
                 (self.alerts_dir / f"{old}.json").unlink(missing_ok=True)
-            except OSError:
-                log.warning("install %s: its old taint alert could not be removed", install, exc_info=True)
+            except OSError as exc:
+                log.warning("install %s: its old taint alert could not be removed (%s)", install,
+                            type(exc).__name__)
 
 
 def _check_archive(impl: Adapter, kind: str, archive: Path) -> None:

@@ -173,8 +173,8 @@ class Scheduler:
             self.wake_at = None
             try:
                 self.d.harness.advance(self.d.clock())
-            except Exception:  # noqa: BLE001 - an install approval's trouble never stops the workstream
-                log.exception("advancing the install approvals failed")
+            except Exception as exc:  # noqa: BLE001 - an install approval's trouble never stops the workstream
+                log.error("advancing the install approvals failed (%s)", type(exc).__name__)
             try:
                 outcome = self._pickup(trigger)
             except BeadsUnavailable as exc:
@@ -278,8 +278,8 @@ class Scheduler:
                 self.parker.park(entry.bead, (), INSTALL_TAINTED, True)
             try:
                 self.d.harness.tainted(signal.adapter, signal.install)
-            except Exception:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
-                log.exception("alerting install %s's taint failed", signal.install)
+            except Exception as exc:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
+                log.error("alerting install %s's taint failed (%s)", signal.install, type(exc).__name__)
             return
         if isinstance(signal, ExecDirCleared):
             shown = dataclasses.replace(signal, names=tuple(shown_name(n) for n in signal.names))

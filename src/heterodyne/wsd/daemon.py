@@ -304,8 +304,8 @@ class Wsd:
         recover every workstream, then run one startup pickup each (§3.3 step 6 comes after this)."""
         try:
             self.parts.harness.recover()
-        except Exception:  # noqa: BLE001 - the rows stay as they were; the next advance retries the publishes
-            log.exception("the managed installs' recovery failed")
+        except Exception as exc:  # noqa: BLE001 - the rows stay as they were; the next advance retries
+            log.error("the managed installs' recovery failed (%s)", type(exc).__name__)
         for name in self.parts.schedulers:
             self.recover_one(name)
         return {name: self.pickup_one(name, Trigger(TriggerKind.STARTUP)) for name in self.parts.schedulers}
@@ -358,8 +358,8 @@ class Wsd:
             return CtlReply("ok", f"pruned {len(done.installs)} install(s)", data)
         except (HarnessRefused, StoreRefused) as exc:
             return CtlReply("refused", exc.constant)
-        except (OSError, JournalBusy):
-            log.exception("wsctl harness %s failed", h.action)
+        except (OSError, JournalBusy) as exc:
+            log.error("wsctl harness %s failed (%s)", h.action, type(exc).__name__)
             return CtlReply("failed", HARNESS_FAILED)
 
     def set_pause(self, name: str, paused: bool) -> CtlReply:

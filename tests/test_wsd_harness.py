@@ -1413,3 +1413,114 @@ def test_an_ask_admind_refuses_to_post_fails_the_install(h: H) -> None:
     r = settle(h, staging_id)
     assert r.state == "failed" and r.failure == wh.ASK_UNPOSTABLE
 
+
+
+# --- T10 c2: no harness failure logs exception text or a traceback. An exception can carry untrusted text
+# (btq's `bd` raises with its stderr; msgspec quotes a field name), so each site logs the type only. ---
+
+LEAK = hashlib.sha256(b"t10 log redaction").hexdigest()
+
+
+def leaked(caplog: pytest.LogCaptureFixture) -> bool:
+    return LEAK in caplog.text or any(rec.exc_info is not None for rec in caplog.records)
+
+
+def raising(error: BaseException) -> Callable[..., Any]:
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+    return fail
+
+
+def test_an_approval_that_cannot_be_created_logs_no_exception_text(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    monkeypatch.setattr(h.ops, "_post", raising(RuntimeError(f"bd failed: {LEAK}")))
+    with caplog.at_level(logging.DEBUG):
+        r = settle(h, h.ops.install("codex", None))
+    assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE)
+    assert "the approval could not be created or posted (RuntimeError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_row_that_fails_to_advance_logs_no_exception_text(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    posted(h)
+    monkeypatch.setattr(h.ops, "_advance", raising(RuntimeError(LEAK)))
+    with caplog.at_level(logging.DEBUG):
+        h.ops.advance(h.clock())
+        h.ops.advance(h.clock())
+    assert "advancing failed; retried each pickup (RuntimeError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_failed_store_recovery_logs_no_exception_text(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    monkeypatch.setattr(h.store, "recover", raising(OSError(5, LEAK)))
+    with caplog.at_level(logging.DEBUG):
+        h.ops._recover_store()
+    assert "the store's recovery failed (OSError)" in caplog.text and not leaked(caplog)
+
+
+def test_an_old_alert_that_cannot_be_removed_logs_no_exception_text(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    _, a = published(h)
+    h.ops.tainted("codex", a)
+    monkeypatch.setattr(Path, "unlink", raising(OSError(5, LEAK)))
+    with caplog.at_level(logging.DEBUG):
+        h.ops._clear_alert("codex", a)
+    assert "its old taint alert could not be removed (OSError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_pickup_whose_install_advance_fails_logs_no_exception_text(
+        rigged: tuple[Rig, H], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    rig, h = rigged
+    monkeypatch.setattr(h.ops, "advance", raising(RuntimeError(LEAK)))
+    with caplog.at_level(logging.DEBUG):
+        rig.pickup()
+    assert "advancing the install approvals failed (RuntimeError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_taint_alert_that_fails_logs_no_exception_text(
+        rigged: tuple[Rig, H], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    rig, h = rigged
+    _, a = published(h)
+    select(h, "codex", pin_of(h, "codex", a))
+    assert rig.pickup() is Outcome.STARTED
+    monkeypatch.setattr(h.ops, "tainted", raising(RuntimeError(LEAK)))
+    rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
+    with caplog.at_level(logging.DEBUG):
+        rig.pickup()
+    assert HELD in rig.beads.show(WS, "btq-1").labels
+    assert "taint failed (RuntimeError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_startup_install_recovery_that_fails_logs_no_exception_text(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    class Failing:
+        def recover(self) -> None:
+            raise RuntimeError(LEAK)
+
+        def advance(self, now: int) -> None:
+            pass
+
+    s = settings_for(tmp_path)
+    journal = Journal(s.journal)
+    try:
+        wsd = assembled(s, journal, FakeRuntime(), World(tmp_path / "btq-state"), Failing())
+        with caplog.at_level(logging.DEBUG):
+            wsd.startup()
+    finally:
+        journal.close()
+    assert "the managed installs' recovery failed (RuntimeError)" in caplog.text and not leaked(caplog)
+
+
+def test_a_harness_op_io_error_logs_no_exception_text(
+        h: H, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    s = settings_for(tmp_path)
+    journal = Journal(s.journal)
+    try:
+        wsd = assembled(s, journal, FakeRuntime(), World(tmp_path / "btq-state"), h.ops)
+        monkeypatch.setattr(h.ops, "list", raising(OSError(5, LEAK)))
+        with caplog.at_level(logging.DEBUG):
+            reply = wsd.harness_one(HarnessRequest("list"))
+    finally:
+        journal.close()
+    assert (reply.result, reply.message) == ("failed", HARNESS_FAILED)
+    assert "wsctl harness list failed (OSError)" in caplog.text and not leaked(caplog)
