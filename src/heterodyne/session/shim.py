@@ -68,6 +68,7 @@ REQUEST_OPS = ("close", "ask", "question")
 CLOSE_EVIDENCE_MAX = 32768      # UTF-8 bytes of `ws-request close --evidence-file F` (plan 5i)
 REQUEST_BODY_MAX = 32768        # an ask's or a question's JSON object, encoded
 RID = re.compile(r"[0-9a-f]{16}")
+TOKEN_ROOM = 256                # bytes kept for the launch token (32 hex) when a request's line is sized
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], None]
@@ -351,6 +352,8 @@ def run_request(words: Sequence[str], env: Mapping[str, str], *, clock: Clock = 
     payload = _request_payload(words)
     if isinstance(payload, tuple):
         return payload
+    if len(_encode({"token": "", "type": "ws_request", "payload": payload})) + 1 + TOKEN_ROOM > MAX_LINE:
+        return _refused("too_large")            # Codex T2 c1 B2: the caller's error, even with wsd away
     found = _config(env)
     if found is None:
         return EX_TEMPFAIL, DENY_REASON

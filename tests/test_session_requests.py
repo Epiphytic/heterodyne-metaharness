@@ -1,12 +1,15 @@
 """Plan 5i part 1 T2: the shim's ws-request ops and the server's request callback."""
 
 import json
+import socket
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from heterodyne.session import shim
+from heterodyne.session import server, shim
 from heterodyne.session.server import UNAVAILABLE, UNSUPPORTED, SessionServer
 
 TOKEN = "tok-" + "z" * 20  # noqa: S105 (test value)
@@ -199,3 +202,93 @@ def test_no_request_is_answered_once_the_server_has_closed(run: Path, tmp_path: 
     (tmp_path / "ev").write_text("done")
     assert request(run, "close", "--evidence-file", str(tmp_path / "ev"))[0] == shim.EX_TEMPFAIL
     assert seen == []
+
+
+def test_a_payload_too_large_on_the_wire_is_refused_before_the_config_is_read(tmp_path: Path) -> None:
+    """Codex T2 c1 B2: 32,768 control bytes pass the evidence read but escape past MAX_LINE; that is the
+    caller's error (exit 2), even with no session config to be found."""
+    worst = tmp_path / "worst"
+    worst.write_bytes(b"\x01" * shim.CLOSE_EVIDENCE_MAX)
+    nowhere = tmp_path / "absent"                               # no token, no config, no socket
+    assert request(nowhere, "close", "--evidence-file", str(worst)) == (2, {"ok": False,
+                                                                           "error": "too_large"})
+
+
+def test_a_lost_reply_after_the_callback_committed_is_answered_from_the_first(
+        run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reply to an accepted request is lost on the way back; the shim's resend carries the same rid,
+    and the runtime's callback (here, a rid map like the event log's, Task 3) answers it with the first
+    result without applying it again."""
+    effects: list[str] = []
+    first: dict[str, dict[str, Any]] = {}
+
+    def once(payload: dict[str, Any]) -> dict[str, Any]:
+        rid = payload["rid"]
+        if rid not in first:
+            effects.append(rid)
+            first[rid] = {"ok": True, "ref": f"sk-a:g1:e{len(effects)}", "message": "accepted"}
+        return first[rid]
+
+    s, seen = serve(run, once)
+    read, handle = s._read, s._handle  # pyright: ignore[reportPrivateUsage]
+    conns: list[socket.socket] = []
+
+    def remember(conn: socket.socket) -> bytes | None:
+        conns.append(conn)
+        return read(conn)
+
+    def lose_first(line: bytes) -> dict[str, Any]:
+        answer = handle(line)
+        if len(seen) == 1:
+            conns[-1].shutdown(socket.SHUT_RDWR)                # committed, then the reply can't be sent
+        return answer
+
+    monkeypatch.setattr(s, "_read", remember)
+    monkeypatch.setattr(s, "_handle", lose_first)
+    try:
+        (tmp_path / "ev").write_text("done")
+        rc, reply = request(run, "close", "--evidence-file", str(tmp_path / "ev"))
+    finally:
+        s.close()
+    assert len(seen) == 2 and seen[0]["rid"] == seen[1]["rid"]
+    assert rc == 0 and reply["ref"] == "sk-a:g1:e1" and len(effects) == 1
+
+
+def test_close_waits_for_a_callback_in_flight_and_starts_no_more(run: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T2 c1 B1: no callback starts once close has begun, and close returns only after every
+    callback already running has finished, so none applies its effect after teardown. The callback here
+    outlasts close's bounded wait for handler threads."""
+    monkeypatch.setattr(server, "CLOSE_SECONDS", 0.05)
+    entered, release = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def slow(payload: dict[str, Any]) -> dict[str, Any]:
+        entered.set()
+        release.wait(10)
+        order.append(f"effect {payload['rid']}")
+        return {"ok": True, "ref": "sk-a:g1:e1", "message": "accepted"}
+
+    s, seen = serve(run, slow)
+    line = json.dumps({"token": TOKEN, "type": "ws_request",
+                       "payload": {"op": "close", "rid": "0123456789abcdef", "evidence": "x"}}) + "\n"
+    client = socket.socket(socket.AF_UNIX)
+    client.connect(str(run / "s.sock"))
+    client.sendall(line.encode())
+    assert entered.wait(5)
+
+    def closing() -> None:
+        s.close()
+        order.append("closed")
+
+    closer = threading.Thread(target=closing)
+    closer.start()
+    time.sleep(0.3)
+    assert closer.is_alive()                                    # still waiting for the callback
+    late = {"op": "close", "rid": "fedcba9876543210", "evidence": "x"}
+    assert s._request(late) == UNSUPPORTED  # pyright: ignore[reportPrivateUsage]
+    release.set()
+    closer.join(10)
+    client.close()
+    assert not closer.is_alive()
+    assert order == ["effect 0123456789abcdef", "closed"] and len(seen) == 1
