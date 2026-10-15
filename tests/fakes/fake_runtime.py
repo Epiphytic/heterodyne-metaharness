@@ -27,6 +27,7 @@ from heterodyne.wsd.runtime import (
     Signal,
     Started,
     SteerRefused,
+    SteerUncertain,
     UnlandedView,
 )
 
@@ -63,6 +64,8 @@ class FakeRuntime:
         self.ended_logs: set[tuple[str, int]] = set()   # (key, generation) logs marked final by end_log
         self.steers: list[tuple[str, int, str]] = []    # every steer delivered
         self.steer_error: Exception | None = None       # raised by the next steer, which delivers nothing
+        # (key, generation) whose steer was uncertain: every later steer to it is refused, as part 1's runtime
+        self.uncertain_steers: set[tuple[str, int]] = set()
         self.wake: Callable[[str], None] | None = None
         self.wakes = 0
         self.subscribed: Mapping[str, frozenset[str]] | None = None
@@ -165,8 +168,12 @@ class FakeRuntime:
                 raise SteerRefused("the session is not running")
             if self.generations[session_key] != generation:
                 raise SteerRefused("the session is running another generation")
+        if (session_key, generation) in self.uncertain_steers:
+            raise SteerRefused("an earlier steer to this session is uncertain")
         if self.steer_error is not None:
             error, self.steer_error = self.steer_error, None
+            if isinstance(error, SteerUncertain):
+                self.uncertain_steers.add((session_key, generation))     # durable, as the runtime's mark
             raise error
         self.steers.append((session_key, generation, text))
 

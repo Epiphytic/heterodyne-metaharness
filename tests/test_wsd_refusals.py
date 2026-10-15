@@ -22,11 +22,14 @@ from heterodyne.wsd.asks import (
     OPEN_ASK,
     QUESTION_INCOMPLETE,
     REFUSED_NOTE,
+    STEER_UNCERTAIN,
+    STEER_UNCERTAIN_BODY,
     AskBridge,
     steer_text,
 )
 from heterodyne.wsd.journal import InboxStatus, Journal
-from heterodyne.wsd.runtime import SessionEvent, SteerRefused
+from heterodyne.wsd.notices import Notices
+from heterodyne.wsd.runtime import SessionEvent, SteerRefused, SteerUncertain
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.session_events import SURFACE
 from heterodyne.wsd.states import BeadState
@@ -57,6 +60,30 @@ def bridge_of(rig: Rig) -> AskBridge:
 def started(tmp_path: Path) -> Rig:
     rig = make_rig(tmp_path)
     rig.asks_for = bridge_of
+    rig.restart()
+    rig.world.add(B)
+    assert rig.pickup() is Outcome.STARTED
+    return rig
+
+
+class Posts:
+    """admind's notice post, recorded: each call is one notice on the operator's phone."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def __call__(self, sock: Path, *, poster: str, title: str, body: str = "", timeout: float = 30.0) -> str:
+        self.sent.append((title, body))
+        return f"n{len(self.sent)}"
+
+
+def with_notices(tmp_path: Path, posts: Posts) -> Rig:
+    def build(rig: Rig) -> AskBridge:
+        notices = Notices(rig.journal, rig.root / "ask.sock", clock=rig.clock, cp=rig.cp, post=posts)
+        return AskBridge(rig.journal, rig.beads, rig.runtime, notices, None, rig.clock, ws=WS, cp=rig.cp)
+
+    rig = make_rig(tmp_path)
+    rig.asks_for = build
     rig.restart()
     rig.world.add(B)
     assert rig.pickup() is Outcome.STARTED
@@ -145,6 +172,74 @@ def test_a_refused_steer_is_retried_at_the_next_pickup(tmp_path: Path) -> None:
     note = refused(question.event_id, QUESTION_INCOMPLETE)
     assert rig.runtime.steers == [(rig.key(B), 1, steer_text([note]))]
     assert delivered(rig, ref) and attempts(rig, ref) == 1
+
+
+def test_an_uncertain_steer_is_delivered_uncertain_and_never_sent_again(tmp_path: Path) -> None:
+    """Part 1's contract (the lead's ruling, against the plan's three retries): one uncertain steer marks
+    its notes delivered, sends one stuck notice, and nothing is steered into that generation again."""
+    posts = Posts()
+    rig = with_notices(tmp_path, posts)
+    rig.runtime.steer_error = SteerUncertain("the paste may have landed")
+    question = ev(rig, "question", 1, body={})
+    rig.runtime.event(WS, question, ev(rig, "stop", 2))
+    rig.pickup()
+    ref = f"refused:{question.event_id}"
+    assert rig.runtime.steers == [] and delivered(rig, ref) and attempts(rig, ref) == 1
+    assert posts.sent == [(STEER_UNCERTAIN.format(bead=B), STEER_UNCERTAIN_BODY)]
+    nothing_created(rig)
+    rig.journal.note_add(WS, B, "answer:later", "a later note")
+    rig.pickup()
+    rig.pickup()                                            # the runtime's mark refuses every later steer
+    assert rig.runtime.steers == [] and not delivered(rig, "answer:later")
+    assert attempts(rig, "answer:later") == 0               # refused, so given back: never a reason to resend
+    assert len(posts.sent) == 1
+    park_and_resume(rig)
+    brief = rig.runtime.launches[-1].brief
+    assert "a later note" in brief and refused(question.event_id, QUESTION_INCOMPLETE) not in brief
+    rig.pickup()
+    assert rig.runtime.steers == [] and len(posts.sent) == 1
+
+
+def test_the_uncertain_steer_mark_survives_a_restart(tmp_path: Path) -> None:
+    """An overflowing brief's remainder, steered uncertainly: after a restart of wsd on the reopened
+    journal, it is neither steered again nor carried by the next brief, and the operator heard once."""
+    posts = Posts()
+    rig = with_notices(tmp_path, posts)
+    texts = [f"note {n}: " + "n" * 6000 for n in range(6)]
+    for n, text in enumerate(texts):
+        rig.journal.note_add(WS, B, f"answer:{n}", text)
+    rig.runtime.steer_error = SteerRefused("mid-turn")
+    rig.pickup()
+    park_and_resume(rig)                                    # the brief carries notes 0 and 1
+    rig.runtime.steer_error = SteerUncertain("the paste may have landed")
+    rig.pickup()                                            # 2 and 3: uncertain
+    assert [delivered(rig, f"answer:{n}") for n in range(6)] == [True] * 4 + [False] * 2
+    rig.restart()
+    for _ in range(3):
+        rig.pickup()                                        # 4 and 5 are refused by the mark, given back
+    assert rig.runtime.steers == [] and attempts(rig, "answer:4") == 0
+    park_and_resume(rig)
+    brief = rig.runtime.launches[-1].brief
+    assert [n for n, t in enumerate(texts) if t in brief] == [4, 5]
+    assert all(delivered(rig, f"answer:{n}") for n in range(6))
+    rig.pickup()
+    assert rig.runtime.steers == [] and len(posts.sent) == 1
+
+
+def test_a_notice_a_crash_cut_off_is_sent_at_the_next_pickup(tmp_path: Path) -> None:
+    posts = Posts()
+    rig = with_notices(tmp_path, posts)
+    rig.restart(CrashAt("asks.uncertain"))                  # the mark committed, the notice not yet sent
+    rig.runtime.steer_error = SteerUncertain("the paste may have landed")
+    rig.journal.note_add(WS, B, "answer:1", "one")
+    with pytest.raises(SimulatedCrash):
+        rig.pickup()
+    assert posts.sent == [] and delivered(rig, "answer:1")
+    rig.restart()
+    rig.pickup()
+    rig.pickup()
+    assert posts.sent == [(STEER_UNCERTAIN.format(bead=B), STEER_UNCERTAIN_BODY)]
+    assert rig.runtime.steers == []
 
 
 def test_a_crash_during_the_steer_counts_an_attempt(tmp_path: Path) -> None:
