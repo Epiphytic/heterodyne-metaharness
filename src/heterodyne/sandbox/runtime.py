@@ -64,6 +64,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    EventBatch,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -76,6 +77,7 @@ from heterodyne.wsd.runtime import (
     Session,
     Signal,
     Started,
+    SteerRefused,
     UnlandedView,
     UsageSeen,
 )
@@ -477,6 +479,16 @@ class SandboxRuntime:
                 self._poll(rec)
         with self.queue_lock:
             return self.queued.pop(ws, [])
+
+    def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
+        """Plan 5i: no session's events are logged yet (Task 3 adds the event log)."""
+        return EventBatch()
+
+    def steer(self, session_key: str, generation: int, text: str) -> None:
+        raise SteerRefused("steering is not implemented yet")     # plan 5i Task 5
+
+    def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
+        return None                                                 # plan 5i Task 3 wires the wake
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
