@@ -1,17 +1,21 @@
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes.fake_btq import FakeQueue, World, factory
+from fakes.fake_btq import ASK_FIELDS, FakeQueue, World, factory
 from wsd_env import WS, git_repo
 
-from heterodyne.wsd import btq, gitwip, ids
+from heterodyne.wsd import approvals, btq, gitwip, ids
+from heterodyne.wsd import btq as wbtq
 from heterodyne.wsd.beads import (
+    FENCE_SECONDS,
     PARKED,
     QUESTION_ANSWERED,
     RECORD_KEY,
@@ -30,6 +34,7 @@ from heterodyne.wsd.beads import (
     SessionRecord,
     UnexpectedShape,
     WorktreeConflict,
+    live_creators,
     parse,
 )
 
@@ -743,6 +748,11 @@ def test_a_bead_id_that_is_not_a_slug_is_never_claimable(world: World) -> None:
 WRITES = frozenset({"create", "comments add", "close", "label", "dep", "update"})
 
 
+def adapter_for(world: World, **kw: Any) -> BeadsAdapter:
+    """An adapter whose create fence asks the fake world which `bd create` processes still run."""
+    return BeadsAdapter(factory(world), **{"creators": world.live_creators, **kw})
+
+
 def writes(world: World, since: int = 0) -> list[str]:
     return [call for _, call in world.calls[since:] if call in WRITES]
 
@@ -756,7 +766,7 @@ def ask(adapter: BeadsAdapter, ref: str = "q:alpha:btq-1:1:1", kind: str = "kind
 def test_create_is_idempotent_by_ref(world: World) -> None:
     """A crash between `bd create` and the journal: the bead exists, the caller never learned its ID. The
     same ref again finds it and makes no second bead."""
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     world.fault("create", RuntimeError("bd: timed out"), after=True)
     with pytest.raises(BeadsUnavailable):
         ask(adapter)
@@ -770,11 +780,12 @@ def test_create_is_idempotent_by_ref(world: World) -> None:
 
 
 def test_create_records_what_was_asked(world: World) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = world.beads[ask(adapter)]
     assert (bead.title, bead.description) == ("Question from btq-1: which?", "the agent asks")
     assert sorted(bead.labels) == ["kind:question", f"ws:{WS}"]
     assert bead.metadata == {"round": "1", REF_KEY: "q:alpha:btq-1:1:1"}
+    assert re.fullmatch(r"btq-[0-9a-f]{16}", bead.id)      # the ID is the ref's, in the database's prefix
 
 
 def _alter(world: World, change: str) -> None:
@@ -810,22 +821,24 @@ def test_create_reads_back_and_refuses_a_mismatch(world: World, monkeypatch: pyt
 
     monkeypatch.setattr(FakeQueue, "_create", lossy)
     with pytest.raises(CreateUnverified):
-        ask(BeadsAdapter(factory(world)))
+        ask(adapter_for(world))
 
 
 @pytest.mark.parametrize("change", [c for c in CHANGES if c != "ref"])
 def test_a_ref_found_with_other_content_is_refused(world: World, change: str) -> None:
     """The ref is the create's identity: a bead under it that isn't what is asked now is never returned."""
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     ask(adapter)
     _alter(world, change)
+    since = len(world.calls)
     with pytest.raises(CreateUnverified):
         ask(adapter)
     assert len(world.created) == 1
+    assert writes(world, since) == []         # a mismatch is never overwritten
 
 
 def test_a_ref_held_by_two_beads_is_refused(world: World) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     ask(adapter)
     world.beads[ask(adapter, ref="q:alpha:btq-1:1:2")].metadata[REF_KEY] = "q:alpha:btq-1:1:1"
     with pytest.raises(CreateUnverified):
@@ -834,7 +847,7 @@ def test_a_ref_held_by_two_beads_is_refused(world: World) -> None:
 
 
 def test_an_unreadable_ref_lookup_never_creates(world: World) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     world.fault("list", RuntimeError("dolt: connection refused"))
     with pytest.raises(BeadsUnavailable):
         ask(adapter)
@@ -843,7 +856,7 @@ def test_an_unreadable_ref_lookup_never_creates(world: World) -> None:
 
 @pytest.mark.parametrize("kind", ["kind:question", "kind:approval"])
 def test_created_beads_are_never_claimable(world: World, kind: str) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = adapter.show(WS, ask(adapter, kind=kind))
     assert "agent:wsd" not in bead.labels
     assert adapter.claimable(WS, bead) is False
@@ -859,19 +872,19 @@ def test_create_refuses_labels_that_are_not_one_operator_kind(world: World, labe
     """wsd creates only question and approval beads, and never routes one to an agent: anything else is
     refused before bd is called. The workstream label is wsd's to add."""
     with pytest.raises(ValueError, match="labels"):
-        BeadsAdapter(factory(world)).create(WS, ref="q:alpha:btq-1:1:1", title="t", description="d",
+        adapter_for(world).create(WS, ref="q:alpha:btq-1:1:1", title="t", description="d",
                                             labels=labels, metadata={})
     assert world.calls == []
 
 
 def test_create_refuses_metadata_that_names_the_ref(world: World) -> None:
     with pytest.raises(ValueError, match=REF_KEY):
-        ask(BeadsAdapter(factory(world)), metadata={REF_KEY: "other"})
+        ask(adapter_for(world), metadata={REF_KEY: "other"})
     assert world.calls == []
 
 
 def test_close_question_comments_then_closes(world: World) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = ask(adapter)
     since = len(world.calls)
     adapter.close_question(WS, bead, "Use the second option.")
@@ -886,7 +899,7 @@ def test_close_question_comments_then_closes(world: World) -> None:
 
 
 def test_close_question_after_a_failed_close_never_comments_twice(world: World) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = ask(adapter)
     world.fault("close", RuntimeError("bd: timed out"))
     with pytest.raises(BeadsUnavailable):
@@ -899,7 +912,7 @@ def test_close_question_after_a_failed_close_never_comments_twice(world: World) 
 
 def test_close_question_that_does_not_read_back_closed_fails(world: World,
                                                             monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = ask(adapter)
     real = FakeQueue._bd      # pyright: ignore[reportPrivateUsage]
 
@@ -924,10 +937,239 @@ def _others(world: World, adapter: BeadsAdapter) -> dict[str, str]:
 @pytest.mark.parametrize("which", ["task", "foreign question", "task and question", "other workstream",
                                    "approval"])
 def test_close_question_refuses_any_other_bead(world: World, which: str) -> None:
-    adapter = BeadsAdapter(factory(world))
+    adapter = adapter_for(world)
     bead = _others(world, adapter)[which]
     since = len(world.calls)
     with pytest.raises(NotAQuestion):
         adapter.close_question(WS, bead, "Yes.")
     assert writes(world, since) == []
     assert world.closed_reasons == {}
+
+
+# --- crash-safe create: the ID is the ref's, and a fence waits out an orphaned `bd create` (c1 B1) ---
+
+def ref_id(world: World, ref: str = "q:alpha:btq-1:1:1") -> str:
+    adapter = adapter_for(world)
+    return adapter.create_id(WS, ref)
+
+
+def holders(world: World, ref: str = "q:alpha:btq-1:1:1") -> list[str]:
+    return sorted(b.id for b in world.beads.values() if b.metadata.get(REF_KEY) == ref)
+
+
+class Clock:
+    """The fence's clock and pause: each pause moves time on and runs `on_pause` (what happens meanwhile)."""
+
+    def __init__(self, on_pause: Any = None) -> None:
+        self.now = 0.0
+        self.pauses = 0
+        self.on_pause = on_pause
+
+    def __call__(self) -> float:
+        return self.now
+
+    def pause(self, seconds: float) -> None:
+        self.pauses += 1
+        self.now += seconds
+        if self.on_pause is not None:
+            self.on_pause()
+
+
+def dies_mid_create(world: World) -> None:
+    """wsd dies inside `bd create`: its lock is gone, and the bd child it started is still running."""
+    world.orphan_next_create = True
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter_for(world))
+    assert world.created == [] and len(world.orphans) == 1
+
+
+def test_the_fence_waits_for_an_orphaned_create_before_listing(world: World) -> None:
+    """The replacement takes the lock while the dead creator's child still runs: it waits for the child to
+    commit, then finds that bead, and makes none of its own."""
+    dies_mid_create(world)
+    clock = Clock(on_pause=world.commit_orphans)
+    replacement = adapter_for(world, clock=clock, pause=clock.pause)
+    since = len(world.calls)
+    bead = ask(replacement)
+    assert clock.pauses == 1
+    assert holders(world) == [bead] == world.created
+    assert writes(world, since) == []
+
+
+@pytest.mark.parametrize("call, nth", [("list", 1), ("show", 1), ("create", 1), ("show", 2)],
+                         ids=["before the list", "after the list", "after the existence check",
+                              "after the create"])
+def test_an_orphan_the_fence_misses_still_leaves_one_bead(world: World, call: str, nth: int) -> None:
+    """Even if the fence were blind, the replacement lists before the child commits, and both write the
+    same ID: bd's upsert leaves exactly one bead holding the ref, as asked."""
+    dies_mid_create(world)
+    world.before(call, world.commit_orphans, nth=nth)
+    bead = ask(adapter_for(world, creators=lambda worker: 0))
+    assert world.orphans == []
+    assert holders(world) == [bead]
+    assert len(world.created) == 1
+
+
+def test_a_live_orphan_times_out_closed_with_no_create(world: World) -> None:
+    dies_mid_create(world)
+    clock = Clock()
+    seen: list[str] = []
+
+    def creators(worker: str) -> int:
+        seen.append(worker)
+        return 1
+
+    since = len(world.calls)
+    with pytest.raises(BeadsUnavailable, match="still running"):
+        ask(adapter_for(world, creators=creators, clock=clock, pause=clock.pause))
+    assert clock.now >= FENCE_SECONDS
+    assert [c for _, c in world.calls[since:] if c in ("list", "create")] == []
+    assert set(seen) == {BeadsAdapter(factory(world)).ws_queue(WS).worker}
+    assert holders(world) == []
+
+
+def test_a_failed_probe_is_never_clear(world: World) -> None:
+    def creators(worker: str) -> int:
+        raise BeadsUnavailable("ps failed")
+
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter_for(world, creators=creators))
+    assert [c for _, c in world.calls if c in ("list", "create")] == []
+
+
+def test_the_prefix_is_the_databases(world: World) -> None:
+    world.prefix = "zq"
+    bead = ask(adapter_for(world))
+    assert re.fullmatch(r"zq-[0-9a-f]{16}", bead)
+
+
+@pytest.mark.parametrize("value", ["", "Not A Prefix", "a-", 7, None])
+def test_an_unknown_prefix_never_creates(world: World, monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+    real = FakeQueue._bd      # pyright: ignore[reportPrivateUsage]
+
+    def config(self: FakeQueue, args: list[str]) -> Any:
+        if args[0] == "config":
+            return {"key": "issue_prefix", "schema_version": 1, "value": value}
+        return real(self, args)
+
+    monkeypatch.setattr(FakeQueue, "_bd", config)
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter_for(world))
+    assert writes(world) == []
+
+
+def test_a_bead_already_at_the_id_with_other_content_is_never_overwritten(world: World) -> None:
+    taken = world.add(ref_id(world), kind="question", title="someone else's")
+    since = len(world.calls)
+    with pytest.raises(CreateUnverified):
+        ask(adapter_for(world))
+    assert writes(world, since) == [] and taken.title == "someone else's"
+
+
+def test_the_id_depends_on_the_workstream_and_the_ref(world: World) -> None:
+    adapter = adapter_for(world)
+    ids_ = {adapter.create_id(ws, ref) for ws in ("alpha", "beta") for ref in ("a:1", "a:2")}
+    assert len(ids_) == 4
+    assert adapter.create_id("alpha", "a:1") == adapter_for(world).create_id("alpha", "a:1")
+
+
+APPROVER = "operator-a"
+
+
+def _approved(bead: str, status: str, digest: str) -> dict[str, Any]:
+    return {"format": 1, "busy": False, "id": bead, "status": status, "labels": ["kind:approval"],
+            "kind_approval": True, "digest": digest, "posted_digest": digest, "gaps": [],
+            "design_review_valid": None, "adr_revision": None, "approvers": [APPROVER], "decision": "approve",
+            "approved_by": APPROVER, "approved_digest": digest, "denied_by": None, "denied_digest": None,
+            "via": "marmot", "via_ref": None, "decided": True, "gate_valid": True, "gate_reasons": [],
+            "links": [], "readout": {"title": [], "description": [], "ask": []}}
+
+
+@pytest.mark.parametrize("readout", ["decision gone", "decision still read"])
+def test_an_approval_reopened_by_a_late_orphan_is_never_approved(world: World, readout: str) -> None:
+    """The residual of bd's upsert: an orphaned create that commits after the approval was decided reopens
+    the bead and drops the decision's metadata. approve-bead then reads it open, so `verdict` waits (or, on
+    a readout that still claims a decision, is Unverified): it is never Approved."""
+    asked = json.dumps({f: ([] if f == "refs" else f"the {f}") for f in ASK_FIELDS})
+    bead = ask(adapter_for(world), ref="a:1", kind="kind:approval", metadata={"ask": asked})
+    late = [world.beads[bead].title, f"--description={world.beads[bead].description}", "--type=task",
+            f"--labels=kind:approval,ws:{WS}", "--id", bead, "--metadata",
+            json.dumps({"ask": asked, REF_KEY: "a:1"})]
+    queue = factory(world)(WS, "approve-bead")
+    digest, gaps = queue.ask_digest(queue.show(bead))
+    assert digest is not None and gaps == []
+    expect = approvals.Expected(bead, digest, lambda value: value == "the effect")
+    world.beads[bead].metadata["approved_by"] = APPROVER          # approve-bead decides, and closes it
+    world.close(bead)
+    shown = queue.show(bead)
+    assert approvals.verdict(wbtq.parse_readout(json.dumps(_approved(bead, "closed", digest)).encode()),
+                             shown, queue.ask_digest(shown), expect, None) == approvals.Approved()
+    world.orphans.append((queue, late))         # an orphaned create of the same ID, committing only now
+    world.commit_orphans()
+    shown = queue.show(bead)
+    assert shown["status"] == "open" and "approved_by" not in shown["metadata"]
+    fields = _approved(bead, shown["status"], digest)
+    if readout == "decision gone":
+        fields.update(decision=None, approved_by=None, approved_digest=None, decided=False)
+    found = approvals.verdict(wbtq.parse_readout(json.dumps(fields).encode()), shown,
+                              queue.ask_digest(shown), expect, None)
+    assert found == (approvals.Waiting() if readout == "decision gone" else approvals.Unverified(4))
+
+
+# --- the fence's probe: `ps -ww -A -o pid=,args=`, matched by exact argv tokens ---
+
+W = "wsd:testhost:alpha-ws"
+
+
+@pytest.mark.parametrize("out, count", [
+    (f"  1 /sbin/init\n 42 bd -C /repo --actor {W} create title --json\n", 1),
+    (f" 42 /opt/beads/bin/bd -C /my repo --actor {W} create t --json\n", 1),
+    (f" 42 bd -C /r --actor {W} create a\n 43 bd -C /r --actor {W} create b\n", 2),
+    (f" 42 bd -C /r --actor {W} show btq-1 --json\n", 0),
+    (f" 42 bd -C /r --actor {W}-other create t\n", 0),
+    (f" 42 bd -C /r --actor x{W} create t\n", 0),
+    (f" 42 bdx -C /r --actor {W} create t\n", 0),
+    (f" 42 python3 btq --actor {W} create t\n", 0),
+    (f" 42 bd -C /r --actor {W}\n", 0),
+    (" 42 bd -C /r --actor\n 7 [kthreadd]\n 8\n", 0),
+], ids=["one", "full path", "two", "another verb", "longer worker", "prefixed worker", "another binary",
+        "not bd", "no verb", "no worker"])
+def test_live_creators_matches_exact_tokens(out: str, count: int) -> None:
+    assert live_creators(W, run=lambda: out) == count
+
+
+@pytest.mark.parametrize("out", ["", "  \n", "abc def\n", "42bd create\n", "-1 bd\n"],
+                         ids=["empty", "blank", "no pid", "glued", "negative"])
+def test_live_creators_refuses_output_it_cannot_parse(out: str) -> None:
+    with pytest.raises(BeadsUnavailable):
+        live_creators(W, run=lambda: out)
+
+
+@pytest.mark.parametrize("exc", [OSError("no ps"), subprocess.TimeoutExpired(["ps"], 10),
+                                 subprocess.CalledProcessError(1, ["ps"])],
+                         ids=["missing", "timeout", "failed"])
+def test_live_creators_fails_closed_when_ps_fails(exc: Exception) -> None:
+    def run() -> str:
+        raise exc
+
+    with pytest.raises(BeadsUnavailable):
+        live_creators(W, run=run)
+
+
+def test_live_creators_sees_a_real_process_through_ps() -> None:
+    """The real probe, on this host's ps: a process whose argv is a `bd` create of the worker is counted
+    while it lives, and not once it is gone."""
+    worker = f"wsd:testhost:probe-{os.getpid()}"
+    assert live_creators(worker) == 0
+    child = subprocess.Popen(["bd", "-c", "import sys; sys.stdin.read()", "--actor", worker, "create", "t"],
+                             executable=sys.executable, stdin=subprocess.PIPE)
+    try:
+        for _ in range(500):          # until ps shows it: a condition, never a fixed sleep
+            if live_creators(worker) == 1:
+                break
+        assert live_creators(worker) == 1
+    finally:
+        assert child.stdin is not None
+        child.stdin.close()
+        child.wait(timeout=30)
+    assert live_creators(worker) == 0

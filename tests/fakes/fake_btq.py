@@ -16,7 +16,7 @@ import hashlib
 import json
 import subprocess
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,10 @@ class World:
         self.approvals = {"approval-1"}     # design approvals btq's gate accepts
         self.created: list[str] = []        # beads `bd create` made, in order
         self.closed_reasons: dict[str, str] = {}      # bead -> the `--reason` of its `bd close`
+        self.prefix = "btq"                 # the database's `issue_prefix`, which an explicit `--id` must use
+        self.orphan_next_create = False     # the next `bd create`'s caller dies before bd commits it
+        self.orphans: list[tuple[FakeQueue, list[str]]] = []      # creates still running, uncommitted
+        self.hooks: list[tuple[str, int, Callable[[], None]]] = []      # (call, nth, fn): see `before`
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
@@ -85,7 +89,30 @@ class World:
                 return f.exc
         return None
 
+    def before(self, call: str, fn: Callable[[], None], nth: int = 1) -> None:
+        """Run `fn` once, just before the `nth` call named `call` from now on is made."""
+        self.hooks.append((call, nth, fn))
+
+    def live_creators(self, worker: str) -> int:
+        """The fence's probe: `bd create` processes of `worker` still running (the orphans)."""
+        return sum(1 for queue, _ in self.orphans if queue.worker == worker)
+
+    def commit_orphans(self) -> None:
+        """Every orphaned `bd create` finishes and commits, as its caller is long gone."""
+        orphans, self.orphans = self.orphans, []
+        for queue, args in orphans:
+            queue._create(args)      # pyright: ignore[reportPrivateUsage]
+
     def check(self, call: str, worker: str, bead: str | None = None) -> None:
+        due = []
+        for i, (name, nth, fn) in enumerate(self.hooks):
+            if name == call:
+                self.hooks[i] = (name, nth - 1, fn)
+                if nth == 1:
+                    due.append(fn)
+        self.hooks = [h for h in self.hooks if h[1] > 0]
+        for fn in due:
+            fn()
         self.calls.append((worker, call))
         if self.down:
             raise RuntimeError("dolt: connection refused")
@@ -301,7 +328,16 @@ class FakeQueue:
             self._get(bead_id).comments.append(text)
             return {"text": text}
         if verb == "create":
+            if self.world.orphan_next_create:
+                self.world.orphan_next_create = False
+                self.world.orphans.append((self, list(args)))
+                raise RuntimeError("the caller died while bd create ran")
             return self._create(args)
+        if verb == "config":
+            action, key = args
+            assert action == "get", "fake bd config: get KEY"
+            value = self.world.prefix if key == "issue_prefix" else ""      # bd 1.1: "" for an unknown key
+            return {"key": key, "schema_version": 1, "value": value}
         if verb == "close":      # `bd close ID --reason R`, or `--reason=R`
             bead_id, flag, *rest = args
             name, eq, reason = flag.partition("=")
@@ -326,7 +362,10 @@ class FakeQueue:
         """`bd create`: the title positional or as `--title`; `--description`, `--type` (the bead's
         `issue_type`), `--labels` (comma separated) or repeated `--label`/`-l`, and `--metadata` (a JSON
         object); `--flag=value` or `--flag value`. Answers with the created bead, as bd 1.1's `create --json`
-        does."""
+        does. An explicit `--id` must carry the database's prefix (`--force` is never wsd's), and an `--id`
+        that exists is upserted exactly as bd 1.1 does it (probed 2026-10-15): title, description, type and
+        metadata are replaced, labels are added to, comments kept, and a closed bead is reopened with its
+        close reason cleared."""
         values: dict[str, list[str]] = {}
         title: str | None = None
         i = 0
@@ -353,9 +392,24 @@ class FakeQueue:
             parsed = json.loads(raw)
             assert isinstance(parsed, dict), "fake bd create: --metadata is not a JSON object"
             metadata.update(parsed)
-        bead_id = f"btq-h{len(self.world.created) + 1}"
-        bead = FakeBead(bead_id, title=title, description=values.get("description", [""])[-1],
-                        issue_type=values.get("type", ["task"])[-1], labels=labels, metadata=metadata)
+        assert "force" not in values, "fake bd create: wsd never passes --force"
+        description = values.get("description", [""])[-1]
+        issue_type = values.get("type", ["task"])[-1]
+        explicit = values.get("id", [None])[-1]
+        if explicit is not None and not explicit.startswith(f"{self.world.prefix}-"):
+            raise RuntimeError(f"Error: prefix mismatch: database uses '{self.world.prefix}-' but ID "
+                               f"'{explicit}' doesn't match (use --force to override)")
+        existing = self.world.beads.get(explicit) if explicit is not None else None
+        if existing is not None:         # bd 1.1's upsert
+            existing.title, existing.description, existing.issue_type = title, description, issue_type
+            existing.metadata = metadata
+            existing.labels.extend(lbl for lbl in labels if lbl not in existing.labels)
+            existing.status = "open"
+            self.world.closed_reasons.pop(existing.id, None)
+            return self.world.json(existing, detail=True)
+        bead_id = explicit if explicit is not None else f"btq-h{len(self.world.created) + 1}"
+        bead = FakeBead(bead_id, title=title, description=description, issue_type=issue_type, labels=labels,
+                        metadata=metadata)
         self.world.beads[bead_id] = bead
         self.world.created.append(bead_id)
         return self.world.json(bead, detail=True)
