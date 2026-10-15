@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
@@ -109,6 +109,16 @@ class SessionHandler(Protocol):
         ...
 
 
+NoticeKind = Literal["stuck", "waiting", "closed", "review"]     # part 2's, verbatim
+
+
+class NoticeSink(Protocol):
+    """What wsd needs of part 2's notice client (`heterodyne.wsd.notices.Notices`): journal by `ref`
+    (posting each ref once), then try; never raise on transport."""
+
+    def send(self, ws: str, bead: str | None, kind: NoticeKind, title: str, body: str, ref: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -129,3 +139,4 @@ class Deps:
     notes: ResumeNotes = field(default_factory=NoNotes)
     session_handlers: Mapping[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
     inbox_attempts: int = 3         # wsd.inbox_attempts_before_human; assemble passes the setting
+    notices: NoticeSink | None = None   # plan 5i part 2's client; None until it is wired
