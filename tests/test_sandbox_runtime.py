@@ -6,10 +6,11 @@ import logging
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ from heterodyne.sandbox.runtime import (
     write_record,
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
+from heterodyne.session import server as session_server
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.tmux import TmuxError, TmuxPasteUncertain
@@ -69,6 +71,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    EventBatch,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -77,6 +80,7 @@ from heterodyne.wsd.runtime import (
     Resolution,
     ResolveRefused,
     RuntimeUnavailable,
+    SessionEvent,
     Signal,
     SteerRefused,
     SteerUncertain,
@@ -129,8 +133,10 @@ def test_a_claude_launch_runs_and_is_listed(rig: RuntimeRig) -> None:
     assert rig.runtime.sessions("beta") == []
     run = rig.runtime.layout(spec.session_key).run(1)
     assert {p.name for p in run.iterdir()} >= {"token", "shim.py", "shim.json", "ws-request", "probes.py",
-                                               "claude-settings.json", "s.sock"}
-    assert all(p.stat().st_mode & 0o077 == 0 for p in run.iterdir() if p.name != "s.sock")
+                                               "claude-settings.json", "s.sock", "install-record.json"}
+    assert all(p.stat().st_mode & 0o077 == 0 for p in run.iterdir() if p.name not in ("s.sock", "empty"))
+    empty = rig.runtime.layout(spec.session_key).empty(1)       # E25: 0555 and empty, whatever the adapter
+    assert stat.S_IMODE(empty.stat().st_mode) == 0o555 and list(empty.iterdir()) == []
 
 
 def test_a_codex_launch_reports_its_thread_and_trusts_its_hooks(rig: RuntimeRig) -> None:
@@ -606,14 +612,6 @@ def test_a_codex_handoff_starts_a_new_thread(rig: RuntimeRig) -> None:
                                         native_id=first.native_id))
     assert second.native_id is not None and second.native_id != first.native_id
     assert "resume" not in rig.backend.ttys[-1]
-
-
-def test_the_cli_pin_refuses_another_version(rig: RuntimeRig) -> None:
-    package = rig.root / "i" / "cli" / "claude" / "package.json"
-    package.write_text(json.dumps({"version": "9.9.9"}))
-    with pytest.raises(LaunchFailed, match="pinned version"):
-        rig.runtime.launch(launch_spec(rig, "p-one"))
-    assert rig.backend.created == []
 
 
 def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: RuntimeRig) -> None:
@@ -2049,7 +2047,8 @@ def wsd_settings(rig: RuntimeRig) -> WsdSettings:
     accounts = accounts_at(rig.home)
     ws = WorkstreamSettings("alpha", {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
     base = rig.root / "wsd"
-    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts)
+    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts,
+                       config_dir=rig.installs["codex"].config_dir)
 
 
 def journal_at(rig: RuntimeRig) -> Path:
@@ -2304,6 +2303,193 @@ def test_with_every_capability_off_no_producer_runs(rig: RuntimeRig) -> None:
     assert not (rig.runtime.layout(two.session_key).run(1) / "codex_usage.py").exists()
     rig.clock.advance(rig.runtime.c.settings.usage_poll_seconds)
     assert rig.runtime.signals("alpha") == [] and reads(rig) == 0
+
+
+def ws_request(rig: RuntimeRig, key: str, *words: str, gen: int = 1) -> tuple[int, dict[str, Any]]:
+    """What the agent's `/run/hz/ws-request` does, from the host side of the session's run directory."""
+    rc, out = shim.run_request(list(words), {"HZ_SESSION_SOCKET": str(rig.runtime.layout(key).socket(gen))})
+    return rc, json.loads(out)
+
+
+def pulled(rig: RuntimeRig, want: int, since: Mapping[str, tuple[int, int]] | None = None,
+           runtime: SandboxRuntime | None = None) -> EventBatch:
+    """Read the workstream's events until `want` have come (the hooks run asynchronously)."""
+    rt = runtime or rig.runtime
+    got = EventBatch()
+
+    def enough() -> bool:
+        nonlocal got
+        got = rt.session_events("alpha", since or {}, 1000)
+        return len(got.events) >= want
+
+    wait_for(enough)
+    return got
+
+
+def briefed(rig: RuntimeRig, ops: frozenset[str] = frozenset(), profile: str = "p-one") -> LaunchSpec:
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": ops})
+    spec = replace(launch_spec(rig, profile), brief="start")
+    rig.runtime.launch(spec)
+    return spec
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_a_stop_is_logged_and_wakes_its_workstream(rig: RuntimeRig) -> None:
+    woken: list[str] = []
+    rig.runtime.subscribe(woken.append, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "another turn")
+    got = pulled(rig, 2).events
+    assert [(e.kind, e.turn, e.text) for e in got] == [("stop", 1, "echo: start"),
+                                                       ("stop", 2, "echo: another turn")]
+    assert got[0].event_id == f"{spec.session_key}:g1:e1" and (got[0].ws, got[0].bead) == ("alpha", "btq-1")
+    wait_for(lambda: woken == ["alpha", "alpha"])       # each wake follows its event's append
+    assert not any(isinstance(s, SessionEvent) for s in rig.runtime.signals("alpha"))   # never queued
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_the_probe_turn_is_never_an_event(rig: RuntimeRig) -> None:
+    briefed(rig)
+    assert [e.text for e in pulled(rig, 1).events] == ["echo: start"]
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> None:
+    spec = briefed(rig, frozenset({"close"}))
+    evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"     # the fake's paths are host paths
+    evidence.write_text("12 passed")
+    rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e2"
+    log = rig.runtime.layout(spec.session_key).session_events(1)
+    assert json.loads(log.read_text().splitlines()[-1])["kind"] == "close"     # durable before the reply
+    [close] = [e for e in pulled(rig, 2).events if e.kind == "close"]
+    assert close.text == "12 passed"
+
+
+def test_ops_are_enabled_per_workstream(rig: RuntimeRig) -> None:
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"}),
+                                             "beta": frozenset({"question"})})     # D6: not alpha's
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    rig.runtime.logs[spec.session_key].forwarding = True    # as once the brief is pasted (Task 4)
+    assert ws_request(rig, spec.session_key, "question", '{"text": "hm"}') == (
+        1, {"ok": False, "error": "unsupported"})
+    evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"
+    evidence.write_text("12 passed")
+    rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e1"
+
+
+def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> None:
+    """Codex T2 c2: the server's close waits only so long for a callback; a callback that outlasts it
+    reaches a log the teardown has closed, and is refused at commit, never logged after the end."""
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    late = rig.runtime.logs[spec.session_key]
+    late.forwarding = True
+    rig.runtime.stop(spec.session_key)
+    assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
+                        frozenset({"close"})) == (None, {"ok": False, "error": "unavailable"})
+    assert not late.path.exists()
+
+
+def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T3 c2 NB: a request's callback is held past the server's bounded wait, the session ends and
+    its log is closed, then the callback commits: it is refused, and nothing is logged after the end."""
+    monkeypatch.setattr(session_server, "CLOSE_SECONDS", 0.1)
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    late = rig.runtime.logs[spec.session_key]
+    late.forwarding = True
+    real = late.request
+    entered, release = threading.Event(), threading.Event()
+    got: list[tuple[SessionEvent | None, dict[str, Any]]] = []
+
+    def held(payload: Mapping[str, Any], ops: frozenset[str]) -> tuple[SessionEvent | None, dict[str, Any]]:
+        entered.set()
+        release.wait(10)
+        got.append(real(payload, ops))
+        return got[-1]
+
+    monkeypatch.setattr(late, "request", held)
+    token = (layout.run(1) / shim.TOKEN_FILE).read_text().strip()
+    client = socket.socket(socket.AF_UNIX)
+    stopper = threading.Thread(target=rig.runtime.stop, args=(spec.session_key,))
+    try:
+        client.connect(str(layout.socket(1)))
+        client.sendall((json.dumps({"token": token, "type": "ws_request", "payload": {
+            "op": "close", "rid": "0123456789abcdef", "evidence": "x"}}) + "\n").encode())
+        assert entered.wait(5)                          # the callback is in flight
+        stopper.start()
+        wait_for(lambda: not late.writable)             # the teardown has closed the log
+    finally:
+        release.set()
+        stopper.join(30)
+        client.close()
+    wait_for(lambda: bool(got))
+    assert got == [(None, {"ok": False, "error": "unavailable"})]
+    assert not late.path.exists() and not stopper.is_alive()
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_a_cursor_reads_only_what_follows_it_and_the_limit_pages(rig: RuntimeRig) -> None:
+    spec = briefed(rig)
+    pane = record(rig, spec.session_key).tmux_session
+    pulled(rig, 1)
+    rig.tmux.paste(pane, "two")
+    pulled(rig, 2)
+    rig.tmux.paste(pane, "three")
+    pulled(rig, 3)
+    page = rig.runtime.session_events("alpha", {spec.session_key: (1, 1)}, 1)
+    assert [e.seq for e in page.events] == [2] and page.more and page.ends == {}
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_a_restarted_runtime_reads_the_same_events(rig: RuntimeRig) -> None:
+    briefed(rig)
+    first = pulled(rig, 1).events
+    assert pulled(rig, 1, runtime=restarted(rig)).events == first       # read from disk: no rebind needed
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_every_unread_generation_is_read_after_the_next_launch(rig: RuntimeRig) -> None:
+    # Codex cycle 1 #3: generation 1's last event, never read before generation 2 started, still comes.
+    rig.runtime.subscribe(lambda _ws: None, {})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    first = rig.runtime.launch(spec)
+    pulled(rig, 1)
+    rig.runtime.stop(spec.session_key)
+    second = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    rig.runtime.launch(second)
+    batch = pulled(rig, 2)
+    assert [e.event_id for e in batch.events] == [f"{spec.session_key}:g1:e1", f"{spec.session_key}:g2:e1"]
+    assert batch.ends == {(spec.session_key, 1): 1}                     # g1 is final; g2 runs on
+    later = pulled(rig, 1, {spec.session_key: (2, 0)}, runtime=restarted(rig))
+    assert [e.event_id for e in later.events] == [f"{spec.session_key}:g2:e1"]
+
+
+@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
+def test_an_ended_generation_is_final(rig: RuntimeRig) -> None:
+    spec = briefed(rig)
+    pulled(rig, 1)
+    rig.runtime.stop(spec.session_key)
+    assert rig.runtime.session_events("alpha", {}, 10).ends == {(spec.session_key, 1): 1}
+    assert spec.session_key not in rig.runtime.logs                     # popped once its socket closed
+
+
+def test_an_unreadable_session_folder_is_unavailable(rig: RuntimeRig,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_self: SandboxRuntime) -> list[SessionRecord]:
+        raise RuntimeUnavailable("the session records can't be listed")
+
+    monkeypatch.setattr(SandboxRuntime, "_records", broken)
+    with pytest.raises(RuntimeUnavailable):
+        rig.runtime.session_events("alpha", {}, 10)
 
 
 def test_a_claude_status_line_is_usage_from_its_own_session(rig: RuntimeRig) -> None:

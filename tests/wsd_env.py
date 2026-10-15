@@ -16,7 +16,8 @@ from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
 
 from heterodyne.config.accounts import Account
-from heterodyne.harness.selection import InstallPin
+from heterodyne.harness import selection
+from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.wsd.accounts import ConfiguredAccounts, Failover, ProfileAccounts
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.brief import NoNotes, ResumeNotes
@@ -34,7 +35,6 @@ from heterodyne.wsd.workstream import (
     Limits,
     SessionHandler,
     WorkstreamSettings,
-    no_selection,
     place,
     record,
 )
@@ -42,6 +42,20 @@ from heterodyne.wsd.workstream import (
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
 ADAPTERS = {"p-one": "claude-code", "p-two": "codex"}
+# A selected install per adapter for rigs whose runtime verifies nothing (plan 4c T8: no selection refuses).
+# The digests are built here, so no 64-hex value is committed.
+FAKE_PINS = {"claude-code": InstallPin("2.1.286-" + "a" * 12, "sha256:" + "a1" * 32),
+             "codex": InstallPin("0.160.0-" + "b" * 12, "sha256:" + "b2" * 32)}
+
+
+def fake_selection(adapter: str) -> InstallPin | None:
+    return FAKE_PINS.get(adapter)
+
+
+def selected_config(config_dir: Path) -> Path:
+    """`config_dir` with a harnesses.toml selecting FAKE_PINS, for a daemon assembled from its settings."""
+    selection.write(config_dir, {a: Selection(a, pin) for a, pin in FAKE_PINS.items()})
+    return config_dir
 
 
 def login_home(path: Path) -> Path:
@@ -89,7 +103,7 @@ class Rig:
     reconciler: ActionReconciler | None = None
     clock: Clock = field(default_factory=Clock)
     usage_reader: UsageReader = field(default_factory=NoUsageReader)
-    selections: Callable[[str], InstallPin | None] = no_selection     # plan 4c T7: adapter to its pin
+    selections: Callable[[str], InstallPin | None] = fake_selection   # plan 4c T7: adapter to its pin
     notes: ResumeNotes = field(default_factory=NoNotes)                # plan 5i T4: part 2's resume notes
     handlers: dict[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
     journal: Journal = field(init=False)
@@ -122,8 +136,12 @@ class Rig:
         spot = place(self.ws, self.beads.show(WS, bead))
         self.beads.worktree(WS, bead, spot.repo)
         self.beads.ensure_record(WS, bead, record(self.ws, spot))
+        adapter = self.ws.accounts.adapter(spot.profile) if self.ws.accounts else None
+        pin = self.selections(adapter or "claude-code")
+        assert pin is not None
         self.runtime.launch(LaunchSpec(WS, bead, self.ws.coder_role, spot.profile, spot.session_key,
-                                       spot.label, spot.worktree, resume=False))
+                                       spot.label, spot.worktree, resume=False, install=pin.install,
+                                       install_digest=pin.digest))
         for step in (BeadState.CLAIMING, BeadState.STARTING, BeadState.RUNNING):
             self.journal.set_state(WS, bead, step)
 

@@ -102,6 +102,8 @@ class SessionServer:
         self._uncertain = False             # a delivery raised: it may yet land, so no other one runs
         self._slots = threading.BoundedSemaphore(max_handlers)
         self._closed = threading.Event()
+        self._calling: dict[int, int] = {}      # thread -> its on_request calls running (Codex T2 c1 B1)
+        self._idle = threading.Condition(self._lock)
         self._sock: socket.socket | None = None
         self._acceptor: threading.Thread | None = None
         self._handlers: dict[socket.socket, threading.Thread] = {}
@@ -122,8 +124,14 @@ class SessionServer:
         self._acceptor = acceptor           # only a started thread is ever joined
 
     def close(self) -> None:
-        """Stop admitting, wake every connection, and wait (bounded) for its handler. Once this returns,
-        nothing a session sent is recorded or spooled, even by a handler still unwinding."""
+        """Stop admitting, wake every connection, then wait for the request callbacks already running and
+        each handler; CLOSE_SECONDS bounds those two waits together. Close begins under the lock, so a hook
+        callback (`on_event`, which runs under it) can delay its start. No new request callback starts
+        once close has begun, and once this returns nothing a session sent is recorded or spooled, even by
+        a handler still unwinding. A request callback still running then (blocked, perhaps on a lock its
+        closer holds, or closing this server itself) is never waited on further, and this server can't
+        stop its effect: that is fenced by its owner at commit, as the runtime's teardown closes the
+        generation's event log after this, which then refuses every append (plan 5i D2)."""
         with self._lock:
             self._closed.set()
             sock, self._sock = self._sock, None
@@ -135,8 +143,14 @@ class SessionServer:
         for conn in handlers:
             with contextlib.suppress(OSError):
                 conn.shutdown(socket.SHUT_RDWR)
+        me, end = threading.get_ident(), time.monotonic() + CLOSE_SECONDS
+        with self._lock:
+            while any(n for t, n in self._calling.items() if t != me):
+                left = end - time.monotonic()
+                if left <= 0:
+                    break                       # never waited on further: the owner refuses its effect
+                self._idle.wait(left)
         try:
-            end = time.monotonic() + CLOSE_SECONDS
             for thread in [self._acceptor, *handlers.values()]:
                 if thread is not None and thread is not threading.current_thread():
                     thread.join(max(0.0, end - time.monotonic()))
@@ -291,14 +305,26 @@ class SessionServer:
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Plan 5i: a request naming an `op` goes to the runtime's callback, outside the lock (it writes
-        the event log and must not hold up hooks), and only while open; close waits for this handler like
-        any other. Anything else, or no callback, is unsupported as before."""
-        if self.on_request is None or not isinstance(payload.get("op"), str) or self._closed.is_set():
+        the event log and must not hold up hooks), and only while open: it is counted in under the lock
+        that close takes to begin, and close waits (bounded) until it is counted out. Anything else, or no
+        callback, is unsupported as before."""
+        if self.on_request is None or not isinstance(payload.get("op"), str):
             return UNSUPPORTED
+        me = threading.get_ident()
+        with self._lock:
+            if self._closed.is_set():
+                return UNSUPPORTED
+            self._calling[me] = self._calling.get(me, 0) + 1
         try:
             return self.on_request(payload)
         except Exception:  # noqa: BLE001 - the session learns only that it can retry
             return UNAVAILABLE
+        finally:
+            with self._lock:
+                left = self._calling.pop(me) - 1
+                if left:
+                    self._calling[me] = left
+                self._idle.notify_all()
 
     def _record(self, payload: dict[str, Any]) -> None:
         """Turn state from the event name and session ID alone, then the runtime's callback, both under

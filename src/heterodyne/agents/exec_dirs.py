@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from heterodyne.admind.redact import redact
 from heterodyne.agents.base import AdapterError
 from heterodyne.harness.resources.store_core import Refused, Stat, statx_at
 
@@ -45,9 +46,12 @@ class _Stop(Exception):
         self.template = template
 
 
-def _shown(name: str) -> str:
+def shown_name(name: str) -> str:
+    """A workload's name as a summary keeps it: redacted (admind's one redaction, Codex T8 r2), escaped, then
+    cut to `MAX_NAME_CHARS`, in that order, so the cut never splits a credential out of the redactor's
+    reach. Idempotent, so wsd applies it again to whatever a runtime reports."""
     text = "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 0x100 else f"\\u{ord(c):04x}"
-                   for c in name)
+                   for c in redact(name))
     return text[:MAX_NAME_CHARS]
 
 
@@ -104,7 +108,7 @@ def _scan(fd: int, rel: str, depth: int, ref: Stat, scan: _Scan) -> None:
             raise _Stop(EXEC_DIR_TOO_LARGE)
         path = f"{rel}/{name}" if rel else name
         if len(scan.names) < MAX_NAMES:
-            scan.names.append(_shown(path))
+            scan.names.append(shown_name(path))
         st = _stat(fd, name, EXEC_DIR_NOT_CLEARED)
         if not _same(st, ref):                       # a mount on a directory, or a file bound over a file
             raise _Stop(EXEC_DIR_CROSSES_MOUNT)

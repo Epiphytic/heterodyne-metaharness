@@ -29,6 +29,9 @@ KEY_CHANGED = "the account's credential key changed after the launch was pinned"
 # pin, and the guard's escalation detail when the profile's adapter has no selected install.
 INSTALL_UNPINNED = "the launch entry pins no install"
 NOT_SELECTED = "no install is selected for the profile's adapter; choose one with `wsctl harness use`"
+# Plan 4c T9: one text for a tainted install: `harness.verify`'s refusal and the park's `why` (Task 10).
+INSTALL_TAINTED = ("the install is tainted: a verification of it failed; check it with "
+                   "`wsctl harness verify` or remove it")
 
 
 class Liveness(StrEnum):
@@ -72,7 +75,7 @@ class LaunchSpec:
     # A cross-account relaunch without (b): a fresh native session, never a resume (D7, plan 4b E10).
     handoff: bool = False
     # The entry's pinned install and its manifest digest (plan 4c T7, D2); empty when the adapter had no
-    # selection. Ignored until T8 binds and verifies it.
+    # selection; the runtime verifies exactly this pin, and refuses an empty one (INSTALL_UNPINNED).
     install: str = ""
     install_digest: str = ""
     brief: str = ""         # plan 5i: pasted once the self-test's turn has ended
@@ -105,7 +108,33 @@ class LimitSeen:
     reset_hint: int | None
 
 
-type Signal = UsageSeen | LimitSeen
+@dataclass(frozen=True)
+class InstallTainted:
+    """A launch found the install of a live session tainted (plan 4c E17): its taint marker is written, and
+    one of these is reported for each live session on the install. wsd acts on it from Task 10."""
+    session_key: str
+    generation: int
+    adapter: str
+    install: str
+
+
+@dataclass(frozen=True)
+class ExecDirCleared:
+    """A launch found leftover content in one of the adapter's empty read-only exec directories (plan 4c E25)
+    and cleared it: Amendment 1 §4.2's bounded summary, counts and at most 16 sanitized names, never any
+    contents. wsd journals it as `exec_dir_cleared`, once per session, generation and path."""
+    session_key: str
+    generation: int
+    adapter: str
+    path: str                   # relative to the session's home
+    files: int
+    links: int
+    dirs: int
+    bytes: int
+    names: tuple[str, ...]
+
+
+type Signal = UsageSeen | LimitSeen | InstallTainted | ExecDirCleared
 
 
 SessionEventKind = Literal["stop", "close", "ask", "question", "damaged"]
@@ -116,12 +145,12 @@ class SessionEvent:
     """A Stop or a `ws-request` a session sent through its own socket (plan 5i part 1). The runtime
     attributes it to the launch whose socket carried it (`ws`, `bead`, `session_key`, `generation`); every
     other field is untrusted. `event_id` comes from the generation's event log on the host
-    (`<key>:g<gen>:e<n>`, `n` from 1 with no gaps), so it is the same after a wsd restart and wsd dedupes
-    on it. `turn` is durable too: a Stop's ordinal among the generation's forwarded Stops (from 1), or for
-    a request the turn it was sent in. `text` is a Stop's last message (cut, None when absent) or a close's
-    evidence; `body` is an ask's or a question's JSON object. `close_requested` marks a Stop after a close
-    accepted in the same generation. A `damaged` event marks a log line that was lost after it was
-    accepted; it carries nothing else."""
+    (`<key>:g<gen>:e<n>`, `n` from 1, with no gaps but a damaged run's), so it is the same after a wsd restart
+    and wsd dedupes on it. `turn` is durable too: a Stop's ordinal among the generation's forwarded Stops
+    (from 1), or for a request the turn it was sent in. `text` is a Stop's last message (cut, None when
+    absent) or a close's evidence; `body` is an ask's or a question's JSON object. `close_requested` marks a
+    Stop after a close accepted in the same generation. A `damaged` event marks log lines lost after they were
+    accepted: every number after the event before it, up to its own; it carries nothing else."""
     event_id: str
     kind: SessionEventKind
     ws: str
@@ -141,9 +170,10 @@ class SessionEvent:
 
 @dataclass(frozen=True)
 class EventBatch:
-    """What `session_events` read: events ordered by (key, generation, n), with no gap after each key's
-    cursor. `ends[(key, g)] = n`: generation g's log is final at n (nothing will follow it). `more`: a
-    key had more events than the limit."""
+    """What `session_events` read: events ordered by (key, generation, n) after each key's cursor. Ordinary
+    events are contiguous; only a `damaged` event may follow a gap, since it stands for every number after
+    the event before it (or the cursor) up to its own. `ends[(key, g)] = n`: generation g's log is final at
+    n (nothing will follow it). `more`: a key had more events than the limit."""
     events: tuple[SessionEvent, ...] = ()
     ends: Mapping[tuple[str, int], int] = field(
         default_factory=lambda: cast(Mapping[tuple[str, int], int], {}))

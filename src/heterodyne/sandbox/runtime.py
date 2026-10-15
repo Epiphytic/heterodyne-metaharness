@@ -18,7 +18,7 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -32,12 +32,18 @@ from heterodyne.config import ConfigError
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.fsutil import private_dir
+from heterodyne.harness import selection
+from heterodyne.harness import verify as hv
+from heterodyne.harness.selection import InstallPin
+from heterodyne.harness.store import Store
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
+from heterodyne.sandbox.events import EventLog
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
     BRIDGE_INSIDE,
+    INSTALL_RECORD_INSIDE,
     NAME,
     READ_ONLY_ROLES,
     REQUEST_INSIDE,
@@ -60,12 +66,17 @@ from heterodyne.wsd.brief import BRIEF_MAX
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
+    INSTALL_TAINTED,
+    INSTALL_UNPINNED,
     KEY_CHANGED,
     LOGIN_STALE,
+    NOT_SELECTED,
     Action,
     EndCause,
     Ended,
     EventBatch,
+    ExecDirCleared,
+    InstallTainted,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -76,6 +87,7 @@ from heterodyne.wsd.runtime import (
     ResolveRefused,
     RuntimeUnavailable,
     Session,
+    SessionEvent,
     Signal,
     Started,
     SteerRefused,
@@ -99,6 +111,7 @@ SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
 RECORD_LOST = "the session record vanished during its launch; inspect the session's git directory"
 MAX_QUEUED = 256        # reports a workstream keeps between drains: a flooding session keeps only its newest
+TAINT_SECONDS = 600     # plan 4c T9: how old an install in use's last walk may get before `expire` walks it
 USAGE_SECONDS = 45      # the in-sandbox usage read's exec bound (codex_usage.py's own limit is 30)
 DIAG_USAGE_READ = "an in-sandbox usage read gave no reading"
 READ_REASON = re.compile(rb"codex_usage: ([A-Za-z]+)\n")       # the script's one stderr line (Task 5)
@@ -161,6 +174,8 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
     end_cause: str = ""               # g08sd: how this generation ended (EndCause); written once
     ended_at: int = 0                 # the `ended` write's clock
+    install_name: str = ""            # plan 4c T8: the generation's verified install and manifest digest
+    install_digest: str = ""
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -293,8 +308,13 @@ class RuntimeConfig:
     uid: int
     gid: int
     tmux: Tmux
-    path: str                         # where CLI binaries are looked up
     clock: Callable[[], int]          # UTC epoch seconds: the scheduler's clock
+    # Plan 4c T8: the managed install store, the taint markers (`<state>/harness-taint`), the config directory
+    # holding harnesses.toml (re-read on every verification), and the store's location problems.
+    store: Store
+    taint_dir: Path
+    config_dir: Path
+    store_problems: Callable[[], Sequence[str]]
     wait_clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     adapters: Mapping[str, Adapter] = field(default_factory=lambda: ADAPTERS)
@@ -311,7 +331,17 @@ class SandboxRuntime:
         self._inspect_cleared = False
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
+        # Codex T8 r1 B1: evidence wsd must see (a taint, an exec dir cleared), by workstream, kept until
+        # drained and never capped: one per (kind, session key, generation[, path]), so its size is bounded
+        # by the live sessions, and no flood of usage reports can evict one.
+        self.notices: dict[str, dict[tuple[str | int, ...], Signal]] = {}
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
+        self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
+        self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
+        self.logs: dict[str, EventLog] = {}               # key -> its running generation's event log
+        self.logs_lock = threading.Lock()                 # the lanes swap logs while session_events reads
+        self.wake: Callable[[str], None] = lambda _ws: None
+        self.ops: Mapping[str, frozenset[str]] = {}       # ws -> the ws-request ops its handlers take (D6)
 
     # --- names ---
 
@@ -402,7 +432,7 @@ class SandboxRuntime:
                 raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
-        cli = self._cli(adapter)
+        installed = self._cli(adapter, spec)
         protected, others = self._logins(adapter, spec.account)
         checked = self._pinned(adapter, spec, protected.chosen_files)
         try:
@@ -417,11 +447,13 @@ class SandboxRuntime:
                             profile=spec.profile, adapter=adapter.name, generation=spec.generation,
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
                             ran=prev.ran if prev else False, native_id=prev.native_id if prev else None,
-                            worktree=str(spec.worktree), repo=str(spec.repo))
+                            worktree=str(spec.worktree), repo=str(spec.repo), install_name=installed.name,
+                            install_digest=installed.digest)
         write_record(layout, rec)
         try:
-            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others, checked,
-                               pinned)
+            self._registered(adapter, installed)
+            return self._start(spec, adapter, installed, layout, rec, resume, native, protected, others,
+                               checked, pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
 
@@ -471,13 +503,14 @@ class SandboxRuntime:
                 continue
             if not stopped:
                 failed.append("a session at its maximum lifetime could not be stopped")
+        self._watch(now, due_only=True)          # after the lifetime pass, which a walk never holds up
         if failed:
             raise RuntimeUnavailable(failed[0])
 
     def signals(self, ws: str) -> list[Signal]:
-        """E8: what the workstream's sessions reported since the last call, oldest first. Each running
-        session's usage read is run first when it is due (E5). Never raises: a report that can't be had
-        is no report."""
+        """E8: what the workstream's sessions reported since the last call, oldest first, then its notices
+        (B1: taints, cleared exec dirs), each once. Each running session's usage read is run first when it
+        is due (E5). Never raises: a report that can't be had is no report."""
         try:
             running = [r for r in self._records() if r.ws == ws and r.phase is Phase.RUNNING]
         except RuntimeUnavailable:
@@ -486,11 +519,41 @@ class SandboxRuntime:
             if rec.key in self.servers:
                 self._poll(rec)
         with self.queue_lock:
-            return self.queued.pop(ws, [])
+            return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
 
     def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
-        """Plan 5i: no session's events are logged yet (Task 3 adds the event log)."""
-        return EventBatch()
+        """Plan 5i: each of the workstream's sessions' events after its cursor, from the cursor's generation
+        up to the record's, at most `limit` per key. A generation is final once a later one exists or the
+        record has ENDED, and its socket is closed (its log is no longer live). The running generation is
+        read from memory, the rest from disk, complete lines only (Codex cycle 1 #3: no generation is
+        skipped, however many started since the cursor)."""
+        records = [r for r in self._records() if r.ws == ws]       # RuntimeUnavailable propagates
+        found: list[SessionEvent] = []
+        ends: dict[tuple[str, int], int] = {}
+        more = False
+        for rec in records:
+            gen, n = since.get(rec.key, (1, 0))
+            taken = 0
+            for g in range(gen, rec.generation + 1):
+                with self.logs_lock:
+                    live = self.logs.get(rec.key)
+                if live is not None and live.generation == g:
+                    lg = live
+                else:
+                    try:
+                        lg = EventLog.read(self.layout(rec.key).session_events(g), rec.ws, rec.bead,
+                                           rec.key, g)
+                    except OSError:
+                        raise RuntimeUnavailable("a session event log can't be read") from None
+                page = lg.after(n if g == gen else 0, limit - taken)
+                found += page
+                taken += len(page)
+                if lg is not live and (g < rec.generation or rec.phase is Phase.ENDED):
+                    ends[(rec.key, g)] = lg.last
+                if taken >= limit:
+                    more = True
+                    break
+        return EventBatch(tuple(found), ends, more)
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
         """D4: paste into the session's pane, only at a turn boundary this process's socket has seen. After
@@ -557,7 +620,7 @@ class SandboxRuntime:
             raise SteerRefused("the paste failed before reaching the session")
 
     def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
-        return None                                                 # plan 5i Task 3 wires the wake
+        self.wake, self.ops = wake, dict(ops)
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
@@ -590,17 +653,101 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the session's home can't be read") from None
         raise RuntimeUnavailable("the session ran before, but its resumable state can't be found")
 
-    def _cli(self, adapter: Adapter) -> Cli:
-        binary = self.c.settings.binaries.get(adapter.name)
-        if not binary:
-            raise LaunchFailed(f"no binary is configured for {adapter.name}")
+    def verified_cli(self, adapter: Adapter, pin: InstallPin | None = None) -> Cli:
+        """Plan 4c T8: the CLI of the install `pin` names, or with no pin of the adapter's current selection
+        (`NOT_SELECTED` if it has none or it can't be read), verified now. Raises LaunchFailed with one of
+        `verify.REFUSALS`. No lock is held: the taint marker and the selection are read again on every call,
+        and the store is read-only to the service user."""
+        return self._verified(adapter, pin).cli
+
+    def _verified(self, adapter: Adapter, pin: InstallPin | None) -> hv.VerifiedInstall:
+        if pin is None:
+            try:
+                chosen = selection.load(self.c.config_dir).get(adapter.name)
+            except ConfigError:
+                chosen = None           # an unreadable selection is not one; its text may quote the file
+            if chosen is None or chosen.current is None:
+                raise LaunchFailed(NOT_SELECTED)
+            pin = chosen.current
         try:
-            cli = adapter.locate(binary, self.c.path)
-        except AdapterError as exc:
-            raise LaunchFailed(str(exc)) from None
-        if cli.version != adapter.version_pin:
-            raise LaunchFailed(f"the {adapter.name} CLI is not the pinned version {adapter.version_pin}")
-        return cli
+            return hv.verify_pin(self.c.store, adapter, pin, self.c.taint_dir, problems=self.c.store_problems)
+        except hv.VerifyRefused as exc:
+            if exc.constant in hv.TAINTING:
+                self._tainted(adapter.name, pin.install)
+            raise LaunchFailed(exc.constant) from None
+
+    def _tainted(self, adapter: str, install: str) -> None:
+        """E17: one InstallTainted per live session on the install, queued before the refusal is raised. The
+        marker is already written; a listing that fails reports nothing, and the marker still refuses."""
+        try:
+            live = [r for r in self._records()
+                    if r.phase is not Phase.ENDED and (r.adapter, r.install_name) == (adapter, install)]
+        except RuntimeUnavailable:
+            return
+        for rec in live:
+            self._notice(rec.ws, ("taint", rec.key, rec.generation),
+                         InstallTainted(rec.key, rec.generation, adapter, install))
+
+    def _notice(self, ws: str, ident: tuple[str | int, ...], signal: Signal) -> None:
+        """Keep `signal` for the workstream's next drain, once per `ident` (B1)."""
+        with self.queue_lock:
+            self.notices.setdefault(ws, {}).setdefault(ident, signal)
+
+    def _watch(self, now: int, *, due_only: bool) -> None:
+        """Plan 4c T9 (E17's second path): walk every install a live session runs, or with `due_only` each
+        one whose last walk is `TAINT_SECONDS` old. A mismatch writes the marker (in `verify_pin`, before it
+        raises) and queues one InstallTainted per live session on the install, into its own workstream's
+        queue; so does a marker already there, since sessions may have started on the install after it was
+        written. Anything else (an unsafe store, a missing install, an undeclared version, an I/O failure)
+        is no evidence: it is logged, and the install stays due. Never raises."""
+        try:
+            live = [r for r in self._records() if r.phase is not Phase.ENDED and r.install_name]
+        except RuntimeUnavailable:
+            log.warning("taint watch: the session records can't be listed")
+            return
+        pins = sorted({(r.adapter, r.install_name, r.install_digest) for r in live})
+        with self.walk_lock:
+            for name, install, digest in pins:
+                last = self.walked.get((name, install))
+                if due_only and last is not None and now - last < TAINT_SECONDS:
+                    continue
+                adapter = self.c.adapters.get(name)
+                if adapter is None:
+                    log.warning("taint watch: no adapter %s for install %s", name, install)
+                    continue
+                try:
+                    hv.verify_pin(self.c.store, adapter, InstallPin(install, digest), self.c.taint_dir,
+                                  problems=self.c.store_problems, mark=hv.taint, io_taints=False)
+                except hv.VerifyRefused as exc:
+                    if exc.constant not in (*hv.TAINTING, INSTALL_TAINTED):
+                        log.warning("taint watch: %s %s can't be walked: %s", name, install, exc.constant)
+                        continue
+                    self._tainted(name, install)
+                except Exception:  # noqa: BLE001 - a walk that can't run is logged, never raised
+                    log.warning("taint watch: %s %s can't be walked", name, install, exc_info=True)
+                    continue
+                self.walked[(name, install)] = now
+
+    def _cli(self, adapter: Adapter, spec: LaunchSpec) -> hv.VerifiedInstall:
+        """The launch entry's pinned install, verified (D2): never the selection, which may have moved since
+        the entry was journaled. An entry without a pin (journaled before schema 3) refuses."""
+        if not spec.install or not spec.install_digest:
+            raise LaunchFailed(INSTALL_UNPINNED)
+        return self._verified(adapter, InstallPin(spec.install, spec.install_digest))
+
+    def _registered(self, adapter: Adapter, installed: hv.VerifiedInstall) -> None:
+        """Codex T9 r1 B1: the launch's record is written, so every watch from here on lists and signals it;
+        one that ran between the verify and the record wrote its marker first. So the marker is read again,
+        under the watch's lock, and a marker (or one that can't be read) refuses. Otherwise the verify
+        counts as the install's walk."""
+        with self.walk_lock:
+            try:
+                marked = hv.tainted(self.c.taint_dir, adapter.name, installed.name)
+            except OSError:
+                marked = True
+            if marked:
+                raise _StepFailed(INSTALL_TAINTED)      # the record is written: `_fail` ends it
+            self.walked[(adapter.name, installed.name)] = self.c.clock()
 
     def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
         """The chosen account's login, and every other account's as configured: `default` is another
@@ -683,34 +830,47 @@ class SandboxRuntime:
             raise LaunchFailed(LOGIN_STALE)
         return int(expiry)
 
-    def _start(self, spec: LaunchSpec, adapter: Adapter, cli: Cli, layout: SessionLayout, rec: SessionRecord,
-               resume: bool, native: str | None, protected: Protected,
+    def _start(self, spec: LaunchSpec, adapter: Adapter, installed: hv.VerifiedInstall, layout: SessionLayout,
+               rec: SessionRecord, resume: bool, native: str | None, protected: Protected,
                others: tuple[tuple[str, Path], ...], checked: _Checked, pinned: gitwip.Pinned) -> Started:
-        c, gen = self.c, spec.generation
+        c, gen, cli = self.c, spec.generation, installed.cli
         run, scratch = layout.run(gen), layout.scratch(gen)
         for folder in (run, scratch):
             shutil.rmtree(folder, ignore_errors=True)
             folder.mkdir(mode=0o700, parents=True)
+        layout.empty(gen).mkdir(mode=0o700)
+        layout.empty(gen).chmod(0o555)          # E25: empty and read-only, remade before every create
         layout.home.mkdir(mode=0o700, exist_ok=True)
-        adapter.prepare_home(layout, spec.worktree)
+        facts = adapter.facts(layout, cli, c.uid)
+        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root):
+            log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
+                        spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
+                        cleared.dirs, cleared.bytes)
+            self._notice(spec.ws, ("cleared", spec.session_key, gen, str(cleared.path)), ExecDirCleared(
+                spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
+                cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
-        token = secrets.token_hex(16)
+        token = secrets.token_hex(shim.TOKEN_HEX // 2)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
                        "local_classes": sorted(ws.local_classes), "worktree": str(spec.worktree)}
         caps = self._caps(spec.profile)
         files = {shim.TOKEN_FILE: token, SHIM_SOURCE.name: SHIM_SOURCE.read_text(),
                  shim.CONFIG_FILE: json.dumps(shim_config), REQUEST_INSIDE.name: shim.REQUEST_WRAPPER,
                  **adapter.run_files(usage=caps.in_session_usage, limits=caps.limit_signal),
-                 **self.selftest.files()}
+                 **self.selftest.files(),
+                 INSTALL_RECORD_INSIDE.name: hv.install_record(
+                     installed, [str(layout.home / p) for p in facts.empty_read_only])}
         for fname, text in files.items():
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
-        server = self._server(rec, adapter, token, caps)
+        events_log = EventLog.open(layout.session_events(gen), rec.ws, rec.bead, rec.key, gen)
+        self._live(rec.key, events_log)
+        server = self._server(rec, adapter, token, caps, events_log)
         self.servers[spec.session_key] = server     # before start: an end closes even a half-started one
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
         sp = build_spec(SpecInput(spec.session_key, gen, spec.role, layout, spec.worktree,
-                                  adapter.facts(layout, cli, c.uid), checked.files, ws.extra_egress,
+                                  facts, checked.files, ws.extra_egress,
                                   ws.extra_ro_mounts, c.settings.probe_allowed_host, c.uid, c.gid,
                                   git_binds))
         if tuple(b.source for b in sp.logins) != checked.files:
@@ -740,7 +900,7 @@ class SandboxRuntime:
             raise _StepFailed("the sandbox was created past its deadline; it was destroyed")
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,
-                           others, c.real_home_canary, c.wsd_socket, c.settings, server.turns)
+                           others, c.real_home_canary, c.wsd_socket, c.settings, server.turns, installed)
         # D23 (Amendment 1): the exec path is the first thing run in the new sandbox, so no process but
         # OpenShell's own exists to reach the pipes `sandbox exec` gives the probe.
         self.selftest.exec_path(ctx)
@@ -821,16 +981,31 @@ class SandboxRuntime:
         `_pinned` reads one, under its lock."""
         return self.c.accounts.capabilities_of(profile)
 
-    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities) -> SessionServer:
-        """The generation's socket: it counts the adapter's turn ends and hands each hook payload to the
-        adapter's parser, attributed to this generation (E8, E14)."""
+    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities,
+                events_log: EventLog) -> SessionServer:
+        """The generation's socket: it counts the adapter's turn ends, hands each hook payload to the
+        adapter's parser, and logs Stops and requests (plan 5i), all attributed to this generation (E8,
+        E14). A Stop that can't be logged is dropped (D3); a request that can't be logged is refused. Only a
+        new event wakes wsd: a resent request is answered from the log and wakes nothing."""
         layout, key, gen = self.layout(rec.key), rec.key, rec.generation
 
         def heard(payload: dict[str, Any]) -> None:
+            if payload.get("hook_event_name") == "Stop" and events_log.stop(payload) is not None:
+                self._woke(rec.ws)
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
+        def asked(payload: dict[str, Any]) -> dict[str, Any]:
+            new, answer = events_log.request(payload, self.ops.get(rec.ws, frozenset()))
+            if new is not None:
+                self._woke(rec.ws)
+            return answer
+
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
-                             on_event=heard)
+                             on_event=heard, on_request=asked)
+
+    def _woke(self, ws: str) -> None:
+        with contextlib.suppress(Exception):      # a wake is a hint: the next pickup reads the log anyway
+            self.wake(ws)
 
     def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
         if report is None:
@@ -860,7 +1035,8 @@ class SandboxRuntime:
             return
         self.polled[ident] = now
         try:
-            argv = adapter.usage_argv(self._cli(adapter))
+            pin = InstallPin(rec.install_name, rec.install_digest)
+            argv = adapter.usage_argv(self.verified_cli(adapter, pin))
             if argv is None:
                 return
             r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)
@@ -949,15 +1125,28 @@ class SandboxRuntime:
         try:
             token = (layout.run(rec.generation) / shim.TOKEN_FILE).read_text().strip()
             adapter = self.c.adapters[rec.adapter]
-            server = self._server(rec, adapter, token, self._caps(rec.profile))
+            events_log = EventLog.open(layout.session_events(rec.generation), rec.ws, rec.bead, rec.key,
+                                       rec.generation)
+            events_log.forwarding = True        # the session is running, so its brief was taken
+            server = self._server(rec, adapter, token, self._caps(rec.profile), events_log)
         except (OSError, KeyError):
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         try:
             server.start()
         except OSError:
             server.close()
+            events_log.close()
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
+        self._live(rec.key, events_log)
+
+    def _live(self, key: str, events_log: EventLog) -> None:
+        """The key's running generation's log; one it replaces (an end that never closed its socket) takes
+        no more appends, so its generation can be read as final."""
+        with self.logs_lock:
+            old, self.logs[key] = self.logs.get(key), events_log
+        if old is not None and old is not events_log:
+            old.close()
 
     def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False,
              cause: EndCause = EndCause.DIED) -> bool:
@@ -986,6 +1175,7 @@ class SandboxRuntime:
             journaled = False                # stop it anyway; landing and `ended` wait for a durable record
         if not self._teardown(rec, interrupt=interrupt) or not journaled:
             return False                     # the reaper stays: it is the backstop until the end is confirmed
+        self._watch(self.c.clock(), due_only=False)    # T9: the tree as the generation left it, `stopping`
         if rec.created:              # a create that failed or timed out may still land: its watcher stays
             with contextlib.suppress(*TMUX_ERRORS):
                 self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
@@ -1068,6 +1258,10 @@ class SandboxRuntime:
                 socket_gone = False             # kept, so the next end closes it again
             else:
                 del self.servers[rec.key]
+                with self.logs_lock:
+                    done = self.logs.pop(rec.key, None)
+                if done is not None:
+                    done.close()            # its generation is final now
         for path in (self.layout(rec.key).socket(rec.generation),
                      self.layout(rec.key).probe_socket(rec.generation)):
             try:

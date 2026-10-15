@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -17,6 +16,7 @@ from pathlib import Path
 
 from fakes.fake_backend import FakeBackend
 from fakes.scripted_selftest import ScriptedSelfTest
+from harness_env import Fixture, store_fixture
 from wsd_env import ADAPTERS, Clock, accounts_at, git_repo, login_home
 
 from heterodyne.config import paths
@@ -94,27 +94,22 @@ def short_dir() -> Iterator[Path]:
     try:
         yield root
     finally:
+        unseal_all(root)
         shutil.rmtree(root, ignore_errors=True)
 
 
-FAKE_CLI = Path(__file__).resolve().parent / "fakes" / "fake_agent_cli.py"
+def unseal_all(root: Path) -> None:
+    """Make every directory under `root` writable again, so it can be removed: a published install and
+    a run's empty directory are 0555. Links are never followed."""
+    for folder, dirs, _ in os.walk(root):
+        for d in dirs:
+            path = Path(folder) / d
+            if not path.is_symlink():
+                with contextlib.suppress(OSError):
+                    path.chmod(0o700)
+
+
 PINS = {"claude-code": "2.1.286", "codex": "0.160.0"}
-
-
-def install_fake_cli(root: Path, adapter: str) -> Path:
-    """A fake CLI install laid out like the real one, at its pinned version. Returns the binary."""
-    if adapter == "claude-code":
-        top = root / "cli" / "claude"
-        binary = top / "bin" / "claude"
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        (top / "package.json").write_text(json.dumps({"version": PINS[adapter]}))
-    else:
-        binary = root / "cli" / "codex" / "releases" / f"{PINS[adapter]}-x86_64-fake" / "bin" / "codex"
-        binary.parent.mkdir(parents=True, exist_ok=True)
-    name = "claude" if adapter == "claude-code" else "codex"
-    binary.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" --as={name} "$@"\n')
-    binary.chmod(0o755)
-    return binary
 
 
 def fake_jwt(exp: int) -> str:
@@ -172,37 +167,43 @@ class RuntimeRig:
     worktree: Path
     home: Path
     repo: Path
+    installs: Mapping[str, Fixture]     # adapter -> its published, selected fake CLI
 
 
 def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> RuntimeRig:
     """A SandboxRuntime on the fake backend, the scripted self-test and a guarded tmux, with both fake
-    CLIs at their pins and default logins valid for a day. `root` must be short (short_dir)."""
+    CLIs published at their declared versions into a local store and selected, and default logins valid
+    for a day. `root` must be short (short_dir)."""
     env = config_env(root / "c", host)
     home = Path(env["HOME"])
     fresh_logins(home, clock() + 86_400)
-    claude, codex = install_fake_cli(root / "i", "claude-code"), install_fake_cli(root / "i", "codex")
+    config_dir = Path(env["HETERODYNE_CONFIG_DIR"])
+    installs = {a: store_fixture(root / "i", a, config_dir) for a in ("claude-code", "codex")}
     backend, selftest = FakeBackend(), ScriptedSelfTest()
     config = RuntimeConfig(
         sessions=root / "s", credlocks=root / "k", settings=sandbox_settings(env), accounts=accounts_at(home),
         real_home=home, real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(),
-        gid=os.getgid(), tmux=tmux, path=os.pathsep.join((str(claude.parent), str(codex.parent))),
-        clock=clock)
+        gid=os.getgid(), tmux=tmux, clock=clock, store=installs["codex"].store,
+        taint_dir=installs["codex"].taint_dir, config_dir=config_dir, store_problems=list)
     runtime = SandboxRuntime(config, backend, selftest)
     repo, worktree = git_repo(root / "r"), root / "w"          # a linked worktree, as btq makes them
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "btq/btq-1", str(worktree)],
                    check=True, capture_output=True)
-    return RuntimeRig(root, runtime, backend, selftest, tmux, clock, worktree, home, repo)
+    return RuntimeRig(root, runtime, backend, selftest, tmux, clock, worktree, home, repo, installs)
 
 
 def launch_spec(rig: RuntimeRig, profile: str, bead: str = "btq-1", *, account: str = "default",
                 resume: bool = False) -> LaunchSpec:
     """A first launch, as plan 3's guard builds it: Claude's native ID is the session key, Codex's is
-    unknown until its thread starts. The credential key is the account's, pinned now (AU-3)."""
+    unknown until its thread starts. The credential key is the account's, pinned now (AU-3), and so is
+    the adapter's selected install (plan 4c D2)."""
     key = ids.role_session(bead, "coder", profile)
     native = key if profile == "p-one" else None
+    pin = rig.installs[ADAPTERS[profile]].pin
     return LaunchSpec("alpha", bead, "coder", profile, key, f"{bead} · coder", rig.worktree, resume=resume,
                       native_id=native, account=account, repo=rig.repo,
-                      credential_key=rig.runtime.c.accounts.current_key(ADAPTERS[profile], account))
+                      credential_key=rig.runtime.c.accounts.current_key(ADAPTERS[profile], account),
+                      install=pin.install, install_digest=pin.digest)
 
 
 def bead_worktree(rig: RuntimeRig, bead: str) -> Path:
