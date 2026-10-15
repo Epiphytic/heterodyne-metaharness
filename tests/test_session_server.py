@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from sandbox_env import WatchedGate, wait_for
 
-from heterodyne.session.server import MAX_DEPTH, BoundaryBusy, SessionServer, TurnState
+from heterodyne.session.server import MAX_DEPTH, BoundaryBusy, BoundaryUncertain, SessionServer, TurnState
 
 TOKEN = "fake-session-token"  # noqa: S105 (test value)
 THREAD = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
@@ -374,6 +374,24 @@ def test_a_failed_delivery_gives_the_boundary_back_and_a_raising_one_spends_it(s
         server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
     with pytest.raises(BoundaryBusy):
         server.at_boundary(lambda: True)
+
+
+def test_after_a_raising_delivery_no_boundary_is_delivered_at_and_nothing_is_spent(
+        server: SessionServer) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")                                    # a fresh boundary
+    before, spent = server.turns(), getattr(server, "_spent")  # noqa: B009 - a private seam
+    calls: list[str] = []
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "later"))
+    assert calls == [] and server.turns() == before and getattr(server, "_spent") == spent  # noqa: B009
+    gate = getattr(server, "_turn_gate")  # noqa: B009
+    assert gate.acquire(blocking=False)                     # and the gate was given back
+    gate.release()
 
 
 def test_turn_events_wait_for_a_delivery(server: SessionServer, monkeypatch: pytest.MonkeyPatch) -> None:

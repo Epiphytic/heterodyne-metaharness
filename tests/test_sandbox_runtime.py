@@ -2608,8 +2608,47 @@ def test_an_uncertain_paste_is_uncertain(rig: RuntimeRig, profile: str,
     monkeypatch.setattr(rig.runtime.c.tmux, "paste", uncertain)
     with pytest.raises(SteerUncertain):
         rig.runtime.steer(spec.session_key, 1, "hello")
-    with pytest.raises(SteerRefused, match="mid-turn"):     # it may have landed: the boundary is spent
+    with pytest.raises(SteerRefused, match="uncertain"):    # it may have landed: nothing is pasted again
         rig.runtime.steer(spec.session_key, 1, "again")
+
+
+@ADAPTERS
+def test_after_an_uncertain_steer_the_generation_is_never_pasted_into_again(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c3 B1: tmux can't cancel a command a timed-out client sent, so a paste may land, or its Enter
+    # arrive, after the gate is gone. Nothing more is pasted into that generation: no later Enter can
+    # submit what a late paste left in the input line, and the note is never delivered twice.
+    spec, pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+
+    def uncertain(_name: str, _text: str, **_: object) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", uncertain)
+        with pytest.raises(SteerUncertain):
+            rig.runtime.steer(spec.session_key, 1, "hello")
+    stops = server.turns().stops
+    rig.tmux.paste(pane, "one more turn")                   # a boundary a steer could otherwise use
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    before, spent = server.turns(), getattr(server, "_spent")  # noqa: B009 - a private seam
+    pasted: list[str] = []
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+        with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+            rig.runtime.steer(spec.session_key, 1, "again")
+    assert pasted == []                                     # nothing pasted, and nothing spent or consumed
+    assert getattr(server, "_spent") == spent and server.turns() == before  # noqa: B009
+    first = record(rig, spec.session_key)
+    rig.runtime.stop(spec.session_key)
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    pane = record(rig, spec.session_key).tmux_session
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    rig.tmux.paste(pane, "start")
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 2, "a fresh generation")    # its own input line: steerable
+    wait_for(lambda: "echo: a fresh generation" in rig.tmux.capture(pane, 50))
 
 
 def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,
@@ -2782,6 +2821,49 @@ def test_a_rebind_after_a_spent_boundary_steers_after_a_turn_end(rig: RuntimeRig
     assert pasted == ["spent"]
 
 
+def hook_wait(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """The daemon's hook wait from now on (what a launch installs in the generation's shim.json)."""
+    c = rig.runtime.c
+    monkeypatch.setattr(rig.runtime, "c", replace(c, settings=replace(c.settings, hook_wait_seconds=seconds)))
+
+
+@ADAPTERS
+def test_a_rebound_steer_is_bounded_by_the_generations_installed_hook_wait(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c3 B2: a rebind keeps the shim.json the generation was launched with, so its shim gives up after
+    # that wait, not after the one wsd's settings say since a restart.
+    hook_wait(rig, monkeypatch, 2.0)
+    spec, pane = idle_session(rig, profile)
+    hook_wait(rig, monkeypatch, 10.0)                       # wsd restarts with a longer wait
+    rig.runtime.servers.pop(spec.session_key).close()
+    rig.runtime.sessions("alpha")                           # rebinds it, its shim still waiting 2s
+    server = rig.runtime.servers[spec.session_key]
+    rig.tmux.paste(pane, "one more turn")
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+    bounds: list[float | None] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste",
+                        lambda _name, _t, *, seconds=None: bounds.append(seconds))
+    rig.runtime.steer(spec.session_key, 1, "bounded")
+    assert bounds == [1.0]                                  # half the installed 2s, not min(5, 10 / 2)
+
+
+@ADAPTERS
+def test_a_steer_is_refused_when_the_installed_hook_wait_is_too_short_or_unreadable(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+    config = rig.runtime.servers[spec.session_key].path.parent / shim.CONFIG_FILE
+    installed = json.loads(config.read_text())
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    config.write_text(json.dumps({**installed, "wait_seconds": 1.5}))
+    with pytest.raises(SteerRefused, match="the hook wait is too short to steer"):
+        rig.runtime.steer(spec.session_key, 1, "short")
+    config.write_text("{")
+    with pytest.raises(SteerRefused, match="the session's hook wait can't be read"):
+        rig.runtime.steer(spec.session_key, 1, "unreadable")
+    assert pasted == []
+
+
 @ADAPTERS
 def test_a_new_generation_after_a_spent_boundary_can_be_steered(rig: RuntimeRig, profile: str,
                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2926,14 +3008,19 @@ def test_a_prompt_hook_during_the_longest_steer_is_answered_and_recorded_in_time
     before = server.turns()
     wait = json.loads((server.path.parent / shim.CONFIG_FILE).read_text())["wait_seconds"]
     entered, bounds = threading.Event(), list[float | None]()
+    gate = WatchedGate(server)
+    contended: list[bool] = []
 
     def slow(_name: str, _text: str, *, seconds: float | None = None) -> None:
+        start = time.monotonic()
         bounds.append(seconds)
         entered.set()
-        time.sleep(seconds if seconds is not None else 15.0)   # the whole bound (unbounded: one tmux step)
+        # The paste holds the gate: the prompt's blocking take, seen before the paste ends, is contention.
+        contended.append(gate.waiting.wait(10))
+        bound = seconds if seconds is not None else 15.0       # the whole bound (unbounded: one tmux step)
+        time.sleep(max(0.0, bound - (time.monotonic() - start)))
 
     monkeypatch.setattr(rig.runtime.c.tmux, "paste", slow)
-    gate = WatchedGate(server)
     monkeypatch.setattr(server, "_turn_gate", gate)
     steer = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
     steer.start()
@@ -2948,7 +3035,7 @@ def test_a_prompt_hook_during_the_longest_steer_is_answered_and_recorded_in_time
         prompts = server.turns().prompts                    # as the shim answers: the agent's turn starts
     finally:
         steer.join(30)
-    assert gate.waiting.is_set()                            # it did wait for the paste
+    assert contended == [True]                              # it did wait for the paste
     assert prompts == before.prompts + 1                    # recorded before the shim gave up
     assert answer == [(0, "")] and took < wait
     assert bounds == [min(runtime_mod.STEER_SECONDS, wait / 2)]
