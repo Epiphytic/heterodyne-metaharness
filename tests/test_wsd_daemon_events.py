@@ -218,6 +218,59 @@ def test_a_burst_of_wakes_runs_a_bounded_number_of_pickups(tmp_path: Path) -> No
     assert 1 <= len(turn_ended(seen)) <= 2
 
 
+def test_a_wake_while_a_pickup_runs_after_reading_its_events_runs_one_more(tmp_path: Path) -> None:
+    """A wake that lands after the running pickup has read the log must not join it: one more runs."""
+    runtime = FakeRuntime()
+    wsd = build(tmp_path, settings(tmp_path), runtime)
+    seen: list[Trigger] = []
+    read, woken = threading.Barrier(2, timeout=10), threading.Event()
+    real = wsd.pickup_one
+
+    def spy(name: str, trigger: Trigger) -> Outcome:
+        seen.append(trigger)
+        outcome = real(name, trigger)               # the events are read by now
+        if len(turn_ended(seen)) == 1:
+            read.wait()                             # let the sender wake while this pickup still runs
+            assert woken.wait(10)
+        return outcome
+
+    wsd.pickup_one = spy  # type: ignore[method-assign]
+
+    def sender() -> None:
+        runtime.event(WS, event(1))
+        read.wait()
+        runtime.event(WS, event(2))
+        woken.set()
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(wsd.serve(stop))
+        await until(lambda: bool(seen))
+        await until(lambda: not wsd.lanes[WS].jobs)     # the startup pickup is done
+        thread = threading.Thread(target=sender)
+        thread.start()
+        await until(lambda: len(turn_ended(seen)) == 2)
+        await until(lambda: not wsd.waking and not wsd.lanes[WS].jobs)
+        await asyncio.to_thread(thread.join, 10)
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+    assert runtime.wakes == 2
+    assert turn_ended(seen) == [Trigger(TriggerKind.TURN_ENDED)] * 2
+
+
+def test_a_wake_before_serve_or_on_a_closed_loop_does_nothing(tmp_path: Path) -> None:
+    wsd = build(tmp_path, settings(tmp_path), FakeRuntime())
+    seen = spy_pickups(wsd)
+    wsd.wake(WS)                                        # no loop yet
+    closed = asyncio.new_event_loop()
+    closed.close()
+    wsd.loop = closed                                   # not stopping, but its loop has gone
+    wsd.wake(WS)                                        # call_soon_threadsafe raises RuntimeError: suppressed
+    assert seen == [] and not wsd.waking and not wsd.event_wakes and not wsd.lanes[WS].jobs
+
+
 def test_a_wake_after_shutdown_does_nothing(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     wsd = build(tmp_path, settings(tmp_path), runtime)
