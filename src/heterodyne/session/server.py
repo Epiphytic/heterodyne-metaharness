@@ -13,7 +13,9 @@ first SessionStart's session ID if it is a canonical UUID (the Codex thread ID, 
 A steer (plan 5i D4) delivers at a turn boundary through `at_boundary`, which spends the boundary before
 delivering and holds the turn gate while it does: a turn event that arrives meanwhile is recorded only once
 the delivery is over, so it never slips between the idle check and the paste, and two steers never share a
-boundary. The spent boundary belongs to this server, so a rebind or a new generation starts with none.
+boundary. A hook's shim gives up after its own wait and lets the turn go on, so a delivery must end well
+within that wait (the runtime bounds a steer's paste to half of it). The spent boundary belongs to this
+server, so a rebind or a new generation starts with none.
 Text an operator types into the pane is outside the gate.
 
 The session is untrusted with wsd's resources too: at most `max_handlers` connections are served at
