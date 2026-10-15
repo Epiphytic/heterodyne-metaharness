@@ -372,11 +372,13 @@ def _with_handlers(both: Both, handlers: dict[str, SessionHandler]) -> None:
     rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
 
 
-def test_a_briefed_stop_reaches_its_handler_through_a_pickup(both: Both) -> None:
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_briefed_stop_reaches_its_handler_through_a_pickup(both: Both, profile: str) -> None:
     seen = Seen()
     _with_handlers(both, {"stop": seen})
     rig = both.rig
     rig.world.add("btq-1")
+    on_profile(rig, "btq-1", profile)
     assert rig.pickup() is Outcome.STARTED
     key = rig.key("btq-1")
     wait_for(lambda: both.rt.runtime.logs[key].last >= 1)      # the brief's turn ended
@@ -387,12 +389,14 @@ def test_a_briefed_stop_reaches_its_handler_through_a_pickup(both: Both) -> None
     assert [r[0] for r in rows] == ["committed"]
 
 
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
 def test_a_missing_run_in_an_ended_generation_is_one_damaged_row_and_later_events_run(
-        both: Both) -> None:
+        both: Both, profile: str) -> None:
     seen = Seen()
     _with_handlers(both, {"stop": seen})
     rig, rt = both.rig, both.rt
     rig.world.add("btq-1")
+    on_profile(rig, "btq-1", profile)
     assert rig.pickup() is Outcome.STARTED
     key = rig.key("btq-1")
     lg = rt.runtime.logs[key]
