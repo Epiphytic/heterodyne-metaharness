@@ -29,6 +29,7 @@ from heterodyne.wsd.states import BeadState
 WS, BEAD = "ws1", "ws1-1"
 T0 = 1_800_000_000
 HOUR = 3600
+WEEK = 7 * 24 * HOUR       # the longest backoff a Notices accepts
 
 
 class Clock:
@@ -167,6 +168,45 @@ def test_a_huge_attempt_count_still_backs_off_to_the_cap_and_stays_owed(rig: Rig
     row = rig.journal.notice("stuck:ws1-1:1")
     assert row is not None and (row.state, row.attempts) == ("owed", 1025)
     assert row.next_at == rig.clock() + 1800
+
+
+def next_after(rig: Rig, n: notices.Notices, attempts: int) -> int:
+    """The delay `n` schedules after attempt `attempts + 1` fails with nothing written (no socket)."""
+    send(n)
+    with rig.journal.transaction():
+        rig.journal.notice_set("stuck:ws1-1:1", rig.clock(), attempts=attempts)
+    rig.clock.at += WEEK
+    n.retry_owed(rig.clock())
+    row = rig.journal.notice("stuck:ws1-1:1")
+    assert row is not None and row.state == "owed" and row.next_at is not None
+    return row.next_at - rig.clock()
+
+
+def test_a_tiny_backoff_still_reaches_its_cap(rig: Rig) -> None:
+    n = notices.Notices(rig.journal, rig.sock, clock=rig.clock, backoff=5e-324, backoff_max=1800.0)
+    assert next_after(rig, n, 2047) == 1800
+
+
+def test_the_default_backoff_after_a_million_attempts_is_the_cap(rig: Rig) -> None:
+    assert next_after(rig, notices.Notices(rig.journal, rig.sock, clock=rig.clock), 10**6) == 1800
+
+
+@pytest.mark.parametrize(("backoff", "backoff_max"), [
+    (float("nan"), 1800.0), (60.0, float("nan")), (float("inf"), 1800.0), (60.0, float("inf")),
+    (10**400, 1800.0), (60.0, 10**400), (1e20, 1e20), (0, 1800.0), (0.0, 0.0), (-1.0, 1800.0),
+    (True, 1800.0), (60.0, True), (120.0, 60.0), (60.0, WEEK + 1), ("60", 1800.0)],
+    ids=["nan", "nan max", "inf", "inf max", "10**400", "10**400 max", "1e20", "zero", "zeros", "negative",
+         "bool", "bool max", "over max", "max over a week", "str"])
+def test_a_bad_backoff_fails_at_construction(rig: Rig, backoff: object, backoff_max: object) -> None:
+    with pytest.raises(ValueError, match="backoff"):
+        notices.Notices(rig.journal, rig.sock, clock=rig.clock, backoff=backoff,  # pyright: ignore[reportArgumentType]
+                        backoff_max=backoff_max)  # pyright: ignore[reportArgumentType]
+
+
+def test_the_backoff_bounds_are_inclusive(rig: Rig) -> None:
+    assert notices.BACKOFF_LIMIT == WEEK
+    n = notices.Notices(rig.journal, rig.sock, clock=rig.clock, backoff=WEEK, backoff_max=WEEK)
+    assert next_after(rig, n, 0) == WEEK
 
 
 @pytest.mark.parametrize("step", ["drop", "hang", "garbage", "failed"])
