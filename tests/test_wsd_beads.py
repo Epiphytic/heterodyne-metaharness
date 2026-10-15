@@ -14,10 +14,6 @@ from wsd_env import WS, git_repo
 from heterodyne.wsd import approvals, btq, gitwip, ids
 from heterodyne.wsd import btq as wbtq
 from heterodyne.wsd.beads import (
-    DUPLICATE_DECIDED,
-    DUPLICATE_LEFT_OPEN,
-    DUPLICATE_NOT_CLOSED,
-    DUPLICATE_OF,
     PARKED,
     QUESTION_ANSWERED,
     RECORD_KEY,
@@ -750,7 +746,15 @@ WRITES = frozenset({"create", "comments add", "close", "label", "dep", "update"}
 
 
 def adapter_for(world: World) -> BeadsAdapter:
-    return BeadsAdapter(factory(world))
+    """An adapter of `world`, with the world's ref pins: a new one is a wsd restarted on the same journal."""
+    return BeadsAdapter(factory(world), pins=world.pins)
+
+
+# The fixed log texts, as literals so the tests read the same against code that predates them.
+DUPLICATE_OF = "duplicate of {canonical}"
+DUPLICATE_DECIDED = "a decision on a duplicate bead is ignored (%d)"
+DUPLICATE_NOT_CLOSED = "a duplicate question bead could not be closed (%d)"
+DUPLICATE_LEFT_OPEN = "a duplicate approval bead is left open and ignored (%d)"
 
 
 def writes(world: World, since: int = 0) -> list[str]:
@@ -981,23 +985,24 @@ WHEN = {"before the list": ("list", 1), "after the list": ("create", 1), "after 
 @pytest.mark.parametrize("when", list(WHEN))
 def test_a_crash_mid_create_leaves_one_open_holder_and_a_stable_canonical(world: World, when: str,
                                                                           tick: int) -> None:
-    """The dead wsd's `bd create` commits at any point around the replacement's create. Once it has, every
-    create and lookup, by any adapter (a restart), gives the same bead: the earliest created, then the lowest
-    ID. Exactly one holder is still open, and nothing is ever created over another bead."""
+    """The dead wsd's `bd create` commits at any point around the replacement's create. The first create to
+    resolve the ref pins its bead (the earliest created, then the lowest ID, of the holders it saw), and
+    every later create and lookup, by any adapter (a restart), gives that bead, whenever the orphan
+    commits. Exactly one holder is still open, and nothing is ever created over another bead."""
     world.tick = timedelta(seconds=tick)
     dies_mid_create(world)
     hook = WHEN[when]
     if hook is not None:
         world.before(hook[0], world.commit_orphans, nth=hook[1])
     first = ask(adapter_for(world))
+    assert world.pins.pinned(WS, REF) == first
     world.commit_orphans()
-    canonical = earliest(world)
-    if when != "after the replacement returned":
-        assert first == canonical
+    if when != "after the replacement returned":      # both were there at the first resolution
+        assert first == earliest(world)
     for _ in range(3):            # restarts
-        assert ask(adapter_for(world)) == canonical
-        assert adapter_for(world).holder(WS, REF) == canonical
-    assert holders(world, status="open") == [canonical]
+        assert ask(adapter_for(world)) == first
+        assert adapter_for(world).holder(WS, REF) == first
+    assert holders(world, status="open") == [first]
     assert len(holders(world)) == (1 if when == "before the list" else 2)
 
 
@@ -1092,3 +1097,127 @@ def test_a_duplicate_whose_close_fails_stays_a_duplicate_and_is_never_used(
     adapter_for(world).close_question(WS, canonical, "Yes.")
     assert world.beads[canonical].status == "closed"
     assert holders(world, status="open") == []
+
+
+# --- the canonical holder is pinned at its first resolution (c3) ---
+
+def _approve(world: World, bead: str) -> None:
+    world.beads[bead].metadata["approved_by"] = APPROVER        # approve-bead decides, and closes it
+    world.close(bead)
+    world.closed_reasons[bead] = "approved"
+
+
+@pytest.mark.parametrize("kind", ["kind:question", "kind:approval"])
+def test_a_late_orphan_created_earlier_never_takes_the_canonical_over(
+        world: World, kind: str, caplog: pytest.LogCaptureFixture) -> None:
+    """The review's repro. The replacement resolves the ref while the dead wsd's `bd create` still runs, so
+    its own bead is the only holder, and is pinned. The orphan then commits with an earlier created_at:
+    by created_at alone it would be canonical. It is a duplicate, and an approval of it is never Approved."""
+    asked = json.dumps({f: ([] if f == "refs" else f"the {f}") for f in ASK_FIELDS})
+    fields: dict[str, Any] = {"ref": "a:1", "kind": kind, "metadata": {"ask": asked}}
+    dies_mid_create(world, **fields)
+    first = ask(adapter_for(world), **fields)
+    world.commit_orphans()
+    [orphan] = [b for b in holders(world, "a:1") if b != first]
+    assert earliest(world, "a:1") == orphan
+    if kind == "kind:approval":
+        _approve(world, orphan)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):            # restarts
+            assert ask(adapter_for(world), **fields) == first
+            assert adapter_for(world).holder(WS, "a:1") == first
+    if kind == "kind:question":
+        assert world.closed_reasons == {orphan: DUPLICATE_OF.format(canonical=first)}
+        assert holders(world, "a:1", status="open") == [first]
+        return
+    assert DUPLICATE_DECIDED % 1 in caplog.messages
+    assert writes(world).count("create") == 1 and "close" not in writes(world)    # never written to
+    queue = factory(world)(WS, "approve-bead")
+    bead = adapter_for(world).holder(WS, "a:1")
+    assert bead is not None
+    readout, shown, recomputed = _readout(queue, bead)
+    expect = approvals.Expected(bead, recomputed[0] or "", lambda value: value == "the effect")
+    assert approvals.verdict(readout, shown, recomputed, expect, None) == approvals.Waiting()
+
+
+def test_a_same_second_tie_never_moves_the_canonical(world: World) -> None:
+    """Whole-second created_at: the replacement's btq-h9 is pinned, and the orphan's btq-h10, committed in
+    the same second, sorts first by ID. It is still the duplicate."""
+    world.tick = timedelta(0)
+    for n in range(8):
+        ask(adapter_for(world), ref=f"q:alpha:btq-2:1:{n}")
+    world.orphan_next_create = True
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter_for(world))
+    first = ask(adapter_for(world))
+    world.commit_orphans()
+    assert (first, earliest(world)) == ("btq-h9", "btq-h10")
+    for _ in range(3):
+        assert ask(adapter_for(world)) == first
+        assert adapter_for(world).holder(WS, REF) == first
+    assert holders(world, status="open") == [first]
+
+
+@pytest.mark.parametrize("via", ["create", "holder"])
+def test_a_crash_before_the_pin_resolves_again_and_then_pins(world: World, via: str) -> None:
+    """The first resolution dies before its pin commits: nothing was returned. The next one, a create or a
+    lookup, resolves by created_at and pins; from then on no holder, however early, takes over."""
+    dies_mid_create(world)
+    world.before("create", world.commit_orphans)
+    world.pins.fail = 1
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter_for(world))
+    assert world.pins.pinned(WS, REF) is None and len(holders(world)) == 2
+    canonical = earliest(world)
+    got = ask(adapter_for(world)) if via == "create" else adapter_for(world).holder(WS, REF)
+    assert got == canonical and world.pins.pinned(WS, REF) == canonical
+    [other] = [b for b in holders(world) if b != canonical]
+    world.beads[other].created_at = "2026-01-01T00:00:00Z"       # earlier than any: it changes nothing
+    assert ask(adapter_for(world)) == canonical
+    assert adapter_for(world).holder(WS, REF) == canonical
+
+
+@pytest.mark.parametrize("change", ["ref edited", "bead gone", "workstream label dropped"])
+def test_a_pinned_bead_that_no_longer_holds_its_ref_fails_closed(world: World, change: str) -> None:
+    """The pin is never re-picked: a pinned bead no longer listed with its ref is refused by create and
+    lookup alike, with no bd write, even with another holder there to choose."""
+    first = ask(adapter_for(world))
+    second = ask(adapter_for(world), ref="q:alpha:btq-1:1:2")
+    world.beads[second].metadata[REF_KEY] = REF       # another holder, which must not be picked
+    if change == "ref edited":
+        world.beads[first].metadata[REF_KEY] = "q:alpha:btq-1:1:9"
+    elif change == "bead gone":
+        del world.beads[first]
+    else:
+        world.beads[first].labels.remove(f"ws:{WS}")
+    since = len(world.calls)
+    with pytest.raises(CreateUnverified, match="pinned"):
+        ask(adapter_for(world))
+    with pytest.raises(CreateUnverified, match="pinned"):
+        adapter_for(world).holder(WS, REF)
+    assert writes(world, since) == []
+    assert world.pins.pinned(WS, REF) == first
+
+
+def test_without_a_pin_store_nothing_is_created(world: World) -> None:
+    with pytest.raises(BeadsUnavailable, match="pin"):
+        ask(BeadsAdapter(factory(world)))
+    with pytest.raises(BeadsUnavailable, match="pin"):
+        BeadsAdapter(factory(world)).holder(WS, REF)
+    assert world.calls == []
+
+
+def test_a_duplicate_closed_before_its_cleanup_gets_no_comment(world: World,
+                                                              caplog: pytest.LogCaptureFixture) -> None:
+    """The operator closes the duplicate question between the list and the cleanup's show: nothing is
+    written to it, and its close counts as a decision on a duplicate, ignored."""
+    first = ask(adapter_for(world))
+    second = ask(adapter_for(world), ref="q:alpha:btq-1:1:2")
+    world.beads[second].metadata[REF_KEY] = REF
+    world.before("show", lambda: world.close(second), nth=2)      # 1: the canonical's read-back
+    since = len(world.calls)
+    with caplog.at_level("WARNING"):
+        assert ask(adapter_for(world)) == first
+    assert writes(world, since) == []
+    assert world.beads[second].comments == []
+    assert DUPLICATE_DECIDED % 1 in caplog.messages

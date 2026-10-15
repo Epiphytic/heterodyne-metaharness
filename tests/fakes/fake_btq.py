@@ -51,6 +51,27 @@ class Fault:
     bead: str | None = None      # only calls about this bead
 
 
+class FakePins:
+    """The journal's ref -> created bead pins (`beads.RefPins`; in wsd, the `asks` row's `child`). They
+    survive a restart: every adapter of a world shares them. `fail` makes the next `pin` calls raise, as a
+    crash before the pin commits."""
+
+    def __init__(self) -> None:
+        self.pins: dict[tuple[str, str], str] = {}
+        self.fail = 0
+
+    def pinned(self, ws: str, ref: str) -> str | None:
+        return self.pins.get((ws, ref))
+
+    def pin(self, ws: str, ref: str, bead: str) -> None:
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("journal: disk I/O error")
+        held = self.pins.setdefault((ws, ref), bead)
+        if held != bead:
+            raise ValueError("the ref is pinned to another bead")
+
+
 class World:
     def __init__(self, state_root: Path) -> None:
         self.beads: dict[str, FakeBead] = {}
@@ -69,6 +90,7 @@ class World:
         self.orphan_next_create = False     # the next `bd create`'s caller dies before bd commits it
         self.orphans: list[tuple[FakeQueue, list[str], str]] = []      # creates still running, uncommitted
         self.hooks: list[tuple[str, int, Callable[[], None]]] = []      # (call, nth, fn): see `before`
+        self.pins = FakePins()              # the journal's pins, kept across restarts
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
