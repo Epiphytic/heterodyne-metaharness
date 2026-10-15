@@ -6,7 +6,7 @@ rules). The card is rebuilt from the bead, so a crash at any step resumes withou
 """
 
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,13 @@ from heterodyne.admind import asks as admind_asks
 from heterodyne.admind import daemon as admind_daemon
 from heterodyne.wsd import asks as asks_module
 from heterodyne.wsd import relay
+from heterodyne.wsd import scheduler as scheduler_module
 from heterodyne.wsd.asks import (
+    ANSWER_CHOICE,
+    ANSWER_CUT,
+    ANSWER_FREE,
+    ANSWER_WITHHELD,
+    ASK_ENDED,
     ASK_POST_UNKNOWN,
     ASK_UNPOSTABLE,
     CARD_HEAD,
@@ -32,9 +38,15 @@ from heterodyne.wsd.asks import (
     CARD_ROUND,
     CUT_MARK,
     D4_CHOICES,
+    ENDED_BODY,
     NO_TEXT,
+    NOTE_BYTES,
     QUESTION_FRAMING,
     QUESTION_MAX,
+    REBUILT_MARK,
+    REBUILT_NONE,
+    REBUILT_NOTE,
+    REPOST,
     ROUNDS_BODY,
     ROUNDS_DETAIL,
     ROUNDS_TITLE,
@@ -50,7 +62,7 @@ from heterodyne.wsd.asks import (
     reshown,
     shown_text,
 )
-from heterodyne.wsd.beads import NEEDS_HUMAN, QUESTION, BeadsAdapter, BeadsUnavailable
+from heterodyne.wsd.beads import ANSWER_MARK, NEEDS_HUMAN, QUESTION, BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.journal import (
     PIN_IN_TRANSACTION,
     PIN_NO_ASK,
@@ -60,11 +72,13 @@ from heterodyne.wsd.journal import (
     Journal,
 )
 from heterodyne.wsd.notices import Notices
+from heterodyne.wsd.recovery import recover
 from heterodyne.wsd.runtime import SessionEvent
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.session_events import SURFACE
 from heterodyne.wsd.settings import RelaySettings
 from heterodyne.wsd.states import BeadState
+from heterodyne.wsd.workstream import NoAsks
 
 B = "btq-1"
 SECRET = "sk-" + "a" * 40                   # built here, so no secret is committed
@@ -148,14 +162,12 @@ def posts(fake: FakeAskSock) -> int:
     return sum(b'"post"' in f for f in fake.frames)
 
 
-def answered(rig: Rig, ref: str) -> None:
-    """Task 6's part, done by hand: the answer delivered and the question bead closed; the next pickups
-    resume the task in a new generation."""
+def answered(rig: Rig, fake: FakeAskSock, ref: str, text: str = "Go with blue.") -> None:
+    """The operator answers the question's card; the next pickups read it, close the question bead and
+    resume the task in a new generation with the answer in its brief."""
     row = rig.journal.ask(ref)
-    assert row is not None and row.child is not None
-    with rig.journal.transaction():
-        rig.journal.ask_set(ref, state="delivered")
-    rig.world.beads[row.child].status = "closed"
+    assert row is not None and row.ask_id is not None
+    fake.answer(row.ask_id, text)
     for _ in range(3):
         rig.pickup()
     assert rig.state(B) == BeadState.RUNNING.value
@@ -328,11 +340,11 @@ def test_progress_resets_the_round_count(tmp_path: Path, fake: FakeAskSock) -> N
     rig = asking(tmp_path, fake)
     rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
     rig.pickup()
-    answered(rig, stop_ref())
+    answered(rig, fake, stop_ref())
     rig.runtime.event(WS, ev(rig, "stop", 1, gen=2, text="Which shade of blue?"))
     rig.pickup()
     assert [tail(c) for c in cards(fake)][-1] == CARD_ROUND.format(bead=B, turn=1, round=2, limit=LIMIT)
-    answered(rig, stop_ref(gen=2))
+    answered(rig, fake, stop_ref(gen=2))
     commit(rig, "progress.txt")
     rig.runtime.event(WS, ev(rig, "stop", 1, gen=3, text="Which font?"))
     rig.pickup()
@@ -345,10 +357,10 @@ def test_the_round_after_the_limit_escalates_and_sends_a_stuck_notice(tmp_path: 
     rig = asking(tmp_path, fake)
     rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
     rig.pickup()
-    answered(rig, stop_ref())
+    answered(rig, fake, stop_ref())
     rig.runtime.event(WS, ev(rig, "stop", 1, gen=2, text="Blue or green, really?"))
     rig.pickup()
-    answered(rig, stop_ref(gen=2))
+    answered(rig, fake, stop_ref(gen=2))
     sessions = rig.runtime.sessions(WS)
     rig.runtime.event(WS, ev(rig, "stop", 1, gen=3, text="Blue or green, honestly?"))
     rig.pickup()
@@ -605,7 +617,7 @@ def test_ws_request_question_uses_the_agents_choices_when_valid_and_d4_otherwise
     assert tail(card) == CARD_REQUEST.format(bead=B, turn=1)
     row = rig.journal.ask(f"q:{rig.key(B)}:g1:e1")
     assert row is not None and row.state == "posted" and row.round == 0
-    answered(rig, row.ref)
+    answered(rig, fake, row.ref)
     bad = {"text": "Which size?", "choices": ["Small", "a = b"], "recommended": "A"}
     rig.runtime.event(WS, ev(rig, "question", 1, gen=2, body=bad))
     rig.pickup()
@@ -725,3 +737,308 @@ def test_journal_asks_and_nudges(tmp_path: Path) -> None:
         j.nudge_set(WS, B, 2, "tree-1")
         j.nudge_set(WS, B, 3, "tree-2")
     assert j.nudge(WS, B) == (3, "tree-2") and j.nudge(WS, "btq-2") == (0, None)
+
+
+# --- Task 6: answers, at each pickup ---------------------------------------------------------------------
+
+
+def asked(tmp_path: Path, fake: FakeAskSock, text: str = "Blue or green?") -> tuple[Rig, str, FakeAsk]:
+    """A rig whose task asked one question at a Stop: the question bead and the posted card."""
+    rig = asking(tmp_path, fake)
+    rig.runtime.event(WS, ev(rig, "stop", 1, text=text))
+    rig.pickup()
+    [child] = questions(rig)
+    [card] = cards(fake)
+    return rig, child, card
+
+
+def briefs(rig: Rig) -> list[str]:
+    return [spec.brief for spec in rig.runtime.launches if spec.bead == B]
+
+
+def note_rows(rig: Rig) -> list[tuple[str, str, str | None]]:
+    rows = rig.journal.db.execute("SELECT ref, text, delivered_at FROM resume_notes ORDER BY seq").fetchall()
+    return [(str(r[0]), str(r[1]), r[2]) for r in rows]
+
+
+def test_an_answer_closes_the_question_and_the_resume_brief_carries_it(tmp_path: Path,
+                                                                     fake: FakeAskSock) -> None:
+    rig, child, card = asked(tmp_path, fake)
+    gets = sum(b'"get"' in f for f in fake.frames)
+    fake.answer(card.ask_id, "Go with blue.")
+    note = ANSWER_FREE.format(ask_id=card.ask_id, text="Go with blue.")
+    assert bridge(rig).resume_gate(WS, B) is False
+    rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.answer, row.choice) == ("Go with blue.", None)
+    made = rig.world.beads[child]
+    assert made.status == "closed" and made.comments == [f"{ANSWER_MARK.format(ref=stop_ref())}\n{note}"]
+    assert rig.state(B) == BeadState.RUNNING.value
+    assert note in briefs(rig)[-1]
+    assert [(ref, text) for ref, text, _ in note_rows(rig)] == [(f"answer:{stop_ref()}", note)]
+    assert all(at is not None for _, _, at in note_rows(rig))
+    rig.pickup()                                            # the note read back delivered: the ask is done
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered"
+    assert fake.asks[card.ask_id].status == "cancelled"        # admind's active asks stay under MAX_OPEN
+    rig.pickup()
+    assert len(briefs(rig)) == 2 and sum(b'"get"' in f for f in fake.frames) == gets + 1
+
+
+def test_notes_are_delivered_only_after_the_started_receipt(tmp_path: Path, fake: FakeAskSock) -> None:
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.runtime.launch_failures = 1                         # the resume's launch fails: nothing started
+    rig.pickup()
+    assert [at for _, _, at in note_rows(rig)] == [None]
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "answered" and fake.asks[card.ask_id].status == "answered"
+    for _ in range(3):
+        rig.pickup()
+        rig.clock.advance(BACKOFF)
+    assert rig.state(B) == BeadState.RUNNING.value
+    note = ANSWER_FREE.format(ask_id=card.ask_id, text="Go with blue.")
+    assert note in briefs(rig)[-1] and [at is not None for _, _, at in note_rows(rig)] == [True]
+
+
+@pytest.mark.parametrize(("choice", "line"), [("A", f"A: {D4_CHOICES[0]}"), ("B", f"B: {D4_CHOICES[1]}"),
+                                              ("C", None)])
+def test_a_choice_answer_carries_the_choice_line(tmp_path: Path, fake: FakeAskSock, choice: str,
+                                                 line: str | None) -> None:
+    """A letter the card did not offer (C of two) is a free answer."""
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "👍" if choice == "A" else choice, choice=choice)
+    rig.pickup()
+    [(_, text, _)] = note_rows(rig)
+    if line is None:
+        assert text == ANSWER_FREE.format(ask_id=card.ask_id, text="C")
+    else:
+        assert text == ANSWER_CHOICE.format(ask_id=card.ask_id, line=line)
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.choice == choice
+
+
+def test_the_task_never_resumes_before_the_note_exists(tmp_path: Path, fake: FakeAskSock) -> None:
+    """The question bead closed by hand on the host while the ask is still posted: the gate holds."""
+    rig, child, card = asked(tmp_path, fake)
+    rig.world.beads[child].status = "closed"
+    for _ in range(3):
+        rig.pickup()
+    assert rig.state(B) != BeadState.RUNNING.value and len(briefs(rig)) == 1
+    assert bridge(rig).resume_gate(WS, B) is False
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()
+    assert rig.state(B) == BeadState.RUNNING.value
+    assert ANSWER_FREE.format(ask_id=card.ask_id, text="Go with blue.") in briefs(rig)[-1]
+    assert rig.world.beads[child].comments[0].startswith(ANSWER_MARK.format(ref=stop_ref()))
+
+
+def test_the_resume_gate_without_an_ask_bridge_is_open() -> None:
+    assert NoAsks().resume_gate(WS, B) is True
+
+
+def test_an_answer_with_a_secret_stays_off_the_bead(tmp_path: Path, fake: FakeAskSock) -> None:
+    rig, child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, f"Use {SECRET} for it.")
+    rig.pickup()
+    made = rig.world.beads[child]
+    assert made.comments == [f"{ANSWER_MARK.format(ref=stop_ref())}\n"
+                             f"{ANSWER_WITHHELD.format(kind='sk- API key')}"]
+    assert all(SECRET not in c for c in made.comments) and made.status == "closed"
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.answer == f"Use {SECRET} for it."      # the journal keeps it
+    assert SECRET in briefs(rig)[-1]                                       # the agent gets the answer
+
+
+def test_a_long_answer_is_cut_to_the_note_budget(tmp_path: Path, fake: FakeAskSock) -> None:
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "é" * 9000)                     # 18,000 bytes of UTF-8
+    rig.pickup()
+    [(_, text, _)] = note_rows(rig)
+    assert len(text.encode("utf-8")) <= NOTE_BYTES and text.endswith(ANSWER_CUT)
+    assert text.startswith(ANSWER_FREE.format(ask_id=card.ask_id, text="é"))
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.answer == "é" * 9000
+
+
+def test_a_question_ended_without_an_answer_is_reposted_once_then_escalated(tmp_path: Path,
+                                                                          fake: FakeAskSock) -> None:
+    rig, child, card = asked(tmp_path, fake)
+    fake.decide(card.ask_id, "stale")
+    rig.pickup()
+    first = rig.journal.ask(stop_ref())
+    again = rig.journal.ask(stop_ref() + REPOST)
+    assert first is not None and first.state == "ended"
+    assert again is not None and (again.state, again.child) == ("posted", child)
+    [_, card2] = cards(fake)
+    assert card2.post.bead == child and card2.post.body == card.post.body
+    assert rig.state(B) == BeadState.WAITING_INPUT.value and bridge(rig).resume_gate(WS, B) is False
+    fake.decide(card2.ask_id, "cancelled")
+    rig.pickup()
+    again = rig.journal.ask(stop_ref() + REPOST)
+    assert again is not None and (again.state, again.why) == ("ended", ASK_ENDED)
+    assert rig.state(B) == BeadState.STUCK.value and NEEDS_HUMAN in rig.world.beads[B].labels
+    assert [(n.title, n.body) for n in fake.notices] == [(UNPOSTABLE_TITLE.format(bead=B),
+                                                          ENDED_BODY.format(bead=B, child=child))]
+    assert rig.world.beads[child].status == "open"            # left for the operator's release
+    for _ in range(2):
+        rig.clock.advance(3600)
+        rig.pickup()
+    assert len(cards(fake)) == 2 and len(fake.notices) == 1
+
+
+def test_an_answered_question_is_not_ended(tmp_path: Path, fake: FakeAskSock) -> None:
+    """Negative control on ENDED_STATUSES: an answer that reaches a finished ask is still the answer."""
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    fake.decide(card.ask_id, "cancelled")
+    for _ in range(2):
+        rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered" and rig.journal.ask(stop_ref() + REPOST) is None
+    assert rig.state(B) == BeadState.RUNNING.value and len(cards(fake)) == 1
+
+
+def lose_journal(rig: Rig) -> None:
+    rig.journal.close()
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{rig.root / 'state' / 'wsd.db'}{suffix}").unlink(missing_ok=True)
+    rig.restart()
+
+
+@pytest.mark.parametrize("secret", [False, True], ids=["answer", "withheld"])
+def test_journal_loss_rebuilds_from_the_question_beads_comment(tmp_path: Path, fake: FakeAskSock,
+                                                               secret: bool) -> None:
+    rig, child, card = asked(tmp_path, fake)
+    answer = f"Use {SECRET} for it." if secret else "Go with blue."
+    fake.answer(card.ask_id, answer)
+    rig.runtime.launch_failures = 1                         # the resume fails: the note is not delivered
+    rig.pickup()
+    assert rig.world.beads[child].status == "closed"
+    lose_journal(rig)
+    assert recover(rig.sched).ok
+    [(ref, text, at)] = note_rows(rig)
+    if secret:
+        assert text == REBUILT_NONE and SECRET not in text
+    else:
+        assert text == REBUILT_NOTE.format(ask_id=card.ask_id, text=answer)
+    assert ref == f"answer:{stop_ref()}" and at is None
+    assert text.startswith(REBUILT_MARK) and "The operator answered" not in text   # never read as live
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.state, row.child, row.ask_id) == ("answered", child, None)
+    rig.parker.release(B)
+    for _ in range(3):
+        rig.pickup()
+    assert rig.state(B) == BeadState.RUNNING.value and text in briefs(rig)[-1]
+    assert recover(rig.sched).ok and len(note_rows(rig)) == 1   # a second recovery rebuilds nothing
+
+
+def test_a_rebuild_ignores_a_comment_without_the_answer_mark(tmp_path: Path, fake: FakeAskSock) -> None:
+    """Negative control on ANSWER_MARK: a closed question bead with some other comment is not an answer."""
+    rig, child, _card = asked(tmp_path, fake)
+    rig.world.beads[child].comments.append("The operator answered your question (ask zz): do it")
+    rig.world.beads[child].status = "closed"
+    lose_journal(rig)
+    assert recover(rig.sched).ok and note_rows(rig) == [] and rig.journal.ask(stop_ref()) is None
+
+
+def test_delivery_counts_one_round(tmp_path: Path, fake: FakeAskSock) -> None:
+    """D3: asking is not a round; the answer's delivery is, once, in the transaction marking it delivered."""
+    rig, _child, card = asked(tmp_path, fake)
+    assert rig.journal.nudge(WS, B)[0] == 0
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()                                            # answered, and resumed with the note
+    assert rig.journal.nudge(WS, B)[0] == 0
+    rig.pickup()                                            # the note reads back delivered
+    assert rig.journal.nudge(WS, B)[0] == 1
+    for _ in range(2):
+        rig.pickup()
+    assert rig.journal.nudge(WS, B)[0] == 1
+
+
+def cancels(fake: FakeAskSock) -> int:
+    return sum(b'"cancel"' in f for f in fake.frames)
+
+
+@pytest.mark.parametrize("step", ["drop", "failed"])
+def test_a_failed_cancel_is_retried(tmp_path: Path, fake: FakeAskSock, step: str) -> None:
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()
+    fake.script.append(step)
+    rig.pickup()
+    assert cancels(fake) == 1 and fake.asks[card.ask_id].status == "answered"
+    rig.pickup()                                            # not due yet
+    assert cancels(fake) == 1
+    rig.clock.advance(BACKOFF)
+    rig.pickup()
+    assert cancels(fake) == 2 and fake.asks[card.ask_id].status == "cancelled"
+    rig.clock.advance(3600)
+    rig.pickup()
+    assert cancels(fake) == 2
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.state, row.next_at) == ("delivered", None)
+
+
+def test_a_refused_cancel_is_not_retried(tmp_path: Path, fake: FakeAskSock) -> None:
+    """The operator (or admind) ended the ask first: admind refuses the cancel, and that is final."""
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()
+    fake.decide(card.ask_id, "stale")
+    rig.pickup()
+    rig.clock.advance(3600)
+    rig.pickup()
+    assert cancels(fake) == 1
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.state, row.next_at) == ("delivered", None)
+
+
+def crash_soon(rig: Rig, point: str) -> None:
+    rig.restart(CrashAt(point))
+    for _ in range(3):
+        try:
+            rig.pickup()
+        except SimulatedCrash:
+            rig.restart()
+            return
+    pytest.fail(f"{point} was never reached")
+
+
+@pytest.mark.parametrize("point", ["asks.answered", "asks.closed!", "asks.delivered"])
+def test_a_crash_in_the_answer_steps_gives_one_note_and_one_comment(tmp_path: Path, fake: FakeAskSock,
+                                                                    point: str) -> None:
+    rig, child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    crash_soon(rig, point)
+    for _ in range(3):
+        rig.pickup()
+    assert len(note_rows(rig)) == 1 and len(rig.world.beads[child].comments) == 1
+    assert rig.state(B) == BeadState.RUNNING.value and rig.journal.nudge(WS, B)[0] == 1
+    assert sum(ANSWER_FREE.format(ask_id=card.ask_id, text="Go with blue.") in b for b in briefs(rig)) == 1
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered" and fake.asks[card.ask_id].status == "cancelled"
+
+
+def test_the_pickup_runs_replays_then_advance_then_the_resume_pass_then_the_flush(
+        tmp_path: Path, fake: FakeAskSock, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    calls: list[str] = []
+    sched, asks = rig.sched, bridge(rig)
+
+    def spy(name: str, real: Callable[..., Any]) -> Callable[..., Any]:
+        def called(*args: Any) -> Any:
+            calls.append(name)
+            return real(*args)
+        return called
+
+    monkeypatch.setattr(scheduler_module, "sweep", spy("sweep", scheduler_module.sweep))
+    monkeypatch.setattr(rig.journal, "ops_open", spy("replays", rig.journal.ops_open))
+    monkeypatch.setattr(sched, "_candidates", spy("resume pass", sched._candidates))  # noqa: SLF001
+    monkeypatch.setattr(asks, "advance", spy("advance", asks.advance))
+    monkeypatch.setattr(asks, "flush", spy("flush", asks.flush))
+    rig.pickup()
+    assert [c for i, c in enumerate(calls) if c not in calls[:i]] == ["sweep", "replays", "advance",
+                                                                      "resume pass", "flush"]
+    assert calls[-1] == "flush" and rig.state(B) == BeadState.RUNNING.value
