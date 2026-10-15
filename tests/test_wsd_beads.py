@@ -1085,6 +1085,12 @@ def _approved(bead: str, status: str, digest: str) -> dict[str, Any]:
             "links": [], "readout": {"title": [], "description": [], "ask": []}}
 
 
+def _readout(fields: dict[str, Any]) -> wbtq.Readout:
+    readout = wbtq.parse_readout(json.dumps(fields).encode())
+    assert isinstance(readout, wbtq.Readout)
+    return readout
+
+
 @pytest.mark.parametrize("readout", ["decision gone", "decision still read"])
 def test_an_approval_reopened_by_a_late_orphan_is_never_approved(world: World, readout: str) -> None:
     """The residual of bd's upsert: an orphaned create that commits after the approval was decided reopens
@@ -1102,7 +1108,7 @@ def test_an_approval_reopened_by_a_late_orphan_is_never_approved(world: World, r
     world.beads[bead].metadata["approved_by"] = APPROVER          # approve-bead decides, and closes it
     world.close(bead)
     shown = queue.show(bead)
-    assert approvals.verdict(wbtq.parse_readout(json.dumps(_approved(bead, "closed", digest)).encode()),
+    assert approvals.verdict(_readout(_approved(bead, "closed", digest)),
                              shown, queue.ask_digest(shown), expect, None) == approvals.Approved()
     world.orphans.append((queue, late))         # an orphaned create of the same ID, committing only now
     world.commit_orphans()
@@ -1111,7 +1117,7 @@ def test_an_approval_reopened_by_a_late_orphan_is_never_approved(world: World, r
     fields = _approved(bead, shown["status"], digest)
     if readout == "decision gone":
         fields.update(decision=None, approved_by=None, approved_digest=None, decided=False)
-    found = approvals.verdict(wbtq.parse_readout(json.dumps(fields).encode()), shown,
+    found = approvals.verdict(_readout(fields), shown,
                               queue.ask_digest(shown), expect, None)
     assert found == (approvals.Waiting() if readout == "decision gone" else approvals.Unverified(4))
 
