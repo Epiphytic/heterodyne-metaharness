@@ -527,6 +527,37 @@ def test_a_permanent_refusal_escalates(tmp_path: Path, fake: FakeAskSock) -> Non
     assert cards(fake) == [] and len(fake.notices) == 1
 
 
+@pytest.mark.parametrize("point", [None, "notice.owed", "notice.sending", "notice.outcome",
+                                   "escalate.labelled!", "escalate.done"])
+def test_a_restart_in_or_after_the_unpostable_window_sends_one_notice(tmp_path: Path, fake: FakeAskSock,
+                                                                      point: str | None) -> None:
+    """Review c2: a crash between the unpostable notice and the escalation (or a plain restart after it)
+    leaves one unpostable:<ref> notice row, the row refused and the task needs-human. A crash once the
+    notice is `sending` (before or after admind took it) leaves it `sending`: T3 never sends it twice."""
+    rig = asking(tmp_path, fake)
+    if point is not None:
+        rig.restart(CrashAt(point))
+    fake.script.append("--title must be one line of 1-200 characters")
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    if point is None:
+        rig.pickup()
+    else:
+        with pytest.raises(SimulatedCrash):
+            rig.pickup()
+    rig.restart()
+    for _ in range(3):
+        rig.pickup()
+        rig.clock.advance(3600)
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "refused" and row.why in (ASK_UNPOSTABLE, ASK_POST_UNKNOWN)
+    assert rig.state(B) == BeadState.STUCK.value and NEEDS_HUMAN in rig.world.beads[B].labels
+    sent = [] if point == "notice.sending" else [UNPOSTABLE_TITLE.format(bead=B)]
+    assert [n.title for n in fake.notices] == sent and cards(fake) == []
+    rows = rig.journal.db.execute("SELECT ref, state FROM notices").fetchall()
+    state = "sending" if point in ("notice.sending", "notice.outcome") else "posted"
+    assert rows == [(f"unpostable:{stop_ref()}", state)]
+
+
 @pytest.mark.parametrize("point", ["asks.row", "asks.created!", "asks.parked", "asks.posted!"])
 def test_a_crash_at_each_step_is_resumed_without_a_second_bead_or_card(tmp_path: Path, fake: FakeAskSock,
                                                                        point: str) -> None:
