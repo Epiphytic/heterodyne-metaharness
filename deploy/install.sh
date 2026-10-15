@@ -888,16 +888,16 @@ else
         fi
         reconcile_service "$u"
     done
-    # the release of the last completed services step (D6), so only once every service has passed
-    if ((!dry_run)) && [[ $(recorded_release) != "$commit" ]]; then
-        platform record-release --record "$record" --release "$commit" </dev/null \
-            || fail "the install record can't be written"
-    fi
     as_service_user PATH="$user_tools" rm -rf -- "$renders" || fail "the render directory can't be removed"
     renders=""
     if ((dry_run)); then
         unmake "$scratch_parent" "$render_made" || fail "the render directory can't be removed"
         render_made=""
+    fi
+    # the release of the last completed services step (D6): last, once nothing in the step can fail
+    if ((!dry_run)) && [[ $(recorded_release) != "$commit" ]]; then
+        platform record-release --record "$record" --release "$commit" </dev/null \
+            || fail "the install record can't be written"
     fi
     if [[ -n $skipped ]]; then
         finish_step "$skipped"

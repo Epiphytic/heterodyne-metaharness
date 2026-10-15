@@ -1055,6 +1055,25 @@ def test_a_backup_directory_link_refuses_an_adoption_before_any_root_change(host
     assert list(elsewhere.iterdir()) == []
 
 
+def failing_tool(host: Host, tool: str, line: str) -> None:
+    """A logged `tool` shim, the system's, which fails on a call that starts with `line`."""
+    shim = host.shims / tool
+    head = SHIM_HEAD.replace("@SHIMS@", shlex.quote(str(host.shims)))
+    shim.write_text(head + f'exec /usr/bin/{tool} "$@"\n')
+    shim.chmod(0o755)
+    host.put("fail", line + "\n")
+
+
+def test_a_render_cleanup_failure_keeps_the_recorded_release(host: Host) -> None:
+    assert installer(host).returncode == 0
+    old = host.commit
+    host.new_commit()
+    failing_tool(host, "rm", f"rm -rf -- {host.home()}/.cache/heterodyne/render.")
+    out = installer(host)
+    assert out.returncode == 1 and "the render directory can't be removed" in out.stderr
+    assert host.record()["release"] == old
+
+
 def failing_mktemp(host: Host, where: str) -> None:
     """A logged mktemp shim, which fails when its directory is under `where`."""
     tool = host.shims / "mktemp"
