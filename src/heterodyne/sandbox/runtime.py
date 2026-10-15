@@ -38,6 +38,7 @@ from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import Store
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
+from heterodyne.sandbox.events import EventLog
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
@@ -85,6 +86,7 @@ from heterodyne.wsd.runtime import (
     ResolveRefused,
     RuntimeUnavailable,
     Session,
+    SessionEvent,
     Signal,
     Started,
     SteerRefused,
@@ -328,6 +330,10 @@ class SandboxRuntime:
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
         self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
         self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
+        self.logs: dict[str, EventLog] = {}               # key -> its running generation's event log
+        self.logs_lock = threading.Lock()                 # the lanes swap logs while session_events reads
+        self.wake: Callable[[str], None] = lambda _ws: None
+        self.ops: Mapping[str, frozenset[str]] = {}       # ws -> the ws-request ops its handlers take (D6)
 
     # --- names ---
 
@@ -508,14 +514,44 @@ class SandboxRuntime:
             return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
 
     def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
-        """Plan 5i: no session's events are logged yet (Task 3 adds the event log)."""
-        return EventBatch()
+        """Plan 5i: each of the workstream's sessions' events after its cursor, from the cursor's generation
+        up to the record's, at most `limit` per key. A generation is final once a later one exists or the
+        record has ENDED, and its socket is closed (its log is no longer live). The running generation is
+        read from memory, the rest from disk, complete lines only (Codex cycle 1 #3: no generation is
+        skipped, however many started since the cursor)."""
+        records = [r for r in self._records() if r.ws == ws]       # RuntimeUnavailable propagates
+        found: list[SessionEvent] = []
+        ends: dict[tuple[str, int], int] = {}
+        more = False
+        for rec in records:
+            gen, n = since.get(rec.key, (1, 0))
+            taken = 0
+            for g in range(gen, rec.generation + 1):
+                with self.logs_lock:
+                    live = self.logs.get(rec.key)
+                if live is not None and live.generation == g:
+                    lg = live
+                else:
+                    try:
+                        lg = EventLog.read(self.layout(rec.key).session_events(g), rec.ws, rec.bead,
+                                           rec.key, g)
+                    except OSError:
+                        raise RuntimeUnavailable("a session event log can't be read") from None
+                page = lg.after(n if g == gen else 0, limit - taken)
+                found += page
+                taken += len(page)
+                if lg is not live and (g < rec.generation or rec.phase is Phase.ENDED):
+                    ends[(rec.key, g)] = lg.last
+                if taken >= limit:
+                    more = True
+                    break
+        return EventBatch(tuple(found), ends, more)
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
         raise SteerRefused("steering is not implemented yet")     # plan 5i Task 5
 
     def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
-        return None                                                 # plan 5i Task 3 wires the wake
+        self.wake, self.ops = wake, dict(ops)
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
@@ -758,7 +794,9 @@ class SandboxRuntime:
         for fname, text in files.items():
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
-        server = self._server(rec, adapter, token, caps)
+        events_log = EventLog.open(layout.session_events(gen), rec.ws, rec.bead, rec.key, gen)
+        self._live(rec.key, events_log)
+        server = self._server(rec, adapter, token, caps, events_log)
         self.servers[spec.session_key] = server     # before start: an end closes even a half-started one
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
@@ -848,16 +886,31 @@ class SandboxRuntime:
         `_pinned` reads one, under its lock."""
         return self.c.accounts.capabilities_of(profile)
 
-    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities) -> SessionServer:
-        """The generation's socket: it counts the adapter's turn ends and hands each hook payload to the
-        adapter's parser, attributed to this generation (E8, E14)."""
+    def _server(self, rec: SessionRecord, adapter: Adapter, token: str, caps: Capabilities,
+                events_log: EventLog) -> SessionServer:
+        """The generation's socket: it counts the adapter's turn ends, hands each hook payload to the
+        adapter's parser, and logs Stops and requests (plan 5i), all attributed to this generation (E8,
+        E14). A Stop that can't be logged is dropped (D3); a request that can't be logged is refused. Only a
+        new event wakes wsd: a resent request is answered from the log and wakes nothing."""
         layout, key, gen = self.layout(rec.key), rec.key, rec.generation
 
         def heard(payload: dict[str, Any]) -> None:
+            if payload.get("hook_event_name") == "Stop" and events_log.stop(payload) is not None:
+                self._woke(rec.ws)
             self._report(rec.ws, key, gen, caps, adapter.usage_from_event(payload))
 
+        def asked(payload: dict[str, Any]) -> dict[str, Any]:
+            new, answer = events_log.request(payload, self.ops.get(rec.ws, frozenset()))
+            if new is not None:
+                self._woke(rec.ws)
+            return answer
+
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
-                             on_event=heard)
+                             on_event=heard, on_request=asked)
+
+    def _woke(self, ws: str) -> None:
+        with contextlib.suppress(Exception):      # a wake is a hint: the next pickup reads the log anyway
+            self.wake(ws)
 
     def _report(self, ws: str, key: str, gen: int, caps: Capabilities, report: UsageReport | None) -> None:
         if report is None:
@@ -977,15 +1030,28 @@ class SandboxRuntime:
         try:
             token = (layout.run(rec.generation) / shim.TOKEN_FILE).read_text().strip()
             adapter = self.c.adapters[rec.adapter]
-            server = self._server(rec, adapter, token, self._caps(rec.profile))
+            events_log = EventLog.open(layout.session_events(rec.generation), rec.ws, rec.bead, rec.key,
+                                       rec.generation)
+            events_log.forwarding = True        # the session is running, so its brief was taken
+            server = self._server(rec, adapter, token, self._caps(rec.profile), events_log)
         except (OSError, KeyError):
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         try:
             server.start()
         except OSError:
             server.close()
+            events_log.close()
             raise RuntimeUnavailable("a live session's socket can't be served") from None
         self.servers[rec.key] = server
+        self._live(rec.key, events_log)
+
+    def _live(self, key: str, events_log: EventLog) -> None:
+        """The key's running generation's log; one it replaces (an end that never closed its socket) takes
+        no more appends, so its generation can be read as final."""
+        with self.logs_lock:
+            old, self.logs[key] = self.logs.get(key), events_log
+        if old is not None and old is not events_log:
+            old.close()
 
     def _end(self, rec: SessionRecord, *, interrupt: bool, lifetime: bool = False,
              cause: EndCause = EndCause.DIED) -> bool:
@@ -1097,6 +1163,10 @@ class SandboxRuntime:
                 socket_gone = False             # kept, so the next end closes it again
             else:
                 del self.servers[rec.key]
+                with self.logs_lock:
+                    done = self.logs.pop(rec.key, None)
+                if done is not None:
+                    done.close()            # its generation is final now
         for path in (self.layout(rec.key).socket(rec.generation),
                      self.layout(rec.key).probe_socket(rec.generation)):
             try:

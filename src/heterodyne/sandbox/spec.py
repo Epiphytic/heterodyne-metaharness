@@ -117,6 +117,11 @@ class SessionLayout:
     def events(self, generation: int) -> Path:
         return self.root / f"r{generation}-events.jsonl"
 
+    def session_events(self, generation: int) -> Path:
+        """Plan 5i: the generation's accepted Stops and requests, outside every bind: the source of their
+        event IDs, read by wsd's pickups until its cursor has passed them."""
+        return self.root / f"r{generation}-session-events.jsonl"
+
     def scratch(self, generation: int) -> Path:
         return self.root / f"r{generation}-scratch"
 
