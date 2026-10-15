@@ -1885,12 +1885,6 @@ class Admind:
                 # stream, and a resubscription would drop them (Codex r3 finding 3).
                 return "refused", ("admind is not reading the group's events right now, so a change during "
                                    "rearm could be missed; nothing changed. Try again shortly.")
-            try:
-                policy = self.load_operators()
-            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
-                self.audit.write("guard", action="rearm-refused", why="policy-unreadable",
-                                 error=type(exc).__name__)
-                return "refused", "policy.toml could not be read; nothing changed."
             generation, events, latched_before = self.sub_gen, self.group_events, self.store.get("latched")
             try:
                 count = await self.read_member_count()
@@ -1904,6 +1898,14 @@ class Admind:
                                    "members, then run `admind rearm` again.")
             if count < 1:
                 return "refused", "the group member count is invalid; nothing changed."
+            # The count RPC can wait while policy changes. Read authority after that await,
+            # immediately before reconciling and persisting the confirmed intersection.
+            try:
+                policy = self.load_operators()
+            except Exception as exc:  # noqa: BLE001 - ConfigError, or a policy file that can't be read
+                self.audit.write("guard", action="rearm-refused", why="policy-unreadable",
+                                 error=type(exc).__name__)
+                return "refused", "policy.toml could not be read; nothing changed."
             confirmed, how = reconcile(count, self.confirmed_operators(),
                                        self.store.get("membership_pending"), policy)
             if confirmed is None:

@@ -67,6 +67,38 @@ def make(tmp_path: Path) -> tuple[Admind, Probe]:
     return daemon, client
 
 
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_rearm_refreshes_policy_after_waiting_for_count(tmp_path: Path, unreadable: bool) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        original = [OPERATOR_HEX, SECOND_HEX]
+        d.store.set("group_operators", json.dumps(original))
+        d.store.set("latched", "explicit recovery hold")
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        probe.gate, probe.started = asyncio.Event(), asyncio.Event()
+        task = asyncio.create_task(d.rearm())
+        await probe.started.wait()
+        if unreadable:
+            def unavailable() -> tuple[Operator, ...]:
+                raise ValueError("policy unavailable during count")
+            d.load_operators = unavailable
+        else:
+            d.load_operators = lambda: (operator("op", OPERATOR_HEX),)
+        probe.gate.set()
+        result, _message = await task
+        if unreadable:
+            assert result == "refused"
+            assert d.confirmed_operators() == set(original)
+            assert d.store.get("latched") == "explicit recovery hold"
+        else:
+            assert result == "rearmed"
+            assert d.confirmed_operators() == {OPERATOR_HEX}
+            assert set(d.operators) == {OPERATOR_HEX}
+            assert not d.latched()
+        d.store.close()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("kind", sorted(guard.MEMBERSHIP_CHANGES))
 def test_events_and_count_changes_never_latch_or_grant(tmp_path: Path, kind: str) -> None:
     async def scenario() -> None:
