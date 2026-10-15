@@ -8,6 +8,7 @@ a retryable refusal) leaves it `owed` for `retry_owed`.
 
 import contextlib
 import socket
+import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -102,6 +103,33 @@ def test_the_same_ref_is_posted_once(rig: Rig) -> None:
     assert rig.state("stuck:ws1-1:1") == "posted"
     row = rig.journal.notice("stuck:ws1-1:1")
     assert row is not None and row.notice_id and row.attempts == 1
+
+
+def column_types(rig: Rig) -> list[tuple[str, str, str, str]]:
+    """Each row's state and the SQLite storage class of its three times, read past the Journal."""
+    db = sqlite3.connect(f"file:{rig.dir / 'state' / 'wsd.db'}?mode=ro", uri=True)
+    try:
+        return db.execute("SELECT state, typeof(created_at), typeof(updated_at), typeof(next_at)"
+                          " FROM notices ORDER BY rowid").fetchall()
+    finally:
+        db.close()
+
+
+def test_every_write_path_stores_integer_times_through_the_real_t2_ddl(rig: Rig) -> None:
+    n = rig.notices()
+    send(n)                                                         # owed, next_at set
+    n.send(WS, BEAD, "stuck", "ws1-1 is stuck", "sk-" + "a" * 40, "stuck:ws1-1:2")  # withheld + its stand-in
+    assert column_types(rig) == [("owed", "integer", "integer", "integer"),
+                                 ("withheld", "integer", "integer", "null"),
+                                 ("owed", "integer", "integer", "integer")]
+    rig.start()
+    rig.clock.at += HOUR
+    n.retry_owed(rig.clock())                                       # owed -> sending -> posted
+    assert {t[1:3] for t in column_types(rig)} == {("integer", "integer")}
+    assert [t[0] for t in column_types(rig)] == ["posted", "withheld", "posted"]
+    with pytest.raises(sqlite3.IntegrityError):                     # the CHECKs are live, not decoration
+        rig.journal.notice_add("stuck:ws1-1:3", WS, BEAD, "stuck", "t", "b", "owed", None,
+                               "2026-10-15T00:00:00Z")  # pyright: ignore[reportArgumentType]
 
 
 def test_admind_down_leaves_it_owed_and_a_later_pickup_posts_it(rig: Rig) -> None:
