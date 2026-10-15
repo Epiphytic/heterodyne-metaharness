@@ -921,15 +921,16 @@ class SandboxRuntime:
             raise _StepFailed("the launch outlasted its login's lifetime window; "
                               "refresh the login on the host")
         if spec.brief:
-            self._brief(server, rec, spec.brief)
+            self._brief(server, rec, spec.brief, events_log)
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
                           error="")
         return Started(rec.tmux_session, pane, pid, native)
 
-    def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
+    def _brief(self, server: SessionServer, rec: SessionRecord, text: str, log: EventLog) -> None:
         """D5: the brief is pasted once the self-test's probe turn has ended, and is confirmed by the next
         UserPromptSubmit. Like a steer it may carry no terminal control (`has_controls`; compose escapes the
-        bead's text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX."""
+        bead's text and the notes), so one paste is one prompt; and it must fit BRIEF_MAX. The event log
+        forwards from the paste on, so the probe's turn is never an event and the brief's is the first."""
         if has_controls(text):
             raise _StepFailed("the brief has terminal control characters")
         try:
@@ -941,6 +942,8 @@ class SandboxRuntime:
         if not self._until(lambda: server.turns().idle, BRIEF_SECONDS):
             raise _StepFailed("the agent's first turn did not end")
         before = server.turns().prompts
+        with log.lock:
+            log.forwarding = True
         try:
             self.c.tmux.paste(rec.tmux_session, text)
         except TmuxPasteUncertain:

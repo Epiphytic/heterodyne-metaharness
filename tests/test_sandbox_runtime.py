@@ -2333,7 +2333,6 @@ def briefed(rig: RuntimeRig, ops: frozenset[str] = frozenset(), profile: str = "
     return spec
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_a_stop_is_logged_and_wakes_its_workstream(rig: RuntimeRig) -> None:
     woken: list[str] = []
     rig.runtime.subscribe(woken.append, {"alpha": frozenset({"close"})})
@@ -2348,13 +2347,11 @@ def test_a_stop_is_logged_and_wakes_its_workstream(rig: RuntimeRig) -> None:
     assert not any(isinstance(s, SessionEvent) for s in rig.runtime.signals("alpha"))   # never queued
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_the_probe_turn_is_never_an_event(rig: RuntimeRig) -> None:
     briefed(rig)
     assert [e.text for e in pulled(rig, 1).events] == ["echo: start"]
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> None:
     spec = briefed(rig, frozenset({"close"}))
     evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"     # the fake's paths are host paths
@@ -2372,13 +2369,12 @@ def test_ops_are_enabled_per_workstream(rig: RuntimeRig) -> None:
                                              "beta": frozenset({"question"})})     # D6: not alpha's
     spec = replace(launch_spec(rig, "p-one"), brief="start")
     rig.runtime.launch(spec)
-    rig.runtime.logs[spec.session_key].forwarding = True    # as once the brief is pasted (Task 4)
     assert ws_request(rig, spec.session_key, "question", '{"text": "hm"}') == (
         1, {"ok": False, "error": "unsupported"})
     evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"
     evidence.write_text("12 passed")
     rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
-    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e1"
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e2"     # e1 is the brief's Stop
 
 
 def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> None:
@@ -2388,11 +2384,10 @@ def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> No
     spec = replace(launch_spec(rig, "p-one"), brief="start")
     rig.runtime.launch(spec)
     late = rig.runtime.logs[spec.session_key]
-    late.forwarding = True
     rig.runtime.stop(spec.session_key)
     assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
                         frozenset({"close"})) == (None, {"ok": False, "error": "unavailable"})
-    assert not late.path.exists()
+    assert [json.loads(line)["kind"] for line in late.path.read_text().splitlines()] == ["stop"]
 
 
 def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
@@ -2405,7 +2400,6 @@ def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
     rig.runtime.launch(spec)
     layout = rig.runtime.layout(spec.session_key)
     late = rig.runtime.logs[spec.session_key]
-    late.forwarding = True
     real = late.request
     entered, release = threading.Event(), threading.Event()
     got: list[tuple[SessionEvent | None, dict[str, Any]]] = []
@@ -2433,10 +2427,10 @@ def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
         client.close()
     wait_for(lambda: bool(got))
     assert got == [(None, {"ok": False, "error": "unavailable"})]
-    assert not late.path.exists() and not stopper.is_alive()
+    assert [json.loads(line)["kind"] for line in late.path.read_text().splitlines()] == ["stop"]
+    assert not stopper.is_alive()
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_a_cursor_reads_only_what_follows_it_and_the_limit_pages(rig: RuntimeRig) -> None:
     spec = briefed(rig)
     pane = record(rig, spec.session_key).tmux_session
@@ -2449,14 +2443,12 @@ def test_a_cursor_reads_only_what_follows_it_and_the_limit_pages(rig: RuntimeRig
     assert [e.seq for e in page.events] == [2] and page.more and page.ends == {}
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_a_restarted_runtime_reads_the_same_events(rig: RuntimeRig) -> None:
     briefed(rig)
     first = pulled(rig, 1).events
     assert pulled(rig, 1, runtime=restarted(rig)).events == first       # read from disk: no rebind needed
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_every_unread_generation_is_read_after_the_next_launch(rig: RuntimeRig) -> None:
     # Codex cycle 1 #3: generation 1's last event, never read before generation 2 started, still comes.
     rig.runtime.subscribe(lambda _ws: None, {})
@@ -2473,7 +2465,6 @@ def test_every_unread_generation_is_read_after_the_next_launch(rig: RuntimeRig) 
     assert [e.event_id for e in later.events] == [f"{spec.session_key}:g2:e1"]
 
 
-@pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
 def test_an_ended_generation_is_final(rig: RuntimeRig) -> None:
     spec = briefed(rig)
     pulled(rig, 1)
@@ -3123,6 +3114,21 @@ def test_an_uncertain_brief_paste_is_settled_by_the_prompt_count(rig: RuntimeRig
     spec = replace(launch_spec(rig, "p-one"), brief="hello")
     rig.runtime.launch(spec)
     assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+def test_the_event_log_forwards_from_the_brief_on(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T3 into T4: the probe's turn is never an event; the brief's turn, and every one after, is.
+    key = launch_spec(rig, "p-one").session_key
+    seen: list[bool] = []
+    real = rig.runtime.c.tmux.paste
+
+    def noted(name: str, text: str, **kw: Any) -> None:
+        seen.append(rig.runtime.logs[key].forwarding)
+        real(name, text, **kw)
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", noted)
+    rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="start"))
+    assert seen == [False, True]                    # the probe's paste, then the brief's
 
 
 def test_no_brief_pastes_nothing(rig: RuntimeRig) -> None:
