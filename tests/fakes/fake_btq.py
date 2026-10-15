@@ -61,6 +61,7 @@ class World:
         self.worktrees: list[str] = []
         self.approvals = {"approval-1"}     # design approvals btq's gate accepts
         self.created: list[str] = []        # beads `bd create` made, in order
+        self.closed_reasons: dict[str, str] = {}      # bead -> the `--reason` of its `bd close`
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
@@ -301,6 +302,15 @@ class FakeQueue:
             return {"text": text}
         if verb == "create":
             return self._create(args)
+        if verb == "close":      # `bd close ID --reason R`, or `--reason=R`
+            bead_id, flag, *rest = args
+            name, eq, reason = flag.partition("=")
+            assert name == "--reason" and len(rest) == (0 if eq else 1), "fake bd close: ID --reason R"
+            reason = reason if eq else rest[0]
+            bead = self._get(bead_id)
+            bead.status = "closed"
+            self.world.closed_reasons[bead_id] = reason
+            return [self.world.json(bead, detail=False)]
         if verb == "update":
             bead_id, flag, pair = args
             assert flag == "--set-metadata"

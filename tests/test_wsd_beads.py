@@ -7,18 +7,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes.fake_btq import World, factory
+from fakes.fake_btq import FakeQueue, World, factory
 from wsd_env import WS, git_repo
 
 from heterodyne.wsd import btq, gitwip, ids
 from heterodyne.wsd.beads import (
     PARKED,
+    QUESTION_ANSWERED,
     RECORD_KEY,
+    REF_KEY,
     BeadsAdapter,
     BeadsUnavailable,
     ClaimRefused,
     ClaimUncertain,
     ClaimView,
+    CreateUnverified,
+    NotAQuestion,
     NotOurs,
     RecordConflict,
     RecordUnreadable,
@@ -732,3 +736,198 @@ def test_a_bead_id_that_is_not_a_slug_is_never_claimable(world: World) -> None:
     adapter = BeadsAdapter(factory(world))
     [listed] = adapter.ready(WS)
     assert adapter.claimable(WS, listed) is False
+
+
+# --- beads wsd creates: question and approval beads (plan 5i part 2, Task 4) ---
+
+WRITES = frozenset({"create", "comments add", "close", "label", "dep", "update"})
+
+
+def writes(world: World, since: int = 0) -> list[str]:
+    return [call for _, call in world.calls[since:] if call in WRITES]
+
+
+def ask(adapter: BeadsAdapter, ref: str = "q:alpha:btq-1:1:1", kind: str = "kind:question", **kw: Any) -> str:
+    fields: dict[str, Any] = {"title": "Question from btq-1: which?", "description": "the agent asks",
+                              "labels": (kind,), "metadata": {"round": "1"}, **kw}
+    return adapter.create(WS, ref=ref, **fields)
+
+
+def test_create_is_idempotent_by_ref(world: World) -> None:
+    """A crash between `bd create` and the journal: the bead exists, the caller never learned its ID. The
+    same ref again finds it and makes no second bead."""
+    adapter = BeadsAdapter(factory(world))
+    world.fault("create", RuntimeError("bd: timed out"), after=True)
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter)
+    assert len(world.created) == 1
+    assert ask(adapter) == world.created[0]
+    assert ask(adapter) == world.created[0]
+    assert len(world.created) == 1
+    assert writes(world) == ["create"]
+    assert ask(adapter, ref="q:alpha:btq-1:1:2") != world.created[0]      # another ref is another bead
+    assert len(world.created) == 2
+
+
+def test_create_records_what_was_asked(world: World) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = world.beads[ask(adapter)]
+    assert (bead.title, bead.description) == ("Question from btq-1: which?", "the agent asks")
+    assert sorted(bead.labels) == ["kind:question", f"ws:{WS}"]
+    assert bead.metadata == {"round": "1", REF_KEY: "q:alpha:btq-1:1:1"}
+
+
+def _alter(world: World, change: str) -> None:
+    [bead] = [world.beads[b] for b in world.created[-1:]]
+    if change == "title":
+        bead.title = "something else"
+    elif change == "description":
+        bead.description = ""
+    elif change == "label dropped":
+        bead.labels.remove("kind:question")
+    elif change == "label added":
+        bead.labels.append("agent:wsd")
+    elif change == "metadata":
+        bead.metadata["round"] = "2"
+    elif change == "metadata dropped":
+        del bead.metadata["round"]
+    else:
+        bead.metadata[REF_KEY] = "q:alpha:btq-1:1:9"
+
+
+CHANGES = ["title", "description", "label dropped", "label added", "metadata", "metadata dropped", "ref"]
+
+
+@pytest.mark.parametrize("change", CHANGES)
+def test_create_reads_back_and_refuses_a_mismatch(world: World, monkeypatch: pytest.MonkeyPatch,
+                                                  change: str) -> None:
+    created = FakeQueue._create      # pyright: ignore[reportPrivateUsage]
+
+    def lossy(self: FakeQueue, args: list[str]) -> Any:
+        out = created(self, args)
+        _alter(world, change)        # bd stored something other than what it was asked to
+        return out
+
+    monkeypatch.setattr(FakeQueue, "_create", lossy)
+    with pytest.raises(CreateUnverified):
+        ask(BeadsAdapter(factory(world)))
+
+
+@pytest.mark.parametrize("change", [c for c in CHANGES if c != "ref"])
+def test_a_ref_found_with_other_content_is_refused(world: World, change: str) -> None:
+    """The ref is the create's identity: a bead under it that isn't what is asked now is never returned."""
+    adapter = BeadsAdapter(factory(world))
+    ask(adapter)
+    _alter(world, change)
+    with pytest.raises(CreateUnverified):
+        ask(adapter)
+    assert len(world.created) == 1
+
+
+def test_a_ref_held_by_two_beads_is_refused(world: World) -> None:
+    adapter = BeadsAdapter(factory(world))
+    ask(adapter)
+    world.beads[ask(adapter, ref="q:alpha:btq-1:1:2")].metadata[REF_KEY] = "q:alpha:btq-1:1:1"
+    with pytest.raises(CreateUnverified):
+        ask(adapter)
+    assert len(world.created) == 2
+
+
+def test_an_unreadable_ref_lookup_never_creates(world: World) -> None:
+    adapter = BeadsAdapter(factory(world))
+    world.fault("list", RuntimeError("dolt: connection refused"))
+    with pytest.raises(BeadsUnavailable):
+        ask(adapter)
+    assert writes(world) == []
+
+
+@pytest.mark.parametrize("kind", ["kind:question", "kind:approval"])
+def test_created_beads_are_never_claimable(world: World, kind: str) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = adapter.show(WS, ask(adapter, kind=kind))
+    assert "agent:wsd" not in bead.labels
+    assert adapter.claimable(WS, bead) is False
+    assert adapter.ready(WS) == []
+
+
+@pytest.mark.parametrize("labels", [
+    (), ("kind:task",), ("kind:review",), ("kind:question", "kind:approval"), ("kind:question", "agent:wsd"),
+    ("kind:question", "agent:codex"), ("kind:question", "ws:beta"), ("kind:question", f"ws:{WS}"),
+    ("kind:question", "session:x"), ("kind:question", "needs-human"),
+])
+def test_create_refuses_labels_that_are_not_one_operator_kind(world: World, labels: tuple[str, ...]) -> None:
+    """wsd creates only question and approval beads, and never routes one to an agent: anything else is
+    refused before bd is called. The workstream label is wsd's to add."""
+    with pytest.raises(ValueError, match="labels"):
+        BeadsAdapter(factory(world)).create(WS, ref="q:alpha:btq-1:1:1", title="t", description="d",
+                                            labels=labels, metadata={})
+    assert world.calls == []
+
+
+def test_create_refuses_metadata_that_names_the_ref(world: World) -> None:
+    with pytest.raises(ValueError, match=REF_KEY):
+        ask(BeadsAdapter(factory(world)), metadata={REF_KEY: "other"})
+    assert world.calls == []
+
+
+def test_close_question_comments_then_closes(world: World) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = ask(adapter)
+    since = len(world.calls)
+    adapter.close_question(WS, bead, "Use the second option.")
+    assert writes(world, since) == ["comments add", "close"]
+    assert world.beads[bead].status == "closed"
+    assert world.closed_reasons == {bead: QUESTION_ANSWERED}
+    [comment] = world.beads[bead].comments
+    assert "Use the second option." in comment
+    since = len(world.calls)
+    adapter.close_question(WS, bead, "Use the second option.")      # replayed: nothing written again
+    assert writes(world, since) == []
+
+
+def test_close_question_after_a_failed_close_never_comments_twice(world: World) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = ask(adapter)
+    world.fault("close", RuntimeError("bd: timed out"))
+    with pytest.raises(BeadsUnavailable):
+        adapter.close_question(WS, bead, "Yes.")
+    assert world.beads[bead].status == "open"
+    adapter.close_question(WS, bead, "Yes.")
+    assert len(world.beads[bead].comments) == 1
+    assert world.beads[bead].status == "closed"
+
+
+def test_close_question_that_does_not_read_back_closed_fails(world: World,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = ask(adapter)
+    real = FakeQueue._bd      # pyright: ignore[reportPrivateUsage]
+
+    def ignored(self: FakeQueue, args: list[str]) -> Any:
+        return [] if args[0] == "close" else real(self, args)       # bd said yes, and closed nothing
+
+    monkeypatch.setattr(FakeQueue, "_bd", ignored)
+    with pytest.raises(BeadsUnavailable, match="close"):
+        adapter.close_question(WS, bead, "Yes.")
+
+
+def _others(world: World, adapter: BeadsAdapter) -> dict[str, str]:
+    world.add("btq-task")                                             # a task: never touched
+    world.add("btq-q", kind="question")                               # a question wsd did not create
+    world.add("btq-qt", labels=["kind:question"], metadata={REF_KEY: "q:x"})      # kind:task as well
+    world.add("btq-other-ws", ws="beta", kind="question", metadata={REF_KEY: "q:y"})
+    approval = ask(adapter, ref="a:1", kind="kind:approval")           # wsd's, but an approval
+    return {"task": "btq-task", "foreign question": "btq-q", "task and question": "btq-qt",
+            "other workstream": "btq-other-ws", "approval": approval}
+
+
+@pytest.mark.parametrize("which", ["task", "foreign question", "task and question", "other workstream",
+                                   "approval"])
+def test_close_question_refuses_any_other_bead(world: World, which: str) -> None:
+    adapter = BeadsAdapter(factory(world))
+    bead = _others(world, adapter)[which]
+    since = len(world.calls)
+    with pytest.raises(NotAQuestion):
+        adapter.close_question(WS, bead, "Yes.")
+    assert writes(world, since) == []
+    assert world.closed_reasons == {}
