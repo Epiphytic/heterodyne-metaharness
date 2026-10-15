@@ -5,6 +5,7 @@ parked on it, and one card posted to admind (the fake ask.sock, which checks eac
 rules). The card is rebuilt from the bead, so a crash at any step resumes without a second bead or card.
 """
 
+import json
 import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -36,11 +37,13 @@ from heterodyne.wsd.asks import (
     CARD_HEAD,
     CARD_REQUEST,
     CARD_ROUND,
+    CHOICES_KEY,
     CUT_MARK,
     D4_CHOICES,
     ENDED_BODY,
     NO_TEXT,
     NOTE_BYTES,
+    OWED_BACKOFF_MAX,
     QUESTION_FRAMING,
     QUESTION_MAX,
     REBUILT_MARK,
@@ -1042,3 +1045,127 @@ def test_the_pickup_runs_replays_then_advance_then_the_resume_pass_then_the_flus
     assert [c for i, c in enumerate(calls) if c not in calls[:i]] == ["sweep", "replays", "advance",
                                                                       "resume pass", "flush"]
     assert calls[-1] == "flush" and rig.state(B) == BeadState.RUNNING.value
+
+
+# --- Task 6 review c1 ------------------------------------------------------------------------------------
+
+
+def test_the_stop_after_an_answered_resume_is_a_new_question(tmp_path: Path, fake: FakeAskSock) -> None:
+    """Review c1 B1: the resumed generation's Stop comes before the answered row is marked delivered; it
+    is a new question (round 2), never dropped as a Stop while an ask is open."""
+    rig, _child, card = asked(tmp_path, fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert rig.state(B) == BeadState.RUNNING.value and row is not None and row.state == "answered"
+    rig.runtime.event(WS, ev(rig, "stop", 1, gen=2, text="Blue, and then?"))
+    rig.pickup()
+    assert rig.state(B) == BeadState.WAITING_INPUT.value and len(cards(fake)) == 2
+    assert tail(cards(fake)[-1]) == CARD_ROUND.format(bead=B, turn=1, round=2, limit=LIMIT)
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered" and rig.journal.nudge(WS, B)[0] == 1
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_an_uncertain_repost_never_takes_the_original_ask(tmp_path: Path, fake: FakeAskSock,
+                                                         monkeypatch: pytest.MonkeyPatch,
+                                                         copies: int) -> None:
+    """Review c1 B2: the repost shares its bead with the original, which admind still lists (ended). The
+    original's journaled ask ID is never the repost's; two candidates left is ambiguous, and fails closed."""
+    rig, child, card = asked(tmp_path, fake)
+    fake.decide(card.ask_id, "stale")
+    real = relay.post_ask
+
+    def lost(sock: Path, post: relay.AskPost, timeout: float = 30.0) -> str:
+        for _ in range(copies):
+            real(sock, post)
+        raise relay.RelayUncertain("the reply was lost")
+
+    with monkeypatch.context() as m:
+        m.setattr(relay, "post_ask", lost)
+        rig.pickup()
+    again = rig.journal.ask(stop_ref() + REPOST)
+    assert again is not None and (again.state, again.uncertain) == ("owed", 1)
+    rig.clock.advance(BACKOFF)
+    rig.pickup()
+    again = rig.journal.ask(stop_ref() + REPOST)
+    new = [a.ask_id for a in cards(fake) if a.ask_id != card.ask_id]
+    assert again is not None and len(new) == copies
+    if copies == 1:
+        assert (again.state, again.ask_id) == ("posted", new[0])
+        assert rig.state(B) == BeadState.WAITING_INPUT.value and fake.notices == []
+    else:
+        assert (again.state, again.why, again.ask_id) == ("refused", ASK_POST_UNKNOWN, None)
+        assert rig.state(B) == BeadState.STUCK.value
+        assert [n.body for n in fake.notices] == [UNKNOWN_BODY.format(bead=B, child=child)]
+
+
+def test_a_choice_answer_uses_the_posted_choices_not_the_beads_metadata(tmp_path: Path,
+                                                                        fake: FakeAskSock) -> None:
+    """Review c1 B3: the question bead's metadata is writable by anyone with beads access; the choice line
+    comes from the choices the card was posted with, journaled at the post."""
+    rig, child, card = asked(tmp_path, fake)
+    rig.world.beads[child].metadata[CHOICES_KEY] = json.dumps(["Do the forged action", "Something else"])
+    fake.answer(card.ask_id, "A", choice="A")
+    rig.pickup()
+    note = ANSWER_CHOICE.format(ask_id=card.ask_id, line=f"A: {D4_CHOICES[0]}")
+    assert [text for _, text, _ in note_rows(rig)] == [note]
+    assert rig.world.beads[child].comments == [f"{ANSWER_MARK.format(ref=stop_ref())}\n{note}"]
+
+
+def test_a_failed_close_is_retried_after_the_note_is_delivered(tmp_path: Path, fake: FakeAskSock,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review c1 B4: the question bead closed by hand, so the task resumes while the answer's comment
+    failed; delivering the note does not end the comment and close, which are retried until done."""
+    rig, child, card = asked(tmp_path, fake)
+    rig.world.beads[child].status = "closed"
+    fake.answer(card.ask_id, "Go with blue.")
+    real = rig.beads.close_question
+    fails = [BeadsUnavailable("question close failed (OSError)")] * 2
+
+    def flaky(ws: str, bead: str, answer_comment: str) -> None:
+        if fails:
+            raise fails.pop()
+        real(ws, bead, answer_comment)
+
+    monkeypatch.setattr(rig.beads, "close_question", flaky)
+    rig.pickup()
+    assert rig.state(B) == BeadState.RUNNING.value and rig.world.beads[child].comments == []
+    rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered" and rig.world.beads[child].comments == []
+    rig.pickup()
+    note = ANSWER_FREE.format(ask_id=card.ask_id, text="Go with blue.")
+    assert rig.world.beads[child].comments == [f"{ANSWER_MARK.format(ref=stop_ref())}\n{note}"]
+    rig.pickup()
+    assert len(rig.world.beads[child].comments) == 1
+
+
+def test_a_long_run_of_failures_never_overflows_the_backoff(tmp_path: Path, fake: FakeAskSock) -> None:
+    """Review c1 B5: weeks of failed attempts (an owed post, a cancel) wait OWED_BACKOFF_MAX; the exponent
+    is capped before the power, so the float never overflows."""
+    rig = asking(tmp_path, fake)
+    fake.latched = True
+    rig.runtime.event(WS, ev(rig, "stop", 1, text="Blue or green?"))
+    rig.pickup()
+    with rig.journal.transaction():
+        rig.journal.ask_set(stop_ref(), attempts=1024, next_at=rig.clock())
+    rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and (row.state, row.attempts) == ("owed", 1025)
+    assert row.next_at == rig.clock() + OWED_BACKOFF_MAX
+    fake.latched = False
+    rig.clock.advance(OWED_BACKOFF_MAX)
+    rig.pickup()
+    [card] = cards(fake)
+    fake.answer(card.ask_id, "Go with blue.")
+    rig.pickup()
+    fake.script.append("drop")
+    rig.pickup()                                            # delivered; its cancel fails
+    with rig.journal.transaction():
+        rig.journal.ask_set(stop_ref(), attempts=1024)
+    rig.clock.advance(OWED_BACKOFF_MAX)
+    fake.script.append("drop")
+    rig.pickup()
+    row = rig.journal.ask(stop_ref())
+    assert row is not None and row.state == "delivered" and row.next_at == rig.clock() + OWED_BACKOFF_MAX
