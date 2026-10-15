@@ -228,55 +228,83 @@ def test_a_readout_with_an_unknown_field_is_refused() -> None:
     assert isinstance(wbtq.parse_readout(b'{"format": 1, "busy": true}'), wbtq.Busy)
 
 
+# --- the deny reason. approve-bead's `decision_comment`, verbatim from beads-task-queue 26f6b50
+# (bin/approve-bead:368-375): `bd close --reason` stores its comment as the bead's close_reason. ---
+
+def decision_comment(verb, name, at, digest, via, via_ref, adr_revision, note):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN201, PLR0913
+    """The decision comment (and close reason), byte-identical to master's, and its prefix (what
+    a resume matches an earlier run's comment by: the note may differ)."""
+    source = f'approve-bead (Marmot, admind message {via_ref})' if via_ref else (
+        'approve-bead (Marmot)' if via == 'marmot' else 'approve-bead')
+    prefix = f'{verb.title()}d by {name} at {at} via {source}; context_digest={digest}'
+    return prefix, (prefix + (f'; adr_revision={adr_revision}' if adr_revision else '')
+                    + (f'. Note: {note}' if note else ''))
+
+
 DENIED_AT = "2026-10-15T00:00:00Z"
-SOURCE = "approve-bead (Marmot, admind message marmot:m1)"
-NOTE = ". Note: "
+SOURCES = {"admind": ("marmot", "marmot:m1"), "marmot": ("marmot", None), "cli": (None, None)}
 
 
-def denied_by(name: str, digest: str, rest: str = "") -> str:
-    """approve-bead's `decision_comment`, which `bd close --reason` stores as the bead's `close_reason`."""
-    return f"Denied by {name} at {DENIED_AT} via {SOURCE}; context_digest={digest}{rest}"
+def deny_comment(digest: str, note: str, source: str = "admind", adr_revision: str | None = None,
+                 name: str = OPERATOR) -> str:
+    via, via_ref = SOURCES[source]
+    return str(decision_comment("DENY", name, DENIED_AT, digest, via, via_ref, adr_revision, note)[1])
 
 
-# (case, close_reason with "<digest>" for the bead's digest or None to leave it out, the reason)
-REASONS: list[tuple[str, object, str | None]] = [
-    ("note", denied_by(OPERATOR, "<digest>", NOTE + "too risky"), "too risky"),
-    ("adr-revision", denied_by(OPERATOR, "<digest>", "; adr_revision=r16" + NOTE + "too risky"), "too risky"),
-    ("bare", denied_by(OPERATOR, "<digest>"), None),
-    ("blank", denied_by(OPERATOR, "<digest>", NOTE + "   "), None),
-    ("padded", denied_by(OPERATOR, "<digest>", NOTE + "  too risky \n"), "too risky"),
-    ("note-in-note", denied_by(OPERATOR, "<digest>", NOTE + "a. Note: b"), "a. Note: b"),
-    ("raw", denied_by(OPERATOR, "<digest>", NOTE + "one\n`two` <x>"), "one\n`two` <x>"),
-    ("bounded", denied_by(OPERATOR, "<digest>", NOTE + "é" * 600), "é" * 500),
-    ("another-operator", denied_by("operator-b", "<digest>", NOTE + "too risky"), None),
-    ("another-digest", denied_by(OPERATOR, "<other>", NOTE + "too risky"), None),
-    ("digest-prefix", denied_by(OPERATOR, "<prefix>", NOTE + "too risky"), None),
-    ("between", denied_by(OPERATOR, "<digest>", "; free text" + NOTE + "too risky"), None),
-    ("approved", denied_by(OPERATOR, "<digest>", NOTE + "too risky").replace("Denied", "Approved"), None),
-    ("missing", None, None),
-    ("type", 5, None),
-]
-
-
-@pytest.mark.parametrize("case, reason, want", REASONS, ids=[c for c, *_ in REASONS])
-def test_verdict_reads_the_deny_reason_from_the_close_reason(
-        bead: tuple[dict[str, Any], Any, Any], case: str, reason: object, want: str | None) -> None:
+def deny(bead: tuple[dict[str, Any], Any, Any], reason: object) -> Any:
     shown, recomputed, expect = bead
     digest = recomputed[0]
-    if isinstance(reason, str):
-        reason = (reason.replace("<digest>", digest).replace("<other>", other())
-                  .replace("<prefix>", digest[:12]))
     closed = {**shown, "status": "closed"} | ({"close_reason": reason} if reason is not None else {})
     fields = {**approved(shown, digest), "decision": "deny", "approved_by": None, "approved_digest": None,
               "denied_by": OPERATOR, "denied_digest": digest}
-    got = decide(readout_of(fields), closed, recomputed, expect)
-    assert got == approvals.Denied(want), case
+    return decide(readout_of(fields), closed, recomputed, expect)
+
+
+@pytest.mark.parametrize("source", list(SOURCES))
+@pytest.mark.parametrize("adr_revision", [None, "16"])
+@pytest.mark.parametrize(("note", "want"), [("too risky", "too risky"), ("", None), ("   ", None),
+                                            ("  too risky \n", "too risky"), ("a. Note: b", "a. Note: b"),
+                                            ("one\n`two` <x>", "one\n`two` <x>"), ("é" * 600, "é" * 500)],
+                         ids=["note", "bare", "blank", "padded", "note-in-note", "raw", "bounded"])
+def test_verdict_reads_the_deny_reason_from_approve_beads_comment(
+        bead: tuple[dict[str, Any], Any, Any], source: str, adr_revision: str | None, note: str,
+        want: str | None) -> None:
+    comment = deny_comment(bead[1][0], note, source, adr_revision)
+    assert comment.startswith("Denyd by ")                         # the producer's own spelling
+    assert deny(bead, comment) == approvals.Denied(want)
+
+
+def test_a_forged_header_in_the_note_gives_no_reason(bead: tuple[dict[str, Any], Any, Any]) -> None:
+    digest = bead[1][0]
+    inner = f"hostile ; context_digest={digest}. Note: injected"
+    for forged in (deny_comment(other(), inner),                    # the real header binds another digest
+                   deny_comment(other(), inner).replace("Denyd", "Denied"),
+                   f"Denied by {OPERATOR} at {DENIED_AT}; context_digest=WRONG. Note: {inner}",
+                   "x" + deny_comment(digest, "injected"),         # not anchored at the start
+                   deny_comment(digest, "injected", name="operator-b"),
+                   deny_comment(digest, "injected", name=f"{OPERATOR} at x"),
+                   deny_comment(digest, "injected").replace(" via approve-bead", " via approve-bead (Other)"),
+                   deny_comment(digest + "0", "injected"),         # a longer digest is another one
+                   deny_comment(digest, "injected").replace(". Note: ", "; free text. Note: ")):
+        assert deny(bead, forged) == approvals.Denied(None), forged
+
+
+@pytest.mark.parametrize("reason", [None, 5, "", "Approved by operator-a"])
+def test_a_missing_or_foreign_close_reason_gives_no_reason(bead: tuple[dict[str, Any], Any, Any],
+                                                          reason: object) -> None:
+    assert deny(bead, reason) == approvals.Denied(None)
+
+
+
+def test_an_approval_comment_gives_no_deny_reason(bead: tuple[dict[str, Any], Any, Any]) -> None:
+    approve = str(decision_comment("APPROVE", OPERATOR, DENIED_AT, bead[1][0], "marmot", None, None, "x")[1])
+    assert deny(bead, approve) == approvals.Denied(None)
 
 
 def test_a_denial_without_a_denier_has_no_reason(bead: tuple[dict[str, Any], Any, Any]) -> None:
     shown, recomputed, expect = bead
     digest = recomputed[0]
-    closed = {**shown, "status": "closed", "close_reason": denied_by(OPERATOR, digest, NOTE + "too risky")}
+    closed = {**shown, "status": "closed", "close_reason": deny_comment(digest, "too risky")}
     for change in ({"denied_by": None}, {"denied_digest": None}):
         fields = {**approved(shown, digest), "decision": "deny", "approved_by": None, "approved_digest": None,
                   "denied_by": OPERATOR, "denied_digest": digest, **change}
