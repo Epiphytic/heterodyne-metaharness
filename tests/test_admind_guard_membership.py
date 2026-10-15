@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from fakes.settings import OPERATOR_HEX, SECOND_HEX, make_settings, operator
 
-from heterodyne.admind import guard, guard_state, membership
+from heterodyne.admind import commands, guard, guard_state, membership
 from heterodyne.admind.audit import Audit
 from heterodyne.admind.daemon import Admind, render_batch
 from heterodyne.admind.settings import Operator
@@ -376,6 +376,136 @@ def test_untrusted_turn_cannot_poison_current_requesters_backstop(
         assert d.store.db.execute("SELECT status FROM outbox WHERE key = ?", (f"held-turn:{bad}",)
                                   ).fetchone() == ("quarantined" if unproven else "suppressed",)
         assert d.store.turn(bad).status == "summarized"  # type: ignore[union-attr]
+        assert d.store.db.execute("SELECT batch_id FROM turns WHERE turn_id = ?",
+                                  (bad,)).fetchone() == (None,)
+        d.store.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("mode", ["held", "stale-held-link", "revoked-after-delivery"])
+def test_batch_details_exclude_held_and_now_revoked_sources(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full: bool, mode: str) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        if mode == "revoked-after-delivery":
+            d.store.set("group_operators", json.dumps([OPERATOR_HEX, SECOND_HEX]))
+            d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        turns: list[int] = []
+        for mid, sender, text in ((MID, OPERATOR_HEX, "current reply"),
+                                  ("b" * 64, SECOND_HEX, "excluded secret")):
+            d.store.claim_inbound(mid, sender_key=sender)
+            turn = d.store.add_turn(mid, "session", mid, text + " origin", text,
+                                    None, None, None, "summarizing")
+            turns.append(turn)
+            d.queue_backstop(turn)
+        batch = d.store.turn(turns[0]).batch_id  # type: ignore[union-attr]
+        d.wallclock = lambda: 2000
+        await d.close_due_batches()
+        await d.outbox_pass()
+        assert probe.sent
+        if mode == "stale-held-link":  # defense in depth against an old/stale association
+            d.store.db.execute("UPDATE turns SET batch_id = ? WHERE turn_id = ?", (batch, turns[1]))
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX),)
+        probe.sent.clear()
+        calls: list[int] = []
+        async def tool_calls(row: Any, _seconds: float, _limit: int) -> tuple[str, bool]:
+            calls.append(row.turn_id)
+            return "tool:" + row.text, False
+        monkeypatch.setattr(d, "tool_calls", tool_calls)
+        command = "c" * 64
+        d.store.claim_inbound(command, sender_key=OPERATOR_HEX)
+        await d.details(command, commands.Command("details", arg="full" if full else None), None)
+        await d.outbox_pass()
+        rendered = "\n".join(probe.sent)
+        assert "current reply" in rendered and "excluded secret" not in rendered
+        assert "tool:current reply" in rendered if full else "tool:" not in rendered
+        assert calls == ([turns[0]] if full else [])
+        d.store.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+@pytest.mark.parametrize("full", [False, True])
+def test_direct_summary_details_preserve_valid_and_exclude_revoked_source(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revoked: bool, full: bool) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        d.store.set("group_operators", json.dumps([OPERATOR_HEX, SECOND_HEX]))
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        source = "b" * 64
+        d.store.claim_inbound(source, sender_key=SECOND_HEX)
+        turn = d.store.add_turn("source", "session", source, "source origin", "source secret",
+                                None, None, None, "summarized")
+        d.post("summary", "short summary", source, owner=(SECOND_HEX,))
+        d.store.record_post("summary", "summary", turn, None)
+        await d.outbox_pass()
+        probe.sent.clear()
+        if revoked:
+            d.load_operators = lambda: (operator("op", OPERATOR_HEX),)
+        calls: list[int] = []
+        async def tool_calls(row: Any, _seconds: float, _limit: int) -> tuple[str, bool]:
+            calls.append(row.turn_id)
+            return "source tool secret", False
+        monkeypatch.setattr(d, "tool_calls", tool_calls)
+        command = "c" * 64
+        d.store.claim_inbound(command, sender_key=OPERATOR_HEX)
+        await d.details(command, commands.Command("details", arg="full" if full else None), None)
+        rows = [row for row in d.store.pending() if row.key.startswith("details:")]
+        assert all(set(d.store.row_owners(row.seq)) == {OPERATOR_HEX, SECOND_HEX} for row in rows)
+        await d.outbox_pass()
+        rendered = "\n".join(probe.sent)
+        assert ("source secret" in rendered) is not revoked
+        assert ("source tool secret" in rendered) == (full and not revoked)
+        assert calls == ([turn] if full and not revoked else [])
+        d.store.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("boundary", ["tool-await", "queued", "between-chunks"])
+def test_batch_details_retain_source_owners_through_awaits_and_delivery(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str) -> None:
+    async def scenario() -> None:
+        d, probe = make(tmp_path)
+        d.store.set("group_operators", json.dumps([OPERATOR_HEX, SECOND_HEX]))
+        d.load_operators = lambda: (operator("op", OPERATOR_HEX), operator("other", SECOND_HEX))
+        for mid, sender in ((MID, OPERATOR_HEX), ("b" * 64, SECOND_HEX)):
+            d.store.claim_inbound(mid, sender_key=sender)
+            turn = d.store.add_turn(mid, "session", mid, "origin", "ordinary output words " * d.s.chunk_chars,
+                                    None, None, None, "summarizing")
+            d.queue_backstop(turn)
+        d.wallclock = lambda: 2000
+        await d.close_due_batches()
+        await d.outbox_pass()
+        probe.sent.clear()
+        def revoke() -> None:
+            d.load_operators = lambda: (operator("op", OPERATOR_HEX),)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def tool_calls(row: Any, _seconds: float, _limit: int) -> tuple[str, bool]:
+            if row.reply_to == "b" * 64 and boundary == "tool-await":
+                entered.set()
+                await release.wait()
+            return "private tool", False
+        monkeypatch.setattr(d, "tool_calls", tool_calls)
+        command = "c" * 64
+        d.store.claim_inbound(command, sender_key=OPERATOR_HEX)
+        task = asyncio.create_task(d.details(command, commands.Command("details", arg="full"), None))
+        if boundary == "tool-await":
+            await entered.wait()
+            revoke()
+            release.set()
+        await task
+        rows = [row for row in d.store.pending() if row.key.startswith("details:")]
+        assert len(rows) > 1
+        assert all(set(d.store.row_owners(row.seq)) == {OPERATOR_HEX, SECOND_HEX} for row in rows)
+        if boundary == "between-chunks":
+            probe.after_send = revoke
+        else:
+            revoke()
+        await d.outbox_pass()
+        assert len(probe.sent) == (1 if boundary == "between-chunks" else 0)
+        statuses = dict(d.store.db.execute("SELECT seq,status FROM outbox WHERE key LIKE 'details:%'"))
+        assert all(statuses[row.seq] == "suppressed" for row in rows[len(probe.sent):])
         d.store.close()
     asyncio.run(scenario())
 

@@ -503,15 +503,17 @@ class Store:
                                 [(token, first + i, p) for i, p in enumerate(parts)])
 
     @_locked
-    def publish_details(self, token: str, prefix: str, reply_to: str, lane: int) -> int:
-        """Publish all staged parts with the request's persisted authenticated owner."""
+    def publish_details(self, token: str, prefix: str, reply_to: str, lane: int,
+                        source_owners: tuple[str, ...] = ()) -> int:
+        """Publish with both the command's authenticated owner and every included source owner."""
         owner = self.inbound_sender(token)
+        owners = tuple(sorted({owner, *source_owners})) if owner else ()
         with self.transaction():
             parts = self.db.execute("SELECT idx, text FROM details_stage WHERE token = ? ORDER BY idx",
                                     (token,)).fetchall()
             added = sum(self.enqueue(f"{prefix}:{idx}", str(text), reply_to, lane,
                                      ownership_kind="request" if owner else "unknown",
-                                     owners=(owner,) if owner else (), delivery_group=prefix)
+                                     owners=owners, delivery_group=prefix)
                         for idx, text in parts)
             self.discard_details(token)
             return added
@@ -664,8 +666,9 @@ class Store:
         return [_turn(r) for r in rows]
 
     @_locked
-    def set_turn_status(self, turn_id: int, status: str) -> None:
-        self.db.execute("UPDATE turns SET status = ? WHERE turn_id = ?", (status, turn_id))
+    def set_turn_status(self, turn_id: int, status: str, *, detach_batch: bool = False) -> None:
+        self.db.execute("UPDATE turns SET status = ?, batch_id = CASE WHEN ? THEN NULL ELSE batch_id END "
+                        "WHERE turn_id = ?", (status, detach_batch, turn_id))
 
     @_locked
     def add_to_batch(self, turn_id: int, batch_id: int) -> None:

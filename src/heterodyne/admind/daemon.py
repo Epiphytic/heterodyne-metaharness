@@ -2212,6 +2212,8 @@ class Admind:
             return
         full = cmd.arg == "full"
         sections: list[str] = []
+        source_owners: set[str] = set()
+        batch_details = post is not None and post.kind == "batch"
         # Deviation from the plan, which gave each turn its own 30 s: one `!details full` has ONE budget,
         # `details_timeout`, for all its reads. A batch can hold any number of turns, and 30 s each would
         # hold the work lock (operator messages, !interrupt, membership transitions) for 30 s x N.
@@ -2237,6 +2239,14 @@ class Admind:
             row = self.store.turn(turn_id)
             if row is None:
                 continue
+            if not self.authorised(mid):  # refresh policy before reading each contribution
+                self.deny(mid, "command")
+                return
+            owners = self.request_owners(row.reply_to)
+            if ((batch_details and row.status != "batched") or not owners
+                    or any(k not in self.operators for k in owners)):
+                continue
+            source_owners.update(owners)
             shown += 1
             section = f"{row.origin}\n{row.text}"      # a stored reply: shown whole, even past the cap
             left_bytes -= utf8_size(section) + 2
@@ -2280,7 +2290,7 @@ class Admind:
                 return
             with self.store.transaction():
                 self.store.set_inbound(mid, "done")
-                self.store.publish_details(mid, f"details:{mid}", mid, 2)
+                self.store.publish_details(mid, f"details:{mid}", mid, 2, tuple(sorted(source_owners)))
             published = True
             self.wake.set()
         finally:
@@ -2960,7 +2970,7 @@ class Admind:
         with self.store.transaction():
             self.post(key, row.text, row.reply_to, owner=owners)
             self.store.hold_group(key, status, reason)
-            self.store.set_turn_status(row.turn_id, "summarized")
+            self.store.set_turn_status(row.turn_id, "summarized", detach_batch=True)
         self.audit_quietly("reply", action=status, reason=reason, turn=row.turn_id)
         return True
 

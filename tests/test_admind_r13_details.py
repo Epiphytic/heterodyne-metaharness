@@ -1175,8 +1175,9 @@ def test_a_failure_after_the_publish_statement_rolls_the_whole_command_back(tmp_
         real = h.store.publish_details
         failed: list[bool] = []
 
-        def publish_then_fail(token: str, prefix: str, reply_to: str, lane: int) -> int:
-            n = real(token, prefix, reply_to, lane)
+        def publish_then_fail(token: str, prefix: str, reply_to: str, lane: int,
+                              source_owners: tuple[str, ...] = ()) -> int:
+            n = real(token, prefix, reply_to, lane, source_owners)
             assert n > 1 and details_texts(h, token) != []  # the rows were really moved...
             failed.append(True)
             raise RuntimeError("the commit never happened")  # ...in the transaction that now rolls back
