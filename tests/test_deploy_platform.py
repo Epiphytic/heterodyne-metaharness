@@ -411,6 +411,19 @@ def test_a_wsd_that_is_not_ready_fails_with_the_journal(host: Host) -> None:
     assert f"journalctl --user -u {WSD} -n 20 --no-pager" in host.calls()
 
 
+def test_a_readiness_failure_keeps_the_recorded_release_until_the_services_pass(host: Host) -> None:
+    assert installer(host).returncode == 0
+    old = host.commit
+    host.new_commit()
+    host.put("wsctl-rc", "1\n")
+    out = installer(host)
+    assert out.returncode == 1 and f"{WSD} is not ready" in out.stderr
+    assert host.record()["release"] == old
+    (host.shims / "wsctl-rc").unlink()
+    assert installer(host).returncode == 0
+    assert host.record()["release"] == host.commit
+
+
 def test_an_admind_that_restarts_during_readiness_fails_the_recheck(host: Host) -> None:
     host.flap(ADMIND)
     out = installer(host)

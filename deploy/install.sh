@@ -867,11 +867,6 @@ else
                 echo "note: $u has drop-ins, which change nothing the installer compares: ${names[*]}"
             fi
         done
-        recorded=$(recorded_release)
-        if [[ $recorded != "$commit" ]]; then
-            platform record-release --record "$record" --release "$commit" </dev/null \
-                || fail "the install record can't be written"
-        fi
     fi
     skipped=""
     for u in "${wanted[@]}"; do
@@ -882,6 +877,11 @@ else
         fi
         reconcile_service "$u"
     done
+    # the release of the last completed services step (D6), so only once every service has passed
+    if ((!dry_run)) && [[ $(recorded_release) != "$commit" ]]; then
+        platform record-release --record "$record" --release "$commit" </dev/null \
+            || fail "the install record can't be written"
+    fi
     as_service_user PATH="$user_tools" rm -rf -- "$renders" || fail "the render directory can't be removed"
     renders=""
     if ((dry_run)); then
