@@ -163,7 +163,7 @@ def test_the_upgrade_keeps_every_v1_row(tmp_path: Path, v1: Path) -> None:
     for table in V1_TABLES:
         kept = before[table] - {("schema_version", "1")}
         assert kept <= after[table], table
-    assert ("schema_version", "3") in after["meta"]          # plan 4c T7: straight to version 3
+    assert ("schema_version", "4") in after["meta"]          # plan 4c T7, T10: straight to the current one
     assert [r[4] for r in after["events"] - before["events"]] == ["journal_upgraded"]
     Journal(v1).close()                                      # the current version's check passes
     assert (v1.parent / "wsd.db.v1.bak").exists()
@@ -576,7 +576,8 @@ def test_the_upgrade_from_2_to_3_keeps_every_row_and_rolls_back_on_failure(tmp_p
             assert [r[4] for r in after[table] - kept] == ["journal_upgraded"]
         else:
             assert after[table] == kept, table
-    j = Journal(path)                                        # the version 3 check passes
+    upgrade.run_3_to_4(path)                                 # plan 4c T10: then on to the current version
+    j = Journal(path)
     try:
         [entry] = j.launches("k")
         assert (entry.install, entry.install_digest, entry.outcome) == ("", "", "launched")
@@ -616,7 +617,7 @@ def test_startup_upgrades_version_2_without_the_hosts_accounts(tmp_path: Path) -
         j.close()
 
 
-def test_the_upgrade_from_1_lands_on_version_3(tmp_path: Path, v1: Path) -> None:
+def test_the_upgrade_from_1_lands_on_the_current_version(tmp_path: Path, v1: Path) -> None:
     upgrade.run(*no_beads(tmp_path), v1)
     j = Journal(v1)
     try:

@@ -1136,7 +1136,7 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
     assert parks == [("btq-1", (), INSTALL_TAINTED, True)]
     assert HELD in rig.beads.show(WS, "btq-1").labels
     alerts = [p for p in h.alerts.iterdir() if not p.name.startswith(".")]
-    assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}", alerts[0].name)
+    assert len(alerts) == 1 and re.fullmatch(r"harness-taint-codex-[0-9a-f]{12}\.json", alerts[0].name)
     assert a in alerts[0].read_text()
     rig.runtime.report(WS, InstallTainted(key, 1, "codex", a))     # again: still one alert for the install
     rig.pickup()
