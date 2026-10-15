@@ -56,7 +56,8 @@ class Approved:
 
 @dataclass(frozen=True)
 class Denied:
-    """`reason` is the denier's own note, raw and untrusted: whatever shows it escapes it."""
+    """`reason` is the denier's own note, raw and untrusted: whatever shows it escapes it. Its one reader is
+    Task 7's resume note, and part 1 T4's `brief.fit` escapes every note before the brief shows it."""
     reason: str | None = None
 
 
