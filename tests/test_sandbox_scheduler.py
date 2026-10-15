@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 import pytest
-from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir
+from sandbox_env import RuntimeRig, fresh_logins, runtime_rig, short_dir, wait_for
 from tmux_guard import new_test_tmux
 from wsd_env import WS, Rig, make_rig, on_profile
 
@@ -45,6 +45,7 @@ def both(request: pytest.FixtureRequest) -> Iterator[Both]:
         rig = make_rig(root / "w", limits=limits)
         try:            # the Journal closes whatever fails below: an open one breaks test_wsd_gate's fd count
             rt = runtime_rig(root / "x", tmux, rig.clock)
+            rt.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"     # D5: the brief arrives as one prompt
             rig.ws = replace(rig.ws, accounts=rt.runtime.c.accounts)   # one Accounts, as in wsd
             rig.deps = replace(rig.deps, runtime=rt.runtime)
             rig.parker = Parker(rig.ws, rig.deps)
@@ -102,8 +103,7 @@ def test_the_lifetime_stop_relaunches_the_same_session(both: Both, profile: str)
     rig.world.add("btq-1")
     on_profile(rig, "btq-1", profile)
     assert rig.pickup() is Outcome.STARTED
-    first = both.record("btq-1")
-    rig.clock.advance(first.deadline - rt.runtime.c.settings.stop_margin_seconds - rig.clock())
+    first = stop_window(both, "btq-1")
     assert rig.pickup() is Outcome.BUSY             # stopped, resumed and relaunched in one pickup
     second = both.record("btq-1")
     assert (second.phase, second.generation, second.native_id) == (Phase.RUNNING, 2, first.native_id)
@@ -129,7 +129,7 @@ def test_a_relaunch_the_gate_refuses_needs_a_human(both: Both) -> None:
     first = both.record("btq-1")
     # Valid for this generation, but not for another full lifetime from the stop window.
     fresh_logins(rt.home, first.started_at + s.max_lifetime_seconds + s.stop_margin_seconds + 600)
-    rig.clock.advance(first.deadline - s.stop_margin_seconds - rig.clock())
+    stop_window(both, "btq-1")
     rig.pickup()
     rec = both.record("btq-1")
     assert rec.phase is Phase.ENDED and rec.generation == 1     # generation 2 never got a record write
@@ -140,7 +140,10 @@ def test_a_relaunch_the_gate_refuses_needs_a_human(both: Both) -> None:
 
 
 def stop_window(both: Both, bead: str) -> SessionRecord:
-    """Move the shared clock to the start of the bead's stop window. Returns its record from before."""
+    """Move the shared clock to the start of the bead's stop window, once the session is at a turn boundary
+    (a launch returns when the agent has taken its brief, with the brief's turn still running; a soft stop
+    waits for its end). Returns its record from before."""
+    wait_for(lambda: both.rt.runtime.servers[both.rig.key(bead)].turns().idle)
     rec = both.record(bead)
     both.rig.clock.advance(rec.deadline - both.rt.runtime.c.settings.stop_margin_seconds - both.rig.clock())
     return rec
