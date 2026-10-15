@@ -2423,6 +2423,43 @@ def test_a_disconnected_callers_resolve_still_completes(tmp_path: Path,
     assert len(resolved_events(wsd.parts.journal)) == 1
 
 
+def test_a_resolve_takes_the_sessions_events_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 5i T6: a resolve moves the session's folder, and its event logs with it, so wsd reads the logs
+    into the inbox before it resolves."""
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+    order: list[str] = []
+    read, resolve = runtime.session_events, runtime.resolve_unlanded
+
+    def reading(*args: Any) -> Any:
+        order.append("read")
+        return read(*args)
+
+    def resolving(*args: Any) -> Any:
+        order.append("resolve")
+        return resolve(*args)
+
+    monkeypatch.setattr(runtime, "session_events", reading)
+    monkeypatch.setattr(runtime, "resolve_unlanded", resolving)
+    assert wsd.resolve_one(WS, SID, 1, "discard", None).result == "ok"
+    assert order == ["read", "resolve"]
+
+
+def test_a_resolve_whose_events_cant_be_read_resolves_nothing(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    wsd, runtime, _, _ = held_wsd(tmp_path, monkeypatch)
+
+    def down(*args: object) -> Any:
+        raise daemon.RuntimeUnavailable("the log can't be read")
+
+    monkeypatch.setattr(runtime, "session_events", down)
+    reply = wsd.resolve_one(WS, SID, 1, "discard", None)
+    assert reply.result == "failed" and "RuntimeUnavailable" in reply.message and "again" in reply.message
+    assert "the log can't be read" not in reply.message                 # named by type, never by text
+    assert runtime.resolves == [] and (SID, 1) not in runtime.intents
+    monkeypatch.undo()
+    assert wsd.resolve_one(WS, SID, 1, "discard", None).result == "ok"
+
+
 def test_emit_once_writes_one_event(tmp_path: Path) -> None:
     j = Journal(tmp_path / "j.db")
     assert j.emit_once(WS, "btq-1", "unlanded_resolved", "action=land tip=none", f"{SID}-g1")

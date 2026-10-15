@@ -94,6 +94,7 @@ from heterodyne.wsd.runtime import (
     Signal,
     UsageSeen,
 )
+from heterodyne.wsd.session_events import dispatch, ingest
 from heterodyne.wsd.states import TERMINAL, BeadState, Reason, allowed, ws_state
 from heterodyne.wsd.sweep import sweep
 from heterodyne.wsd.usage import decide, ingest_untrusted
@@ -210,6 +211,8 @@ class Scheduler:
         try:
             self.d.runtime.expire(name, now)      # §7: a session at its lifetime ends; the sweep resumes it
             self._signals(now)                    # plan 4b E8: after the lifetime stop, before the sweep
+            ingest(j, self.d.runtime, name)       # plan 5i: every logged event, by cursor
+            dispatch(self.parker, self.d.session_handlers, self.d.inbox_attempts)
             sweep(self.parker)
             for op in j.ops_open(name):
                 self.replay(op)

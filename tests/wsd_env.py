@@ -33,6 +33,7 @@ from heterodyne.wsd.usage import NoUsageReader, UsageReader
 from heterodyne.wsd.workstream import (
     Deps,
     Limits,
+    NoticeSink,
     SessionHandler,
     WorkstreamSettings,
     place,
@@ -106,6 +107,7 @@ class Rig:
     selections: Callable[[str], InstallPin | None] = fake_selection   # plan 4c T7: adapter to its pin
     notes: ResumeNotes = field(default_factory=NoNotes)                # plan 5i T4: part 2's resume notes
     handlers: dict[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
+    notices: NoticeSink | None = None                                    # plan 5i T6: part 2's notices
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -126,7 +128,7 @@ class Rig:
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
                          self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
                          usage_reader=self.usage_reader, selections=self.selections, notes=self.notes,
-                         session_handlers=self.handlers)
+                         session_handlers=self.handlers, notices=self.notices)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 

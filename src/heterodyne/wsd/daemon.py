@@ -82,6 +82,7 @@ from heterodyne.wsd.runtime import (
     UnlandedView,
 )
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
+from heterodyne.wsd.session_events import ingest
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
@@ -356,6 +357,11 @@ class Wsd:
         launch guard to account; the intent, and so the hold, goes only once it has committed."""
         sched = self.parts.schedulers[name]
         with sched.parker.entry():
+            try:
+                ingest(sched.d.journal, sched.d.runtime, name)   # plan 5i: a resolve deletes the logs
+            except Exception as exc:  # noqa: BLE001 - reported by type; nothing was resolved
+                return CtlReply("failed", f"{name}: the session's events could not be taken first "
+                                          f"({type(exc).__name__}); run the same wsctl resolve again")
             try:
                 done = sched.d.runtime.resolve_unlanded(name, sid, generation, action, tip)
             except ResolveRefused as exc:
