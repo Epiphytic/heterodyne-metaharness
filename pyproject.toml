@@ -41,7 +41,7 @@ ignore = ["S603", "S607"]
 "src/heterodyne/sandbox/resources/**" = ["S", "PTH"]
 
 [tool.pyright]
-include = ["src", "tests", "scripts"]
+include = ["src", "tests", "scripts", "deploy"]
 strict = ["src"]
 pythonVersion = "3.12"
 venvPath = "."

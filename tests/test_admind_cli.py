@@ -314,7 +314,7 @@ def test_unit_rejects_control_characters(bad: str) -> None:
 def test_unit_refuses_identifier_values_naming_only_the_variable(var: str, make: object) -> None:
     ident = make()  # type: ignore[operator]
     with pytest.raises(ValueError) as info:
-        unit.render("/opt/venv/bin/python", {var: f"/srv/{ident}/x"})
+        unit.render("/opt/venv/bin/python", {"PATH": "/usr/bin", var: f"/srv/{ident}/x"})
     assert var in str(info.value) and ident not in str(info.value)
 
 
@@ -483,7 +483,7 @@ def test_supervise_resets_backoff_only_after_a_child_outlives_the_threshold(
 def test_unit_refuses_secret_values_naming_only_the_variable() -> None:
     token = "sk-" + "A1b2" * 6
     with pytest.raises(ValueError) as info:
-        unit.render("/opt/venv/bin/python", {"HETERODYNE_CONFIG_DIR": f"/srv/{token}/x"})
+        unit.render("/opt/venv/bin/python", {"PATH": "/usr/bin", "HETERODYNE_CONFIG_DIR": f"/srv/{token}/x"})
     assert "HETERODYNE_CONFIG_DIR" in str(info.value) and token not in str(info.value)
 
 

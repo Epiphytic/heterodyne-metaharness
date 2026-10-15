@@ -2,7 +2,8 @@
 
 from collections.abc import Mapping
 
-from heterodyne.config.secret_scan import sensitive_kind
+from heterodyne import units
+from heterodyne.config import paths
 
 TEMPLATE = """\
 [Unit]
@@ -25,27 +26,13 @@ UMask=0077
 [Install]
 WantedBy=default.target
 """
-PASSED_THROUGH = ("PATH", "HETERODYNE_CONFIG_DIR", "HETERODYNE_STATE_DIR", "XDG_CONFIG_HOME",
-                  "XDG_STATE_HOME")
-_UNSAFE = set(" \t\n\"'\\")
 
 
-def _control(ch: str) -> bool:
-    return ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F
-
-
-def render(python: str, env: Mapping[str, str]) -> str:
-    """The unit text. PATH and location variables are captured from `env` so the service finds the
-    same `claude`, `wn-agent` and config as the shell that rendered it; `%` is escaped for systemd."""
-    values = {"python": python, **{k: env[k] for k in PASSED_THROUGH if env.get(k)}}
-    for name, value in values.items():
-        if _UNSAFE & set(value) or any(_control(ch) for ch in value):
-            raise ValueError(f"{name} contains whitespace, a quote, a backslash or a control "
-                             "character; systemd would split or unquote it")
-        kind = sensitive_kind(value)
-        if kind:  # the unit must be installable verbatim, so refuse rather than redact
-            raise ValueError(f"{name} contains sensitive material ({kind}), which must not be printed; "
-                             "use a path without it")
-    environment = "".join(f"Environment={k}={env[k].replace('%', '%%')}\n"
-                          for k in PASSED_THROUGH if env.get(k))
-    return TEMPLATE.format(python=python.replace("%", "%%"), environment=environment)
+def render(python: str, env: Mapping[str, str], *, config_dir: str | None = None,
+           state_dir: str | None = None, release: str | None = None) -> str:
+    """The unit text (heterodyne.units.render). PATH is `env`'s, so the service finds the same `claude`
+    and `wn-agent` as the shell that rendered it; locations not given are resolved from `env` as
+    heterodyne reads them, and written into the unit explicitly."""
+    return units.render(TEMPLATE, python, path=env.get("PATH", ""),
+                        config_dir=config_dir or str(paths.config_dir(env)),
+                        state_dir=state_dir or str(paths.state_dir(env)), release=release)
