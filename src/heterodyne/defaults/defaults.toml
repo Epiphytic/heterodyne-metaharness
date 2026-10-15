@@ -89,7 +89,8 @@ usage_poll_seconds = 600                # how often a session's in-sandbox usage
 # default is the store owner's /var/lib/heterodyne/harnesses; with fallback = true (no store owner: wsd
 # runs the helper's steps itself, an accepted risk, §17 item 13) it is
 # ${XDG_DATA_HOME:-~/.local/share}/heterodyne/harnesses. `approval_workstream` has no default: `install`
-# refuses without it. Recipes are `[harnesses.<adapter>]` tables, written by the host.
+# refuses without it, and without `[admind] approve_bead` (no decision could be read). Recipes are
+# `[harnesses.<adapter>]` tables, written by the host: none ship here.
 [harnesses]
 fallback = false
 owner = "heterodyne-store"
