@@ -369,6 +369,35 @@ class HarnessInstall:
 
 
 @dataclass(frozen=True)
+class NoticeRow:
+    """One notice by its `ref` (plan 5i part 2 T3): `state` is one of NOTICE_STATES; `next_at` is when an
+    `owed` row is due; `why` holds a refusal code, `expired` or a withheld kind. Times are epoch seconds."""
+    ref: str
+    ws: str
+    bead: str | None
+    kind: str
+    title: str
+    body: str
+    state: str
+    notice_id: str | None
+    attempts: int
+    next_at: int | None
+    why: str | None
+    created_at: int
+    updated_at: int
+
+
+_NOTICE_COLS = ", ".join(f.name for f in dataclasses.fields(NoticeRow))
+_NOTICE_SET = frozenset({"state", "notice_id", "attempts", "next_at", "why"})
+
+
+def _notice(r: tuple[object, ...]) -> NoticeRow:
+    return NoticeRow(str(r[0]), str(r[1]), _opt(r[2]), str(r[3]), str(r[4]), str(r[5]), str(r[6]), _opt(r[7]),
+                     int(cast(int, r[8])), None if r[9] is None else int(cast(int, r[9])), _opt(r[10]),
+                     int(cast(int, r[11])), int(cast(int, r[12])))
+
+
+@dataclass(frozen=True)
 class RefusedRequest:
     """A refused request's fixed text and attribution (plan 5i part 2, part 1's D1). Its delivery is its
     note's, `refused:<event_id>`."""
@@ -1509,6 +1538,52 @@ class Journal:
         if row is None:
             return None
         return RefusedRequest(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), str(row[5]))
+
+    # --- notices (plan 5i part 2 T3) ---
+
+    @_locked
+    def notice_add(self, ref: str, ws: str, bead: str | None, kind: str, title: str, body: str, state: str,
+                   next_at: int | None, at: int, why: str | None = None) -> bool:
+        """A notice, once per `ref` (in any state), inside the caller's transaction. True only if new.
+
+        Only a `ref` conflict is ignored; `OR IGNORE` would also drop a row that fails a CHECK, silently."""
+        cur = self.db.execute("INSERT INTO notices (ref, ws, bead, kind, title, body, state, "
+                              "next_at, why, created_at, updated_at) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (ref) DO NOTHING",
+                              (ref, ws, bead, kind, title, body, state, next_at, why, at, at))
+        return cur.rowcount == 1
+
+    @_locked
+    def notice(self, ref: str) -> NoticeRow | None:
+        row = self.db.execute(f"SELECT {_NOTICE_COLS} FROM notices WHERE ref = ?",  # noqa: S608
+                              (ref,)).fetchone()
+        return None if row is None else _notice(row)
+
+    @_locked
+    def notice_set(self, ref: str, at: int, **fields: str | int | None) -> None:
+        """Set `fields` (of `_NOTICE_SET`) and `updated_at` on the row, which must exist."""
+        if not fields or not set(fields) <= _NOTICE_SET:
+            raise ValueError("notice_set: no such field")
+        names = ", ".join(f"{k} = ?" for k in fields)
+        cur = self.db.execute(f"UPDATE notices SET {names}, updated_at = ? WHERE ref = ?",  # noqa: S608
+                              (*fields.values(), at, ref))
+        if cur.rowcount != 1:
+            raise KeyError("notice_set: no such notice")
+
+    @_locked
+    def notices_in(self, state: str) -> list[NoticeRow]:
+        """Every notice in `state`, oldest first."""
+        rows = self.db.execute(f"SELECT {_NOTICE_COLS} FROM notices WHERE state = ? "  # noqa: S608
+                               "ORDER BY created_at, rowid", (state,)).fetchall()
+        return [_notice(r) for r in rows]
+
+    @_locked
+    def notices_due(self, now: int, limit: int) -> list[NoticeRow]:
+        """At most `limit` `owed` notices due by `now`, oldest first."""
+        rows = self.db.execute(f"SELECT {_NOTICE_COLS} FROM notices WHERE state = 'owed' "  # noqa: S608
+                               "AND (next_at IS NULL OR next_at <= ?) ORDER BY created_at, rowid LIMIT ?",
+                               (now, limit)).fetchall()
+        return [_notice(r) for r in rows]
 
     @_locked
     def launches_naming(self, install: str) -> list[LaunchEntry]:
