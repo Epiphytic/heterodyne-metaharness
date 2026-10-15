@@ -87,6 +87,10 @@ class InstallLayout:
     locator: str                # the release repository, or the npm package with `<target>` in it
     layout: store_core.Layout
     strip: str                  # the prefix every member of the artifact has
+    # A release's: the asset (`{target}` in it), its SHA256SUMS asset, and the tag (`{version}` in it).
+    asset: str = ""
+    sums: str = ""
+    tag: str = ""
 
 
 @dataclass(frozen=True)

@@ -116,7 +116,8 @@ class Codex:
     versions: Mapping[str, Declared] = {"0.160.0": Declared(TOOL_ENV, KINDS)}
     install_layout = InstallLayout("github-release", "openai/codex",
                                    store_core.Layout("codex-package.json", "version", "target", "entrypoint",
-                                                     None), "")
+                                                     None), "",
+                                   asset=RELEASE_ASSET, sums=RELEASE_SUMS, tag="rust-v{version}")
     content_kinds = KINDS
     # E9: written, or dropped, after the defaults. `features.apps` is the connectors; `profile` and
     # `profiles` are never written, so no config profile can turn a key back on. The rest of 0.160's
