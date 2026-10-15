@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from tmux_guard import new_test_tmux
 
-from heterodyne.tmux import Tmux, TmuxError
+from heterodyne.tmux import Tmux, TmuxError, escape_controls, has_controls
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
@@ -156,3 +156,27 @@ def test_session_names_reads_only_a_missing_server_as_no_sessions(
     else:
         with pytest.raises(TmuxError, match="list-sessions failed"):
             tmux.session_names()
+
+
+@pytest.mark.parametrize("text", [
+    "\x1b[201~\rsecond\r", "a\rb", "\x1b[2J", "\x07", "\x9b31m", "\x7f", "a\x00b", "\x0b", "\x0c"])
+def test_terminal_controls_are_found(text: str) -> None:
+    assert has_controls(text)
+
+
+@pytest.mark.parametrize("text", ["plain", "tab\there", "line\nbreak", "é ✓    "])
+def test_tab_newline_and_printable_text_are_not_controls(text: str) -> None:
+    assert not has_controls(text)
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    ("a\x1b[201~\rsecond\r", "a\\x1b[201~\nsecond\n"),
+    ("one\r\ntwo\rthree\n", "one\ntwo\nthree\n"),
+    ("bell\x07 del\x7f csi\x9b nul\x00", "bell\\x07 del\\x7f csi\\x9b nul\\x00"),
+    ("lone \ud800 surrogate", "lone \\ud800 surrogate"),
+    ("tab\tkept é", "tab\tkept é"),
+])
+def test_escaped_text_shows_its_controls_and_carries_none(text: str, shown: str) -> None:
+    assert escape_controls(text) == shown
+    assert not has_controls(escape_controls(text))
+    escape_controls(text).encode("utf-8")                   # strict: always pasteable

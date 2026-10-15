@@ -48,6 +48,24 @@ class TmuxPasteUncertain(TmuxError):
     timed out. Unlike any earlier TmuxError, retrying could deliver the text twice."""
 
 
+# Terminal controls pasted text may not carry: all of C0 but tab and newline, DEL and C1. ESC could end the
+# bracketed paste early (`\x1b[201~`) and CR then submit what follows as prompts of its own.
+PASTE_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def has_controls(text: str) -> bool:
+    """Whether `text` carries a terminal control that a paste must not (PASTE_CONTROLS)."""
+    return PASTE_CONTROLS.search(text) is not None
+
+
+def escape_controls(text: str) -> str:
+    """Untrusted text made safe to paste and still readable: CRLF and CR become newlines, every other
+    control in PASTE_CONTROLS is shown as `\\xNN`, and a lone surrogate (not UTF-8) as `\\udNNN`."""
+    text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return PASTE_CONTROLS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 class Tmux:
     def __init__(self, socket_name: str, binary: str = "tmux",
                  launcher: Callable[[], Sequence[str]] | None = None, *,
