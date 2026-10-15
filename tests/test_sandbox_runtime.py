@@ -8,6 +8,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -51,6 +52,7 @@ from heterodyne.sandbox.runtime import (
     write_record,
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
+from heterodyne.session import server as session_server
 from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
 from heterodyne.wsd import gitwip, ids
@@ -2385,6 +2387,47 @@ def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> No
     assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
                         frozenset({"close"})) == (None, {"ok": False, "error": "unavailable"})
     assert not late.path.exists()
+
+
+def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T3 c2 NB: a request's callback is held past the server's bounded wait, the session ends and
+    its log is closed, then the callback commits: it is refused, and nothing is logged after the end."""
+    monkeypatch.setattr(session_server, "CLOSE_SECONDS", 0.1)
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    layout = rig.runtime.layout(spec.session_key)
+    late = rig.runtime.logs[spec.session_key]
+    late.forwarding = True
+    real = late.request
+    entered, release = threading.Event(), threading.Event()
+    got: list[tuple[SessionEvent | None, dict[str, Any]]] = []
+
+    def held(payload: Mapping[str, Any], ops: frozenset[str]) -> tuple[SessionEvent | None, dict[str, Any]]:
+        entered.set()
+        release.wait(10)
+        got.append(real(payload, ops))
+        return got[-1]
+
+    monkeypatch.setattr(late, "request", held)
+    token = (layout.run(1) / shim.TOKEN_FILE).read_text().strip()
+    client = socket.socket(socket.AF_UNIX)
+    stopper = threading.Thread(target=rig.runtime.stop, args=(spec.session_key,))
+    try:
+        client.connect(str(layout.socket(1)))
+        client.sendall((json.dumps({"token": token, "type": "ws_request", "payload": {
+            "op": "close", "rid": "0123456789abcdef", "evidence": "x"}}) + "\n").encode())
+        assert entered.wait(5)                          # the callback is in flight
+        stopper.start()
+        wait_for(lambda: not late.writable)             # the teardown has closed the log
+    finally:
+        release.set()
+        stopper.join(30)
+        client.close()
+    wait_for(lambda: bool(got))
+    assert got == [(None, {"ok": False, "error": "unavailable"})]
+    assert not late.path.exists() and not stopper.is_alive()
 
 
 @pytest.mark.xfail(strict=True, reason="T4 pastes the brief")

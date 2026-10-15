@@ -268,25 +268,60 @@ def test_the_log_is_private_and_the_reply_is_fixed(tmp_path: Path) -> None:
     assert all("granted" not in text and "approved" not in text for text in ACCEPTED.values())   # D1
 
 
-def test_a_number_far_past_the_last_is_one_damaged_event(tmp_path: Path) -> None:
-    """Codex T3 c1 B1: a gap is filled only up to MAX_GAP; a number past that is damage in its own place,
-    so one short line can't make the reader build an unbounded run of events."""
+def renumbered(lines: list[bytes], *ns: int) -> bytes:
+    """The lines with these numbers in place of their own: intact rows around a run lost from the file."""
+    out = b""
+    for line, n in zip(lines, ns, strict=True):
+        row = json.loads(line)
+        row["n"] = n
+        out += json.dumps(row).encode() + b"\n"
+    return out
+
+
+def test_a_long_missing_run_is_one_damaged_event_and_the_rest_keep_their_numbers(tmp_path: Path) -> None:
+    """Codex T3 c2 B1: e2..e1026 are lost; e1027 and e1028 survive under their own IDs, and the run they
+    follow is one damaged event at its last number (it stands for every number after the event before)."""
     lg, lines = three(tmp_path)
-    far = json.loads(lines[1])
-    far["n"] = 20000
-    lg.path.write_bytes(lines[0] + json.dumps(far).encode() + b"\n" + lines[2])
+    lg.path.write_bytes(renumbered(lines, 1, 1027, 1028))
     got = EventLog.read(lg.path, *ARGS)
-    assert [(e.seq, e.kind) for e in got.events()] == [(1, "stop"), (2, "damaged"), (3, "stop")]
+    assert [(e.seq, e.kind) for e in got.events()] == [(1, "stop"), (1026, "damaged"), (1027, "stop"),
+                                                       (1028, "stop")]
+    gap = got.events()[1]
+    assert (gap.event_id, gap.turn, gap.text, gap.body) == ("sk-a:g1:e1026", 0, None, {})
+    assert got.last == 1028 and got.damaged
 
 
-def test_a_gap_up_to_the_bound_is_filled(tmp_path: Path) -> None:
+def test_a_cursor_reads_on_across_a_missing_run(tmp_path: Path) -> None:
     lg, lines = three(tmp_path)
-    edge = json.loads(lines[2])
-    edge["n"] = 2 + events.MAX_GAP                 # e2 .. e(1+MAX_GAP) missing: exactly MAX_GAP
-    lg.path.write_bytes(lines[0] + json.dumps(edge).encode() + b"\n")
-    got = EventLog.read(lg.path, *ARGS).events()
-    assert len(got) == 2 + events.MAX_GAP and got[-1].kind == "stop"
-    assert all(e.kind == "damaged" for e in got[1:-1])
+    lg.path.write_bytes(renumbered(lines, 1, 1027, 1028))
+    got = EventLog.read(lg.path, *ARGS)
+    assert [e.seq for e in got.after(1026, 10)] == [1027, 1028]        # a cursor persisted at e1026
+    assert [e.seq for e in got.after(500, 10)] == [1026, 1027, 1028]   # one inside the run: its marker
+    assert [e.seq for e in got.after(0, 2)] == [1, 1026]
+    assert got.after(1028, 10) == []
+
+
+def test_appends_after_a_missing_run_take_the_next_number(tmp_path: Path) -> None:
+    lg, lines = three(tmp_path)
+    lg.path.write_bytes(renumbered(lines, 1, 1027, 1028))
+    again = EventLog.open(lg.path, *ARGS)
+    again.forwarding = True
+    nxt = again.stop(stop("four"))
+    assert isinstance(nxt, SessionEvent) and nxt.event_id == "sk-a:g1:e1029"     # never an earlier ID
+    assert [e.seq for e in reopen(again).events()] == [1, 1026, 1027, 1028, 1029]
+
+
+def test_missing_runs_cost_one_event_each_however_long(tmp_path: Path) -> None:
+    """Codex T3 c2 B2: memory follows the lines, not the numbers skipped."""
+    lg, lines = three(tmp_path)
+    row = json.loads(lines[0])
+    rows = b""
+    for i in range(128):
+        row["n"] = (i + 1) * 1_000_000_007
+        rows += json.dumps(row).encode() + b"\n"
+    lg.path.write_bytes(rows)
+    got = EventLog.read(lg.path, *ARGS)
+    assert len(got.events()) == 256 and got.last == 128 * 1_000_000_007
 
 
 @pytest.mark.parametrize("field", ["n", "turn"])

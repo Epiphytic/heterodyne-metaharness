@@ -145,12 +145,12 @@ class SessionEvent:
     """A Stop or a `ws-request` a session sent through its own socket (plan 5i part 1). The runtime
     attributes it to the launch whose socket carried it (`ws`, `bead`, `session_key`, `generation`); every
     other field is untrusted. `event_id` comes from the generation's event log on the host
-    (`<key>:g<gen>:e<n>`, `n` from 1 with no gaps), so it is the same after a wsd restart and wsd dedupes
-    on it. `turn` is durable too: a Stop's ordinal among the generation's forwarded Stops (from 1), or for
-    a request the turn it was sent in. `text` is a Stop's last message (cut, None when absent) or a close's
-    evidence; `body` is an ask's or a question's JSON object. `close_requested` marks a Stop after a close
-    accepted in the same generation. A `damaged` event marks a log line that was lost after it was
-    accepted; it carries nothing else."""
+    (`<key>:g<gen>:e<n>`, `n` from 1, with no gaps but a damaged run's), so it is the same after a wsd restart
+    and wsd dedupes on it. `turn` is durable too: a Stop's ordinal among the generation's forwarded Stops
+    (from 1), or for a request the turn it was sent in. `text` is a Stop's last message (cut, None when
+    absent) or a close's evidence; `body` is an ask's or a question's JSON object. `close_requested` marks a
+    Stop after a close accepted in the same generation. A `damaged` event marks log lines lost after they were
+    accepted: every number after the event before it, up to its own; it carries nothing else."""
     event_id: str
     kind: SessionEventKind
     ws: str

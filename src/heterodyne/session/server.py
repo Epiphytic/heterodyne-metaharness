@@ -99,12 +99,14 @@ class SessionServer:
         self._acceptor = acceptor           # only a started thread is ever joined
 
     def close(self) -> None:
-        """Stop admitting, wake every connection, and wait, all within one CLOSE_SECONDS bound, for the
-        request callbacks already running and then each handler. No new callback starts once close has
-        begun. Once this returns, nothing a session sent is recorded or spooled, even by a handler still
-        unwinding. A callback still running then (blocked, perhaps on a lock its closer holds, or closing
-        this server itself) is never waited on further: its effect is its owner's to refuse at commit, as
-        the runtime's event log refuses appends once the teardown has closed it (plan 5i D2)."""
+        """Stop admitting, wake every connection, then wait for the request callbacks already running and
+        each handler; CLOSE_SECONDS bounds those two waits together. Close begins under the lock, so a hook
+        callback (`on_event`, which runs under it) can delay its start. No new request callback starts
+        once close has begun, and once this returns nothing a session sent is recorded or spooled, even by
+        a handler still unwinding. A request callback still running then (blocked, perhaps on a lock its
+        closer holds, or closing this server itself) is never waited on further, and this server can't
+        stop its effect: that is fenced by its owner at commit, as the runtime's teardown closes the
+        generation's event log after this, which then refuses every append (plan 5i D2)."""
         with self._lock:
             self._closed.set()
             sock, self._sock = self._sock, None

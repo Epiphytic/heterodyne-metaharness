@@ -7,8 +7,13 @@ request's `rid` (made by the shim per invocation) answers a resend as the first 
 again. A write that fails is cut back so the next starts a fresh line; an fsync that fails stops the log
 (its outcome is unknown); opening the log to append cuts a torn last line first. Every string came from
 the session and is untrusted; this module checks shape and size only.
+
+The numbers are sparse only where damage left them so: a run of numbers missing from the file is one
+`damaged` event at the run's last number, standing for every number after the event before it, so the
+lines that survived keep their IDs and the events in memory follow the lines, never the numbers skipped.
 """
 
+import bisect
 import contextlib
 import errno
 import json
@@ -25,7 +30,6 @@ from heterodyne.wsd.runtime import SessionEvent, SessionEventKind
 
 LOG_MAX = 4 << 20               # bytes per generation: a flooding session is refused, never unbounded
 STOP_TEXT_MAX = 16000           # characters of a Stop's last message kept
-MAX_GAP = 1024                  # missing numbers filled before one line; a number past that is damage
 UNSUPPORTED = {"ok": False, "error": "unsupported"}
 MALFORMED = {"ok": False, "error": "malformed"}
 FULL = {"ok": False, "error": "full"}
@@ -61,6 +65,7 @@ class EventLog:
         self.writable = False           # only a log opened to append, until a write's outcome is unknown
         self.damaged = False            # a complete line didn't decode, or a number was missing
         self._events: list[SessionEvent] = []
+        self._seqs: list[int] = []      # each event's number, ascending: gaps only where damage left them
         self._rids: dict[str, SessionEvent] = {}
         self._size = 0                  # bytes of complete, parsed lines: the durable length
         self._fd: int | None = None
@@ -104,16 +109,17 @@ class EventLog:
     @property
     def last(self) -> int:
         with self.lock:
-            return len(self._events)
+            return self._last()
 
     def events(self) -> list[SessionEvent]:
         with self.lock:
             return list(self._events)
 
     def after(self, n: int, limit: int) -> list[SessionEvent]:
-        """The events numbered n+1 on, at most `limit`."""
+        """The events numbered past n, at most `limit`. A cursor inside a missing run gets its marker."""
         with self.lock:
-            return self._events[n:n + limit]
+            start = bisect.bisect_right(self._seqs, n)
+            return self._events[start:start + limit]
 
     def close(self) -> None:
         with self.lock:
@@ -167,6 +173,9 @@ class EventLog:
 
     # --- under self.lock ---
 
+    def _last(self) -> int:
+        return self._seqs[-1] if self._seqs else 0
+
     def _turn(self) -> int:
         """The last Stop's turn: a damaged line may have been a Stop, so this is read, not counted."""
         return max((e.turn for e in self._events if e.kind == "stop"), default=0)
@@ -178,7 +187,7 @@ class EventLog:
                 closing: bool, rid: str | None) -> SessionEvent | dict[str, Any]:
         if not self.writable:
             return UNAVAILABLE
-        n = len(self._events) + 1
+        n = self._last() + 1
         row = {"n": n, "kind": kind, "turn": turn, "text": text, "body": body, "close_requested": closing,
                "rid": rid}
         line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
@@ -228,16 +237,16 @@ class EventLog:
             self.writable = False
 
     def _parse(self, raw: bytes) -> None:
-        """Every complete line, in order. A line that doesn't decode, repeats a number or skips more than
-        MAX_GAP ahead is a damaged event at the next number (so the events stay bounded by the lines); a
-        number that skips ahead less leaves a damaged event for each one skipped. JSON true is no number."""
+        """Every complete line, in order. A line that doesn't decode, or has a number at or below the last
+        one, is a damaged event at the next number. A line whose number skips ahead keeps it, after one
+        damaged event at the last number skipped (Codex T3 c2: at most two events a line, however far it
+        skips). JSON true is no number."""
         for line in raw.splitlines(keepends=True):
             self._size += len(line)
-            expect = len(self._events) + 1
+            expect = self._last() + 1
             try:
                 row = json.loads(line)
-                if (not _number(row["n"]) or not expect <= row["n"] <= expect + MAX_GAP
-                        or row["kind"] not in KINDS
+                if (not _number(row["n"]) or row["n"] < expect or row["kind"] not in KINDS
                         or not _number(row["turn"]) or not isinstance(row["body"], dict)
                         or not (row["text"] is None or isinstance(row["text"], str))
                         or not (row["rid"] is None or isinstance(row["rid"], str))
@@ -246,8 +255,8 @@ class EventLog:
             except (ValueError, KeyError, TypeError):
                 self._damage(expect)
                 continue
-            for missing in range(expect, row["n"]):
-                self._damage(missing)
+            if row["n"] > expect:
+                self._damage(row["n"] - 1)          # expect .. n-1: one marker for the whole run
             self._add(row["n"], row["kind"], row["turn"], row["text"], row["body"],
                       row["close_requested"], row["rid"])
 
@@ -262,6 +271,7 @@ class EventLog:
         ev = SessionEvent(f"{self.key}:g{self.generation}:e{n}", cast(SessionEventKind, kind), self.ws,
                           self.bead, self.key, self.generation, turn, text, body, closing)
         self._events.append(ev)
+        self._seqs.append(n)
         if rid is not None:
             self._rids[rid] = ev
         return ev
