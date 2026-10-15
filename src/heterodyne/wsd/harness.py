@@ -383,8 +383,10 @@ class HarnessOps:
     def _decide(self, row: HarnessInstall) -> None:
         try:
             readout = self.readout(row.approval_bead)
-        except Exception:  # noqa: BLE001 - an unreadable decision waits for the next pickup
-            log.warning("install %s: approve-bead could not be read", self._name(row), exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - an unreadable decision waits for the next pickup
+            # The type only: a parse error's text quotes approve-bead's output, which is untrusted.
+            log.warning("install %s: approve-bead could not be read (%s)", self._name(row),
+                        type(exc).__name__)
             return
         if isinstance(readout, Busy):
             return
@@ -392,8 +394,9 @@ class HarnessOps:
             queue = self.queues(self.settings.approval_workstream, SESSION)
             shown = queue.show(row.approval_bead)
             recomputed = queue.ask_digest(shown)
-        except Exception:  # noqa: BLE001 - as above
-            log.warning("install %s: the approval bead could not be read", self._name(row), exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - as above, and the bead's text is untrusted too
+            log.warning("install %s: the approval bead could not be read (%s)", self._name(row),
+                        type(exc).__name__)
             return
         expect = approvals.Expected(row.approval_bead, row.context_digest, partial(self._effect_ok, row))
         verdict = approvals.verdict(readout, shown, recomputed, expect, None)

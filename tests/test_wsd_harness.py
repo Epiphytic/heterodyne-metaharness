@@ -1369,6 +1369,19 @@ def test_a_published_outcome_naming_another_install_fails(h: H, monkeypatch: pyt
     assert (done.state, done.failure) == ("failed", sc.RECOVERY_FAILED)
 
 
+def test_an_unreadable_readout_logs_fixed_wording_never_its_text(
+        h: H, caplog: pytest.LogCaptureFixture) -> None:
+    """msgspec names an unknown field in its error, and the field name is approve-bead's (untrusted) text."""
+    staging_id, r = posted(h)
+    secret = hashlib.sha256(b"review-secret").hexdigest()
+    approve(h, r.approval_bead, override={secret: "unexpected"})
+    with caplog.at_level(logging.DEBUG):
+        h.ops.advance(h.clock())
+    assert row(h, staging_id).state == "posted"
+    assert secret not in caplog.text and all(rec.exc_info is None for rec in caplog.records)
+    assert "approve-bead could not be read (ValidationError)" in caplog.text
+
+
 def test_an_open_approval_expires_after_staging_hours(h: H) -> None:
     staging_id, _ = posted(h)
     h.ops.advance(h.clock() + 23 * 3600)
