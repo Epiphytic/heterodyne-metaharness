@@ -98,6 +98,15 @@ def _wait(cfg: Mapping[str, Any]) -> float:
     return DEFAULT_WAIT
 
 
+def installed_wait(run: Path) -> float:
+    """The hook wait a run directory's shim uses: its CONFIG_FILE's, as `_wait` reads it. Raises OSError or
+    ValueError if the file can't be read or isn't an object."""
+    cfg: Any = json.loads((run / CONFIG_FILE).read_text())
+    if not isinstance(cfg, dict):
+        raise ValueError("the shim config is not an object")
+    return _wait(cast(dict[str, Any], cfg))
+
+
 def _exchange(sock: Path, line: bytes, end: float, clock: Clock) -> Any:
     """One connection: send `line`, read one reply line. Every step gets only what is left of the
     deadline, so a slow or trickling peer can't stretch it; the reply is capped in length and nesting."""

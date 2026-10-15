@@ -61,7 +61,7 @@ class EventLog:
     def __init__(self, path: Path, ws: str, bead: str, key: str, generation: int) -> None:
         self.path, self.ws, self.bead, self.key, self.generation = path, ws, bead, key, generation
         self.lock = threading.Lock()
-        self.forwarding = False         # set once the brief is pasted: the probe's turn is never an event
+        self.forwarding = False         # set by the probe turn's end (`start`): the probe is never an event
         self.writable = False           # only a log opened to append, until a write's outcome is unknown
         self.damaged = False            # a complete line didn't decode, or a number was missing
         self._events: list[SessionEvent] = []
@@ -129,8 +129,17 @@ class EventLog:
                     os.close(self._fd)
                 self._fd = None
 
+    def start(self) -> bool:
+        """A turn ended: if nothing is forwarded yet it was the probe's, and forwarding starts with it, in
+        the hook's own callback, so the next turn end can't arrive before it (True). False once forwarding."""
+        with self.lock:
+            if self.forwarding:
+                return False
+            self.forwarding = True
+            return True
+
     def stop(self, payload: Mapping[str, Any]) -> SessionEvent | None:
-        """The Stop's event, or None when it isn't forwarded (before the brief) or can't be logged (D3)."""
+        """The Stop's event, or None when it isn't forwarded (the probe's) or can't be logged (D3)."""
         text = payload.get("last_assistant_message")
         kept = text[:STOP_TEXT_MAX] if isinstance(text, str) else None
         with self.lock:

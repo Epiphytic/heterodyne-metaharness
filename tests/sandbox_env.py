@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
@@ -49,6 +50,30 @@ def config_env(root: Path, host: str = "", workstreams: Mapping[str, str] | None
         (config / "workstreams" / f"{name}.toml").write_text(text)
     home = login_home(root / "home")
     return {"HETERODYNE_CONFIG_DIR": str(config), "HOME": str(home)}
+
+
+class WatchedGate:
+    """Stands in for a SessionServer's turn gate (install it with monkeypatch.setattr(server, "_turn_gate",
+    WatchedGate(server))): `waiting` is set when a turn event starts its blocking take of the gate, so a test
+    knows the handler has reached it rather than merely not having run yet."""
+
+    def __init__(self, server: object) -> None:
+        self.lock: threading.Lock = getattr(server, "_turn_gate")  # noqa: B009 - a private seam
+        self.waiting = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if blocking:
+            self.waiting.set()
+        return self.lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self.lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
 
 
 def wait_for(pred: Callable[[], object], timeout: float = 10.0) -> None:

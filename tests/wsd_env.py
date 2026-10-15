@@ -20,6 +20,7 @@ from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.wsd.accounts import ConfiguredAccounts, Failover, ProfileAccounts
 from heterodyne.wsd.beads import BeadsAdapter
+from heterodyne.wsd.brief import NoNotes, ResumeNotes
 from heterodyne.wsd.checkpoints import Checkpoint
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.headroom import Mark
@@ -29,7 +30,14 @@ from heterodyne.wsd.runtime import ActionReconciler, HoldingReconciler, LaunchSp
 from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, Limits, WorkstreamSettings, place, record
+from heterodyne.wsd.workstream import (
+    Deps,
+    Limits,
+    SessionHandler,
+    WorkstreamSettings,
+    place,
+    record,
+)
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
@@ -96,6 +104,8 @@ class Rig:
     clock: Clock = field(default_factory=Clock)
     usage_reader: UsageReader = field(default_factory=NoUsageReader)
     selections: Callable[[str], InstallPin | None] = fake_selection   # plan 4c T7: adapter to its pin
+    notes: ResumeNotes = field(default_factory=NoNotes)                # plan 5i T4: part 2's resume notes
+    handlers: dict[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -115,7 +125,8 @@ class Rig:
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
                          self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
-                         usage_reader=self.usage_reader, selections=self.selections)
+                         usage_reader=self.usage_reader, selections=self.selections, notes=self.notes,
+                         session_handlers=self.handlers)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 

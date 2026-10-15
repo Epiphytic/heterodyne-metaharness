@@ -186,7 +186,10 @@ class SteerRefused(Exception):
 
 
 class SteerUncertain(Exception):
-    """The text may have reached the session (a paste that failed part way). Never retried blindly."""
+    """The text may have reached the session (a paste that failed part way), maybe later and mid-turn. The
+    caller counts it as delivered, uncertain: it never steers the same note again or puts it on a resume
+    brief without an operator, and it alerts the operator as for any other uncertain delivery. Nothing
+    more is pasted into that generation (later steers are SteerRefused)."""
 
 
 Action = Literal["land", "keep", "discard"]
@@ -316,7 +319,8 @@ class AgentRuntime(Protocol):
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
         """Paste `text` into the session, only at a turn boundary its socket has seen (plan 5i, ADR
-        §5.6). Raises SteerRefused when nothing was delivered and SteerUncertain when it may have been."""
+        §5.6). Raises SteerRefused when nothing was delivered and SteerUncertain when it may have been
+        (see SteerUncertain for what the caller owes)."""
         ...
 
     def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:

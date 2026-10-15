@@ -40,7 +40,7 @@ from pathlib import Path
 
 from heterodyne.config import ConfigError
 from heterodyne.config.capabilities import NONE, Capabilities
-from heterodyne.wsd import gitwip, ids
+from heterodyne.wsd import brief, gitwip, ids
 from heterodyne.wsd.accounts import DEFAULT, AccountChanged, Accounts
 from heterodyne.wsd.beads import (
     DEFERRED,
@@ -1391,12 +1391,18 @@ class Parker:
         # the session key as its native ID, and Codex's is unknown until its thread starts.
         first = rec.session_key if adapter == "claude-code" else None
         native = None if handoff else launched[-1].native_id if launched else first
+        # Plan 5i T4: the brief, with the resume notes that fit; a handoff gets the first brief and the notes.
+        resume = op.kind is OpKind.RESUME and not handoff
+        batch = self.d.notes.notes_for(ws, op.bead) if op.kind is OpKind.RESUME else brief.NoteBatch()
+        fitted = brief.fit(batch)
+        text = brief.compose(shown, resume=resume, ops=frozenset(self.d.session_handlers), notes=fitted.texts,
+                             more=fitted.more)
         spec = LaunchSpec(ws, op.bead, rec.role, rec.profile, rec.session_key, label(shown, rec.role),
-                          worktree, resume=op.kind is OpKind.RESUME and not handoff,
+                          worktree, resume=resume,
                           ref=op.data.get("ref") or None, generation=entry.generation, native_id=native,
                           account=entry.account, credential_key=entry.credential_key, handoff=handoff,
                           model=entry.model_passed, repo=Path(rec.repo), install=entry.install,
-                          install_digest=entry.install_digest)
+                          install_digest=entry.install_digest, brief=text)
         # step 5: the receipt, before anything else is done with the result
         try:
             started = self.d.runtime.launch(spec)
@@ -1415,6 +1421,10 @@ class Parker:
                               native_id=started.native_id)
         j.receipt_put(receipt)
         self.d.cp(f"{kind}.receipt")
+        if receipt.kind == "started" and fitted.upto is not None:
+            # Only the notes this brief carried; the rest stay pending (part 2 steers them, or the next
+            # brief). At least once: a crash before this redelivers them.
+            self.d.notes.notes_delivered(ws, op.bead, fitted.upto)
         return self._outcome(op, entry)                        # step 6
 
     def _previous_key(self, session_key: str) -> str | None:

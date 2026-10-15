@@ -31,6 +31,9 @@ host path) so the hook commands' /run/hz paths can be translated here. Modes:
   turn ends with a StopFailure hook carrying that `error` instead of Stop. With `HZ_FAKE_STATUS_LINE=<json>`
   (Claude), after each turn it runs the `--settings` layer's `statusLine` command, if it has one, with
   `{"session_id", "rate_limits": <json>}` on stdin, as 2.1.286 runs it after an API response.
+  `HZ_FAKE_BRACKETED=1` asks for bracketed paste and submits a whole paste as one prompt.
+  With `HZ_FAKE_HOLD_FILE=<path>`, a turn doesn't end (no Stop) while that file exists, for at most
+  30 seconds, so a test can steer into a running turn.
 """
 
 import contextlib
@@ -41,6 +44,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -258,6 +262,9 @@ def claude_status_line() -> str | None:
     return status.get("command") if isinstance(status, dict) else None
 
 
+PASTE_START, PASTE_END = "\x1b[200~", "\x1b[201~"
+
+
 def tui() -> None:
     if ADAPTER == "claude":
         commands = claude_hooks()
@@ -276,10 +283,24 @@ def tui() -> None:
         session = ARGS[ARGS.index("resume") + 1] if "resume" in ARGS else None
         log = None
     marker = "❯" if ADAPTER == "claude" else "›"
+    bracketed = os.environ.get("HZ_FAKE_BRACKETED") == "1"
+    if bracketed:
+        print("\x1b[?2004h", end="", flush=True)        # ask the terminal for bracketed paste
+    pasting: list[str] | None = None
     print(f"{marker} ", end="", flush=True)
     started = False
     for raw in sys.stdin:
-        line = raw.strip().lstrip("\x1b")
+        if bracketed and (pasting is not None or PASTE_START in raw):
+            chunk = raw.rstrip("\r\n")
+            if pasting is None:
+                pasting, chunk = [], chunk.split(PASTE_START, 1)[1]
+            if PASTE_END not in chunk:
+                pasting.append(chunk)
+                continue                                 # inside the paste: no prompt yet
+            pasting.append(chunk.split(PASTE_END, 1)[0])
+            line, pasting = "\n".join(pasting), None   # the paste ended; this line's Enter submits it
+        else:
+            line = raw.strip().lstrip("\x1b")
         if ADAPTER == "codex" and not started:
             session = session or str(uuid.uuid4())
             day = Path(os.environ["CODEX_HOME"]) / "sessions" / "2026" / "10" / "09"
@@ -292,6 +313,10 @@ def tui() -> None:
         if log is not None:
             with log.open("a") as fh:
                 fh.write(json.dumps({"user": line}) + "\n")
+        hold = os.environ.get("HZ_FAKE_HOLD_FILE")
+        deadline = time.monotonic() + 30
+        while hold and Path(hold).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)                         # the turn is still running
         failure = os.environ.get("HZ_FAKE_STOP_FAILURE") if ADAPTER == "claude" else None
         if failure:
             fire(commands.get("StopFailure", []), "StopFailure", session, error=failure,
