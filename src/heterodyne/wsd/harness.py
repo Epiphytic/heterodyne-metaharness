@@ -435,16 +435,18 @@ class HarnessOps:
 
     def _settle(self, row: HarnessInstall) -> None:
         """An approved row, from what the store reports (E21): staged is published; a published outcome
-        whose install is `published` is recorded; a failure is recorded; anything else is RECOVERY_FAILED."""
+        whose install is `published` is recorded; a failure is recorded; anything else, or an install other
+        than the row's, is RECOVERY_FAILED."""
         try:
             outcome = self.store.outcome(row.staging_id)
             if outcome == "staged":
                 install = self.store.publish(row.staging_id, row.digest)
-                self._published(row, install)
-                return
-            if outcome is not None and outcome.startswith("published:"):
+                if install == self._name(row):
+                    self._published(row, install)
+                    return
+            elif outcome is not None and outcome.startswith("published:"):
                 install = outcome.removeprefix("published:")
-                if self.store.state(row.adapter, install) == "published":
+                if install == self._name(row) and self.store.state(row.adapter, install) == "published":
                     self._published(row, install)
                     return
             if outcome is not None and outcome.startswith("failed:"):

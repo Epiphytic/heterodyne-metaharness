@@ -1341,6 +1341,17 @@ def test_one_rows_error_does_not_stop_advance_or_log_every_pickup(
     assert row(h, bad).state == "published"
 
 
+def test_a_published_outcome_naming_another_install_fails(h: H, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, other = published(h, "claude-code")
+    staging_id, r = posted(h)
+    approve(h, r.approval_bead)
+    monkeypatch.setattr(h.store, "outcome", lambda _sid: f"published:{other}")
+    monkeypatch.setattr(h.store, "state", lambda _adapter, _install: "published")
+    h.ops.advance(h.clock())
+    done = row(h, staging_id)
+    assert (done.state, done.failure) == ("failed", sc.RECOVERY_FAILED)
+
+
 def test_an_open_approval_expires_after_staging_hours(h: H) -> None:
     staging_id, _ = posted(h)
     h.ops.advance(h.clock() + 23 * 3600)
