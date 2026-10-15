@@ -24,13 +24,14 @@ BOUND = Evidence("L1,L2", "0.160.0")
 
 
 def test_the_shipped_table_keeps_every_rule() -> None:
-    pins = {name: adapter.version_pin for name, adapter in ADAPTERS.items()}
+    pins = {name: version for name, adapter in ADAPTERS.items() for version in adapter.versions}
     assert table_problems(CAPABILITIES, EVIDENCE, pins) == ()
 
 
 def test_the_pins_here_are_the_adapters_pins() -> None:
     """The fixtures below use literal pins; this keeps them honest."""
-    assert {name: adapter.version_pin for name, adapter in ADAPTERS.items()} == PINS
+    assert {name: list(adapter.versions) for name, adapter in ADAPTERS.items()} == {
+        name: [pin] for name, pin in PINS.items()}
 
 
 def test_an_empty_table_needs_no_evidence() -> None:

@@ -1,6 +1,9 @@
 """Live checks of the OpenShell sandbox runtime: plan 4's live gate. Needs HZ_LIVE=1 (the conftest) and
-HZ_LIVE_SANDBOX=1, the S5 host setup, the agent image and both pinned CLIs with a default login. It makes
-real model calls: one per launch, plus one prompt. It prints nothing from any login.
+HZ_LIVE_SANDBOX=1, the S5 host setup, the agent image, a default login for each CLI, and each CLI's unpacked
+release package at its declared version (HZ_LIVE_SANDBOX_CODEX_PACKAGE: the Codex package archive's tree;
+HZ_LIVE_SANDBOX_CLAUDE_PACKAGE: the Claude Code platform package's `package/` tree), which the module
+publishes into its own scratch store and selects (plan 4c T8; Task 10 adds the command that fetches one).
+It makes real model calls: one per launch, plus one prompt. It prints nothing from any login.
 
 Run it only while no wsd on this host uses the OpenShell runtime: that wsd would see these sandboxes
 without a record and hold its workstreams until they are gone."""
@@ -27,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))     # tests/: sandbox_env, wsd_env
 
+from harness_env import Fixture, defaults_part, host_part, store_fixture  # noqa: E402
 from probe_verdicts import (  # noqa: E402
     CHANNEL,
     ENV_REJECTED,
@@ -47,10 +51,9 @@ from probe_verdicts import (  # noqa: E402
     shown,
     tool_var_rejection,
 )
-from sandbox_env import config_env, gateway_listener, sandbox_teardown  # noqa: E402
+from sandbox_env import config_env, gateway_listener, sandbox_teardown, unseal_all  # noqa: E402
 from wsd_env import ADAPTERS, git_repo  # noqa: E402
 
-from heterodyne.agents.codex import Codex  # noqa: E402
 from heterodyne.agents.registry import ADAPTERS as REGISTRY  # noqa: E402
 from heterodyne.sandbox import channel as probe_channel  # noqa: E402
 from heterodyne.sandbox import openshell_selftest  # noqa: E402
@@ -77,7 +80,7 @@ from heterodyne.sandbox.runtime import (  # noqa: E402
 )
 from heterodyne.sandbox.selftest import ProbeContext, SelfTestFailed  # noqa: E402
 from heterodyne.sandbox.settings import SandboxSettings, sandbox_settings  # noqa: E402
-from heterodyne.sandbox.spec import SessionLayout, sandbox_name  # noqa: E402
+from heterodyne.sandbox.spec import sandbox_name  # noqa: E402
 from heterodyne.tmux import Tmux  # noqa: E402
 from heterodyne.wsd import ids  # noqa: E402
 from heterodyne.wsd.accounts import ConfiguredAccounts  # noqa: E402
@@ -134,6 +137,7 @@ class Live:
     tmux: Tmux
     repo: Path
     artifact: Artifact
+    installs: dict[str, Fixture]                            # adapter -> its published, selected install
     keys: list[str] = field(default_factory=list[str])      # every session this module launched
     first: dict[str, tuple[LaunchSpec, Started]] = field(
         default_factory=dict[str, tuple[LaunchSpec, Started]])     # cli -> its first launch
@@ -151,10 +155,13 @@ class Live:
     def spec(self, cli: str, bead: str, role: str = "coder") -> LaunchSpec:
         profile = PROFILES[cli]
         key = ids.role_session(bead, role, profile)
+        adapter = self.runtime.c.accounts.adapter(profile) or ""
+        pin = self.installs[adapter].pin                    # the guard pins the selection (plan 4c D2)
         return LaunchSpec("alpha", bead, role, profile, key, f"{bead} · {role}", self.worktree(bead),
                           resume=False, native_id=key if cli == "claude" else None, model=MODELS[cli],
-                          repo=self.repo, credential_key=self.runtime.c.accounts.current_key(
-                              self.runtime.c.accounts.adapter(profile) or "", "default"))
+                          repo=self.repo,
+                          credential_key=self.runtime.c.accounts.current_key(adapter, "default"),
+                          install=pin.install, install_digest=pin.digest)
 
     def launch(self, spec: LaunchSpec) -> Started:
         self.keys.append(spec.session_key)
@@ -284,22 +291,23 @@ class PinnedSelfTest(OpenShellSelfTest):
         super().agent_path(ctx)
 
 
-class LiveCodex(Codex):
-    """Test-only: the effort is an install's `defaults/config.toml`, merged under the launcher's keys by
-    `prepare_install_home`, since Q4 refuses profile args and no argv carries `-c`. The runtime calls
-    `prepare_home` until Task 8 wires the install in, so this routes it there."""
-
-    def __init__(self, install: Path) -> None:
-        self.install = install
-
-    def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
-        self.prepare_install_home(layout, worktree, self.install)
+PACKAGES = {"claude-code": "HZ_LIVE_SANDBOX_CLAUDE_PACKAGE", "codex": "HZ_LIVE_SANDBOX_CODEX_PACKAGE"}
 
 
-def live_install(root: Path) -> Path:
-    (root / "defaults").mkdir(parents=True)
-    (root / "defaults" / "config.toml").write_text(CODEX_EFFORT)
-    return root
+def live_installs(root: Path, config_dir: Path) -> dict[str, Fixture]:
+    """Each CLI's unpacked release package, published into a scratch store under `root` and selected in
+    `config_dir`. Codex's effort is the install's `defaults` part (`config.toml`), merged under the
+    launcher's keys by `prepare_install_home`, since Q4 refuses profile args and no argv carries `-c`."""
+    installs: dict[str, Fixture] = {}
+    for adapter, var in sorted(PACKAGES.items()):
+        source = Path(os.environ.get(var, ""))
+        require(bool(os.environ.get(var)) and source.is_dir(),
+                f"preflight: {var} names no unpacked {adapter} package")
+        parts = [host_part(adapter, source)]
+        if adapter == "codex":
+            parts.append(defaults_part("config.toml", CODEX_EFFORT.encode()))
+        installs[adapter] = store_fixture(root, adapter, config_dir, parts=parts)
+    return installs
 
 
 def host_config() -> str:
@@ -373,7 +381,7 @@ def started_at(pid: int) -> float:
     return boot + ticks / os.sysconf("SC_CLK_TCK")
 
 
-def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
+def preflight(settings: SandboxSettings, env: dict[str, str], installs: dict[str, Fixture]) -> Artifact:
     """The artifact the launches run on, checked against D23's precondition: a mismatch fails the module
     before any sandbox exists. Every check is of the running gateway, read-only: its binary is the
     package's, unchanged; its configuration is what it was started with (its own environment, and a
@@ -417,13 +425,13 @@ def preflight(settings: SandboxSettings, env: dict[str, str]) -> Artifact:
     assert server.startswith("5."), f"preflight: the gateway's podman is {server!r}, not podman 5"
     lines = [f"EVIDENCE artifact {version}; gateway reports {reported}, the packaged {package} {release} "
              f"binary, no arguments, environment {named}, toml keys {keys}; its podman endpoint {server}"]
-    # The image carries no agent CLI: each is the host's pinned install, bound read-only into the sandbox.
+    # The image carries no agent CLI: each is a managed install, verified, bound read-only into the sandbox.
     for name, adapter in sorted(REGISTRY.items()):
-        cli = adapter.locate(settings.binaries[name], os.environ.get("PATH", os.defpath))
+        cli = installs[name].cli()
         said = tool(env, str(cli.binary), "--version")
-        assert cli.version == adapter.version_pin and adapter.version_pin in said.split(), \
-            f"preflight: the {name} CLI is {cli.version} ({said!r}), not the pinned {adapter.version_pin}"
-        lines.append(f"EVIDENCE artifact {name} {said}")
+        assert cli.version in adapter.versions and cli.version in said.split(), \
+            f"preflight: the {name} CLI is {cli.version} ({said!r}), not a version the adapter declares"
+        lines.append(f"EVIDENCE artifact {name} {said} install {cli.install}")
     images: dict[str, str] = {}
     for image in (settings.image, *DRIVER_IMAGES):
         found = tool(env, *podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", image)
@@ -463,7 +471,9 @@ def live() -> Iterator[Live]:
         tmux = Tmux(f"hz-live-sb-{uuid.uuid4().hex[:8]}")
         backend = OpenShellBackend(settings.openshell, settings.podman, settings.image,
                                    tool_env(os.environ, settings.tool_env))     # as wsd's build_runtime
-        artifact = preflight(settings, backend.env)
+        config_dir = Path(env["HETERODYNE_CONFIG_DIR"])
+        installs = live_installs(root / "i", config_dir)
+        artifact = preflight(settings, backend.env, installs)
         print("\n".join(artifact.lines))
         # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
         accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
@@ -471,10 +481,10 @@ def live() -> Iterator[Live]:
             sessions=root / "s", credlocks=root / "k",
             settings=settings, accounts=accounts, real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
-            tmux=tmux, path=os.environ.get("PATH", os.defpath), clock=utc_now,
-            adapters={**REGISTRY, "codex": LiveCodex(live_install(root / "i"))})
+            tmux=tmux, clock=utc_now, store=installs["codex"].store, taint_dir=installs["codex"].taint_dir,
+            config_dir=config_dir, store_problems=list)     # the scratch store: not the configured location
         live = Live(root, SandboxRuntime(config, backend, PinnedSelfTest()), backend, tmux,
-                    tiny_repo(root / "r"), artifact)
+                    tiny_repo(root / "r"), artifact, installs)
         yield live
     finally:
         uncertain = teardown(live) if live is not None else []
@@ -484,6 +494,7 @@ def live() -> Iterator[Live]:
         if live is not None:
             live.tmux.kill_server()
         canary.unlink(missing_ok=True)
+        unseal_all(root)                    # the published installs are 0555
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -607,6 +618,36 @@ def test_a_new_generation_resumes_the_same_session(live: Live, cli: str) -> None
         print(f"EVIDENCE codex policies g1={before} g1+g2={after}")
         assert before and set(before) == {BYPASSED}
         assert len(after) > len(before) and set(after) == {BYPASSED}
+
+
+def exec_dirs_on_the_host(live: Live, key: str) -> dict[str, list[str]]:
+    """What the host side of each of Codex's E25 exec directories holds."""
+    home = live.runtime.layout(key).home
+    return {str(p): sorted(e.name for e in (home / p).iterdir()) for p in REGISTRY["codex"].empty_read_only}
+
+
+def test_codex_new_and_resumed_remote_launch_with_empty_read_only_exec_dirs(live: Live) -> None:
+    """Plan 4c Amendment 1 §4.3 (E25): the launcher's real Codex shape (`app-server --listen`, then the TUI
+    with `--remote`), new and then resumed, in the real sandbox with `.codex/tmp` and `.codex/packages`
+    bound to one empty read-only directory and no `-c`. A launch returns only once the server is ready
+    and the self-test, whose checks include `empty-read-only`, has passed; after each exit the host side
+    of both directories is empty."""
+    assert "empty-read-only" in EXEC_CHECKS and "empty-read-only" in AGENT_CHECKS
+    codex = REGISTRY["codex"]
+    spec = live.spec("codex", "btq-live-9")
+    first = live.launch(spec)
+    layout = live.runtime.layout(spec.session_key)
+    assert first.native_id is not None and codex.server_ready(layout)
+    live.runtime.stop(spec.session_key)
+    assert exec_dirs_on_the_host(live, spec.session_key) == {str(p): [] for p in codex.empty_read_only}
+    resumed = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    second = live.runtime.launch(resumed)
+    live.pinned(resumed, second)
+    assert second.native_id == first.native_id and codex.server_ready(layout)
+    live.runtime.stop(spec.session_key)
+    assert exec_dirs_on_the_host(live, spec.session_key) == {str(p): [] for p in codex.empty_read_only}
+    print(f"EVIDENCE codex E25 new+resumed: server ready, empty-read-only passed, host exec dirs empty "
+          f"(install {live.installs['codex'].pin.install})")
 
 
 def test_the_lifetime_stop_ends_a_real_sandbox(live: Live) -> None:
@@ -763,7 +804,7 @@ def test_a_wrong_pinned_login_hash_refuses_the_launch(live: Live, monkeypatch: p
 
 def test_a_leaked_variable_refuses_the_launch(live: Live, monkeypatch: pytest.MonkeyPatch) -> None:
     real = openshell_selftest.env_allowed
-    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, p) - {"LANG"})
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p, v: real(a, p, v) - {"LANG"})
     seen: list[tuple[int, str]] = []
     hooked = Hooked(before_exec=lambda ctx: seen.append(in_workload(ctx, HAS_LANG)))   # it is there
     spec = live.spec("claude", "btq-live-n3")
@@ -901,11 +942,11 @@ def test_a_tool_path_variable_is_caught_on_the_agent_path(live: Live,
     CLI's tool variables, so the channel must reject it for them, and for nothing else."""
     made = recorded_channels(monkeypatch)
     real = openshell_selftest.env_allowed
-    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p: real(a, "exec"))
+    monkeypatch.setattr(openshell_selftest, "env_allowed", lambda a, p, v: real(a, "exec", v))
     hooked = Hooked()
     refused(live, runtime(live, selftest=hooked), live.spec("claude", "btq-live-n8"), CHANNEL_REJECTED)
-    adapter = hooked.seen[0].adapter
-    tool_only = frozenset(real(adapter, "agent") - real(adapter, "exec"))
+    adapter, version = hooked.seen[0].adapter, hooked.seen[0].install.manifest.version
+    tool_only = frozenset(real(adapter, "agent", version) - real(adapter, "exec", version))
     reasons = rejections(made)
     # Codex T15 r2, r3: only the CLI's own tool variables are named; any other is shown as unrecognised.
     why = tool_var_rejection(reasons, tool_only)
@@ -1087,7 +1128,7 @@ def test_an_overlaid_probe_from_a_namespace_the_agent_made_is_never_counted(
 
     def nest(ctx: ProbeContext) -> None:
         if wait_until(lambda: ctx.layout.probe_socket(ctx.generation).exists(), PROMPT_SECONDS):
-            allowed = ",".join(sorted(env_allowed(ctx.adapter, "agent")))
+            allowed = ",".join(sorted(env_allowed(ctx.adapter, "agent", ctx.install.manifest.version)))
             r = ctx.backend.exec(ctx.spec.name, ctx.spec.workdir,
                                  ["python3", "-I", "-c", NESTED, str(ctx.cli.binary), allowed],
                                  input=forged.encode(), timeout=EXEC_SECONDS)

@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import socket
+import stat
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
@@ -121,8 +122,10 @@ def test_a_claude_launch_runs_and_is_listed(rig: RuntimeRig) -> None:
     assert rig.runtime.sessions("beta") == []
     run = rig.runtime.layout(spec.session_key).run(1)
     assert {p.name for p in run.iterdir()} >= {"token", "shim.py", "shim.json", "ws-request", "probes.py",
-                                               "claude-settings.json", "s.sock"}
-    assert all(p.stat().st_mode & 0o077 == 0 for p in run.iterdir() if p.name != "s.sock")
+                                               "claude-settings.json", "s.sock", "install-record.json"}
+    assert all(p.stat().st_mode & 0o077 == 0 for p in run.iterdir() if p.name not in ("s.sock", "empty"))
+    empty = rig.runtime.layout(spec.session_key).empty(1)       # E25: 0555 and empty, whatever the adapter
+    assert stat.S_IMODE(empty.stat().st_mode) == 0o555 and list(empty.iterdir()) == []
 
 
 def test_a_codex_launch_reports_its_thread_and_trusts_its_hooks(rig: RuntimeRig) -> None:
@@ -598,14 +601,6 @@ def test_a_codex_handoff_starts_a_new_thread(rig: RuntimeRig) -> None:
                                         native_id=first.native_id))
     assert second.native_id is not None and second.native_id != first.native_id
     assert "resume" not in rig.backend.ttys[-1]
-
-
-def test_the_cli_pin_refuses_another_version(rig: RuntimeRig) -> None:
-    package = rig.root / "i" / "cli" / "claude" / "package.json"
-    package.write_text(json.dumps({"version": "9.9.9"}))
-    with pytest.raises(LaunchFailed, match="pinned version"):
-        rig.runtime.launch(launch_spec(rig, "p-one"))
-    assert rig.backend.created == []
 
 
 def test_the_deadline_runs_from_the_logins_exposure_not_from_a_slow_start(rig: RuntimeRig) -> None:
@@ -2041,7 +2036,8 @@ def wsd_settings(rig: RuntimeRig) -> WsdSettings:
     accounts = accounts_at(rig.home)
     ws = WorkstreamSettings("alpha", {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
     base = rig.root / "wsd"
-    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts)
+    return WsdSettings(base / "state", 0.05, 3600, 3, base / "btq", {}, (ws,), accounts,
+                       config_dir=rig.installs["codex"].config_dir)
 
 
 def journal_at(rig: RuntimeRig) -> Path:

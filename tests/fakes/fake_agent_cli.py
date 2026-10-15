@@ -1,5 +1,5 @@
 """A fake `claude` or `codex` for the sandbox tests, chosen by its wrapper's first argument (`--as=claude`
-or `--as=codex`; install_fake_cli writes the wrapper).
+or `--as=codex`; harness_env.fake_wrapper writes the wrapper).
 
 The sandbox tests run it on the host through FakeBackend, which exports HZ_FAKE_PATHS (inside path ->
 host path) so the hook commands' /run/hz paths can be translated here. Modes:

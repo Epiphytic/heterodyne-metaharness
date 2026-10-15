@@ -29,11 +29,9 @@ from heterodyne.agents.base import (
     checked_id,
     content_items,
     epoch_or_none,
-    find_binary,
     has_file,
     home_dir,
     hook_group,
-    install_root,
     jwt_exp,
     profile_args,
     read_json,
@@ -55,7 +53,6 @@ USAGE_SCRIPT = RUN_INSIDE / "codex_usage.py"
 USAGE_SOURCE = Path(__file__).resolve().parents[1] / "sandbox" / "resources" / "codex_usage.py"
 IN_SESSION_SOURCE = "codex.app-server"
 HOST_SOURCE = "codex.host-read"
-VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 KEY_TEXT = re.compile(r'[^"\\\x00-\x1f\x7f]{1,400}')
 HASH = re.compile(r"(sha256:)?[0-9a-f]{16,64}")
 # The release's assets (plan 4c E5): the package archive for a target, and its checksums.
@@ -116,9 +113,7 @@ class Codex:
     config_subdir = ".codex"
     login_names: tuple[str, ...] = ("auth.json",)
     model_hosts: tuple[str, ...] = ("chatgpt.com",)
-    version_pin = "0.160.0"
     versions: Mapping[str, Declared] = {"0.160.0": Declared(TOOL_ENV, KINDS)}
-    tool_env = versions[version_pin].tool_env
     install_layout = InstallLayout("github-release", "openai/codex",
                                    store_core.Layout("codex-package.json", "version", "target", "entrypoint",
                                                      None), "")
@@ -149,14 +144,6 @@ class Codex:
     assigns_id = True
     turn_end_events: tuple[str, ...] = ("Stop",)
 
-    def locate(self, binary: str, path: str) -> Cli:
-        real = find_binary(binary, path)
-        root = install_root(real)
-        version = root.name.split("-")[0]           # .../releases/<version>-<target>
-        if not VERSION.fullmatch(version):
-            raise AdapterError("the codex CLI version can't be read")
-        return Cli(real, root, version)
-
     def facts(self, layout: SessionLayout, cli: Cli, uid: int) -> AgentFacts:
         # codex 0.160 binds the real app-server socket in /tmp/codex-daemon-<uid>/ and leaves only a
         # symlink at the --listen path, so that directory is bound from the session too (S5).
@@ -165,7 +152,7 @@ class Codex:
                           model_hosts=self.model_hosts,
                           binds=(Bind(layout.bridge, BRIDGE_INSIDE, False),
                                  Bind(layout.daemon, Path(f"/tmp/codex-daemon-{uid}"), False)),  # noqa: S108
-                          read_write=(str(BRIDGE_INSIDE),))
+                          read_write=(str(BRIDGE_INSIDE),), empty_read_only=self.empty_read_only)
 
     def launcher_config(self, worktree: Path) -> dict[str, Any]:
         """The launcher's own config.toml keys, written last (E9). `check_for_update_on_startup` is the
@@ -176,9 +163,6 @@ class Codex:
                 "projects": {str(worktree): {"trust_level": "untrusted"}},
                 "features": {"apps": False, "daemon_auto_start": False, "plugins": False,
                              "in_app_updates": False}}
-
-    def prepare_home(self, layout: SessionLayout, worktree: Path) -> None:
-        self._write_home(layout, toml_text(self.launcher_config(worktree)))
 
     def prepare_install_home(self, layout: SessionLayout, worktree: Path,
                              install: Path) -> tuple[exec_dirs.Cleared, ...]:

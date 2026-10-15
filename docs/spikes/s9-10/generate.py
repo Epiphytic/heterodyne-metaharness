@@ -16,6 +16,7 @@ from pathlib import Path
 from heterodyne.agents import exec_dirs
 from heterodyne.agents.base import Cli
 from heterodyne.agents.codex import APP_SOCKET, Codex
+from heterodyne.agents.config_files import toml_text
 from heterodyne.sandbox.spec import BRIDGE_INSIDE, SessionLayout
 
 
@@ -31,7 +32,8 @@ def main() -> None:
     codex = Codex()
     layout = SessionLayout(args.root / "s")
     binary = (args.store_cli / "bin" / "codex").resolve(strict=True)
-    cli = Cli(binary, args.store_cli.resolve(), codex.version_pin)
+    [version] = codex.versions       # the spike's adapter declares one version (plan 4c E12)
+    cli = Cli(binary, args.store_cli.resolve(), version)
     profile = {"model": args.model} if args.model else {}
     if args.resume:
         argv = codex.tui_argv(cli, profile, native_id=args.resume, resume=True, label="s9-10")
@@ -46,7 +48,8 @@ def main() -> None:
     if args.install:
         codex.prepare_install_home(layout, worktree, args.install)       # E25's clear included
     else:
-        codex.prepare_home(layout, worktree)
+        # the removed `prepare_home`: the launcher's config alone, no install defaults and no E25 clear
+        codex._write_home(layout, toml_text(codex.launcher_config(worktree)))  # noqa: SLF001
         if args.e25:
             exec_dirs.prepare(layout.home, codex.empty_read_only)
     out = {
@@ -56,7 +59,7 @@ def main() -> None:
         "server": codex.server_argv(cli),
         "tui_new": codex.tui_argv(cli, profile, native_id=None, resume=False, label="s9-10"),
         "empty_read_only": [str(p) for p in codex.empty_read_only],
-        "tool_env": sorted(codex.versions[codex.version_pin].tool_env),
+        "tool_env": sorted(codex.versions[version].tool_env),
     }
     for name in ("server", "tui_new"):
         argv = out[name]

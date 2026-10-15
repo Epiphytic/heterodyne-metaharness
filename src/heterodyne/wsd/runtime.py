@@ -71,7 +71,7 @@ class LaunchSpec:
     # A cross-account relaunch without (b): a fresh native session, never a resume (D7, plan 4b E10).
     handoff: bool = False
     # The entry's pinned install and its manifest digest (plan 4c T7, D2); empty when the adapter had no
-    # selection. Ignored until T8 binds and verifies it.
+    # selection; the runtime verifies exactly this pin, and refuses an empty one (INSTALL_UNPINNED).
     install: str = ""
     install_digest: str = ""
 
@@ -103,7 +103,33 @@ class LimitSeen:
     reset_hint: int | None
 
 
-type Signal = UsageSeen | LimitSeen
+@dataclass(frozen=True)
+class InstallTainted:
+    """A launch found the install of a live session tainted (plan 4c E17): its taint marker is written, and
+    one of these is reported for each live session on the install. wsd acts on it from Task 10."""
+    session_key: str
+    generation: int
+    adapter: str
+    install: str
+
+
+@dataclass(frozen=True)
+class ExecDirCleared:
+    """A launch found leftover content in one of the adapter's empty read-only exec directories (plan 4c E25)
+    and cleared it: Amendment 1 §4.2's bounded summary, counts and at most 16 sanitized names, never any
+    contents. wsd journals it as `exec_dir_cleared`, once per session, generation and path."""
+    session_key: str
+    generation: int
+    adapter: str
+    path: str                   # relative to the session's home
+    files: int
+    links: int
+    dirs: int
+    bytes: int
+    names: tuple[str, ...]
+
+
+type Signal = UsageSeen | LimitSeen | InstallTainted | ExecDirCleared
 
 
 Action = Literal["land", "keep", "discard"]

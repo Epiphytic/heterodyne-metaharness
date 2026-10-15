@@ -19,7 +19,7 @@ import pytest
 from fakes.checkpoints import CrashAt, Recorder, SimulatedCrash
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, repoint_codex_at, selected_config
 
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
@@ -121,7 +121,8 @@ def settings(tmp_path: Path) -> WsdSettings:
     repo = git_repo(tmp_path / "repos" / "proj")
     accounts = accounts_at(login_home(tmp_path / "home"))
     ws = WorkstreamSettings(WS, {"default": repo}, "coder", "p-one", PROFILES, accounts=accounts)
-    return WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts)
+    return WsdSettings(tmp_path / "state" / "wsd", 0.05, 3600, 3, tmp_path / "btq", {}, (ws,), accounts,
+                       config_dir=selected_config(tmp_path / "config"))
 
 
 def test_startup_recovers_before_accepting_events(tmp_path: Path) -> None:
@@ -1179,7 +1180,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, selected_config
 from heterodyne.wsd import cli, daemon
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
@@ -1188,7 +1189,8 @@ tmp = Path(sys.argv[1])
 accounts = accounts_at(login_home(tmp / "home"))
 ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES,
                         accounts=accounts)
-s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts,
+                config_dir=selected_config(tmp / "config"))
 
 
 class Stuck(FakeRuntime):
@@ -1561,7 +1563,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from fakes.fake_btq import World, factory
 from fakes.fake_runtime import FakeRuntime
-from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home
+from wsd_env import PROFILES, WS, Clock, accounts_at, git_repo, login_home, selected_config
 from heterodyne.wsd import cli
 from heterodyne.wsd.settings import WsdSettings
 from heterodyne.wsd.workstream import WorkstreamSettings
@@ -1570,7 +1572,8 @@ tmp = Path(sys.argv[1])
 accounts = accounts_at(login_home(tmp / "home"))
 ws = WorkstreamSettings(WS, {"default": git_repo(tmp / "repos" / "proj")}, "coder", "p-one", PROFILES,
                         accounts=accounts)
-s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts)
+s = WsdSettings(tmp / "state" / "wsd", 0.05, 3600, 3, tmp / "btq", {}, (ws,), accounts,
+                config_dir=selected_config(tmp / "config"))
 s.socket.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
 s.socket.write_text("not a socket")
 sys.exit(cli.run(s, factory(World(tmp / "btq-state")), FakeRuntime()))
@@ -2583,7 +2586,7 @@ def test_the_daemon_wires_selections_to_harnesses_toml_and_rereads_it(tmp_path: 
     hexes = "0123456789abcdef"
     one = InstallPin(f"0.160.0-{hexes[:12]}", "sha256:" + hexes * 4)
     two = InstallPin(f"0.161.0-{hexes[4:]}", "sha256:" + hexes[::-1] * 4)
-    config = tmp_path / "config"
+    config = tmp_path / "chosen"            # settings() selects FAKE_PINS in its own config directory
     config.mkdir()
     s = replace(settings(tmp_path), config_dir=config)
     j = Journal(s.journal)

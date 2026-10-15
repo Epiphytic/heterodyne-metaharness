@@ -170,8 +170,8 @@ def wsd_main(argv: Sequence[str] | None = None) -> int:
     try:
         s = _settings()
         if args.cmd == "run":
-            return run(s, _factory(s), build_runtime(s, os.environ),
-                       usage_reader=build_usage_reader(s, os.environ))
+            runtime = build_runtime(s, os.environ)
+            return run(s, _factory(s), runtime, usage_reader=build_usage_reader(s, os.environ, runtime))
     except ConfigError as exc:
         print(f"wsd: {exc}", file=sys.stderr)
         return EX_CONFIG

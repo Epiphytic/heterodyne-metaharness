@@ -18,7 +18,7 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -32,12 +32,17 @@ from heterodyne.config import ConfigError
 from heterodyne.config.accounts import credential_key
 from heterodyne.config.capabilities import Capabilities
 from heterodyne.fsutil import private_dir
+from heterodyne.harness import selection
+from heterodyne.harness import verify as hv
+from heterodyne.harness.selection import InstallPin
+from heterodyne.harness.store import Store
 from heterodyne.sandbox import sessiongit
 from heterodyne.sandbox.backend import Backend, BackendError, BackendUnavailable, ExecResult, Watch
 from heterodyne.sandbox.selftest import ProbeContext, SelfTest, SelfTestFailed
 from heterodyne.sandbox.settings import SandboxSettings, WsSandbox
 from heterodyne.sandbox.spec import (
     BRIDGE_INSIDE,
+    INSTALL_RECORD_INSIDE,
     NAME,
     READ_ONLY_ROLES,
     REQUEST_INSIDE,
@@ -59,11 +64,15 @@ from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.credlock import CredentialBusy, credential_lock
 from heterodyne.wsd.runtime import (
+    INSTALL_UNPINNED,
     KEY_CHANGED,
     LOGIN_STALE,
+    NOT_SELECTED,
     Action,
     EndCause,
     Ended,
+    ExecDirCleared,
+    InstallTainted,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -151,6 +160,8 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
     end_cause: str = ""               # g08sd: how this generation ended (EndCause); written once
     ended_at: int = 0                 # the `ended` write's clock
+    install_name: str = ""            # plan 4c T8: the generation's verified install and manifest digest
+    install_digest: str = ""
 
 
 def read_record(layout: SessionLayout) -> SessionRecord | None:
@@ -283,8 +294,13 @@ class RuntimeConfig:
     uid: int
     gid: int
     tmux: Tmux
-    path: str                         # where CLI binaries are looked up
     clock: Callable[[], int]          # UTC epoch seconds: the scheduler's clock
+    # Plan 4c T8: the managed install store, the taint markers (`<state>/harness-taint`), the config directory
+    # holding harnesses.toml (re-read on every verification), and the store's location problems.
+    store: Store
+    taint_dir: Path
+    config_dir: Path
+    store_problems: Callable[[], Sequence[str]]
     wait_clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     adapters: Mapping[str, Adapter] = field(default_factory=lambda: ADAPTERS)
@@ -301,6 +317,10 @@ class SandboxRuntime:
         self._inspect_cleared = False
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
+        # Codex T8 r1 B1: evidence wsd must see (a taint, an exec dir cleared), by workstream, kept until
+        # drained and never capped: one per (kind, session key, generation[, path]), so its size is bounded
+        # by the live sessions, and no flood of usage reports can evict one.
+        self.notices: dict[str, dict[tuple[str | int, ...], Signal]] = {}
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
 
     # --- names ---
@@ -392,7 +412,7 @@ class SandboxRuntime:
                 raise LaunchFailed("the last generation's lifetime WIP commit is still owed")
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
-        cli = self._cli(adapter)
+        installed = self._cli(adapter, spec)
         protected, others = self._logins(adapter, spec.account)
         checked = self._pinned(adapter, spec, protected.chosen_files)
         try:
@@ -407,11 +427,12 @@ class SandboxRuntime:
                             profile=spec.profile, adapter=adapter.name, generation=spec.generation,
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
                             ran=prev.ran if prev else False, native_id=prev.native_id if prev else None,
-                            worktree=str(spec.worktree), repo=str(spec.repo))
+                            worktree=str(spec.worktree), repo=str(spec.repo), install_name=installed.name,
+                            install_digest=installed.digest)
         write_record(layout, rec)
         try:
-            return self._start(spec, adapter, cli, layout, rec, resume, native, protected, others, checked,
-                               pinned)
+            return self._start(spec, adapter, installed, layout, rec, resume, native, protected, others,
+                               checked, pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
             raise self._fail(layout, rec, exc) from None
 
@@ -465,9 +486,9 @@ class SandboxRuntime:
             raise RuntimeUnavailable(failed[0])
 
     def signals(self, ws: str) -> list[Signal]:
-        """E8: what the workstream's sessions reported since the last call, oldest first. Each running
-        session's usage read is run first when it is due (E5). Never raises: a report that can't be had
-        is no report."""
+        """E8: what the workstream's sessions reported since the last call, oldest first, then its notices
+        (B1: taints, cleared exec dirs), each once. Each running session's usage read is run first when it
+        is due (E5). Never raises: a report that can't be had is no report."""
         try:
             running = [r for r in self._records() if r.ws == ws and r.phase is Phase.RUNNING]
         except RuntimeUnavailable:
@@ -476,7 +497,7 @@ class SandboxRuntime:
             if rec.key in self.servers:
                 self._poll(rec)
         with self.queue_lock:
-            return self.queued.pop(ws, [])
+            return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
@@ -509,17 +530,52 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the session's home can't be read") from None
         raise RuntimeUnavailable("the session ran before, but its resumable state can't be found")
 
-    def _cli(self, adapter: Adapter) -> Cli:
-        binary = self.c.settings.binaries.get(adapter.name)
-        if not binary:
-            raise LaunchFailed(f"no binary is configured for {adapter.name}")
+    def verified_cli(self, adapter: Adapter, pin: InstallPin | None = None) -> Cli:
+        """Plan 4c T8: the CLI of the install `pin` names, or with no pin of the adapter's current selection
+        (`NOT_SELECTED` if it has none or it can't be read), verified now. Raises LaunchFailed with one of
+        `verify.REFUSALS`. No lock is held: the taint marker and the selection are read again on every call,
+        and the store is read-only to the service user."""
+        return self._verified(adapter, pin).cli
+
+    def _verified(self, adapter: Adapter, pin: InstallPin | None) -> hv.VerifiedInstall:
+        if pin is None:
+            try:
+                chosen = selection.load(self.c.config_dir).get(adapter.name)
+            except ConfigError:
+                chosen = None           # an unreadable selection is not one; its text may quote the file
+            if chosen is None or chosen.current is None:
+                raise LaunchFailed(NOT_SELECTED)
+            pin = chosen.current
         try:
-            cli = adapter.locate(binary, self.c.path)
-        except AdapterError as exc:
-            raise LaunchFailed(str(exc)) from None
-        if cli.version != adapter.version_pin:
-            raise LaunchFailed(f"the {adapter.name} CLI is not the pinned version {adapter.version_pin}")
-        return cli
+            return hv.verify_pin(self.c.store, adapter, pin, self.c.taint_dir, problems=self.c.store_problems)
+        except hv.VerifyRefused as exc:
+            if exc.constant in hv.TAINTING:
+                self._tainted(adapter.name, pin.install)
+            raise LaunchFailed(exc.constant) from None
+
+    def _tainted(self, adapter: str, install: str) -> None:
+        """E17: one InstallTainted per live session on the install, queued before the refusal is raised. The
+        marker is already written; a listing that fails reports nothing, and the marker still refuses."""
+        try:
+            live = [r for r in self._records()
+                    if r.phase is not Phase.ENDED and (r.adapter, r.install_name) == (adapter, install)]
+        except RuntimeUnavailable:
+            return
+        for rec in live:
+            self._notice(rec.ws, ("taint", rec.key, rec.generation),
+                         InstallTainted(rec.key, rec.generation, adapter, install))
+
+    def _notice(self, ws: str, ident: tuple[str | int, ...], signal: Signal) -> None:
+        """Keep `signal` for the workstream's next drain, once per `ident` (B1)."""
+        with self.queue_lock:
+            self.notices.setdefault(ws, {}).setdefault(ident, signal)
+
+    def _cli(self, adapter: Adapter, spec: LaunchSpec) -> hv.VerifiedInstall:
+        """The launch entry's pinned install, verified (D2): never the selection, which may have moved since
+        the entry was journaled. An entry without a pin (journaled before schema 3) refuses."""
+        if not spec.install or not spec.install_digest:
+            raise LaunchFailed(INSTALL_UNPINNED)
+        return self._verified(adapter, InstallPin(spec.install, spec.install_digest))
 
     def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
         """The chosen account's login, and every other account's as configured: `default` is another
@@ -602,16 +658,25 @@ class SandboxRuntime:
             raise LaunchFailed(LOGIN_STALE)
         return int(expiry)
 
-    def _start(self, spec: LaunchSpec, adapter: Adapter, cli: Cli, layout: SessionLayout, rec: SessionRecord,
-               resume: bool, native: str | None, protected: Protected,
+    def _start(self, spec: LaunchSpec, adapter: Adapter, installed: hv.VerifiedInstall, layout: SessionLayout,
+               rec: SessionRecord, resume: bool, native: str | None, protected: Protected,
                others: tuple[tuple[str, Path], ...], checked: _Checked, pinned: gitwip.Pinned) -> Started:
-        c, gen = self.c, spec.generation
+        c, gen, cli = self.c, spec.generation, installed.cli
         run, scratch = layout.run(gen), layout.scratch(gen)
         for folder in (run, scratch):
             shutil.rmtree(folder, ignore_errors=True)
             folder.mkdir(mode=0o700, parents=True)
+        layout.empty(gen).mkdir(mode=0o700)
+        layout.empty(gen).chmod(0o555)          # E25: empty and read-only, remade before every create
         layout.home.mkdir(mode=0o700, exist_ok=True)
-        adapter.prepare_home(layout, spec.worktree)
+        facts = adapter.facts(layout, cli, c.uid)
+        for cleared in adapter.prepare_install_home(layout, spec.worktree, installed.root):
+            log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
+                        spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
+                        cleared.dirs, cleared.bytes)
+            self._notice(spec.ws, ("cleared", spec.session_key, gen, str(cleared.path)), ExecDirCleared(
+                spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
+                cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
         token = secrets.token_hex(16)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
@@ -620,7 +685,9 @@ class SandboxRuntime:
         files = {shim.TOKEN_FILE: token, SHIM_SOURCE.name: SHIM_SOURCE.read_text(),
                  shim.CONFIG_FILE: json.dumps(shim_config), REQUEST_INSIDE.name: shim.REQUEST_WRAPPER,
                  **adapter.run_files(usage=caps.in_session_usage, limits=caps.limit_signal),
-                 **self.selftest.files()}
+                 **self.selftest.files(),
+                 INSTALL_RECORD_INSIDE.name: hv.install_record(
+                     installed, [str(layout.home / p) for p in facts.empty_read_only])}
         for fname, text in files.items():
             write_private(run / fname, text)
         (run / REQUEST_INSIDE.name).chmod(0o700)
@@ -629,7 +696,7 @@ class SandboxRuntime:
         server.start()
         git_binds = sessiongit.seed(pinned, layout.git, read_only=spec.role in READ_ONLY_ROLES)
         sp = build_spec(SpecInput(spec.session_key, gen, spec.role, layout, spec.worktree,
-                                  adapter.facts(layout, cli, c.uid), checked.files, ws.extra_egress,
+                                  facts, checked.files, ws.extra_egress,
                                   ws.extra_ro_mounts, c.settings.probe_allowed_host, c.uid, c.gid,
                                   git_binds))
         if tuple(b.source for b in sp.logins) != checked.files:
@@ -659,7 +726,7 @@ class SandboxRuntime:
             raise _StepFailed("the sandbox was created past its deadline; it was destroyed")
         rec = self._phase(layout, rec, phase=Phase.TESTING)
         ctx = ProbeContext(self.backend, c.tmux, rec.tmux_session, sp, layout, gen, adapter, cli, token,
-                           others, c.real_home_canary, c.wsd_socket, c.settings, server.turns)
+                           others, c.real_home_canary, c.wsd_socket, c.settings, server.turns, installed)
         # D23 (Amendment 1): the exec path is the first thing run in the new sandbox, so no process but
         # OpenShell's own exists to reach the pipes `sandbox exec` gives the probe.
         self.selftest.exec_path(ctx)
@@ -753,7 +820,8 @@ class SandboxRuntime:
             return
         self.polled[ident] = now
         try:
-            argv = adapter.usage_argv(self._cli(adapter))
+            pin = InstallPin(rec.install_name, rec.install_digest)
+            argv = adapter.usage_argv(self.verified_cli(adapter, pin))
             if argv is None:
                 return
             r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)
