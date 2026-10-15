@@ -5,6 +5,8 @@ carries that end in its Resolution (wpyv5). A launch returns a `Started` with sy
 native ID is the spec's, or a synthetic thread ID when the spec has none (Codex before its thread is
 known)."""
 
+from collections.abc import Callable, Mapping
+
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd.runtime import (
     INSTALL_UNPINNED,
@@ -12,6 +14,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    EventBatch,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -20,6 +23,7 @@ from heterodyne.wsd.runtime import (
     ResolveFailed,
     RuntimeUnavailable,
     Session,
+    SessionEvent,
     Signal,
     Started,
     UnlandedView,
@@ -54,6 +58,13 @@ class FakeRuntime:
         self.ended_failures = 0
         self.queued: dict[str, list[Signal]] = {}   # reports by workstream, drained by signals()
         self.drains: list[str] = []
+        self.logs: dict[str, list[SessionEvent]] = {}   # ws -> the events its sessions logged, once each
+        self.ended_logs: set[tuple[str, int]] = set()   # (key, generation) logs marked final by end_log
+        self.steers: list[tuple[str, int, str]] = []    # every steer delivered
+        self.steer_error: Exception | None = None       # raised by the next steer, which delivers nothing
+        self.wake: Callable[[str], None] | None = None
+        self.wakes = 0
+        self.subscribed: Mapping[str, frozenset[str]] | None = None
 
     def available(self) -> bool:
         return self.up
@@ -122,6 +133,37 @@ class FakeRuntime:
         self.drains.append(ws)
         return self.queued.pop(ws, [])
 
+    def session_events(self, ws: str, since: Mapping[str, tuple[int, int]], limit: int) -> EventBatch:
+        """As the runtime: per key, in (generation, n) order after the cursor, at most `limit`. A generation
+        below the key's latest (logged or launched) is final, as is one marked by end_log."""
+        if not self.up:
+            raise RuntimeUnavailable("the fake runtime is down")
+        log = sorted(self.logs.get(ws, []), key=lambda e: (e.session_key, e.generation, e.seq))
+        found: list[SessionEvent] = []
+        ends: dict[tuple[str, int], int] = {}
+        more = False
+        for key in sorted({e.session_key for e in log}):
+            mine = [e for e in log if e.session_key == key]
+            top = max([e.generation for e in mine]
+                      + [s.generation for s in self.launches if s.session_key == key])
+            gen, n = since.get(key, (1, 0))
+            after = [e for e in mine if (e.generation, e.seq) > (gen, n)]
+            found += after[:limit]
+            more = more or len(after) > limit
+            for g in range(gen, top + 1):
+                if g < top or (key, g) in self.ended_logs:
+                    ends[(key, g)] = max((e.seq for e in mine if e.generation == g), default=0)
+        return EventBatch(tuple(found), ends, more)
+
+    def steer(self, session_key: str, generation: int, text: str) -> None:
+        if self.steer_error is not None:
+            error, self.steer_error = self.steer_error, None
+            raise error
+        self.steers.append((session_key, generation, text))
+
+    def subscribe(self, wake: Callable[[str], None], ops: Mapping[str, frozenset[str]]) -> None:
+        self.wake, self.subscribed = wake, ops
+
     def unlanded(self, ws: str) -> list[UnlandedView]:
         if not self.up:
             raise RuntimeUnavailable("down")
@@ -166,9 +208,27 @@ class FakeRuntime:
 
     # --- test controls ---
 
-    def report(self, ws: str, *signals: Signal) -> None:
-        """The workstream's sessions sent these reports (already attributed, as the runtime does)."""
-        self.queued.setdefault(ws, []).extend(signals)
+    def report(self, ws: str, *signals: Signal | SessionEvent) -> None:
+        """The workstream's sessions sent these (already attributed, as the runtime does). A SessionEvent
+        is logged, once per event ID, as the runtime's event log does; the rest are queued reports."""
+        log = self.logs.setdefault(ws, [])
+        for s in signals:
+            if isinstance(s, SessionEvent):
+                if all(e.event_id != s.event_id for e in log):
+                    log.append(s)
+            else:
+                self.queued.setdefault(ws, []).append(s)
+
+    def event(self, ws: str, *events: SessionEvent) -> None:
+        """The sessions logged these events, then woke wsd once."""
+        self.report(ws, *events)
+        if self.wake is not None:
+            self.wakes += 1
+            self.wake(ws)
+
+    def end_log(self, session_key: str, generation: int) -> None:
+        """The generation ended: its log is final."""
+        self.ended_logs.add((session_key, generation))
 
     def end(self, session_key: str, cause: EndCause = EndCause.DIED) -> None:
         """The session ended on its own (the agent exited or crashed)."""

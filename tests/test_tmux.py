@@ -9,7 +9,16 @@ from pathlib import Path
 import pytest
 from tmux_guard import new_test_tmux
 
-from heterodyne.tmux import Tmux, TmuxError
+from heterodyne.tmux import (
+    ESCAPE_GROWTH,
+    MIN_STEP,
+    PASTE_SETTLE,
+    Tmux,
+    TmuxError,
+    TmuxPasteUncertain,
+    escape_controls,
+    has_controls,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
@@ -156,3 +165,129 @@ def test_session_names_reads_only_a_missing_server_as_no_sessions(
     else:
         with pytest.raises(TmuxError, match="list-sessions failed"):
             tmux.session_names()
+
+
+@pytest.mark.parametrize("text", [
+    "\x1b[201~\rsecond\r", "a\rb", "\x1b[2J", "\x07", "\x9b31m", "\x7f", "a\x00b", "\x0b", "\x0c"])
+def test_terminal_controls_are_found(text: str) -> None:
+    assert has_controls(text)
+
+
+@pytest.mark.parametrize("text", ["plain", "tab\there", "line\nbreak", "é ✓    "])
+def test_tab_newline_and_printable_text_are_not_controls(text: str) -> None:
+    assert not has_controls(text)
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    ("a\x1b[201~\rsecond\r", "a\\x1b[201~\nsecond\n"),
+    ("one\r\ntwo\rthree\n", "one\ntwo\nthree\n"),
+    ("bell\x07 del\x7f csi\x9b nul\x00", "bell\\x07 del\\x7f csi\\x9b nul\\x00"),
+    ("lone \ud800 surrogate", "lone \\ud800 surrogate"),
+    ("tab\tkept é", "tab\tkept é"),
+])
+def test_escaped_text_shows_its_controls_and_carries_none(text: str, shown: str) -> None:
+    assert escape_controls(text) == shown
+    assert not has_controls(escape_controls(text))
+    escape_controls(text).encode("utf-8")                   # strict: always pasteable
+
+
+def unescape(shown: str) -> str:
+    """escape_controls undone (its CR to newline aside): a test that no two texts are shown the same."""
+    out, i = [], 0
+    while i < len(shown):
+        if shown[i] != "\\":
+            out.append(shown[i])
+            i += 1
+        elif shown[i + 1] == "\\":
+            out.append("\\")
+            i += 2
+        elif shown[i + 1] == "x":
+            out.append(chr(int(shown[i + 2:i + 4], 16)))
+            i += 4
+        else:
+            assert shown[i + 1] == "u"
+            out.append(chr(int(shown[i + 2:i + 6], 16)))
+            i += 6
+    return "".join(out)
+
+
+COLLIDING = ["\x1b", "\\x1b", "\x9b", "\\x9b", "\ud800", "\\ud800", "\\", "\\\\", "\\\x1b", "\\\\x1b",
+             "a\\x1b[201~\\nb", "\\u0041", "\x7f\\x7f\x00\\x00"]
+
+
+def test_escaping_is_unambiguous() -> None:
+    # T4 c2 B2: a real ESC and the text `\x1b` were shown the same; so were C1 and lone surrogates.
+    shown = [escape_controls(t) for t in COLLIDING]
+    assert len(set(shown)) == len(COLLIDING)
+    assert [unescape(s) for s in shown] == COLLIDING
+    assert escape_controls("\x1b") == "\\x1b" and escape_controls("\\x1b") == "\\\\x1b"
+
+
+@pytest.mark.parametrize("code", [*range(0x20), *range(0x7f, 0xa0), 0x5c, 0xd800, 0xdfff, 0x41, 0xe9, 0x2713])
+def test_escaping_grows_a_code_point_at_most_fourfold(code: int) -> None:
+    text = chr(code)
+    raw = len(text.encode("utf-8", "surrogatepass"))
+    assert len(escape_controls(text).encode("utf-8")) <= ESCAPE_GROWTH * raw
+
+
+class SlowTmux:
+    """tmux commands that take `delay[command]` seconds, or time out (TimeoutExpired once their timeout
+    passes) when that is longer than the timeout they were given. Notes (command, timeout, when run)."""
+
+    def __init__(self, delay: dict[str, float]) -> None:
+        self.delay = delay
+        self.calls: list[tuple[str, float, float]] = []
+
+    def __call__(self, argv: list[str], *, input: bytes | None,
+                 timeout: float) -> subprocess.CompletedProcess[bytes]:
+        command = next(a for a in argv if a in ("load-buffer", "paste-buffer", "send-keys", "delete-buffer"))
+        self.calls.append((command, timeout, time.monotonic()))
+        took = self.delay.get(command, 0.0)
+        if took > timeout:
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        time.sleep(took)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def commands(self) -> list[str]:
+        return [c for c, _, _ in self.calls]
+
+
+def bounded_paste(tmux: Tmux, monkeypatch: pytest.MonkeyPatch, delay: dict[str, float],
+                  seconds: float) -> tuple[SlowTmux, float, BaseException | None]:
+    slow = SlowTmux(delay)
+    monkeypatch.setattr(tmux, "_exec", slow)
+    start, raised = time.monotonic(), None
+    try:
+        tmux.paste("s", "hello", seconds=seconds)
+    except TmuxError as exc:
+        raised = exc
+    end = start + seconds
+    for command, timeout, at in slow.calls:     # no command may run past the bound (cleanup: MIN_STEP)
+        assert at + timeout <= end + (MIN_STEP if command == "delete-buffer" else 0) + 0.05, command
+    return slow, time.monotonic() - start, raised
+
+
+def test_a_bounded_paste_gives_each_command_only_what_is_left(tmux: Tmux,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {}, 2.0)
+    assert raised is None and slow.commands()[:3] == ["load-buffer", "paste-buffer", "send-keys"]
+    assert took < 2.0
+
+
+def test_a_bounded_paste_with_no_time_left_after_the_load_pastes_nothing(
+        tmux: Tmux, monkeypatch: pytest.MonkeyPatch) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {"load-buffer": 0.6}, 1.0)
+    assert type(raised) is TmuxError                    # not uncertain: nothing reached the pane
+    assert "paste-buffer" not in slow.commands() and took < 1.0 + MIN_STEP + 0.1
+    assert 1.0 - 0.6 < PASTE_SETTLE + 2 * MIN_STEP      # the case is the one it claims
+
+
+@pytest.mark.parametrize("hung", ["paste-buffer", "send-keys"])
+def test_a_bounded_paste_that_hangs_ends_within_its_bound(tmux: Tmux, monkeypatch: pytest.MonkeyPatch,
+                                                         hung: str) -> None:
+    slow, took, raised = bounded_paste(tmux, monkeypatch, {hung: 60.0}, 1.5)
+    assert isinstance(raised, TmuxPasteUncertain)
+    assert took < 1.5 + MIN_STEP + 0.1
+    if hung == "paste-buffer":
+        assert "send-keys" not in slow.commands()

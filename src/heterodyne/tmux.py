@@ -18,6 +18,9 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+COMMAND_SECONDS = 15.0          # one tmux command
+PASTE_SETTLE = 0.3              # between a paste and its Enter: the application finishes reading the paste
+MIN_STEP = 0.1                  # the least a bounded paste leaves each of its remaining commands
 LAUNCHER_FAILED = "tmux server could not be started through the launcher"
 NO_SESSION = "tmux reported a start through the launcher, but no session exists"
 
@@ -48,6 +51,28 @@ class TmuxPasteUncertain(TmuxError):
     timed out. Unlike any earlier TmuxError, retrying could deliver the text twice."""
 
 
+# Terminal controls pasted text may not carry: all of C0 but tab and newline, DEL and C1. ESC could end the
+# bracketed paste early (`\x1b[201~`) and CR then submit what follows as prompts of its own.
+PASTE_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+ESCAPE_GROWTH = 4              # escape_controls: a C0 control or DEL (1 byte) is shown in 4
+
+
+def has_controls(text: str) -> bool:
+    """Whether `text` carries a terminal control that a paste must not (PASTE_CONTROLS)."""
+    return PASTE_CONTROLS.search(text) is not None
+
+
+def escape_controls(text: str) -> str:
+    """Untrusted text made safe to paste and still readable: CRLF and CR become newlines, every other
+    control in PASTE_CONTROLS is shown as `\\xNN`, and a lone surrogate (not UTF-8) as `\\udNNN`. A
+    backslash of the text is shown doubled, so a shown escape is never the same as text that spells one
+    (`\\x1b` in the text is shown as `\\\\x1b`). Shown, a code point takes at most 4 times its UTF-8 bytes
+    (ESCAPE_GROWTH; a lone surrogate counted as the 3 bytes it would encode to)."""
+    text = text.replace("\\", "\\\\").encode("utf-8", "backslashreplace").decode("utf-8")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return PASTE_CONTROLS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 class Tmux:
     def __init__(self, socket_name: str, binary: str = "tmux",
                  launcher: Callable[[], Sequence[str]] | None = None, *,
@@ -72,9 +97,9 @@ class Tmux:
         """The one place tmux is run. Callers map its exceptions and exit status."""
         return subprocess.run(argv, input=input, capture_output=True, timeout=timeout, check=False)
 
-    def _run(self, *args: str, data: bytes | None = None,
-             check: bool = True) -> subprocess.CompletedProcess[bytes]:
-        proc = self._exec([self.binary, *self._selector(), *args], input=data, timeout=15)
+    def _run(self, *args: str, data: bytes | None = None, check: bool = True,
+             timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess[bytes]:
+        proc = self._exec([self.binary, *self._selector(), *args], input=data, timeout=timeout)
         if check and proc.returncode != 0:
             detail = proc.stderr.decode("utf-8", "replace").strip()
             raise TmuxError(f"tmux {args[0]} failed: {detail}")
@@ -173,35 +198,57 @@ class Tmux:
             raise TmuxError(f"tmux reported no pane for {name!r}")
         return pane, int(pid)
 
-    def paste(self, name: str, text: str) -> None:
+    def paste(self, name: str, text: str, *, seconds: float | None = None) -> None:
         """Paste `text` and submit it. Only a failure of the `load-buffer` step, strictly before anything
         reaches the pane, raises a plain TmuxError (definitely not delivered, so a retry is safe). A failure
         or timeout of `paste-buffer`, or of anything after it, raises TmuxPasteUncertain: text may already
-        sit in the application's input line (a retry would duplicate it) or have been submitted."""
+        sit in the application's input line (a retry would duplicate it) or have been submitted.
+
+        With `seconds`, the whole paste ends within that bound: each command gets only what is left of it,
+        and if too little is left after the load for the paste, its settle and its Enter, nothing is pasted
+        (a plain TmuxError). Past the bound no tmux command of this paste is still running, so nothing of
+        it reaches the pane later."""
+        end = None if seconds is None else time.monotonic() + seconds
+
+        def left(need: float = 0.0) -> float:
+            if end is None:
+                return COMMAND_SECONDS
+            rest = end - time.monotonic() - need
+            if rest <= 0:
+                raise subprocess.TimeoutExpired("tmux", seconds or 0.0)
+            return min(COMMAND_SECONDS, rest)
+
+        def spare() -> float:
+            """Cleanup's time: what is left, but never nothing (it delivers nothing)."""
+            if end is None:
+                return COMMAND_SECONDS
+            return min(COMMAND_SECONDS, max(MIN_STEP, end - time.monotonic()))
+
         buffer = f"hz-{uuid.uuid4().hex}"
         try:
-            self._run("load-buffer", "-b", buffer, "-", data=text.encode("utf-8"))
+            self._run("load-buffer", "-b", buffer, "-", data=text.encode("utf-8"), timeout=left())
+            left(PASTE_SETTLE + 2 * MIN_STEP)       # room for the paste, its settle and the Enter
         except (subprocess.TimeoutExpired, OSError) as exc:
-            self._drop_buffer(buffer)
+            self._drop_buffer(buffer, spare())
             raise TmuxError(f"tmux paste failed ({type(exc).__name__})") from None
         except BaseException:
-            self._drop_buffer(buffer)
+            self._drop_buffer(buffer, spare())
             raise
         try:
-            self._run("paste-buffer", "-p", "-d", "-b", buffer, "-t", f"={name}:")
-            time.sleep(0.3)  # let the application finish reading the paste before Enter arrives
-            self._run("send-keys", "-t", f"={name}:", "Enter")
-            self._run("delete-buffer", "-b", buffer, check=False)
+            self._run("paste-buffer", "-p", "-d", "-b", buffer, "-t", f"={name}:", timeout=left(PASTE_SETTLE))
+            time.sleep(PASTE_SETTLE)  # let the application finish reading the paste before Enter arrives
+            self._run("send-keys", "-t", f"={name}:", "Enter", timeout=left())
+            self._run("delete-buffer", "-b", buffer, check=False, timeout=spare())  # -d dropped it: backstop
         except Exception as exc:  # noqa: BLE001 - whatever failed, the text may already be in the pane
-            self._drop_buffer(buffer)
+            self._drop_buffer(buffer, spare())
             raise TmuxPasteUncertain(f"tmux paste may have been delivered ({type(exc).__name__})") from None
         except BaseException:
-            self._drop_buffer(buffer)
+            self._drop_buffer(buffer, spare())
             raise
 
-    def _drop_buffer(self, buffer: str) -> None:
+    def _drop_buffer(self, buffer: str, timeout: float = COMMAND_SECONDS) -> None:
         with contextlib.suppress(Exception):
-            self._run("delete-buffer", "-b", buffer, check=False)
+            self._run("delete-buffer", "-b", buffer, check=False, timeout=timeout)
 
     def send_key(self, name: str, key: str) -> None:
         self._run("send-keys", "-t", f"={name}:", key)

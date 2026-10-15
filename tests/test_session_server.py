@@ -2,13 +2,20 @@ import contextlib
 import json
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from sandbox_env import wait_for
+from sandbox_env import WatchedGate, wait_for
 
-from heterodyne.session.server import MAX_DEPTH, SessionServer, TurnState
+from heterodyne.session.server import (
+    MAX_DEPTH,
+    BoundaryBusy,
+    BoundaryUncertain,
+    BoundaryUnmarked,
+    SessionServer,
+    TurnState,
+)
 
 TOKEN = "fake-session-token"  # noqa: S105 (test value)
 THREAD = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
@@ -327,3 +334,161 @@ def test_nothing_reaches_the_callback_after_close(tmp_path: Path) -> None:
     s.close()
     s._record({"hook_event_name": "Stop"})     # a handler still unwinding after close  # noqa: SLF001
     assert seen == [] and not s.turns().idle
+
+
+def turn(server: SessionServer, event: str) -> None:
+    ask(server.path, req(TOKEN, "hook_event", {"hook_event_name": event}))
+
+
+def noting(calls: list[str], name: str) -> Callable[[], bool]:
+    """A delivery that notes it ran and reached the session."""
+    def deliver() -> bool:
+        calls.append(name)
+        return True
+    return deliver
+
+
+def test_at_boundary_spends_the_boundary_before_delivering(server: SessionServer) -> None:
+    calls: list[str] = []
+    with pytest.raises(BoundaryBusy):                       # no turn has ended yet
+        server.at_boundary(noting(calls, "early"))
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+
+    def deliver() -> bool:
+        with pytest.raises(BoundaryBusy):                   # spent before delivery; and the gate is held
+            server.at_boundary(noting(calls, "nested"))
+        calls.append("first")
+        return True
+
+    server.at_boundary(deliver)
+    with pytest.raises(BoundaryBusy):
+        server.at_boundary(noting(calls, "again"))
+    assert calls == ["first"]
+    turn(server, "UserPromptSubmit")
+    with pytest.raises(BoundaryBusy):                       # mid-turn
+        server.at_boundary(noting(calls, "mid"))
+    turn(server, "Stop")
+    server.at_boundary(noting(calls, "next"))
+    assert calls == ["first", "next"]
+
+
+def test_a_failed_delivery_gives_the_boundary_back_and_a_raising_one_spends_it(server: SessionServer) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    server.at_boundary(lambda: False)
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    with pytest.raises(BoundaryBusy):
+        server.at_boundary(lambda: True)
+
+
+def test_after_a_raising_delivery_no_boundary_is_delivered_at_and_nothing_is_spent(
+        server: SessionServer) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")                                    # a fresh boundary
+    before, spent = server.turns(), getattr(server, "_spent")  # noqa: B009 - a private seam
+    calls: list[str] = []
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "later"))
+    assert calls == [] and server.turns() == before and getattr(server, "_spent") == spent  # noqa: B009
+    gate = getattr(server, "_turn_gate")  # noqa: B009
+    assert gate.acquire(blocking=False)                     # and the gate was given back
+    gate.release()
+
+
+def test_the_uncertain_mark_is_durable_and_outlives_the_server(tmp_path: Path) -> None:
+    # T5 c4 B1: a rebind builds a new server for the same generation; the mark on disk keeps it refusing.
+    inflight, uncertain = tmp_path / "steer-inflight", tmp_path / "steer-uncertain"
+
+    def served() -> SessionServer:
+        s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", inflight=inflight,
+                          uncertain=uncertain)
+        s.start()
+        turn(s, "UserPromptSubmit")
+        turn(s, "Stop")
+        return s
+
+    server = served()
+    seen: list[bool] = []
+    server.at_boundary(lambda: seen.append(inflight.exists()) is None)   # marked before it delivers
+    assert seen == [True] and not inflight.exists() and not uncertain.exists()  # confirmed: cleared
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    server.at_boundary(lambda: False)                       # nothing reached the session: cleared
+    assert not inflight.exists() and not uncertain.exists()
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    assert uncertain.exists() and not inflight.exists()
+    server.close()
+    calls: list[str] = []
+    server = served()                                       # a rebind after a restart
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "after a restart"))
+    server.close()
+    uncertain.unlink()
+    inflight.touch()                                        # a crash between the mark and the confirm
+    server = served()
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "after a crash"))
+    server.close()
+    assert calls == []
+
+
+def test_a_delivery_whose_mark_cant_be_made_never_runs_and_keeps_the_boundary(tmp_path: Path) -> None:
+    server = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl",
+                           inflight=tmp_path / "gone" / "steer-inflight",
+                           uncertain=tmp_path / "steer-uncertain")
+    server.start()
+    try:
+        turn(server, "UserPromptSubmit")
+        turn(server, "Stop")
+        calls: list[str] = []
+        with pytest.raises(BoundaryUnmarked):
+            server.at_boundary(noting(calls, "unmarked"))
+        assert calls == [] and getattr(server, "_spent") is None  # noqa: B009 - a private seam
+    finally:
+        server.close()
+
+
+def test_turn_events_wait_for_a_delivery(server: SessionServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    before = server.turns()
+    entered, release = threading.Event(), threading.Event()
+    gate = WatchedGate(server)
+    monkeypatch.setattr(server, "_turn_gate", gate)
+
+    def deliver() -> bool:
+        entered.set()
+        return release.wait(10)
+
+    delivery = threading.Thread(target=server.at_boundary, args=(deliver,))
+    delivery.start()
+    assert entered.wait(10)
+    prompt = threading.Thread(target=turn, args=(server, "UserPromptSubmit"))
+    prompt.start()
+    try:
+        assert gate.waiting.wait(10)                        # its handler is at the gate
+        assert prompt.is_alive()
+        ask(server.path, req(TOKEN, "hook_event", {"hook_event_name": "Notification"}))   # not a turn event
+        assert server.turns() == before
+    finally:
+        release.set()
+        delivery.join(10)
+        prompt.join(10)
+    assert server.turns().prompts == before.prompts + 1 and not server.turns().idle
+
+
+def test_a_closed_server_has_no_boundary(tmp_path: Path) -> None:
+    s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl")
+    s.start()
+    turn(s, "UserPromptSubmit")
+    turn(s, "Stop")
+    s.close()
+    with pytest.raises(BoundaryBusy):
+        s.at_boundary(lambda: True)

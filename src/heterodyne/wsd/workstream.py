@@ -10,18 +10,22 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
+from heterodyne.wsd.brief import NoNotes, ResumeNotes
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.journal import Journal
-from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime
+from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime, SessionEvent
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
+
+if TYPE_CHECKING:
+    from heterodyne.wsd.park import Parker
 
 REPO_KEY = "repo"            # bead metadata naming one of the workstream's [repos]
 DEFAULT_REPO = "default"
@@ -127,6 +131,23 @@ class NoHarness:
         pass
 
 
+class SessionHandler(Protocol):
+    def __call__(self, parker: "Parker", event: SessionEvent) -> None:
+        """Handle one session event (plan 5i): idempotent by `event.event_id`. Raise OpConflict to wait
+        for the bead's open operation; anything else counts a failed attempt."""
+        ...
+
+
+NoticeKind = Literal["stuck", "waiting", "closed", "review"]     # part 2's, verbatim
+
+
+class NoticeSink(Protocol):
+    """What wsd needs of part 2's notice client (`heterodyne.wsd.notices.Notices`): journal by `ref`
+    (posting each ref once), then try; never raise on transport."""
+
+    def send(self, ws: str, bead: str | None, kind: NoticeKind, title: str, body: str, ref: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -144,3 +165,9 @@ class Deps:
     selections: Callable[[str], InstallPin | None] = no_selection
     # wsd's harness ops (plan 4c T10): each pickup advances the install approvals, and a taint alerts.
     harness: HarnessHooks = field(default_factory=NoHarness)
+    # Plan 5i: resume notes for the brief (part 2's AskBridge), and the handlers of session events by kind
+    # (parts 2 and 3). The ws-request ops wsd accepts are the handlers' kinds.
+    notes: ResumeNotes = field(default_factory=NoNotes)
+    session_handlers: Mapping[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
+    inbox_attempts: int = 3         # wsd.inbox_attempts_before_human; assemble passes the setting
+    notices: NoticeSink | None = None   # plan 5i part 2's client; None until it is wired

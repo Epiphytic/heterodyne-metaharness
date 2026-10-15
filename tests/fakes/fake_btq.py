@@ -38,6 +38,8 @@ class FakeBead:
     deps: list[tuple[str, str]] = field(default_factory=list)      # (other bead, dependency type)
     comments: list[str] = field(default_factory=list)
     notes: str = ""
+    description: str = ""
+    acceptance_criteria: str = ""
 
 
 @dataclass
@@ -123,6 +125,10 @@ class World:
             out["metadata"] = dict(bead.metadata)
         if bead.notes:
             out["notes"] = bead.notes
+        if detail and bead.description:          # as `bd show` gives them; `bd list` doesn't
+            out["description"] = bead.description
+        if detail and bead.acceptance_criteria:
+            out["acceptance_criteria"] = bead.acceptance_criteria
         out["dependency_count"] = len(bead.deps)
         if not detail and bead.deps:        # `bd list` gives the edges, not the beads they point at
             out["dependencies"] = [{"issue_id": bead.id, "depends_on_id": other, "type": kind,

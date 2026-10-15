@@ -8,7 +8,9 @@ import shutil
 import socket
 import stat
 import subprocess
-from collections.abc import Callable, Iterator, Sequence
+import threading
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ import pytest
 from fakes.fake_btq import World, factory
 from sandbox_env import (
     RuntimeRig,
+    WatchedGate,
     bead_worktree,
     fresh_logins,
     launch_spec,
@@ -51,9 +54,13 @@ from heterodyne.sandbox.runtime import (
     write_record,
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
+from heterodyne.session import server as session_server
+from heterodyne.session import shim
 from heterodyne.session.server import SessionServer
-from heterodyne.wsd import gitwip, ids
+from heterodyne.tmux import TmuxError, TmuxPasteUncertain
+from heterodyne.wsd import brief, gitwip, ids
 from heterodyne.wsd.accounts import ConfiguredAccounts
+from heterodyne.wsd.beads import Bead
 from heterodyne.wsd.checkpoints import nothing
 from heterodyne.wsd.credlock import LOCK_BUSY, credential_lock
 from heterodyne.wsd.daemon import Wsd, assemble
@@ -64,6 +71,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    EventBatch,
     LaunchFailed,
     LaunchSpec,
     LaunchUncertain,
@@ -72,7 +80,10 @@ from heterodyne.wsd.runtime import (
     Resolution,
     ResolveRefused,
     RuntimeUnavailable,
+    SessionEvent,
     Signal,
+    SteerRefused,
+    SteerUncertain,
     UnlandedView,
     UsageSeen,
 )
@@ -2294,6 +2305,234 @@ def test_with_every_capability_off_no_producer_runs(rig: RuntimeRig) -> None:
     assert rig.runtime.signals("alpha") == [] and reads(rig) == 0
 
 
+def ws_request(rig: RuntimeRig, key: str, *words: str, gen: int = 1) -> tuple[int, dict[str, Any]]:
+    """What the agent's `/run/hz/ws-request` does, from the host side of the session's run directory."""
+    rc, out = shim.run_request(list(words), {"HZ_SESSION_SOCKET": str(rig.runtime.layout(key).socket(gen))})
+    return rc, json.loads(out)
+
+
+def pulled(rig: RuntimeRig, want: int, since: Mapping[str, tuple[int, int]] | None = None,
+           runtime: SandboxRuntime | None = None) -> EventBatch:
+    """Read the workstream's events until `want` have come (the hooks run asynchronously)."""
+    rt = runtime or rig.runtime
+    got = EventBatch()
+
+    def enough() -> bool:
+        nonlocal got
+        got = rt.session_events("alpha", since or {}, 1000)
+        return len(got.events) >= want
+
+    wait_for(enough)
+    return got
+
+
+def launch_briefed(rig: RuntimeRig, spec: LaunchSpec) -> None:
+    """Launch `spec` (with a brief) and wait for the brief's Stop in its log: launch returns once the
+    brief is taken, and its Stop may still be on its way."""
+    rig.runtime.launch(spec)
+    wait_for(lambda: rig.runtime.logs[spec.session_key].last >= 1)
+
+
+def briefed(rig: RuntimeRig, ops: frozenset[str] = frozenset(), profile: str = "p-one") -> LaunchSpec:
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": ops})
+    spec = replace(launch_spec(rig, profile), brief="start")
+    launch_briefed(rig, spec)
+    return spec
+
+
+def test_a_stop_is_logged_and_wakes_its_workstream(rig: RuntimeRig) -> None:
+    woken: list[str] = []
+    rig.runtime.subscribe(woken.append, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "another turn")
+    got = pulled(rig, 2).events
+    assert [(e.kind, e.turn, e.text) for e in got] == [("stop", 1, "echo: start"),
+                                                       ("stop", 2, "echo: another turn")]
+    assert got[0].event_id == f"{spec.session_key}:g1:e1" and (got[0].ws, got[0].bead) == ("alpha", "btq-1")
+    wait_for(lambda: woken == ["alpha", "alpha"])       # each wake follows its event's append
+    assert not any(isinstance(s, SessionEvent) for s in rig.runtime.signals("alpha"))   # never queued
+
+
+def test_the_probe_turn_is_never_an_event(rig: RuntimeRig) -> None:
+    briefed(rig)
+    assert [e.text for e in pulled(rig, 1).events] == ["echo: start"]
+
+
+def test_a_launch_without_a_brief_forwards_from_the_probe_turns_end(rig: RuntimeRig) -> None:
+    # The lead's ruling: forwarding starts once the probe turn has ended, brief or none.
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset()})
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert rig.runtime.logs[spec.session_key].forwarding
+    rig.tmux.paste(record(rig, spec.session_key).tmux_session, "an operator's turn")
+    got = pulled(rig, 1).events
+    assert [(e.kind, e.turn, e.text) for e in got] == [("stop", 1, "echo: an operator's turn")]
+
+
+@pytest.mark.parametrize("brief", ["", "start"])
+def test_a_turn_that_ends_before_the_launch_sees_the_probes_end_is_an_event(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, brief: str) -> None:
+    # T4 final B1: a whole turn runs between the probe's end and the launch's wait seeing it; its Stop is
+    # still logged, because the probe's own hook started the forwarding.
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset()})
+    spec = replace(launch_spec(rig, "p-one"), brief=brief)
+    servers: list[SessionServer] = []
+    real_server, real_until = rig.runtime._server, rig.runtime._until
+    gap: list[bool] = []
+
+    def serving(*args: Any) -> SessionServer:
+        servers.append(real_server(*args))
+        return servers[-1]
+
+    def until(pred: Callable[[], bool], seconds: float) -> bool:
+        done = real_until(pred, seconds)
+        if done and not gap and servers and servers[-1].turns().stops >= 1:    # the probe's turn has ended
+            gap.append(True)
+            stops = servers[-1].turns().stops
+            rig.tmux.paste(record(rig, spec.session_key).tmux_session, "GAP-TURN")
+            wait_for(lambda: servers[-1].turns().stops == stops + 1)      # answered before the wait returns
+        return done
+
+    monkeypatch.setattr(rig.runtime, "_server", serving)
+    monkeypatch.setattr(rig.runtime, "_until", until)
+    rig.runtime.launch(spec)
+    assert gap == [True]
+    want = ["echo: GAP-TURN"] + (["echo: start"] if brief else [])
+    assert [e.text for e in pulled(rig, len(want)).events] == want
+
+
+def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> None:
+    spec = briefed(rig, frozenset({"close"}))
+    evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"     # the fake's paths are host paths
+    evidence.write_text("12 passed")
+    rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e2"
+    log = rig.runtime.layout(spec.session_key).session_events(1)
+    assert json.loads(log.read_text().splitlines()[-1])["kind"] == "close"     # durable before the reply
+    [close] = [e for e in pulled(rig, 2).events if e.kind == "close"]
+    assert close.text == "12 passed"
+
+
+def test_ops_are_enabled_per_workstream(rig: RuntimeRig) -> None:
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"}),
+                                             "beta": frozenset({"question"})})     # D6: not alpha's
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    launch_briefed(rig, spec)
+    assert ws_request(rig, spec.session_key, "question", '{"text": "hm"}') == (
+        1, {"ok": False, "error": "unsupported"})
+    evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"
+    evidence.write_text("12 passed")
+    rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e2"     # e1 is the brief's Stop
+
+
+def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> None:
+    """Codex T2 c2: the server's close waits only so long for a callback; a callback that outlasts it
+    reaches a log the teardown has closed, and is refused at commit, never logged after the end."""
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    launch_briefed(rig, spec)
+    late = rig.runtime.logs[spec.session_key]
+    rig.runtime.stop(spec.session_key)
+    assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
+                        frozenset({"close"})) == (None, {"ok": False, "error": "unavailable"})
+    assert [json.loads(line)["kind"] for line in late.path.read_text().splitlines()] == ["stop"]
+
+
+def test_a_request_in_flight_across_the_teardown_is_refused_at_commit(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T3 c2 NB: a request's callback is held past the server's bounded wait, the session ends and
+    its log is closed, then the callback commits: it is refused, and nothing is logged after the end."""
+    monkeypatch.setattr(session_server, "CLOSE_SECONDS", 0.1)
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    launch_briefed(rig, spec)
+    layout = rig.runtime.layout(spec.session_key)
+    late = rig.runtime.logs[spec.session_key]
+    real = late.request
+    entered, release = threading.Event(), threading.Event()
+    got: list[tuple[SessionEvent | None, dict[str, Any]]] = []
+
+    def held(payload: Mapping[str, Any], ops: frozenset[str]) -> tuple[SessionEvent | None, dict[str, Any]]:
+        entered.set()
+        release.wait(10)
+        got.append(real(payload, ops))
+        return got[-1]
+
+    monkeypatch.setattr(late, "request", held)
+    token = (layout.run(1) / shim.TOKEN_FILE).read_text().strip()
+    client = socket.socket(socket.AF_UNIX)
+    stopper = threading.Thread(target=rig.runtime.stop, args=(spec.session_key,))
+    try:
+        client.connect(str(layout.socket(1)))
+        client.sendall((json.dumps({"token": token, "type": "ws_request", "payload": {
+            "op": "close", "rid": "0123456789abcdef", "evidence": "x"}}) + "\n").encode())
+        assert entered.wait(5)                          # the callback is in flight
+        stopper.start()
+        wait_for(lambda: not late.writable)             # the teardown has closed the log
+    finally:
+        release.set()
+        stopper.join(30)
+        client.close()
+    wait_for(lambda: bool(got))
+    assert got == [(None, {"ok": False, "error": "unavailable"})]
+    assert [json.loads(line)["kind"] for line in late.path.read_text().splitlines()] == ["stop"]
+    assert not stopper.is_alive()
+
+
+def test_a_cursor_reads_only_what_follows_it_and_the_limit_pages(rig: RuntimeRig) -> None:
+    spec = briefed(rig)
+    pane = record(rig, spec.session_key).tmux_session
+    pulled(rig, 1)
+    rig.tmux.paste(pane, "two")
+    pulled(rig, 2)
+    rig.tmux.paste(pane, "three")
+    pulled(rig, 3)
+    page = rig.runtime.session_events("alpha", {spec.session_key: (1, 1)}, 1)
+    assert [e.seq for e in page.events] == [2] and page.more and page.ends == {}
+
+
+def test_a_restarted_runtime_reads_the_same_events(rig: RuntimeRig) -> None:
+    briefed(rig)
+    first = pulled(rig, 1).events
+    assert pulled(rig, 1, runtime=restarted(rig)).events == first       # read from disk: no rebind needed
+
+
+def test_every_unread_generation_is_read_after_the_next_launch(rig: RuntimeRig) -> None:
+    # Codex cycle 1 #3: generation 1's last event, never read before generation 2 started, still comes.
+    rig.runtime.subscribe(lambda _ws: None, {})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    first = rig.runtime.launch(spec)
+    pulled(rig, 1)
+    rig.runtime.stop(spec.session_key)
+    second = replace(spec, generation=2, resume=True, native_id=first.native_id)
+    rig.runtime.launch(second)
+    batch = pulled(rig, 2)
+    assert [e.event_id for e in batch.events] == [f"{spec.session_key}:g1:e1", f"{spec.session_key}:g2:e1"]
+    assert batch.ends == {(spec.session_key, 1): 1}                     # g1 is final; g2 runs on
+    later = pulled(rig, 1, {spec.session_key: (2, 0)}, runtime=restarted(rig))
+    assert [e.event_id for e in later.events] == [f"{spec.session_key}:g2:e1"]
+
+
+def test_an_ended_generation_is_final(rig: RuntimeRig) -> None:
+    spec = briefed(rig)
+    pulled(rig, 1)
+    rig.runtime.stop(spec.session_key)
+    assert rig.runtime.session_events("alpha", {}, 10).ends == {(spec.session_key, 1): 1}
+    assert spec.session_key not in rig.runtime.logs                     # popped once its socket closed
+
+
+def test_an_unreadable_session_folder_is_unavailable(rig: RuntimeRig,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_self: SandboxRuntime) -> list[SessionRecord]:
+        raise RuntimeUnavailable("the session records can't be listed")
+
+    monkeypatch.setattr(SandboxRuntime, "_records", broken)
+    with pytest.raises(RuntimeUnavailable):
+        rig.runtime.session_events("alpha", {}, 10)
+
+
 def test_a_claude_status_line_is_usage_from_its_own_session(rig: RuntimeRig) -> None:
     with_caps(rig, "claude-code", USAGE)
     rig.backend.env_extra["HZ_FAKE_STATUS_LINE"] = json.dumps(STATUS)
@@ -2494,3 +2733,610 @@ def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(rig.runtime, "_records", unlistable)
     assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
+
+
+# --- plan 5i T5: steer ---------------------------------------------------------------------------
+ADAPTERS = pytest.mark.parametrize("profile", ["p-one", "p-two"])
+
+
+def idle_session(rig: RuntimeRig, profile: str) -> tuple[LaunchSpec, str]:
+    """A launched session at its first turn boundary: the operator's prompt has run and its turn ended."""
+    spec = launch_spec(rig, profile)
+    rig.runtime.launch(spec)
+    pane = record(rig, spec.session_key).tmux_session
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops                # the self-test's turn has ended: wait for this one's end
+    rig.tmux.paste(pane, "start")
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    return spec, pane
+
+
+@ADAPTERS
+def test_steer_pastes_into_an_idle_session(rig: RuntimeRig, profile: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    rig.runtime.steer(spec.session_key, 1, "use the blue one")
+    wait_for(lambda: "echo: use the blue one" in rig.tmux.capture(pane, 50))
+
+
+@ADAPTERS
+@pytest.mark.parametrize(("generation", "text", "why"), [
+    (2, "x", "generation"),
+    (1, "x" * (runtime_mod.STEER_MAX + 1), "too long"),
+    (1, "é" * (runtime_mod.STEER_MAX // 2 + 1), "too long"),         # counted in UTF-8 bytes
+])
+def test_steer_refuses_the_wrong_generation_and_long_text(rig: RuntimeRig, profile: str, generation: int,
+                                                          text: str, why: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    with pytest.raises(SteerRefused, match=why):
+        rig.runtime.steer(spec.session_key, generation, text)
+    assert "echo: x" not in rig.tmux.capture(pane, 50)
+
+
+@ADAPTERS
+def test_steer_refuses_a_second_steer_until_the_first_turn_ends(rig: RuntimeRig, profile: str,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, text, **_: pasted.append(text))
+    rig.runtime.steer(spec.session_key, 1, "first")         # delivered; its turn hasn't started yet
+    with pytest.raises(SteerRefused, match="mid-turn"):     # the boundary it pasted at is spent
+        rig.runtime.steer(spec.session_key, 1, "second")
+    assert pasted == ["first"]
+    monkeypatch.undo()
+    rig.tmux.paste(pane, "next")                            # a turn ends: a fresh boundary
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "third")
+    wait_for(lambda: "echo: third" in rig.tmux.capture(pane, 50))
+
+
+@ADAPTERS
+def test_steer_refuses_after_a_rebind_until_a_turn_ends(rig: RuntimeRig, profile: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    rig.runtime.servers.pop(spec.session_key).close()       # wsd died: the socket went with it
+    rig.runtime.sessions("alpha")                           # rebinds it, with no turn end seen yet
+    server = rig.runtime.servers[spec.session_key]
+    with pytest.raises(SteerRefused, match="mid-turn"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    rig.tmux.paste(pane, "one more turn")       # the operator types; its Stop reaches the new socket
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "now steer")
+    wait_for(lambda: "echo: now steer" in rig.tmux.capture(pane, 50))
+
+
+def test_an_unknown_session_is_refused(rig: RuntimeRig) -> None:
+    with pytest.raises(SteerRefused, match="not running"):
+        rig.runtime.steer("sk-none", 1, "hello")
+
+
+def test_an_ended_session_is_refused(rig: RuntimeRig) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    rig.runtime.stop(spec.session_key)
+    with pytest.raises(SteerRefused, match="not running"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+
+
+def test_an_unreadable_record_is_refused(rig: RuntimeRig) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    rig.runtime.layout(spec.session_key).record.write_text("{not json")
+    with pytest.raises(SteerRefused, match="record"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+
+
+@ADAPTERS
+def test_an_uncertain_paste_is_uncertain(rig: RuntimeRig, profile: str,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+
+    def uncertain(_name: str, _text: str, **_: object) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", uncertain)
+    with pytest.raises(SteerUncertain):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    with pytest.raises(SteerRefused, match="uncertain"):    # it may have landed: nothing is pasted again
+        rig.runtime.steer(spec.session_key, 1, "again")
+
+
+@ADAPTERS
+def test_after_an_uncertain_steer_the_generation_is_never_pasted_into_again(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c3 B1: tmux can't cancel a command a timed-out client sent, so a paste may land, or its Enter
+    # arrive, after the gate is gone. Nothing more is pasted into that generation: no later Enter can
+    # submit what a late paste left in the input line, and the note is never delivered twice.
+    spec, pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+
+    def uncertain(_name: str, _text: str, **_: object) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", uncertain)
+        with pytest.raises(SteerUncertain):
+            rig.runtime.steer(spec.session_key, 1, "hello")
+    stops = server.turns().stops
+    rig.tmux.paste(pane, "one more turn")                   # a boundary a steer could otherwise use
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    before, spent = server.turns(), getattr(server, "_spent")  # noqa: B009 - a private seam
+    pasted: list[str] = []
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+        with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+            rig.runtime.steer(spec.session_key, 1, "again")
+    assert pasted == []                                     # nothing pasted, and nothing spent or consumed
+    assert getattr(server, "_spent") == spent and server.turns() == before  # noqa: B009
+    first = record(rig, spec.session_key)
+    rig.runtime.stop(spec.session_key)
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    pane = record(rig, spec.session_key).tmux_session
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    rig.tmux.paste(pane, "start")
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 2, "a fresh generation")    # its own input line: steerable
+    wait_for(lambda: "echo: a fresh generation" in rig.tmux.capture(pane, 50))
+    layout = rig.runtime.layout(spec.session_key)
+    assert layout.steer_uncertain(1).exists()               # generation 1's mark stays; 2 has none
+    assert not layout.steer_inflight(2).exists() and not layout.steer_uncertain(2).exists()
+
+
+def rebound_at_a_boundary(rig: RuntimeRig, spec: LaunchSpec, pane: str) -> None:
+    """wsd restarts: the generation's socket is rebound, then a turn ends at it."""
+    rig.runtime.servers.pop(spec.session_key).close()
+    rig.runtime.sessions("alpha")
+    server = rig.runtime.servers[spec.session_key]
+    rig.tmux.paste(pane, "one more turn")
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+
+
+@ADAPTERS
+def test_a_rebind_after_an_uncertain_steer_still_refuses_with_nothing_pasted(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c4 B1: the uncertain mark is durable, so a restart can't forget it and paste after a late paste.
+    spec, pane = idle_session(rig, profile)
+
+    def uncertain(_name: str, _text: str, **_: object) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", uncertain)
+        with pytest.raises(SteerUncertain):
+            rig.runtime.steer(spec.session_key, 1, "UNCERTAIN-")
+    rebound_at_a_boundary(rig, spec, pane)
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+        rig.runtime.steer(spec.session_key, 1, "NEXT")
+    assert pasted == []
+
+
+@ADAPTERS
+def test_a_clean_steer_leaves_no_mark_and_a_crash_mid_steer_leaves_a_rebind_that_refuses(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, pane = idle_session(rig, profile)
+    layout = rig.runtime.layout(spec.session_key)
+    marked: list[bool] = []
+    real = rig.runtime.c.tmux.paste
+
+    def noted(name: str, text: str, **kw: Any) -> None:
+        marked.append(layout.steer_inflight(1).exists())
+        real(name, text, **kw)
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", noted)
+        rig.runtime.steer(spec.session_key, 1, "clean")
+    assert marked == [True]                                 # durable before the first tmux command
+    assert not layout.steer_inflight(1).exists() and not layout.steer_uncertain(1).exists()
+    layout.steer_inflight(1).touch()                        # wsd died between the mark and the confirm
+    rebound_at_a_boundary(rig, spec, pane)
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+        rig.runtime.steer(spec.session_key, 1, "after the crash")
+    assert pasted == []
+
+
+def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    calls: list[str] = []
+
+    def failed(_name: str, text: str, **_: object) -> None:
+        calls.append(text)
+        if len(calls) == 1:
+            raise TmuxError("tmux paste failed (OSError)")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", failed)
+    with pytest.raises(SteerRefused, match="paste failed"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    rig.runtime.steer(spec.session_key, 1, "hello")     # nothing reached the pane: the boundary holds
+    assert calls == ["hello", "hello"]
+
+
+def hook(server: SessionServer, event: str) -> None:
+    """Send a hook event to the session's socket, as the session's shim does."""
+    line = json.dumps({"token": server.token.decode(), "type": "hook_event",
+                       "payload": {"hook_event_name": event}}) + "\n"
+    with socket.socket(socket.AF_UNIX) as c:
+        c.settimeout(10)
+        c.connect(str(server.path))
+        c.sendall(line.encode())
+        c.makefile("rb").readline()
+
+
+class BlockedPaste:
+    """A tmux paste that blocks until released, so a test can act while a steer is delivering."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.pasted: list[str] = []
+
+    def __call__(self, _name: str, text: str, **_: object) -> None:
+        self.pasted.append(text)
+        self.entered.set()
+        assert self.release.wait(10)
+
+
+@ADAPTERS
+def test_steer_refuses_a_running_turn(rig: RuntimeRig, profile: str, tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    hold = tmp_path / "hold"
+    rig.backend.env_extra["HZ_FAKE_HOLD_FILE"] = str(hold)
+    spec, pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    before = server.turns()
+    hold.touch()                                            # the next turn runs until the file goes
+    rig.tmux.paste(pane, "work")
+    wait_for(lambda: server.turns().prompts == before.prompts + 1)
+    assert not server.turns().idle
+    pasted: list[str] = []
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, text, **_: pasted.append(text))
+        with pytest.raises(SteerRefused, match="mid-turn"):
+            rig.runtime.steer(spec.session_key, 1, "hello")
+    assert pasted == []
+    hold.unlink()
+    wait_for(lambda: server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "after the turn")
+    wait_for(lambda: "echo: after the turn" in rig.tmux.capture(pane, 50))
+
+
+@ADAPTERS
+def test_concurrent_steers_share_no_boundary(rig: RuntimeRig, profile: str,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+    paste = BlockedPaste()
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste)
+    first = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
+    first.start()
+    try:
+        assert paste.entered.wait(10)                       # the first steer is delivering
+        with pytest.raises(SteerRefused, match="mid-turn"):
+            rig.runtime.steer(spec.session_key, 1, "second")
+    finally:
+        paste.release.set()
+        first.join(10)
+    assert not first.is_alive()
+    assert paste.pasted == ["first"]
+    with pytest.raises(SteerRefused, match="mid-turn"):     # and the boundary it used stays spent
+        rig.runtime.steer(spec.session_key, 1, "third")
+
+
+def test_a_turn_event_waits_for_a_delivering_steer(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    server = rig.runtime.servers[spec.session_key]
+    before = server.turns()
+    paste = BlockedPaste()
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste)
+    gate = WatchedGate(server)
+    monkeypatch.setattr(server, "_turn_gate", gate)
+    steer = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
+    steer.start()
+    prompt = threading.Thread(target=hook, args=(server, "UserPromptSubmit"))
+    try:
+        assert paste.entered.wait(10)
+        prompt.start()
+        assert gate.waiting.wait(10)                        # the prompt's handler is at the gate
+        assert prompt.is_alive()                            # held until the delivery is over
+        assert server.turns() == before
+    finally:
+        paste.release.set()
+        steer.join(10)
+        if prompt.ident is not None:                        # started
+            prompt.join(10)
+    assert not steer.is_alive() and not prompt.is_alive()
+    assert server.turns().prompts == before.prompts + 1 and not server.turns().idle
+
+
+@pytest.mark.parametrize("text", [
+    "\x1b[201~\rsecond\r", "a\rb", "\x1b[2J", "\x07", "\x9b31m", "\x7f", "a\x00b"])
+def test_steer_refuses_terminal_controls(rig: RuntimeRig, text: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="terminal control"):
+        rig.runtime.steer(spec.session_key, 1, text)
+    assert pasted == []
+    rig.runtime.steer(spec.session_key, 1, "plain\ttext")  # the boundary wasn't spent
+    assert pasted == ["plain\ttext"]
+
+
+def test_steer_refuses_text_that_is_not_utf8(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="not valid UTF-8"):
+        rig.runtime.steer(spec.session_key, 1, "lone \ud800 surrogate")
+    assert pasted == []
+
+
+@ADAPTERS
+def test_a_multi_line_steer_is_one_prompt(rig: RuntimeRig, profile: str) -> None:
+    rig.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"
+    spec, _pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    rig.runtime.steer(spec.session_key, 1, "line one\n\tline two\nline three")
+    wait_for(lambda: server.turns().stops == stops + 1)
+    events = rig.runtime.layout(spec.session_key).events(1)
+    prompts = [row["payload"].get("prompt") for row in map(json.loads, events.read_text().splitlines())
+               if row["payload"].get("hook_event_name") == "UserPromptSubmit"]
+    assert prompts[-1] == "line one\n\tline two\nline three"
+    assert server.turns().prompts == len(prompts)
+
+
+@ADAPTERS
+def test_a_rebind_after_a_spent_boundary_steers_after_a_turn_end(rig: RuntimeRig, profile: str,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, pane = idle_session(rig, profile)
+    pasted: list[str] = []
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+        rig.runtime.steer(spec.session_key, 1, "spent")     # pasted nowhere: the boundary is spent
+    rig.runtime.servers.pop(spec.session_key).close()
+    rig.runtime.sessions("alpha")                           # rebinds it
+    server = rig.runtime.servers[spec.session_key]
+    with pytest.raises(SteerRefused, match="mid-turn"):
+        rig.runtime.steer(spec.session_key, 1, "too soon")
+    rig.tmux.paste(pane, "one more turn")
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "now steer")
+    wait_for(lambda: "echo: now steer" in rig.tmux.capture(pane, 50))
+    assert pasted == ["spent"]
+
+
+def hook_wait(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """The daemon's hook wait from now on (what a launch installs in the generation's shim.json)."""
+    c = rig.runtime.c
+    monkeypatch.setattr(rig.runtime, "c", replace(c, settings=replace(c.settings, hook_wait_seconds=seconds)))
+
+
+@ADAPTERS
+def test_a_rebound_steer_is_bounded_by_the_generations_installed_hook_wait(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c3 B2: a rebind keeps the shim.json the generation was launched with, so its shim gives up after
+    # that wait, not after the one wsd's settings say since a restart.
+    hook_wait(rig, monkeypatch, 2.0)
+    spec, pane = idle_session(rig, profile)
+    hook_wait(rig, monkeypatch, 10.0)                       # wsd restarts with a longer wait
+    rig.runtime.servers.pop(spec.session_key).close()
+    rig.runtime.sessions("alpha")                           # rebinds it, its shim still waiting 2s
+    server = rig.runtime.servers[spec.session_key]
+    rig.tmux.paste(pane, "one more turn")
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+    bounds: list[float | None] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste",
+                        lambda _name, _t, *, seconds=None: bounds.append(seconds))
+    rig.runtime.steer(spec.session_key, 1, "bounded")
+    assert bounds == [1.0]                                  # half the installed 2s, not min(5, 10 / 2)
+
+
+@ADAPTERS
+def test_a_steer_is_refused_when_the_installed_hook_wait_is_too_short_or_unreadable(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+    config = rig.runtime.servers[spec.session_key].path.parent / shim.CONFIG_FILE
+    installed = json.loads(config.read_text())
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    config.write_text(json.dumps({**installed, "wait_seconds": 1.5}))
+    with pytest.raises(SteerRefused, match="the hook wait is too short to steer"):
+        rig.runtime.steer(spec.session_key, 1, "short")
+    config.write_text("{")
+    with pytest.raises(SteerRefused, match="the session's hook wait can't be read"):
+        rig.runtime.steer(spec.session_key, 1, "unreadable")
+    assert pasted == []
+
+
+@ADAPTERS
+def test_a_new_generation_after_a_spent_boundary_can_be_steered(rig: RuntimeRig, profile: str,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", lambda _name, _t, **_: None)
+        rig.runtime.steer(spec.session_key, 1, "spent")
+    first = record(rig, spec.session_key)
+    rig.runtime.stop(spec.session_key)
+    rig.runtime.launch(replace(spec, generation=2, resume=True, native_id=first.native_id))
+    pane = record(rig, spec.session_key).tmux_session
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    rig.tmux.paste(pane, "start")
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 2, "second generation")
+    wait_for(lambda: "echo: second generation" in rig.tmux.capture(pane, 50))
+
+
+# --- plan 5i T4: the brief -----------------------------------------------------------------------
+def test_the_brief_is_pasted_after_the_probe_turn_and_confirmed(rig: RuntimeRig) -> None:
+    spec = replace(launch_spec(rig, "p-one"), brief="Your task is btq-1.")
+    rig.runtime.launch(spec)
+    pane = record(rig, spec.session_key).tmux_session
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2       # the probe, then the brief
+    wait_for(lambda: "echo: Your task is btq-1." in rig.tmux.capture(pane, 50))
+
+
+def paste_after_probe(tmux: Any, after: Callable[[Callable[[str, str], None], str, str], None]
+                      ) -> Callable[[str, str], None]:
+    """A paste that delivers the self-test's probe (the first paste) and hands each later one to `after`,
+    with the real paste."""
+    real, pasted = tmux.paste, []
+
+    def paste(name: str, text: str) -> None:
+        pasted.append(text)
+        if len(pasted) == 1:
+            real(name, text)
+        else:
+            after(real, name, text)
+
+    return paste
+
+
+def test_a_brief_the_agent_never_takes_fails_the_launch(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_mod, "BRIEF_SECONDS", 0.5)
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste",
+                        paste_after_probe(rig.runtime.c.tmux, lambda _real, _name, _text: None))
+    with pytest.raises(LaunchFailed, match="did not take its brief"):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="hello"))
+
+
+def test_a_brief_that_cannot_be_pasted_fails_the_launch(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    def failed(_real: Callable[[str, str], None], _name: str, _text: str) -> None:
+        raise TmuxError("tmux paste failed (OSError)")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, failed))
+    with pytest.raises(LaunchFailed, match="brief could not be pasted"):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="hello"))
+
+
+def test_an_uncertain_brief_paste_is_settled_by_the_prompt_count(rig: RuntimeRig,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    def uncertain(real: Callable[[str, str], None], name: str, text: str) -> None:
+        real(name, text)
+        raise TmuxPasteUncertain("maybe")            # it landed; the prompt count says so
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, uncertain))
+    spec = replace(launch_spec(rig, "p-one"), brief="hello")
+    rig.runtime.launch(spec)
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+def test_the_event_log_forwards_from_the_brief_on(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T3 into T4: the probe's turn is never an event; the brief's turn, and every one after, is.
+    key = launch_spec(rig, "p-one").session_key
+    seen: list[bool] = []
+    real = rig.runtime.c.tmux.paste
+
+    def noted(name: str, text: str, **kw: Any) -> None:
+        seen.append(rig.runtime.logs[key].forwarding)
+        real(name, text, **kw)
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", noted)
+    rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="start"))
+    assert seen == [False, True]                    # the probe's paste, then the brief's
+
+
+def test_no_brief_pastes_nothing(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 1
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_multi_line_brief_arrives_as_one_prompt(rig: RuntimeRig, profile: str) -> None:
+    # D5: a CLI that asks for bracketed paste gets the whole brief as one prompt, newlines and all.
+    rig.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"
+    text = "You are working on bead btq-1: Blue widget\n\nMake the widget blue.\n\nHow to work:\n- commit"
+    spec = replace(launch_spec(rig, profile), brief=text)
+    rig.runtime.launch(spec)
+    prompts = [row["payload"]["prompt"] for row in spool(rig, spec.session_key)
+               if row["payload"].get("hook_event_name") == "UserPromptSubmit"]
+    assert prompts[1:] == [text]                   # the probe's prompt, then exactly one: the brief
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+def spool(rig: RuntimeRig, key: str) -> list[dict[str, Any]]:
+    """The session server's spool of hook payloads (`SessionLayout.events`)."""
+    path = rig.runtime.layout(key).events(1)
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_hostile_bead_is_briefed_as_one_prompt(rig: RuntimeRig, profile: str) -> None:
+    # T4 c1 B1: a paste terminator and CRs in the bead's text or a note can't split the brief.
+    rig.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"
+    hostile = "a\x1b[201~\rsecond\rthird\x1b[200~"
+    shown = Bead("btq-1", "Blue " + hostile, "in_progress", None, (), {}, (),
+                 raw={"description": hostile, "acceptance_criteria": hostile})
+    got = brief.fit(brief.NoteBatch(((1, "note " + hostile),)))
+    text = brief.compose(shown, resume=False, ops=frozenset(), notes=got.texts, more=got.more)
+    spec = replace(launch_spec(rig, profile), brief=text)
+    rig.runtime.launch(spec)
+    prompts = [row["payload"]["prompt"] for row in spool(rig, spec.session_key)
+               if row["payload"].get("hook_event_name") == "UserPromptSubmit"]
+    assert prompts[1:] == [text]                   # the probe's prompt, then exactly one: the whole brief
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+@pytest.mark.parametrize(("text", "why"), [
+    ("a\x1b[201~\rsecond\r", "terminal control"),
+    ("lone \ud800", "not valid UTF-8"),
+    ("x" * (brief.BRIEF_MAX + 1), "too long"),
+], ids=["controls", "surrogate", "too-long"])
+def test_a_brief_that_is_unsafe_to_paste_fails_the_launch_unpasted(rig: RuntimeRig, text: str, why: str,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    pasted: list[str] = []
+
+    def noted(_real: Callable[[str, str], None], _name: str, t: str) -> None:
+        pasted.append(t)
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, noted))
+    with pytest.raises(LaunchFailed, match=why):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief=text))
+    assert pasted == []
+@ADAPTERS
+def test_a_prompt_hook_during_the_longest_steer_is_answered_and_recorded_in_time(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c2 B1: the shim gives up after its hook wait and lets the turn start, so a prompt that waits for
+    # a paste must still be answered within it. The paste is bounded to half the hook wait; here it takes
+    # all of that bound, and the real shim's UserPromptSubmit, sent mid-paste, is still recorded in time.
+    spec, _pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    before = server.turns()
+    wait = json.loads((server.path.parent / shim.CONFIG_FILE).read_text())["wait_seconds"]
+    entered, bounds = threading.Event(), list[float | None]()
+    gate = WatchedGate(server)
+    contended: list[bool] = []
+
+    def slow(_name: str, _text: str, *, seconds: float | None = None) -> None:
+        start = time.monotonic()
+        bounds.append(seconds)
+        entered.set()
+        # The paste holds the gate: the prompt's blocking take, seen before the paste ends, is contention.
+        contended.append(gate.waiting.wait(10))
+        bound = seconds if seconds is not None else 15.0       # the whole bound (unbounded: one tmux step)
+        time.sleep(max(0.0, bound - (time.monotonic() - start)))
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", slow)
+    monkeypatch.setattr(server, "_turn_gate", gate)
+    steer = threading.Thread(target=rig.runtime.steer, args=(spec.session_key, 1, "first"))
+    steer.start()
+    answer: list[tuple[int, str]] = []
+    try:
+        assert entered.wait(10)
+        raw = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": None, "prompt": "typed"})
+        env = {"HZ_SESSION_SOCKET": str(server.path), "HOME": str(rig.home)}
+        start = time.monotonic()
+        answer.append(shim.run_hook(raw.encode(), env, event="UserPromptSubmit"))
+        took = time.monotonic() - start
+        prompts = server.turns().prompts                    # as the shim answers: the agent's turn starts
+    finally:
+        steer.join(30)
+    assert contended == [True]                              # it did wait for the paste
+    assert prompts == before.prompts + 1                    # recorded before the shim gave up
+    assert answer == [(0, "")] and took < wait
+    assert bounds == [min(runtime_mod.STEER_SECONDS, wait / 2)]

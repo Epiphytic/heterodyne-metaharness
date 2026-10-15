@@ -467,6 +467,7 @@ CRASH_CLASSES = frozenset({"died", "stopped", "lifetime", "legacy", "reset"})
 # wpyv5: the end a resolve carried from a generation's record, once (`crash_end:<ws>:<bead>:<key>:<gen>`),
 # for the guard to account it from. Never changed or removed by accounting; retention is plan 8's.
 CRASH_END = "crash_end:"
+SESSION_CURSOR = "session_cursor:"     # plan 5i: <ws>:<key> -> "<generation>:<n>"
 
 
 class ResolvedEnd(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -819,10 +820,28 @@ class Journal:
         return None if cur.rowcount == 0 else cur.lastrowid
 
     @_locked
-    def inbox_pending(self) -> list[InboxRow]:
+    def inbox_pending(self, ws: str | None = None, surface: str | None = None) -> list[InboxRow]:
         rows = self.db.execute(f"SELECT {_INBOX} FROM inbox WHERE status = 'pending' "  # noqa: S608
-                               "ORDER BY seq").fetchall()
+                               "AND (? IS NULL OR ws = ?) AND (? IS NULL OR surface = ?) ORDER BY seq",
+                               (ws, ws, surface, surface)).fetchall()
         return [_inbox(r) for r in rows]
+
+    @_locked
+    def session_cursors(self, ws: str) -> dict[str, tuple[int, int]]:
+        """Plan 5i: each session key's last taken event, (generation, n)."""
+        prefix = f"{SESSION_CURSOR}{ws}:"
+        rows = self.db.execute("SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?",
+                               (len(prefix), prefix)).fetchall()
+        found: dict[str, tuple[int, int]] = {}
+        for key, value in rows:
+            gen, n = str(value).split(":")
+            found[str(key)[len(prefix):]] = (int(gen), int(n))
+        return found
+
+    @_locked
+    def session_cursor_put(self, ws: str, key: str, generation: int, n: int) -> None:
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET "
+                        "value = excluded.value", (f"{SESSION_CURSOR}{ws}:{key}", f"{generation}:{n}"))
 
     @_locked
     def inbox_get(self, seq: int) -> InboxRow | None:
