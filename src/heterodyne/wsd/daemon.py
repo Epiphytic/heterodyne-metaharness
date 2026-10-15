@@ -73,6 +73,7 @@ from heterodyne.wsd.ctl import CtlReply, CtlRequest, CtlServer, HarnessRequest, 
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.harness import HarnessOps, HarnessRefused, Pruning
 from heterodyne.wsd.journal import Journal, JournalBusy, ResolvedEnd
+from heterodyne.wsd.notices import Notices
 from heterodyne.wsd.recovery import Recovered, recover
 from heterodyne.wsd.runtime import (
     Action,
@@ -89,7 +90,7 @@ from heterodyne.wsd.session_events import ingest
 from heterodyne.wsd.settings import WsdSettings, resolve, restart_fields, restart_view
 from heterodyne.wsd.states import BeadState, WsState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
-from heterodyne.wsd.workstream import Deps, HarnessHooks, NoHarness, WorkstreamSettings, no_selection
+from heterodyne.wsd.workstream import Deps, HarnessHooks, NoHarness, WorkstreamSettings, no_selection, utc_now
 
 NEEDS_A_HUMAN = "not idle; a human must act"
 FINISHED = frozenset({BeadState.CLOSED, BeadState.DROPPED})
@@ -229,10 +230,17 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
     beads = BeadsAdapter(factory)
     gate = ClaimGate(s.lock_dir, beads, cp)
     hooks = harness if harness is not None else NoHarness()
-    deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp,
+    # Plan 5i part 2: one notice client over admind's relay, when it is enabled. Its rows cut off inside
+    # the post window are made `uncertain` here, once, before any pickup.
+    notices = None
+    if s.relay is not None and s.relay.enabled:
+        notices = Notices(journal, s.relay.ask_socket, clock=utc_now, backoff=s.relay.notice_backoff_seconds,
+                          owed_hours=s.relay.owed_hours_before_human, cp=cp)
+        notices.recover()
+    deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp, clock=utc_now,
                 usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
                 selections=selections_at(s.config_dir), harness=hooks,
-                inbox_attempts=s.inbox_attempts_before_human)
+                inbox_attempts=s.inbox_attempts_before_human, notices=notices)
     return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams}, hooks)
 
 
