@@ -8,7 +8,8 @@ The accepted readings of E17 these tests pin (the PR lists (b)3 and (b)4 as inte
 - (b)3: a walk that finds a marker already there re-queues the signals for the live sessions on it.
 - (b)4: the end's walk runs after the teardown and before `ended`, and signals the ending generation too.
 - (b)5: a walk that fails for any other reason logs, writes no marker, sends no signal and leaves the
-  timer alone (the next `expire` tries again); it never blocks the lifetime pass."""
+  timer alone (the next `expire` tries again); it never blocks the lifetime pass.
+- (b)6: one `INSTALL_TAINTED` text, defined in `wsd.runtime`; `harness.verify` imports it."""
 
 import contextlib
 import errno
@@ -40,8 +41,9 @@ pytestmark = needs_tools
 # section: the record's pin fields, where the rig's store and taint markers live, and the walk's check. ---
 
 def install_of(rec: SessionRecord) -> str:
-    """The install the session's generation runs (E15's pin, as the record keeps it)."""
-    return rec.install_name
+    """The install the session's generation runs (E15's pin, as the record keeps it; `install_name` if the
+    lead's rename of T8's `SessionRecord.install` lands)."""
+    return rec.install
 
 
 def store_root(rig: RuntimeRig) -> Path:
@@ -50,8 +52,8 @@ def store_root(rig: RuntimeRig) -> Path:
 
 
 def taint_dir(rig: RuntimeRig) -> Path:
-    """`<state>/harness-taint` (E17): the rig's wsd state is `rig.root` (its sessions are `root / "s"`)."""
-    return rig.root / "harness-taint"
+    """The runtime's `taint_dir` (E17): `harness_env.TAINT_DIR` beside the rig's store."""
+    return rig.runtime.c.taint_dir
 
 
 def install_root(rig: RuntimeRig, adapter: str, install: str) -> Path:
@@ -222,6 +224,12 @@ def test_a_login_file_copied_in_under_the_fallback_is_found_by_the_next_walk(rig
 
 
 # --- the accepted readings of E17 ---
+
+def test_one_install_tainted_text_defined_by_wsd_and_refused_by_verify() -> None:
+    """(b)6: the park's `why` and verify's refusal are one constant, `wsd.runtime`'s."""
+    assert verify.INSTALL_TAINTED is INSTALL_TAINTED
+    assert INSTALL_TAINTED in verify.REFUSALS
+
 
 def test_two_workstreams_on_one_install_walk_it_once_per_interval_and_each_gets_its_signals(
         rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
