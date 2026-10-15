@@ -51,6 +51,7 @@ from heterodyne.sandbox.runtime import (
 )
 from heterodyne.sandbox.spec import SessionLayout, sandbox_name, short_id
 from heterodyne.session.server import SessionServer
+from heterodyne.tmux import TmuxError, TmuxPasteUncertain
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import ConfiguredAccounts
 from heterodyne.wsd.checkpoints import nothing
@@ -72,6 +73,8 @@ from heterodyne.wsd.runtime import (
     ResolveRefused,
     RuntimeUnavailable,
     Signal,
+    SteerRefused,
+    SteerUncertain,
     UnlandedView,
     UsageSeen,
 )
@@ -2498,3 +2501,125 @@ def test_signals_never_raise(rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(rig.runtime, "_records", unlistable)
     assert rig.runtime.signals("alpha") == [LimitSeen(spec.session_key, 1, None)]
+
+
+# --- plan 5i T5: steer ---------------------------------------------------------------------------
+ADAPTERS = pytest.mark.parametrize("profile", ["p-one", "p-two"])
+
+
+def idle_session(rig: RuntimeRig, profile: str) -> tuple[LaunchSpec, str]:
+    """A launched session at its first turn boundary: the operator's prompt has run and its turn ended."""
+    spec = launch_spec(rig, profile)
+    rig.runtime.launch(spec)
+    pane = record(rig, spec.session_key).tmux_session
+    rig.tmux.paste(pane, "start")
+    wait_for(lambda: rig.runtime.servers[spec.session_key].turns().idle)
+    return spec, pane
+
+
+@ADAPTERS
+def test_steer_pastes_into_an_idle_session(rig: RuntimeRig, profile: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    rig.runtime.steer(spec.session_key, 1, "use the blue one")
+    wait_for(lambda: "echo: use the blue one" in rig.tmux.capture(pane, 50))
+
+
+@ADAPTERS
+@pytest.mark.parametrize(("generation", "text", "why"), [
+    (2, "x", "generation"),
+    (1, "x" * (runtime_mod.STEER_MAX + 1), "too long"),
+    (1, "é" * (runtime_mod.STEER_MAX // 2 + 1), "too long"),         # counted in UTF-8 bytes
+])
+def test_steer_refuses_the_wrong_generation_and_long_text(rig: RuntimeRig, profile: str, generation: int,
+                                                          text: str, why: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    with pytest.raises(SteerRefused, match=why):
+        rig.runtime.steer(spec.session_key, generation, text)
+    assert "echo: x" not in rig.tmux.capture(pane, 50)
+
+
+@ADAPTERS
+def test_steer_refuses_mid_turn(rig: RuntimeRig, profile: str) -> None:
+    spec = launch_spec(rig, profile)
+    rig.runtime.launch(spec)                                # no turn has ended yet
+    with pytest.raises(SteerRefused, match="mid-turn"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+
+
+@ADAPTERS
+def test_steer_refuses_a_second_steer_until_the_first_turn_ends(rig: RuntimeRig, profile: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    server = rig.runtime.servers[spec.session_key]
+    stops = server.turns().stops
+    rig.runtime.steer(spec.session_key, 1, "first")
+    with pytest.raises(SteerRefused, match="mid-turn"):     # the boundary it pasted at is spent
+        rig.runtime.steer(spec.session_key, 1, "second")
+    wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "third")
+    wait_for(lambda: "echo: third" in rig.tmux.capture(pane, 50))
+    assert "echo: second" not in rig.tmux.capture(pane, 50)
+
+
+@ADAPTERS
+def test_steer_refuses_after_a_rebind_until_a_turn_ends(rig: RuntimeRig, profile: str) -> None:
+    spec, pane = idle_session(rig, profile)
+    rig.runtime.servers.pop(spec.session_key).close()       # wsd died: the socket went with it
+    rig.runtime.sessions("alpha")                           # rebinds it, with no turn end seen yet
+    server = rig.runtime.servers[spec.session_key]
+    with pytest.raises(SteerRefused, match="mid-turn"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    rig.tmux.paste(pane, "one more turn")       # the operator types; its Stop reaches the new socket
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+    rig.runtime.steer(spec.session_key, 1, "now steer")
+    wait_for(lambda: "echo: now steer" in rig.tmux.capture(pane, 50))
+
+
+def test_an_unknown_session_is_refused(rig: RuntimeRig) -> None:
+    with pytest.raises(SteerRefused, match="not running"):
+        rig.runtime.steer("sk-none", 1, "hello")
+
+
+def test_an_ended_session_is_refused(rig: RuntimeRig) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    rig.runtime.stop(spec.session_key)
+    with pytest.raises(SteerRefused, match="not running"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+
+
+def test_an_unreadable_record_is_refused(rig: RuntimeRig) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    rig.runtime.layout(spec.session_key).record.write_text("{not json")
+    with pytest.raises(SteerRefused, match="record"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+
+
+@ADAPTERS
+def test_an_uncertain_paste_is_uncertain(rig: RuntimeRig, profile: str,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, profile)
+
+    def uncertain(_name: str, _text: str) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", uncertain)
+    with pytest.raises(SteerUncertain):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    with pytest.raises(SteerRefused, match="mid-turn"):     # it may have landed: the boundary is spent
+        rig.runtime.steer(spec.session_key, 1, "again")
+
+
+def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _pane = idle_session(rig, "p-one")
+    calls: list[str] = []
+
+    def failed(_name: str, text: str) -> None:
+        calls.append(text)
+        if len(calls) == 1:
+            raise TmuxError("tmux paste failed (OSError)")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", failed)
+    with pytest.raises(SteerRefused, match="paste failed"):
+        rig.runtime.steer(spec.session_key, 1, "hello")
+    rig.runtime.steer(spec.session_key, 1, "hello")     # nothing reached the pane: the boundary holds
+    assert calls == ["hello", "hello"]
