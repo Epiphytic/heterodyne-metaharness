@@ -963,6 +963,36 @@ def test_a_directory_that_is_not_the_service_users_refuses_before_any_change(hos
     assert not release_dir(host).exists() and started(host) == [] and list(elsewhere.iterdir()) == []
 
 
+@pytest.mark.parametrize("branch", ["fetch", "completed"])
+@pytest.mark.parametrize(("where", "why"), [
+    ("symlink", "the scratch directory is not the service user's directory"),
+    ("readable", "the scratch directory can be read by others"),
+    ("ancestor-writable", "the scratch directory is under a directory others can write"),
+])
+def test_a_scratch_refusal_comes_before_any_root_change_with_no_scratch_build(host: Host, branch: str,
+                                                                             where: str, why: str) -> None:
+    """--fetch and a completed release skip the scratch build, but the services step still renders into
+    the scratch parent: its check is the preflight's, in every branch."""
+    if branch == "completed":
+        assert installer(host).returncode == 0
+        shutil.rmtree(host.home() / ".cache/heterodyne")
+        host.clear_calls()
+    scratch = host.home() / ".cache/heterodyne"
+    scratch.parent.mkdir(exist_ok=True)
+    elsewhere = host.home() / "elsewhere"
+    elsewhere.mkdir()
+    if where == "symlink":
+        scratch.symlink_to(elsewhere)
+    elif where == "readable":
+        scratch.mkdir(mode=0o755)
+        scratch.chmod(0o755)
+    else:
+        scratch.parent.chmod(0o777)
+    out = installer(host, *(["--fetch"] if branch == "fetch" else []))
+    assert install_refusal(host, out) == why
+    assert started(host) == [] and list(elsewhere.iterdir()) == []
+
+
 def failing_mktemp(host: Host, where: str) -> None:
     """A logged mktemp shim, which fails when its directory is under `where`."""
     tool = host.shims / "mktemp"

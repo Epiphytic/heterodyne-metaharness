@@ -150,6 +150,8 @@ install_dir=$(host "$service_home")/.local/share/heterodyne/install
 record=$install_dir/record.json
 backups=$install_dir/backup
 user_units=$(host "$service_home")/.config/systemd/user
+# The service steps' renders and the offline build check's scratch, both the service user's.
+scratch_parent=$(host "$service_home")/.cache/heterodyne
 # What the units get, and what every checked command runs with: host paths, never under the prefix.
 config_dir=$service_home/.config/heterodyne
 state_dir=$service_home/.local/state/heterodyne
@@ -218,6 +220,8 @@ plan_check() {
     local u msg
     dir_check "user unit directory" --dir "$user_units" --kind units --home "$(host "$service_home")"
     dir_check "install directory" --dir "$install_dir" --kind private --home "$(host "$service_home")"
+    # every branch renders the services into it, the ones that skip the offline build check too
+    dir_check "scratch directory" --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")"
     for u in "${wanted[@]}"; do
         if ! msg=$(platform plan --unit "$u" --record "$record" --file "$user_units/$u" --render /dev/null \
             --backup-dir "$backups" "${plan_flags[@]}" 2>&1 >/dev/null </dev/null); then
@@ -391,7 +395,6 @@ if [[ -z $staged ]]; then
     if [[ ! -f $releases/$resolved/.complete ]] && ((!fetch)); then
         cache=$(as_service_user PATH="$service_path" uv cache dir 2>/dev/null </dev/null) && [[ -n $cache ]] \
             || refuse "the uv cache can't be found"
-        scratch_parent=$(host "$service_home")/.cache/heterodyne
         dir_check "scratch directory" --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")"
         made=$(platform dir --what "scratch directory" --dir "$scratch_parent" --kind scratch \
             --home "$(host "$service_home")" --make </dev/null 2>/dev/null) \
@@ -822,7 +825,6 @@ else
     init_rc=0
     as_service_user "${location_env[@]}" "$vbin/admind" initialised >/dev/null 2>&1 </dev/null || init_rc=$?
     case $init_rc in 0|1) ;; *) fail "admind initialised can't tell (exit $init_rc)" ;; esac
-    scratch_parent=$(host "$service_home")/.cache/heterodyne
     render_made=$(platform dir --dir "$scratch_parent" --kind scratch --home "$(host "$service_home")" \
         --what "scratch directory" --make </dev/null) || fail "no render directory"
     renders=$(as_service_user PATH="$user_tools" mktemp -d "$scratch_parent/render.XXXXXX" </dev/null) \
