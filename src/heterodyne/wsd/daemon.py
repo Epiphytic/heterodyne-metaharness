@@ -117,6 +117,9 @@ PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last o
 RELOAD = "reload"
 NO_HARNESS = "managed installs are not set up in this wsd"
 HARNESS_FAILED = "the harness operation failed on an I/O error or a busy journal; wsd's log says which"
+# Only the type: the exception's text may hold a row's. Rows still `sending` are never retried (retry_owed
+# takes `owed` only), so they wait, unposted, for a later start's recover.
+NOTICES_RECOVERY_FAILED = "the notices' startup recovery failed (%s); notices in flight wait for a restart"
 log = logging.getLogger(__name__)
 
 
@@ -236,7 +239,10 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
     if s.relay is not None and s.relay.enabled:
         notices = Notices(journal, s.relay.ask_socket, clock=utc_now, backoff=s.relay.notice_backoff_seconds,
                           owed_hours=s.relay.owed_hours_before_human, cp=cp)
-        notices.recover()
+        try:
+            notices.recover()
+        except Exception as exc:    # a journal error here must not stop wsd from starting
+            log.error(NOTICES_RECOVERY_FAILED, type(exc).__name__)
     deps = Deps(journal, beads, gate, runtime, reconciler(beads), cp, clock=utc_now,
                 usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
                 selections=selections_at(s.config_dir), harness=hooks,
