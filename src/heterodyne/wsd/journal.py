@@ -158,7 +158,7 @@ ASK_STATES = ("creating", "owed", "posted", "answered", "approved", "denied", "u
 NOTICE_STATES = ("owed", "sending", "posted", "uncertain", "refused", "withheld")
 NOTICE_KINDS = ("stuck", "waiting", "closed", "review")
 ANSWER_MAX = 16000
-STEER_ATTEMPTS = 3          # a note steered this often is left to the next resume brief
+STEER_ATTEMPTS = 3          # a guard: a crash mid-steer delivers its notes uncertain (StartedSteer)
 
 
 def _among(values: tuple[str, ...]) -> str:
@@ -188,6 +188,8 @@ V5_TABLES = (
     """CREATE TABLE refusals (event_id TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT NOT NULL,
     session_key TEXT NOT NULL, generation INTEGER NOT NULL, turn INTEGER NOT NULL, text TEXT NOT NULL,
     created_at TEXT NOT NULL)""",
+    """CREATE TABLE steers (ws TEXT NOT NULL, bead TEXT NOT NULL, session_key TEXT NOT NULL,
+    generation INTEGER NOT NULL, refs TEXT NOT NULL, started_at TEXT NOT NULL, PRIMARY KEY (ws, bead))""",
 )
 SCHEMA = V4_SCHEMA + "".join(f"{stmt};\n" for stmt in V5_TABLES)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
@@ -407,6 +409,17 @@ class RefusedRequest:
     generation: int
     turn: int
     text: str
+
+
+@dataclass(frozen=True)
+class StartedSteer:
+    """A steer of the bead's notes `refs` into one generation, journaled before the steer and ended with
+    its outcome: one that a restart still finds may have arrived (plan 5i part 2, the lead's B1)."""
+    ws: str
+    bead: str
+    session_key: str
+    generation: int
+    refs: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1557,6 +1570,57 @@ class Journal:
         if row is None:
             return None
         return RefusedRequest(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), str(row[5]))
+
+    @_locked
+    def refused_in_turn(self, ws: str, bead: str, session_key: str, generation: int, turn: int) -> bool:
+        """Whether a request of this generation's `turn` was refused: that turn's Stop is the one the agent
+        was told to end it with, whether or not the refusal's note is delivered yet."""
+        row = self.db.execute("SELECT 1 FROM refusals WHERE ws = ? AND bead = ? AND session_key = ? "
+                              "AND generation = ? AND turn = ? LIMIT 1",
+                              (ws, bead, session_key, generation, turn)).fetchone()
+        return row is not None
+
+    @_locked
+    def steer_started(self, ws: str, bead: str, session_key: str, generation: int,
+                      refs: Iterable[str]) -> None:
+        """Record a steer of the notes `refs` before it is made, inside the caller's transaction. One per
+        bead: the last one's outcome ends it (steer_ended), or a restart finds it (steers_unended)."""
+        self.db.execute("INSERT INTO steers (ws, bead, session_key, generation, refs, started_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (ws, bead, session_key, generation, msgspec.json.encode(list(refs)).decode(), now()))
+
+    @_locked
+    def steer_ended(self, ws: str, bead: str) -> None:
+        """The bead's steer has its outcome journaled, inside the caller's transaction."""
+        self.db.execute("DELETE FROM steers WHERE ws = ? AND bead = ?", (ws, bead))
+
+    @_locked
+    def steers_unended(self, ws: str, bead: str | None = None) -> list[StartedSteer]:
+        """The workstream's steers (or the bead's) whose outcome was never journaled, by bead."""
+        rows = self.db.execute("SELECT bead, session_key, generation, refs FROM steers WHERE ws = ? "
+                               "AND (? IS NULL OR bead = ?) ORDER BY started_at, rowid",
+                               (ws, bead, bead)).fetchall()
+        return [StartedSteer(ws, str(r[0]), str(r[1]), int(r[2]),
+                             tuple(msgspec.json.decode(str(r[3]), type=list[str]))) for r in rows]
+
+    @_locked
+    def events_without_notice(self, ws: str, kind: str) -> list[tuple[str, str]]:
+        """(bead, ref) of the workstream's events of `kind` whose ref has no notice yet, oldest first."""
+        rows = self.db.execute("SELECT e.bead, e.ref FROM events AS e WHERE e.ws = ? AND e.kind = ? "
+                               "AND e.bead IS NOT NULL AND e.ref IS NOT NULL "
+                               "AND NOT EXISTS (SELECT 1 FROM notices AS n WHERE n.ref = e.ref) "
+                               "ORDER BY e.seq",
+                               (ws, kind)).fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    @_locked
+    def ask_open(self, ws: str, bead: str, states: Iterable[str]) -> bool:
+        """Whether an `asks` row of the bead is in one of `states`."""
+        wanted = tuple(states)
+        row = self.db.execute(f"SELECT 1 FROM asks WHERE ws = ? AND bead = ? "  # noqa: S608 - placeholders only
+                              f"AND state IN ({', '.join('?' * len(wanted))}) LIMIT 1",
+                              (ws, bead, *wanted)).fetchone()
+        return row is not None
 
     # --- notices (plan 5i part 2 T3) ---
 

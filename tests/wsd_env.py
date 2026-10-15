@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fakes.checkpoints import Recorder
 from fakes.fake_btq import World, factory
@@ -31,14 +32,19 @@ from heterodyne.wsd.scheduler import Outcome, Scheduler, Trigger, TriggerKind
 from heterodyne.wsd.states import BeadState
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
 from heterodyne.wsd.workstream import (
+    AskHooks,
     Deps,
     Limits,
+    NoAsks,
     NoticeSink,
     SessionHandler,
     WorkstreamSettings,
     place,
     record,
 )
+
+if TYPE_CHECKING:
+    from heterodyne.wsd.asks import AskBridge
 
 WS = "alpha"
 PROFILES = frozenset({"p-one", "p-two"})
@@ -108,6 +114,10 @@ class Rig:
     notes: ResumeNotes = field(default_factory=NoNotes)                # plan 5i T4: part 2's resume notes
     handlers: dict[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
     notices: NoticeSink | None = None                                    # plan 5i T6: part 2's notices
+    # Plan 5i part 2 T5: builds the AskBridge on each restart's journal. It is the rig's notes, its handlers
+    # come before `handlers` (which may override one), and the scheduler advances it.
+    asks_for: "Callable[[Rig], AskBridge] | None" = None
+    bridge: "AskBridge | None" = field(init=False, default=None)
     journal: Journal = field(init=False)
     beads: BeadsAdapter = field(init=False)
     gate: ClaimGate = field(init=False)
@@ -125,10 +135,14 @@ class Rig:
         self.journal = Journal(self.root / "state" / "wsd.db")
         self.beads = BeadsAdapter(factory(self.world))
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
+        self.bridge = self.asks_for(self) if self.asks_for is not None else None
+        notes: ResumeNotes = self.notes if self.bridge is None else self.bridge
+        handlers = self.handlers if self.bridge is None else {**self.bridge.handlers(), **self.handlers}
+        asks: AskHooks = NoAsks() if self.bridge is None else self.bridge
         self.deps = Deps(self.journal, self.beads, self.gate, self.runtime,
                          self.reconciler or HoldingReconciler(self.beads), self.cp, self.clock,
-                         usage_reader=self.usage_reader, selections=self.selections, notes=self.notes,
-                         session_handlers=self.handlers, notices=self.notices)
+                         usage_reader=self.usage_reader, selections=self.selections, notes=notes,
+                         session_handlers=handlers, notices=self.notices, asks=asks)
         self.parker = Parker(self.ws, self.deps)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 

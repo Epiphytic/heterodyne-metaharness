@@ -220,6 +220,7 @@ class Scheduler:
             self._signals(now)                    # plan 4b E8: after the lifetime stop, before the sweep
             ingest(j, self.d.runtime, name)       # plan 5i: every logged event, by cursor
             dispatch(self.parker, self.d.session_handlers, self.d.inbox_attempts)
+            self.d.asks.advance(now)              # plan 5i part 2: notes steered once their turn has ended
             sweep(self.parker)
             for op in j.ops_open(name):
                 self.replay(op)

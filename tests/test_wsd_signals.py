@@ -98,6 +98,20 @@ def test_the_fake_runtime_records_steers() -> None:
     assert rt.steers == [("sk-a", 1, "look again")]          # an uncertain steer isn't recorded as sent
 
 
+def test_the_fake_runtime_refuses_every_steer_after_an_uncertain_one_in_that_generation() -> None:
+    """As part 1's runtime marks the boundary durably uncertain: later steers to it are SteerRefused."""
+    rt = FakeRuntime()
+    rt.steer_error = SteerUncertain("maybe")
+    with pytest.raises(SteerUncertain):
+        rt.steer("sk-a", 1, "one")
+    for _ in range(2):
+        with pytest.raises(SteerRefused, match="uncertain"):
+            rt.steer("sk-a", 1, "two")
+    rt.steer("sk-a", 2, "the next generation")
+    rt.steer("sk-b", 1, "another session")
+    assert rt.steers == [("sk-a", 2, "the next generation"), ("sk-b", 1, "another session")]
+
+
 def test_the_fake_runtime_serves_its_logs_after_a_cursor() -> None:
     rt = FakeRuntime()
     woken: list[str] = []
