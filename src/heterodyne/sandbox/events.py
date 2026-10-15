@@ -25,6 +25,7 @@ from heterodyne.wsd.runtime import SessionEvent, SessionEventKind
 
 LOG_MAX = 4 << 20               # bytes per generation: a flooding session is refused, never unbounded
 STOP_TEXT_MAX = 16000           # characters of a Stop's last message kept
+MAX_GAP = 1024                  # missing numbers filled before one line; a number past that is damage
 UNSUPPORTED = {"ok": False, "error": "unsupported"}
 MALFORMED = {"ok": False, "error": "malformed"}
 FULL = {"ok": False, "error": "full"}
@@ -227,15 +228,17 @@ class EventLog:
             self.writable = False
 
     def _parse(self, raw: bytes) -> None:
-        """Every complete line, in order. A line that doesn't decode, or repeats a number, is a damaged
-        event at the next number; a number that skips ahead leaves a damaged event for each one skipped."""
+        """Every complete line, in order. A line that doesn't decode, repeats a number or skips more than
+        MAX_GAP ahead is a damaged event at the next number (so the events stay bounded by the lines); a
+        number that skips ahead less leaves a damaged event for each one skipped. JSON true is no number."""
         for line in raw.splitlines(keepends=True):
             self._size += len(line)
             expect = len(self._events) + 1
             try:
                 row = json.loads(line)
-                if (not isinstance(row["n"], int) or row["n"] < expect or row["kind"] not in KINDS
-                        or not isinstance(row["turn"], int) or not isinstance(row["body"], dict)
+                if (not _number(row["n"]) or not expect <= row["n"] <= expect + MAX_GAP
+                        or row["kind"] not in KINDS
+                        or not _number(row["turn"]) or not isinstance(row["body"], dict)
                         or not (row["text"] is None or isinstance(row["text"], str))
                         or not (row["rid"] is None or isinstance(row["rid"], str))
                         or not isinstance(row["close_requested"], bool)):
@@ -262,6 +265,10 @@ class EventLog:
         if rid is not None:
             self._rids[rid] = ev
         return ev
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _utf8_within(text: str, limit: int) -> bool:

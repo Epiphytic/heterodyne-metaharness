@@ -266,3 +266,36 @@ def test_the_log_is_private_and_the_reply_is_fixed(tmp_path: Path) -> None:
     assert reply == {"ok": True, "ref": "sk-a:g1:e1", "message": ACCEPTED["close"]}
     assert json.loads(lg.path.read_text())["rid"] == RID
     assert all("granted" not in text and "approved" not in text for text in ACCEPTED.values())   # D1
+
+
+def test_a_number_far_past_the_last_is_one_damaged_event(tmp_path: Path) -> None:
+    """Codex T3 c1 B1: a gap is filled only up to MAX_GAP; a number past that is damage in its own place,
+    so one short line can't make the reader build an unbounded run of events."""
+    lg, lines = three(tmp_path)
+    far = json.loads(lines[1])
+    far["n"] = 20000
+    lg.path.write_bytes(lines[0] + json.dumps(far).encode() + b"\n" + lines[2])
+    got = EventLog.read(lg.path, *ARGS)
+    assert [(e.seq, e.kind) for e in got.events()] == [(1, "stop"), (2, "damaged"), (3, "stop")]
+
+
+def test_a_gap_up_to_the_bound_is_filled(tmp_path: Path) -> None:
+    lg, lines = three(tmp_path)
+    edge = json.loads(lines[2])
+    edge["n"] = 2 + events.MAX_GAP                 # e2 .. e(1+MAX_GAP) missing: exactly MAX_GAP
+    lg.path.write_bytes(lines[0] + json.dumps(edge).encode() + b"\n")
+    got = EventLog.read(lg.path, *ARGS).events()
+    assert len(got) == 2 + events.MAX_GAP and got[-1].kind == "stop"
+    assert all(e.kind == "damaged" for e in got[1:-1])
+
+
+@pytest.mark.parametrize("field", ["n", "turn"])
+def test_a_boolean_number_is_damaged(tmp_path: Path, field: str) -> None:
+    """Codex T3 c1 B2: JSON true is not a number here (bool is an int subclass)."""
+    lg, lines = three(tmp_path)
+    odd = json.loads(lines[0])
+    odd[field] = True                              # True == 1: as the first line, it was taken as e1
+    lg.path.write_bytes(json.dumps(odd).encode() + b"\n" + lines[1] + lines[2])
+    got = EventLog.read(lg.path, *ARGS).events()
+    assert [(e.seq, e.kind) for e in got] == [(1, "damaged"), (2, "stop"), (3, "stop")]
+    assert [e.event_id for e in got] == ["sk-a:g1:e1", "sk-a:g1:e2", "sk-a:g1:e3"]

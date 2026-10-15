@@ -2360,11 +2360,31 @@ def test_a_close_request_is_logged_before_it_is_accepted(rig: RuntimeRig) -> Non
 
 
 def test_ops_are_enabled_per_workstream(rig: RuntimeRig) -> None:
-    rig.runtime.subscribe(lambda _ws: None, {"beta": frozenset({"question"})})     # D6: not alpha's
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"}),
+                                             "beta": frozenset({"question"})})     # D6: not alpha's
     spec = replace(launch_spec(rig, "p-one"), brief="start")
     rig.runtime.launch(spec)
+    rig.runtime.logs[spec.session_key].forwarding = True    # as once the brief is pasted (Task 4)
     assert ws_request(rig, spec.session_key, "question", '{"text": "hm"}') == (
         1, {"ok": False, "error": "unsupported"})
+    evidence = rig.runtime.layout(spec.session_key).run(1) / "ev.txt"
+    evidence.write_text("12 passed")
+    rc, reply = ws_request(rig, spec.session_key, "close", "--evidence-file", str(evidence))
+    assert rc == 0 and reply["ref"] == f"{spec.session_key}:g1:e1"
+
+
+def test_a_stopped_generations_log_refuses_a_late_request(rig: RuntimeRig) -> None:
+    """Codex T2 c2: the server's close waits only so long for a callback; a callback that outlasts it
+    reaches a log the teardown has closed, and is refused at commit, never logged after the end."""
+    rig.runtime.subscribe(lambda _ws: None, {"alpha": frozenset({"close"})})
+    spec = replace(launch_spec(rig, "p-one"), brief="start")
+    rig.runtime.launch(spec)
+    late = rig.runtime.logs[spec.session_key]
+    late.forwarding = True
+    rig.runtime.stop(spec.session_key)
+    assert late.request({"op": "close", "rid": "0123456789abcdef", "evidence": "x"},
+                        frozenset({"close"})) == (None, {"ok": False, "error": "unavailable"})
+    assert not late.path.exists()
 
 
 @pytest.mark.xfail(strict=True, reason="T4 pastes the brief")
