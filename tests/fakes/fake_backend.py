@@ -145,7 +145,9 @@ class FakeBackend:
         the deletion it stands for, and `reaper.reap` is tested on its own."""
         self.reapers.append((name, deadline, record))
         self.watches.append(watch)
-        return [sys.executable, "-I", "-c", "import time; time.sleep(86400)"]
+        script = (f"from pathlib import Path; import time; Path({str(watch.ready)!r}).write_text('ready'); "
+                  "time.sleep(86400)")
+        return [sys.executable, "-I", "-c", script]
 
     def pane_env(self) -> Mapping[str, str]:
         return {}

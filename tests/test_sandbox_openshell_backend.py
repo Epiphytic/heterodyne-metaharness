@@ -139,7 +139,8 @@ def test_tty_argv_carries_its_own_environment() -> None:
 
 
 def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
-    watch = Watch(3, Path("/s/hz0/reaped-r3.json"), "hz-alpha-p", "tmux", "wsd", None)
+    watch = Watch(3, Path("/s/hz0/reaped-r3.json"), "hz-alpha-p", "tmux", "wsd", None,
+                  Path("/creates"), Path("/alerts"), Path("/creates/.ready-n"))
     record = Path("/s/hz0/session.json")
     argv = backend(Script()).reaper_argv("hz0123456789abg1", 1_800_007_200, record, watch)
     assert argv[:3] == ["env", "-i", "PATH=/usr/bin"]
@@ -147,9 +148,11 @@ def test_the_reaper_runs_outside_wsd_with_its_own_environment() -> None:
     assert argv[7:] == ["--deadline", "1800007200", "--openshell", "openshell", "--podman", "podman",
                         "--image", "img:1", "--record", "/s/hz0/session.json", "--generation", "3",
                         "--marker", "/s/hz0/reaped-r3.json", "--pane", "hz-alpha-p", "--tmux", "tmux",
-                        "--tmux-socket", "wsd", "hz0123456789abg1"]
-    pinned = Watch(3, Path("/s/m"), "p", "tmux", "wsd", Path("/run/wsd.sock"))
-    assert pinned.argv()[-2:] == ["--tmux-socket-path", "/run/wsd.sock"]
+                        "--tmux-socket", "wsd", "--ledger", "/creates", "--alerts", "/alerts",
+                        "--ready", "/creates/.ready-n", "hz0123456789abg1"]
+    pinned = Watch(3, Path("/s/m"), "p", "tmux", "wsd", Path("/run/wsd.sock"),
+                   Path("/creates"), Path("/alerts"), Path("/creates/.ready-n"))
+    assert pinned.argv()[10:12] == ["--tmux-socket-path", "/run/wsd.sock"]
 
 
 def test_kill_uses_podman_alone() -> None:

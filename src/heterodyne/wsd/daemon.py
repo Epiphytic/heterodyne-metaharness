@@ -349,6 +349,20 @@ class Wsd:
         return CtlReply("ok", f"{name}: {len(views)} unlanded session(s); the subjects are the agent's, "
                               "untrusted", {v.short_id: view_fields(v) for v in views})
 
+    def settle_one(self, name: str, sid: str, generation: int) -> CtlReply:
+        """Host-only settlement on the workstream lane under the ordinary operation lock."""
+        sched = self.parts.schedulers[name]
+        with sched.parker.entry():
+            try:
+                observed = sched.d.runtime.settle_sandbox(name, sid, generation)
+            except ResolveRefused as exc:
+                return CtlReply("refused", f"{name}: {exc}")
+            except RuntimeUnavailable as exc:
+                return CtlReply("failed", f"{name}: {exc}")
+        return CtlReply("ok", f"{name}: create {sid} generation {generation}: operator settled; {observed}. "
+                              "The operator accepts remaining late-create risk; "
+                              "the watcher confirms deletion.")
+
     def resolve_one(self, name: str, sid: str, generation: int, action: Action, tip: str | None) -> CtlReply:
         """`wsctl resolve` on the workstream's lane, holding its operation lock from the checks to the
         intent's removal. The journal entry comes from the runtime's Resolution, so from its intent, and is
@@ -499,6 +513,11 @@ class Wsd:
         if req.op == "unlanded" and req.ws is not None:
             name = req.ws
             return await self._run(name, ("unlanded", name), lambda: self.unlanded_one(name))
+        if req.op == "sandbox-settle" and req.ws is not None and req.session is not None \
+                and req.generation is not None:
+            name, sid, generation = req.ws, req.session, req.generation
+            return await self._run(name, ("sandbox-settle", sid, generation),
+                                   lambda: self.settle_one(name, sid, generation))
         if req.op == "resolve" and req.ws is not None and req.session is not None \
                 and req.generation is not None and req.action is not None:
             name, sid, generation, action, tip = req.ws, req.session, req.generation, req.action, req.tip
