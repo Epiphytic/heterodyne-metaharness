@@ -221,6 +221,20 @@ def shown_digest(shown: dict[str, Any]) -> str:
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+@pytest.mark.parametrize("fmt", [None, 999, 2, 0, "1", True, 1.0, [1]])
+def test_a_readout_whose_format_is_not_the_integer_1_is_refused(fmt: Any) -> None:
+    for fields in ({**approved({"id": "btq-1"}, "x"), "format": fmt}, {"format": fmt, "busy": True}):
+        with pytest.raises(ValueError, match="^the readout is not format 1$"):
+            wbtq.parse_readout(json.dumps(fields).encode())
+
+
+def test_a_readout_without_a_format_is_refused() -> None:
+    fields = approved({"id": "btq-1"}, "x")
+    del fields["format"]
+    with pytest.raises(ValueError, match="^the readout is not format 1$"):
+        wbtq.parse_readout(json.dumps(fields).encode())
+
+
 def test_a_readout_with_an_unknown_field_is_refused() -> None:
     with pytest.raises(ValueError):
         wbtq.parse_readout(json.dumps({**approved({"id": "btq-1"}, "x"), "surprise": 1}).encode())

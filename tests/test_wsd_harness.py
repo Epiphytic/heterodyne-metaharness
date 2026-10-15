@@ -1369,6 +1369,22 @@ def test_a_published_outcome_naming_another_install_fails(h: H, monkeypatch: pyt
     assert (done.state, done.failure) == ("failed", sc.RECOVERY_FAILED)
 
 
+@pytest.mark.parametrize("change", [{"drop": ["format"]}, {"override": {"format": None}},
+                                    {"override": {"format": 999}}, {"override": {"format": "1"}},
+                                    {"override": {"format": True}}])
+def test_an_approval_whose_readout_is_not_format_1_is_never_published(
+        h: H, change: dict[str, Any], caplog: pytest.LogCaptureFixture) -> None:
+    staging_id, r = posted(h)
+    approve(h, r.approval_bead, **change)
+    with caplog.at_level(logging.WARNING, logger=wh.__name__):
+        h.ops.advance(h.clock())
+    assert row(h, staging_id).state == "posted" and installs(h) == set()
+    assert "approve-bead could not be read (ValueError)" in caplog.text
+    h.clock.advance(24 * 3600 + 1)
+    h.ops.advance(h.clock())
+    assert row(h, staging_id).state == "expired" and installs(h) == set()
+
+
 def test_an_unreadable_readout_logs_fixed_wording_never_its_text(
         h: H, caplog: pytest.LogCaptureFixture) -> None:
     """msgspec names an unknown field in its error, and the field name is approve-bead's (untrusted) text."""

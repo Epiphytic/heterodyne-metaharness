@@ -92,11 +92,13 @@ def factory(module: ModuleType, locations: Mapping[str, str]) -> QueueFactory:
 READOUT_SECONDS = 5.0       # one read's deadline: `advance` runs one per posted install from every pickup
 REAP_SECONDS = 5.0          # after a kill, how long the child has to be reaped
 MAX_READOUT = 1 << 20       # a readout line's bytes
+READOUT_FORMAT = 1          # the only `--json` format this reader accepts
 
 
 class Readout(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """approve-bead's `--json` line. Every field is kept as it came, missing (UNSET), null or of any type:
-    `approvals.verdict` checks each one, so a malformed field fails the predicate that reads it."""
+    """approve-bead's `--json` line. Every field but `format` (which `parse_readout` checks) is kept as it
+    came, missing (UNSET), null or of any type: `approvals.verdict` checks each one, so a malformed field
+    fails the predicate that reads it."""
     format: Any = msgspec.UNSET
     busy: Any = msgspec.UNSET
     id: Any = msgspec.UNSET
@@ -138,8 +140,11 @@ _READOUT = msgspec.json.Decoder(Readout)
 
 def parse_readout(data: bytes) -> Readout | Busy:
     """One `--json` line. ValueError (msgspec's DecodeError is one) for anything not a JSON object of the
-    readout's fields; `{"format": 1, "busy": true}` is Busy."""
+    readout's fields, or whose `format` is not the integer 1 (this reader knows no other, so nothing else in
+    it is read, `busy` included); `{"format": 1, "busy": true}` is Busy."""
     readout = _READOUT.decode(data)
+    if type(readout.format) is not int or readout.format != READOUT_FORMAT:
+        raise ValueError("the readout is not format 1")
     if readout.busy is True:
         return Busy()
     return readout
