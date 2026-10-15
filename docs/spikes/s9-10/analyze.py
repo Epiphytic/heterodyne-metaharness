@@ -27,16 +27,19 @@ ARGV = rb"\[((?:" + STRING + rb"(?:, " + STRING + rb")*)?)\]"
 EXEC = re.compile(rb"(\d+) +execve\(" + STRING + rb", " + ARGV + rb", .*\) = 0$")
 ENDED = re.compile(rb"(\d+) +\+\+\+ (?:exited with \d+|killed by (SIG[A-Z0-9]+)( \(core dumped\))?) \+\+\+$")
 # DNS names are read only from complete sends to port 53 (btq-wi1xz): a sendto's address, or a sendmmsg
-# entry's own msg_name. A NULL address (a connected socket) is never read.
+# entry's own msg_name. A NULL address (a connected socket) is never read. A count is at most 6 digits, so a
+# hostile one can't reach int()'s digit limit; a longer one doesn't match and its send is dropped.
+COUNT = rb"(\d{1,6})"
 PORT_53 = re.compile(rb"\{sa_family=(?:AF_INET, sin_port|AF_INET6, sin6_port)=htons\(53\), [^{}]*\}")
-SENDTO = re.compile(rb"\bsendto\(\d+, (" + STRING + rb")(\.\.\.)?, (\d+), [^,]*, (NULL|\{[^{}]*\}), \d+")
+SENDTO = re.compile(rb"\bsendto\(\d+, (" + STRING + rb")(\.\.\.)?, " + COUNT
+                    + rb", [^,]*, (NULL|\{[^{}]*\}), \d+")
 SENDMMSG = re.compile(rb"\bsendmmsg\(\d+, \[")
-IOV = rb"\{iov_base=(" + STRING + rb")(\.\.\.)?, iov_len=(\d+)\}"
+IOV = rb"\{iov_base=(" + STRING + rb")(\.\.\.)?, iov_len=" + COUNT + rb"\}"
 IOVS = re.compile(IOV)
-ANY_IOV = rb"\{iov_base=" + STRING + rb"(?:\.\.\.)?, iov_len=\d+\}"
+ANY_IOV = rb"\{iov_base=" + STRING + rb"(?:\.\.\.)?, iov_len=\d{1,6}\}"
 MSG = re.compile(rb"\{msg_hdr=\{msg_name=(NULL|\{[^{}]*\}), msg_namelen=\d+, msg_iov=\[(" + ANY_IOV
-                 + rb"(?:, " + ANY_IOV + rb")*)\], msg_iovlen=\d+, msg_controllen=0, msg_flags=[^{}\[\],]*\}"
-                 + rb"(?:, msg_len=\d+)?\}")
+                 + rb"(?:, " + ANY_IOV + rb")*)\], msg_iovlen=" + COUNT
+                 + rb", msg_controllen=0, msg_flags=[^{}\[\],]*\}(?:, msg_len=\d+)?\}")
 LABEL = re.compile(rb"[A-Za-z0-9_-]{1,63}")
 GITHUB_API = b"\x03api\x06github\x03com"
 LOGIN_SCREEN = b"Sign in with ChatGPT"
@@ -116,7 +119,7 @@ def dns_payloads(line: bytes) -> tuple[list[bytes], int]:
             while (msg := MSG.match(line, i)) is not None:   # each entry on its own, iovecs joined in order
                 iovs = list(IOVS.finditer(msg.group(2)))
                 whole = all(v.group(2) is None and len(unhex(v.group(1))) == int(v.group(3)) for v in iovs)
-                if PORT_53.fullmatch(msg.group(1)) and whole:
+                if PORT_53.fullmatch(msg.group(1)) and whole and int(msg.group(3)) == len(iovs):
                     payloads.append(b"".join(unhex(v.group(1)) for v in iovs))
                 else:
                     dropped += 1
