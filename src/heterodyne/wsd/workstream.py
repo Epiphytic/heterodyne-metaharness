@@ -131,6 +131,22 @@ class NoHarness:
         pass
 
 
+class AskHooks(Protocol):
+    """What a pickup runs of part 2's AskBridge (`heterodyne.wsd.asks`)."""
+
+    def advance(self, now: int) -> None:
+        """After dispatch, before the sweep and the resume pass: retry owed notices and steer the
+        undelivered notes of the beads that run."""
+        ...
+
+
+class NoAsks:
+    """No ask bridge: the default outside production."""
+
+    def advance(self, now: int) -> None:
+        pass
+
+
 class SessionHandler(Protocol):
     def __call__(self, parker: "Parker", event: SessionEvent) -> None:
         """Handle one session event (plan 5i): idempotent by `event.event_id`. Raise OpConflict to wait
@@ -171,3 +187,4 @@ class Deps:
     session_handlers: Mapping[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
     inbox_attempts: int = 3         # wsd.inbox_attempts_before_human; assemble passes the setting
     notices: NoticeSink | None = None   # plan 5i part 2's client; None until it is wired
+    asks: AskHooks = field(default_factory=NoAsks)     # plan 5i part 2's AskBridge, advanced at each pickup

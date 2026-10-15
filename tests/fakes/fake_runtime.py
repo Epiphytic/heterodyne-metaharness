@@ -26,6 +26,7 @@ from heterodyne.wsd.runtime import (
     SessionEvent,
     Signal,
     Started,
+    SteerRefused,
     UnlandedView,
 )
 
@@ -156,6 +157,14 @@ class FakeRuntime:
         return EventBatch(tuple(found), ends, more)
 
     def steer(self, session_key: str, generation: int, text: str) -> None:
+        """A session this fake launched is steered only while it runs that generation, as the runtime's
+        record check refuses (SteerRefused); a key it never launched is recorded as given."""
+        if session_key in self.generations:
+            listed = self.listed.get(session_key)
+            if listed is None or listed.liveness is not Liveness.LIVE:
+                raise SteerRefused("the session is not running")
+            if self.generations[session_key] != generation:
+                raise SteerRefused("the session is running another generation")
         if self.steer_error is not None:
             error, self.steer_error = self.steer_error, None
             raise error
