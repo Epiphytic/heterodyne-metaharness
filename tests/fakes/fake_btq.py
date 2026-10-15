@@ -30,6 +30,7 @@ class FakeBead:
     id: str
     title: str = "a task"
     description: str = ""
+    issue_type: str = "task"
     status: str = "open"
     assignee: str | None = None
     labels: list[str] = field(default_factory=list)
@@ -110,7 +111,7 @@ class World:
 
     def json(self, bead: FakeBead, detail: bool) -> dict[str, Any]:
         out: dict[str, Any] = {"id": bead.id, "title": bead.title, "status": bead.status,
-                               "priority": 2, "issue_type": "task",
+                               "priority": 2, "issue_type": bead.issue_type,
                                "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}
         if bead.description:
             out["description"] = bead.description
@@ -312,9 +313,10 @@ class FakeQueue:
         raise AssertionError(f"fake bd does not support {verb}")
 
     def _create(self, args: list[str]) -> Any:
-        """`bd create`: the title positional or as `--title`; `--description`, `--type`, `--labels` (comma
-        separated) or repeated `--label`/`-l`, and `--metadata` (a JSON object); `--flag=value` or
-        `--flag value`. Answers with the created bead, as bd 1.1's `create --json` does."""
+        """`bd create`: the title positional or as `--title`; `--description`, `--type` (the bead's
+        `issue_type`), `--labels` (comma separated) or repeated `--label`/`-l`, and `--metadata` (a JSON
+        object); `--flag=value` or `--flag value`. Answers with the created bead, as bd 1.1's `create --json`
+        does."""
         values: dict[str, list[str]] = {}
         title: str | None = None
         i = 0
@@ -343,7 +345,7 @@ class FakeQueue:
             metadata.update(parsed)
         bead_id = f"btq-h{len(self.world.created) + 1}"
         bead = FakeBead(bead_id, title=title, description=values.get("description", [""])[-1],
-                        labels=labels, metadata=metadata)
+                        issue_type=values.get("type", ["task"])[-1], labels=labels, metadata=metadata)
         self.world.beads[bead_id] = bead
         self.world.created.append(bead_id)
         return self.world.json(bead, detail=True)
