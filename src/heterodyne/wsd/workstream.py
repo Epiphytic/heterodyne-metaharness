@@ -10,17 +10,22 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd import ids
 from heterodyne.wsd.accounts import Accounts
 from heterodyne.wsd.beads import Bead, BeadsAdapter, SessionRecord
+from heterodyne.wsd.brief import NoNotes, ResumeNotes
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.gate import ClaimGate
 from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.journal import Journal
-from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime
+from heterodyne.wsd.runtime import ActionReconciler, AgentRuntime, SessionEvent
 from heterodyne.wsd.usage import NoUsageReader, UsageReader
+
+if TYPE_CHECKING:
+    from heterodyne.wsd.park import Parker
 
 REPO_KEY = "repo"            # bead metadata naming one of the workstream's [repos]
 DEFAULT_REPO = "default"
@@ -97,6 +102,13 @@ def no_selection(_adapter: str) -> InstallPin | None:
     return None
 
 
+class SessionHandler(Protocol):
+    def __call__(self, parker: "Parker", event: SessionEvent) -> None:
+        """Handle one session event (plan 5i): idempotent by `event.event_id`. Raise OpConflict to wait
+        for the bead's open operation; anything else counts a failed attempt."""
+        ...
+
+
 @dataclass(frozen=True)
 class Deps:
     journal: Journal
@@ -112,3 +124,8 @@ class Deps:
     # The adapter's selected install, read afresh on each call (plan 4c T7): the guard pins it in each new
     # launch entry. ConfigError when the selection can't be read.
     selections: Callable[[str], InstallPin | None] = no_selection
+    # Plan 5i: resume notes for the brief (part 2's AskBridge), and the handlers of session events by kind
+    # (parts 2 and 3). The ws-request ops wsd accepts are the handlers' kinds.
+    notes: ResumeNotes = field(default_factory=NoNotes)
+    session_handlers: Mapping[str, SessionHandler] = field(default_factory=dict[str, SessionHandler])
+    inbox_attempts: int = 3         # wsd.inbox_attempts_before_human; assemble passes the setting

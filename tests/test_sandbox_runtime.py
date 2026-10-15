@@ -2620,3 +2620,84 @@ def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,
         rig.runtime.steer(spec.session_key, 1, "hello")
     rig.runtime.steer(spec.session_key, 1, "hello")     # nothing reached the pane: the boundary holds
     assert calls == ["hello", "hello"]
+
+
+# --- plan 5i T4: the brief -----------------------------------------------------------------------
+def test_the_brief_is_pasted_after_the_probe_turn_and_confirmed(rig: RuntimeRig) -> None:
+    spec = replace(launch_spec(rig, "p-one"), brief="Your task is btq-1.")
+    rig.runtime.launch(spec)
+    pane = record(rig, spec.session_key).tmux_session
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2       # the probe, then the brief
+    wait_for(lambda: "echo: Your task is btq-1." in rig.tmux.capture(pane, 50))
+
+
+def paste_after_probe(tmux: Any, after: Callable[[Callable[[str, str], None], str, str], None]
+                      ) -> Callable[[str, str], None]:
+    """A paste that delivers the self-test's probe (the first paste) and hands each later one to `after`,
+    with the real paste."""
+    real, pasted = tmux.paste, []
+
+    def paste(name: str, text: str) -> None:
+        pasted.append(text)
+        if len(pasted) == 1:
+            real(name, text)
+        else:
+            after(real, name, text)
+
+    return paste
+
+
+def test_a_brief_the_agent_never_takes_fails_the_launch(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_mod, "BRIEF_SECONDS", 0.5)
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste",
+                        paste_after_probe(rig.runtime.c.tmux, lambda _real, _name, _text: None))
+    with pytest.raises(LaunchFailed, match="did not take its brief"):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="hello"))
+
+
+def test_a_brief_that_cannot_be_pasted_fails_the_launch(rig: RuntimeRig,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    def failed(_real: Callable[[str, str], None], _name: str, _text: str) -> None:
+        raise TmuxError("tmux paste failed (OSError)")
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, failed))
+    with pytest.raises(LaunchFailed, match="brief could not be pasted"):
+        rig.runtime.launch(replace(launch_spec(rig, "p-one"), brief="hello"))
+
+
+def test_an_uncertain_brief_paste_is_settled_by_the_prompt_count(rig: RuntimeRig,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    def uncertain(real: Callable[[str, str], None], name: str, text: str) -> None:
+        real(name, text)
+        raise TmuxPasteUncertain("maybe")            # it landed; the prompt count says so
+
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", paste_after_probe(rig.runtime.c.tmux, uncertain))
+    spec = replace(launch_spec(rig, "p-one"), brief="hello")
+    rig.runtime.launch(spec)
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+def test_no_brief_pastes_nothing(rig: RuntimeRig) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 1
+
+
+@pytest.mark.parametrize("profile", ["p-one", "p-two"])
+def test_a_multi_line_brief_arrives_as_one_prompt(rig: RuntimeRig, profile: str) -> None:
+    # D5: a CLI that asks for bracketed paste gets the whole brief as one prompt, newlines and all.
+    rig.backend.env_extra["HZ_FAKE_BRACKETED"] = "1"
+    text = "You are working on bead btq-1: Blue widget\n\nMake the widget blue.\n\nHow to work:\n- commit"
+    spec = replace(launch_spec(rig, profile), brief=text)
+    rig.runtime.launch(spec)
+    prompts = [row["payload"]["prompt"] for row in spool(rig, spec.session_key)
+               if row["payload"].get("hook_event_name") == "UserPromptSubmit"]
+    assert prompts[1:] == [text]                   # the probe's prompt, then exactly one: the brief
+    assert rig.runtime.servers[spec.session_key].turns().prompts == 2
+
+
+def spool(rig: RuntimeRig, key: str) -> list[dict[str, Any]]:
+    """The session server's spool of hook payloads (`SessionLayout.events`)."""
+    path = rig.runtime.layout(key).events(1)
+    return [json.loads(line) for line in path.read_text().splitlines()]

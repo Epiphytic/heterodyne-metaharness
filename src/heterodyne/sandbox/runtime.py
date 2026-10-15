@@ -88,6 +88,7 @@ TRUST_SECONDS = 90
 SERVER_SECONDS = 20
 POLL_SECONDS = 0.1
 STEER_MAX = 16384       # UTF-8 bytes of one steer (plan 5i)
+BRIEF_SECONDS = 60.0    # the probe turn's end, then the brief's prompt (plan 5i T4)
 TMUX_ERRORS = (TmuxError, OSError, subprocess.TimeoutExpired)
 SHIM_SOURCE = Path(shim.__file__)
 WIP_FAILED = "the lifetime WIP commit failed; it is retried before the next launch"
@@ -719,9 +720,26 @@ class SandboxRuntime:
         if now >= rec.deadline - c.settings.stop_margin_seconds:
             raise _StepFailed("the launch outlasted its login's lifetime window; "
                               "refresh the login on the host")
+        if spec.brief:
+            self._brief(server, rec, spec.brief)
         rec = self._phase(layout, rec, phase=Phase.RUNNING, ran=True, native_id=native, started_at=now,
                           error="")
         return Started(rec.tmux_session, pane, pid, native)
+
+    def _brief(self, server: SessionServer, rec: SessionRecord, text: str) -> None:
+        """D5: the brief is pasted once the self-test's probe turn has ended, and is confirmed by the next
+        UserPromptSubmit."""
+        if not self._until(lambda: server.turns().idle, BRIEF_SECONDS):
+            raise _StepFailed("the agent's first turn did not end")
+        before = server.turns().prompts
+        try:
+            self.c.tmux.paste(rec.tmux_session, text)
+        except TmuxPasteUncertain:
+            pass                        # confirmed or not by the prompt count below
+        except TmuxError:
+            raise _StepFailed("the brief could not be pasted") from None
+        if not self._until(lambda: server.turns().prompts > before, BRIEF_SECONDS):
+            raise _StepFailed("the agent did not take its brief")
 
     def _phase(self, layout: SessionLayout, rec: SessionRecord, **changes: Any) -> SessionRecord:
         rec = msgspec.structs.replace(rec, **changes)
