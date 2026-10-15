@@ -18,10 +18,11 @@ from heterodyne.wsd import gitwip
 from heterodyne.wsd.beads import NEEDS_HUMAN
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.recovery import recover
-from heterodyne.wsd.runtime import Liveness, RuntimeUnavailable
+from heterodyne.wsd.runtime import Liveness, RuntimeUnavailable, SessionEvent
 from heterodyne.wsd.scheduler import Outcome, Scheduler
+from heterodyne.wsd.session_events import SURFACE, dispatch, ingest
 from heterodyne.wsd.states import BeadState, Reason
-from heterodyne.wsd.workstream import Limits
+from heterodyne.wsd.workstream import Limits, SessionHandler
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None or shutil.which("setsid") is None,
                                 reason="tmux and setsid are needed")
@@ -349,3 +350,66 @@ def test_a_credential_named_leftover_is_journaled_redacted(both: Both) -> None:
     rig.pickup()                           # the notice is drained and journaled
     [event] = [e for e in rig.journal.events_since(0) if e.kind == "exec_dir_cleared"]
     assert secret not in event.detail and json.loads(event.detail)["files"] == 1
+
+
+# --- plan 5i part 1 integration: wsd's ingest against the real runtime and EventLog ---
+
+class Seen:
+    """A stop handler that records the IDs it was given."""
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+
+    def __call__(self, parker: Parker, event: SessionEvent) -> None:
+        del parker
+        self.ids.append(event.event_id)
+
+
+def _with_handlers(both: Both, handlers: dict[str, SessionHandler]) -> None:
+    rig = both.rig
+    rig.deps = replace(rig.deps, session_handlers=handlers)
+    rig.parker = Parker(rig.ws, rig.deps)
+    rig.sched = Scheduler(rig.ws, rig.deps, rig.parker)
+
+
+def test_a_briefed_stop_reaches_its_handler_through_a_pickup(both: Both) -> None:
+    seen = Seen()
+    _with_handlers(both, {"stop": seen})
+    rig = both.rig
+    rig.world.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    key = rig.key("btq-1")
+    wait_for(lambda: both.rt.runtime.logs[key].last >= 1)      # the brief's turn ended
+    rig.pickup()
+    assert seen.ids == [f"{key}:g1:e1"]
+    assert rig.journal.session_cursors(WS) == {key: (1, 1)}
+    rows = rig.journal.db.execute("SELECT status FROM inbox WHERE surface = ?", (SURFACE,)).fetchall()
+    assert [r[0] for r in rows] == ["committed"]
+
+
+def test_a_missing_run_in_an_ended_generation_is_one_damaged_row_and_later_events_run(
+        both: Both) -> None:
+    seen = Seen()
+    _with_handlers(both, {"stop": seen})
+    rig, rt = both.rig, both.rt
+    rig.world.add("btq-1")
+    assert rig.pickup() is Outcome.STARTED
+    key = rig.key("btq-1")
+    lg = rt.runtime.logs[key]
+    wait_for(lambda: lg.last >= 1)
+    rt.runtime.stop(key)                                     # generation 1 ends: read from disk now
+    row = json.loads(lg.path.read_text().splitlines()[0])
+    row.update(n=5, turn=2)                                  # e2..e4 lost: a missing run
+    with lg.path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    got = rt.runtime.session_events(WS, {}, 1024)
+    assert [(e.seq, e.kind) for e in got.events] == [(1, "stop"), (4, "damaged"), (5, "stop")]
+    assert got.ends == {(key, 1): 5}
+    ingest(rig.journal, rt.runtime, WS)
+    dispatch(rig.parker, rig.deps.session_handlers, 3)
+    rows = rig.journal.db.execute("SELECT event_id, status FROM inbox WHERE surface = ? ORDER BY seq",
+                                  (SURFACE,)).fetchall()
+    assert [(r[0].rsplit(":", 1)[1], r[1]) for r in rows] == [
+        ("e1", "committed"), ("e4", "needs_human"), ("e5", "committed")]
+    assert seen.ids == [f"{key}:g1:e1", f"{key}:g1:e5"]
+    assert rig.journal.session_cursors(WS) == {key: (2, 0)}
