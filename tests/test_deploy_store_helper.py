@@ -471,7 +471,8 @@ def test_the_pinned_uninstall_runs_only_the_approved_uninstaller(host: Host, tmp
         (host.repo / "deploy" / "uninstall.sh").write_text(f"#!/bin/bash\ntouch {marker}\n")
     out = pinned("uninstall-pinned", host, tmp_path, {
         "<uninstall.sh sum>": sum_of(host.sums, "tree/deploy/uninstall.sh")},
-        {"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_LOG": str(log), "STUB_FAIL_ON": NO_PROCESS})
+        {"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_LOG": str(log), "STUB_FAIL_ON": NO_PROCESS,
+         "HZ_INSTALL_TEST": "1"}, extra=rollback_flags(tmp_path))
     boot = f"rm -f {tmp_path}/boot."    # the block's own trap removing the copy
     calls = [c for c in log.read_text().splitlines() if not c.startswith(boot)]
     if changed:
@@ -864,6 +865,11 @@ exit 0
 """
 ROLLBACK_TOOLS = ("systemctl", "pgrep", "rm", "rmdir", "userdel")
 NO_PROCESS = "pgrep "      # pgrep exits 1: nothing runs as the store owner
+# root, as far as `id -u` is concerned, and `runuser -u USER -- CMD...` running CMD as this user; not logged
+QUIET_STUBS = {
+    "id": '[[ $* == -u ]] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n',
+    "runuser": '[[ $1 == -u && $3 == -- ]] || exit 99\nshift 3\nexec "$@"\n',
+}
 
 
 def rollback_stubs(tmp_path: Path, fail_on: str) -> tuple[Path, Path]:
@@ -872,18 +878,29 @@ def rollback_stubs(tmp_path: Path, fail_on: str) -> tuple[Path, Path]:
     for tool in ROLLBACK_TOOLS:
         (stubs / tool).write_text(STUB)
         (stubs / tool).chmod(0o755)
+    for tool, body in QUIET_STUBS.items():
+        (stubs / tool).write_text(f"#!/bin/bash\n{body}")
+        (stubs / tool).chmod(0o755)
+    (tmp_path / "root").mkdir(exist_ok=True)
     log = tmp_path / "calls.log"
     log.write_text("")
     return stubs, log
 
 
+def rollback_flags(tmp_path: Path) -> tuple[str, ...]:
+    """An empty fake root, so that the platform stage finds nothing installed."""
+    return ("--prefix", str(tmp_path / "root"), "--service-user", ME)
+
+
 def rollback(tmp_path: Path, fail_on: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """uninstall.sh with every host command a stand-in that logs its call and fails as told."""
+    """uninstall.sh with every host command a stand-in that logs its call (host paths as the host's) and
+    fails as told."""
     stubs, log = rollback_stubs(tmp_path, fail_on)
-    out = subprocess.run(["bash", str(UNINSTALL)], capture_output=True, text=True, timeout=60, check=False,
+    out = subprocess.run(["bash", str(UNINSTALL), *rollback_flags(tmp_path)], capture_output=True, text=True,
+                         timeout=60, check=False,
                          env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "STUB_LOG": str(log),
-                              "STUB_FAIL_ON": fail_on})
-    return out, log.read_text().splitlines()
+                              "STUB_FAIL_ON": fail_on, "HZ_INSTALL_TEST": "1"})
+    return out, log.read_text().replace(str(tmp_path / "root"), "").splitlines()
 
 
 def test_the_rollback_stops_every_helper_then_removes_and_ends_with_the_owner(tmp_path: Path) -> None:
@@ -913,7 +930,8 @@ def test_the_rollback_removes_nothing_while_a_helper_may_run(tmp_path: Path, fai
 
 
 def test_the_rollback_keeps_a_store_that_is_not_empty_and_its_owner(tmp_path: Path) -> None:
-    out, calls = rollback(tmp_path, f"{NO_PROCESS};rmdir /var/lib/heterodyne/harnesses")
+    store = tmp_path / "root" / "var/lib/heterodyne/harnesses"     # the fake root's
+    out, calls = rollback(tmp_path, f"{NO_PROCESS};rmdir {store}")
     assert out.returncode != 0
     assert calls[-1] == "rmdir /var/lib/heterodyne/harnesses /var/lib/heterodyne"
     assert "userdel heterodyne-store" not in calls

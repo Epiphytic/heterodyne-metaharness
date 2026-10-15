@@ -484,3 +484,11 @@ def test_restore_refuses_without_a_verified_backup(p: Paths) -> None:
               str(p.backups))
     assert out.returncode == 1 and "no verified backup" in out.stderr
     assert p.file.read_text() == p.render.read_text()
+
+
+def test_classify_compares_the_fragment_with_the_unit_dir_systemd_names(p: Paths) -> None:
+    adopt_through_created(p)
+    out = run("classify", "--record", str(p.record), "--unit-dir", str(p.units), "--backup-dir",
+              str(p.backups), "--loaded-unit-dir", "/srv/u/.config/systemd/user",
+              stdin=blocks(admind=("loaded", "active", f"/srv/u/.config/systemd/user/{U}")))
+    assert (out.returncode, out.stdout.splitlines()[1]) == (0, f"{U} managed")

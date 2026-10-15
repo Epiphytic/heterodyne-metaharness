@@ -115,7 +115,7 @@ exec bash -c "$4"
     "systemctl": r"""if [[ $1 == --user ]]; then shift; exec "$S/user-systemctl" "$@"; fi
 case $1 in
     daemon-reload) [[ -f $S/reload-no-effect ]] || echo no >"$S/need-reload" ;;
-    enable) ;;
+    enable|disable|stop|list-units) ;;      # list-units: no helper instance left (the uninstall)
     is-active) read -r state <"$S/active"; echo "$state"; [[ $state == active ]] ;;
     start|restart)
         echo active >"$S/active"
@@ -473,6 +473,38 @@ class Host:
             self.clear_calls()
         return HAND_MADE.encode()
 
+    def make_ambiguous(self, case: str) -> None:
+        """After an install (adopting a hand-made admind for `bad-backup`), the state the uninstall can't
+        decide on (design btq-v7sgt D6), at admind's unit."""
+        if case == "bad-backup":
+            self.hand_made_admind()
+        out = installer(self, *(["--adopt"] if case == "bad-backup" else []))
+        assert out.returncode == 0, out.stdout + out.stderr
+        f = self.unit_file(ADMIND)
+        record = self.install_dir() / "record.json"
+        rec = self.record()
+        if case == "marker-no-entry":
+            del rec["units"][ADMIND]
+        elif case == "entry-no-marker":
+            f.write_text(HAND_MADE)
+        elif case == "writing":
+            rec["units"][ADMIND]["state"] = "writing"
+        elif case == "malformed-record":
+            record.write_text("{")
+            return
+        elif case == "symlink":
+            (self.home() / "admind.service").write_bytes(f.read_bytes())
+            f.unlink()
+            f.symlink_to(self.home() / "admind.service")
+        elif case == "bad-backup":
+            [b] = self.backups()
+            b.write_text("changed\n")
+        elif case == "loaded-no-file":
+            f.unlink()
+        else:
+            raise AssertionError(case)
+        record.write_text(json.dumps(rec))
+
     def selftest_unit(self) -> None:
         f = self.unit_file("heterodyne-admind-selftest.service")
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -632,13 +664,17 @@ def readme_block(name: str) -> str:
 BOOT = "/run/hz-install-boot.XXXXXX"
 
 
-def pinned(name: str, host: Host, tmp_path: Path, values: dict[str, str],
-           env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def pinned(name: str, host: Host, tmp_path: Path, values: dict[str, str], env: dict[str, str],
+           extra: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     """The README's pinned block `name`, as the operator pastes it with the approval's values: `sudo`
-    dropped, the root-only copy under tmp, and the checkout's real path where it is read."""
+    dropped, the root-only copy under tmp, the checkout's real path where it is read, and `extra` appended
+    after the script, as the new flags are (design btq-v7sgt D7)."""
     text = readme_block(name)
     assert text.startswith("sudo bash -euo pipefail -c '")
     text = text.removeprefix("sudo ")
+    if extra:
+        assert text.endswith("'\n") and not any(set(a) & set(" '\"\\$") for a in extra)
+        text = text.removesuffix("'\n") + " " + " ".join(extra) + "'\n"
     for placeholder, value in {BOOT: str(tmp_path / "boot.XXXXXX"), "cat <checkout>/": f"cat {host.repo}/",
                                **values}.items():
         assert placeholder in text, placeholder

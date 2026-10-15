@@ -3,6 +3,8 @@ and uninstall. Offline and unprivileged; every host command is a shim that logs 
 
 import base64
 import hashlib
+import os
+import shlex
 import shutil
 import subprocess
 import zipfile
@@ -12,12 +14,15 @@ import pytest
 from deploy_host import (
     ADMIND,
     FEATURES_OFF,
+    ME,
     REPO,
+    SHIM_HEAD,
     WSD,
     Host,
     git_show,
     hook,
     host_fixture,  # noqa: F401  (the `host` fixture)
+    host_path,
     install_refusal,
     installer,
     summary,
@@ -575,3 +580,119 @@ def test_a_dry_run_after_an_install_reports_a_drift_and_changes_nothing(host: Ho
     assert summary(out)["services"] == "would change"
     assert f"would: restart {ADMIND}" in out.stdout.splitlines()
     assert host.home_snapshot() == snap and started(host) == []
+
+
+# --- uninstall (D6) ---
+
+# The root steps' commands, logged and doing nothing (pgrep: nothing runs as the store owner).
+ROOT_TOOLS = {"rm": "", "rmdir": "", "userdel": "", "pgrep": "exit 1\n"}
+
+
+def uninstaller(host: Host, *args: str) -> subprocess.CompletedProcess[str]:
+    tools = host.shims / "root-tools"
+    if not tools.exists():
+        tools.mkdir()
+        for name, body in ROOT_TOOLS.items():
+            (tools / name).write_text(SHIM_HEAD.replace("@SHIMS@", shlex.quote(str(host.shims))) + body)
+            (tools / name).chmod(0o755)
+    argv = ["bash", str(host.repo / "deploy" / "uninstall.sh"), "--prefix", str(host.root),
+            "--service-user", ME, *args]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False,
+                          env={**os.environ, "PATH": f"{tools}:{host_path(host)}", "HZ_INSTALL_TEST": "1"})
+
+
+def root_steps(host: Host) -> list[str]:
+    return [c for c in host.calls() if c.startswith(("systemctl disable --now heterodyne-store-helper",
+                                                     "rm ", "rmdir ", "userdel "))]
+
+
+def test_managed_units_go_wsd_first_then_one_reload_then_the_root_steps(host: Host) -> None:
+    assert installer(host).returncode == 0
+    host.clear_calls()
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c.split()[1:] for c in user_calls(host, "stop")] == [["stop", WSD], ["stop", ADMIND]]
+    assert [c.split()[1:] for c in user_calls(host, "disable")] == [["disable", WSD], ["disable", ADMIND]]
+    calls = host.calls()
+    assert user_calls(host, "daemon-reload") == ["user-systemctl daemon-reload"]
+    assert calls.index("user-systemctl daemon-reload") < calls.index(root_steps(host)[0])
+    assert root_steps(host)[-1] == "userdel heterodyne-store"
+    assert not host.unit_file(ADMIND).exists() and not host.unit_file(WSD).exists()
+    assert host.record()["units"] == {}
+    assert release_dir(host).exists() and f"release: {host.commit} (kept)" in out.stdout.splitlines()
+    never_touched_the_manager(host)
+
+
+def test_a_second_uninstall_finds_nothing_to_remove(host: Host) -> None:
+    assert installer(host).returncode == 0
+    assert uninstaller(host).returncode == 0
+    host.clear_calls()
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert user_calls(host, "stop", "disable", "daemon-reload") == []
+
+
+@pytest.mark.parametrize("case", ["marker-no-entry", "entry-no-marker", "writing", "malformed-record",
+                                  "symlink", "bad-backup", "loaded-no-file"])
+def test_ambiguous_state_refuses_with_nothing_touched(host: Host, case: str) -> None:
+    host.make_ambiguous(case)
+    before = host.home_snapshot()
+    host.clear_calls()
+    out = uninstaller(host, *(["--restore-adopted"] if case == "bad-backup" else []))
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert out.stderr.splitlines()[-1].startswith("refused: ")
+    if case != "malformed-record":      # that one names no release, so nothing is classified
+        assert out.stderr.startswith(f"{ADMIND}: ambiguous: ")
+    assert user_calls(host, "stop", "disable", "daemon-reload") == [] and root_steps(host) == []
+    assert host.home_snapshot() == before
+
+
+def test_a_not_managed_hand_made_unit_is_left_alone(host: Host) -> None:
+    old = host.hand_made_admind()
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.unit_file(ADMIND).read_bytes() == old
+    assert f"{ADMIND}: not managed by the installer; left in place" in out.stdout.splitlines()
+    assert user_calls(host, "stop", "disable") == []
+
+
+def test_restore_adopted_puts_the_backup_back_and_does_not_start_it(host: Host) -> None:
+    old = host.hand_made_admind()
+    assert installer(host, "--adopt").returncode == 0
+    host.clear_calls()
+    out = uninstaller(host, "--restore-adopted")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.unit_file(ADMIND).read_bytes() == old and not host.unit_file(WSD).exists()
+    assert not any(ADMIND in c for c in user_calls(host, "enable", "start", "restart"))
+
+
+def test_without_restore_adopted_an_adopted_unit_is_removed(host: Host) -> None:
+    host.hand_made_admind()
+    assert installer(host, "--adopt").returncode == 0
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert not host.unit_file(ADMIND).exists() and len(host.backups()) == 1
+
+
+def test_a_failing_stop_stops_the_uninstall_before_the_root_steps(host: Host) -> None:
+    assert installer(host).returncode == 0
+    host.put("fail", f"user-systemctl stop {WSD}\n")
+    host.clear_calls()
+    out = uninstaller(host)
+    assert out.returncode == 1 and root_steps(host) == []
+    assert host.unit_file(ADMIND).exists() and host.unit_file(WSD).exists()
+
+
+def test_nothing_installed_skips_the_user_stage(host: Host) -> None:
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "platform: nothing installed" in out.stdout.splitlines()
+    assert [c for c in host.calls() if c.startswith("user-systemctl ")] == []
+    assert root_steps(host)[0] == "systemctl disable --now heterodyne-store-helper.socket"
+
+
+def test_the_uninstall_prefix_is_for_the_tests_only(host: Host) -> None:
+    out = subprocess.run(["bash", str(host.repo / "deploy" / "uninstall.sh"), "--prefix", str(host.root)],
+                         capture_output=True, text=True, timeout=60, check=False,
+                         env={k: v for k, v in os.environ.items() if k != "HZ_INSTALL_TEST"})
+    assert (out.returncode, out.stderr) == (1, "refused: --prefix is for the tests only\n")

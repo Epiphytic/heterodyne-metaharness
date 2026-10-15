@@ -296,7 +296,9 @@ def _blocks(show_text: str) -> dict[str, dict[str, str]]:
 
 
 def classify(rec: dict, unit_dir: Path, backups: Path, show_text: str,
-             restore: bool) -> list[tuple[str, str, str]]:
+             restore: bool, loaded_dir: Path | None = None) -> list[tuple[str, str, str]]:
+    """Each managed unit's kind, wsd first. `loaded_dir` is the unit directory as systemd names it in
+    FragmentPath (the tests' prefix aside, `unit_dir`)."""
     shown = _blocks(show_text)
     rows = []
     for unit in reversed(MANAGED):     # wsd first: uninstall stops it before admind
@@ -315,7 +317,7 @@ def classify(rec: dict, unit_dir: Path, backups: Path, show_text: str,
         elif kind == "hand-made" and e is None:
             rows.append((unit, "not-managed", ""))
         elif kind == "marker" and e is not None and e["state"] == "written":
-            if props.get("FragmentPath") != str(file):
+            if props.get("FragmentPath") != str((loaded_dir or unit_dir) / unit):
                 rows.append((unit, "ambiguous", "systemd loads it from elsewhere"))
             elif restore and e["origin"] == "adopted" and not _backup_ok(e, backups):
                 rows.append((unit, "ambiguous", "the recorded backup is missing or changed"))
@@ -372,6 +374,7 @@ def main(argv: list[str]) -> int:
     for a in ("--record", "--unit-dir", "--backup-dir"):
         c.add_argument(a, required=True)
     c.add_argument("--restore-adopted", action="store_true")
+    c.add_argument("--loaded-unit-dir")
     rs = sub.add_parser("restore")
     for a in ("--unit", "--record", "--unit-dir", "--backup-dir"):
         rs.add_argument(a, required=True)
@@ -413,7 +416,8 @@ def main(argv: list[str]) -> int:
                 print(line)
         elif args.cmd == "classify":
             rows = classify(load_record(Path(args.record)), Path(args.unit_dir), Path(args.backup_dir),
-                            sys.stdin.read(), args.restore_adopted)
+                            sys.stdin.read(), args.restore_adopted,
+                            Path(args.loaded_unit_dir) if args.loaded_unit_dir else None)
             for unit, kind, why in rows:
                 print(f"{unit} {kind} {why}".rstrip())
             return 1 if any(kind == "ambiguous" for _, kind, _ in rows) else 0
