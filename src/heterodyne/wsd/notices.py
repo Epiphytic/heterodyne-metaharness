@@ -78,6 +78,8 @@ class Notices:
         left alone."""
         if not 1 <= len(ref) <= REF_MAX:
             raise ValueError(f"a notice ref must be 1-{REF_MAX} characters")
+        if ref.startswith(WITHHELD):
+            raise ValueError(f"a notice ref may not start with {WITHHELD!r}: that prefix names replacements")
         now = at = self.clock()
         found = sensitive_kind(title) or sensitive_kind(body)
         if found is not None:
@@ -149,4 +151,5 @@ class Notices:
             self.cp("notice.outcome")
 
     def _next(self, now: int, attempts: int) -> int:
-        return now + math.ceil(min(self.backoff * 2 ** (attempts - 1), self.backoff_max))
+        # 2.0 ** 1023 is the largest finite power; past float range the product is inf, which the cap clamps.
+        return now + math.ceil(min(self.backoff * 2.0 ** min(attempts - 1, 1023), self.backoff_max))
