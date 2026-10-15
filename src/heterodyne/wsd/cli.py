@@ -20,8 +20,9 @@ recovery replays like any other.
 
 A version 1 journal (plan 3's) is upgraded in place before anything else uses it (`upgrade.run`, AU-3 §3).
 If the beads can't be read for it, the file is left untouched and `wsd run` exits 1: retrying is safe. A
-version 2 journal (AU-3's) gets plan 4c's install pin columns the same way (`upgrade.run_2_to_3`), and a
-version 3 one plan 4c T10's install tables (`upgrade.run_3_to_4`).
+version 2 journal (AU-3's) gets plan 4c's install pin columns the same way (`upgrade.run_2_to_3`), a
+version 3 one plan 4c T10's install tables (`upgrade.run_3_to_4`), and a version 4 one plan 5i part 2's
+ask bridge tables (`upgrade.run_4_to_5`).
 
 `wsctl harness` manages the installs (plan 4c T10). Its `remove` and `prune` take every workstream's
 operation lock (the schedulers' parker locks, in name order) before they check what is in use.
@@ -49,6 +50,7 @@ from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.journal import (
     V2_VERSION,
     V3_VERSION,
+    V4_VERSION,
     Journal,
     JournalBusy,
     JournalCorrupt,
@@ -140,7 +142,9 @@ def _open(s: WsdSettings, factory: btq.QueueFactory) -> Journal:
             if needs.version in seen:
                 raise JournalCorrupt("the journal upgrade did not land") from None
             seen.add(needs.version)
-            if needs.version == V3_VERSION:
+            if needs.version == V4_VERSION:
+                upgrade.run_4_to_5(s.journal)      # adds empty tables only
+            elif needs.version == V3_VERSION:
                 upgrade.run_3_to_4(s.journal)      # adds empty tables only
             elif needs.version == V2_VERSION:
                 upgrade.run_2_to_3(s.journal)      # adds columns only: no bead or account is read

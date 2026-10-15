@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from wsd_env import WS
 
-from heterodyne.wsd.journal import Journal, Refusal
+from heterodyne.wsd.journal import Journal, RefusedRequest
 from heterodyne.wsd.states import BeadState
 
 B = "btq-1"
@@ -127,7 +127,7 @@ def test_refusals_insert_is_idempotent_by_event_id(tmp_path: Path, j: Journal) -
     assert j.refusal_add(WS, B, "k:g1:e3", "k", 1, 2, "fixed text") is True
     assert j.refusal_add(WS, B, "k:g1:e3", "k", 1, 2, "fixed text") is False
     assert j.refusal_add(WS, B, "k:g1:e3", "k", 9, 9, "other") is False   # the first row stands
-    assert j.refusal("k:g1:e3") == Refusal(WS, B, "k", 1, 2, "fixed text")
+    assert j.refusal("k:g1:e3") == RefusedRequest(WS, B, "k", 1, 2, "fixed text")
     assert j.refusal("k:g1:e4") is None
     with pytest.raises(Crash), j.transaction():
         j.refusal_add(WS, B, "k:g1:e4", "k", 1, 3, "fixed text")
@@ -135,4 +135,4 @@ def test_refusals_insert_is_idempotent_by_event_id(tmp_path: Path, j: Journal) -
         raise Crash
     assert j.refusal("k:g1:e4") is None and j.notes(WS, B) == []
     j.close()
-    assert Journal(tmp_path / "wsd.db").refusal("k:g1:e3") == Refusal(WS, B, "k", 1, 2, "fixed text")
+    assert Journal(tmp_path / "wsd.db").refusal("k:g1:e3") == RefusedRequest(WS, B, "k", 1, 2, "fixed text")

@@ -1,5 +1,5 @@
-"""The journal upgrades: version 1 to 4 (AU-3 design §3, then plan 4c T7's columns and T10's tables), 2 to 3,
-and 3 to 4.
+"""The journal upgrades: version 1 to 5 (AU-3 design §3, then plan 4c T7's columns, T10's tables and plan 5i
+part 2's), 2 to 3, 3 to 4 and 4 to 5.
 
 `cli.run` calls `run` when `Journal()` raises JournalNeedsUpgrade, under the instance lock and before
 `assemble`. Three steps:
@@ -9,8 +9,8 @@ and 3 to 4.
 2. Decide, a pure function: `adopt` gives each legacy bead `adopted` or `held`, or no row for a bead proven
    never to have launched.
 3. Commit, one SQLite transaction on the v1 file: the v2 tables (one `execute` each, never `executescript`,
-   which would commit first), version 3's columns and version 4's tables, the adoption rows, the adopted
-   entries, the version.
+   which would commit first), version 3's columns and version 4's and 5's tables, the adoption rows, the
+   adopted entries, the version.
    Any exception rolls back, so a crash leaves version 1 intact; the `.v1.bak` copy taken first is for
    the operator only.
 
@@ -19,7 +19,8 @@ The facts are fixed here: an account configured later never un-adopts a session 
 `run_2_to_3` adds version 3's columns to AU-3's journal in one transaction the same way (a `.v2.bak`
 first). It reads no bead and no account: every existing entry was journaled before any install was
 pinned, so each keeps the empty pin the columns default to. `run_3_to_4` adds version 4's harness tables,
-empty, the same way (a `.v3.bak` first). `cli._open` runs them in turn until the journal opens.
+empty, the same way (a `.v3.bak` first), and `run_4_to_5` the ask bridge's tables (a `.v4.bak` first).
+`cli._open` runs them in turn until the journal opens.
 """
 
 import json
@@ -47,6 +48,8 @@ from heterodyne.wsd.journal import (
     V3_COLUMNS,
     V3_VERSION,
     V4_TABLES,
+    V4_VERSION,
+    V5_TABLES,
     Adoption,
     JournalCorrupt,
     backup_to,
@@ -54,6 +57,7 @@ from heterodyne.wsd.journal import (
     check_v1,
     check_v2,
     check_v3,
+    check_v4,
     launch_row,
     now,
 )
@@ -290,7 +294,7 @@ def _write(db: sqlite3.Connection, verdicts: Sequence[Verdict], at: str, cp: Che
     for stmt in V2_TABLES:
         db.execute(stmt)
         cp(f"upgrade.created.{stmt.split()[2]}")
-    for stmt in (*V3_COLUMNS, *V4_TABLES):
+    for stmt in (*V3_COLUMNS, *V4_TABLES, *V5_TABLES):
         db.execute(stmt)
     db.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", V2_META)
     for v in verdicts:
@@ -323,7 +327,7 @@ def run_2_to_3(path: Path, cp: Checkpoint = nothing) -> None:
     db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=rw", uri=True, isolation_level=None,
                          timeout=BUSY_TIMEOUT)
     try:
-        if check_v3(db) or check_current(db):
+        if check_v3(db) or check_v4(db) or check_current(db):
             return
         if not check_v2(db):
             raise JournalCorrupt("the journal is not version 2")
@@ -350,13 +354,13 @@ def run_2_to_3(path: Path, cp: Checkpoint = nothing) -> None:
 
 def run_3_to_4(path: Path, cp: Checkpoint = nothing) -> None:
     """Upgrade the version 3 journal at `path` in place: the harness tables, empty, in one transaction.
-    Already version 4 is a no-op; anything else that is not exactly version 3 is JournalCorrupt. Both are
-    decided before the backup is taken, so neither replaces it. Any exception rolls back. Reopen with
+    Already version 4 or later is a no-op; anything else that is not exactly version 3 is JournalCorrupt. Both
+    are decided before the backup is taken, so neither replaces it. Any exception rolls back. Reopen with
     `Journal(path)`."""
     db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=rw", uri=True, isolation_level=None,
                          timeout=BUSY_TIMEOUT)
     try:
-        if check_current(db):
+        if check_v4(db) or check_current(db):
             return
         if not check_v3(db):
             raise JournalCorrupt("the journal is not version 3")
@@ -368,10 +372,43 @@ def run_3_to_4(path: Path, cp: Checkpoint = nothing) -> None:
             for stmt in V4_TABLES:
                 db.execute(stmt)
                 cp(f"upgrade.v4.{stmt.split()[2]}")
+            db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (V4_VERSION,))
+            db.execute("INSERT INTO events (at, ws, bead, kind, detail) VALUES (?, '-', NULL, "
+                       "'journal_upgraded', ?)", (now(), f"version {V3_VERSION} to {V4_VERSION}"))
+            cp("upgrade.v4.inserted")
+            db.execute("COMMIT")
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
+    finally:
+        db.close()
+
+
+def run_4_to_5(path: Path, cp: Checkpoint = nothing) -> None:
+    """Upgrade the version 4 journal at `path` in place: the ask bridge's tables, empty, in one transaction
+    (plan 5i part 2). Already version 5 is a no-op; anything else that is not exactly version 4 is
+    JournalCorrupt. Both are decided before the backup is taken, so neither replaces it. Any exception rolls
+    back. Reopen with `Journal(path)`."""
+    db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=rw", uri=True, isolation_level=None,
+                         timeout=BUSY_TIMEOUT)
+    try:
+        if check_current(db):
+            return
+        if not check_v4(db):
+            raise JournalCorrupt("the journal is not version 4")
+        backup_to(db, path.with_name(f"{path.name}.v4.bak"))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if not check_v4(db):
+                raise JournalCorrupt("the journal changed during its upgrade")
+            for stmt in V5_TABLES:
+                db.execute(stmt)
+                cp(f"upgrade.v5.{stmt.split()[2]}")
             db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (SCHEMA_VERSION,))
             db.execute("INSERT INTO events (at, ws, bead, kind, detail) VALUES (?, '-', NULL, "
-                       "'journal_upgraded', ?)", (now(), f"version {V3_VERSION} to {SCHEMA_VERSION}"))
-            cp("upgrade.v4.inserted")
+                       "'journal_upgraded', ?)", (now(), f"version {V4_VERSION} to {SCHEMA_VERSION}"))
+            cp("upgrade.v5.inserted")
             db.execute("COMMIT")
         except BaseException:
             if db.in_transaction:

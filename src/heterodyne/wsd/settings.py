@@ -5,6 +5,10 @@
 unchanged, and anything not set falls back to btq's own `BTQ_*` environment and defaults. A workstream is
 a file `workstreams/<name>.toml` whose stem is a slug; its `[repos]` names its repositories (absolute
 paths, one of them `default`) and `roles.coder` its coder profile.
+
+`[wsd.relay]` is admind's interim relay as wsd uses it (plan 5i part 2): whether to use it, its `ask.sock`
+(by default admind's own, derived from the state directory as admind derives it), the question rounds and
+the hours an owed ask may take before the bead needs a human, and the notice retry's first backoff.
 """
 
 from collections.abc import Mapping
@@ -21,7 +25,14 @@ from heterodyne.wsd.headroom import UsageSettings
 from heterodyne.wsd.workstream import DEFAULT_REPO, Limits, WorkstreamSettings
 
 WSD_KEYS = frozenset({"backstop_seconds", "reconcile_seconds", "launch_failures_before_human",
-                      "park_attempts_before_human", "inbox_attempts_before_human", "coder_role"})
+                      "park_attempts_before_human", "inbox_attempts_before_human", "coder_role", "relay"})
+RELAY_KEYS = frozenset({"enabled", "ask_socket", "question_rounds_before_human", "owed_hours_before_human",
+                        "notice_backoff_seconds"})
+RELAY = "[wsd.relay]"
+ADMIND_STATE = "admind"         # admind's state directory under the host's, and its ask socket in it
+ASK_SOCKET = "ask.sock"
+OWED_HOURS_MAX = 720
+NOTICE_BACKOFF_MAX = 1800.0     # the notice retry's backoff doubles up to this
 BTQ_KEYS = frozenset({"btq", "config_dir", "repo", "dolt_host", "dolt_port", "dolt_database",
                       "tls_cert", "credentials"})
 BTQ_PATHS = ("config_dir", "repo", "tls_cert")
@@ -30,6 +41,15 @@ BEADS = "[integrations.beads]"
 JOURNAL = "wsd.db"
 INSTANCE_LOCK = "wsd.lock"
 CTL_SOCKET = "ctl.sock"
+
+
+@dataclass(frozen=True)
+class RelaySettings:
+    enabled: bool
+    ask_socket: Path
+    question_rounds_before_human: int
+    owed_hours_before_human: int
+    notice_backoff_seconds: float
 
 
 @dataclass(frozen=True)
@@ -44,6 +64,7 @@ class WsdSettings:
     accounts: Accounts | None = None     # the host's accounts: the journal upgrade's adapter facts (AU-3 §3)
     # The host's config directory, where `harnesses.toml` is (plan 4c T7). None: no install is selected.
     config_dir: Path | None = None
+    relay: RelaySettings | None = None   # None: no relay (`resolve` always sets it)
 
     @property
     def journal(self) -> Path:
@@ -90,6 +111,7 @@ class RestartView:
     btq_checkout: Path
     btq_locations: tuple[tuple[str, str], ...]
     workstreams: tuple[WorkstreamView, ...]
+    relay: RelaySettings | None = None
 
 
 def restart_view(s: WsdSettings) -> RestartView:
@@ -97,7 +119,7 @@ def restart_view(s: WsdSettings) -> RestartView:
                                    w.coder_role, w.coder_profile, tuple(sorted(w.profiles)), w.limits)
                     for w in sorted(s.workstreams, key=lambda w: w.name))
     return RestartView(s.state_dir, s.backstop_seconds, s.reconcile_seconds, s.inbox_attempts_before_human,
-                       s.btq_checkout, tuple(sorted(s.btq_locations.items())), streams)
+                       s.btq_checkout, tuple(sorted(s.btq_locations.items())), streams, s.relay)
 
 
 def restart_fields(running: RestartView, loaded: RestartView) -> list[str]:
@@ -147,7 +169,33 @@ def resolve(env: Mapping[str, str]) -> WsdSettings:
         btq_locations=_locations(btq, env),
         workstreams=streams,
         accounts=ConfiguredAccounts.from_config(host, env),
-        config_dir=paths.config_dir(env))
+        config_dir=paths.config_dir(env),
+        relay=_relay(table_at(wsd, "relay", "[wsd]"), env))
+
+
+def _relay(table: Mapping[str, Any], env: Mapping[str, str]) -> RelaySettings:
+    _only(table, RELAY_KEYS, RELAY)
+    enabled = table.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{RELAY} enabled must be true or false")
+    socket = table.get("ask_socket")
+    rounds = table.get("question_rounds_before_human")
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 100:
+        raise ConfigError(f"{RELAY} question_rounds_before_human must be an integer from 1 to 100")
+    hours = table.get("owed_hours_before_human")
+    if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= OWED_HOURS_MAX:
+        raise ConfigError(f"{RELAY} owed_hours_before_human must be an integer from 1 to {OWED_HOURS_MAX}")
+    backoff = table.get("notice_backoff_seconds")
+    if (isinstance(backoff, bool) or not isinstance(backoff, int | float)
+            or not 0 < backoff <= NOTICE_BACKOFF_MAX):
+        raise ConfigError(f"{RELAY} notice_backoff_seconds must be a number of seconds, more than 0 and at "
+                          f"most {NOTICE_BACKOFF_MAX:g}")
+    return RelaySettings(
+        enabled=enabled,
+        ask_socket=(paths.state_dir(env) / ADMIND_STATE / ASK_SOCKET if socket is None
+                    else _path(socket, env, f"{RELAY} ask_socket")),
+        question_rounds_before_human=rounds, owed_hours_before_human=hours,
+        notice_backoff_seconds=float(backoff))
 
 
 def _workstream(name: str, cfg: Config, coder_role: str, limits: Limits, usage: UsageSettings,

@@ -144,8 +144,14 @@ def with_relay(cfg: Path, text: str) -> None:
     write(cfg, "config.toml", (cfg / "config.toml").read_text() + f"[wsd.relay]\n{text}\n")
 
 
-def test_relay_settings_defaults_and_bounds(cfg: Path) -> None:
+def relay(cfg: Path) -> RelaySettings:
     r = resolve(env(cfg)).relay
+    assert r is not None
+    return r
+
+
+def test_relay_settings_defaults_and_bounds(cfg: Path) -> None:
+    r = relay(cfg)
     assert r == RelaySettings(enabled=True, ask_socket=paths.state_dir(env(cfg)) / "admind" / asks.ASK_SOCKET,
                               question_rounds_before_human=3, owed_hours_before_human=24,
                               notice_backoff_seconds=60.0)
@@ -157,7 +163,7 @@ def test_relay_settings_defaults_and_bounds(cfg: Path) -> None:
 
 def test_relay_ask_socket_expands_home(cfg: Path) -> None:
     with_relay(cfg, 'ask_socket = "~/s/ask.sock"')
-    assert resolve(env(cfg)).relay.ask_socket == cfg / "s" / "ask.sock"
+    assert relay(cfg).ask_socket == cfg / "s" / "ask.sock"
 
 
 @pytest.mark.parametrize(("text", "match"), [

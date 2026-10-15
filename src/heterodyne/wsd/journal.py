@@ -41,7 +41,8 @@ from heterodyne.wsd.headroom import Mark, UsageCache, Window, epoch
 from heterodyne.wsd.launches import LAUNCHED, SET_ONCE, LaunchEntry, Receipt
 from heterodyne.wsd.states import BeadState, Reason, WsState, check
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
+V4_VERSION = "4"
 V3_VERSION = "3"
 V2_VERSION = "2"
 V1_VERSION = "1"
@@ -149,7 +150,45 @@ V4_TABLES = (
     """CREATE TABLE harness_events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
     action TEXT NOT NULL, adapter TEXT NOT NULL, install TEXT NOT NULL, detail TEXT NOT NULL)""",
 )
-SCHEMA = V3_SCHEMA + "".join(f"{stmt};\n" for stmt in V4_TABLES)
+V4_SCHEMA = V3_SCHEMA + "".join(f"{stmt};\n" for stmt in V4_TABLES)
+# Version 5 (plan 5i part 2): the ask bridge's asks, notices, resume notes, question rounds, denied asks and
+# refused requests. `next_at` is epoch seconds; an answer is held locally, at most ANSWER_MAX characters.
+ASK_STATES = ("creating", "owed", "posted", "answered", "approved", "denied", "unverified", "ended",
+              "refused", "delivered", "released")
+NOTICE_STATES = ("owed", "sending", "posted", "uncertain", "refused", "withheld")
+NOTICE_KINDS = ("stuck", "waiting", "closed", "review")
+ANSWER_MAX = 16000
+STEER_ATTEMPTS = 3          # a note steered this often is left to the next resume brief
+
+
+def _among(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{v}'" for v in values)
+
+
+V5_TABLES = (
+    f"""CREATE TABLE asks (ref TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'approval')), child TEXT, ask_id TEXT, context_digest TEXT,
+    state TEXT NOT NULL CHECK (state IN ({_among(ASK_STATES)})), round INTEGER NOT NULL DEFAULT 0,
+    answer TEXT CHECK (length(answer) <= {ANSWER_MAX}), choice TEXT, why TEXT,
+    uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain IN (0, 1)), attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    f"""CREATE TABLE notices (ref TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ({_among(NOTICE_KINDS)})), title TEXT NOT NULL, body TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ({_among(NOTICE_STATES)})), notice_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER, why TEXT, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL)""",
+    """CREATE TABLE resume_notes (seq INTEGER PRIMARY KEY AUTOINCREMENT, ws TEXT NOT NULL, bead TEXT NOT NULL,
+    ref TEXT NOT NULL UNIQUE, text TEXT NOT NULL, delivered_at TEXT,
+    steer_attempts INTEGER NOT NULL DEFAULT 0 CHECK (steer_attempts >= 0))""",
+    """CREATE TABLE nudges (ws TEXT NOT NULL, bead TEXT NOT NULL, rounds INTEGER NOT NULL DEFAULT 0,
+    last_head TEXT, PRIMARY KEY (ws, bead))""",
+    """CREATE TABLE denied_asks (session_key TEXT NOT NULL, effect_digest TEXT NOT NULL,
+    PRIMARY KEY (session_key, effect_digest))""",
+    """CREATE TABLE refusals (event_id TEXT PRIMARY KEY, ws TEXT NOT NULL, bead TEXT NOT NULL,
+    session_key TEXT NOT NULL, generation INTEGER NOT NULL, turn INTEGER NOT NULL, text TEXT NOT NULL,
+    created_at TEXT NOT NULL)""",
+)
+SCHEMA = V4_SCHEMA + "".join(f"{stmt};\n" for stmt in V5_TABLES)
 BUSY_TIMEOUT = 5.0  # seconds a connection waits on another's lock before SQLITE_BUSY
 
 
@@ -162,8 +201,9 @@ class JournalCorrupt(Exception):
 
 
 class JournalNeedsUpgrade(Exception):
-    """The journal is an earlier version exactly: plan 3's (schema and version 1), for `upgrade.run`, or
-    AU-3's (version 2), for `upgrade.run_2_to_3`. Nothing was written; each upgrades in one transaction."""
+    """The journal is an earlier version exactly: plan 3's (schema and version 1), for `upgrade.run`; AU-3's
+    (version 2), for `upgrade.run_2_to_3`; plan 4c T7's (3) for `run_3_to_4`; or T10's (4) for `run_4_to_5`.
+    Nothing was written; each upgrades in one transaction."""
 
     def __init__(self, version: str) -> None:
         super().__init__(f"the journal is version {version}")
@@ -325,6 +365,18 @@ class HarnessInstall:
     failure: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class RefusedRequest:
+    """A refused request's fixed text and attribution (plan 5i part 2, part 1's D1). Its delivery is its
+    note's, `refused:<event_id>`."""
+    ws: str
+    bead: str
+    session_key: str
+    generation: int
+    turn: int
+    text: str
 
 
 @dataclass(frozen=True)
@@ -540,6 +592,7 @@ def _expected(schema: str) -> set[tuple[str, str, str, str]]:
 
 
 EXPECTED_SCHEMA = _expected(SCHEMA)
+EXPECTED_V4 = _expected(V4_SCHEMA)
 EXPECTED_V3 = _expected(V3_SCHEMA)
 EXPECTED_V2 = _expected(V2_SCHEMA)
 EXPECTED_V1 = _expected(V1_SCHEMA)
@@ -565,13 +618,18 @@ def check_v3(db: sqlite3.Connection) -> bool:
     return _schema(db) == EXPECTED_V3 and _version(db) == V3_VERSION
 
 
+def check_v4(db: sqlite3.Connection) -> bool:
+    """Whether the file is plan 4c T10's journal exactly: the version 4 schema and version 4."""
+    return _schema(db) == EXPECTED_V4 and _version(db) == V4_VERSION
+
+
 def check_current(db: sqlite3.Connection) -> bool:
     """Whether the file is this version's journal exactly: the current schema and version."""
     return _schema(db) == EXPECTED_SCHEMA and _version(db) == SCHEMA_VERSION
 
 
 def _check(db: sqlite3.Connection) -> None:
-    """Version 4 opens; version 1, 2 or 3, exactly, needs its upgrade; anything else is refused."""
+    """Version 5 opens; version 1, 2, 3 or 4, exactly, needs its upgrade; anything else is refused."""
     rows = db.execute("PRAGMA integrity_check").fetchall()
     if [tuple(r) for r in rows] != [("ok",)]:
         raise JournalCorrupt("integrity_check failed")
@@ -580,7 +638,8 @@ def _check(db: sqlite3.Connection) -> None:
         if _version(db) != SCHEMA_VERSION:
             raise JournalCorrupt("unknown schema version")
         return
-    older = ((EXPECTED_V3, V3_VERSION), (EXPECTED_V2, V2_VERSION), (EXPECTED_V1, V1_VERSION))
+    older = ((EXPECTED_V4, V4_VERSION), (EXPECTED_V3, V3_VERSION), (EXPECTED_V2, V2_VERSION),
+             (EXPECTED_V1, V1_VERSION))
     for expected, version in older:
         if schema == expected:
             if _version(db) != version:
@@ -1384,6 +1443,71 @@ class Journal:
         rows = self.db.execute("SELECT key FROM meta WHERE key GLOB ?", (f"{HARNESS_OPEN}*",)).fetchall()
         pairs = (str(r[0]).removeprefix(HARNESS_OPEN).split(":", 1) for r in rows)
         return {(p[0], p[1]) for p in pairs if len(p) == 2}
+
+    # --- resume notes and refusals (plan 5i part 2; part 3 adds notes too) ---
+
+    @_locked
+    def note_add(self, ws: str, bead: str, ref: str, text: str) -> bool:
+        """A note owed to the bead's agent, once per `ref` (delivered or not), inside the caller's
+        transaction. True only if it is new: a second add with the same ref keeps the first text."""
+        cur = self.db.execute("INSERT OR IGNORE INTO resume_notes (ws, bead, ref, text) VALUES (?, ?, ?, ?)",
+                              (ws, bead, ref, text))
+        return cur.rowcount == 1
+
+    @_locked
+    def notes(self, ws: str, bead: str) -> list[tuple[int, str]]:
+        """Every undelivered note of the bead as (seq, text), oldest first."""
+        rows = self.db.execute("SELECT seq, text FROM resume_notes WHERE ws = ? AND bead = ? "
+                               "AND delivered_at IS NULL ORDER BY seq", (ws, bead)).fetchall()
+        return [(int(cast(int, r[0])), str(r[1])) for r in rows]
+
+    @_locked
+    def notes_delivered(self, ws: str, bead: str, upto: int) -> int:
+        """Mark the bead's undelivered notes with `seq <= upto` delivered (a brief carried them); how many.
+        A note added after the brief was composed has a higher seq, so it stays undelivered."""
+        cur = self.db.execute("UPDATE resume_notes SET delivered_at = ? WHERE ws = ? AND bead = ? "
+                              "AND seq <= ? AND delivered_at IS NULL", (now(), ws, bead, upto))
+        return cur.rowcount
+
+    @_locked
+    def note_delivered(self, ws: str, bead: str, ref: str) -> bool:
+        """Mark one undelivered note of the bead delivered by its ref (a steer carried it)."""
+        cur = self.db.execute("UPDATE resume_notes SET delivered_at = ? WHERE ws = ? AND bead = ? "
+                              "AND ref = ? AND delivered_at IS NULL", (now(), ws, bead, ref))
+        return cur.rowcount == 1
+
+    @_locked
+    def steerable_notes(self, ws: str, bead: str, limit_bytes: int) -> list[tuple[int, str, str]]:
+        """The bead's undelivered notes a steer may carry, as (seq, ref, text), oldest first: fewer than
+        STEER_ATTEMPTS attempts so far, and at most `limit_bytes` of UTF-8."""
+        rows = self.db.execute("SELECT seq, ref, text FROM resume_notes WHERE ws = ? AND bead = ? "
+                               "AND delivered_at IS NULL AND steer_attempts < ? "
+                               "AND length(CAST(text AS BLOB)) <= ? ORDER BY seq",
+                               (ws, bead, STEER_ATTEMPTS, limit_bytes)).fetchall()
+        return [(int(cast(int, r[0])), str(r[1]), str(r[2])) for r in rows]
+
+    @_locked
+    def note_steer_attempt(self, refs: Iterable[str], delta: int) -> None:
+        """Count a steer attempt on each note (`delta` 1), or undo one (-1); never below 0."""
+        self.db.executemany("UPDATE resume_notes SET steer_attempts = max(0, steer_attempts + ?) "
+                            "WHERE ref = ?", [(delta, ref) for ref in refs])
+
+    @_locked
+    def refusal_add(self, ws: str, bead: str, event_id: str, session_key: str, generation: int, turn: int,
+                    text: str) -> bool:
+        """Record a refused request once per event, inside the caller's transaction; True only if new."""
+        cur = self.db.execute("INSERT OR IGNORE INTO refusals (event_id, ws, bead, session_key, generation, "
+                              "turn, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (event_id, ws, bead, session_key, generation, turn, text, now()))
+        return cur.rowcount == 1
+
+    @_locked
+    def refusal(self, event_id: str) -> RefusedRequest | None:
+        row = self.db.execute("SELECT ws, bead, session_key, generation, turn, text FROM refusals "
+                              "WHERE event_id = ?", (event_id,)).fetchone()
+        if row is None:
+            return None
+        return RefusedRequest(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), str(row[5]))
 
     @_locked
     def launches_naming(self, install: str) -> list[LaunchEntry]:
