@@ -400,6 +400,50 @@ def _notice(r: tuple[object, ...]) -> NoticeRow:
 
 
 @dataclass(frozen=True)
+class AskRow:
+    """One ask by its `ref` (plan 5i part 2 T5): `child` is the question or approval bead, pinned once
+    (`ask_pin`); `uncertain` is 1 while a post's outcome is unknown; `next_at` (epoch seconds) is when an
+    `owed` row is due. `created_at` and `updated_at` are ISO times."""
+    ref: str
+    ws: str
+    bead: str
+    kind: str
+    child: str | None
+    ask_id: str | None
+    context_digest: str | None
+    state: str
+    round: int
+    answer: str | None
+    choice: str | None
+    why: str | None
+    uncertain: int
+    attempts: int
+    next_at: int | None
+    created_at: str
+    updated_at: str
+
+
+_ASK_COLS = ", ".join(f.name for f in dataclasses.fields(AskRow))
+_ASK_SET = frozenset({"ask_id", "state", "why", "uncertain", "attempts", "next_at"})
+
+
+def _ask(r: tuple[object, ...]) -> AskRow:
+    return AskRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), _opt(r[4]), _opt(r[5]), _opt(r[6]), str(r[7]),
+                  int(cast(int, r[8])), _opt(r[9]), _opt(r[10]), _opt(r[11]), int(cast(int, r[12])),
+                  int(cast(int, r[13])), None if r[14] is None else int(cast(int, r[14])), str(r[15]),
+                  str(r[16]))
+
+
+class AskPinRefused(Exception):
+    """`Journal.ask_pin` refused: one of the fixed PIN_* texts, never a ref or a bead."""
+
+
+PIN_NO_ASK = "no asks row holds this ref in this workstream; only a question's ref has a pin store"
+PIN_TAKEN = "the ref is pinned to another bead"
+PIN_IN_TRANSACTION = "a pin commits on its own: never inside an open journal transaction"
+
+
+@dataclass(frozen=True)
 class RefusedRequest:
     """A refused request's fixed text and attribution (plan 5i part 2, part 1's D1). Its delivery is its
     note's, `refused:<event_id>`."""
@@ -1602,6 +1646,82 @@ class Journal:
                                (ws, bead, bead)).fetchall()
         return [StartedSteer(ws, str(r[0]), str(r[1]), int(r[2]),
                              tuple(msgspec.json.decode(str(r[3]), type=list[str]))) for r in rows]
+
+    # --- asks and nudges (plan 5i part 2 T5) ---
+
+    @_locked
+    def ask_add(self, ref: str, ws: str, bead: str, kind: str, round_: int) -> bool:
+        """An ask in `creating`, once per `ref`, inside the caller's transaction. True only if new; a row
+        already there (in any state) is kept as it is."""
+        at = now()
+        cur = self.db.execute("INSERT INTO asks (ref, ws, bead, kind, state, round, created_at, updated_at) "
+                              "VALUES (?, ?, ?, ?, 'creating', ?, ?, ?) ON CONFLICT (ref) DO NOTHING",
+                              (ref, ws, bead, kind, round_, at, at))
+        return cur.rowcount == 1
+
+    @_locked
+    def ask(self, ref: str) -> AskRow | None:
+        row = self.db.execute(f"SELECT {_ASK_COLS} FROM asks WHERE ref = ?", (ref,)).fetchone()  # noqa: S608
+        return None if row is None else _ask(row)
+
+    @_locked
+    def asks_in(self, ws: str, states: Iterable[str]) -> list[AskRow]:
+        """The workstream's asks in one of `states`, oldest first."""
+        wanted = tuple(states)
+        rows = self.db.execute(f"SELECT {_ASK_COLS} FROM asks WHERE ws = ? "  # noqa: S608 - placeholders only
+                               f"AND state IN ({', '.join('?' * len(wanted))}) ORDER BY created_at, rowid",
+                               (ws, *wanted)).fetchall()
+        return [_ask(r) for r in rows]
+
+    @_locked
+    def ask_set(self, ref: str, **fields: str | int | None) -> None:
+        """Set `fields` (of `_ASK_SET`) and `updated_at` on the row, which must exist. `child` is never set
+        here: only `ask_pin` sets it, once."""
+        if not fields or not set(fields) <= _ASK_SET:
+            raise ValueError("ask_set: no such field")
+        names = ", ".join(f"{k} = ?" for k in fields)
+        cur = self.db.execute(f"UPDATE asks SET {names}, updated_at = ? WHERE ref = ?",  # noqa: S608
+                              (*fields.values(), now(), ref))
+        if cur.rowcount != 1:
+            raise KeyError("ask_set: no such ask")
+
+    @_locked
+    def ask_pin(self, ws: str, ref: str, bead: str) -> None:
+        """Pin `bead` as the ask's `child`, committed before it returns (so never inside an open
+        transaction). Pinning the same bead again is a no-op; AskPinRefused if the workstream has no asks
+        row for `ref` (an approval's ref, say) or the row holds another bead."""
+        if self._depth or self.db.in_transaction:
+            raise AskPinRefused(PIN_IN_TRANSACTION)
+        with self.transaction():
+            self.db.execute("UPDATE asks SET child = ?, updated_at = ? WHERE ws = ? AND ref = ? "
+                            "AND child IS NULL", (bead, now(), ws, ref))
+            row = self.db.execute("SELECT child FROM asks WHERE ws = ? AND ref = ?", (ws, ref)).fetchone()
+            if row is None:
+                raise AskPinRefused(PIN_NO_ASK)
+            if row[0] != bead:
+                raise AskPinRefused(PIN_TAKEN)
+
+    @_locked
+    def ask_pinned(self, ws: str, ref: str) -> str | None:
+        """The ask's pinned `child`, or None if it has none yet. AskPinRefused if the workstream has no
+        asks row for `ref`."""
+        row = self.db.execute("SELECT child FROM asks WHERE ws = ? AND ref = ?", (ws, ref)).fetchone()
+        if row is None:
+            raise AskPinRefused(PIN_NO_ASK)
+        return _opt(row[0])
+
+    @_locked
+    def nudge(self, ws: str, bead: str) -> tuple[int, str | None]:
+        """The bead's question rounds without progress, and the tree they were counted from (D3)."""
+        row = self.db.execute("SELECT rounds, last_head FROM nudges WHERE ws = ? AND bead = ?",
+                              (ws, bead)).fetchone()
+        return (0, None) if row is None else (int(cast(int, row[0])), _opt(row[1]))
+
+    @_locked
+    def nudge_set(self, ws: str, bead: str, rounds: int, last_head: str | None) -> None:
+        self.db.execute("INSERT INTO nudges (ws, bead, rounds, last_head) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT (ws, bead) DO UPDATE SET rounds = excluded.rounds, "
+                        "last_head = excluded.last_head", (ws, bead, rounds, last_head))
 
     @_locked
     def events_without_notice(self, ws: str, kind: str) -> list[tuple[str, str]]:

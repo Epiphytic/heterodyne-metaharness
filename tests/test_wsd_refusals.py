@@ -32,6 +32,7 @@ from heterodyne.wsd.notices import Notices
 from heterodyne.wsd.runtime import SessionEvent, SteerRefused, SteerUncertain
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.session_events import SURFACE
+from heterodyne.wsd.settings import RelaySettings
 from heterodyne.wsd.states import BeadState
 
 B = "btq-1"
@@ -53,8 +54,13 @@ def _close_journals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         each.close()
 
 
+def relay_of(rig: Rig) -> RelaySettings:
+    """admind's socket, never started here: a question these tests make is owed, never posted."""
+    return RelaySettings(True, rig.root / "admind" / "ask.sock", 2, 6, 90.0)
+
+
 def bridge_of(rig: Rig) -> AskBridge:
-    return AskBridge(rig.journal, rig.beads, rig.runtime, None, None, rig.clock, ws=WS, cp=rig.cp)
+    return AskBridge(rig.journal, rig.beads, rig.runtime, None, relay_of(rig), rig.clock, ws=WS, cp=rig.cp)
 
 
 def started(tmp_path: Path) -> Rig:
@@ -80,7 +86,8 @@ class Posts:
 def with_notices(tmp_path: Path, posts: Posts) -> Rig:
     def build(rig: Rig) -> AskBridge:
         notices = Notices(rig.journal, rig.root / "ask.sock", clock=rig.clock, cp=rig.cp, post=posts)
-        return AskBridge(rig.journal, rig.beads, rig.runtime, notices, None, rig.clock, ws=WS, cp=rig.cp)
+        return AskBridge(rig.journal, rig.beads, rig.runtime, notices, relay_of(rig), rig.clock, ws=WS,
+                         cp=rig.cp)
 
     rig = make_rig(tmp_path)
     rig.asks_for = build
@@ -341,7 +348,34 @@ def test_the_stop_of_a_refused_turn_is_held_after_its_note_is_steered(tmp_path: 
     later = ev(rig, "stop", 3, turn=2, text="Which colour?")   # the steered turn's own end: not held
     rig.runtime.event(WS, later)
     rig.pickup()
-    assert inbox_status(rig, later.event_id) != [InboxStatus.COMMITTED.value]
+    row = rig.journal.ask(f"q:{WS}:{B}:1:2")
+    assert row is not None and row.child is not None        # a question: owed, as admind isn't running
+    assert rig.state(B) == BeadState.WAITING_INPUT.value
+
+
+def test_a_steered_refusal_is_not_repeated_in_the_resume_brief(tmp_path: Path) -> None:
+    rig = started(tmp_path)
+    question = ev(rig, "question", 1, body={})
+    rig.runtime.event(WS, question, ev(rig, "stop", 2))
+    rig.pickup()
+    note = refused(question.event_id, QUESTION_INCOMPLETE)
+    assert rig.runtime.steers == [(rig.key(B), 1, steer_text([note]))]
+    rig.runtime.event(WS, ev(rig, "stop", 3, turn=2, text="Which colour?"))
+    rig.pickup()                                            # a question: the task parks on its bead
+    ref = f"q:{WS}:{B}:1:2"
+    row = rig.journal.ask(ref)
+    assert row is not None and row.child is not None
+    assert rig.state(B) == BeadState.WAITING_INPUT.value
+    # Task 6's part, by hand: the answer as a note, the ask delivered, the question bead closed.
+    rig.journal.note_add(WS, B, f"answer:{ref}", "Paint it blue.")
+    with rig.journal.transaction():
+        rig.journal.ask_set(ref, state="delivered")
+    rig.world.beads[row.child].status = "closed"
+    for _ in range(3):
+        rig.pickup()
+    assert len(rig.runtime.launches) == 2
+    brief = rig.runtime.launches[-1].brief
+    assert "Paint it blue." in brief and note not in brief
 
 
 def test_a_refusal_for_a_session_that_ended_rides_the_next_brief(tmp_path: Path) -> None:

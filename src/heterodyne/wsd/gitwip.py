@@ -201,6 +201,11 @@ def wip_commit(p: Pinned, mark: str, summary: str) -> str:
     return head
 
 
+def tree(p: Pinned) -> str:
+    """The tree of HEAD: what the commits hold, whichever commits (a park's WIP included) hold it."""
+    return _text(p, "rev-parse", "HEAD^{tree}")
+
+
 def descends_from(p: Pinned, base: str) -> bool:
     """HEAD is the commit `base` or a descendant of it. git refuses (and this is False) when `base` names
     no object, or an object that is not a commit (a tree, a blob)."""

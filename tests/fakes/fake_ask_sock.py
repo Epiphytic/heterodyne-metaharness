@@ -7,8 +7,9 @@ structs and refusal texts, so a refusal the client sees is admind's wording. The
 open, per hour, undelivered notices) are flags and counters the test sets.
 
 `script` scripts the next connections, one entry each: "drop" closes after reading without a reply,
-"hang" never replies, "garbage" replies with a line that is not JSON, "failed" replies with admind's
-internal error, any other string is a refusal with that message, and bytes are written as the raw reply.
+"lost" handles the request as usual and then closes without its reply, "hang" never replies, "garbage"
+replies with a line that is not JSON, "failed" replies with admind's internal error, any other string is a
+refusal with that message, and bytes are written as the raw reply.
 `frames` holds every raw request line.
 """
 
@@ -115,6 +116,9 @@ class FakeAskSock:
             self.frames.append(line)
             step = self.script.popleft() if self.script else None
             if step == "drop":
+                return
+            if step == "lost":
+                self._reply(line)
                 return
             if step == "hang":
                 assert self._release is not None

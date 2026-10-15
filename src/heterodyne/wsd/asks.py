@@ -10,6 +10,7 @@ never reach a refusal.
 """
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from heterodyne.wsd.checkpoints import Checkpoint, nothing
 from heterodyne.wsd.journal import Journal
 from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.notices import Notices
+from heterodyne.wsd.relay import AskPost
 from heterodyne.wsd.runtime import AgentRuntime, SessionEvent, SteerRefused, SteerUncertain
 from heterodyne.wsd.settings import RelaySettings
 from heterodyne.wsd.states import BeadState
@@ -60,6 +62,39 @@ STEER_UNCERTAIN = "a message to {bead}'s agent may not have arrived"
 STEER_UNCERTAIN_BODY = ("wsd pasted pending notes into the agent's session and can't tell whether they "
                         "arrived. They are not sent again, and no later resume brief carries them.")
 STEER_UNCERTAIN_EVENT = "steer_uncertain"
+# A question (Task 5): the bead it is asked on, the card the operator sees, and the texts the agent's own
+# words are replaced by. D4's two choices are the card's whenever the agent's own don't pass admind's rules.
+QUESTION_FRAMING = ("\n\n---\nAsked by the agent working on {bead}, in its own words (unverified). wsd "
+                    "writes the operator's answer here and closes this bead.")
+WITHHELD_TEXT = ("The agent's message is withheld: it contained a {kind}, which is never sent to the "
+                 "operator.")
+CUT_MARK = "\n[cut: the agent's message was longer than this]"
+NO_LINE = "(see the message)"
+CARD_TITLE = "{ws}/{bead} asks: {line}"
+CARD_HEAD = "The agent working on {bead} ({title}) asks, in its own words (unverified):"
+CARD_ROUND = "Branch btq/{bead}, turn {turn}, question round {round} of {limit}."
+CARD_REQUEST = "Branch btq/{bead}, turn {turn}; the agent asked this by request."
+D4_CHOICES = ("Go ahead with what you proposed", "Stop and explain what is blocking you")
+D4_RECOMMENDED = "A"
+LETTERS = "ABCDEF"              # admind's asks.LETTERS
+MIN_CHOICES, MAX_CHOICES, MAX_CHOICE = 2, 6, 80     # admind's K13 limits
+TITLE_MAX = 200                 # admind's asks.MAX_TITLE
+BEAD_LINE, CARD_LINE, TITLE_SHOWN = 120, 150, 200   # characters of the first line, and of the task's title
+# admind's _TITLE_CONTROLS and _CHOICE_BAD: a title or a choice holding one is refused.
+_TITLE_BAD = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_CHOICE_BAD = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u00b7=]")
+TURN_KEY, ROUND_KEY, CHOICES_KEY, RECOMMENDED_KEY = "wsd_turn", "wsd_round", "wsd_choices", "wsd_recommended"
+ROUNDS_DETAIL = "question rounds without progress"
+ROUNDS_TITLE = "{bead} asked {rounds} questions without progress"
+ROUNDS_BODY = ("The agent working on {bead} ended {rounds} turns in a row with a question and no new commit "
+               "on btq/{bead}. wsd sent no further question and marked the task needs-human; its session "
+               "was left as it is.")
+UNPOSTABLE_TITLE = "{bead}'s question could not be posted"
+UNPOSTABLE_BODY = ("admind refused the question the agent working on {bead} asked, so wsd marked the task "
+                   "needs-human. The question is on bead {child}.")
+OWED_BACKOFF_MAX = 1800         # seconds between an owed question's attempts, at most
+RECOVER_FAILED = "an ask could not be continued this pickup (%s); it is tried again at the next"
+NOT_WAITING = "an ask's task is not waiting on its question bead; it is not posted"
 
 
 def steer_text(notes: Sequence[str]) -> str:
@@ -87,6 +122,35 @@ def _uncertain_notice(notices: Notices, ws: str, bead: str, ref: str) -> None:
     notices.send(ws, bead, "stuck", STEER_UNCERTAIN.format(bead=bead), STEER_UNCERTAIN_BODY, ref)
 
 
+# Task 5's question half: its interface only, in the commit of its failing tests.
+def shown_text(text: str | None) -> str:
+    raise NotImplementedError
+
+
+def first_line(shown: str, limit: int) -> str:
+    raise NotImplementedError
+
+
+def card_choices(choices: object, recommended: object) -> tuple[list[str], str]:
+    raise NotImplementedError
+
+
+def question_card(ws: str, bead: str, bead_title: str, child: str, shown: str, turn: int, round_: int,
+                  limit: int, choices: Sequence[str], recommended: str) -> AskPost:
+    raise NotImplementedError
+
+
+class AsksPins:
+    def __init__(self, journal: Journal) -> None:
+        self.journal = journal
+
+    def pinned(self, ws: str, ref: str) -> str | None:
+        raise NotImplementedError
+
+    def pin(self, ws: str, ref: str, bead: str) -> None:
+        raise NotImplementedError
+
+
 class AskBridge:
     """One per workstream (`ws`): its session handlers, its resume notes (part 1's ResumeNotes) and what
     each of its pickups advances (`Deps.asks`)."""
@@ -102,6 +166,10 @@ class AskBridge:
         self.clock = clock
         self.ws = ws
         self.cp = cp
+        self.parker: Parker | None = None
+
+    def bind(self, parker: "Parker") -> None:
+        self.parker = parker
 
     def handlers(self) -> dict[str, SessionHandler]:
         return {"stop": self.on_stop, "question": self.on_question}

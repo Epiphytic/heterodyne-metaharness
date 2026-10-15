@@ -20,6 +20,7 @@ from heterodyne.config.accounts import Account
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.wsd.accounts import ConfiguredAccounts, Failover, ProfileAccounts
+from heterodyne.wsd.asks import AsksPins
 from heterodyne.wsd.beads import BeadsAdapter
 from heterodyne.wsd.brief import NoNotes, ResumeNotes
 from heterodyne.wsd.checkpoints import Checkpoint
@@ -133,7 +134,7 @@ class Rig:
             self.journal.close()
         self.cp = cp if cp is not None else Recorder()
         self.journal = Journal(self.root / "state" / "wsd.db")
-        self.beads = BeadsAdapter(factory(self.world))
+        self.beads = BeadsAdapter(factory(self.world), pins=AsksPins(self.journal))   # as assemble pins them
         self.gate = ClaimGate(self.root / "state" / "claims", self.beads, self.cp)
         self.bridge = self.asks_for(self) if self.asks_for is not None else None
         notes: ResumeNotes = self.notes if self.bridge is None else self.bridge
@@ -144,6 +145,8 @@ class Rig:
                          usage_reader=self.usage_reader, selections=self.selections, notes=notes,
                          session_handlers=handlers, notices=self.notices, asks=asks)
         self.parker = Parker(self.ws, self.deps)
+        if self.bridge is not None:
+            self.bridge.bind(self.parker)
         self.sched = Scheduler(self.ws, self.deps, self.parker)
 
     def start(self, bead: str) -> None:

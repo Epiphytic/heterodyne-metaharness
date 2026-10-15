@@ -29,6 +29,7 @@ from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.sandbox.spec import short_id
 from heterodyne.wsd import cli, ctl, daemon, ids, journal, notices, park, scheduler
+from heterodyne.wsd.asks import AskBridge, AsksPins
 from heterodyne.wsd.daemon import NEEDS_A_HUMAN, Wsd, assemble
 from heterodyne.wsd.gate import AlreadyRunning, instance_lock
 from heterodyne.wsd.headroom import Mark
@@ -38,7 +39,7 @@ from heterodyne.wsd.scheduler import Outcome, Trigger, TriggerKind
 from heterodyne.wsd.settings import CTL_SOCKET, RelaySettings, WsdSettings, resolve
 from heterodyne.wsd.states import BeadState, Reason, WsState
 from heterodyne.wsd.usage import NoUsageReader
-from heterodyne.wsd.workstream import NoHarness, WorkstreamSettings
+from heterodyne.wsd.workstream import NoAsks, NoHarness, WorkstreamSettings
 
 
 @pytest.fixture(autouse=True)
@@ -2703,6 +2704,34 @@ def test_assemble_wires_one_notices_client_from_the_relay_settings(tmp_path: Pat
     assert isinstance(n, notices.Notices)
     assert (n.journal, n.sock, n.backoff, n.owed_hours) == (parts.journal, s.relay.ask_socket, 90.0, 6)
     assert n.clock is sch.d.clock and n.cp is cp
+
+
+def test_assemble_wires_one_ask_bridge_per_workstream(tmp_path: Path) -> None:
+    s = with_relay(tmp_path)
+    second = replace(s.workstreams[0], name="beta")
+    s = replace(s, workstreams=(*s.workstreams, second))
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime())
+    pins = parts.beads._pins  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(pins, AsksPins) and pins.journal is parts.journal
+    bridges: list[AskBridge] = []
+    for name, sch in parts.schedulers.items():
+        bridge = sch.d.asks
+        assert isinstance(bridge, AskBridge) and sch.d.notes is bridge
+        assert (bridge.ws, bridge.parker, bridge.beads) == (name, sch.parker, parts.beads)
+        assert bridge.notices is sch.d.notices and bridge.relay_settings is s.relay
+        assert set(sch.d.session_handlers) == {"stop", "question"}
+        assert all(getattr(h, "__self__", None) is bridge for h in sch.d.session_handlers.values())
+        bridges.append(bridge)
+    assert len({id(b) for b in bridges}) == 2
+
+
+@pytest.mark.parametrize("relay", ["absent", "disabled"])
+def test_assemble_wires_no_ask_bridge_without_an_enabled_relay(tmp_path: Path, relay: str) -> None:
+    s = settings(tmp_path) if relay == "absent" else with_relay(tmp_path, enabled=False)
+    parts = assemble(s, Journal(s.journal), factory(World(tmp_path / "w")), FakeRuntime())
+    (sch,) = parts.schedulers.values()
+    assert isinstance(sch.d.asks, NoAsks) and dict(sch.d.session_handlers) == {}
+    assert isinstance(parts.beads._pins, AsksPins)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_assemble_recovers_a_notice_cut_off_in_flight_before_any_pickup(tmp_path: Path) -> None:
