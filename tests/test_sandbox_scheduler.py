@@ -344,7 +344,7 @@ def test_a_credential_named_leftover_is_journaled_redacted(both: Both) -> None:
     packages = rt.runtime.layout(first.key).home / ".codex" / "packages"
     packages.mkdir(mode=0o700, parents=True, exist_ok=True)
     (packages / secret).write_bytes(b"x")  # what generation 1 left behind
-    rig.clock.advance(first.deadline - rt.runtime.c.settings.stop_margin_seconds - rig.clock())
+    stop_window(both, "btq-1")             # once generation 1's brief turn has ended
     assert rig.pickup() is Outcome.BUSY    # stopped and relaunched: generation 2's launch clears it
     assert both.record("btq-1").generation == 2 and not any(packages.iterdir())
     rig.pickup()                           # the notice is drained and journaled
