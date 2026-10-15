@@ -755,3 +755,55 @@ def test_api_github_in_a_non_dns_send_still_fails(tmp_path: Path) -> None:
     result, _ = listed(tmp_path, sendto_to(inet(443), hello))
     assert result["dns"] == [] and not result["passed"]
     assert not result["checks"]["no_api_github_lookup"]
+
+
+# --- c1: hostile strace text: oversized counts and a msg_iovlen that disagrees with the iovecs shown ---
+
+HUGE = "9" * 5000                                            # past int()'s 4300-digit guard
+
+
+@pytest.mark.parametrize("field", ["sendto-length", "iov_len"])
+def test_an_oversized_count_is_dropped_not_a_crash(tmp_path: Path, field: str) -> None:
+    packet = dns("huge.example")
+    if field == "sendto-length":
+        line = sendto_to(inet(53), packet).replace(f", {len(packet)}, MSG", f", {HUGE}, MSG", 1)
+    else:
+        line = sendmmsg_of([(inet(53), [iov(packet)])]).replace(f"iov_len={len(packet)}", f"iov_len={HUGE}")
+    assert HUGE in line
+    result, _ = listed(tmp_path, line)
+    assert result["dns"] == [] and result["dns_dropped"] == 1
+
+
+@pytest.mark.parametrize("iovlen", [0, 2, 3])
+def test_a_msg_iovlen_unlike_the_iovecs_shown_is_dropped(tmp_path: Path, iovlen: int) -> None:
+    good = sendmmsg_of([(inet(53), [dns("good.example")])])
+    bad = sendmmsg_of([(inet(53), [dns("poc.example")])]).replace("msg_iovlen=1", f"msg_iovlen={iovlen}", 1)
+    result, _ = listed(tmp_path, good, bad)
+    assert result["dns"] == ["good.example"] and result["dns_dropped"] == 1
+
+
+FRAGMENTS = ["7 sendto(6, ", "7 sendmmsg(6, [", "{msg_hdr={msg_name=", inet(53), inet(53, v6=True), "NULL",
+             ", msg_namelen=16, msg_iov=[", '{iov_base="', hx(dns("a.example")), '"', "...", ", iov_len=",
+             "]", "}", ", ", ", msg_iovlen=", ", msg_controllen=0, msg_flags=0}", ", msg_len=",
+             ", MSG_NOSIGNAL, ", ", 16) = 1", " <unfinished ...>", "<... sendto resumed>"]
+SPLIT = [dns("a.example")[:12], dns("a.example")[12:]]
+VALID_LINES = [sendto_to(inet(53), dns("a.example")),
+               sendmmsg_of([(inet(53), list[bytes | str](SPLIT)), ("NULL", [dns("b.c")])])]
+COUNT = re.compile(r"(?<=[ =(])\d+(?=[,)}\] ])")           # a decimal field, not the hex inside a buffer
+DIGITS = st.one_of(st.integers(1, 7), st.sampled_from([4300, 4301, 5000])).map(lambda n: "9" * n)
+
+
+def recount(line: str, counts: list[str]) -> str:
+    """`line` with its decimal fields replaced by `counts`, in order, as far as they go."""
+    it = iter(counts)
+    return COUNT.sub(lambda m: next(it, m.group()), line)
+
+
+@given(st.one_of(
+    st.lists(st.one_of(st.sampled_from(FRAGMENTS), DIGITS), max_size=40).map("".join),
+    st.builds(recount, st.sampled_from(VALID_LINES), st.lists(DIGITS, min_size=1, max_size=20)),
+))
+def test_dns_payloads_never_raises_on_hostile_strace_text(text: str) -> None:
+    payloads, dropped = ANALYZER.dns_payloads(text.encode())
+    assert isinstance(dropped, int) and dropped >= 0
+    assert all(isinstance(p, bytes) for p in payloads)
