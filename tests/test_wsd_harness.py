@@ -69,8 +69,9 @@ from heterodyne.harness.store import LocalStore
 from heterodyne.wsd import btq as wbtq
 from heterodyne.wsd import harness as wh
 from heterodyne.wsd.beads import HELD
-from heterodyne.wsd.daemon import Wsd, assemble, selections_at
-from heterodyne.wsd.journal import Journal
+from heterodyne.wsd.ctl import HarnessRequest
+from heterodyne.wsd.daemon import HARNESS_FAILED, Wsd, assemble, selections_at
+from heterodyne.wsd.journal import Journal, JournalBusy
 from heterodyne.wsd.park import Parker
 from heterodyne.wsd.runtime import INSTALL_TAINTED, InstallTainted
 from heterodyne.wsd.scheduler import Outcome, Scheduler
@@ -1096,6 +1097,24 @@ def test_recover_runs_before_the_first_pickup(tmp_path: Path) -> None:
     finish(up)
     assert order[0] == "recover" and order.count("recover") == 1 and "advance" in order
     assert runtime.expires != []
+
+
+@pytest.mark.parametrize("error", [OSError(5, "I/O error"), JournalBusy("the journal is busy")])
+def test_a_harness_op_that_hits_an_io_error_replies_failed_with_fixed_wording(
+        h: H, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    s = settings_for(tmp_path)
+    journal = Journal(s.journal)
+    try:
+        wsd = assembled(s, journal, FakeRuntime(), World(tmp_path / "btq-state"), h.ops)
+
+        def install(adapter: str, version: str | None) -> str:
+            raise error
+
+        monkeypatch.setattr(h.ops, "install", install)
+        reply = wsd.harness_one(HarnessRequest("install", adapter="codex"))
+        assert (reply.result, reply.message) == ("failed", HARNESS_FAILED)
+    finally:
+        journal.close()
 
 
 def settings_for(tmp_path: Path) -> WsdSettings:

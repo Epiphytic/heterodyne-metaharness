@@ -113,6 +113,7 @@ STATUS_LANE = ""        # not a workstream slug (slugs are never empty)
 PAUSE_STATE = "pause-state"     # the one key pause and resume share: the last one asked is applied
 RELOAD = "reload"
 NO_HARNESS = "managed installs are not set up in this wsd"
+HARNESS_FAILED = "the harness operation failed on an I/O error or a busy journal; wsd's log says which"
 log = logging.getLogger(__name__)
 
 
@@ -356,6 +357,9 @@ class Wsd:
             return CtlReply("ok", f"pruned {len(done.installs)} install(s)", data)
         except HarnessRefused as exc:
             return CtlReply("refused", exc.constant)
+        except (OSError, JournalBusy):
+            log.exception("wsctl harness %s failed", h.action)
+            return CtlReply("failed", HARNESS_FAILED)
 
     def set_pause(self, name: str, paused: bool) -> CtlReply:
         """§4.3: the flag is set under the claim lock, so once this returns no claim can start. A flag that
