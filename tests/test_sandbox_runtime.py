@@ -2648,6 +2648,65 @@ def test_after_an_uncertain_steer_the_generation_is_never_pasted_into_again(
     wait_for(lambda: server.turns().stops == stops + 1 and server.turns().idle)
     rig.runtime.steer(spec.session_key, 2, "a fresh generation")    # its own input line: steerable
     wait_for(lambda: "echo: a fresh generation" in rig.tmux.capture(pane, 50))
+    layout = rig.runtime.layout(spec.session_key)
+    assert layout.steer_uncertain(1).exists()               # generation 1's mark stays; 2 has none
+    assert not layout.steer_inflight(2).exists() and not layout.steer_uncertain(2).exists()
+
+
+def rebound_at_a_boundary(rig: RuntimeRig, spec: LaunchSpec, pane: str) -> None:
+    """wsd restarts: the generation's socket is rebound, then a turn ends at it."""
+    rig.runtime.servers.pop(spec.session_key).close()
+    rig.runtime.sessions("alpha")
+    server = rig.runtime.servers[spec.session_key]
+    rig.tmux.paste(pane, "one more turn")
+    wait_for(lambda: server.turns().stops == 1 and server.turns().idle)
+
+
+@ADAPTERS
+def test_a_rebind_after_an_uncertain_steer_still_refuses_with_nothing_pasted(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # T5 c4 B1: the uncertain mark is durable, so a restart can't forget it and paste after a late paste.
+    spec, pane = idle_session(rig, profile)
+
+    def uncertain(_name: str, _text: str, **_: object) -> None:
+        raise TmuxPasteUncertain("maybe")
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", uncertain)
+        with pytest.raises(SteerUncertain):
+            rig.runtime.steer(spec.session_key, 1, "UNCERTAIN-")
+    rebound_at_a_boundary(rig, spec, pane)
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+        rig.runtime.steer(spec.session_key, 1, "NEXT")
+    assert pasted == []
+
+
+@ADAPTERS
+def test_a_clean_steer_leaves_no_mark_and_a_crash_mid_steer_leaves_a_rebind_that_refuses(
+        rig: RuntimeRig, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, pane = idle_session(rig, profile)
+    layout = rig.runtime.layout(spec.session_key)
+    marked: list[bool] = []
+    real = rig.runtime.c.tmux.paste
+
+    def noted(name: str, text: str, **kw: Any) -> None:
+        marked.append(layout.steer_inflight(1).exists())
+        real(name, text, **kw)
+
+    with monkeypatch.context() as m:
+        m.setattr(rig.runtime.c.tmux, "paste", noted)
+        rig.runtime.steer(spec.session_key, 1, "clean")
+    assert marked == [True]                                 # durable before the first tmux command
+    assert not layout.steer_inflight(1).exists() and not layout.steer_uncertain(1).exists()
+    layout.steer_inflight(1).touch()                        # wsd died between the mark and the confirm
+    rebound_at_a_boundary(rig, spec, pane)
+    pasted: list[str] = []
+    monkeypatch.setattr(rig.runtime.c.tmux, "paste", lambda _name, t, **_: pasted.append(t))
+    with pytest.raises(SteerRefused, match="an earlier steer to this session is uncertain"):
+        rig.runtime.steer(spec.session_key, 1, "after the crash")
+    assert pasted == []
 
 
 def test_a_paste_that_failed_before_the_pane_is_refused(rig: RuntimeRig,

@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 from sandbox_env import WatchedGate, wait_for
 
-from heterodyne.session.server import MAX_DEPTH, BoundaryBusy, BoundaryUncertain, SessionServer, TurnState
+from heterodyne.session.server import (
+    MAX_DEPTH,
+    BoundaryBusy,
+    BoundaryUncertain,
+    BoundaryUnmarked,
+    SessionServer,
+    TurnState,
+)
 
 TOKEN = "fake-session-token"  # noqa: S105 (test value)
 THREAD = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
@@ -392,6 +399,60 @@ def test_after_a_raising_delivery_no_boundary_is_delivered_at_and_nothing_is_spe
     gate = getattr(server, "_turn_gate")  # noqa: B009
     assert gate.acquire(blocking=False)                     # and the gate was given back
     gate.release()
+
+
+def test_the_uncertain_mark_is_durable_and_outlives_the_server(tmp_path: Path) -> None:
+    # T5 c4 B1: a rebind builds a new server for the same generation; the mark on disk keeps it refusing.
+    inflight, uncertain = tmp_path / "steer-inflight", tmp_path / "steer-uncertain"
+
+    def served() -> SessionServer:
+        s = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl", inflight=inflight,
+                          uncertain=uncertain)
+        s.start()
+        turn(s, "UserPromptSubmit")
+        turn(s, "Stop")
+        return s
+
+    server = served()
+    seen: list[bool] = []
+    server.at_boundary(lambda: seen.append(inflight.exists()) is None)   # marked before it delivers
+    assert seen == [True] and not inflight.exists() and not uncertain.exists()  # confirmed: cleared
+    turn(server, "UserPromptSubmit")
+    turn(server, "Stop")
+    server.at_boundary(lambda: False)                       # nothing reached the session: cleared
+    assert not inflight.exists() and not uncertain.exists()
+    with pytest.raises(RuntimeError):
+        server.at_boundary(lambda: (_ for _ in ()).throw(RuntimeError("uncertain")))
+    assert uncertain.exists() and not inflight.exists()
+    server.close()
+    calls: list[str] = []
+    server = served()                                       # a rebind after a restart
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "after a restart"))
+    server.close()
+    uncertain.unlink()
+    inflight.touch()                                        # a crash between the mark and the confirm
+    server = served()
+    with pytest.raises(BoundaryUncertain):
+        server.at_boundary(noting(calls, "after a crash"))
+    server.close()
+    assert calls == []
+
+
+def test_a_delivery_whose_mark_cant_be_made_never_runs_and_keeps_the_boundary(tmp_path: Path) -> None:
+    server = SessionServer(tmp_path / "s.sock", TOKEN, tmp_path / "events.jsonl",
+                           inflight=tmp_path / "gone" / "steer-inflight",
+                           uncertain=tmp_path / "steer-uncertain")
+    server.start()
+    try:
+        turn(server, "UserPromptSubmit")
+        turn(server, "Stop")
+        calls: list[str] = []
+        with pytest.raises(BoundaryUnmarked):
+            server.at_boundary(noting(calls, "unmarked"))
+        assert calls == [] and getattr(server, "_spent") is None  # noqa: B009 - a private seam
+    finally:
+        server.close()
 
 
 def test_turn_events_wait_for_a_delivery(server: SessionServer, monkeypatch: pytest.MonkeyPatch) -> None:

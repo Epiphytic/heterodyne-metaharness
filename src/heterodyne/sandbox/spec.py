@@ -107,6 +107,15 @@ class SessionLayout:
     def events(self, generation: int) -> Path:
         return self.root / f"r{generation}-events.jsonl"
 
+    def steer_inflight(self, generation: int) -> Path:
+        """T5: a steer to this generation has begun and isn't confirmed yet (`SessionServer`). Beside the
+        session record and outside every bind, so the session can't clear it."""
+        return self.root / f"r{generation}-steer-inflight"
+
+    def steer_uncertain(self, generation: int) -> Path:
+        """T5: a steer to this generation may have landed: nothing more is pasted into it."""
+        return self.root / f"r{generation}-steer-uncertain"
+
     def scratch(self, generation: int) -> Path:
         return self.root / f"r{generation}-scratch"
 

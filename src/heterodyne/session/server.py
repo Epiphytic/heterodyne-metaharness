@@ -18,11 +18,17 @@ within that wait (the runtime bounds a steer's paste to half of the generation's
 boundary belongs to this server, so a rebind or a new generation starts with none.
 
 A delivery that raised may still land: tmux can't cancel a command whose client timed out, so its paste
-or its Enter may run after the gate is gone. Nothing is delivered at this server again (BoundaryUncertain),
-so no later Enter of ours submits what a late paste left. What the gate can't cover: a late Enter from a
-timed-out send-keys, which submits that one delivery once, maybe mid-turn; text a late paste-buffer left
-in the input line, which waits there until an operator presses Enter in the pane; a hook already in flight
-before the boundary was spent; and text an operator types into the pane.
+or its Enter may run after the gate is gone. Nothing is delivered for this generation again
+(BoundaryUncertain), so no later Enter of ours submits what a late paste left. The mark is durable when the
+runtime passes `inflight` and `uncertain` paths: a delivery creates `inflight` (synced) before it starts and
+removes it once it is confirmed or nothing reached the session, and an uncertain one renames it to
+`uncertain`. A server built while either exists, as by a rebind after a restart or a crash mid-delivery,
+delivers nothing (BoundaryUncertain); a new generation has its own paths.
+
+What the gate can't cover: a late Enter from a timed-out send-keys, which submits that one delivery once,
+maybe mid-turn; text a late paste-buffer left in the input line, which waits there until an operator
+presses Enter in the pane; a hook already in flight before the boundary was spent; and text an operator
+types into the pane.
 
 The session is untrusted with wsd's resources too: at most `max_handlers` connections are served at
 once (more are closed unread), each request has one absolute deadline however its bytes trickle in, and
@@ -57,12 +63,25 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 TURN_EVENTS = ("UserPromptSubmit", "Stop")
 
 
+def _sync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class BoundaryBusy(Exception):
     """No turn boundary to deliver at: mid-turn, already spent, another delivery under way, or closed."""
 
 
 class BoundaryUncertain(BoundaryBusy):
-    """An earlier delivery raised, so it may still land: nothing is delivered at this server again."""
+    """An earlier delivery raised, or was never confirmed, so it may still land: nothing is delivered for
+    this generation again."""
+
+
+class BoundaryUnmarked(BoundaryBusy):
+    """The in-flight mark couldn't be made durable, so nothing was delivered and the boundary is kept."""
 
 
 @dataclass(frozen=True)
@@ -84,7 +103,8 @@ class SessionServer:
                  max_handlers: int = MAX_HANDLERS, client_seconds: float = CLIENT_SECONDS,
                  clock: Callable[[], float] = time.monotonic, turn_ends: tuple[str, ...] = ("Stop",),
                  on_event: Callable[[dict[str, Any]], None] | None = None,
-                 on_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> None:
+                 on_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+                 inflight: Path | None = None, uncertain: Path | None = None) -> None:
         self.path = path
         self.token = token.encode()
         self.events = events
@@ -94,12 +114,14 @@ class SessionServer:
         self.turn_ends = turn_ends
         self.on_event = on_event
         self.on_request = on_request
+        self.inflight = inflight
+        self.uncertain = uncertain
         self.served = 0
         self._state = TurnState()
         self._lock = threading.Lock()
         self._turn_gate = threading.Lock()  # held by a delivery; taken before _lock by turn events
         self._spent: int | None = None      # the turn-end count whose boundary a delivery used
-        self._uncertain = False             # a delivery raised: it may yet land, so no other one runs
+        self._uncertain = self._marked()    # a delivery raised: it may yet land, so no other one runs
         self._slots = threading.BoundedSemaphore(max_handlers)
         self._closed = threading.Event()
         self._sock: socket.socket | None = None
@@ -158,28 +180,82 @@ class SessionServer:
         """Run `deliver` at the current turn boundary, spending it first; raise BoundaryBusy if there is
         none to spend. No turn event is recorded until `deliver` returns. If it returns False (nothing
         reached the session) the boundary is given back; if it raises, the boundary stays spent and every
-        later call raises BoundaryUncertain, touching nothing: what it sent may still land."""
+        later call raises BoundaryUncertain, touching nothing: what it sent may still land. So does every
+        call once a durable mark says a delivery is in flight or uncertain. If the in-flight mark can't be
+        made, BoundaryUnmarked: nothing is delivered and the boundary is given back."""
         if not self._turn_gate.acquire(blocking=False):
             raise BoundaryBusy
         try:
             with self._lock:
-                if self._uncertain:
+                if self._uncertain or self._marked():
+                    self._uncertain = True
                     raise BoundaryUncertain
                 stops = self._state.stops
                 if self._closed.is_set() or not self._state.idle or self._spent == stops:
                     raise BoundaryBusy
                 self._spent = stops
             try:
+                self._mark()
+            except OSError:
+                with self._lock:
+                    self._spent = None
+                raise BoundaryUnmarked from None
+            try:
                 delivered = deliver()
             except BaseException:
                 with self._lock:
                     self._uncertain = True
+                self._settle(uncertain=True)
                 raise
+            self._settle(uncertain=False)
             if not delivered:
                 with self._lock:
                     self._spent = None
         finally:
             self._turn_gate.release()
+
+    def _marked(self) -> bool:
+        """A durable mark is there, or can't be ruled out (fail closed)."""
+        for mark in (self.inflight, self.uncertain):
+            if mark is None:
+                continue
+            try:
+                os.lstat(mark)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                pass                        # can't be ruled out
+            return True
+        return False
+
+    def _mark(self) -> None:
+        """Create the in-flight mark and sync it and its directory before anything is delivered."""
+        if self.inflight is None:
+            return
+        try:
+            fd = os.open(self.inflight, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _sync_dir(self.inflight.parent)
+        except OSError:
+            with contextlib.suppress(OSError):
+                self.inflight.unlink()      # never delivered: a mark left half-made only refuses more
+            raise
+
+    def _settle(self, *, uncertain: bool) -> None:
+        """Clear the in-flight mark once the delivery is confirmed or reached nothing, or turn it into the
+        uncertain mark. Failing to is conservative: a mark left in place refuses every later delivery."""
+        if self.inflight is None:
+            return
+        with contextlib.suppress(OSError):
+            if uncertain and self.uncertain is not None:
+                self.inflight.replace(self.uncertain)
+            elif not uncertain:
+                self.inflight.unlink()
+            _sync_dir(self.inflight.parent)
 
     def _accept(self, sock: socket.socket) -> None:
         while not self._closed.is_set():
