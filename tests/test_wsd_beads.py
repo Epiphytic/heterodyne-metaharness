@@ -1221,3 +1221,21 @@ def test_a_duplicate_closed_before_its_cleanup_gets_no_comment(world: World,
     assert writes(world, since) == []
     assert world.beads[second].comments == []
     assert DUPLICATE_DECIDED % 1 in caplog.messages
+
+
+@pytest.mark.parametrize("via", ["create", "holder"])
+def test_a_pin_refused_for_another_bead_fails_closed(world: World, via: str) -> None:
+    """The store already pins the ref to another bead when wsd pins its pick (here set just after wsd read
+    no pin): the pin refuses, nothing is returned, and the next call finds the other pin unlisted: PinLost,
+    never a re-pick."""
+    if via == "holder":
+        dies_mid_create(world)
+        world.commit_orphans()            # a holder, never pinned
+    world.before("list", lambda: world.pins.pins.__setitem__((WS, REF), "btq-elsewhere"))
+    with pytest.raises(BeadsUnavailable, match="pin"):
+        ask(adapter_for(world)) if via == "create" else adapter_for(world).holder(WS, REF)
+    since = len(world.calls)
+    with pytest.raises(CreateUnverified, match="pinned"):
+        ask(adapter_for(world)) if via == "create" else adapter_for(world).holder(WS, REF)
+    assert writes(world, since) == []
+    assert world.pins.pinned(WS, REF) == "btq-elsewhere"
