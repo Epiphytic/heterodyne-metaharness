@@ -17,6 +17,8 @@ leaves every launch to pickup's launch guard.
    bead is escalated UNEXPECTED_STATE, taking over its open pickup or resume;
    4b. convert AU-5's PARKED/QUOTA rows (AU-4 §6): each is gated fresh, then resumed as parked or deferred.
    A pickup or resume at a `defer.*` or `quota` step is replayed in step 4 (it never launches);
+   4c. answers a lost journal had are rebuilt from their question beads (plan 5i part 2), as
+   unverified notes;
 5. reconcile sessions (`sweep`, which every pickup also runs): a session whose bead is not ours
    (closed, claimed by another worker, gone) is stopped; a recorded running bead whose session is gone
    gets a resume operation that pickup will carry through the guard; anything beads and the journal
@@ -121,6 +123,8 @@ class _Recovery:
         d.cp("recovery.journals")
         # 4b. AU-5's PARKED/QUOTA rows, converted before the sweep sees them (AU-4 §6)
         self.s.convert_quota_rows()
+        # 4c. answers a lost journal had, from their question beads (plan 5i part 2)
+        d.asks.rebuild()
         # 5. sessions, read again: the replays changed both
         swept = sweep(self.s.parker, defer=True)
         if swept.unconfirmed:

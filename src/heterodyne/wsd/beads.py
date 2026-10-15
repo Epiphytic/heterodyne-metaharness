@@ -410,6 +410,12 @@ class BeadsAdapter:
         beads = self._labelled(ws)
         return [b.id for b in beads if key in b.metadata and not _settled(b.metadata[key], settled)]
 
+    def questions(self, ws: str) -> list[Bead]:
+        """wsd's question beads of the workstream, closed ones included: labelled `kind:question` and
+        holding a `wsd_ref`, as `bd list` gives them (no comments)."""
+        return [b for b in self._labelled(ws) if QUESTION in b.labels and isinstance(b.metadata.get(REF_KEY),
+                                                                                       str)]
+
     def _labelled(self, ws: str) -> list[Bead]:
         """Every bead labelled `ws:<ws>`, closed ones included, as `bd list` gives them."""
         queue = self.ws_queue(ws)

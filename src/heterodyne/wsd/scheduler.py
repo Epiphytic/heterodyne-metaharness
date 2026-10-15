@@ -10,13 +10,17 @@ the workstream's operation lock (`Parker.entry`):
    session is gone gets a resume operation;
 4. every open operation is replayed: park, release and escalation finish; pickup and resume reach the
    launch guard, which refuses while any hold applies;
+   4a. (plan 5i part 3's review settle: its slot, after the replays);
+   4b. the asks advance (plan 5i part 2): posted questions' answers are read and become resume notes;
 5. any hold left: pickup reports HELD;
 6. the coder role is taken if the runtime lists any session of the workstream, live or unknown, under
    whatever role name it was launched (wsd launches one role per workstream);
 7. otherwise resumable parked beads and over deferred beads first (one list, by bead id), then new
    ready work, trying each candidate in turn until one starts. A refused claim, a lost claim or a
    confirmed launch failure moves on to the next candidate (the "never idle while an unblocked bead
-   exists" rule); an uncertain launch keeps the role and holds.
+   exists" rule); an uncertain launch keeps the role and holds. A bead with a question still
+   unanswered (`AskHooks.resume_gate`) is not resumed;
+8. last, whatever the outcome, the owed notices are sent (`AskHooks.flush`).
 
 Discovery and claiming agree: btq's claim refuses whatever its per-bead worker's own `ready()` would not
 list, so a listed bead that worker can't claim (a `session:` pin on the workstream session), or one still
@@ -181,6 +185,7 @@ class Scheduler:
             except BeadsUnavailable as exc:
                 self.d.journal.hold(self.ws.name, Reason.BEADS_UNREACHABLE, type(exc).__name__)
                 outcome = Outcome.HELD
+            self.d.asks.flush(self.d.clock())       # plan 5i part 2: last, the owed notices
             self.publish()
             return outcome
 
@@ -220,10 +225,11 @@ class Scheduler:
             self._signals(now)                    # plan 4b E8: after the lifetime stop, before the sweep
             ingest(j, self.d.runtime, name)       # plan 5i: every logged event, by cursor
             dispatch(self.parker, self.d.session_handlers, self.d.inbox_attempts)
-            self.d.asks.advance(now)              # plan 5i part 2: notes steered once their turn has ended
             sweep(self.parker)
             for op in j.ops_open(name):
                 self.replay(op)
+            # Plan 5i part 3's review settle runs here: after the replays, before the asks advance.
+            self.d.asks.advance(now)              # plan 5i part 2: answers read, notes steered
             if j.holds(name):
                 return Outcome.HELD
             coder = self.d.runtime.sessions(name)
@@ -310,6 +316,8 @@ class Scheduler:
             if row is not None and row.state is BeadState.DEFERRED:
                 result = self.parker.undefer(bead.id, trigger.ref)
             else:
+                if not self.d.asks.resume_gate(name, bead.id):
+                    continue                # plan 5i part 2: a question without its answer note yet
                 verdict = self._gate_resume(bead, scan.now)
                 if row is not None and row.state is BeadState.PARKED and verdict is not None:
                     until = verdict.at if isinstance(verdict, Deadline) else None

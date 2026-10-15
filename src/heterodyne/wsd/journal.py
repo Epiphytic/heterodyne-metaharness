@@ -1583,6 +1583,12 @@ class Journal:
         return cur.rowcount == 1
 
     @_locked
+    def note_is_delivered(self, ref: str) -> bool | None:
+        """Whether the note `ref` was delivered (a brief or a steer carried it); None if there is none."""
+        row = self.db.execute("SELECT delivered_at FROM resume_notes WHERE ref = ?", (ref,)).fetchone()
+        return None if row is None else row[0] is not None
+
+    @_locked
     def steerable_notes(self, ws: str, bead: str, limit_bytes: int) -> list[tuple[int, str, str]]:
         """The bead's undelivered notes a steer may carry, as (seq, ref, text), oldest first: fewer than
         STEER_ATTEMPTS attempts so far, and at most `limit_bytes` of UTF-8."""
@@ -1684,6 +1690,15 @@ class Journal:
                               (*fields.values(), now(), ref))
         if cur.rowcount != 1:
             raise KeyError("ask_set: no such ask")
+
+    @_locked
+    def ask_answer(self, ref: str, answer: str, choice: str | None) -> None:
+        """The operator's answer (at most ANSWER_MAX characters) on a question's row, now `answered`,
+        inside the caller's transaction (T6: with its note). The row must exist."""
+        cur = self.db.execute("UPDATE asks SET state = 'answered', answer = ?, choice = ?, uncertain = 0, "
+                              "next_at = NULL, updated_at = ? WHERE ref = ?", (answer, choice, now(), ref))
+        if cur.rowcount != 1:
+            raise KeyError("ask_answer: no such ask")
 
     @_locked
     def ask_pin(self, ws: str, ref: str, bead: str) -> None:

@@ -132,11 +132,24 @@ class NoHarness:
 
 
 class AskHooks(Protocol):
-    """What a pickup runs of part 2's AskBridge (`heterodyne.wsd.asks`)."""
+    """What a pickup and startup recovery run of part 2's AskBridge (`heterodyne.wsd.asks`)."""
 
     def advance(self, now: int) -> None:
-        """After dispatch, before the sweep and the resume pass: retry owed notices and steer the
-        undelivered notes of the beads that run."""
+        """After the replays, before the resume pass: read the answers of posted questions, finish the
+        delivered ones, post what is owed, and steer the undelivered notes of the beads that run."""
+        ...
+
+    def resume_gate(self, ws: str, bead: str) -> bool:
+        """Whether the resume pass may resume `bead`: False while one of its questions has no answer."""
+        ...
+
+    def flush(self, now: int) -> None:
+        """Last in a pickup, after the resume pass: send the owed notices."""
+        ...
+
+    def rebuild(self) -> None:
+        """Startup recovery, once the journals are replayed: an answer the journal lost is rebuilt from its
+        question bead's record."""
         ...
 
 
@@ -144,6 +157,15 @@ class NoAsks:
     """No ask bridge: the default outside production."""
 
     def advance(self, now: int) -> None:
+        pass
+
+    def resume_gate(self, ws: str, bead: str) -> bool:
+        return True
+
+    def flush(self, now: int) -> None:
+        pass
+
+    def rebuild(self) -> None:
         pass
 
 

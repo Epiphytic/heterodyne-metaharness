@@ -20,10 +20,18 @@ from heterodyne.config.secret_scan import sensitive_kind
 from heterodyne.sandbox.runtime import STEER_MAX
 from heterodyne.tmux import escape_controls
 from heterodyne.wsd import gitwip, relay
-from heterodyne.wsd.beads import QUESTION, BeadsAdapter, BeadsUnavailable, CreateUnverified, RecordUnreadable
+from heterodyne.wsd.beads import (
+    ANSWER_MARK,
+    QUESTION,
+    REF_KEY,
+    BeadsAdapter,
+    BeadsUnavailable,
+    CreateUnverified,
+    RecordUnreadable,
+)
 from heterodyne.wsd.brief import NOTE_HEADER, NoteBatch
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
-from heterodyne.wsd.journal import AskPinRefused, AskRow, Journal, OpConflict
+from heterodyne.wsd.journal import ANSWER_MAX, AskPinRefused, AskRow, Journal, OpConflict
 from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.notices import Notices
 from heterodyne.wsd.relay import AskPost, RelayRefused, RelayUnavailable, RelayUncertain
@@ -101,6 +109,29 @@ UNKNOWN_BODY = ("wsd can't tell whether admind took the question the agent worki
                 "marked the task needs-human. The question is on bead {child}. Ask the admin agent to check "
                 "its asks for it, then release the task.")
 TITLE_WITHHELD = "its title withheld: it contained a {kind}"
+TASK_KEY = "wsd_task"            # the question bead's task: how a rebuild after a journal loss finds it
+# Task 6: the answer, as the agent's note, on the question bead, and after a journal loss. Every note is at
+# most NOTE_BYTES of UTF-8, so one fits part 1's NOTES_MAX beside the brief's own text.
+ANSWER_CHOICE = "The operator answered your question (ask {ask_id}): {line}"
+ANSWER_FREE = "The operator answered your question (ask {ask_id}), in their words: {text}"
+ANSWER_CUT = " (cut; the full answer is with the operator)"
+NOTE_BYTES = 12000
+ANSWER_WITHHELD = "answer withheld from beads ({kind})"
+# A bead comment can be written by anyone with beads write access: a rebuilt note says it is not verified.
+REBUILT_MARK = ("Recovered from the question bead's record after a journal loss, and not verified as the "
+                "operator's")
+REBUILT_NOTE = REBUILT_MARK + ": the answer to your question (ask {ask_id}) reads: {text}"
+REBUILT_NONE = REBUILT_MARK + ": your question was answered but the answer is not on record; ask again."
+_ANSWERED = re.compile(r"The operator answered your question \(ask ([A-Za-z0-9_-]{1,64})\)"
+                       r"(?:: |, in their words: )(.*)", re.DOTALL)
+ENDED_STATUSES = ("stale", "superseded", "cancelled", "blocked")     # an ask that ended unanswered
+REPOST = ":repost"
+ASK_REPOSTED = "the question's ask ended without an answer; it was posted again"
+ASK_ENDED = "the question's ask ended without an answer, twice"
+ENDED_BODY = ("The question the agent working on {bead} asked ended in admind twice without an answer, so "
+              "wsd marked the task needs-human. The question is on bead {child}.")
+NO_ANSWER = "a question's answer could not be read this pickup (%s); it is read again at the next"
+NO_CANCEL = "a delivered question's ask could not be cancelled (%s); it is tried again later"
 OWED_BACKOFF_MAX = 1800         # seconds between an owed question's attempts, at most
 RECOVER_FAILED = "an ask could not be continued this pickup (%s); it is tried again at the next"
 NOT_WAITING = "an ask's task is not waiting on its question bead; it is not posted"
@@ -196,6 +227,36 @@ def card_choices(choices: object, recommended: object) -> tuple[list[str], str]:
     return list(D4_CHOICES), D4_RECOMMENDED
 
 
+def cut_note(text: str) -> str:
+    """`text` if it is at most NOTE_BYTES of UTF-8, else cut on a character boundary, with ANSWER_CUT."""
+    if len(text.encode("utf-8")) <= NOTE_BYTES:
+        return text
+    room = NOTE_BYTES - len(ANSWER_CUT.encode("utf-8"))
+    return text.encode("utf-8")[:room].decode("utf-8", "ignore") + ANSWER_CUT
+
+
+def answer_note(ask_id: str, text: str, choice: str | None, choices: Sequence[str]) -> str:
+    """The agent's note of the operator's answer: the choice's line if `choice` is a letter of the card's
+    `choices`, else the operator's own words."""
+    if choice is not None and len(choice) == 1 and choice in LETTERS[:len(choices)]:
+        line = f"{choice}: {choices[LETTERS.index(choice)]}"
+        return cut_note(ANSWER_CHOICE.format(ask_id=ask_id, line=line))
+    return cut_note(ANSWER_FREE.format(ask_id=ask_id, text=text))
+
+
+def rebuilt_note(comment: str, mark: str) -> str | None:
+    """The note a lost journal had, from the question bead's answer comment (`mark`, then the note wsd
+    wrote): marked unverified, since anyone with beads write access can write a comment. REBUILT_NONE if
+    the answer was withheld, or the comment is not one wsd wrote; None without `mark`."""
+    head, _, rest = comment.partition("\n")
+    if head != mark:
+        return None
+    found = _ANSWERED.fullmatch(rest)
+    if found is None or sensitive_kind(rest) is not None:
+        return REBUILT_NONE
+    return cut_note(REBUILT_NOTE.format(ask_id=found.group(1), text=found.group(2)))
+
+
 def question_card(ws: str, bead: str, bead_title: str, child: str, shown: str, turn: int, round_: int,
                   limit: int, choices: Sequence[str], recommended: str) -> AskPost:
     """The question's ask (step 9): its fixed head and tail carry admind's minimum of 80 non-space
@@ -208,6 +269,15 @@ def question_card(ws: str, bead: str, bead_title: str, child: str, shown: str, t
     return AskPost("question", title=title[:TITLE_MAX], body="\n\n".join((head, shown, tail)), bead=child,
                    poster=relay.poster_for(ws), form="choices", choices=list(choices),
                    recommended=recommended)
+
+
+def _choices_of(metadata: dict[str, object]) -> tuple[list[str], str]:
+    """The card's choices and recommendation, read back from the question bead's metadata (untrusted)."""
+    try:
+        choices: object = json.loads(str(metadata.get(CHOICES_KEY, "")))
+    except ValueError:
+        choices = None
+    return card_choices(choices, metadata.get(RECOMMENDED_KEY))
 
 
 class AsksPins:
@@ -287,9 +357,9 @@ class AskBridge:
             if rounds >= self.relay_settings.question_rounds_before_human:
                 self._too_many_rounds(parker, bead, rounds, kept)
                 return
-            with self.journal.transaction():
+            with self.journal.transaction():     # D3: the round counts once its answer is delivered
                 self.journal.ask_add(ref, ws, bead, "question", rounds + 1)
-                self.journal.nudge_set(ws, bead, rounds + 1, kept)
+                self.journal.nudge_set(ws, bead, rounds, kept)
             self.cp("asks.row")
             row = self._row(ref)
         self._ask(parker, row, shown_text(event.text), event.turn, list(D4_CHOICES), D4_RECOMMENDED)
@@ -330,7 +400,7 @@ class AskBridge:
         if row.state != "creating" or self._state(row.ws, row.bead) is not BeadState.RUNNING:
             return
         metadata = {TURN_KEY: str(turn), ROUND_KEY: str(row.round), CHOICES_KEY: json.dumps(list(choices)),
-                    RECOMMENDED_KEY: recommended}
+                    RECOMMENDED_KEY: recommended, TASK_KEY: row.bead}
         child = self.beads.create(row.ws, ref=row.ref, title=QUESTION_TITLE.format(
             bead=row.bead, line=first_line(shown, BEAD_LINE)), description=shown + QUESTION_FRAMING.format(
             bead=row.bead), labels=(QUESTION,), metadata=metadata)
@@ -347,7 +417,8 @@ class AskBridge:
         asks but only its 20 newest finished ones, and admind has no lookup by bead or ref, so absence
         proves nothing: the ask fails closed (`_unpostable`, ASK_POST_UNKNOWN)."""
         ws, bead = row.ws, row.bead
-        child = self.beads.holder(ws, row.ref)
+        # A repost asks on its original's bead, pinned from the original's row: no bead holds its own ref.
+        child = row.child if row.ref.endswith(REPOST) else self.beads.holder(ws, row.ref)
         if child is None:
             log.warning(NOT_WAITING)
             return
@@ -394,11 +465,7 @@ class AskBridge:
         made = self.beads.show(row.ws, child)
         description = str(made.raw.get("description", ""))
         shown = reshown(description.removesuffix(QUESTION_FRAMING.format(bead=row.bead)))
-        try:
-            choices: object = json.loads(str(made.metadata.get(CHOICES_KEY, "")))
-        except ValueError:
-            choices = None
-        picked, recommended = card_choices(choices, made.metadata.get(RECOMMENDED_KEY))
+        picked, recommended = _choices_of(made.metadata)
         turn = str(made.metadata.get(TURN_KEY, ""))
         return question_card(row.ws, row.bead, self.beads.show(row.ws, row.bead).title, child, shown,
                              int(turn) if turn.isdigit() else 0, row.round,
@@ -411,14 +478,14 @@ class AskBridge:
                                  next_at=now + int(wait))
 
     def _unpostable(self, parker: "Parker", row: AskRow, child: str, *, why: str = ASK_UNPOSTABLE,
-                    body: str = UNPOSTABLE_BODY) -> None:
-        """A permanent refusal, or a post whose outcome can't be known: the row is `refused`, the task
-        escalated needs-human, the operator told."""
+                    body: str = UNPOSTABLE_BODY, state: str = "refused") -> None:
+        """A permanent refusal, a post whose outcome can't be known, or a repost that ended unanswered too
+        (`state` "ended"): the row is in `state`, the task escalated needs-human, the operator told."""
         if self.notices is not None:
             self.notices.send(row.ws, row.bead, "stuck", UNPOSTABLE_TITLE.format(bead=row.bead),
                               body.format(bead=row.bead, child=child), f"unpostable:{row.ref}")
         with self.journal.transaction():
-            self.journal.ask_set(row.ref, state="refused", why=why, uncertain=0, next_at=None)
+            self.journal.ask_set(row.ref, state=state, why=why, uncertain=0, next_at=None)
             op = parker.escalation_for(row.bead, Reason.NEEDS_HUMAN, why)
         parker.replay_escalate(op)
 
@@ -472,6 +539,8 @@ class AskBridge:
         if parker is None:
             return
         for row in self.journal.asks_in(self.ws, ("creating", "owed")):
+            if row.kind == "question" and row.child is None and row.ref.endswith(REPOST):
+                row = self._pin_repost(row)
             if row.kind != "question" or row.child is None:
                 continue
             if row.state == "owed" and row.next_at is not None and row.next_at > now:
@@ -518,18 +587,160 @@ class AskBridge:
     # --- each pickup ---
 
     def advance(self, now: int) -> None:
-        """At each pickup, after part 1's dispatch and before the sweep and the resume pass: the owed
-        notices, then the pending notes of the beads that run. A steer a crash cut off is uncertain first."""
+        """At each pickup, after the replays (and part 3's review settle) and before the resume pass: the
+        delivered answers finished, the posted questions' answers read, what is owed posted, then the
+        pending notes of the beads that run. A steer a crash cut off is uncertain first."""
         self._reconcile(self.ws)
+        self._delivered(now)
+        self._answers(now)
         self.recover(now)
         if self.notices is not None:
-            self.notices.retry_owed(now)
             for bead, ref in self.journal.events_without_notice(self.ws, STEER_UNCERTAIN_EVENT):
                 _uncertain_notice(self.notices, self.ws, bead, ref)
         for row in self.journal.states(self.ws):
             current = self._current(self.ws, row.bead)
             if current is not None:
                 self._steer_notes(current)
+
+    def flush(self, now: int) -> None:
+        """Last in each pickup, after the resume pass: the owed notices."""
+        if self.notices is not None:
+            self.notices.retry_owed(now)
+
+    def resume_gate(self, ws: str, bead: str) -> bool:
+        """False while a question of the bead has no note yet: one being asked or posted, or one that ended
+        unanswered and is not reposted yet. An answered row's note was written with its answer."""
+        rows = self.journal.asks_in(ws, ("creating", "owed", "posted", "ended"))
+        return not any(r.bead == bead and (r.state != "ended" or (
+            not r.ref.endswith(REPOST) and self.journal.ask(r.ref + REPOST) is None)) for r in rows)
+
+    # --- answers (Task 6) ---
+
+    def _answers(self, now: int) -> None:
+        """Each posted question's answer, read from admind: stored with its note in one transaction, then put
+        on the question bead (withheld if it holds a secret), which is closed. An answered row whose bead a
+        crash left open is closed here too. A question that ended unanswered is reposted once (`_ended`)."""
+        sock = self.relay_settings.ask_socket
+        for row in self.journal.asks_in(self.ws, ("posted",)):
+            if row.kind != "question" or row.ask_id is None or row.child is None:
+                continue
+            try:
+                view = relay.get_ask(sock, row.ask_id)
+            except (RelayUnavailable, RelayUncertain, RelayRefused) as exc:
+                log.warning(NO_ANSWER, type(exc).__name__)
+                continue
+            answers = [a for a in view.answers if a.kind == "answer"]
+            try:
+                if answers:
+                    self._answered(row, row.child, row.ask_id, answers[0].text, answers[0].choice)
+                elif view.summary.status in ENDED_STATUSES:
+                    self._ended(row, row.child)
+            except (BeadsUnavailable, CreateUnverified, OpConflict) as exc:
+                log.warning(RECOVER_FAILED, type(exc).__name__)
+        for row in self.journal.asks_in(self.ws, ("answered",)):
+            if row.kind == "question" and row.child is not None and row.answer is not None:
+                try:
+                    self._close(row, row.child, row.answer)
+                except BeadsUnavailable as exc:
+                    log.warning(RECOVER_FAILED, type(exc).__name__)
+
+    def _answered(self, row: AskRow, child: str, ask_id: str, text: str, choice: str | None) -> None:
+        choices, _ = _choices_of(self.beads.show(row.ws, child).metadata)
+        note = answer_note(ask_id, text, choice, choices)
+        with self.journal.transaction():
+            self.journal.ask_answer(row.ref, text[:ANSWER_MAX], choice)
+            self.journal.note_add(row.ws, row.bead, _note_ref(row.ref), note)
+        self.cp("asks.answered")
+
+    def _close(self, row: AskRow, child: str, answer: str) -> None:
+        """The answer on the question bead, then the bead closed: both read back, so a replay writes
+        neither twice. The comment is the note itself, or ANSWER_WITHHELD."""
+        kind = sensitive_kind(answer)
+        if kind is not None:
+            comment = ANSWER_WITHHELD.format(kind=kind)
+        else:
+            choices, _ = _choices_of(self.beads.show(row.ws, child).metadata)
+            comment = answer_note(row.ask_id or "", answer, row.choice, choices)
+        self.beads.close_question(row.ws, child, comment)
+        self.cp("asks.closed!")
+
+    def _ended(self, row: AskRow, child: str) -> None:
+        """An ask that ended unanswered: the first is posted again once, on the same bead, as `<ref>:repost`;
+        the repost's end escalates the task needs-human, its bead left open for the operator's release."""
+        if row.ref.endswith(REPOST):
+            if self.parker is not None:
+                self._unpostable(self.parker, row, child, why=ASK_ENDED, body=ENDED_BODY, state="ended")
+            return
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, state="ended", why=ASK_REPOSTED, next_at=None)
+            self.journal.ask_add(row.ref + REPOST, row.ws, row.bead, "question", row.round)
+        self.cp("asks.ended")
+        self._pin_repost(self._row(row.ref + REPOST))
+
+    def _pin_repost(self, row: AskRow) -> AskRow:
+        original = self.journal.ask(row.ref.removesuffix(REPOST))
+        if original is None or original.child is None:
+            return row
+        self.journal.ask_pin(row.ws, row.ref, original.child)
+        return self._row(row.ref)
+
+    def _delivered(self, now: int) -> None:
+        """Each answered question whose note reads back delivered is `delivered`, with its round counted
+        (D3), in one transaction; its admind ask is then cancelled, so it no longer counts against admind's
+        open asks. A cancel that fails is tried again later (`next_at`); a refused one (the ask already
+        ended) is not."""
+        for row in self.journal.asks_in(self.ws, ("answered",)):
+            if row.kind != "question" or self.journal.note_is_delivered(_note_ref(row.ref)) is not True:
+                continue
+            rounds, head = self.journal.nudge(row.ws, row.bead)
+            with self.journal.transaction():
+                self.journal.ask_set(row.ref, state="delivered", next_at=None if row.ask_id is None else now)
+                self.journal.nudge_set(row.ws, row.bead, rounds + 1, head)
+            self.cp("asks.delivered")
+        for row in self.journal.asks_in(self.ws, ("delivered",)):
+            if row.ask_id is not None and row.next_at is not None and row.next_at <= now:
+                self._cancel(row, row.ask_id, now)
+
+    def _cancel(self, row: AskRow, ask_id: str, now: int) -> None:
+        try:
+            relay.cancel_ask(self.relay_settings.ask_socket, ask_id)
+        except RelayRefused as exc:
+            if exc.retryable:
+                self._cancel_later(row, now)
+                return
+        except (RelayUnavailable, RelayUncertain) as exc:
+            log.warning(NO_CANCEL, type(exc).__name__)
+            self._cancel_later(row, now)
+            return
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, next_at=None)
+
+    def _cancel_later(self, row: AskRow, now: int) -> None:
+        wait = min(self.relay_settings.notice_backoff_seconds * 2 ** row.attempts, OWED_BACKOFF_MAX)
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, attempts=row.attempts + 1, next_at=now + int(wait))
+
+    def rebuild(self) -> None:
+        """Startup recovery, after a journal loss: each closed question bead of a task of ours whose ref
+        the journal has no row for, with wsd's answer comment, gets its row (`answered`, no ask ID, so
+        nothing is cancelled) and its note again, marked unverified (`rebuilt_note`). A question still open
+        has no answer to rebuild; the operator's release is its way out."""
+        ours = {b.id for b in self.beads.ours(self.ws)}
+        for made in self.beads.questions(self.ws):
+            ref, task = made.metadata.get(REF_KEY), made.metadata.get(TASK_KEY)
+            if (made.status != "closed" or not isinstance(ref, str) or not isinstance(task, str)
+                    or task not in ours or self.journal.ask(ref) is not None):
+                continue
+            mark = ANSWER_MARK.format(ref=ref)
+            notes = [n for n in map(lambda c: rebuilt_note(c, mark), self.beads.comments(self.ws, made.id))
+                     if n is not None]
+            if not notes:
+                continue
+            with self.journal.transaction():
+                self.journal.ask_add(ref, self.ws, task, "question", 0)
+                self.journal.ask_set(ref, state="answered")
+                self.journal.note_add(self.ws, task, _note_ref(ref), notes[0])
+            self.journal.ask_pin(self.ws, ref, made.id)
 
     def _reconcile(self, ws: str, bead: str | None = None) -> None:
         """Every steer whose outcome was never journaled (a crash cut it off) may have arrived: its notes
@@ -588,3 +799,8 @@ class AskBridge:
             for ref in refs:
                 self.journal.note_delivered(ws, bead, ref)
             self.journal.steer_ended(ws, bead)
+
+
+def _note_ref(ref: str) -> str:
+    """The answer note's ref: the question's own, a repost's included, so a rebuild finds the same one."""
+    return f"answer:{ref.removesuffix(REPOST)}"
