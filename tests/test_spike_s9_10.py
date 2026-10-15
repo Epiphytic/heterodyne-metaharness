@@ -3,12 +3,18 @@ evidence, a capped run or any failed check gives a non-zero exit, and both wrapp
 metadata field a check reads must be there with its type, and each trace must open with the exec of its exact
 argv and end with strace's record of that process ending (r3)."""
 
+import importlib.util
 import json
+import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 SPIKE = Path(__file__).resolve().parents[1] / "docs" / "spikes" / "s9-10"
 CLI = "/store/cli/bin/codex"
@@ -540,3 +546,207 @@ def test_the_hooks_step_with_no_spool_prints_nothing(tmp_path: Path) -> None:
 def test_part2_copies_the_hooks_and_inner2_writes_them() -> None:
     assert " hooks " in (SPIKE / "part2.sh").read_text().replace("\\\n", " ")
     assert 'part2_steps.py" hooks "$SESSION" > "$R/hooks"' in (SPIKE / "inner2.sh").read_text()
+
+
+# --- btq-wi1xz: only well-formed queries sent to port 53 are listed as DNS names ---
+
+def load_analyzer() -> Any:
+    spec = importlib.util.spec_from_file_location("s9_10_analyze", SPIKE / "analyze.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ANALYZER = load_analyzer()
+NAME = re.compile(r"[A-Za-z0-9_-]{1,63}(\.[A-Za-z0-9_-]{1,63})*")
+COOKIE = struct.pack(">HH", 10, 8) + b"\x01\x02\x03\x04\x05\x06\x07\x08"   # one EDNS option: CODE 10, 8 bytes
+# A TLS ClientHello's first bytes, with a label planted where a DNS question would start (offset 12).
+LONGEST = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 61])        # 255 bytes on the wire
+HELLO = b"\x16\x03\x01\x00\xc8\x01\x00\x00\xc4\x03\x03\x00" + b"\x0bPLANTEDMARK\x00" + bytes(range(40))
+
+
+def query(name: str = "example.com", *, qd: int = 1, an: int = 0, ns: int = 0, ar: int = 0,
+          flags: int = 0x0100, tail: bytes = b"") -> bytes:
+    """dns(name) with its header's flags and counts set, and `tail` after the question."""
+    return struct.pack(">HHHHHH", 0x1234, flags, qd, an, ns, ar) + dns(name)[12:] + tail
+
+
+def opt(rdata: bytes = b"", *, rdlength: int | None = None, owner: bytes = b"\x00", rtype: int = 41) -> bytes:
+    """An OPT record: owner name, TYPE, CLASS (UDP size 1232), TTL 0, RDLENGTH, RDATA."""
+    size = len(rdata) if rdlength is None else rdlength
+    return owner + struct.pack(">HHIH", rtype, 1232, 0, size) + rdata
+
+
+def inet(port: int, v6: bool = False) -> str:
+    if v6:
+        return (f"{{sa_family=AF_INET6, sin6_port=htons({port}), sin6_flowinfo=htonl(0), "
+                f'inet_pton(AF_INET6, "fd00::3", &sin6_addr), sin6_scope_id=0}}')
+    return f'{{sa_family=AF_INET, sin_port=htons({port}), sin_addr=inet_addr("10.0.2.3")}}'
+
+
+def sendto_to(addr: str, buf: bytes) -> str:
+    size = 0 if addr == "NULL" else 28 if "AF_INET6" in addr else 16
+    return f'7 sendto(6, "{hx(buf)}", {len(buf)}, MSG_NOSIGNAL, {addr}, {size}) = {len(buf)}'
+
+
+def iov(buf: bytes, *, length: int | None = None, cut: bool = False) -> str:
+    """One strace iovec; `cut` marks it truncated, as strace does past -s."""
+    return f'{{iov_base="{hx(buf)}"{"..." if cut else ""}, iov_len={len(buf) if length is None else length}}}'
+
+
+def sendmmsg_of(entries: list[tuple[str, list[bytes | str]]], *, abbreviated: bool = False) -> str:
+    """A sendmmsg of one message per entry: its address and its iovecs (bytes, or an iov() string)."""
+    shown = []
+    for addr, vecs in entries:
+        items = [v if isinstance(v, str) else iov(v) for v in vecs]
+        size = 0 if addr == "NULL" else 28 if "AF_INET6" in addr else 16
+        total = sum(len(v) for v in vecs if isinstance(v, bytes))
+        shown.append(f"{{msg_hdr={{msg_name={addr}, msg_namelen={size}, msg_iov=[{', '.join(items)}], "
+                     f"msg_iovlen={len(items)}, msg_controllen=0, msg_flags=0}}, msg_len={total}}}")
+    more = ", ..." if abbreviated else ""
+    n = len(entries) + (1 if abbreviated else 0)
+    return f"7 sendmmsg(6, [{', '.join(shown)}{more}], {n}, MSG_NOSIGNAL) = {n}"
+
+
+def listed(tmp_path: Path, *body: str) -> tuple[dict[str, Any], str]:
+    """result.json and stdout of a passing Part 1 run whose server trace holds `body`."""
+    run = evidence(tmp_path / "r", 1)
+    (run / "server.strace").write_text(trace([CLI, "app-server"], *body))
+    done = analyze(run, "--part", "1")
+    return json.loads((run / "result.json").read_text()), done.stdout
+
+
+@pytest.mark.parametrize(("packet", "name"), [
+    (dns("example.com"), "example.com"), (dns("_dns-sd._udp.Local-1"), "_dns-sd._udp.Local-1"),
+    (query(ar=1, tail=opt()), "example.com"), (query(ar=1, tail=opt(COOKIE)), "example.com"),
+    (query(LONGEST), LONGEST),
+], ids=["plain", "underscore-hyphen", "opt", "opt-option", "255-bytes"])
+def test_query_name_reads_a_well_formed_query(packet: bytes, name: str) -> None:
+    assert ANALYZER.query_name(packet) == name
+
+
+FIXED = opt()[1:]                                            # the 10 fixed bytes after the root name
+
+
+REFUSED = {
+    "qd0": query(qd=0), "qd2": query(qd=2), "response": query(flags=0x8180), "opcode": query(flags=0x2900),
+    "an1": query(an=1), "ns1": query(ns=1), "ar2": query(ar=2, tail=opt() + opt()),
+    "label64": query("a" * 64 + ".com"), "name257": query(".".join(["a" * 63] * 4)),
+    "pointer": query()[:12] + b"\x03www\xc0\x0c\x00\x01\x00\x01",
+    "unended": query()[:12] + b"\x07example", "short-type": query()[:12] + b"\x07example\x03com\x00\x00\x01",
+    "no-type": query()[:-4], "space": query("exa mple.com"), "star": query("ex*mple.com"),
+    "non-ascii": query()[:12] + b"\x03ex\xe9\x03com\x00\x00\x01\x00\x01",
+    "root": query()[:12] + b"\x00\x00\x01\x00\x01", "trailing": query(tail=b"\x00"),
+    "empty": b"", "short-header": query()[:11],
+    # ARCOUNT 1: exactly one OPT record must follow
+    "opt-missing": query(ar=1), "opt-owner": query(ar=1, tail=opt(owner=b"\x01a\x00")),
+    "opt-type": query(ar=1, tail=opt(rtype=1)),
+    **{f"opt-cut-{k}": query(ar=1, tail=b"\x00" + FIXED[:k]) for k in range(10)},
+    "rdlength-long": query(ar=1, tail=opt(COOKIE, rdlength=len(COOKIE) + 1)),
+    "rdlength-short": query(ar=1, tail=opt(COOKIE, rdlength=len(COOKIE) - 1)),
+    "option-overruns": query(ar=1, tail=opt(struct.pack(">HH", 10, 9) + COOKIE[4:])),
+    "option-short": query(ar=1, tail=opt(struct.pack(">HH", 10, 7) + COOKIE[4:])),
+    "rdata-left": query(ar=1, tail=opt(COOKIE + b"\x00")),
+    "after-opt": query(ar=1, tail=opt() + b"\x00"),
+    "after-opt-option": query(ar=1, tail=opt(COOKIE) + b"\x00\x00"),
+    "tls": HELLO,
+}
+
+
+@pytest.mark.parametrize("packet", REFUSED.values(), ids=REFUSED.keys())
+def test_query_name_refuses_anything_else(packet: bytes) -> None:
+    assert ANALYZER.query_name(packet) is None
+
+
+@given(st.one_of(st.binary(max_size=600), st.builds(lambda b: query()[:12] + b, st.binary(max_size=300)),
+                 st.builds(lambda b: query(ar=1) + b, st.binary(max_size=40))))
+def test_query_name_never_raises_and_gives_only_a_name(packet: bytes) -> None:
+    name = ANALYZER.query_name(packet)
+    assert name is None or NAME.fullmatch(name)
+
+
+@pytest.mark.parametrize(("send", "names"), [
+    (sendto_to(inet(53), dns("v4.example")), ["v4.example"]),
+    (sendto_to(inet(53, v6=True), dns("v6.example")), ["v6.example"]),
+    (sendto_to("NULL", dns("null.example")), []),
+    (sendto_to(inet(443), dns("tls.example")), []),
+    (sendto_to(inet(5353), dns("mdns.example")), []),
+    (sendto_to(inet(53), dns("cut.example")).replace('", ', '"..., ', 1), []),
+    (sendto_to(inet(53), dns("long.example")).replace(f", {len(dns('long.example'))}, ", ", 99, ", 1), []),
+], ids=["v4-53", "v6-53", "null", "443", "5353", "truncated", "length-mismatch"])
+def test_only_sends_to_port_53_are_listed(tmp_path: Path, send: str, names: list[str]) -> None:
+    result, _ = listed(tmp_path, send)
+    assert result["dns"] == names
+    assert result["dns_dropped"] == 1 - len(names)
+
+
+def test_a_null_send_after_a_connect_to_53_is_not_listed(tmp_path: Path) -> None:
+    connected = f"7 connect(6, {inet(53)}, 16) = 0"
+    result, _ = listed(tmp_path, connected, sendto_to("NULL", dns("connected.example")))
+    assert result["dns"] == [] and result["dns_dropped"] == 1
+
+
+def test_an_unfinished_send_is_read_and_its_resumption_yields_nothing(tmp_path: Path) -> None:
+    send = sendto_to(inet(53), dns("slow.example")).rsplit(") = ", 1)[0] + " <unfinished ...>"
+    result, _ = listed(tmp_path, send, "7 <... sendto resumed>) = 34")
+    assert result["dns"] == ["slow.example"] and result["dns_dropped"] == 0
+
+
+def test_sendmmsg_lists_only_its_port_53_entries(tmp_path: Path) -> None:
+    line = sendmmsg_of([(inet(53), [dns("good.example")]), (inet(443), [dns("other.example")]),
+                        ("NULL", [dns("null.example")])])
+    result, _ = listed(tmp_path, line)
+    assert result["dns"] == ["good.example"] and result["dns_dropped"] == 2
+
+
+def test_sendmmsg_joins_a_query_split_across_iovecs(tmp_path: Path) -> None:
+    packet = dns("split.example")
+    head, rest = packet[:12], packet[12:]
+    result, _ = listed(tmp_path, sendmmsg_of([(inet(53), [head, rest])]))
+    assert result["dns"] == ["split.example"] and result["dns_dropped"] == 0
+
+
+@pytest.mark.parametrize("bad", ["cut", "length"])
+def test_a_split_query_with_a_bad_iovec_is_dropped(tmp_path: Path, bad: str) -> None:
+    packet = dns("split.example")
+    head, rest = packet[:12], packet[12:]
+    last = iov(rest, cut=True) if bad == "cut" else iov(rest, length=len(rest) + 1)
+    result, out = listed(tmp_path, sendmmsg_of([(inet(53), [head, last])]))
+    assert result["dns"] == [] and result["dns_dropped"] == 1
+    assert "split" not in out
+
+
+def test_ipv6_sendmmsg_of_a_and_aaaa_gives_one_name(tmp_path: Path) -> None:
+    aaaa = dns("both.example")[:-4] + b"\x00\x1c\x00\x01"
+    result, _ = listed(tmp_path, sendmmsg_of([(inet(53, v6=True), [dns("both.example")]),
+                                             (inet(53, v6=True), [aaaa])]))
+    assert result["dns"] == ["both.example"] and result["dns_dropped"] == 0
+
+
+def test_an_abbreviated_sendmmsg_array_is_dropped_whole(tmp_path: Path) -> None:
+    line = sendmmsg_of([(inet(53), [dns("one.example")]), (inet(53), [dns("two.example")])], abbreviated=True)
+    result, out = listed(tmp_path, line)
+    assert result["dns"] == [] and result["dns_dropped"] == 2
+    assert "example" not in out
+
+
+def test_a_tls_record_never_reaches_the_output(tmp_path: Path) -> None:
+    mixed = sendmmsg_of([(inet(53), [dns("real.example")]), (inet(443), [HELLO]), (inet(53), [HELLO])])
+    result, out = listed(tmp_path, sendto_to(inet(443), HELLO), sendto_to(inet(53), HELLO), mixed)
+    assert result["dns"] == ["real.example"] and result["dns_dropped"] == 4
+    assert "PLANTEDMARK" not in out and "PLANTEDMARK" not in json.dumps(result)
+    assert result["passed"]
+
+
+def test_at_most_32_names_are_listed(tmp_path: Path) -> None:
+    sends = [sendto_to(inet(53), dns(f"n{i:02d}.example")) for i in range(40)]
+    result, _ = listed(tmp_path, *sends)
+    assert result["dns"] == [f"n{i:02d}.example" for i in range(32)] and result["dns_dropped"] == 0
+
+
+def test_api_github_in_a_non_dns_send_still_fails(tmp_path: Path) -> None:
+    hello = HELLO + b"\x00\x00\x0e" + b"api.github.com"            # an SNI-shaped mention, sent to 443
+    result, _ = listed(tmp_path, sendto_to(inet(443), hello))
+    assert result["dns"] == [] and not result["passed"]
+    assert not result["checks"]["no_api_github_lookup"]
