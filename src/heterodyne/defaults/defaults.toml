@@ -55,6 +55,14 @@ park_attempts_before_human = 3
 inbox_attempts_before_human = 3
 coder_role = "coder"
 
+# admind's interim relay as wsd uses it (plan 5i part 2). `ask_socket` defaults to admind's own, under the
+# host's state directory.
+[wsd.relay]
+enabled = true
+question_rounds_before_human = 3
+owed_hours_before_human = 24
+notice_backoff_seconds = 60
+
 # Usage-aware scheduling (§4.4 D3-D5). Host only; accounts have no defaults.
 [usage]
 reserve_percent             = 5     # a trusted window blocks at >= 100 - reserve_percent used
