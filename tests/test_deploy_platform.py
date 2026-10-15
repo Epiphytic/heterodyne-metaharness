@@ -702,6 +702,38 @@ def test_managed_units_go_wsd_first_then_one_reload_then_the_root_steps(host: Ho
     never_touched_the_manager(host)
 
 
+@pytest.mark.parametrize(("where", "why"), [
+    ("units-ancestor-symlink", "the user unit directory is not the service user's directory"),
+    ("units-ancestor-writable", "the user unit directory is under a directory others can write"),
+    ("install-symlink", "the install directory is not the service user's directory"),
+    ("backup-symlink", "the backup directory is not the service user's directory"),
+    ("release-ancestor-writable", "the release directory is under a directory others can write"),
+])
+def test_an_uninstall_path_that_is_not_the_service_users_refuses_before_any_change(host: Host, where: str,
+                                                                                  why: str) -> None:
+    assert installer(host).returncode == 0
+    host.clear_calls()
+    moved = host.home() / "elsewhere"
+    if where == "units-ancestor-symlink":
+        (host.home() / ".config").rename(moved)
+        (host.home() / ".config").symlink_to(moved)
+    elif where == "install-symlink":
+        host.install_dir().rename(moved)
+        host.install_dir().symlink_to(moved)
+    elif where == "backup-symlink":
+        moved.mkdir()
+        (host.install_dir() / "backup").symlink_to(moved)
+    else:
+        level = host.home() / ".config" if where == "units-ancestor-writable" else release_dir(host).parent
+        level.chmod(0o777)
+    before = tree_of(host.home())
+    out = uninstaller(host)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert out.stderr.splitlines()[-1] == f"{REFUSED}{why}; nothing was changed"
+    assert user_calls(host, "stop", "disable", "daemon-reload") == [] and root_steps(host) == []
+    assert tree_of(host.home()) == before
+
+
 def test_a_second_uninstall_finds_nothing_to_remove(host: Host) -> None:
     assert installer(host).returncode == 0
     assert uninstaller(host).returncode == 0

@@ -90,6 +90,43 @@ else:
     print("present")
 '
 
+# The directories the uninstall writes into or runs from, as `WHAT KIND DIR` triples after the home, walked
+# from the home with lstat as platform_state.py `dir` does, since the recorded release may predate it: each
+# level a real directory of the user, never a link, and no level above a directory writable by others. A
+# unit directory must not be writable by others either. Absent passes. Prints `CODE WHAT` and exits 1 on
+# the first failure. (No apostrophes in it: it is a single-quoted bash string.)
+readonly WALK='
+import os, stat, sys
+def no(code, what):
+    print(code, what)
+    sys.exit(1)
+home = sys.argv[1]
+for what, kind, d in zip(*[iter(sys.argv[2:])] * 3):
+    try:
+        st = os.stat(home)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            no("not-theirs", what)
+        rel = os.path.relpath(d, home)
+        if rel == "." or rel == ".." or rel.startswith("../"):
+            no("outside", what)
+        p = home
+        for part in rel.split("/"):
+            if stat.S_IMODE(st.st_mode) & 0o022:
+                no("above", what)
+            p = os.path.join(p, part)
+            try:
+                st = os.lstat(p)
+            except FileNotFoundError:
+                break
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                no("not-theirs", what)
+        else:
+            if kind == "units" and stat.S_IMODE(st.st_mode) & 0o022:
+                no("writable", what)
+    except OSError:
+        no("unreadable", what)
+'
+
 refuse() {
     echo "refused: $*" >&2
     exit 1
@@ -168,6 +205,19 @@ show_units() {
     user_systemctl show "${MANAGED[@]}" -p Id -p LoadState -p ActiveState "$@" \
         || refuse "the service user's systemd state can't be read; nothing was changed"
 }
+walk() {
+    local out code what
+    out=$(as_service_user PATH="$user_tools" python3 -I -c "$WALK" "$(host "$service_home")" "$@" \
+        2>/dev/null </dev/null) && return 0
+    read -r code what <<<"$out"
+    case $code in
+        not-theirs) refuse "the $what is not the service user's directory; nothing was changed" ;;
+        outside) refuse "the $what is not under the service user's home; nothing was changed" ;;
+        above) refuse "the $what is under a directory others can write; nothing was changed" ;;
+        writable) refuse "the $what can be written by others; nothing was changed" ;;
+        *) refuse "the service user's directories can't be checked; nothing was changed" ;;
+    esac
+}
 no_record() {
     as_service_user PATH="$user_tools" python3 -I -c "$NO_RECORD" "$MARKER_PREFIX" "$user_units" "$@"
 }
@@ -199,12 +249,16 @@ if [[ $has_record == absent ]]; then
         if [[ $kind == not-managed ]]; then echo "$u: not managed by the installer; left in place"; fi
     done <<<"$rows"
 else
+    # what the uninstall writes into, and the release it runs, before anything is read through them
+    walk "user unit directory" units "$user_units" "install directory" private "$install_dir" \
+        "backup directory" private "$install_dir/backup" "releases directory" private "$releases"
     shown=$(show_units -p FragmentPath) || exit 1
 
     rel=$(as_service_user PATH="$user_tools" python3 -I -c "$RECORD_RELEASE" "$record" \
         2>/dev/null </dev/null) || rel=""
     [[ $rel =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ && -f $releases/$rel/.complete ]] \
         || refuse "the install record names no completed release; nothing was changed"
+    walk "release directory" private "$releases/$rel"
     # The recorded release's own deploy/platform_state.py, on its own interpreter, as the service user.
     py=("$releases/$rel/.venv/bin/python3" -I "$releases/$rel/deploy/platform_state.py")
     platform() { as_service_user PATH="$user_tools" "${py[@]}" "$@"; }
