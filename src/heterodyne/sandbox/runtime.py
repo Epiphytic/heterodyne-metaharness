@@ -289,6 +289,8 @@ def _canonical(login_files: tuple[Path, ...]) -> tuple[tuple[Path, ...], tuple[t
 @dataclass(frozen=True)
 class RuntimeConfig:
     sessions: Path                    # <wsd state>/sessions
+    creates: Path                     # <state>/creates, outside every sandbox bind
+    alerts: Path                      # <state>/alerts, shared with same-user admind
     credlocks: Path                   # <wsd state>/credlocks: the D8 lock directory (wsd.credlock)
     settings: SandboxSettings
     accounts: Accounts
@@ -343,7 +345,7 @@ class SandboxRuntime:
 
     def _ledger(self) -> creates.Ledger:
         try:
-            return creates.Ledger(self.c.sessions.parent / "creates", self.c.sessions.parent / "alerts")
+            return creates.Ledger(self.c.creates, self.c.alerts)
         except OSError:
             raise RuntimeUnavailable("the create ledger can't be opened") from None
 
@@ -515,7 +517,10 @@ class SandboxRuntime:
             raise RuntimeUnavailable("the sandbox backend can't list its sandboxes") from None
         records = self._records()
         known = {short_id(r.key) for r in records}
-        known.update(n.split("g")[0] for n in self._ledger().names())
+        try:
+            known.update(n.split("g")[0] for n in self._ledger().names())
+        except OSError:
+            raise RuntimeUnavailable("the create ledger can't be read") from None
         if any(NAME.fullmatch(n) and n.rsplit("g", 1)[0] not in known for n in names):
             raise RuntimeUnavailable("a sandbox has no session record")
         listed: list[Session] = []
@@ -1173,7 +1178,7 @@ class SandboxRuntime:
         self._watch(self.c.clock(), due_only=False)    # T9: the tree as the generation left it, `stopping`
         if was_settled:
             ledger.put(rec.sandbox, "gone", by="teardown", at=self.c.clock())
-        if creates.gone(ledger.directory, rec.sandbox):
+        if creates.gone(ledger.directory, rec.sandbox) and ledger.close_notice(rec.sandbox, self.c.clock()):
             with contextlib.suppress(*TMUX_ERRORS):
                 self.c.tmux.kill(self.reaper_name(rec.key, rec.generation))
         try:
@@ -1275,7 +1280,10 @@ class SandboxRuntime:
             ledger = self._ledger()
             confirmed: list[bool] = []
             for name in mine:
-                ledger.observe(name, "teardown", self.c.clock())
+                # Unknown pre-upgrade/reappearing siblings have no create to recover.
+                # Delete them without inventing an unreadable observed-only entry.
+                if ledger.submission(name) is not None or creates.settled(ledger.directory, name):
+                    ledger.observe(name, "teardown", self.c.clock())
                 confirmed.append(self.backend.delete(name))
             deleted = all(confirmed) and not any(n.startswith(prefix) for n in self.backend.names())
         except (BackendUnavailable, BackendError):

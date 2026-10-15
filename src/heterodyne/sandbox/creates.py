@@ -144,6 +144,13 @@ class Ledger:
         return write_once(self.alerts / f"{ident}.json", json.dumps({"id": ident,
                           "created_at": datetime.fromtimestamp(at, UTC).isoformat(), "text": text}).encode())
 
+    def close_notice(self, name: str, at: int) -> bool:
+        """An escalated create must publish its close-out before its watcher retires."""
+        try:
+            return not (self.alerts / f"create-{name}.json").exists() or self.alert(name, at, close=True)
+        except OSError:
+            return False
+
     def cleanup(self, name: str) -> None:
         """Called only for done entries whose watcher is confirmed absent."""
         paths = [self.alerts / f"create-{name}.json", self.alerts / f"create-{name}-settled.json"]

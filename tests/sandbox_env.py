@@ -156,7 +156,8 @@ def runtime_rig(root: Path, tmux: Tmux, clock: Clock, host: str = "") -> Runtime
     installs = {a: store_fixture(root / "i", a, config_dir) for a in ("claude-code", "codex")}
     backend, selftest = FakeBackend(), ScriptedSelfTest()
     config = RuntimeConfig(
-        sessions=root / "s", credlocks=root / "k", settings=sandbox_settings(env), accounts=accounts_at(home),
+        sessions=root / "s", credlocks=root / "k", creates=root / "creates", alerts=root / "alerts",
+        settings=sandbox_settings(env), accounts=accounts_at(home),
         real_home=home, real_home_canary=root / "canary", wsd_socket=root / "ctl.sock", uid=os.getuid(),
         gid=os.getgid(), tmux=tmux, clock=clock, store=installs["codex"].store,
         taint_dir=installs["codex"].taint_dir, config_dir=config_dir, store_problems=list)

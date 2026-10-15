@@ -97,12 +97,8 @@ def reap(name: str, deadline: int, delete: Callable[[str], bool], kill: Callable
                 if ledger is None:
                     return
                 if ledger.put(name, "gone", by="watcher", at=int(clock())):
-                    escalation = ledger.alerts / f"create-{name}.json"
-                    try:
-                        if not escalation.exists() or ledger.alert(name, int(clock()), close=True):
-                            return
-                    except OSError:
-                        pass
+                    if ledger.close_notice(name, int(clock())):
+                        return
         sleep(POLL_SECONDS if gone else RETRY_SECONDS)
 
 

@@ -478,7 +478,7 @@ def live() -> Iterator[Live]:
         # accounts_at's profiles, plus the cheap Codex profile, each on its default login in the real home
         accounts = ConfiguredAccounts({**ADAPTERS, PROFILES["codex"]: "codex"}, {"HOME": str(real_home)})
         config = RuntimeConfig(
-            sessions=root / "s", credlocks=root / "k",
+            sessions=root / "s", credlocks=root / "k", creates=root / "creates", alerts=root / "alerts",
             settings=settings, accounts=accounts, real_home=real_home,
             real_home_canary=canary, wsd_socket=root / "ctl.sock", uid=os.getuid(), gid=os.getgid(),
             tmux=tmux, clock=utc_now, store=installs["codex"].store, taint_dir=installs["codex"].taint_dir,

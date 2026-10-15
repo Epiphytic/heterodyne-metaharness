@@ -489,7 +489,9 @@ def test_gone_write_failure_keeps_teardown_watcher(rig: RuntimeRig, monkeypatch:
 def test_teardown_observes_each_listed_generation_before_delete(rig: RuntimeRig,
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     rec = seed(rig)
-    other = f"{short_id(rec.key)}g2"
+    other_rec = msgspec.structs.replace(rec, generation=2, sandbox=f"{short_id(rec.key)}g2")
+    other = other_rec.sandbox
+    assert rig.runtime._submission(book(rig), other_rec)  # pyright: ignore[reportPrivateUsage]
     rig.backend.extra.update({rec.sandbox, other})
     real, names = rig.backend.delete, []
 
@@ -573,3 +575,69 @@ def test_actual_resolve_refuses_outstanding_create_without_watcher(rig: RuntimeR
         rig.runtime.resolve_unlanded("alpha", short_id(rec.key), 1, "discard", None)
     assert rig.runtime.layout(rec.key).root.exists()
     assert book(rig).submission(rec.sandbox) is not None
+
+
+@pytest.mark.parametrize("stray_generation", [1, 7])
+def test_teardown_of_unknown_or_reappearing_sibling_does_not_poison_recovery(
+        rig: RuntimeRig, stray_generation: int) -> None:
+    spec = launch_spec(rig, "p-one")
+    rig.runtime.launch(spec)
+    rig.runtime.stop(spec.session_key)
+    assert rig.runtime.sessions("alpha") == []  # fully clean generation 1's ledger
+    rig.runtime.launch(replace(spec, generation=2))
+    stray = f"{short_id(spec.session_key)}g{stray_generation}"
+    assert book(rig).submission(stray) is None
+    rig.backend.extra.add(stray)
+    rig.runtime.stop(spec.session_key)
+    assert stray not in rig.backend.names()
+    assert not (book(rig).directory / f"{stray}.observed.json").exists()
+    for _ in range(3):
+        assert rig.runtime.sessions("alpha") == []
+    assert rig.runtime._running(short_id(spec.session_key)) == ""  # pyright: ignore[reportPrivateUsage]
+    rig.runtime.launch(replace(spec, generation=3))
+    assert len(rig.runtime.sessions("alpha")) == 1
+
+
+@pytest.mark.parametrize("close_write_fails", [False, True])
+def test_end_repairs_returned_create_and_closes_escalation_before_killing_watcher(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch, close_write_fails: bool) -> None:
+    rec = seed(rig, created=True)
+    ledger = book(rig)
+    entry = ledger.submission(rec.sandbox)
+    assert entry is not None
+    rig.runtime._arm(entry)  # pyright: ignore[reportPrivateUsage]
+    assert ledger.alert(rec.sandbox, rig.clock())
+    closed = ledger.alerts / f"create-{rec.sandbox}-settled.json"
+    real_write, real_kill = creates.write_once, rig.tmux.kill
+    watcher = rig.runtime.reaper_name(rec.key, rec.generation)
+
+    def kill(name: str) -> None:
+        if name == watcher:
+            assert closed.exists()
+        real_kill(name)
+
+    monkeypatch.setattr(rig.tmux, "kill", kill)
+    if close_write_fails:
+        monkeypatch.setattr(creates, "write_once", lambda path, body:
+                            False if path == closed else real_write(path, body))
+    assert rig.runtime._end(rec, interrupt=False)  # pyright: ignore[reportPrivateUsage]
+    assert creates.gone(ledger.directory, rec.sandbox)
+    assert closed.exists() is not close_write_fails
+    assert rig.tmux.has_session(watcher) is close_write_fails
+
+
+def test_second_ledger_listing_failure_is_runtime_unavailable(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = creates.Ledger.names
+    calls = 0
+
+    def names(ledger: creates.Ledger) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError()
+        return real(ledger)
+
+    monkeypatch.setattr(creates.Ledger, "names", names)
+    with pytest.raises(RuntimeUnavailable, match="ledger"):
+        rig.runtime.sessions("alpha")

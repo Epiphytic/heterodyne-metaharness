@@ -84,6 +84,7 @@ def build_runtime(s: WsdSettings, env: Mapping[str, str], *,
     harnesses = settings.harnesses
     config = RuntimeConfig(
         sessions=s.state_dir / "sessions", credlocks=s.credlock_dir,
+        creates=paths.state_dir(env) / "creates", alerts=paths.state_dir(env) / "alerts",
         settings=settings, accounts=s.accounts, real_home=real_home,
         real_home_canary=real_home / CANARY, wsd_socket=s.socket, uid=os.getuid(), gid=os.getgid(),
         tmux=Tmux(TMUX_SOCKET, launcher=_launcher(service_manager)), clock=utc_now,
