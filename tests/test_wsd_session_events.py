@@ -325,6 +325,65 @@ def test_a_jump_onto_a_damaged_marker_advances_and_the_later_events_run(tmp_path
     assert rig.journal.session_cursors(WS) == {key: (1, 1027)}
 
 
+def damaged(rig: Rig, n: int, gen: int = 1) -> SessionEvent:
+    key = rig.key(B)
+    return SessionEvent(f"{key}:g{gen}:e{n}", "damaged", WS, B, key, gen, 0)
+
+
+def test_a_damaged_marker_first_in_its_generation_advances(tmp_path: Path) -> None:
+    # e1 to e5 lost: the marker at e5 is the generation's first readable event.
+    stop = Handler()
+    rig = started(tmp_path, stop=stop)
+    key = rig.key(B)
+    rig.runtime.report(WS, damaged(rig, 5), ev(rig, n=6))
+    rig.pickup()
+    assert stop.seen == [f"{key}:g1:e6"] and rig.journal.session_cursors(WS) == {key: (1, 6)}
+    assert statuses(rig) == [InboxStatus.NEEDS_HUMAN.value, InboxStatus.COMMITTED.value]
+
+
+@pytest.mark.parametrize("at", [session_events.PAGE, session_events.PAGE + 1])
+def test_a_damaged_marker_at_a_page_boundary_advances(tmp_path: Path, at: int) -> None:
+    # The marker is the last event of the first page, or the first of the second.
+    rig = started(tmp_path)
+    key = rig.key(B)
+    marker = at + 1000
+    before = [ev(rig, n=n) for n in range(1, at)]
+    rig.runtime.report(WS, *before, damaged(rig, marker), ev(rig, n=marker + 1))
+    ingest(rig.journal, rig.runtime, WS)
+    assert ids(rig) == [f"{key}:g1:e{n}" for n in [*range(1, at), marker, marker + 1]]
+    assert rig.journal.session_cursors(WS) == {key: (1, marker + 1)}
+
+
+def test_a_cursor_already_at_the_marker_takes_only_what_follows(tmp_path: Path) -> None:
+    stop = Handler()
+    rig = started(tmp_path, stop=stop)
+    key = rig.key(B)
+    rig.journal.session_cursor_put(WS, key, 1, 1026)
+    rig.runtime.report(WS, ev(rig, n=1), damaged(rig, 1026), ev(rig, n=1027))
+    real = rig.runtime.session_events
+    rig.runtime.session_events = lambda ws, since, limit: real(ws, {}, limit)  # type: ignore[method-assign]
+    rig.pickup()                                            # every log read from its start
+    assert ids(rig) == [f"{key}:g1:e1027"] and stop.seen == [f"{key}:g1:e1027"]
+    assert not any(e.kind == "session_event_damaged" for e in rig.journal.events_since(0))
+    assert rig.journal.session_cursors(WS) == {key: (1, 1027)}
+
+
+def test_a_damaged_marker_then_an_ordinary_gap_waits_after_the_marker(tmp_path: Path) -> None:
+    stop = Handler()
+    rig = started(tmp_path, stop=stop)
+    key = rig.key(B)
+    rig.runtime.report(WS, ev(rig, n=1), damaged(rig, 10), ev(rig, n=12))
+    rig.pickup()
+    rig.pickup()
+    assert stop.seen == [f"{key}:g1:e1"] and rig.journal.session_cursors(WS) == {key: (1, 10)}
+    assert [e.kind for e in rig.journal.events_since(0)].count("session_event_gap") == 1
+    rig.runtime.report(WS, ev(rig, n=11))
+    rig.pickup()
+    assert stop.seen == [f"{key}:g1:e{n}" for n in (1, 11, 12)]
+    assert statuses(rig) == [InboxStatus.COMMITTED.value, InboxStatus.NEEDS_HUMAN.value,
+                             InboxStatus.COMMITTED.value, InboxStatus.COMMITTED.value]
+
+
 def test_a_jump_onto_an_ordinary_event_waits_for_the_missing_one(tmp_path: Path) -> None:
     # P1: only the fake delivers this (out of order); the key waits, says so once, and goes on once e2 comes.
     stop = Handler()
