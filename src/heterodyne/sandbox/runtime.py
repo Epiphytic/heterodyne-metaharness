@@ -72,6 +72,7 @@ from heterodyne.wsd.runtime import (
     Action,
     EndCause,
     Ended,
+    ExecDirCleared,
     InstallTainted,
     LaunchFailed,
     LaunchSpec,
@@ -161,7 +162,7 @@ class SessionRecord(msgspec.Struct, frozen=True, kw_only=True):
     create_started: bool = False      # a create may be submitted: written before the watcher starts (r2)
     end_cause: str = ""               # g08sd: how this generation ended (EndCause); written once
     ended_at: int = 0                 # the `ended` write's clock
-    install: str = ""                 # plan 4c T8: the generation's verified install and manifest digest
+    install_name: str = ""            # plan 4c T8: the generation's verified install and manifest digest
     install_digest: str = ""
 
 
@@ -318,6 +319,10 @@ class SandboxRuntime:
         self._inspect_cleared = False
         self.queued: dict[str, list[Signal]] = {}         # ws -> reports since the last drain
         self.queue_lock = threading.Lock()                # the servers' threads add, signals() drains
+        # Codex T8 r1 B1: evidence wsd must see (a taint, an exec dir cleared), by workstream, kept until
+        # drained and never capped: one per (kind, session key, generation[, path]), so its size is bounded
+        # by the live sessions, and no flood of usage reports can evict one.
+        self.notices: dict[str, dict[tuple[str | int, ...], Signal]] = {}
         self.polled: dict[tuple[str, int], int] = {}      # (key, generation) -> when its read last ran
         self.walked: dict[tuple[str, str], int] = {}      # (adapter, install) -> when its last walk passed
         self.walk_lock = threading.Lock()                  # one taint walk at a time: expire's and the ends'
@@ -428,7 +433,7 @@ class SandboxRuntime:
                             profile=spec.profile, adapter=adapter.name, generation=spec.generation,
                             phase=Phase.CREATING, sandbox=name, tmux_session=self.tmux_name(spec.session_key),
                             ran=prev.ran if prev else False, native_id=prev.native_id if prev else None,
-                            worktree=str(spec.worktree), repo=str(spec.repo), install=installed.name,
+                            worktree=str(spec.worktree), repo=str(spec.repo), install_name=installed.name,
                             install_digest=installed.digest)
         write_record(layout, rec)
         try:
@@ -488,9 +493,9 @@ class SandboxRuntime:
             raise RuntimeUnavailable(failed[0])
 
     def signals(self, ws: str) -> list[Signal]:
-        """E8: what the workstream's sessions reported since the last call, oldest first. Each running
-        session's usage read is run first when it is due (E5). Never raises: a report that can't be had
-        is no report."""
+        """E8: what the workstream's sessions reported since the last call, oldest first, then its notices
+        (B1: taints, cleared exec dirs), each once. Each running session's usage read is run first when it
+        is due (E5). Never raises: a report that can't be had is no report."""
         try:
             running = [r for r in self._records() if r.ws == ws and r.phase is Phase.RUNNING]
         except RuntimeUnavailable:
@@ -499,7 +504,7 @@ class SandboxRuntime:
             if rec.key in self.servers:
                 self._poll(rec)
         with self.queue_lock:
-            return self.queued.pop(ws, [])
+            return [*self.queued.pop(ws, []), *self.notices.pop(ws, {}).values()]
 
     def ended(self, session_key: str) -> Ended | None:
         """g08sd: the latest generation's end, from its record (`_end_of`)."""
@@ -560,14 +565,17 @@ class SandboxRuntime:
         marker is already written; a listing that fails reports nothing, and the marker still refuses."""
         try:
             live = [r for r in self._records()
-                    if r.phase is not Phase.ENDED and (r.adapter, r.install) == (adapter, install)]
+                    if r.phase is not Phase.ENDED and (r.adapter, r.install_name) == (adapter, install)]
         except RuntimeUnavailable:
             return
+        for rec in live:
+            self._notice(rec.ws, ("taint", rec.key, rec.generation),
+                         InstallTainted(rec.key, rec.generation, adapter, install))
+
+    def _notice(self, ws: str, ident: tuple[str | int, ...], signal: Signal) -> None:
+        """Keep `signal` for the workstream's next drain, once per `ident` (B1)."""
         with self.queue_lock:
-            for rec in live:
-                queue = self.queued.setdefault(rec.ws, [])
-                queue.append(InstallTainted(rec.key, rec.generation, adapter, install))
-                del queue[:-MAX_QUEUED]
+            self.notices.setdefault(ws, {}).setdefault(ident, signal)
 
     def _watch(self, now: int, *, due_only: bool) -> None:
         """Plan 4c T9 (E17's second path): walk every install a live session runs, or with `due_only` each
@@ -708,6 +716,9 @@ class SandboxRuntime:
             log.warning("exec_dir_cleared %s gen=%d adapter=%s path=%s files=%d links=%d dirs=%d bytes=%d",
                         spec.session_key, gen, adapter.name, cleared.path, cleared.files, cleared.links,
                         cleared.dirs, cleared.bytes)
+            self._notice(spec.ws, ("cleared", spec.session_key, gen, str(cleared.path)), ExecDirCleared(
+                spec.session_key, gen, adapter.name, str(cleared.path), cleared.files, cleared.links,
+                cleared.dirs, cleared.bytes, cleared.names))         # B2: wsd journals it
         ws = c.settings.workstreams.get(spec.ws, WsSandbox())
         token = secrets.token_hex(16)
         shim_config = {"wait_seconds": c.settings.hook_wait_seconds,
@@ -851,7 +862,8 @@ class SandboxRuntime:
             return
         self.polled[ident] = now
         try:
-            argv = adapter.usage_argv(self.verified_cli(adapter, InstallPin(rec.install, rec.install_digest)))
+            pin = InstallPin(rec.install_name, rec.install_digest)
+            argv = adapter.usage_argv(self.verified_cli(adapter, pin))
             if argv is None:
                 return
             r = self.backend.exec(rec.sandbox, Path(rec.worktree), argv, timeout=USAGE_SECONDS)

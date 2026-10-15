@@ -21,21 +21,31 @@ from sandbox_env import RuntimeRig, bead_worktree, launch_spec, runtime_rig, sho
 from tmux_guard import new_test_tmux
 from wsd_env import PROFILES, Clock, accounts_at, git_repo
 
-from heterodyne.agents.base import UNDECLARED_VERSION, Adapter
+from heterodyne.agents.base import UNDECLARED_VERSION, Adapter, UsageReport
 from heterodyne.agents.codex import Codex
 from heterodyne.agents.registry import ADAPTERS
+from heterodyne.config.capabilities import Capabilities
 from heterodyne.harness import verify
 from heterodyne.harness.selection import InstallPin
 from heterodyne.sandbox.build import build_usage_reader
 from heterodyne.sandbox.hostread import HostUsageReader
-from heterodyne.sandbox.runtime import SandboxRuntime
+from heterodyne.sandbox.runtime import (
+    MAX_QUEUED,
+    Phase,
+    SandboxRuntime,
+    SessionRecord,
+    read_record,
+    write_record,
+)
 from heterodyne.sandbox.spec import INSTALL_RECORD_INSIDE
 from heterodyne.wsd.runtime import (
     INSTALL_UNPINNED,
     NOT_SELECTED,
+    ExecDirCleared,
     InstallTainted,
     LaunchFailed,
     LaunchSpec,
+    LimitSeen,
     RuntimeUnavailable,
 )
 from heterodyne.wsd.settings import WsdSettings
@@ -387,6 +397,77 @@ def test_a_taint_found_at_launch_signals_every_live_session_on_the_install(rig: 
     with pytest.raises(LaunchFailed) as again:              # the marker refuses; no second round of signals
         rig.runtime.verified_cli(ADAPTERS["codex"])
     assert str(again.value) == verify.INSTALL_TAINTED and tainted_signals(rig) == []
+
+
+def live_on(rig: RuntimeRig, pin: InstallPin, count: int) -> list[str]:
+    """`count` running sessions' records on the install, written as a launch writes them (no sandbox)."""
+    keys = [f"live-{i:04d}" for i in range(count)]
+    for key in keys:
+        write_record(rig.runtime.layout(key), SessionRecord(
+            key=key, ws="alpha", bead=f"btq-{key}", role="coder", profile="p-two", adapter="codex",
+            generation=1, phase=Phase.RUNNING, sandbox=f"sb-{key}", tmux_session=f"wsd-{key}",
+            install_name=pin.install, install_digest=pin.digest))
+    return keys
+
+
+def test_the_record_pins_the_generations_install(rig: RuntimeRig) -> None:
+    f = rig.installs["codex"]
+    spec = codex_spec(rig, f.pin)
+    rig.runtime.launch(spec)
+    rec = read_record(rig.runtime.layout(spec.session_key))
+    assert rec is not None and (rec.install_name, rec.install_digest) == (f.pin.install, f.pin.digest)
+
+
+def test_every_session_on_a_tainted_install_gets_its_notice_however_many(rig: RuntimeRig) -> None:
+    """Codex T8 r1 B1: taint notices are kept apart from the capped usage queue."""
+    f = rig.installs["codex"]
+    keys = live_on(rig, f.pin, MAX_QUEUED + 1)
+    link_into(f, rig.root / "elsewhere")
+    with pytest.raises(LaunchFailed):
+        rig.runtime.verified_cli(ADAPTERS["codex"])
+    assert sorted(s.session_key for s in tainted_signals(rig)) == keys
+
+
+def test_a_pending_taint_outlasts_any_number_of_usage_reports(rig: RuntimeRig) -> None:
+    """Codex T8 r1 B1: a flood of limit reports evicts only older limit reports, never a taint notice."""
+    f = rig.installs["codex"]
+    [key] = live_on(rig, f.pin, 1)
+    link_into(f, rig.root / "elsewhere")
+    with pytest.raises(LaunchFailed):
+        rig.runtime.verified_cli(ADAPTERS["codex"])
+    limited = UsageReport(limited=True, reset_hint=1)
+    for _ in range(MAX_QUEUED + 44):
+        rig.runtime._report("alpha", key, 1, Capabilities(limit_signal=True), limited)  # noqa: SLF001
+    drained = rig.runtime.signals("alpha")
+    taints = [s for s in drained if isinstance(s, InstallTainted)]
+    assert taints == [InstallTainted(key, 1, "codex", f.pin.install)]
+    assert sum(isinstance(s, LimitSeen) for s in drained) == MAX_QUEUED
+
+
+def test_a_session_tainted_twice_before_a_drain_is_signalled_once(rig: RuntimeRig) -> None:
+    f = rig.installs["codex"]
+    [key] = live_on(rig, f.pin, 1)
+    link_into(f, rig.root / "elsewhere")
+    for _ in range(2):
+        with pytest.raises(LaunchFailed):
+            rig.runtime.verified_cli(ADAPTERS["codex"])
+        verify.clear_taint(f.taint_dir, "codex", f.pin.install)     # the next verify walks again
+    assert [s.session_key for s in tainted_signals(rig)] == [key]
+
+
+def test_a_leftover_exec_dir_is_cleared_and_noticed_for_the_journal(rig: RuntimeRig) -> None:
+    """Codex T8 r1 B2 (Amendment 1 §4.2): each clear reaches wsd as an `ExecDirCleared` notice, with the
+    session, generation and adapter and the bounded summary; wsd journals it as `exec_dir_cleared`."""
+    f = rig.installs["codex"]
+    spec = codex_spec(rig, f.pin)
+    packages = rig.runtime.layout(spec.session_key).home / ".codex" / "packages"
+    packages.mkdir(mode=0o700, parents=True)
+    (packages / "leftover").write_bytes(b"x")
+    rig.runtime.launch(spec)
+    assert not any(packages.iterdir())
+    notices = [s for s in rig.runtime.signals("alpha") if isinstance(s, ExecDirCleared)]
+    assert notices == [ExecDirCleared(spec.session_key, 1, "codex", ".codex/packages", files=1, links=0,
+                                      dirs=0, bytes=1, names=("leftover",))]
 
 
 def test_a_taint_survives_a_restart(rig: RuntimeRig) -> None:
