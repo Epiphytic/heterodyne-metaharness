@@ -15,6 +15,7 @@ Prints one line per check and exits 0 only when every check passes."""
 import argparse
 import json
 import re
+import struct
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,18 @@ STRING = rb'"(?:\\x[0-9a-f]{2})*"'
 ARGV = rb"\[((?:" + STRING + rb"(?:, " + STRING + rb")*)?)\]"
 EXEC = re.compile(rb"(\d+) +execve\(" + STRING + rb", " + ARGV + rb", .*\) = 0$")
 ENDED = re.compile(rb"(\d+) +\+\+\+ (?:exited with \d+|killed by (SIG[A-Z0-9]+)( \(core dumped\))?) \+\+\+$")
+# DNS names are read only from complete sends to port 53 (btq-wi1xz): a sendto's address, or a sendmmsg
+# entry's own msg_name. A NULL address (a connected socket) is never read.
+PORT_53 = re.compile(rb"\{sa_family=(?:AF_INET, sin_port|AF_INET6, sin6_port)=htons\(53\), [^{}]*\}")
+SENDTO = re.compile(rb"\bsendto\(\d+, (" + STRING + rb")(\.\.\.)?, (\d+), [^,]*, (NULL|\{[^{}]*\}), \d+")
+SENDMMSG = re.compile(rb"\bsendmmsg\(\d+, \[")
+IOV = rb"\{iov_base=(" + STRING + rb")(\.\.\.)?, iov_len=(\d+)\}"
+IOVS = re.compile(IOV)
+ANY_IOV = rb"\{iov_base=" + STRING + rb"(?:\.\.\.)?, iov_len=\d+\}"
+MSG = re.compile(rb"\{msg_hdr=\{msg_name=(NULL|\{[^{}]*\}), msg_namelen=\d+, msg_iov=\[(" + ANY_IOV
+                 + rb"(?:, " + ANY_IOV + rb")*)\], msg_iovlen=\d+, msg_controllen=0, msg_flags=[^{}\[\],]*\}"
+                 + rb"(?:, msg_len=\d+)?\}")
+LABEL = re.compile(rb"[A-Za-z0-9_-]{1,63}")
 GITHUB_API = b"\x03api\x06github\x03com"
 LOGIN_SCREEN = b"Sign in with ChatGPT"
 COMPOSER = "›".encode()                                      # Codex.prompt_marker
@@ -55,16 +68,72 @@ def strings(line: bytes) -> list[bytes]:
     return [bytes.fromhex(m.group(1).replace(b"\\x", b"").decode()) for m in HEX.finditer(line)]
 
 
-def qname(packet: bytes) -> str | None:
-    """The first question's name of a DNS query, or None if `packet` doesn't read as one."""
+def unhex(quoted: bytes) -> bytes:
+    return bytes.fromhex(quoted[1:-1].replace(b"\\x", b"").decode())
+
+
+def query_name(packet: bytes) -> str | None:
+    """The name a well-formed single-question DNS query asks for, or None for anything else: QR and opcode
+    0, one question, no answers or authority, and nothing after the question but one optional OPT record."""
+    if len(packet) < 12:
+        return None
+    flags, qd, an, ns, ar = struct.unpack(">5H", packet[2:12])
+    if flags & 0xF800 or qd != 1 or an or ns or ar > 1:
+        return None
     i, labels = 12, []
     while i < len(packet) and packet[i] != 0:
-        n = packet[i]
-        if n > 63 or i + 1 + n > len(packet):
+        n = packet[i]                                        # over 63 is also a compression pointer
+        if n > 63 or i + 1 + n > len(packet) or not LABEL.fullmatch(label := packet[i + 1:i + 1 + n]):
             return None
-        labels.append(packet[i + 1:i + 1 + n].decode("ascii", "replace"))
+        labels.append(label.decode())
         i += 1 + n
-    return ".".join(labels) if labels and len(packet) > 12 else None
+    end = i + 1 + 4                                          # the root byte, QTYPE and QCLASS
+    if i >= len(packet) or not labels or i + 1 - 12 > 255 or end > len(packet):
+        return None
+    name = ".".join(labels)
+    if not ar:
+        return name if end == len(packet) else None
+    # One OPT record: the root name, then TYPE 41, CLASS, TTL and RDLENGTH, then RDATA ending the packet.
+    if len(packet) < end + 11 or packet[end] != 0:
+        return None
+    rtype, _, _, rdlength = struct.unpack(">HHIH", packet[end + 1:end + 11])
+    i, rdata_end = end + 11, end + 11 + rdlength
+    if rtype != 41 or rdata_end != len(packet):
+        return None
+    while i + 4 <= rdata_end:                                # whole options (CODE, LENGTH, data) fill RDATA
+        i += 4 + struct.unpack(">H", packet[i + 2:i + 4])[0]
+    return name if i == rdata_end else None
+
+
+def dns_payloads(line: bytes) -> tuple[list[bytes], int]:
+    """The complete payloads one trace line sends to port 53, and how many other payloads it sends. A
+    `<... resumed>` line holds no arguments; an `<unfinished ...>` one holds them all and is read as usual."""
+    if b" resumed>" in line:
+        return [], 0
+    if b"sendmmsg(" in line:
+        if (start := SENDMMSG.search(line)) is not None:
+            payloads, dropped, i = [], 0, start.end()
+            while (msg := MSG.match(line, i)) is not None:   # each entry on its own, iovecs joined in order
+                iovs = list(IOVS.finditer(msg.group(2)))
+                whole = all(v.group(2) is None and len(unhex(v.group(1))) == int(v.group(3)) for v in iovs)
+                if PORT_53.fullmatch(msg.group(1)) and whole:
+                    payloads.append(b"".join(unhex(v.group(1)) for v in iovs))
+                else:
+                    dropped += 1
+                i = msg.end()
+                if line.startswith(b"]", i):
+                    return payloads, dropped
+                if not line.startswith(b", ", i):
+                    break
+                i += 2
+        return [], max(1, line.count(b"{msg_hdr="))         # an abbreviated or unreadable array: all of it
+    if b"sendto(" not in line:
+        return [], 0
+    call = SENDTO.search(line)
+    if (call is None or call.group(2) is not None or not PORT_53.fullmatch(call.group(4))
+            or len(buf := unhex(call.group(1))) != int(call.group(3))):
+        return [], 1
+    return [buf], 0
 
 
 def nonempty(path: Path) -> bool:
@@ -146,8 +215,13 @@ def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
     home = str(meta["argv.json"]["home"]).encode()
     execs = [s[0] for ln in lines if b" execve(" in ln and (s := strings(ln))]
     under_home = [e for e in execs if e.startswith(home + b"/")]
-    names = sorted({n for ln in lines if b"sendto(" in ln or b"sendmmsg(" in ln
-                    for s in strings(ln) if (n := qname(s))})
+    payloads, dropped = [], 0
+    for ln in lines:
+        sent, other = dns_payloads(ln)
+        payloads += sent
+        dropped += other
+    found = [query_name(p) for p in payloads]
+    names = sorted({n for n in found if n})[:32]
     github = any(GITHUB_API in s or b"api.github.com" in s for ln in lines for s in strings(ln))
     sockets = sorted({s.decode("utf-8", "replace") for ln in traced["tui.strace"]
                       if b"connect(" in ln and b"AF_UNIX" in ln for s in strings(ln)})
@@ -175,7 +249,7 @@ def analyze(run: Path, part: int) -> tuple[dict[str, bool], dict[str, Any]]:
         hooks = (run / "hooks").read_text(errors="replace").split() if complete else []
         checks["no_hook_failure"] = complete and not any(f in screens for f in HOOK_FAILURE)
         checks["hooks_ran"] = complete and "UserPromptSubmit" in hooks
-    facts.update({"dns": names, "sockets": sockets,
+    facts.update({"dns": names, "dns_dropped": dropped + found.count(None), "sockets": sockets,
                   "under_home": [e.decode("utf-8", "replace") for e in under_home], "left": left[:16]})
     return checks, facts
 

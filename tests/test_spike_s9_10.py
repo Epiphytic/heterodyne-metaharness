@@ -714,7 +714,7 @@ def test_a_split_query_with_a_bad_iovec_is_dropped(tmp_path: Path, bad: str) -> 
     last = iov(rest, cut=True) if bad == "cut" else iov(rest, length=len(rest) + 1)
     result, out = listed(tmp_path, sendmmsg_of([(inet(53), [head, last])]))
     assert result["dns"] == [] and result["dns_dropped"] == 1
-    assert "split" not in out
+    assert "split.example" not in out
 
 
 def test_ipv6_sendmmsg_of_a_and_aaaa_gives_one_name(tmp_path: Path) -> None:
@@ -728,7 +728,12 @@ def test_an_abbreviated_sendmmsg_array_is_dropped_whole(tmp_path: Path) -> None:
     line = sendmmsg_of([(inet(53), [dns("one.example")]), (inet(53), [dns("two.example")])], abbreviated=True)
     result, out = listed(tmp_path, line)
     assert result["dns"] == [] and result["dns_dropped"] == 2
-    assert "example" not in out
+    assert "one.example" not in out and "two.example" not in out
+
+
+def test_an_unreadable_sendmmsg_array_is_dropped(tmp_path: Path) -> None:
+    result, _ = listed(tmp_path, "7 sendmmsg(6, 0x7ffd5e1c2a40, 2, MSG_NOSIGNAL) = -1 EFAULT (Bad address)")
+    assert result["dns"] == [] and result["dns_dropped"] == 1
 
 
 def test_a_tls_record_never_reaches_the_output(tmp_path: Path) -> None:
