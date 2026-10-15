@@ -58,7 +58,7 @@ from heterodyne.sandbox.spec import (
     short_id,
 )
 from heterodyne.session import shim
-from heterodyne.session.server import BoundaryBusy, BoundaryUncertain, SessionServer
+from heterodyne.session.server import BoundaryBusy, BoundaryUncertain, BoundaryUnmarked, SessionServer
 from heterodyne.tmux import Tmux, TmuxError, TmuxPasteUncertain, has_controls
 from heterodyne.wsd import gitwip, ids
 from heterodyne.wsd.accounts import Accounts
@@ -562,7 +562,9 @@ class SandboxRuntime:
         a steer (even an uncertain one) pasted at is spent until the next turn end, and concurrent steers
         can't share one. Text must be valid UTF-8 with no terminal controls but tab and newline. After an
         uncertain steer nothing more is pasted into that generation (`BoundaryUncertain`): tmux may still
-        run the paste or its Enter late, and no later Enter may submit what it left or deliver it twice.
+        run the paste or its Enter late, and no later Enter may submit what it left or deliver it twice. The
+        mark is durable (`steer_inflight`, `steer_uncertain` beside the record), so a restart, a rebind or
+        a crash mid-steer keeps the generation refusing.
 
         Turn events wait for the paste, and their hooks' shim gives up after the hook wait and lets the turn
         go on, so the paste is bounded to half of it: a prompt hook that arrives during a paste is still
@@ -611,6 +613,8 @@ class SandboxRuntime:
             server.at_boundary(deliver)
         except BoundaryUncertain:
             raise SteerRefused("an earlier steer to this session is uncertain") from None
+        except BoundaryUnmarked:
+            raise SteerRefused("the steer can't be marked in flight") from None
         except BoundaryBusy:
             raise SteerRefused("the session is mid-turn") from None
         except TmuxPasteUncertain:
@@ -1013,7 +1017,8 @@ class SandboxRuntime:
             return answer
 
         return SessionServer(layout.socket(gen), token, layout.events(gen), turn_ends=adapter.turn_end_events,
-                             on_event=heard, on_request=asked)
+                             on_event=heard, on_request=asked, inflight=layout.steer_inflight(gen),
+                             uncertain=layout.steer_uncertain(gen))
 
     def _woke(self, ws: str) -> None:
         with contextlib.suppress(Exception):      # a wake is a hint: the next pickup reads the log anyway
