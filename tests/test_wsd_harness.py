@@ -537,6 +537,19 @@ def test_the_install_ask_resolves_under_real_btq(h: H) -> None:
     assert module.ask_digest(bead, h.queue().show) == (r.context_digest, [])
 
 
+@pytest.mark.skipif(not os.environ.get("BTQ_REPO"), reason="needs $BTQ_REPO (a beads-task-queue checkout)")
+def test_an_install_ask_naming_the_checkout_by_github_name_is_unpostable_under_real_btq(h: H) -> None:
+    """The other side of the test above: btq reads a ref's repo as a local path, so an owner/name repo is a
+    gap and the install fails before anything is posted."""
+    module = wbtq.load(Path(os.environ["BTQ_REPO"]))
+    _, commit = skill_repo(h.tmp / "checkout")
+    fake = factory(h.world)
+    h.ops = make_ops(h, queues=lambda ws, session: RealDigest(fake(ws, session), module),
+                     repo="Epiphytic/heterodyne-metaharness", commit=commit)
+    r = settle(h, h.ops.install("codex", None))
+    assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE) and h.asks.posts == []
+
+
 def test_install_passes_every_adapters_login_names_to_stage(h: H, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[frozenset[str]] = []
     real = LocalStore.stage
