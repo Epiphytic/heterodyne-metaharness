@@ -16,8 +16,9 @@ import hashlib
 import json
 import subprocess
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ class FakeBead:
     notes: str = ""
     description: str = ""
     acceptance_criteria: str = ""
+    created_at: str = "2026-10-01T00:00:00Z"
 
 
 @dataclass
@@ -49,6 +51,27 @@ class Fault:
     after: bool = False
     times: int = 1
     bead: str | None = None      # only calls about this bead
+
+
+class FakePins:
+    """The journal's ref -> created bead pins (`beads.RefPins`; in wsd, the `asks` row's `child`). They
+    survive a restart: every adapter of a world shares them. `fail` makes the next `pin` calls raise, as a
+    crash before the pin commits."""
+
+    def __init__(self) -> None:
+        self.pins: dict[tuple[str, str], str] = {}
+        self.fail = 0
+
+    def pinned(self, ws: str, ref: str) -> str | None:
+        return self.pins.get((ws, ref))
+
+    def pin(self, ws: str, ref: str, bead: str) -> None:
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("journal: disk I/O error")
+        held = self.pins.setdefault((ws, ref), bead)
+        if held != bead:
+            raise ValueError("the ref is pinned to another bead")
 
 
 class World:
@@ -63,6 +86,13 @@ class World:
         self.worktrees: list[str] = []
         self.approvals = {"approval-1"}     # design approvals btq's gate accepts
         self.created: list[str] = []        # beads `bd create` made, in order
+        self.closed_reasons: dict[str, str] = {}      # bead -> the `--reason` of its `bd close`
+        self.now = datetime(2026, 10, 15, tzinfo=UTC)      # the next `bd create`'s created_at
+        self.tick = timedelta(seconds=1)                  # how far each `bd create` moves `now` on
+        self.orphan_next_create = False     # the next `bd create`'s caller dies before bd commits it
+        self.orphans: list[tuple[FakeQueue, list[str], str]] = []      # creates still running, uncommitted
+        self.hooks: list[tuple[str, int, Callable[[], None]]] = []      # (call, nth, fn): see `before`
+        self.pins = FakePins()              # the journal's pins, kept across restarts
         self.lock = threading.RLock()
 
     def add(self, bead_id: str, ws: str = "alpha", **kw: Any) -> FakeBead:
@@ -86,7 +116,28 @@ class World:
                 return f.exc
         return None
 
+    def stamp(self) -> str:
+        """A `bd create`'s created_at, at bd 1.1's whole-second RFC 3339 precision."""
+        at, self.now = self.now, self.now + self.tick
+        return at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def before(self, call: str, fn: Callable[[], None], nth: int = 1) -> None:
+        """Run `fn` once, just before the `nth` call named `call` from now on is made."""
+        self.hooks.append((call, nth, fn))
+
+    def commit_orphans(self) -> None:
+        """Every orphaned `bd create` finishes and commits, its caller long gone. Its created_at is when it
+        started, so it may be earlier than a bead created after it while it ran."""
+        orphans, self.orphans = self.orphans, []
+        for queue, args, created_at in orphans:
+            queue._create(args, created_at)      # pyright: ignore[reportPrivateUsage]
+
     def check(self, call: str, worker: str, bead: str | None = None) -> None:
+        due = [fn for name, nth, fn in self.hooks if name == call and nth == 1]
+        self.hooks = [(name, nth - (name == call), fn) for name, nth, fn in self.hooks
+                      if not (name == call and nth == 1)]
+        for fn in due:
+            fn()
         self.calls.append((worker, call))
         if self.down:
             raise RuntimeError("dolt: connection refused")
@@ -114,7 +165,9 @@ class World:
     def json(self, bead: FakeBead, detail: bool) -> dict[str, Any]:
         out: dict[str, Any] = {"id": bead.id, "title": bead.title, "status": bead.status,
                                "priority": 2, "issue_type": bead.issue_type,
-                               "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}
+                               "created_at": bead.created_at, "updated_at": bead.created_at}
+        if bead.status == "closed" and bead.id in self.closed_reasons:
+            out["close_reason"] = self.closed_reasons[bead.id]
         if bead.description:
             out["description"] = bead.description
         if bead.assignee:
@@ -306,7 +359,20 @@ class FakeQueue:
             self._get(bead_id).comments.append(text)
             return {"text": text}
         if verb == "create":
+            if self.world.orphan_next_create:
+                self.world.orphan_next_create = False
+                self.world.orphans.append((self, list(args), self.world.stamp()))
+                raise RuntimeError("the caller died while bd create ran")
             return self._create(args)
+        if verb == "close":      # `bd close ID --reason R`, or `--reason=R`
+            bead_id, flag, *rest = args
+            name, eq, reason = flag.partition("=")
+            assert name == "--reason" and len(rest) == (0 if eq else 1), "fake bd close: ID --reason R"
+            reason = reason if eq else rest[0]
+            bead = self._get(bead_id)
+            bead.status = "closed"
+            self.world.closed_reasons[bead_id] = reason
+            return [self.world.json(bead, detail=False)]
         if verb == "update":
             bead_id, flag, pair = args
             assert flag == "--set-metadata"
@@ -318,11 +384,11 @@ class FakeQueue:
             return [self.world.json(self._get(bead_id), detail=False)]
         raise AssertionError(f"fake bd does not support {verb}")
 
-    def _create(self, args: list[str]) -> Any:
+    def _create(self, args: list[str], created_at: str | None = None) -> Any:
         """`bd create`: the title positional or as `--title`; `--description`, `--type` (the bead's
         `issue_type`), `--labels` (comma separated) or repeated `--label`/`-l`, and `--metadata` (a JSON
-        object); `--flag=value` or `--flag value`. Answers with the created bead, as bd 1.1's `create --json`
-        does."""
+        object); `--flag=value` or `--flag value`. bd assigns the ID; wsd never passes `--id`, which upserts
+        in bd 1.1. Answers with the created bead, as bd 1.1's `create --json` does."""
         values: dict[str, list[str]] = {}
         title: str | None = None
         i = 0
@@ -350,8 +416,10 @@ class FakeQueue:
             assert isinstance(parsed, dict), "fake bd create: --metadata is not a JSON object"
             metadata.update(parsed)
         bead_id = f"btq-h{len(self.world.created) + 1}"
+        assert "id" not in values and "force" not in values, "fake bd create: wsd never passes --id/--force"
         bead = FakeBead(bead_id, title=title, description=values.get("description", [""])[-1],
-                        issue_type=values.get("type", ["task"])[-1], labels=labels, metadata=metadata)
+                        issue_type=values.get("type", ["task"])[-1], labels=labels, metadata=metadata,
+                        created_at=created_at if created_at is not None else self.world.stamp())
         self.world.beads[bead_id] = bead
         self.world.created.append(bead_id)
         return self.world.json(bead, detail=True)
