@@ -65,6 +65,7 @@ from typing import Any
 from heterodyne.config import ConfigError
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin
+from heterodyne.harness.store import StoreRefused
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -355,7 +356,7 @@ class Wsd:
                 return CtlReply("ok", f"prune would remove {len(done.installs)} install(s); run wsctl "
                                       f"harness prune --confirm {done.code} within 10 minutes", data)
             return CtlReply("ok", f"pruned {len(done.installs)} install(s)", data)
-        except HarnessRefused as exc:
+        except (HarnessRefused, StoreRefused) as exc:
             return CtlReply("refused", exc.constant)
         except (OSError, JournalBusy):
             log.exception("wsctl harness %s failed", h.action)

@@ -65,7 +65,7 @@ from heterodyne.harness.fetch import Fetcher
 from heterodyne.harness.resources import store_core as sc
 from heterodyne.harness.selection import InstallPin, Selection
 from heterodyne.harness.settings import ContentSource, HarnessSettings, Recipe
-from heterodyne.harness.store import LocalStore
+from heterodyne.harness.store import LocalStore, StoreRefused
 from heterodyne.wsd import btq as wbtq
 from heterodyne.wsd import harness as wh
 from heterodyne.wsd.beads import HELD
@@ -1126,6 +1126,23 @@ def test_a_harness_op_that_hits_an_io_error_replies_failed_with_fixed_wording(
         monkeypatch.setattr(h.ops, "install", install)
         reply = wsd.harness_one(HarnessRequest("install", adapter="codex"))
         assert (reply.result, reply.message) == ("failed", HARNESS_FAILED)
+    finally:
+        journal.close()
+
+
+def test_a_harness_op_refused_by_the_store_replies_refused_with_its_constant(
+        h: H, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = settings_for(tmp_path)
+    journal = Journal(s.journal)
+    try:
+        wsd = assembled(s, journal, FakeRuntime(), World(tmp_path / "btq-state"), h.ops)
+
+        def listing(adapter: str | None) -> Any:
+            raise StoreRefused(sc.NO_MOUNT_ID)
+
+        monkeypatch.setattr(h.ops, "list", listing)
+        reply = wsd.harness_one(HarnessRequest("list"))
+        assert (reply.result, reply.message) == ("refused", sc.NO_MOUNT_ID)
     finally:
         journal.close()
 
