@@ -53,6 +53,13 @@ REFUSED_NOTE = ("Your request {ref} was refused: {why}. Nothing was created and 
 QUESTION_MAX = 12000            # characters of a question: with the card's framing, within admind's 16,000
 OPEN_STATES = ("creating", "owed", "posted", "answered")     # an ask in one of these: no new round
 STEER_HEAD = "Messages for you from wsd, oldest first:"
+# Part 1's SteerUncertain: the notes count as delivered, uncertain, and the operator is told once per
+# generation (later steers to it are refused). The event is journaled with the mark, so a notice a crash
+# cut off is sent at the next pickup.
+STEER_UNCERTAIN = "a message to {bead}'s agent may not have arrived"
+STEER_UNCERTAIN_BODY = ("wsd pasted pending notes into the agent's session and can't tell whether they "
+                        "arrived. They are not sent again, and no later resume brief carries them.")
+STEER_UNCERTAIN_EVENT = "steer_uncertain"
 
 
 def steer_text(notes: Sequence[str]) -> str:
@@ -74,6 +81,10 @@ def _batch(rows: Sequence[tuple[int, str, str]]) -> list[tuple[str, str]]:
         elif taken:
             break
     return taken
+
+
+def _uncertain_notice(notices: Notices, ws: str, bead: str, ref: str) -> None:
+    notices.send(ws, bead, "stuck", STEER_UNCERTAIN.format(bead=bead), STEER_UNCERTAIN_BODY, ref)
 
 
 class AskBridge:
@@ -157,6 +168,8 @@ class AskBridge:
         notices, then the pending notes of the beads that run."""
         if self.notices is not None:
             self.notices.retry_owed(now)
+            for bead, ref in self.journal.events_without_notice(self.ws, STEER_UNCERTAIN_EVENT):
+                _uncertain_notice(self.notices, self.ws, bead, ref)
         for row in self.journal.states(self.ws):
             current = self._current(self.ws, row.bead)
             if current is not None:
@@ -181,8 +194,19 @@ class AskBridge:
                 self.journal.note_steer_attempt(refs, -1)
             return
         except SteerUncertain:
+            # Delivered, uncertain (part 1): never steered again and never on a brief. Only a crash
+            # during the steer leaves the attempt standing, bounded by STEER_ATTEMPTS.
             log.warning("a steer of %d notes to %s may not have arrived", len(refs), bead)
-            return              # the attempt stands: at STEER_ATTEMPTS the next brief carries them
+            ref = f"steer-uncertain:{launch.session_key}:g{launch.generation}"
+            with self.journal.transaction():
+                for each in refs:
+                    self.journal.note_delivered(ws, bead, each)
+                self.journal.emit_once(ws, bead, STEER_UNCERTAIN_EVENT, STEER_UNCERTAIN.format(bead=bead),
+                                       ref)
+            self.cp("asks.uncertain")
+            if self.notices is not None:
+                _uncertain_notice(self.notices, ws, bead, ref)
+            return
         self.cp("asks.steered!")
         with self.journal.transaction():
             for ref in refs:

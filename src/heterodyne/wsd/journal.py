@@ -1570,6 +1570,16 @@ class Journal:
         return row is not None
 
     @_locked
+    def events_without_notice(self, ws: str, kind: str) -> list[tuple[str, str]]:
+        """(bead, ref) of the workstream's events of `kind` whose ref has no notice yet, oldest first."""
+        rows = self.db.execute("SELECT e.bead, e.ref FROM events AS e WHERE e.ws = ? AND e.kind = ? "
+                               "AND e.bead IS NOT NULL AND e.ref IS NOT NULL "
+                               "AND NOT EXISTS (SELECT 1 FROM notices AS n WHERE n.ref = e.ref) "
+                               "ORDER BY e.seq",
+                               (ws, kind)).fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    @_locked
     def ask_open(self, ws: str, bead: str, states: Iterable[str]) -> bool:
         """Whether an `asks` row of the bead is in one of `states`."""
         wanted = tuple(states)
