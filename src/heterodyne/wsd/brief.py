@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from heterodyne.tmux import escape_controls
+from heterodyne.tmux import ESCAPE_GROWTH, escape_controls
 from heterodyne.wsd.beads import Bead
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,8 @@ TEXT_MAX = 12288                # UTF-8 bytes each of the description and the ac
 NOTES_MAX = 16384               # UTF-8 bytes of notes in all (the first note may go past it)
 NOTE_MAX = 65536                # UTF-8 bytes of one note: part 2's are at most 12,000, part 3's about 54,000
 NOTE_HEADER = 16                # the "--- i ---" line before each note (i <= NOTES_MAX // NOTE_HEADER)
-BRIEF_MAX = TITLE_MAX + 2 * TEXT_MAX + NOTES_MAX + NOTE_MAX + 4096
+SHOWN_NOTE_MAX = ESCAPE_GROWTH * NOTE_MAX     # a note of at most NOTE_MAX, escaped
+BRIEF_MAX = TITLE_MAX + 2 * TEXT_MAX + NOTES_MAX + SHOWN_NOTE_MAX + 4096
 PENDING = ("[{n} more notes are pending; they will reach you as a message while you work, or in your next "
            "resume brief]")
 REQUEST = "/run/hz/ws-request"
@@ -94,8 +95,10 @@ def _rules(bead: Bead, ops: frozenset[str]) -> list[str]:
 
 def fit(batch: NoteBatch) -> Fitted:
     """The notes a brief carries: whole notes, oldest first, while they fit NOTES_MAX, stopping at the first
-    that doesn't, so acking `upto` acks exactly these. The first is always taken (cut only past NOTE_MAX, a
-    writer's bug), so every brief makes progress; the rest stay pending for the steer or the next brief."""
+    that doesn't, so acking `upto` acks exactly these. They are budgeted as shown (escaped). The first is
+    always taken, so every brief makes progress, and a note of at most NOTE_MAX is never cut however much
+    escaping grows it (SHOWN_NOTE_MAX); only a longer one, a writer's bug, is. The rest stay pending for the
+    steer or the next brief."""
     texts: list[str] = []
     used, upto = 0, None
     for seq, note in batch.notes:
@@ -104,9 +107,9 @@ def fit(batch: NoteBatch) -> Fitted:
         size = raw + NOTE_HEADER                            # its "--- i ---" line counts too
         if texts and used + size > NOTES_MAX:
             break
-        if raw > NOTE_MAX:
-            log.warning("a resume note of %d bytes is over NOTE_MAX; it is cut", raw)
-            text = _cut(text, NOTE_MAX)
+        if raw > SHOWN_NOTE_MAX:
+            log.warning("a resume note of %d bytes shown is over SHOWN_NOTE_MAX; it is cut", raw)
+            text = _cut(text, SHOWN_NOTE_MAX)
         texts.append(text)
         used += size
         upto = seq

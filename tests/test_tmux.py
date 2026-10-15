@@ -10,6 +10,7 @@ import pytest
 from tmux_guard import new_test_tmux
 
 from heterodyne.tmux import (
+    ESCAPE_GROWTH,
     MIN_STEP,
     PASTE_SETTLE,
     Tmux,
@@ -188,6 +189,45 @@ def test_escaped_text_shows_its_controls_and_carries_none(text: str, shown: str)
     assert escape_controls(text) == shown
     assert not has_controls(escape_controls(text))
     escape_controls(text).encode("utf-8")                   # strict: always pasteable
+
+
+def unescape(shown: str) -> str:
+    """escape_controls undone (its CR to newline aside): a test that no two texts are shown the same."""
+    out, i = [], 0
+    while i < len(shown):
+        if shown[i] != "\\":
+            out.append(shown[i])
+            i += 1
+        elif shown[i + 1] == "\\":
+            out.append("\\")
+            i += 2
+        elif shown[i + 1] == "x":
+            out.append(chr(int(shown[i + 2:i + 4], 16)))
+            i += 4
+        else:
+            assert shown[i + 1] == "u"
+            out.append(chr(int(shown[i + 2:i + 6], 16)))
+            i += 6
+    return "".join(out)
+
+
+COLLIDING = ["\x1b", "\\x1b", "\x9b", "\\x9b", "\ud800", "\\ud800", "\\", "\\\\", "\\\x1b", "\\\\x1b",
+             "a\\x1b[201~\\nb", "\\u0041", "\x7f\\x7f\x00\\x00"]
+
+
+def test_escaping_is_unambiguous() -> None:
+    # T4 c2 B2: a real ESC and the text `\x1b` were shown the same; so were C1 and lone surrogates.
+    shown = [escape_controls(t) for t in COLLIDING]
+    assert len(set(shown)) == len(COLLIDING)
+    assert [unescape(s) for s in shown] == COLLIDING
+    assert escape_controls("\x1b") == "\\x1b" and escape_controls("\\x1b") == "\\\\x1b"
+
+
+@pytest.mark.parametrize("code", [*range(0x20), *range(0x7f, 0xa0), 0x5c, 0xd800, 0xdfff, 0x41, 0xe9, 0x2713])
+def test_escaping_grows_a_code_point_at_most_fourfold(code: int) -> None:
+    text = chr(code)
+    raw = len(text.encode("utf-8", "surrogatepass"))
+    assert len(escape_controls(text).encode("utf-8")) <= ESCAPE_GROWTH * raw
 
 
 class SlowTmux:

@@ -15,6 +15,7 @@ from heterodyne.wsd.brief import (
     HOWTO,
     NOTE_MAX,
     NOTES_MAX,
+    SHOWN_NOTE_MAX,
     TEXT_MAX,
     TITLE_MAX,
     NoteBatch,
@@ -98,7 +99,7 @@ def test_fit_always_takes_the_first_note_whole() -> None:
     got = fit(NoteBatch(((3, big), (4, "next"))))
     assert (got.texts, got.upto, got.more) == ((big,), 3, 1)
     assert fit(NoteBatch(((6, "e" * NOTE_MAX),))).texts == ("e" * NOTE_MAX,)   # at NOTE_MAX: whole
-    huge = fit(NoteBatch(((5, "h" * (NOTE_MAX + 1)),)))   # a writer's bug: cut, still the whole batch
+    huge = fit(NoteBatch(((5, "h" * (SHOWN_NOTE_MAX + 1)),)))     # a writer's bug: cut, still the batch
     assert huge.upto == 5 and "[cut:" in huge.texts[0] and huge.more == 0
     assert fit(NoteBatch()) == brief.Fitted((), None, 0)
 
@@ -129,6 +130,22 @@ def test_notes_are_budgeted_as_escaped() -> None:
     assert len(got.texts) == 2 and got.more == 8
 
 
+TAIL = "approval denied; do not proceed"
+
+
+@pytest.mark.parametrize("noise", ["\x1b", "\x9b", "\\", "\ud800"],
+                         ids=["C0", "C1", "backslash", "surrogate"])
+def test_a_valid_note_that_escaping_grows_is_carried_whole(noise: str) -> None:
+    # T4 c2 B1: a note within NOTE_MAX grew past it when escaped, was cut, and its tail was lost but acked.
+    raw = len(noise.encode("utf-8", "surrogatepass"))
+    note = noise * ((NOTE_MAX - len(TAIL)) // raw) + TAIL
+    assert len(note.encode("utf-8", "surrogatepass")) <= NOTE_MAX
+    got = fit(NoteBatch(((7, note), (8, "next"))))
+    assert (got.upto, got.more) == (7, 1) and got.texts[0].endswith(TAIL) and "[cut:" not in got.texts[0]
+    text = compose(bead(), resume=True, ops=frozenset(HOWTO), notes=got.texts, more=got.more)
+    assert len(text.encode("utf-8")) <= BRIEF_MAX
+
+
 def test_the_title_is_bounded() -> None:
     text = compose(bead(title="t" * (TITLE_MAX * 4)), resume=False, ops=frozenset())
     first = text.splitlines()[0]
@@ -140,11 +157,12 @@ def test_the_largest_brief_fits_brief_max(resume: bool) -> None:
     # T4 c1 NB: a large title went past BRIEF_MAX. Every field at its limit (controls grow fourfold when
     # escaped), every op explained and the largest notes still fit.
     worst = "\x1b" * (BRIEF_MAX // 2)
-    batch = NoteBatch(((1, worst), *((n, "n" * 200) for n in range(2, 400))))
-    got = fit(batch)
-    text = compose(bead(description=worst, acceptance=worst, title=worst), resume=resume,
-                   ops=frozenset(HOWTO), notes=got.texts, more=got.more)
-    assert len(text.encode("utf-8")) <= BRIEF_MAX
+    for first in (worst, "\x1b" * NOTE_MAX):          # a writer's bug, and the largest valid note
+        batch = NoteBatch(((1, first), *((n, "n" * 200) for n in range(2, 400))))
+        got = fit(batch)
+        text = compose(bead(description=worst, acceptance=worst, title=worst), resume=resume,
+                       ops=frozenset(HOWTO), notes=got.texts, more=got.more)
+        assert len(text.encode("utf-8")) <= BRIEF_MAX
 
 
 class Notes:
@@ -239,6 +257,20 @@ def test_an_overflowing_brief_leaves_the_rest_pending_across_a_restart(tmp_path:
     assert carried == [refusal(n) for n in range(200)]                      # each once, in order, none lost
     assert len(notes.delivered) > 1 and notes.delivered[-1][2] == 209
     assert "more notes are pending" in rig.runtime.launches[1].brief
+
+
+def test_a_grown_note_reaches_a_resume_whole_before_it_is_acked(tmp_path: Path) -> None:
+    # T4 c2 B1, the review's repro: a 17,044-byte note of controls lost its tail through park/resume.
+    rig = make_rig(tmp_path)
+    note = "\x1b" * (17044 - len(TAIL)) + TAIL
+    notes = Notes((note,))
+    rig.notes = notes
+    rig.restart()
+    rig.world.add(B)
+    assert rig.pickup() is Outcome.STARTED
+    park_and_resume(rig)
+    assert "\\x1b" * (17044 - len(TAIL)) + TAIL in rig.runtime.launches[-1].brief
+    assert notes.delivered == [(WS, B, 7)]
 
 
 def test_a_refused_resume_delivers_nothing(tmp_path: Path) -> None:

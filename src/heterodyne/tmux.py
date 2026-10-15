@@ -54,6 +54,7 @@ class TmuxPasteUncertain(TmuxError):
 # Terminal controls pasted text may not carry: all of C0 but tab and newline, DEL and C1. ESC could end the
 # bracketed paste early (`\x1b[201~`) and CR then submit what follows as prompts of its own.
 PASTE_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+ESCAPE_GROWTH = 4              # escape_controls: a C0 control or DEL (1 byte) is shown in 4
 
 
 def has_controls(text: str) -> bool:
@@ -63,8 +64,11 @@ def has_controls(text: str) -> bool:
 
 def escape_controls(text: str) -> str:
     """Untrusted text made safe to paste and still readable: CRLF and CR become newlines, every other
-    control in PASTE_CONTROLS is shown as `\\xNN`, and a lone surrogate (not UTF-8) as `\\udNNN`."""
-    text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    control in PASTE_CONTROLS is shown as `\\xNN`, and a lone surrogate (not UTF-8) as `\\udNNN`. A
+    backslash of the text is shown doubled, so a shown escape is never the same as text that spells one
+    (`\\x1b` in the text is shown as `\\\\x1b`). Shown, a code point takes at most 4 times its UTF-8 bytes
+    (ESCAPE_GROWTH; a lone surrogate counted as the 3 bytes it would encode to)."""
+    text = text.replace("\\", "\\\\").encode("utf-8", "backslashreplace").decode("utf-8")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return PASTE_CONTROLS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
 
