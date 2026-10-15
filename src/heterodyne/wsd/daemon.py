@@ -66,6 +66,7 @@ from heterodyne.config import ConfigError
 from heterodyne.harness import selection
 from heterodyne.harness.selection import InstallPin
 from heterodyne.harness.store import StoreRefused
+from heterodyne.wsd.asks import AskBridge, AsksPins
 from heterodyne.wsd.beads import BeadsAdapter, BeadsUnavailable
 from heterodyne.wsd.btq import QueueFactory
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
@@ -230,7 +231,7 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
              reconciler: Callable[[BeadsAdapter], ActionReconciler] = HoldingReconciler,
              cp: Checkpoint = nothing, usage_reader: UsageReader | None = None,
              harness: HarnessHooks | None = None) -> Parts:
-    beads = BeadsAdapter(factory)
+    beads = BeadsAdapter(factory, pins=AsksPins(journal))     # a question's bead is pinned on its asks row
     gate = ClaimGate(s.lock_dir, beads, cp)
     hooks = harness if harness is not None else NoHarness()
     # Plan 5i part 2: one notice client over admind's relay, when it is enabled. Its rows cut off inside
@@ -247,7 +248,18 @@ def assemble(s: WsdSettings, journal: Journal, factory: QueueFactory, runtime: A
                 usage_reader=usage_reader if usage_reader is not None else NoUsageReader(),
                 selections=selections_at(s.config_dir), harness=hooks,
                 inbox_attempts=s.inbox_attempts_before_human, notices=notices)
-    return Parts(journal, beads, gate, {w.name: Scheduler(w, deps) for w in s.workstreams}, hooks)
+    schedulers: dict[str, Scheduler] = {}
+    for w in s.workstreams:
+        if notices is None or s.relay is None:
+            schedulers[w.name] = Scheduler(w, deps)
+            continue
+        # Plan 5i part 2 T5: one AskBridge per workstream, its resume notes, session handlers and pickup step.
+        bridge = AskBridge(journal, beads, runtime, notices, s.relay, utc_now, ws=w.name, cp=cp)
+        sched = Scheduler(w, dataclasses.replace(deps, notes=bridge, asks=bridge, session_handlers={
+            **bridge.handlers(), **deps.session_handlers}))
+        bridge.bind(sched.parker)
+        schedulers[w.name] = sched
+    return Parts(journal, beads, gate, schedulers, hooks)
 
 
 class Wsd:

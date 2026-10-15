@@ -9,24 +9,27 @@ resume brief (`notes_for`). Every text this module writes for the agent is fixed
 never reach a refusal.
 """
 
+import json
 import logging
 import re
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from heterodyne.config.secret_scan import sensitive_kind
 from heterodyne.sandbox.runtime import STEER_MAX
 from heterodyne.tmux import escape_controls
-from heterodyne.wsd.beads import BeadsAdapter
+from heterodyne.wsd import gitwip, relay
+from heterodyne.wsd.beads import QUESTION, BeadsAdapter, BeadsUnavailable, CreateUnverified, RecordUnreadable
 from heterodyne.wsd.brief import NOTE_HEADER, NoteBatch
 from heterodyne.wsd.checkpoints import Checkpoint, nothing
-from heterodyne.wsd.journal import Journal
+from heterodyne.wsd.journal import AskPinRefused, AskRow, Journal, OpConflict
 from heterodyne.wsd.launches import LAUNCHED, LaunchEntry
 from heterodyne.wsd.notices import Notices
-from heterodyne.wsd.relay import AskPost
+from heterodyne.wsd.relay import AskPost, RelayRefused, RelayUnavailable, RelayUncertain
 from heterodyne.wsd.runtime import AgentRuntime, SessionEvent, SteerRefused, SteerUncertain
 from heterodyne.wsd.settings import RelaySettings
-from heterodyne.wsd.states import BeadState
+from heterodyne.wsd.states import BeadState, Reason
 from heterodyne.wsd.workstream import SessionHandler
 
 if TYPE_CHECKING:
@@ -122,33 +125,84 @@ def _uncertain_notice(notices: Notices, ws: str, bead: str, ref: str) -> None:
     notices.send(ws, bead, "stuck", STEER_UNCERTAIN.format(bead=bead), STEER_UNCERTAIN_BODY, ref)
 
 
-# Task 5's question half: its interface only, in the commit of its failing tests.
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - len(CUT_MARK)] + CUT_MARK
+
+
 def shown_text(text: str | None) -> str:
-    raise NotImplementedError
+    """What the operator, the question bead and the journal get of the agent's message (step 5): NO_TEXT
+    for none, WITHHELD_TEXT if it (or what is shown of it) holds a secret or a public identifier, otherwise
+    the text with its controls escaped, cut to QUESTION_MAX with a marker."""
+    if text is None or not text.strip():
+        return NO_TEXT
+    shown = _cut(escape_controls(text), QUESTION_MAX)
+    kind = sensitive_kind(text) or sensitive_kind(shown)
+    return shown if kind is None else WITHHELD_TEXT.format(kind=kind)
 
 
 def first_line(shown: str, limit: int) -> str:
-    raise NotImplementedError
+    """The first line of `shown` with words, its whitespace runs made single spaces, cut to `limit`: one
+    line admind takes as a title. NO_LINE if there is none, or if the cut holds something sensitive."""
+    for raw in shown.split("\n"):
+        line = " ".join(raw.split())[:limit].strip()
+        if line:
+            return line if sensitive_kind(line) is None and not _TITLE_BAD.search(line) else NO_LINE
+    return NO_LINE
+
+
+def _choice_ok(text: str) -> bool:
+    return (1 <= len(text) <= MAX_CHOICE and bool(text.strip()) and not _CHOICE_BAD.search(text)
+            and sensitive_kind(text) is None)
 
 
 def card_choices(choices: object, recommended: object) -> tuple[list[str], str]:
-    raise NotImplementedError
+    """The agent's choices and recommendation if they pass admind's K13 rules (mirrored here: wsd never
+    imports admind), else D4's two, recommending A. admind also refuses a choice it would redact: a
+    secret or public identifier is refused here; a login directory's path is not known to wsd."""
+    if isinstance(choices, list) and isinstance(recommended, str):
+        given = cast(list[object], choices)
+        texts = [c for c in given if isinstance(c, str)]
+        if (MIN_CHOICES <= len(given) <= MAX_CHOICES and len(texts) == len(given) and len(recommended) == 1
+                and recommended in LETTERS[:len(given)] and all(map(_choice_ok, texts))):
+            return texts, recommended
+    return list(D4_CHOICES), D4_RECOMMENDED
 
 
 def question_card(ws: str, bead: str, bead_title: str, child: str, shown: str, turn: int, round_: int,
                   limit: int, choices: Sequence[str], recommended: str) -> AskPost:
-    raise NotImplementedError
+    """The question's ask (step 9): its fixed head and tail carry admind's minimum of 80 non-space
+    characters, and `shown` (at most QUESTION_MAX) keeps it within admind's 16,000. A request's question
+    (`round_` 0) is not a round."""
+    title = CARD_TITLE.format(ws=ws, bead=bead, line=first_line(shown, CARD_LINE))
+    tail = (CARD_ROUND.format(bead=bead, turn=turn, round=round_, limit=limit) if round_
+            else CARD_REQUEST.format(bead=bead, turn=turn))
+    head = CARD_HEAD.format(bead=bead, title=" ".join(escape_controls(bead_title).split())[:TITLE_SHOWN])
+    return AskPost("question", title=title[:TITLE_MAX], body="\n\n".join((head, shown, tail)), bead=child,
+                   poster=relay.poster_for(ws), form="choices", choices=list(choices),
+                   recommended=recommended)
 
 
 class AsksPins:
+    """BeadsAdapter's ref pins (`beads.RefPins`) on the journal's `asks` rows: a question's `child`. Only a
+    ref an asks row holds has a pin store; any other (an approval's, until Task 7 gives it one) fails
+    closed with a fixed text, logged, which the adapter makes BeadsUnavailable."""
+
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
 
     def pinned(self, ws: str, ref: str) -> str | None:
-        raise NotImplementedError
+        try:
+            return self.journal.ask_pinned(ws, ref)
+        except AskPinRefused as exc:
+            log.error("%s", exc)
+            raise
 
     def pin(self, ws: str, ref: str, bead: str) -> None:
-        raise NotImplementedError
+        try:
+            self.journal.ask_pin(ws, ref, bead)
+        except AskPinRefused as exc:
+            log.error("%s", exc)
+            raise
 
 
 class AskBridge:
@@ -156,7 +210,7 @@ class AskBridge:
     each of its pickups advances (`Deps.asks`)."""
 
     def __init__(self, journal: Journal, beads: BeadsAdapter, runtime: AgentRuntime, notices: Notices | None,
-                 relay_settings: RelaySettings | None, clock: Callable[[], int], *, ws: str,
+                 relay_settings: RelaySettings, clock: Callable[[], int], *, ws: str,
                  cp: Checkpoint = nothing) -> None:
         self.journal = journal
         self.beads = beads
@@ -169,6 +223,7 @@ class AskBridge:
         self.parker: Parker | None = None
 
     def bind(self, parker: "Parker") -> None:
+        """The workstream's Parker, for what `advance` continues outside a handler (a post's escalation)."""
         self.parker = parker
 
     def handlers(self) -> dict[str, SessionHandler]:
@@ -191,9 +246,35 @@ class AskBridge:
         ws, bead, key, gen = event.ws, event.bead, event.session_key, event.generation
         if self.journal.refused_in_turn(ws, bead, key, gen, event.turn):
             return              # step 1b: the turn the agent was told to end; its note is steered or briefed
-        raise NotImplementedError("a Stop's question needs BeadsAdapter.create (Task 4)")
+        ref = f"q:{ws}:{bead}:{gen}:{event.turn}"
+        row = self.journal.ask(ref)
+        if row is None:         # a replayed Stop goes on from its row (step 6)
+            if self.journal.ask_open(ws, bead, OPEN_STATES):
+                return          # step 2: a Stop while an ask is open is not a new round
+            rounds, last = self.journal.nudge(ws, bead)
+            head = self._tree(ws, bead)
+            if head is not None and head != last:
+                rounds = 0      # step 3: progress
+            kept = head if head is not None else last
+            if rounds >= self.relay_settings.question_rounds_before_human:
+                self._too_many_rounds(parker, bead, rounds, kept)
+                return
+            with self.journal.transaction():
+                self.journal.ask_add(ref, ws, bead, "question", rounds + 1)
+                self.journal.nudge_set(ws, bead, rounds + 1, kept)
+            self.cp("asks.row")
+            row = self._row(ref)
+        self._ask(parker, row, shown_text(event.text), event.turn, list(D4_CHOICES), D4_RECOMMENDED)
 
     def on_question(self, parker: "Parker", event: SessionEvent) -> None:
+        ref = f"q:{event.event_id}"
+        row = self.journal.ask(ref)
+        if row is not None:     # a replayed request goes on from its row
+            text = event.body.get("text")
+            choices, recommended = card_choices(event.body.get("choices"), event.body.get("recommended"))
+            self._ask(parker, row, shown_text(text if isinstance(text, str) else None), event.turn, choices,
+                      recommended)
+            return
         if not self._running_on(event) or self.journal.ask_open(event.ws, event.bead, OPEN_STATES):
             self._refuse(event, OPEN_ASK)
             return
@@ -204,7 +285,180 @@ class AskBridge:
         if sensitive_kind(text) is not None:
             self._refuse(event, ASK_WITHHELD)
             return
-        raise NotImplementedError("a question needs BeadsAdapter.create (Task 4)")
+        choices, recommended = card_choices(event.body.get("choices"), event.body.get("recommended"))
+        with self.journal.transaction():
+            self.journal.ask_add(ref, event.ws, event.bead, "question", 0)
+        self.cp("asks.row")
+        row = self._row(ref)
+        self._ask(parker, row, shown_text(text), event.turn, choices, recommended)
+
+    # --- a question: its bead, its park and its post (steps 7-9) ---
+
+    def _ask(self, parker: "Parker", row: AskRow, shown: str, turn: int, choices: Sequence[str],
+             recommended: str) -> None:
+        """Steps 7-9 for a row still `creating` whose task runs: the question bead (found again if an
+        earlier attempt made it), the park on it, then the post once the task waits on it. A row already
+        further on, or a task no longer running, is `recover`'s."""
+        if row.state != "creating" or self._state(row.ws, row.bead) is not BeadState.RUNNING:
+            return
+        metadata = {TURN_KEY: str(turn), ROUND_KEY: str(row.round), CHOICES_KEY: json.dumps(list(choices)),
+                    RECOMMENDED_KEY: recommended}
+        child = self.beads.create(row.ws, ref=row.ref, title=QUESTION_TITLE.format(
+            bead=row.bead, line=first_line(shown, BEAD_LINE)), description=shown + QUESTION_FRAMING.format(
+            bead=row.bead), labels=(QUESTION,), metadata=metadata)
+        self.cp("asks.created!")
+        state = parker.park(row.bead, (child,), why=f"question {row.ref}")
+        self.cp("asks.parked")
+        if state is BeadState.WAITING_INPUT:
+            self._post(parker, self._row(row.ref), self.clock())
+
+    def _post(self, parker: "Parker", row: AskRow, now: int) -> None:
+        """Post the question's card, rebuilt from its bead (read through `holder`), at most once: the row is
+        marked uncertain, committed, before the post, so a post whose outcome is unknown (a lost reply, or
+        wsd dying) is looked for in admind's list before it is posted again."""
+        ws, bead = row.ws, row.bead
+        child = self.beads.holder(ws, row.ref)
+        if child is None:
+            log.warning(NOT_WAITING)
+            return
+        self._refresh_head(ws, bead)
+        sock = self.relay_settings.ask_socket
+        if row.uncertain:
+            try:
+                listed = relay.list_asks(sock)
+            except (RelayUnavailable, RelayUncertain, RelayRefused):
+                self._owed(row, now, uncertain=1)
+                return
+            found = [a.ask_id for a in listed if a.kind == "question" and a.bead == child]
+            if found:
+                with self.journal.transaction():
+                    self.journal.ask_set(row.ref, state="posted", ask_id=found[-1], uncertain=0, next_at=None)
+                return
+        card = self._card(row, child)
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, uncertain=1)
+        self.cp("asks.posting")
+        try:
+            ask_id = relay.post_ask(sock, card)
+        except RelayUnavailable:
+            self._owed(row, now, uncertain=0)
+            return
+        except RelayUncertain:
+            self._owed(row, now, uncertain=1)
+            return
+        except RelayRefused as exc:
+            if exc.retryable:
+                self._owed(row, now, uncertain=0)
+            else:
+                self._unpostable(parker, row, child)
+            return
+        self.cp("asks.posted!")
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, state="posted", ask_id=ask_id, uncertain=0, next_at=None)
+
+    def _card(self, row: AskRow, child: str) -> AskPost:
+        """The card, from the question bead wsd made and the task's own title. The bead's text is what step
+        5 showed, unless someone edited it since: then it is shown as the agent's would be."""
+        made = self.beads.show(row.ws, child)
+        description = str(made.raw.get("description", ""))
+        framing = QUESTION_FRAMING.format(bead=row.bead)
+        shown = (description.removesuffix(framing) if description.endswith(framing)
+                 else shown_text(description))
+        if sensitive_kind(shown) is not None or len(shown) > QUESTION_MAX:
+            shown = shown_text(shown)
+        try:
+            choices: object = json.loads(str(made.metadata.get(CHOICES_KEY, "")))
+        except ValueError:
+            choices = None
+        picked, recommended = card_choices(choices, made.metadata.get(RECOMMENDED_KEY))
+        turn = str(made.metadata.get(TURN_KEY, ""))
+        return question_card(row.ws, row.bead, self.beads.show(row.ws, row.bead).title, child, shown,
+                             int(turn) if turn.isdigit() else 0, row.round,
+                             self.relay_settings.question_rounds_before_human, picked, recommended)
+
+    def _owed(self, row: AskRow, now: int, *, uncertain: int) -> None:
+        wait = min(self.relay_settings.notice_backoff_seconds * 2 ** row.attempts, OWED_BACKOFF_MAX)
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, state="owed", uncertain=uncertain, attempts=row.attempts + 1,
+                                 next_at=now + int(wait))
+
+    def _unpostable(self, parker: "Parker", row: AskRow, child: str) -> None:
+        """A permanent refusal: the row is `refused`, the task escalated needs-human, the operator told."""
+        if self.notices is not None:
+            self.notices.send(row.ws, row.bead, "stuck", UNPOSTABLE_TITLE.format(bead=row.bead),
+                              UNPOSTABLE_BODY.format(bead=row.bead, child=child), f"unpostable:{row.ref}")
+        with self.journal.transaction():
+            self.journal.ask_set(row.ref, state="refused", why=ASK_UNPOSTABLE, uncertain=0, next_at=None)
+            op = parker.escalation_for(row.bead, Reason.NEEDS_HUMAN, ASK_UNPOSTABLE)
+        parker.replay_escalate(op)
+
+    def _too_many_rounds(self, parker: "Parker", bead: str, rounds: int, head: str | None) -> None:
+        """Step 4: no question; the operator is told (first, so a crash before the escalation sends it once),
+        then the task is escalated needs-human. Its session is left as it is."""
+        if self.notices is not None:
+            self.notices.send(self.ws, bead, "stuck", ROUNDS_TITLE.format(bead=bead, rounds=rounds),
+                              ROUNDS_BODY.format(bead=bead, rounds=rounds),
+                              f"stuck:{self.ws}:{bead}:{rounds}")
+        with self.journal.transaction():
+            self.journal.nudge_set(self.ws, bead, rounds, head)
+            op = parker.escalation_for(bead, Reason.NEEDS_HUMAN, ROUNDS_DETAIL)
+        parker.replay_escalate(op)
+
+    def _tree(self, ws: str, bead: str) -> str | None:
+        """The tree of btq/<bead>'s HEAD in the task's worktree (D3's progress), read only; None if it
+        can't be read, which counts as no progress."""
+        try:
+            rec = self.beads.show(ws, bead).record()
+            if rec is None:
+                return None
+            return gitwip.tree(gitwip.pin(Path(rec.repo), Path(rec.worktree), f"btq/{bead}"))
+        except (RecordUnreadable, gitwip.GitFailed, OSError, UnicodeDecodeError):
+            return None
+
+    def _refresh_head(self, ws: str, bead: str) -> None:
+        """Once the task is parked on its question, its tree (the park's WIP commit included) is where the
+        next round counts progress from: uncommitted work the park committed is not progress."""
+        head = self._tree(ws, bead)
+        if head is not None:
+            rounds, _ = self.journal.nudge(ws, bead)
+            with self.journal.transaction():
+                self.journal.nudge_set(ws, bead, rounds, head)
+
+    def _row(self, ref: str) -> AskRow:
+        found = self.journal.ask(ref)
+        if found is None:
+            raise KeyError("the ask's row is gone")
+        return found
+
+    def _state(self, ws: str, bead: str) -> BeadState | None:
+        row = self.journal.state(ws, bead)
+        return None if row is None else row.state
+
+    def recover(self, now: int) -> None:
+        """At each pickup: post every question that is due, `creating` (a post a crash or a failed park
+        cut off) or `owed` (its next attempt due), once its task waits on its question bead. A row
+        without a bead is its event's: a replay continues it. A failure leaves the row for the next pickup."""
+        parker = self.parker
+        if parker is None:
+            return
+        for row in self.journal.asks_in(self.ws, ("creating", "owed")):
+            if row.kind != "question" or row.child is None:
+                continue
+            if row.state == "owed" and row.next_at is not None and row.next_at > now:
+                continue
+            try:
+                if self._waiting_on(row.ws, row.bead, row.child):
+                    self._post(parker, row, now)
+            except (BeadsUnavailable, CreateUnverified, OpConflict) as exc:
+                log.warning(RECOVER_FAILED, type(exc).__name__)
+
+    def _waiting_on(self, ws: str, bead: str, child: str) -> bool:
+        if self._state(ws, bead) is not BeadState.WAITING_INPUT:
+            return False
+        if child in {d.id for d in self.beads.show(ws, bead).open_blockers()}:
+            return True
+        log.warning(NOT_WAITING)
+        return False
 
     def _refuse(self, ev: SessionEvent, why: str) -> None:
         """Record what the agent is owed for a request it was told was accepted: the refusal and its note,
@@ -237,6 +491,7 @@ class AskBridge:
         """At each pickup, after part 1's dispatch and before the sweep and the resume pass: the owed
         notices, then the pending notes of the beads that run. A steer a crash cut off is uncertain first."""
         self._reconcile(self.ws)
+        self.recover(now)
         if self.notices is not None:
             self.notices.retry_owed(now)
             for bead, ref in self.journal.events_without_notice(self.ws, STEER_UNCERTAIN_EVENT):
