@@ -122,7 +122,7 @@ def test_the_backoff_doubles_up_to_its_cap(rig: Rig) -> None:
     due: list[int] = []
     for _ in range(8):
         row = rig.journal.notice("stuck:ws1-1:1")
-        assert row is not None and row.state == "owed"
+        assert row is not None and row.state == "owed" and row.next_at is not None
         due.append(row.next_at - rig.clock())
         rig.clock.at = row.next_at
         n.retry_owed(rig.clock())
