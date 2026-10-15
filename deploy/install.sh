@@ -172,28 +172,24 @@ recorded_release() {
     return 0
 }
 
-# A wsd that answers while its unit is not active runs outside it, and the install would start a second one
-# (design btq-v7sgt D4). It is asked with the commit's built release's wsctl, or else the recorded one's.
+# A wsd that holds the units' state directory's instance lock while its unit is not active runs outside
+# the unit, and the install would start a second one on the same journal (design btq-v7sgt D4). The
+# lock is wsd's own, read by the approved archive's platform_state.py, so no release is needed: every
+# branch looks, and evidence that can't be read refuses.
 wsd_outside_check() {
-    local rel bin state
+    local state lock
     ((!no_wsd)) || return 0
-    rel=$releases/$1
-    if [[ ! -f $rel/.complete ]]; then
-        rel=$(recorded_release)
-        [[ -n $rel ]] && rel=$releases/$rel
-    fi
-    if [[ -z $rel || ! -f $rel/.complete || ! -x $rel/.venv/bin/wsctl ]]; then
-        echo "note: no built release has wsctl, so a wsd outside its unit can't be looked for"
-        return 0
-    fi
     state=$(user_systemctl is-active heterodyne-wsd.service 2>/dev/null) || true
     [[ $state != active ]] || return 0
-    bin=$rel/.venv/bin
-    if as_service_user PATH="$bin:$service_path" HETERODYNE_CONFIG_DIR="$config_dir" \
-        HETERODYNE_STATE_DIR="$state_dir" "$bin/wsctl" status >/dev/null 2>&1 </dev/null; then
-        refuse "a wsd is running outside its unit: stop it first"
-    fi
+    lock=$(platform wsd-lock --lock "$(host "$state_dir")/wsd/wsd.lock" </dev/null 2>/dev/null) \
+        || refuse "whether a wsd runs outside its unit can't be told"
+    case $lock in
+        held) refuse "a wsd is running outside its unit: stop it first" ;;
+        free|absent) ;;
+        *) refuse "whether a wsd runs outside its unit can't be told" ;;
+    esac
 }
+
 
 # platform_state.py plan for each wanted unit as its files are now: a refusal is the install's. The render
 # is empty, since it only decides between actions that go ahead.
@@ -391,7 +387,7 @@ if [[ -z $staged ]]; then
     [[ -f $installer && ! -L $installer ]] || refuse "the commit has no installer"
     PLATFORM_PY=$(<"$stage/tree/deploy/platform_state.py") || refuse "the commit has no platform_state.py"
     plan_check
-    wsd_outside_check "$resolved"
+    wsd_outside_check
 
     args=(--staged "$stage" --checkout "$checkout" --commit "$resolved" --archive-sha256 "$archive_sum"
           --service-user "$service_user")
@@ -490,7 +486,7 @@ fi
 # The user state as the preflight read it, read again before the first change.
 service_path=$(login_path)
 plan_check
-wsd_outside_check "$commit"
+wsd_outside_check
 
 # --- step 3: the store owner, the store and the helper copy ---
 

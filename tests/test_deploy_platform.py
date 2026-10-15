@@ -2,12 +2,15 @@
 and uninstall. Offline and unprivileged; every host command is a shim that logs it (tests/deploy_host.py)."""
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import os
 import shlex
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -415,18 +418,59 @@ def test_an_unreadable_proc_is_not_a_match_and_the_restart_is_rechecked(host: Ho
     assert f"ok: {ADMIND} is up and runs the render" in out.stdout.splitlines()
 
 
-def test_a_wsd_running_outside_its_unit_refuses_before_any_change(host: Host) -> None:
-    installer(host)
+@contextlib.contextmanager
+def wsd_lock_held(host: Host) -> Iterator[None]:
+    """A wsd's single-instance lock on the units' state directory, held as a wsd holds it."""
+    lock = host.home() / ".local/state/heterodyne/wsd/wsd.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("flags", [(), ("--dry-run",), ("--fetch",)])
+def test_a_wsd_outside_its_unit_refuses_a_fresh_install_before_any_change(host: Host,
+                                                                         flags: tuple[str, ...]) -> None:
+    with wsd_lock_held(host):
+        out = installer(host, *flags)
+    assert install_refusal(host, out) == "a wsd is running outside its unit: stop it first"
+    assert not release_dir(host).exists() and started(host) == []
+
+
+def test_a_wsd_outside_its_unit_refuses_a_rerun_before_any_change(host: Host) -> None:
+    assert installer(host).returncode == 0
     host.set_unit(WSD, active="inactive")
-    host.put("wsd-outside", "")      # an older wsd answers on its socket
     host.clear_calls()
-    assert install_refusal(host, installer(host)) == "a wsd is running outside its unit: stop it first"
+    with wsd_lock_held(host):
+        assert install_refusal(host, installer(host)) == "a wsd is running outside its unit: stop it first"
     assert started(host) == []
 
 
-def test_without_a_built_release_a_wsd_outside_its_unit_is_a_note(host: Host) -> None:
-    out = installer(host, "--dry-run")
-    assert "note: no built release has wsctl, so a wsd outside its unit can't be looked for" in out.stdout
+def test_the_units_own_wsd_holding_the_lock_is_not_outside(host: Host) -> None:
+    assert installer(host).returncode == 0
+    with wsd_lock_held(host):            # the fake manager says the unit is active
+        out = installer(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_a_free_lock_goes_ahead_and_an_unreadable_one_refuses(host: Host) -> None:
+    lock = host.home() / ".local/state/heterodyne/wsd/wsd.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_bytes(b"")
+    assert installer(host, "--dry-run").returncode == 0
+    lock.unlink()
+    lock.symlink_to(host.home() / "elsewhere")
+    assert install_refusal(host, installer(host, "--dry-run")) == \
+        "whether a wsd runs outside its unit can't be told"
+
+
+def test_no_wsd_skips_the_probe(host: Host) -> None:
+    with wsd_lock_held(host):
+        out = installer(host, "--no-wsd")
+    assert out.returncode in (0, 3), out.stdout + out.stderr
 
 
 def test_a_contaminated_manager_environment_changes_nothing_the_installer_checked(host: Host) -> None:

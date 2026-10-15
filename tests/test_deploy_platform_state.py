@@ -1,9 +1,11 @@
 """deploy/platform_state.py (design btq-v7sgt D6): the install record, and the order around every unit
 write, so that a failure at any point leaves the intent on disk before the change it describes."""
 
+import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -492,3 +494,24 @@ def test_classify_compares_the_fragment_with_the_unit_dir_systemd_names(p: Paths
               str(p.backups), "--loaded-unit-dir", "/srv/u/.config/systemd/user",
               stdin=blocks(admind=("loaded", "active", f"/srv/u/.config/systemd/user/{U}")))
     assert (out.returncode, out.stdout.splitlines()[1]) == (0, f"{U} managed")
+
+
+def test_wsd_lock_absent_free_held_and_refused(tmp_path: Path) -> None:
+    lock = tmp_path / "wsd" / "wsd.lock"
+    assert P.wsd_lock(lock) == "absent"
+    lock.parent.mkdir()
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        assert P.wsd_lock(lock) == "free"
+        fcntl.flock(fd, fcntl.LOCK_EX)      # another open file description, as another process holds it
+        assert P.wsd_lock(lock) == "held"
+    finally:
+        os.close(fd)
+    assert P.wsd_lock(lock) == "free"
+    link = tmp_path / "wsd" / "link.lock"
+    link.symlink_to(lock)
+    with pytest.raises(P.Refusal):
+        P.wsd_lock(link)
+    (tmp_path / "wsd" / "dir.lock").mkdir()
+    with pytest.raises(P.Refusal):
+        P.wsd_lock(tmp_path / "wsd" / "dir.lock")

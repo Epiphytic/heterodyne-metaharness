@@ -7,6 +7,7 @@ stdlib only: it runs under the system python3, outside any venv. (Not `platform.
 stdlib module for anything that put `deploy/` on its path.)"""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -335,6 +336,30 @@ def restore(unit: str, rec: dict, unit_dir: Path, backups: Path) -> None:
     _atomic_write(unit_dir / unit, (backups / e["backup"]).read_bytes(), 0o644)
 
 
+def wsd_lock(path: Path) -> str:
+    """Whether a wsd holds its state directory's single-instance lock: held, free, or absent (ENOENT: no wsd
+    has run on it). The lock is tried shared and let go at once. A wsd starting in that instant fails its
+    own exclusive try, as it would beside a second wsd, and its unit's Restart=always starts it again."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        raise Refusal("the wsd instance lock can't be read") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise Refusal("the wsd instance lock is not the service user's file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held"
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return "free"
+    finally:
+        os.close(fd)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="platform_state.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -378,6 +403,8 @@ def main(argv: list[str]) -> int:
     rs = sub.add_parser("restore")
     for a in ("--unit", "--record", "--unit-dir", "--backup-dir"):
         rs.add_argument(a, required=True)
+    wl = sub.add_parser("wsd-lock")
+    wl.add_argument("--lock", required=True)
     args = ap.parse_args(argv)
     if getattr(args, "unit", None) is not None and args.unit not in MANAGED:
         ap.error("not a managed unit")
@@ -421,6 +448,8 @@ def main(argv: list[str]) -> int:
             for unit, kind, why in rows:
                 print(f"{unit} {kind} {why}".rstrip())
             return 1 if any(kind == "ambiguous" for _, kind, _ in rows) else 0
+        elif args.cmd == "wsd-lock":
+            print(wsd_lock(Path(args.lock)))
         elif args.cmd == "restore":
             restore(args.unit, load_record(Path(args.record)), Path(args.unit_dir), Path(args.backup_dir))
     except (Refusal, RecordError) as exc:
