@@ -888,7 +888,8 @@ def test_the_readme_names_every_flag_the_prerequisites_and_the_limits() -> None:
         assert f"`{flag}`" in text, flag
     for words in ("loginctl enable-linger", "hatchling", "`release`", "`services`", "admind init",
                   "skipped (admind init has not run)", "~/.local/share/heterodyne/releases/<commit>",
-                  "record.json"):
+                  "record.json", "wsd.lock", "/run/user/<uid>", "dry run leaves the home as it found it",
+                  "can't tell"):
         assert words in text, words
     assert "uv run --offline --project" not in text      # the run checkout is gone (D2)
 

@@ -24,7 +24,7 @@ This is the operator runbook for `admind` (ADR 0001 §8, revision 13). The ADR i
    ```
 
    This starts the private `wn-agent` child, creates admind's identity (if its home has none) and a group with every operator in `policy.toml` that has a `marmot_npub`, and stops the child. The bootstrap output holds invite details, so admind captures it and prints nothing from it. Each operator then accepts the invite in their Marmot client. `admind init` refuses to run again once a group exists; to start over, stop admind and remove `<state>/admind/` (this abandons the identity and group).
-3. **Render the unit.** The platform installer, `deploy/install.sh` ([deploy/store-helper/README.md](../deploy/store-helper/README.md)), does this step and the next: it renders the unit from its release, replaces a hand-made one only with `--adopt` (keeping a backup), and enables and starts it once `admind init` has run. Rendering it by hand still works:
+3. **Render the unit.** The platform installer, `deploy/install.sh` ([deploy/store-helper/README.md](../deploy/store-helper/README.md)), does this step and the next: it renders the unit from its release, replaces a hand-made one only with `--adopt` (keeping a backup), and enables and starts it once `admind init` has run. It asks `admind initialised`, which reads a consistent snapshot of the database in a private copy and changes nothing: exit 0 initialised, 1 not, and 2 can't tell (a write was in progress, say), in which case the install fails and you run it again. Rendering it by hand still works:
 
    ```sh
    admind unit > ~/.config/systemd/user/heterodyne-admind.service
