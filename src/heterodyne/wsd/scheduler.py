@@ -256,17 +256,21 @@ class Scheduler:
         """A usage report is stored untrusted only for a profile with (c); a limit report defers its own
         bead only with (e). A report for a launch the journal doesn't have as this workstream's is
         dropped. Handling a limit report twice is safe (`Parker.limit` opens nothing the second time).
-        An install taint (plan 4c E17) writes the install's alert, then holds the launch's bead for the
-        operator unless it no longer runs: the marker already refuses every launch on the install."""
+        An install taint (plan 4c E17) holds the launch's bead for the operator unless it no longer runs
+        (the marker already refuses every launch on the install), then writes the install's alert; an
+        alert that fails is logged, never raised, so it can't drop the hold."""
         j, name = self.d.journal, self.ws.name
         entry = j.launch(signal.session_key, signal.generation)
         if entry is None or entry.ws != name:
             return
         if isinstance(signal, InstallTainted):
-            self.d.harness.tainted(signal.adapter, signal.install)
             row = j.state(name, entry.bead)
             if row is not None and row.state in (BeadState.RUNNING, BeadState.WAITING_INPUT):
                 self.parker.park(entry.bead, (), INSTALL_TAINTED, True)
+            try:
+                self.d.harness.tainted(signal.adapter, signal.install)
+            except Exception:  # noqa: BLE001 - the hold stands; the alert's trouble never fails the pickup
+                log.exception("alerting install %s's taint failed", signal.install)
             return
         caps = capabilities(self.ws.accounts, entry.profile)
         if isinstance(signal, UsageSeen):

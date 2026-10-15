@@ -1144,6 +1144,22 @@ def test_a_taint_signal_holds_every_bead_on_the_install_and_writes_one_alert(
     assert [p.name for p in h.alerts.iterdir() if not p.name.startswith(".")] == [alerts[0].name]
 
 
+def test_a_taint_whose_alert_cannot_be_written_still_holds_the_bead(rigged: tuple[Rig, H]) -> None:
+    rig, h = rigged
+    _, a = published(h)
+    select(h, "codex", pin_of(h, "codex", a))
+    assert rig.pickup() is Outcome.STARTED
+    h.alerts.mkdir(parents=True, exist_ok=True)
+    h.alerts.chmod(0o500)
+    try:
+        rig.runtime.report(WS, InstallTainted(rig.key("btq-1"), 1, "codex", a))
+        rig.pickup()
+        assert HELD in rig.beads.show(WS, "btq-1").labels
+        rig.pickup()                                    # the dropped alert doesn't fail every pickup
+    finally:
+        h.alerts.chmod(0o700)
+
+
 def install_files(h: H, adapter: str, install: str) -> list[Path]:
     root = h.tmp / "store" / adapter / install
     return sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink())
