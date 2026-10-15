@@ -19,16 +19,15 @@
 """
 
 import contextlib
-import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import threading
-import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
@@ -62,21 +61,13 @@ CREATED_KINDS = ("kind:question", "kind:approval")
 QUESTION = "kind:question"
 QUESTION_ANSWERED = "answered by the operator"      # the `bd close --reason` of an answered question
 ANSWER_MARK = "[wsd answer {ref}]"
-# A created bead's ID is `<issue_prefix>-<the first ID_HEX hex of sha256(ws NUL ref)>`, so every create of
-# one ref writes one ID. bd 1.1's `create --id` of an ID that exists upserts it (probed 2026-10-15: no error,
-# a closed bead reopened, its metadata replaced), so a create is only ever run once the ID is confirmed
-# absent, after the fence below.
-ID_HEX = 16
-PREFIX = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
-# The fence: before it looks for the ref, create waits while a `bd create` of the workstream worker is still
-# running. The lock is held by wsd, not by bd, so a wsd that died inside `bd create` leaves its child
-# running unlocked; that child is the only writer the lock can't stop. The worker name includes the host,
-# so the child is a process here.
-PS = ("ps", "-ww", "-A", "-o", "pid=,args=")
-PS_SECONDS = 10.0
-FENCE_SECONDS = 30.0
-FENCE_POLL = 0.25
-_PS_LINE = re.compile(r"\s*(\d+)(?:\s+(.*))?")
+# A crash inside `bd create` can leave a second bead holding a ref (the lock is wsd's, so the dead wsd's bd
+# child commits unlocked). The canonical holder is the earliest created, then the lowest ID; every other one
+# is a duplicate, never returned or used, and closed if it is a question. Neither text holds the ref.
+DUPLICATE_OF = "duplicate of {canonical}"
+DUPLICATE_DECIDED = "a decision on a duplicate bead is ignored (%d)"
+DUPLICATE_NOT_CLOSED = "a duplicate question bead could not be closed (%d)"
+DUPLICATE_LEFT_OPEN = "a duplicate approval bead is left open and ignored (%d)"
 # The provenance line btq's `worktree` appends to the bead's notes. Paths may contain the separators, so a
 # line is never split on them: it is matched against the exact worker, repository and worktree expected
 # (`Bead.bases`), and what lies between is the base.
@@ -291,16 +282,8 @@ def _one(result: object) -> Bead:
 
 
 class BeadsAdapter:
-    def __init__(self, factory: QueueFactory, *, creators: Callable[[str], int] | None = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 pause: Callable[[float], None] = time.sleep) -> None:
-        """`creators(worker)` counts the `bd create` processes of `worker` still running (`live_creators`,
-        through ps); `clock` and `pause` time the create fence."""
+    def __init__(self, factory: QueueFactory) -> None:
         self._factory = factory
-        self._creators = creators if creators is not None else live_creators
-        self._clock = clock
-        self._pause = pause
-        self._prefixes: dict[str, str] = {}
         self._queues: dict[tuple[str, str], QueueLike] = {}
         self._lock = threading.Lock()
 
@@ -583,50 +566,19 @@ class BeadsAdapter:
 
     # --- beads wsd creates: questions and approvals (plan 5i) ---
 
-    def create_id(self, ws: str, ref: str) -> str:
-        """The ID every create of `ref` in `ws` writes: the database's `issue_prefix` (learned from bd once,
-        never assumed, and never overridden with `--force`), then a hash of the workstream and the ref."""
-        prefix = self._prefixes.get(ws)
-        if prefix is None:
-            queue = self.ws_queue(ws)
-            raw = self._call(lambda: queue.bd("config", "get", "issue_prefix"))
-            value = cast(dict[str, Any], raw).get("value") if isinstance(raw, dict) else None
-            if (not isinstance(raw, dict) or cast(dict[str, Any], raw).get("key") != "issue_prefix"
-                    or not isinstance(value, str) or not PREFIX.fullmatch(value)):
-                raise BeadsUnavailable("bd config issue_prefix is not a usable prefix")
-            prefix = self._prefixes.setdefault(ws, value)
-        digest = hashlib.sha256(f"{ws}\0{ref}".encode()).hexdigest()[:ID_HEX]
-        bead = f"{prefix}-{digest}"
-        if not ids.SLUG.fullmatch(bead):
-            raise BeadsUnavailable("bd config issue_prefix gives an ID that is not a slug")
-        return bead
-
-    def _fence(self, worker: str) -> None:
-        """Wait, up to FENCE_SECONDS, until no `bd create` of `worker` is running. One still running then is
-        BeadsUnavailable, and so is a probe that fails: never read as clear."""
-        deadline = self._clock() + FENCE_SECONDS
-        waited = False
-        while (running := self._creators(worker)) > 0:
-            if not waited:
-                log.warning("an earlier bd create of this workstream is still running (%d); waiting", running)
-                waited = True
-            if self._clock() >= deadline:
-                raise BeadsUnavailable("an earlier bd create is still running")
-            self._pause(FENCE_POLL)
-
     def create(self, ws: str, *, ref: str, title: str, description: str, labels: tuple[str, ...],
                metadata: dict[str, str]) -> str:
         """Create a question or approval bead in the workstream, or find the one an earlier call made, and
         return its ID. `labels` is exactly one of CREATED_KINDS; wsd adds `ws:<ws>` and never an `agent:`
         label, so btq never routes the bead to a worker. `metadata` gains `wsd_ref = ref`.
 
-        Crash safety: the bead's ID is the ref's (`create_id`), and everything runs under the workstream
-        worker's lock, after the fence has waited out any `bd create` an earlier, dead wsd left running.
-        So a crash between `bd create` and the caller's journal, a second caller, or a dead creator's child
-        never makes a second bead. A ref held by any bead other than its ID is CreateUnverified, and a bead
-        at the ID is never written again: it is read back, found or created, and a title, description or
-        label set other than asked, or an asked metadata value missing or changed, is CreateUnverified.
-        Metadata others add later (an approval's decision) is allowed."""
+        Under the workstream worker's lock it lists the ref's holders; only if there is none does it run
+        `bd create`, with the ID left to bd (bd 1.1's `--id` upserts, so a create never overwrites a bead),
+        and then lists them again. Either way it returns the canonical holder (`_canonical`), which must
+        read back as asked: a title, description or label set other than asked, or an asked metadata
+        value missing or changed, is CreateUnverified. Metadata others add later (an approval's decision)
+        is allowed. A crash between `bd create` and the caller's journal finds the bead again; a crash
+        inside `bd create` may leave a duplicate, which is never returned."""
         if len(labels) != 1 or labels[0] not in CREATED_KINDS:
             raise ValueError("labels must be exactly one of " + ", ".join(CREATED_KINDS))
         if REF_KEY in metadata:
@@ -637,29 +589,77 @@ class BeadsAdapter:
         asked = {**metadata, REF_KEY: ref}
         queue = self.ws_queue(ws)
         try:
-            bead = self.create_id(ws, ref)
             with queue.exclusive():
-                self._fence(queue.worker)
-                if any(b.id != bead for b in self._labelled(ws) if b.metadata.get(REF_KEY) == ref):
-                    raise CreateUnverified(f"a bead other than the ref's ID holds this {REF_KEY}")
-                if not self.exists(ws, bead):
+                found = self._holders(ws, ref)
+                if not found:
                     created = self._call(lambda: queue.bd(
-                        "create", title, f"--id={bead}", f"--description={description}", "--type=task",
+                        "create", title, f"--description={description}", "--type=task",
                         f"--labels={','.join(asked_labels)}", "--metadata",
                         json.dumps(asked, sort_keys=True)))
-                    if _created_id(created) != bead:
-                        raise CreateUnverified("bd create answered with another ID")
-                shown = self.show(ws, bead)
+                    made = _created_id(created)
+                    found = self._holders(ws, ref)
+                    if made not in {b.id for b in found}:
+                        raise CreateUnverified(f"the created bead is not listed with its {REF_KEY}")
+                canonical, duplicates = _canonical(found)
+                shown = self.show(ws, canonical.id)
                 if (shown.title != title or shown.raw.get("description", "") != description
                         or sorted(shown.labels) != sorted(asked_labels)
                         or any(shown.metadata.get(k) != v for k, v in asked.items())):
                     raise CreateUnverified("the bead does not read back as asked (title, description, "
                                            f"labels or metadata, {REF_KEY} included)")
-                return bead
+                self._settle_duplicates(ws, canonical.id, duplicates)
+                return canonical.id
         except (CreateUnverified, BeadsUnavailable):
             raise
         except _FAILURES as exc:
             raise BeadsUnavailable(f"create failed ({type(exc).__name__})") from None
+
+    def holder(self, ws: str, ref: str) -> str | None:
+        """The canonical bead holding `ref` in the workstream, or None if no bead holds it. A caller reads a
+        created bead (an approval's verdict above all) only through this, never by an ID it journaled: after
+        a crash inside `bd create`, that ID may be a duplicate, whose decision counts for nothing. Settles
+        the duplicates as `create` does, under the same lock."""
+        queue = self.ws_queue(ws)
+        try:
+            with queue.exclusive():
+                found = self._holders(ws, ref)
+                if not found:
+                    return None
+                canonical, duplicates = _canonical(found)
+                self._settle_duplicates(ws, canonical.id, duplicates)
+                return canonical.id
+        except BeadsUnavailable:
+            raise
+        except _FAILURES as exc:
+            raise BeadsUnavailable(f"ref lookup failed ({type(exc).__name__})") from None
+
+    def _holders(self, ws: str, ref: str) -> list[Bead]:
+        return [b for b in self._labelled(ws) if b.metadata.get(REF_KEY) == ref]
+
+    def _settle_duplicates(self, ws: str, canonical: str, duplicates: list[Bead]) -> None:
+        """Close each open duplicate question (`duplicate of <canonical>`); an approval is never written
+        after its create, so a duplicate one stays open, ignored. A duplicate already closed other than as
+        a duplicate carries a decision, which is ignored. A failed close leaves the duplicate open, still
+        never used. Logged as fixed texts and counts, never the ref."""
+        decided = not_closed = left_open = 0      # closed other than as a duplicate (of any holder) = decided
+        for bead in duplicates:
+            if bead.status == "closed":
+                reason = bead.raw.get("close_reason")
+                ours = isinstance(reason, str) and reason.startswith(DUPLICATE_OF.format(canonical=""))
+                decided += not ours
+                continue
+            if QUESTION not in bead.labels:
+                left_open += 1
+                continue
+            comment = DUPLICATE_OF.format(canonical=canonical)
+            try:
+                self._close_own(ws, bead.id, comment, comment, comment)
+            except (NotAQuestion, BeadsUnavailable, *_FAILURES):
+                not_closed += 1
+        for text, count in ((DUPLICATE_DECIDED, decided), (DUPLICATE_NOT_CLOSED, not_closed),
+                            (DUPLICATE_LEFT_OPEN, left_open)):
+            if count:
+                log.warning(text, count)
 
     def close_question(self, ws: str, bead: str, answer_comment: str) -> None:
         """Put the operator's answer on one of wsd's own question beads, then close it. The bead must be
@@ -670,26 +670,33 @@ class BeadsAdapter:
         queue = self.ws_queue(ws)
         try:
             with queue.exclusive():
-                shown = self.show(ws, bead)
-                ref = shown.metadata.get(REF_KEY)
-                kinds = [lbl for lbl in shown.labels if lbl.startswith("kind:")]
-                if (kinds != [QUESTION] or f"ws:{ws}" not in shown.labels
-                        or any(lbl.startswith("agent:") for lbl in shown.labels)
-                        or not isinstance(ref, str) or not ref):
-                    raise NotAQuestion(bead)
-                mark = ANSWER_MARK.format(ref=ref)
-                if not any(mark in c for c in self.comments(ws, bead)):
-                    self._call(lambda: queue.bd("comments", "add", bead, f"{mark}\n{answer_comment}"))
-                    if not any(mark in c for c in self.comments(ws, bead)):
-                        raise BeadsUnavailable("answer comment did not read back")
-                if shown.status != "closed":
-                    self._call(lambda: queue.bd("close", bead, f"--reason={QUESTION_ANSWERED}"))
-                    if self.show(ws, bead).status != "closed":
-                        raise BeadsUnavailable("question close did not read back")
+                self._close_own(ws, bead, None, answer_comment, QUESTION_ANSWERED)
         except (NotAQuestion, BeadsUnavailable):
             raise
         except _FAILURES as exc:
             raise BeadsUnavailable(f"question close failed ({type(exc).__name__})") from None
+
+    def _close_own(self, ws: str, bead: str, mark: str | None, text: str, reason: str) -> None:
+        """close_question's checks and writes, under the caller's lock. The comment is `mark` (the ref's
+        ANSWER_MARK if None), then `text` if it is not the mark itself."""
+        queue = self.ws_queue(ws)
+        shown = self.show(ws, bead)
+        ref = shown.metadata.get(REF_KEY)
+        kinds = [lbl for lbl in shown.labels if lbl.startswith("kind:")]
+        if (kinds != [QUESTION] or f"ws:{ws}" not in shown.labels
+                or any(lbl.startswith("agent:") for lbl in shown.labels)
+                or not isinstance(ref, str) or not ref):
+            raise NotAQuestion(bead)
+        mark = mark if mark is not None else ANSWER_MARK.format(ref=ref)
+        comment = mark if text == mark else f"{mark}\n{text}"
+        if not any(mark in c for c in self.comments(ws, bead)):
+            self._call(lambda: queue.bd("comments", "add", bead, comment))
+            if not any(mark in c for c in self.comments(ws, bead)):
+                raise BeadsUnavailable("comment did not read back")
+        if shown.status != "closed":
+            self._call(lambda: queue.bd("close", bead, f"--reason={reason}"))
+            if self.show(ws, bead).status != "closed":
+                raise BeadsUnavailable("question close did not read back")
 
     # --- worktrees (§4.3: btq's convention) ---
 
@@ -743,6 +750,22 @@ class BeadsAdapter:
         return worktree
 
 
+def _canonical(holders: list[Bead]) -> tuple[Bead, list[Bead]]:
+    """The canonical holder of a ref (the earliest `created_at`, then the lowest ID) and the duplicates. A
+    `created_at` that is not an RFC 3339 time with a zone is UnexpectedShape: never guessed at."""
+    def key(bead: Bead) -> tuple[datetime, str]:
+        raw = bead.raw.get("created_at")
+        try:
+            at = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+        except ValueError:
+            at = None
+        if at is None or at.tzinfo is None:
+            raise UnexpectedShape("bead created_at is not a time with a zone")
+        return at, bead.id
+    first, *rest = sorted(holders, key=key)
+    return first, rest
+
+
 def _created_id(created: object) -> str:
     """The bead ID in `bd create --json`'s answer (an object, or a list of one)."""
     if isinstance(created, list) and len(cast(list[Any], created)) == 1:
@@ -752,34 +775,3 @@ def _created_id(created: object) -> str:
         raise UnexpectedShape("bd create gave no bead ID")
     return bead
 
-
-def _ps() -> str:
-    return subprocess.run(PS, capture_output=True, text=True, timeout=PS_SECONDS, check=True).stdout
-
-
-def live_creators(worker: str, run: Callable[[], str] = _ps) -> int:
-    """How many running processes are a `bd ... --actor <worker> create ...`, as btq's `Queue.bd` runs it
-    (`bd -C <repo> --actor <worker> <args>`), from `ps -ww -A -o pid=,args=` (Linux and macOS). Matched by
-    whole whitespace-separated tokens: argv[0] is `bd` or a path ending `/bd`, and some `--actor` token is
-    followed by exactly `worker` and then `create`. A path with spaces shifts tokens but never makes a false
-    "clear"; a title that happens to hold those tokens can only make the fence wait. ps failing, or any
-    line that is not a PID and its arguments, is BeadsUnavailable, never 0."""
-    try:
-        out = run()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise BeadsUnavailable(f"ps failed ({type(exc).__name__})") from None
-    lines = [line for line in out.splitlines() if line.strip()]
-    if not lines:                  # ps always lists itself: nothing at all is not evidence of nothing
-        raise BeadsUnavailable("ps listed no processes")
-    count = 0
-    for line in lines:
-        found = _PS_LINE.fullmatch(line)
-        if found is None:
-            raise BeadsUnavailable("ps output does not parse")
-        tokens = (found[2] or "").split()
-        if not tokens or (tokens[0] != "bd" and not tokens[0].endswith("/bd")):
-            continue
-        if any(tokens[i] == "--actor" and tokens[i + 1] == worker and tokens[i + 2] == "create"
-               for i in range(1, len(tokens) - 2)):
-            count += 1
-    return count
