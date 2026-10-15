@@ -27,6 +27,69 @@ with open(sys.argv[1], encoding="utf-8") as f:
 print(release if isinstance(release, str) else "")
 '
 
+# With no install record, each managed unit as the files and systemd show it, without a release: wsd
+# first, one "U KIND [WHY]" line each, and exit 1 when one is ambiguous (design btq-v7sgt D6). Its
+# arguments are the marker, the unit directory, and --no-manager when no user manager runs; otherwise
+# systemd's `show` text is on stdin. stdlib only, and in this file, so the pinned uninstall hash covers
+# it. (No apostrophes in it: it is a single-quoted bash string.)
+readonly NO_RECORD='
+import os, stat, sys
+marker, unit_dir = sys.argv[1].encode(), sys.argv[2]
+no_manager = sys.argv[3:] == ["--no-manager"]
+shown = {}
+if not no_manager:
+    for block in sys.stdin.read().strip().split("\n\n"):
+        props = dict(line.partition("=")[::2] for line in block.splitlines())
+        if "Id" in props:
+            shown[props["Id"]] = props
+bad = False
+for unit in ("heterodyne-wsd.service", "heterodyne-admind.service"):
+    path = os.path.join(unit_dir, unit)
+    try:
+        st = os.lstat(path)
+        kind = "file" if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() else "odd"
+    except FileNotFoundError:
+        kind = "absent"
+    except OSError:
+        kind = "unreadable"
+    if kind == "file":
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as f:
+                kind = "marker" if f.readline().startswith(marker) else "file"
+        except OSError:
+            kind = "unreadable"
+    props = {"LoadState": "not-found", "ActiveState": "inactive"} if no_manager else shown.get(unit, {})
+    load, active = props.get("LoadState"), props.get("ActiveState")
+    if load is None or active is None:
+        why = "the systemd state can not be read"
+    elif kind == "odd":
+        why = "the unit file is a symlink, not a regular file, or another user owns it"
+    elif kind == "unreadable":
+        why = "the unit file can not be read"
+    elif kind == "marker":
+        why = "the installer marker with no install record"
+    elif kind == "absent" and (load != "not-found" or active != "inactive"):
+        why = "loaded or running with no file"
+    else:
+        why = ""
+    bad = bad or bool(why)
+    print(unit, *(("ambiguous", why) if why else ("not-managed" if kind == "file" else "absent",)))
+sys.exit(1 if bad else 0)
+'
+# Whether a path is there, for root, without following it: "absent" is ENOENT alone, "present" is a
+# successful lstat, and "error" is any other failure, which callers treat as "can't tell".
+readonly LSTAT='
+import os, sys
+try:
+    os.lstat(sys.argv[1])
+except FileNotFoundError:
+    print("absent")
+except OSError:
+    print("error")
+else:
+    print("present")
+'
+
 refuse() {
     echo "refused: $*" >&2
     exit 1
@@ -94,31 +157,57 @@ install_dir=$share/install
 record=$install_dir/record.json
 user_units=$(host "$service_home")/.config/systemd/user
 
-# Installed: a record, or a unit file with the installer's marker, read as the service user.
-installed=0
-if [[ -e $record || -L $record ]]; then installed=1; fi
-for u in "${MANAGED[@]}"; do
-    first=$(as_service_user PATH=/usr/bin:/bin head -n1 -- "$user_units/$u" 2>/dev/null </dev/null) || first=""
-    if [[ $first == "$MARKER_PREFIX"* ]]; then installed=1; fi
-done
-
-if ((!installed)); then
-    echo "platform: nothing installed"
-    for u in "${MANAGED[@]}"; do
-        if [[ -e $user_units/$u || -L $user_units/$u ]]; then
-            echo "$u: not managed by the installer; left in place"
-        fi
-    done
-else
-    shown=$(user_systemctl show "${MANAGED[@]}" -p Id -p LoadState -p ActiveState -p FragmentPath) \
+# How systemd sees the managed units. None runs when the service user's runtime directory is absent:
+# logind makes it before user@ starts and removes it after the manager stops, so nothing is loaded.
+# Any other failure to read it refuses, before the root steps.
+runtime=$(host "/run/user/$service_uid")
+lstat_of() {
+    python3 -I -c "$LSTAT" "$1" </dev/null 2>/dev/null || echo error
+}
+show_units() {
+    user_systemctl show "${MANAGED[@]}" -p Id -p LoadState -p ActiveState "$@" \
         || refuse "the service user's systemd state can't be read; nothing was changed"
-    rel=$(as_service_user PATH=/usr/bin:/bin /usr/bin/python3 -I -c "$RECORD_RELEASE" "$record" \
+}
+no_record() {
+    as_service_user PATH="$user_tools" python3 -I -c "$NO_RECORD" "$MARKER_PREFIX" "$user_units" "$@"
+}
+
+has_record=$(lstat_of "$record")
+case $has_record in
+    absent|present) ;;
+    *) refuse "the install record can't be read; nothing was changed" ;;
+esac
+if [[ $has_record == absent ]]; then
+    # No install record: no release to ask, so the files and systemd are classified here.
+    rc=0
+    has_runtime=$(lstat_of "$runtime")
+    case $has_runtime in
+        absent) rows=$(no_record --no-manager </dev/null) || rc=$? ;;
+        present)
+            shown=$(show_units) || exit 1     # show_units has printed the refusal
+            rows=$(printf '%s\n' "$shown" | no_record) || rc=$? ;;
+        *) refuse "the service user's systemd state can't be read; nothing was changed" ;;
+    esac
+    if ((rc)); then
+        while read -r u kind why; do
+            if [[ $kind == ambiguous ]]; then echo "$u: ambiguous: $why" >&2; fi
+        done <<<"$rows"
+        refuse "a platform unit's ownership is ambiguous; nothing was changed"
+    fi
+    echo "platform: nothing installed"
+    while read -r u kind _; do
+        if [[ $kind == not-managed ]]; then echo "$u: not managed by the installer; left in place"; fi
+    done <<<"$rows"
+else
+    shown=$(show_units -p FragmentPath) || exit 1
+
+    rel=$(as_service_user PATH="$user_tools" python3 -I -c "$RECORD_RELEASE" "$record" \
         2>/dev/null </dev/null) || rel=""
     [[ $rel =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ && -f $releases/$rel/.complete ]] \
         || refuse "the install record names no completed release; nothing was changed"
     # The recorded release's own deploy/platform_state.py, on its own interpreter, as the service user.
     py=("$releases/$rel/.venv/bin/python3" -I "$releases/$rel/deploy/platform_state.py")
-    platform() { as_service_user PATH=/usr/bin:/bin "${py[@]}" "$@"; }
+    platform() { as_service_user PATH="$user_tools" "${py[@]}" "$@"; }
     places=(--record "$record" --unit-dir "$user_units" --backup-dir "$install_dir/backup")
     classify=(classify "${places[@]}" --loaded-unit-dir "${user_units#"$prefix"}")
     if ((restore)); then classify+=(--restore-adopted); fi
@@ -141,7 +230,7 @@ else
                     platform restore --unit "$u" "${places[@]}" </dev/null || fail "$u can't be restored"
                     echo "$u: put back from its backup, not started"
                 else
-                    as_service_user PATH=/usr/bin:/bin rm -- "$user_units/$u" </dev/null \
+                    as_service_user PATH="$user_tools" rm -- "$user_units/$u" </dev/null \
                         || fail "$u can't be removed"
                 fi
                 platform record-drop --unit "$u" --record "$record" </dev/null \

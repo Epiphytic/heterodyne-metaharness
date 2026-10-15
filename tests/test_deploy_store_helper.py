@@ -466,6 +466,8 @@ def test_the_pinned_install_runs_nothing_from_a_changed_installer(host: Host, tm
 def test_the_pinned_uninstall_runs_only_the_approved_uninstaller(host: Host, tmp_path: Path,
                                                                  changed: bool) -> None:
     stubs, log = rollback_stubs(tmp_path, NO_PROCESS)
+    # no user manager in the fake root, so the platform stage asks no systemctl stub
+    shutil.rmtree(host.root / f"run/user/{os.getuid()}")
     marker = tmp_path / "ran"
     if changed:
         (host.repo / "deploy" / "uninstall.sh").write_text(f"#!/bin/bash\ntouch {marker}\n")

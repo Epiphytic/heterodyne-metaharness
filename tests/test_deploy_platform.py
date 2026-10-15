@@ -19,6 +19,7 @@ from deploy_host import (
     ADMIND,
     CHECKOUT,
     FEATURES_OFF,
+    HAND_MADE,
     ME,
     README,
     REFUSED,
@@ -636,7 +637,8 @@ def test_a_dry_run_after_an_install_reports_a_drift_and_changes_nothing(host: Ho
 # --- uninstall (D6) ---
 
 # The root steps' commands, logged and doing nothing (pgrep: nothing runs as the store owner).
-ROOT_TOOLS = {"rm": "", "rmdir": "", "userdel": "", "pgrep": "exit 1\n"}
+ROOT_TOOLS = {"rm": '[[ ${2:-} == */.config/systemd/user/* ]] && exec /usr/bin/rm "$@"\nexit 0\n',
+              "rmdir": "", "userdel": "", "pgrep": "exit 1\n"}
 
 
 def root_tools(host: Host) -> Path:
@@ -658,8 +660,9 @@ def uninstaller(host: Host, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def root_steps(host: Host) -> list[str]:
+    home = str(host.home())
     return [c for c in host.calls() if c.startswith(("systemctl disable --now heterodyne-store-helper",
-                                                     "rm ", "rmdir ", "userdel "))]
+                                                     "rm ", "rmdir ", "userdel ")) and home not in c]
 
 
 def test_managed_units_go_wsd_first_then_one_reload_then_the_root_steps(host: Host) -> None:
@@ -739,12 +742,96 @@ def test_a_failing_stop_stops_the_uninstall_before_the_root_steps(host: Host) ->
     assert host.unit_file(ADMIND).exists() and host.unit_file(WSD).exists()
 
 
-def test_nothing_installed_skips_the_user_stage(host: Host) -> None:
+SHOW = f"user-systemctl show {WSD} {ADMIND} -p Id -p LoadState -p ActiveState"
+
+
+def test_nothing_installed_asks_systemd_then_goes_on_to_the_root_steps(host: Host) -> None:
     out = uninstaller(host)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "platform: nothing installed" in out.stdout.splitlines()
-    assert [c for c in host.calls() if c.startswith("user-systemctl ")] == []
+    assert [c for c in host.calls() if c.startswith("user-systemctl ")] == [SHOW]
     assert root_steps(host)[0] == "systemctl disable --now heterodyne-store-helper.socket"
+
+
+def test_no_user_manager_at_all_is_nothing_loaded(host: Host) -> None:
+    shutil.rmtree(host.root / f"run/user/{os.getuid()}")
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert [c for c in host.calls() if c.startswith("user-systemctl ")] == []
+    assert root_steps(host)[-1] == "userdel heterodyne-store"
+
+
+def no_record_case(host: Host, case: str) -> None:
+    f = host.unit_file(ADMIND)
+    if case in ("marker-no-record", "loaded-no-file-no-record", "active-no-file-no-record"):
+        assert installer(host).returncode == 0
+        (host.install_dir() / "record.json").unlink()
+        if case != "marker-no-record":
+            f.unlink()                   # the fake manager still has it loaded, and running
+        if case == "loaded-no-file-no-record":
+            host.set_unit(ADMIND, active="inactive")
+    elif case in ("dangling-symlink", "dangling-symlink-no-manager"):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.symlink_to(host.home() / "gone.service")
+        if case == "dangling-symlink-no-manager":
+            shutil.rmtree(host.root / f"run/user/{os.getuid()}")
+    elif case == "symlink":
+        (host.home() / "a.service").write_text(HAND_MADE)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.symlink_to(host.home() / "a.service")
+    elif case == "manager-unreadable":
+        host.put("fail", SHOW + "\n")
+    elif case == "runtime-not-a-directory":          # ENOTDIR is not ENOENT
+        shutil.rmtree(host.root / "run/user")
+        (host.root / "run/user").write_text("")
+    elif case == "record-unreadable":               # the record's lookup fails with ENOTDIR
+        shutil.rmtree(host.install_dir(), ignore_errors=True)
+        host.install_dir().parent.mkdir(parents=True, exist_ok=True)
+        host.install_dir().write_text("")
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", ["marker-no-record", "loaded-no-file-no-record", "active-no-file-no-record",
+                                  "dangling-symlink", "dangling-symlink-no-manager", "symlink",
+                                  "manager-unreadable", "runtime-not-a-directory", "record-unreadable"])
+def test_without_a_record_unclear_evidence_refuses_before_any_root_step(host: Host, case: str) -> None:
+    no_record_case(host, case)
+    before = host.home_snapshot()
+    host.clear_calls()
+    out = uninstaller(host)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert out.stderr.splitlines()[-1].startswith("refused: ")
+    assert out.stderr.splitlines()[-1].endswith("; nothing was changed")
+    if case == "runtime-not-a-directory":
+        assert out.stderr.splitlines()[-1] == ("refused: the service user's systemd state can't be read; "
+                                               "nothing was changed")
+        assert not [c for c in host.calls() if c.startswith("user-systemctl ")]
+    elif case == "record-unreadable":
+        assert out.stderr.splitlines()[-1] == "refused: the install record can't be read; nothing was changed"
+    elif case != "manager-unreadable":
+        assert f"{ADMIND}: ambiguous: " in out.stderr
+    assert user_calls(host, "stop", "disable", "daemon-reload") == [] and root_steps(host) == []
+    assert host.home_snapshot() == before
+
+
+def test_a_hand_made_unit_with_no_record_is_left_alone_even_while_it_runs(host: Host) -> None:
+    old = host.hand_made_admind()
+    host.set_unit(ADMIND, active="active")
+    out = uninstaller(host)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert host.unit_file(ADMIND).read_bytes() == old
+    assert f"{ADMIND}: not managed by the installer; left in place" in out.stdout.splitlines()
+    assert user_calls(host, "stop", "disable") == [] and root_steps(host)[-1] == "userdel heterodyne-store"
+
+
+def test_the_user_stages_removal_goes_through_the_shims(host: Host) -> None:
+    assert installer(host).returncode == 0
+    host.put("fail", f"rm -- {host.unit_file(WSD)}\n")
+    host.clear_calls()
+    out = uninstaller(host)
+    assert out.returncode == 1 and out.stderr.splitlines()[-1] == f"failed: {WSD} can't be removed"
+    assert root_steps(host) == []
 
 
 def test_the_uninstall_prefix_is_for_the_tests_only(host: Host) -> None:
