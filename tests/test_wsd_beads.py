@@ -1131,7 +1131,7 @@ def test_a_late_orphan_created_earlier_never_takes_the_canonical_over(
         assert holders(world, "a:1", status="open") == [first]
         return
     assert DUPLICATE_DECIDED % 1 in caplog.messages
-    assert writes(world).count("create") == 1 and "close" not in writes(world)    # never written to
+    assert writes(world) == ["create", "create"]        # the dead wsd's and the replacement's: nothing after
     queue = factory(world)(WS, "approve-bead")
     bead = adapter_for(world).holder(WS, "a:1")
     assert bead is not None
