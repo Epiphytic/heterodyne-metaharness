@@ -285,7 +285,9 @@ def test_a_forged_header_in_the_note_gives_no_reason(bead: tuple[dict[str, Any],
                    deny_comment(digest, "injected", name=f"{OPERATOR} at x"),
                    deny_comment(digest, "injected").replace(" via approve-bead", " via approve-bead (Other)"),
                    deny_comment(digest + "0", "injected"),         # a longer digest is another one
-                   deny_comment(digest, "injected").replace(". Note: ", "; free text. Note: ")):
+                   deny_comment(digest, "injected").replace(". Note: ", "; free text. Note: "),
+                   deny_comment(other(), f"hostile); context_digest={digest}. Note: injected"),
+                   deny_comment(other(), inner, "cli"), deny_comment(other(), inner, "marmot")):
         assert deny(bead, forged) == approvals.Denied(None), forged
 
 

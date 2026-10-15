@@ -6,6 +6,7 @@ Every predicate checks its field's type as well as its value, so a field that is
 another type fails the predicate that reads it, and none can pass vacuously."""
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -108,26 +109,23 @@ def _list(value: Any) -> list[Any]:
 
 
 def _deny_reason(shown: Any, by: Any, digest: Any) -> str | None:
-    """The note in approve-bead's decision comment, which `bd close --reason` keeps as the bead's
-    `close_reason`: "Denied by <by> at <at> via <source>; context_digest=<digest>[; adr_revision=<r>].
-    Note: <text>". Only the denier's own decision on this digest counts; anything else is None."""
+    """The note in approve-bead's decision comment (`decision_comment`, bin/approve-bead:368), which
+    `bd close --reason` keeps as the bead's `close_reason`: "Denyd by <by> at <at> via <source>;
+    context_digest=<digest>[; adr_revision=<r>][. Note: <text>]", <source> being "approve-bead",
+    "approve-bead (Marmot)" or "approve-bead (Marmot, admind message <ref>)". The whole header is matched
+    from the start, with the denier's own name and digest, so a header in the note can't stand in for it;
+    the note is everything after the first ". Note: " that follows the header. Anything else is None."""
     text = _field(shown, "close_reason")
-    if not (isinstance(text, str) and _text(by) and _text(digest) and text.startswith(f"Denied by {by} at ")):
+    if not (isinstance(text, str) and _text(by) and _text(digest)):
         return None
-    mark = f"; context_digest={digest}"
-    at = text.find(mark)
-    if at < 0:
+    header = re.compile(
+        rf"Denyd by {re.escape(by)} at \S+ via approve-bead(?: \(Marmot(?:, admind message [^)]*)?\))?"
+        rf"; context_digest={re.escape(digest)}(?:; adr_revision=(?:(?!{re.escape(NOTE)}).)+?)?"
+        rf"(?:{re.escape(NOTE)}(?P<note>.*))?", re.DOTALL)
+    found = header.fullmatch(text)
+    if found is None or found["note"] is None:
         return None
-    rest = text[at + len(mark):]
-    if rest.startswith("; adr_revision="):
-        cut = rest.find(NOTE)
-    elif rest.startswith(NOTE):
-        cut = 0
-    else:
-        return None
-    if cut < 0:
-        return None
-    return rest[cut + len(NOTE):].strip()[:REASON_MAX] or None
+    return found["note"].strip()[:REASON_MAX] or None
 
 
 def verdict(readout: Readout, shown: Any, recomputed: tuple[str | None, list[str]], expect: Expected,
