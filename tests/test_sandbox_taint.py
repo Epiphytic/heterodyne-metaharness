@@ -174,18 +174,18 @@ def test_the_walk_repeats_every_ten_minutes_while_a_session_runs(rig: RuntimeRig
 def test_the_marker_is_written_before_the_signal_and_survives_a_restart(
         rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
     rec = launch(rig, "p-two", "btq-1")
-    seen: list[tuple[bool, int]] = []
-    real = verify.taint
+    seen: list[bool] = []
+    real = rig.runtime._notice                               # noqa: SLF001 - where every signal is kept
 
-    def taint(*args: Any, **kwargs: Any) -> None:
-        queued = sum(isinstance(s, InstallTainted) for q in rig.runtime.queued.values() for s in q)
-        real(*args, **kwargs)
-        seen.append((marker(rig, rec).is_file(), queued))
+    def notice(ws: str, ident: tuple[str | int, ...], sent: Signal) -> None:
+        if isinstance(sent, InstallTainted):
+            seen.append(marker(rig, rec).is_file())          # Codex T9 r1 NB2: observed as it is kept
+        real(ws, ident, sent)
 
-    monkeypatch.setattr(verify, "taint", taint)
+    monkeypatch.setattr(rig.runtime, "_notice", notice)
     change(rig, rec)
     rig.runtime.stop(rec.key)
-    assert seen == [(True, 0)]                               # the marker is durable before any signal
+    assert seen == [True]                                    # the marker is durable before any signal
     restarted = SandboxRuntime(rig.runtime.c, rig.backend, rig.selftest)
     with pytest.raises(LaunchFailed) as refused:             # before any signal is drained
         restarted.verified_cli(ADAPTERS["codex"])
@@ -308,3 +308,32 @@ def test_a_walk_that_cant_run_never_blocks_a_lifetime_stop(
     ended = record(rig, rec.key)
     assert (ended.phase, ended.stop_reason) == (Phase.ENDED, "lifetime")
     assert not marker(rig, rec).exists() and tainted(rig, "alpha") == []
+
+
+def test_a_watch_between_a_launchs_verify_and_its_record_refuses_the_launch(
+        rig: RuntimeRig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex T9 r1 B1: a watch that taints the install after the launch's verify but before its record exists
+    signals only the sessions it lists. The launch checks the marker again once its record is written, under
+    the watch's lock, so it refuses rather than run unsignalled on a tainted install."""
+    first = launch(rig, "p-two", "btq-1")
+    real = rig.runtime._cli                                  # noqa: SLF001 - the launch's verify
+
+    def changed(*_: Any, **__: Any) -> None:
+        raise sc.Mismatch("changed")                         # the watch's walk finds a change
+
+    def cli(*args: Any) -> Any:
+        installed = real(*args)                              # verified, no marker yet
+        with monkeypatch.context() as m:
+            patch_check(m, changed)
+            rig.runtime._watch(rig.clock(), due_only=False)  # noqa: SLF001 - a concurrent watch runs here
+        return installed
+
+    monkeypatch.setattr(rig.runtime, "_cli", cli)
+    spec = replace(launch_spec(rig, "p-two", "btq-2"), worktree=bead_worktree(rig, "btq-2"))
+    with pytest.raises(LaunchFailed) as refused:
+        rig.runtime.launch(spec)
+    assert str(refused.value) == INSTALL_TAINTED
+    refused_rec = record(rig, spec.session_key)
+    assert refused_rec.phase is Phase.ENDED and rig.backend.created == [first.sandbox]
+    assert sorted(tainted(rig, "alpha"), key=lambda s: s.session_key) == sorted(
+        [signal(first), signal(refused_rec)], key=lambda s: s.session_key)   # (b)4: its end walk signals it

@@ -417,8 +417,6 @@ class SandboxRuntime:
         self._claim_branch(spec)
         resume, native = self._resume(adapter, layout, prev, spec)
         installed = self._cli(adapter, spec)
-        with self.walk_lock:
-            self.walked[(adapter.name, installed.name)] = self.c.clock()    # the launch's verify walked it
         protected, others = self._logins(adapter, spec.account)
         checked = self._pinned(adapter, spec, protected.chosen_files)
         try:
@@ -437,6 +435,7 @@ class SandboxRuntime:
                             install_digest=installed.digest)
         write_record(layout, rec)
         try:
+            self._registered(adapter, installed)
             return self._start(spec, adapter, installed, layout, rec, resume, native, protected, others,
                                checked, pinned)
         except Exception as exc:  # noqa: BLE001 - every failure ends the sandbox, then is reported
@@ -618,6 +617,20 @@ class SandboxRuntime:
         if not spec.install or not spec.install_digest:
             raise LaunchFailed(INSTALL_UNPINNED)
         return self._verified(adapter, InstallPin(spec.install, spec.install_digest))
+
+    def _registered(self, adapter: Adapter, installed: hv.VerifiedInstall) -> None:
+        """Codex T9 r1 B1: the launch's record is written, so every watch from here on lists and signals it;
+        one that ran between the verify and the record wrote its marker first. So the marker is read again,
+        under the watch's lock, and a marker (or one that can't be read) refuses. Otherwise the verify
+        counts as the install's walk."""
+        with self.walk_lock:
+            try:
+                marked = hv.tainted(self.c.taint_dir, adapter.name, installed.name)
+            except OSError:
+                marked = True
+            if marked:
+                raise _StepFailed(INSTALL_TAINTED)      # the record is written: `_fail` ends it
+            self.walked[(adapter.name, installed.name)] = self.c.clock()
 
     def _logins(self, adapter: Adapter, account: str) -> tuple[Protected, tuple[tuple[str, Path], ...]]:
         """The chosen account's login, and every other account's as configured: `default` is another
