@@ -12,10 +12,11 @@ from wsd_env import WS, Rig, make_rig
 
 from heterodyne.wsd import scheduler as scheduler_mod
 from heterodyne.wsd import session_events
+from heterodyne.wsd.beads import BeadsUnavailable
 from heterodyne.wsd.journal import InboxStatus, Journal, OpConflict
 from heterodyne.wsd.launches import LAUNCHED
 from heterodyne.wsd.park import Parker
-from heterodyne.wsd.runtime import LimitSeen, SessionEvent
+from heterodyne.wsd.runtime import LimitSeen, RuntimeUnavailable, SessionEvent
 from heterodyne.wsd.scheduler import Outcome
 from heterodyne.wsd.session_events import SURFACE, ingest
 from heterodyne.wsd.workstream import NoticeKind
@@ -245,6 +246,40 @@ def test_a_failing_handler_escalates_after_the_limit(tmp_path: Path) -> None:
     assert any(e.kind == "session_event_needs_human" for e in rig.journal.events_since(0))
 
 
+def test_a_failing_handler_holds_only_its_own_beads_later_rows(tmp_path: Path) -> None:
+    # P3 for an ordinary failure: btq-1's close waits behind its failed stop; btq-2's row, after both, runs.
+    seen: list[str] = []
+    stop, close = Handler([RuntimeError("x")], seen=seen), Handler(seen=seen)
+    rig = started(tmp_path, stop=stop, close=close)
+    k1, k2 = rig.key(B), "sk-other"
+    rig.runtime.report(WS, ev(rig, "stop", 1), ev(rig, "close", 2, text="done"))
+    ingest(rig.journal, rig.runtime, WS)
+    other = SessionEvent(f"{k2}:g1:e1", "close", WS, "btq-2", k2, 1, 1, text="done")
+    rig.journal.inbox_add(SURFACE, other.event_id, "close", msgspec.json.encode(other).decode(), WS, "btq-2")
+    rig.pickup()
+    assert seen == [f"{k2}:g1:e1"]
+    assert [(r.event_id, r.attempts) for r in rig.journal.inbox_pending(WS, SURFACE)] == [
+        (f"{k1}:g1:e1", 1), (f"{k1}:g1:e2", 0)]
+    rig.pickup()
+    assert seen == [f"{k2}:g1:e1", f"{k1}:g1:e1", f"{k1}:g1:e2"]
+    assert statuses(rig) == [InboxStatus.COMMITTED.value] * 3
+
+
+@pytest.mark.parametrize("exc", [BeadsUnavailable("down"), RuntimeUnavailable("down")])
+def test_an_unavailable_queue_or_runtime_counts_no_attempt(tmp_path: Path, exc: Exception) -> None:
+    # The pickup holds as for any other read; the row stays pending with no attempt, however often.
+    stop = Handler([exc] * 3)
+    rig = started(tmp_path, stop=stop)
+    rig.runtime.report(WS, ev(rig))
+    for _ in range(3):
+        assert rig.pickup() is Outcome.HELD
+        [row] = rig.journal.inbox_pending(WS, SURFACE)
+        assert row.attempts == 0
+    rig.pickup()
+    assert stop.seen == [f"{rig.key(B)}:g1:e1"] and statuses(rig) == [InboxStatus.COMMITTED.value]
+    assert not any(e.kind == "session_event_needs_human" for e in rig.journal.events_since(0))
+
+
 def test_an_event_for_another_launch_is_passed(tmp_path: Path) -> None:
     stop = Handler()
     rig = started(tmp_path, stop=stop)
@@ -271,7 +306,26 @@ def test_an_event_whose_launch_has_no_outcome_yet_waits_for_it(tmp_path: Path) -
     assert stop.seen == [f"{rig.key(B)}:g2:e1"]
 
 
-def test_a_gap_stops_the_key_and_is_reported_once(tmp_path: Path) -> None:
+def test_a_jump_onto_a_damaged_marker_advances_and_the_later_events_run(tmp_path: Path) -> None:
+    # T3 collapses a run of missing numbers into one damaged marker at the run's last number: e2 to
+    # e1026 are lost, and e1026 stands for them all. The key moves on; the loss needs a human, once.
+    stop = Handler()
+    rig = started(tmp_path, stop=stop)
+    key = rig.key(B)
+    rig.runtime.report(WS, ev(rig, n=1), SessionEvent(f"{key}:g1:e1026", "damaged", WS, B, key, 1, 0),
+                       ev(rig, n=1027))
+    rig.pickup()
+    rig.pickup()
+    assert stop.seen == [f"{key}:g1:e1", f"{key}:g1:e1027"]
+    assert statuses(rig) == [InboxStatus.COMMITTED.value, InboxStatus.NEEDS_HUMAN.value,
+                             InboxStatus.COMMITTED.value]
+    kinds = [e.kind for e in rig.journal.events_since(0)]
+    assert kinds.count("session_event_damaged") == 1 and "session_event_gap" not in kinds
+    assert rig.journal.session_cursors(WS) == {key: (1, 1027)}
+
+
+def test_a_jump_onto_an_ordinary_event_waits_for_the_missing_one(tmp_path: Path) -> None:
+    # P1: only the fake delivers this (out of order); the key waits, says so once, and goes on once e2 comes.
     stop = Handler()
     rig = started(tmp_path, stop=stop)
     rig.runtime.report(WS, ev(rig, n=1), ev(rig, n=3))
@@ -279,6 +333,9 @@ def test_a_gap_stops_the_key_and_is_reported_once(tmp_path: Path) -> None:
     rig.pickup()
     assert stop.seen == [f"{rig.key(B)}:g1:e1"]
     assert [e.kind for e in rig.journal.events_since(0)].count("session_event_gap") == 1
+    rig.runtime.report(WS, ev(rig, n=2))
+    rig.pickup()
+    assert stop.seen == [f"{rig.key(B)}:g1:e{n}" for n in (1, 2, 3)]
 
 
 def test_a_final_generation_rolls_the_cursor_on(tmp_path: Path) -> None:
@@ -311,6 +368,30 @@ def test_a_failed_page_loses_nothing_however_many_events_wait(tmp_path: Path, mo
     assert len(ids(rig)) == kept and rig.journal.session_cursors(WS).get(rig.key(B), (1, 0)) == (1, kept)
     ingest(rig.journal, rig.runtime, WS)
     assert ids(rig) == [f"{rig.key(B)}:g1:e{n}" for n in range(1, 4501)]
+
+
+def test_cursors_and_rows_survive_a_journal_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The journal reopened from disk: the cursor stands, an event read again from the log's start is
+    skipped by it, and one read again past a cursor that went back is kept out by the inbox's key."""
+    stop = Handler()
+    rig = started(tmp_path, stop=stop)
+    key = rig.key(B)
+    rig.runtime.report(WS, ev(rig, n=1), ev(rig, n=2))
+    rig.pickup()
+    rig.restart()
+    assert rig.journal.session_cursors(WS) == {key: (1, 2)}
+    rig.runtime.report(WS, ev(rig, n=3))
+    real = rig.runtime.session_events
+    monkeypatch.setattr(rig.runtime, "session_events", lambda ws, since, limit: real(ws, {}, limit))
+    rig.pickup()                                            # every log read from its start
+    assert stop.seen == [f"{key}:g1:e{n}" for n in (1, 2, 3)]
+    assert rig.journal.session_cursors(WS) == {key: (1, 3)}
+    rig.restart()
+    rig.journal.session_cursor_put(WS, key, 1, 0)
+    ingest(rig.journal, rig.runtime, WS)
+    rig.pickup()
+    assert ids(rig) == [f"{key}:g1:e{n}" for n in (1, 2, 3)] and len(stop.seen) == 3
+    assert statuses(rig) == [InboxStatus.COMMITTED.value] * 3
 
 
 def test_a_journal_failure_in_a_pickup_keeps_the_events_for_the_next(tmp_path: Path,

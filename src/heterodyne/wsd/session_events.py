@@ -74,7 +74,9 @@ def _take(j: Journal, ws: str, cursors: Mapping[str, tuple[int, int]], batch: Ev
             at = (ev.generation, ev.seq)
             if at <= cursor:
                 continue                    # taken before: read again after a failure or a crash
-            if at != (cursor[0], cursor[1] + 1):
+            # The next number, or a damaged marker further on in the same generation: the log collapses a
+            # run of missing numbers into one marker at the run's last (plan 5i T3), which stands for them.
+            if at != (cursor[0], cursor[1] + 1) and not (at[0] == cursor[0] and ev.kind == "damaged"):
                 j.emit_once(ws, ev.bead, "session_event_gap", f"{key}: g{cursor[0]}:e{cursor[1]} then "
                             f"g{at[0]}:e{at[1]}", f"gap:{key}:{cursor[0]}:{cursor[1]}")
                 break
