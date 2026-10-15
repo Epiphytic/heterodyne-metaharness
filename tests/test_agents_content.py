@@ -372,6 +372,18 @@ def test_clear_returns_a_bounded_summary_without_contents(tmp_path: Path) -> Non
     assert (cleared.files, cleared.bytes) == (21, 20 * len(secret))
 
 
+def test_clear_redacts_credential_shaped_names_before_the_bound(tmp_path: Path) -> None:
+    """Codex T8 r2: names are the workload's. Each is redacted before it is cut to `MAX_NAME_CHARS`, so a
+    credential the cut would split (leaving too little to match) is hidden whole, at any depth."""
+    home = tmp_path / "home"
+    token = "ghp_" + "a1" * 12              # built here: no credential-shaped literal in the repo
+    he.make_tree(home / TMP, {"y" * 114 + "." + token: b"", f"d/{token}": b""})    # cut 15 chars into it
+    (cleared,) = clear(home)
+    assert len(cleared.names) == 3 and all(len(n) <= ed.MAX_NAME_CHARS for n in cleared.names)
+    assert not any("ghp_" in n for n in cleared.names)
+    assert "d/<redacted GitHub token>" in cleared.names
+
+
 def test_a_directory_swapped_for_a_link_during_the_clear_stops_it(tmp_path: Path) -> None:
     home = tmp_path / "home"
     outside = tmp_path / "outside"

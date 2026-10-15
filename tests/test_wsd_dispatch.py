@@ -13,6 +13,7 @@ import pytest
 from fakes.checkpoints import CrashAt, SimulatedCrash
 from wsd_env import FAKE_PINS, WS, Rig, make_rig
 
+from heterodyne.agents.exec_dirs import MAX_NAME_CHARS
 from heterodyne.harness.selection import InstallPin
 from heterodyne.wsd.beads import NEEDS_HUMAN
 from heterodyne.wsd.journal import Journal
@@ -109,3 +110,19 @@ def test_an_exec_dir_cleared_notice_is_journaled_once(tmp_path: Path) -> None:
     assert json.loads(event.detail) == {
         "session_key": launched.session_key, "generation": launched.generation, "adapter": "codex",
         "path": ".codex/packages", "files": 1, "links": 0, "dirs": 0, "bytes": 1, "names": ["leftover"]}
+
+
+def test_an_exec_dir_cleared_notice_is_journaled_redacted(tmp_path: Path) -> None:
+    """Codex T8 r2: the names are the workload's, so a credential-shaped one is redacted before the journal
+    keeps it, whatever runtime reported it, and stays within the name bound."""
+    secret = "ghp_" + "a1" * 12            # built here: no credential-shaped literal in the repo
+    rig = started(tmp_path)
+    rig.pickup()
+    [launched] = rig.runtime.launches
+    notice = ExecDirCleared(launched.session_key, launched.generation, "codex", ".codex/packages", files=2,
+                            links=0, dirs=0, bytes=2, names=(secret, "x" * 200))
+    rig.runtime.report(WS, notice)
+    rig.pickup()
+    [event] = [e for e in rig.journal.events_since(0) if e.kind == "exec_dir_cleared"]
+    assert secret not in event.detail and "redacted" in event.detail
+    assert all(len(n) <= MAX_NAME_CHARS for n in json.loads(event.detail)["names"])
