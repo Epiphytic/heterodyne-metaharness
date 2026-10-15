@@ -139,6 +139,12 @@ def _no_locks() -> Sequence[AbstractContextManager[Any]]:
     return ()
 
 
+def _label(adapter: str, digest: str) -> str:
+    """A log's name for an install: its adapter and the first 12 hex of its manifest digest (the tail of its
+    install name). Never its version, which is the package's own, upstream text (T10 c3)."""
+    return f"{adapter} manifest {digest.removeprefix(sc.SHA256_PREFIX)[:12]}"
+
+
 class HarnessOps:
     def __init__(self, *, settings: HarnessSettings, store: Store, fetcher: Fetcher, queues: QueueFactory,
                  journal: Journal, readout: Readouts, ask_socket: Path, config_dir: Path, taint_dir: Path,
@@ -286,13 +292,16 @@ class HarnessOps:
 
     def _ask(self, staging_id: str, adapter: str, install: str, manifest: sc.Manifest, staged: sc.Staged,
              got: _Fetched) -> None:
-        """The worker: compose, scan, create, read back, post. Anything amiss fails the row."""
+        """The worker: compose, scan, create, read back, post. Anything amiss fails the row. Its logs name the
+        install by `_label`, never by `install`: that holds the package's own version, upstream text the scan
+        may have withheld."""
+        label = _label(adapter, staged.digest)
         try:
             composed = self._compose(adapter, install, manifest, staged, got)
             texts = (composed.title, composed.description, json.dumps(composed.ask))
             kinds = [k for k in map(secret_scan.sensitive_kind, texts) if k is not None]
             if kinds:
-                log.warning("install %s: the approval text holds a %s; withheld", install, kinds[0])
+                log.warning("install %s: the approval text holds a %s; withheld", label, kinds[0])
                 self._fail_open(staging_id, ASK_UNPOSTABLE)
                 return
             ws = self.settings.approval_workstream
@@ -301,7 +310,8 @@ class HarnessOps:
                      "metadata": {"ask": composed.ask}}
             digest, gaps = queue.ask_digest(issue)
             if digest is None or gaps:
-                log.warning("install %s: btq finds the approval incomplete: %s", install, "; ".join(gaps))
+                log.warning("install %s: btq finds the approval incomplete (%d gap%s)", label, len(gaps),
+                            "" if len(gaps) == 1 else "s")
                 self._fail_open(staging_id, ASK_UNPOSTABLE)
                 return
             created = queue.bd("create", composed.title, f"--description={composed.description}",
@@ -309,7 +319,7 @@ class HarnessOps:
                                json.dumps({"ask": composed.ask, "context_digest": digest}))
             bead = _created_id(created)
             if queue.ask_digest(queue.show(bead)) != (digest, []):
-                log.warning("install %s: the approval bead does not read back as created", install)
+                log.warning("install %s: the approval bead does not read back as created", label)
                 self._fail_open(staging_id, ASK_UNPOSTABLE)
                 return
             with self.lock:
@@ -317,7 +327,7 @@ class HarnessOps:
                                          context_digest=digest)
             reply = self._post(bead)
             if reply.get("result") != "posted":
-                log.warning("install %s: admind did not post the approval", install)
+                log.warning("install %s: admind did not post the approval", label)
                 self._fail_open(staging_id, ASK_UNPOSTABLE)
                 return
             with self.lock:
@@ -326,7 +336,7 @@ class HarnessOps:
                     self.journal.harness_set(staging_id, iso(self.clock()), state="posted",
                                              ask_id=_ask_id(reply))
         except Exception as exc:  # noqa: BLE001 - logged by type only: btq's errors carry `bd`'s stderr
-            log.error("install %s: the approval could not be created or posted (%s)", install,
+            log.error("install %s: the approval could not be created or posted (%s)", label,
                       type(exc).__name__)
             self._fail_open(staging_id, ASK_UNPOSTABLE)
 
@@ -365,13 +375,12 @@ class HarnessOps:
                 try:
                     self._advance(row, now)
                 except Exception as exc:  # noqa: BLE001 - one row's trouble never stops the others; it retries
-                    kind = type(exc).__name__
+                    label, kind = _label(row.adapter, row.digest), type(exc).__name__
                     if row.staging_id in self.failing:
-                        log.debug("install %s: advancing failed again (%s)", self._name(row), kind)
+                        log.debug("install %s: advancing failed again (%s)", label, kind)
                     else:
                         self.failing.add(row.staging_id)
-                        log.error("install %s: advancing failed; retried each pickup (%s)", self._name(row),
-                                  kind)
+                        log.error("install %s: advancing failed; retried each pickup (%s)", label, kind)
                 else:
                     self.failing.discard(row.staging_id)
 
@@ -386,12 +395,12 @@ class HarnessOps:
             self._settle(row)
 
     def _decide(self, row: HarnessInstall) -> None:
+        label = _label(row.adapter, row.digest)
         try:
             readout = self.readout(row.approval_bead)
         except Exception as exc:  # noqa: BLE001 - an unreadable decision waits for the next pickup
             # The type only: a parse error's text quotes approve-bead's output, which is untrusted.
-            log.warning("install %s: approve-bead could not be read (%s)", self._name(row),
-                        type(exc).__name__)
+            log.warning("install %s: approve-bead could not be read (%s)", label, type(exc).__name__)
             return
         if isinstance(readout, Busy):
             return
@@ -400,8 +409,7 @@ class HarnessOps:
             shown = queue.show(row.approval_bead)
             recomputed = queue.ask_digest(shown)
         except Exception as exc:  # noqa: BLE001 - as above, and the bead's text is untrusted too
-            log.warning("install %s: the approval bead could not be read (%s)", self._name(row),
-                        type(exc).__name__)
+            log.warning("install %s: the approval bead could not be read (%s)", label, type(exc).__name__)
             return
         expect = approvals.Expected(row.approval_bead, row.context_digest, partial(self._effect_ok, row))
         verdict = approvals.verdict(readout, shown, recomputed, expect, None)
@@ -411,7 +419,7 @@ class HarnessOps:
             self._end(row, "denied", DENIED)
             return
         if isinstance(verdict, approvals.Unverified):
-            log.warning("install %s: the approval failed predicate %d", self._name(row), verdict.n)
+            log.warning("install %s: the approval failed predicate %d", label, verdict.n)
             self._end(row, "failed", NOT_APPROVED)
             return
         at = iso(self.clock())

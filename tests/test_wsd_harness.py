@@ -1524,3 +1524,35 @@ def test_a_harness_op_io_error_logs_no_exception_text(
         journal.close()
     assert (reply.result, reply.message) == ("failed", HARNESS_FAILED)
     assert "wsctl harness list failed (OSError)" in caplog.text and not leaked(caplog)
+
+
+# --- T10 c3: a withheld or rejected approval's log names the install by its adapter and manifest digest,
+# never by upstream text. A package's metadata supplies the version, so a 64-hex one is withheld, not logged.
+# ---
+
+def test_a_withheld_upstream_version_never_reaches_the_logs(h: H, caplog: pytest.LogCaptureFixture) -> None:
+    package = json.dumps({**CODEX_PACKAGE, "version": LEAK}).encode()
+    archive = tar_of({**CODEX_TREE, "codex-package.json": package}, prefix=CODEX_STRIP)
+    h.opener.files.update(codex_files(archive))
+    with caplog.at_level(logging.DEBUG):
+        r = settle(h, h.ops.install("codex", None))
+    assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE) and LEAK not in wh.ASK_UNPOSTABLE
+    assert h.world.created == [] and h.asks.posts == []
+    assert "the approval text holds a" in caplog.text and "; withheld" in caplog.text
+    assert f"codex manifest {r.digest.removeprefix(sc.SHA256_PREFIX)[:12]}" in caplog.text
+    assert not leaked(caplog)
+
+
+def test_an_incomplete_approval_logs_how_many_gaps_never_their_text(
+        h: H, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    make = factory(h.world)
+
+    def queues(ws: str, session: str) -> Any:
+        queue = make(ws, session)
+        monkeypatch.setattr(queue, "ask_digest", lambda issue: (None, [f"ask.refs is not a list: {LEAK!r}"]))
+        return queue
+    monkeypatch.setattr(h.ops, "queues", queues)
+    with caplog.at_level(logging.DEBUG):
+        r = settle(h, h.ops.install("codex", None))
+    assert (r.state, r.failure) == ("failed", wh.ASK_UNPOSTABLE)
+    assert "btq finds the approval incomplete (1 gap)" in caplog.text and not leaked(caplog)
