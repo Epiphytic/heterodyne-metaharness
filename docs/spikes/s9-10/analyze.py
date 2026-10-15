@@ -34,6 +34,7 @@ PORT_53 = re.compile(rb"\{sa_family=(?:AF_INET, sin_port|AF_INET6, sin6_port)=ht
 SENDTO = re.compile(rb"\bsendto\(\d+, (" + STRING + rb")(\.\.\.)?, " + COUNT
                     + rb", [^,]*, (NULL|\{[^{}]*\}), \d+")
 SENDMMSG = re.compile(rb"\bsendmmsg\(\d+, \[")
+VLEN = re.compile(rb"\], " + COUNT + rb", ")                # the array's end, then sendmmsg's own count
 IOV = rb"\{iov_base=(" + STRING + rb")(\.\.\.)?, iov_len=" + COUNT + rb"\}"
 IOVS = re.compile(IOV)
 ANY_IOV = rb"\{iov_base=" + STRING + rb"(?:\.\.\.)?, iov_len=\d{1,6}\}"
@@ -115,7 +116,7 @@ def dns_payloads(line: bytes) -> tuple[list[bytes], int]:
         return [], 0
     if b"sendmmsg(" in line:
         if (start := SENDMMSG.search(line)) is not None:
-            payloads, dropped, i = [], 0, start.end()
+            payloads, dropped, entries, i = [], 0, 0, start.end()
             while (msg := MSG.match(line, i)) is not None:   # each entry on its own, iovecs joined in order
                 iovs = list(IOVS.finditer(msg.group(2)))
                 whole = all(v.group(2) is None and len(unhex(v.group(1))) == int(v.group(3)) for v in iovs)
@@ -123,9 +124,11 @@ def dns_payloads(line: bytes) -> tuple[list[bytes], int]:
                     payloads.append(b"".join(unhex(v.group(1)) for v in iovs))
                 else:
                     dropped += 1
-                i = msg.end()
-                if line.startswith(b"]", i):
+                entries, i = entries + 1, msg.end()
+                if (vlen := VLEN.match(line, i)) is not None and int(vlen.group(1)) == entries:
                     return payloads, dropped
+                if line.startswith(b"]", i):                 # a vlen unlike the entries shown: all of it
+                    return [], entries
                 if not line.startswith(b", ", i):
                     break
                 i += 2
