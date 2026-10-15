@@ -130,7 +130,7 @@ def install_tree(tmp_path: Path, adapter: str, spec: Mapping[str, he.Spec]) -> t
         entries = sc.entries_of(fd)
     finally:
         os.close(fd)
-    version = ADAPTERS[adapter].version_pin
+    [version] = ADAPTERS[adapter].versions
     return root, sc.Manifest(adapter, version, "t", "cli/bin/x", he.sources(), entries)
 
 

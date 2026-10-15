@@ -25,9 +25,9 @@ from harness_env import (
     codex_part,
     fd_count,
     install_name,
-    install_root,
     meta_path,
     open_dir,
+    published_root,
     record_of,
     rewrite,
     sample_manifest,
@@ -128,7 +128,7 @@ def stored_record(tmp_path: Path, name: str) -> sc.Record:
 def check_published(tmp_path: Path, name: str) -> None:
     """`check_fast` on the install against its meta manifest and record."""
     m = sc.parse(meta_path(tmp_path, name, "manifest").read_bytes())
-    fd = open_dir(install_root(tmp_path, name))
+    fd = open_dir(published_root(tmp_path, name))
     try:
         sc.check_fast(fd, m, stored_record(tmp_path, name))
     finally:
@@ -136,7 +136,7 @@ def check_published(tmp_path: Path, name: str) -> None:
 
 
 def assert_gone(tmp_path: Path, name: str) -> None:
-    assert not os.path.lexists(install_root(tmp_path, name))
+    assert not os.path.lexists(published_root(tmp_path, name))
     assert not os.path.lexists(meta_path(tmp_path, name, "manifest"))
     assert not os.path.lexists(meta_path(tmp_path, name, "record"))
     assert sc.list_installs(store_of(tmp_path)) == []
@@ -157,7 +157,7 @@ def test_publish_with_the_staged_digest_names_the_install_and_changes_no_mode(tm
     version = sc.parse(meta_path(tmp_path, name, "manifest").read_bytes()).version
     assert name == f"{version}-{staged.digest.removeprefix('sha256:')[:12]}"
     assert name == sc.install_name(version, staged.digest)
-    assert modes(install_root(tmp_path, name)) == before
+    assert modes(published_root(tmp_path, name)) == before
     assert before[""] == 0o555
     assert not os.path.lexists(staged_root(tmp_path, staged))
     assert not os.path.lexists(store_of(tmp_path) / ".staged" / f"{staged.id}.json")
@@ -196,7 +196,7 @@ def test_publish_of_an_unknown_staging_is_refused(tmp_path: Path) -> None:
 
 def test_the_record_matches_a_fresh_walk_and_lies_outside_the_install(tmp_path: Path) -> None:
     _, name = published(tmp_path)
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     assert stored_record(tmp_path, name) == record_of(root)
     record = meta_path(tmp_path, name, "record").resolve()
     assert root.resolve() not in record.parents
@@ -222,7 +222,7 @@ def test_a_same_size_rewrite_at_any_point_of_publish_is_refused(tmp_path: Path, 
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     staging_file = staged_root(tmp_path, staged) / FIRST_FILE
-    installed_file = install_root(tmp_path, name) / FIRST_FILE
+    installed_file = published_root(tmp_path, name) / FIRST_FILE
     read: sc.Reader = os.read
 
     def hook(point: str) -> None:
@@ -295,7 +295,7 @@ def test_a_crash_after_each_write_recovers_to_one_published_install_or_none(tmp_
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], point)
-    if install_root(tmp_path, name).exists() or meta_path(tmp_path, name, "manifest").exists():
+    if published_root(tmp_path, name).exists() or meta_path(tmp_path, name, "manifest").exists():
         assert sc.state(store, "codex", name) != "published"     # an intent is still there
     assert sc.recover(store) == [(staged.id, CRASH_POINTS[point])]
     assert sc.recover(store) == []
@@ -344,7 +344,7 @@ def test_a_rewrite_during_recovery_is_refused_and_never_becomes_the_baseline(tmp
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P3")
-    path = install_root(tmp_path, name) / FIRST_FILE
+    path = published_root(tmp_path, name) / FIRST_FILE
     read: sc.Reader = os.read
 
     def hook(point: str) -> None:
@@ -366,7 +366,7 @@ def test_recovery_never_touches_an_install_the_intent_does_not_identify(tmp_path
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P2")
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     root.chmod(0o755)
     root.rename(tmp_path / "moved")
     root.mkdir()
@@ -445,7 +445,7 @@ def test_a_conflicting_install_name_is_refused(tmp_path: Path) -> None:
     # a name taken between the check and the rename: RENAME_NOREPLACE refuses, and the taker is untouched
     third = staged_codex(tmp_path / "third")
     name3 = install_name(tmp_path / "third", third)
-    theirs = install_root(tmp_path / "third", name3)
+    theirs = published_root(tmp_path / "third", name3)
 
     def hook(point: str) -> None:
         if point == "P1.intent":
@@ -552,7 +552,7 @@ def test_verify_finds_a_rewrite_and_a_matching_rehash_after_a_device_change_rere
     check_published(tmp_path, name)
     assert sc.state(store, "codex", name) == "published"
 
-    rewrite(install_root(tmp_path, name) / FIRST_FILE)
+    rewrite(published_root(tmp_path, name) / FIRST_FILE)
     before = record.read_bytes()
     assert refused(lambda: sc.verify(store, "codex", name)) == sc.CONTENT_CHANGED
     assert record.read_bytes() == before
@@ -561,7 +561,7 @@ def test_verify_finds_a_rewrite_and_a_matching_rehash_after_a_device_change_rere
 def test_verify_rerecords_a_tree_whose_bytes_were_restored(tmp_path: Path) -> None:
     store = store_of(tmp_path)
     _, name = published(tmp_path)
-    path = install_root(tmp_path, name) / FIRST_FILE
+    path = published_root(tmp_path, name) / FIRST_FILE
     rewrite(path)
     original = CODEX_TREE["bin/codex"]
     assert isinstance(original, bytes)
@@ -581,7 +581,7 @@ def test_verify_rerecords_a_tree_whose_bytes_were_restored(tmp_path: Path) -> No
 def test_a_rewrite_during_verify_is_refused_and_the_record_is_kept(tmp_path: Path, when: str) -> None:
     store = store_of(tmp_path)
     _, name = published(tmp_path)
-    path = install_root(tmp_path, name) / FIRST_FILE
+    path = published_root(tmp_path, name) / FIRST_FILE
     before = meta_path(tmp_path, name, "record").read_bytes()
     read: sc.Reader = RewriteAfterFirstFile(path) if when == "rehash" else os.read
 
@@ -678,10 +678,10 @@ def test_a_crash_between_the_rename_and_the_roots_seal_recovers_to_a_0555_root(t
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P2.renamed")
-    assert modes(install_root(tmp_path, name))[""] == 0o755
+    assert modes(published_root(tmp_path, name))[""] == 0o755
     assert sc.state(store, "codex", name) == "publishing"
     assert sc.recover(store) == [(staged.id, "published")]
-    assert modes(install_root(tmp_path, name))[""] == 0o555
+    assert modes(published_root(tmp_path, name))[""] == 0o555
     assert sc.state(store, "codex", name) == "published"
     check_published(tmp_path, name)
 
@@ -704,19 +704,19 @@ def test_a_root_that_cant_be_sealed_after_the_rename_is_left_for_recovery(
     monkeypatch.setattr(os, "fchmod", fchmod)
     assert refused(lambda: sc.publish(store, staged.id, staged.digest)) == sc.PUBLISH_INTERRUPTED
     monkeypatch.setattr(os, "fchmod", real)
-    assert modes(install_root(tmp_path, name))[""] == 0o755
+    assert modes(published_root(tmp_path, name))[""] == 0o755
     assert not os.path.lexists(meta_path(tmp_path, name, "manifest"))
     assert sc.state(store, "codex", name) == "publishing"
     assert sc.outcome(store, staged.id) == "staged"
     assert sc.recover(store) == [(staged.id, "published")]
-    assert modes(install_root(tmp_path, name))[""] == 0o555
+    assert modes(published_root(tmp_path, name))[""] == 0o555
     check_published(tmp_path, name)
 
 
 def test_an_install_whose_root_is_not_0555_is_never_published_or_verified(tmp_path: Path) -> None:
     store = store_of(tmp_path)
     _, name = published(tmp_path)
-    install_root(tmp_path, name).chmod(0o755)
+    published_root(tmp_path, name).chmod(0o755)
     assert sc.state(store, "codex", name) == "broken"
     assert [i["state"] for i in sc.list_installs(store)] == ["broken"]
     assert refused(lambda: sc.verify(store, "codex", name)) == sc.ENTRY_CHANGED
@@ -747,7 +747,7 @@ def test_recovery_makes_the_roots_seal_durable_before_it_commits_the_meta(
     m = f"codex/.meta/{name}"
     assert f"codex/{name}" in seen
     assert seen.index(f"codex/{name}") < seen.index(f"{m}.manifest.json.tmp")
-    assert modes(install_root(tmp_path, name))[""] == 0o555
+    assert modes(published_root(tmp_path, name))[""] == 0o555
 
 
 @pytest.mark.parametrize("replacement", ["directory", "symlink"])
@@ -757,7 +757,7 @@ def test_recovery_never_changes_a_root_that_replaced_the_install_after_its_check
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P2.renamed")
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     theirs = tmp_path / "theirs"
     theirs.mkdir(mode=0o755)
     theirs.chmod(0o755)
@@ -795,7 +795,7 @@ def test_recovery_refuses_committed_meta_that_conflicts_with_its_intent(tmp_path
     path.write_bytes(conflicting)
     assert sc.recover(store) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
     assert sc.outcome(store, staged.id) == f"failed:{sc.RECOVERY_FAILED}"
-    assert not os.path.lexists(install_root(tmp_path, name))
+    assert not os.path.lexists(published_root(tmp_path, name))
     if what == "manifest":      # not the intent's, so abandonment keeps it, and it holds the name
         assert path.read_bytes() == conflicting
         assert not os.path.lexists(meta_path(tmp_path, name, "record"))
@@ -810,7 +810,7 @@ def test_abandonment_keeps_meta_files_another_install_wrote(tmp_path: Path, repl
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P4")
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     root.chmod(0o755)
     root.rename(tmp_path / "moved")
     root.mkdir()
@@ -856,7 +856,7 @@ def test_abandonment_never_removes_a_tree_that_replaced_the_intents_after_it_was
     store = store_of(tmp_path)
     name = install_name(tmp_path, staged)
     crash(tmp_path, "publish", [staged.id, staged.digest], "P3")
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     rewrite(root / FIRST_FILE)                  # recovery refuses, so the publish is abandoned
     hook = swap_in_theirs(root, tmp_path / "moved")
     assert sc.recover(store, hook=hook) == [(staged.id, f"failed:{sc.RECOVERY_FAILED}")]
@@ -869,7 +869,7 @@ def test_abandonment_never_removes_a_tree_that_replaced_the_intents_after_it_was
 def test_remove_never_removes_a_tree_that_replaced_the_install_after_it_was_opened(tmp_path: Path) -> None:
     store = store_of(tmp_path)
     _, name = published(tmp_path)
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     hook = swap_in_theirs(root, tmp_path / "moved")
     assert refused(lambda: sc.remove(store, "codex", name, hook=hook)) == sc.INSTALL_BROKEN
     assert (root / "theirs").read_bytes() == b"another install\n"
@@ -884,7 +884,7 @@ def test_remove_refuses_and_changes_nothing_when_the_install_path_is_not_the_ins
         tmp_path: Path, theirs: str) -> None:
     store = store_of(tmp_path)
     _, name = published(tmp_path)
-    root = install_root(tmp_path, name)
+    root = published_root(tmp_path, name)
     root.chmod(0o755)
     root.rename(tmp_path / "moved")
     if theirs == "directory":
